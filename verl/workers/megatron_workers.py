@@ -25,7 +25,7 @@ from omegaconf import DictConfig
 from verl.single_controller.base.megatron.worker import MegatronWorker
 from verl.workers.actor.megatron_actor import MegatronPPOActor
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
-from verl.workers.hybrid_engine import AllGatherPPModel
+from verl.workers.sharding_manager import AllGatherPPModel
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 
 from verl.single_controller.base.decorator import register, Dispatch
@@ -112,13 +112,19 @@ class ActorRolloutRefWorker(MegatronWorker):
         # normalize config
         if self._is_actor and self._is_rollout:
             self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.rollout.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+            if self.config.actor.get('ppo_micro_batch_size', None):
+                self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
+                self.config.rollout.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+                self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
+                self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
+
             self._is_offload_param = self.config.actor.get('param_offload', False)
             self._is_offload_grad = self.config.actor.get('grad_offload', False)
             self._is_offload_optimizer = self.config.actor.get('optimizer_offload', False)
         elif self._is_ref:
-            self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+            if self.config.ref.get('ppo_micro_batch_size', None):
+                self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+                self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.ppo_micro_batch_size
             self._is_offload_param = self.config.ref.get('param_offload', False)
 
     def _build_model_optimizer(self,
@@ -216,7 +222,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     def _build_rollout(self):
         if self.config.rollout.name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout
-            from verl.workers.hybrid_engine import MegatronVLLMShardingManager
+            from verl.workers.sharding_manager import MegatronVLLMShardingManager
             from verl.utils.model import normalize_pp_vpp_params
 
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
@@ -358,14 +364,6 @@ class ActorRolloutRefWorker(MegatronWorker):
 
             output = self.sharding_manager.postprocess_data(output)
 
-        validate = prompts.meta_info.get('validate', False)
-        if self._is_actor and not validate:
-            # we should always recompute old_log_probs when it is HybridEngine
-            output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size
-            output.meta_info['temperature'] = self.config.rollout.temperature
-            old_log_probs = self.actor.compute_log_prob(data=output)
-            output.batch['old_log_probs'] = old_log_probs
-
         output = output.to('cpu')
         # clear kv cache
         torch.cuda.empty_cache()
@@ -380,7 +378,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_offload_param:
             load_megatron_param_and_grad(self.ref_module, torch.cuda.current_device(), self._is_offload_grad)
 
-        micro_batch_size = self.config.rollout.log_prob_micro_batch_size
+        micro_batch_size = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info['micro_batch_size'] = micro_batch_size
         data.meta_info['temperature'] = self.config.rollout.temperature
         output = self.ref_policy.compute_log_prob(data=data)
@@ -389,6 +387,22 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_offload_param:
             offload_megatron_param_and_grad(self.ref_module, self._is_offload_grad)
         torch.cuda.empty_cache()
+        return output
+
+    @register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
+    def compute_log_prob(self, data: DataProto):
+        assert self._is_actor
+        data = data.to('cuda')
+        output = data
+        # we should always recompute old_log_probs when it is HybridEngine
+        output.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        output.meta_info['temperature'] = self.config.rollout.temperature
+        old_log_probs = self.actor.compute_log_prob(data=output)
+        output.batch['old_log_probs'] = old_log_probs
+        output = output.to('cpu')
+        # clear kv cache
+        torch.cuda.empty_cache()
+        log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -439,7 +453,9 @@ class CriticWorker(MegatronWorker):
 
         # normalize config
         self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-        self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
+        if self.config.get('ppo_micro_batch_size', None):
+            self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
+            self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
 
         # TODO(sgm): support critic model offload
 
@@ -609,7 +625,9 @@ class RewardModelWorker(MegatronWorker):
         set_random_seed(seed=self.config.megatron.seed)
 
         # normalize config
-        self.config.micro_batch_size //= mpu.get_data_parallel_world_size()
+        if self.config.micro_batch_size is not None:
+            self.config.micro_batch_size //= mpu.get_data_parallel_world_size()
+            self.config.micro_batch_size_per_gpu = self.config.micro_batch_size
 
     def _build_rm_model(self, model_path, megatron_config: ModelParallelConfig, override_model_config):
         from megatron.core.models.gpt.gpt_model import ModelType

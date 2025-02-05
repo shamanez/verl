@@ -41,8 +41,12 @@ def test_union_tensor_dict():
         data = union_tensor_dict(data1, data_with_copied_obs)
 
     data = np.random.random(100)
-    a = {'a': data}
-    b = {'a': data}
+    data2 = [float('nan') for _ in range(99)]
+    data2.append('nan')
+    data2 = np.array(data2, dtype=object)
+    data3 = np.tile(data2, (2, 1))
+    a = {'a': data, 'b': data2, 'c': data3}
+    b = {'a': data, 'b': data2, 'c': data3}
     b_ = {'a': np.random.random(100)}
     union_numpy_dict(a, b)
     with pytest.raises(AssertionError):
@@ -107,6 +111,9 @@ def test_chunk_concat():
     obs = torch.tensor([1, 2, 3, 4, 5, 6])
     labels = ['a', 'b', 'c', 'd', 'e', 'f']
     data = DataProto.from_dict(tensors={'obs': obs}, non_tensors={'labels': labels}, meta_info={'name': 'abdce'})
+
+    with pytest.raises(AssertionError):
+        data.chunk(5)
 
     data_split = data.chunk(2)
     assert len(data_split) == 2
@@ -199,6 +206,20 @@ def test_dataproto_pad_unpad():
     assert (unpadd_data.non_tensor_batch['labels'] == labels).all()
     assert unpadd_data.meta_info == {'info': 'test_info'}
 
+    padded_data, pad_size = pad_dataproto_to_divisor(data, size_divisor=7)
+    assert pad_size == 4
+
+    expected_obs = torch.tensor([[1, 2], [3, 4], [5, 6], [1, 2], [3, 4], [5, 6], [1, 2]])
+    expected_labels = ['a', 'b', 'c', 'a', 'b', 'c', 'a']
+    assert torch.all(torch.eq(padded_data.batch['obs'], expected_obs))
+    assert (padded_data.non_tensor_batch['labels'] == expected_labels).all()
+    assert padded_data.meta_info == {'info': 'test_info'}
+
+    unpadd_data = unpad_dataproto(padded_data, pad_size=pad_size)
+    assert torch.all(torch.eq(unpadd_data.batch['obs'], obs))
+    assert (unpadd_data.non_tensor_batch['labels'] == labels).all()
+    assert unpadd_data.meta_info == {'info': 'test_info'}
+
 
 def test_dataproto_fold_unfold():
     from verl.protocol import fold_batch_dim, unfold_batch_dim, DataProto
@@ -237,3 +258,44 @@ def test_torch_save_data_proto():
 
     import os
     os.remove('test_data.pt')
+
+
+def test_len():
+    obs = torch.tensor([[1, 2], [3, 4], [5, 6]])
+    labels = np.array(['a', 'b', 'c'], dtype=object)
+    data = DataProto.from_dict(tensors={'obs': obs}, non_tensors={'labels': labels}, meta_info={'info': 'test_info'})
+
+    assert len(data) == 3
+
+    data = DataProto(batch=None, non_tensor_batch={'labels': labels}, meta_info={'info': 'test_info'})
+
+    assert len(data) == 3
+
+    data = DataProto(batch=None, non_tensor_batch={}, meta_info={'info': 'test_info'})
+
+    assert len(data) == 0
+
+    data = DataProto(batch=None, non_tensor_batch=None, meta_info={'info': 'test_info'})
+
+    assert len(data) == 0
+
+
+def test_seqlen_balancing():
+    from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
+    input_ids = torch.randint(low=0, high=10, size=(20, 100))
+    from verl.utils.model import create_random_mask
+    attention_mask = create_random_mask(input_ids=input_ids,
+                                        max_ratio_of_left_padding=0.1,
+                                        max_ratio_of_valid_token=0.9,
+                                        min_ratio_of_valid_token=0.5)
+    data = {'input_ids': input_ids, 'attention_mask': attention_mask}
+    dataproto = DataProto.from_single_dict(data)
+    micro_batches, micro_bsz_idx_lst = rearrange_micro_batches(dataproto.batch, max_token_len=300)
+    batch = torch.cat(micro_batches)
+    micro_bsz_idx = []
+    for idx in micro_bsz_idx_lst:
+        micro_bsz_idx.extend(idx)
+    reverse_idx_map = get_reverse_idx(micro_bsz_idx)
+    reverse_idx_map = torch.tensor(reverse_idx_map)
+    new_batch = batch[reverse_idx_map]
+    torch.testing.assert_close(new_batch, dataproto.batch)

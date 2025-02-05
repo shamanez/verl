@@ -14,18 +14,27 @@ actor_rollout_ref:
   hybrid_engine: True
   model:
     path: ~/verl/tests/e2e/arithmetic_sequence/model
+    tokenizer_path: ${actor_rollout_ref.model.path}
     external_lib: tests.e2e.envs.digit_completion
     override_config: {}
     enable_gradient_checkpointing: False
+    use_remove_padding: False
   actor:
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 200
-    ppo_micro_batch_size: 200
+    ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+    ppo_micro_batch_size_per_gpu: null
+    use_dynamic_bsz: False
+    ppo_max_token_len_per_gpu: 16384 # n * ${data.max_prompt_length} + ${data.max_response_length}
     grad_clip: 1.0
     clip_ratio: 0.2
     entropy_coeff: 0.0
+    use_kl_loss: False # True for GRPO
+    kl_loss_coef: 0.001 # for grpo
+    kl_loss_type: low_var_kl # for grpo
     ppo_epochs: 1
-    shuffle: True
+    shuffle: False
+    ulysses_sequence_parallel_size: 1 # sp size
     optim:
       lr: 1e-4
     fsdp_config:
@@ -35,13 +44,18 @@ actor_rollout_ref:
       param_offload: False
       grad_offload: False
       optimizer_offload: False
+      fsdp_size: -1
   ref:
     fsdp_config:
       param_offload: False
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
-    micro_batch_size: 200
+    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
   rollout:
     name: hf
     temperature: 1.0
@@ -53,18 +67,24 @@ actor_rollout_ref:
     dtype: bfloat16 # should align with FSDP
     gpu_memory_utilization: 0.1
     ignore_eos: False
-    micro_batch_size: 200
+    micro_batch_size_per_gpu: 200
     enforce_eager: True
     free_cache_engine: True
     load_format: dummy_dtensor
-    tensor_model_parallel_size: 2
+    tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
-    log_prob_micro_batch_size: 200
+    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    disable_log_stats: True
+    enable_chunked_prefill: False # could get higher throughput
     # for hf rollout
     do_sample: True
     # number of responses (i.e. num sample times)
     n: 1 # > 1 for grpo
+
 
 critic:
   strategy: fsdp
@@ -76,7 +96,9 @@ critic:
     override_config: {}
     external_lib: ${actor_rollout_ref.model.external_lib}
     enable_gradient_checkpointing: False
+    use_remove_padding: False
     fsdp_config:
+      fsdp_size: -1
       param_offload: False
       grad_offload: False
       optimizer_offload: False
@@ -84,8 +106,14 @@ critic:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
-  ppo_micro_batch_size: 200
+  ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+  ppo_micro_batch_size_per_gpu: null
   forward_micro_batch_size: ${critic.ppo_micro_batch_size}
+  forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu}
+  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+  ppo_max_token_len_per_gpu: 32768 # (${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}) * 2
+  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
+  ulysses_sequence_parallel_size: 1 # sp size
   ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
   shuffle: ${actor_rollout_ref.actor.shuffle}
   grad_clip: 1.0
@@ -104,10 +132,14 @@ reward_model:
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
     external_lib: ${actor_rollout_ref.model.external_lib}
     offload: False
+    use_remove_padding: False
     fsdp_config:
       min_num_params: 0
-  micro_batch_size: 8
+      fsdp_size: -1
+  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
+  micro_batch_size_per_gpu: null # set a number
   max_length: null
+  ulysses_sequence_parallel_size: 1 # sp size
 
 algorithm:
   gamma: 1.0
@@ -120,6 +152,7 @@ algorithm:
 
 trainer:
   total_epochs: 200
+  total_training_steps: null
   project_name: verl_examples
   experiment_name: arithmetic_sequences
   logger: ['console']

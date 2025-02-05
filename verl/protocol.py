@@ -18,6 +18,7 @@ We can subclass Protocol to define more detailed batch info with specific keys
 
 import pickle
 import numpy as np
+import pandas as pd
 import copy
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Union
@@ -50,7 +51,13 @@ def pad_dataproto_to_divisor(data: 'DataProto', size_divisor: int):
     assert isinstance(data, DataProto), 'data must be a DataProto'
     if len(data) % size_divisor != 0:
         pad_size = size_divisor - len(data) % size_divisor
-        data_padded = DataProto.concat([data, data[:pad_size]])
+        padding_protos = []
+        remaining_pad = pad_size
+        while remaining_pad > 0:
+            take_size = min(remaining_pad, len(data))
+            padding_protos.append(data[:take_size])
+            remaining_pad -= take_size
+        data_padded = DataProto.concat([data] + padding_protos)
     else:
         pad_size = 0
         data_padded = data
@@ -82,7 +89,8 @@ def union_numpy_dict(tensor_dict1: dict[np.ndarray], tensor_dict2: dict[np.ndarr
         if key in tensor_dict1:
             assert isinstance(tensor_dict2[key], np.ndarray)
             assert isinstance(tensor_dict1[key], np.ndarray)
-            assert np.all(tensor_dict2[key] == tensor_dict1[key]), \
+            # to properly deal with nan and object type
+            assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), \
                 f'{key} in tensor_dict1 and tensor_dict2 are not the same object'
         tensor_dict1[key] = val
 
@@ -178,7 +186,13 @@ class DataProto:
         self.check_consistency()
 
     def __len__(self):
-        return self.batch.batch_size[0]
+        if self.batch is not None:
+            return self.batch.batch_size[0]
+        elif self.non_tensor_batch is not None and len(self.non_tensor_batch) > 0:
+            random_key = list(self.non_tensor_batch.keys())[0]
+            return self.non_tensor_batch[random_key].shape[0]
+        else:
+            return 0
 
     def __getitem__(self, item):
         tensor_data = self.batch[item]
@@ -240,7 +254,11 @@ class DataProto:
         if self.batch is not None:
             assert len(self.batch.batch_size) == 1, 'only support num_batch_dims=1'
 
-        if len(self.non_tensor_batch) != 0:
+        if self.non_tensor_batch is not None:
+            for key, val in self.non_tensor_batch.items():
+                assert isinstance(val, np.ndarray)
+
+        if self.batch is not None and len(self.non_tensor_batch) != 0:
             # TODO: we can actually lift this restriction if needed
             assert len(self.batch.batch_size) == 1, 'only support num_batch_dims=1 when non_tensor_batch is not empty.'
 
@@ -478,6 +496,9 @@ class DataProto:
         Returns:
             List[DataProto]: a list of DataProto after splitting
         """
+        assert len(
+            self) % chunks == 0, f'only support equal chunk. Got size of DataProto {len(self)} and chunk {chunks}.'
+
         if self.batch is not None:
             batch_lst = self.batch.chunk(chunks=chunks, dim=0)
         else:
