@@ -60,7 +60,39 @@ the home for fork-specific launchers).
 
 - [ ] `~/.config/verl-research/secrets.env` contains ONLY `HF_TOKEN` and
       `WANDB_API_KEY`.
-- [ ] `grep -E '^(VAST|STREAMS_VAST)' ~/.config/verl-research/secrets.env`
-      returns nothing (exit 1).
+- [ ] `grep -E '^export (VAST|STREAMS_VAST)' ~/.config/verl-research/secrets.env`
+      returns nothing (exit 1). Note the `^export ` prefix — the laptop's
+      secrets file uses `export NAME=...` form, so the bare-name grep
+      misses everything and produces a zero-byte stripped file.
 - [ ] Inside the running container (or current SSH session) `env | grep
       ^VAST` returns nothing.
+
+## Vast.ai host gotcha — check `cgroup/pids.max` BEFORE running the smoke
+
+The verl FSDP + vLLM + Ray stack peaks at ~1700 pthreads at the
+FSDP→vLLM weight-transfer boundary. Vast.ai hosts vary in their docker
+daemon `--pids-limit` configuration (observed 1792 vs 7680 on two
+different A100-80GB hosts). On a 1792 host the smoke dies inside
+`verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py` with the
+misleading `Resource temporarily unavailable (src/thread.cpp:241)` ZMQ
+error. **Always probe before running:**
+
+```bash
+ssh -i ~/.ssh/vast_ai -p <port> root@<host> 'cat /sys/fs/cgroup/pids/pids.max'
+# >= 4096 → safe to run
+# 1792    → tear down, provision a different host
+```
+
+The cgroup file is read-only from inside the container even with
+`--cap-add=SYS_ADMIN` (Vast silently strips it). The only fix is
+host-selection. Full diagnostic notes in
+`research/.claude/skills/vast-provision/SKILL.md` ("Container limits on
+Vast.ai (cgroup PIDs cap)" section) and the post-mortem at
+`research/runs/EXP-vast-1p5b-smoke/PROGRESS.md`.
+
+## ulimit -n bump (already in the launcher)
+
+`vast_smoke_qwen25_*.sh` bump `ulimit -n 65535` before any python3 call.
+The default 1024 makes verl's Ray + vLLM ZMQ socket allocation hit
+EMFILE during EngineCore init. The bump is necessary but not sufficient
+— the cgroup pids cap is the harder wall (see previous section).
