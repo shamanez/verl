@@ -34,6 +34,15 @@ if [[ -n "${VAST_API_KEY:-}" ]]; then
   exit 1
 fi
 
+# Vast.ai containers default to `ulimit -n 1024`, which is too low for verl's
+# Ray + vLLM + FSDP spawn pattern: ZMQ allocates FDs per worker socket, hits
+# the cap mid-init, and pthread_create then returns EAGAIN ("Resource
+# temporarily unavailable") — the failure surface is the EngineCore actor
+# dying before the first rollout. Bump FDs and (defensively) user processes
+# to the cgroup ceiling before any python3 invocation.
+ulimit -n 65535 || echo "WARN: could not bump open-files ulimit" >&2
+ulimit -u 65535 2>/dev/null || true
+
 export HF_TOKEN HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}" \
        HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-$HF_TOKEN}" WANDB_API_KEY
 
