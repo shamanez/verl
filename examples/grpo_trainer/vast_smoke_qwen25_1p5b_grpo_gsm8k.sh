@@ -60,47 +60,63 @@ export TRAIN_FILE="$DATA_DIR/train.parquet"
 export TEST_FILE="$DATA_DIR/test.parquet"
 ls -la "$DATA_DIR"
 
-# Single GPU, 1 step, no checkpoint, vLLM eager.
-# Batch sizes are bumped vs the 0.5B sibling because 1.5B with grad-ckpt on
-# a single ≥40 GB GPU still has plenty of room — but kept small enough that
-# a 24 GB fallback also stands a chance.
+# Single GPU, 1 step, no checkpoint, vLLM eager. Knobs tuned tight to fit
+# under the Vast.ai container's cgroup pids.max (typically 1792); rollout
+# pressure shrinks the per-step worker thread spawn burst and KV-cache
+# shm pressure while still exercising the full FSDP + vLLM weight-transfer
+# path.
 export NGPUS_PER_NODE=1
 export ROLLOUT_TP=1
-export ROLLOUT_N=2
-export ROLLOUT_GPU_MEM_UTIL=0.5
-export TRAIN_BATCH_SIZE=8
+export ROLLOUT_N=1
+export ROLLOUT_GPU_MEM_UTIL=0.7
+export TRAIN_BATCH_SIZE=4
 export PPO_MINI_BATCH_SIZE=4
 export PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1
 export MAX_PROMPT_LENGTH=512
-export MAX_RESPONSE_LENGTH=512
+export MAX_RESPONSE_LENGTH=256
 export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_vast_smoke}"
 
 LOG="${LOG:-/workspace/verl/runs/vast_smoke_1p5b/train.log}"
 mkdir -p "$(dirname "$LOG")"
 
-# Vast.ai hosts cap each container's cgroup at pids.max=1792 (read-only from
-# inside the container, can't be raised). verl's vLLM rollout backend +
-# multiproc executor + Ray dashboard + ZMQ bucketed weight transfer
-# (verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py) routinely
-# spawns 1700+ pthreads at the FSDP->vLLM weight-transfer boundary, hitting
-# the cap; the failure surface is `ZMQ Resource temporarily unavailable
-# (src/thread.cpp:241)` followed by EngineCore dying.
+# Vast.ai hosts cap the container cgroup at `/sys/fs/cgroup/pids/pids.max`
+# (typically 1792, read-only from inside the container). verl's vLLM
+# rollout stack — Ray raylet + Ray dashboard sub-modules + vLLM multiproc
+# executor + vLLM EngineCore + ZMQ I/O threads in
+# verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py — easily
+# spawns 1700+ pthreads at the FSDP->vLLM weight-transfer boundary,
+# tripping the cap. The failure surface is
+# `Resource temporarily unavailable (src/thread.cpp:241)` followed by
+# zmq_socket SIGABRT and EngineCore death.
 #
-# Switch to the HF rollout backend (Transformers `model.generate()`,
-# in-process, no subprocess executor, no ZMQ): same FSDP training path,
-# same GRPO optimizer step, same WandB logging — just rollout is slower.
-# Acceptance criterion (≥1 optimizer step with non-NaN loss) holds either
-# way; vLLM rollout can be re-enabled on a Vast.ai host with higher
-# pids.max if/when one is provisioned.
-ROLLOUT_NAME="${ROLLOUT_NAME:-hf}"
+# Verl only registers `vllm/sglang/trtllm` for `mode=async` in
+# `verl.workers.rollout.base._ROLLOUT_REGISTRY`; `hf` is a public class
+# but not selectable via the trainer (asserts in `get_rollout_class`).
+# So we keep vllm and instead trim Ray's idle thread footprint to leave
+# headroom for vLLM's spawn burst:
+#   - RAY_DISABLE_DASHBOARD=1 drops the dashboard's ~30 helper actors.
+#   - OMP/MKL/TOKENIZERS=1 drops OpenMP/MKL/HF threadpools that each
+#     Ray worker would otherwise import (each saves ~10-30 threads).
+#   - RAY_DISABLE_USAGE_STATS=1 drops the usage telemetry actor.
+export RAY_DISABLE_DASHBOARD=1
+export RAY_DISABLE_USAGE_STATS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 
 echo "=== launching GRPO with $MODEL_PATH on 1 GPU rollout=$ROLLOUT_NAME (log: $LOG) ==="
+echo "=== cgroup pids: $(cat /sys/fs/cgroup/pids/pids.current 2>/dev/null)/$(cat /sys/fs/cgroup/pids/pids.max 2>/dev/null) ==="
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   +trainer.total_training_steps=1 \
   trainer.save_freq=-1 \
   trainer.test_freq=-1 \
   actor_rollout_ref.rollout.name="$ROLLOUT_NAME" \
   actor_rollout_ref.rollout.enforce_eager=True \
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=2048 \
+  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=2048 \
+  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096 \
   2>&1 | tee "$LOG"
