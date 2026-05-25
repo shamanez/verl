@@ -80,10 +80,27 @@ export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_vast_smoke}"
 LOG="${LOG:-/workspace/verl/runs/vast_smoke_1p5b/train.log}"
 mkdir -p "$(dirname "$LOG")"
 
-echo "=== launching GRPO with $MODEL_PATH on 1 GPU (log: $LOG) ==="
+# Vast.ai hosts cap each container's cgroup at pids.max=1792 (read-only from
+# inside the container, can't be raised). verl's vLLM rollout backend +
+# multiproc executor + Ray dashboard + ZMQ bucketed weight transfer
+# (verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py) routinely
+# spawns 1700+ pthreads at the FSDP->vLLM weight-transfer boundary, hitting
+# the cap; the failure surface is `ZMQ Resource temporarily unavailable
+# (src/thread.cpp:241)` followed by EngineCore dying.
+#
+# Switch to the HF rollout backend (Transformers `model.generate()`,
+# in-process, no subprocess executor, no ZMQ): same FSDP training path,
+# same GRPO optimizer step, same WandB logging — just rollout is slower.
+# Acceptance criterion (≥1 optimizer step with non-NaN loss) holds either
+# way; vLLM rollout can be re-enabled on a Vast.ai host with higher
+# pids.max if/when one is provisioned.
+ROLLOUT_NAME="${ROLLOUT_NAME:-hf}"
+
+echo "=== launching GRPO with $MODEL_PATH on 1 GPU rollout=$ROLLOUT_NAME (log: $LOG) ==="
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   +trainer.total_training_steps=1 \
   trainer.save_freq=-1 \
   trainer.test_freq=-1 \
+  actor_rollout_ref.rollout.name="$ROLLOUT_NAME" \
   actor_rollout_ref.rollout.enforce_eager=True \
   2>&1 | tee "$LOG"
