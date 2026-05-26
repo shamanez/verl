@@ -60,7 +60,7 @@ the home for fork-specific launchers).
 
 - [ ] `~/.config/verl-research/secrets.env` contains ONLY `HF_TOKEN` and
       `WANDB_API_KEY`.
-- [ ] `grep -E '^export (VAST|STREAMS_VAST)' ~/.config/verl-research/secrets.env`
+- [ ] `grep -E '^export VAST' ~/.config/verl-research/secrets.env`
       returns nothing (exit 1). Note the `^export ` prefix — the laptop's
       secrets file uses `export NAME=...` form, so the bare-name grep
       misses everything and produces a zero-byte stripped file.
