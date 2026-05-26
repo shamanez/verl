@@ -1,0 +1,34 @@
+---
+name: vast-teardown
+description: Destroy one or more Vast.ai instances by id and mark the corresponding ledger rows TORN_DOWN. Use after an experiment finishes or fails so we never bleed money.
+allowed-tools: Bash
+---
+
+# vast-teardown
+
+Companion to the `vast-provision` skill. Tears down provisioned Vast.ai instances by id and patches the local `research/.claude/state/runs.jsonl` ledger so the harness knows they're gone.
+
+## Usage
+
+From an agent or directly:
+
+```
+$CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh <instance_id> [<instance_id> ...]
+```
+
+Or pass a path to a handle JSON file (the runner emits these under `research/runs/EXP-<ID>/handles/`):
+
+```
+$CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh --handles research/runs/EXP-7/handles/
+```
+
+## Behavior
+
+1. Reads `VAST_API_KEY` for auth (sourced from `~/.config/verl-research/secrets.env`). Same single-credential model as `vast-provision`.
+2. For each instance id, runs `vastai destroy instance <id>`. Failures are logged to `/tmp/teardown.err` but never block — the script always exits 0 even if some destroys failed, so a partially-failed teardown still lets the orchestrator move on.
+3. Patches matching ledger rows in `.claude/state/runs.jsonl` to `status: "TORN_DOWN"` with `torn_down_at` and `teardown_reason: "manual"` (or `--reason <r>` to override).
+4. Emits a one-line summary on stdout: `VAST_TORN_DOWN: count=<N> reasons=<list>`.
+
+## Why this exists separately from the Stop-hook teardown
+
+The `teardown-finished-runs.sh` Stop hook handles **automatic** teardown — verdict written, heartbeat stale, or budget exceeded. This skill is for **explicit** teardown the operator or an agent wants to force, independent of those triggers (e.g., aborting an experiment that's heading nowhere, or cleaning up after a launch retry that left orphans).

@@ -1,0 +1,77 @@
+# Project config — single source of truth for the values that agents need to operate.
+# Update this file when porting the harness to a different research project; the
+# operating-context blocks in agents/playbooks mirror these values inline as a
+# token-cost optimization (so fresh-context agents don't need an extra read), but
+# project.yaml is authoritative. If the two diverge, this file wins.
+#
+# Porting checklist (5 fields) — change these, the harness machinery comes along for free:
+#   1. project.name + research_repo
+#   2. source_tree.path + protect/exception paths (if you fork a different upstream)
+#   3. vast_template.* (only if you maintain a different Vast.ai template)
+#   4. default_compute.gpu_filter_chain (only if the new project needs a different shape)
+#   5. major_goal_dir contents (research goal + paper) — human-only
+
+project:
+  name: verl-compression-research
+  description: Communication-efficient pipeline-adaptation research on verl GRPO + GSM8K.
+  major_goal_dir: ../major-goal/        # human-only reference (research/<-./major-goal/>); agents must not read it
+
+workspace:
+  working_dir: /Users/shamane/Documents/verl/research/
+  secrets_file: $HOME/.config/verl-research/secrets.env
+  secrets_required:
+    - HF_TOKEN
+    - WANDB_API_KEY
+    - VAST_API_KEY
+  secrets_file_perms: "600"
+
+github:
+  research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.
+  research_repo_visibility: private
+  code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=vast-ai-workload
+  code_pr_base_branch: vast-ai-workload                       # NEVER `main` — main tracks upstream
+  labels:
+    research_claim: research:claim                            # triage picks these up
+    status_prefix: "status:"                                  # planned, approved, running, pass, revise, stop, done
+    milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
+    kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature
+
+source_tree:                                                  # the upstream code the experiments operate on
+  path: /Users/shamane/Documents/verl/
+  remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
+  upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
+  base_branch: vast-ai-workload                               # primary working branch on the fork — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here
+  protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
+    - /Users/shamane/Documents/verl/                          # everything UNDER verl/
+  allowed_paths:                                              # except these subtrees
+    - /Users/shamane/Documents/verl/research/                 # always writable
+  exception_branches:                                         # plus any path is writable when on these branches
+    - exp/*                                                   # experiment-runner worktrees for code_change=true plans
+    - vast-ai-workload                                        # the base working branch — research/ + examples/grpo_trainer/vast_*.sh edits live here
+
+vast_template:                                                # the locked Vast.ai docker template the runner provisions
+  name: verl-research-vllm020
+  hash: 6485b9625ddd6d25a5f2f09b9f7fde17
+  id: 435160
+  image: verlai/verl:vllm020.dev1
+  bundled_torch: 2.11.0+cu130
+  bundled_vllm: 0.20.2
+  recommended_disk_gb: 200
+  registry_file: .claude/skills/vast-provision/templates.json
+
+default_compute:                                              # planner emits these defaults unless the issue overrides
+  gpu_count: 1
+  gpu_filter_chain:
+    - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
+    - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
+    - "num_gpus=4 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
+  max_dph: 24.0
+  max_gpu_hr: 96
+  max_parallel: 1
+  wall_clock_hr: 12
+  iterations: 3
+
+codex:
+  invoke_via: .claude/skills/codex-verify/run.sh              # ONLY entry point — never raw `codex exec`
+  hard_timeout_sec: 600
+  stall_timeout_sec: 90

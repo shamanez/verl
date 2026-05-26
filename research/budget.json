@@ -1,0 +1,9 @@
+{
+  "monthly_cap_usd": 1500,
+  "weekly_cap_usd": 500,
+  "default_max_dph": 24.0,
+  "default_max_gpu_hr": 96,
+  "default_per_node_gpus": 8,
+  "default_gpu_filter": "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95",
+  "notes": "Edit caps as needed. The planner refuses plans whose budget_gpu_hr would push month spend past monthly_cap_usd. The teardown hook also enforces per-experiment max_gpu_hr at runtime."
+}
