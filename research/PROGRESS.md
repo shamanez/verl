@@ -24,3 +24,5 @@ The orchestrator greps this file each tick for these structured markers to route
 Anything else here is informational. The hook that used to spam `[session-id] Edit` per file write has been removed — only meaningful events are recorded.
 
 ---
+[2026-05-26T17:05:00+10:00] [research-planner #3] plan written
+[2026-05-26T17:05:12+10:00] [triage] dispatched 1 planners, 0 issues already planned
