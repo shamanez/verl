@@ -28,3 +28,4 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-26T17:05:12+10:00] [triage] dispatched 1 planners, 0 issues already planned
 [2026-05-26T17:32:05+10:00] [experiment-runner #3] launched on 1 instances dph=$16.0540
 [2026-05-26T17:33:20+10:00] [orchestrator] tick: verify=[] running=[3] analyzing=[] logging=[] blocked=[]
+[2026-05-26T18:08:41+10:00] [triage] no claimable issues — ALL_PLANNED
