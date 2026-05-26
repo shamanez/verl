@@ -59,6 +59,11 @@ vast_template:                                                # the locked Vast.
   recommended_disk_gb: 200
   registry_file: .claude/skills/vast-provision/templates.json
 
+vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
+  identity_file: ~/.ssh/vast_ai                               # private key — the matching .pub is already registered on Vast (id 835115)
+  pubkey_file: ~/.ssh/vast_ai.pub                             # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
+  # sync-metrics.sh, experiment-runner SSH/rsync calls, and any future on-box helpers MUST pass `-i $(eval echo "$identity_file")` so the right key is offered. Bare `ssh root@host` will silently fall back to id_rsa/id_ed25519 and fail with publickey.
+
 default_compute:                                              # planner emits these defaults unless the issue overrides
   gpu_count: 1
   gpu_filter_chain:

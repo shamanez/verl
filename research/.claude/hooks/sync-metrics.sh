@@ -9,6 +9,20 @@ LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 DEBOUNCE="$PROJECT_DIR/.claude/state/.last-sync"
 DEBOUNCE_SEC=300
 
+# SSH identity — sourced from project.yaml (vast_ssh.identity_file). Falls back
+# to ~/.ssh/vast_ai if project.yaml is missing/unparseable. Bare `ssh root@host`
+# silently picks id_rsa/id_ed25519 and gets `Permission denied (publickey)` from
+# Vast.ai boxes, which is what kept this hook broken before.
+SSH_IDENTITY="$(awk '/^[[:space:]]*identity_file:/ {
+  sub(/^[[:space:]]*identity_file:[[:space:]]*/, "", $0)
+  sub(/[[:space:]]*#.*$/, "", $0)
+  gsub(/["'"'"']/, "", $0)
+  print; exit
+}' "$PROJECT_DIR/.claude/project.yaml" 2>/dev/null)"
+SSH_IDENTITY="${SSH_IDENTITY:-~/.ssh/vast_ai}"
+SSH_IDENTITY="${SSH_IDENTITY/#~/$HOME}"   # expand leading ~
+SSH_OPTS=(-i "$SSH_IDENTITY" -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+
 [[ -f "$LEDGER" ]] || exit 0
 
 NOW=$(date +%s)
@@ -39,7 +53,7 @@ jq -c 'select(.status == "RUNNING")' "$LEDGER" 2>/dev/null | while IFS= read -r 
     # training jobs stay "alive" in the harness and never get torn down.
     TMP_TAIL=$(mktemp -t sync-metrics.XXXXXX)
     SSH_RC=0
-    ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    ssh "${SSH_OPTS[@]}" \
         -p "$PORT" "root@$HOST" \
         'tail -n 200 /workspace/train.log 2>/dev/null' \
         > "$TMP_TAIL" 2>>"$OUT_DIR/sync-errors.log" || SSH_RC=$?
@@ -61,7 +75,7 @@ jq -c 'select(.status == "RUNNING")' "$LEDGER" 2>/dev/null | while IFS= read -r 
     HOTFIX_LOCAL="$PROJECT_DIR/runs/$ID/hotfix-patches"
     mkdir -p "$HOTFIX_LOCAL"
     rsync -av --ignore-existing \
-      -e "ssh -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p $PORT" \
+      -e "ssh -i $SSH_IDENTITY -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p $PORT" \
       "root@$HOST:/workspace/runs/$ID/hotfix-patches/" \
       "$HOTFIX_LOCAL/" \
       >> "$OUT_DIR/sync-errors.log" 2>&1 || true
