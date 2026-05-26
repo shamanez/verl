@@ -29,3 +29,6 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-26T17:32:05+10:00] [experiment-runner #3] launched on 1 instances dph=$16.0540
 [2026-05-26T17:33:20+10:00] [orchestrator] tick: verify=[] running=[3] analyzing=[] logging=[] blocked=[]
 [2026-05-26T18:08:41+10:00] [triage] no claimable issues — ALL_PLANNED
+[2026-05-26T18:14:42+10:00] [hf-watcher #3] step_100 pushed to gshasiri/qwen25-1p5b-grpo-gsm8k-baseline-step100 (private)
+[2026-05-26T18:17:16+10:00] [user #3] issue closed via gh issue close; val=0.789 (+0.702 from baseline) at step 100
+[2026-05-26T18:18:27+10:00] [vast-teardown #3] destroyed instance 37881404 (reason: EXP-3 closed at global_step_100 — checkpoints preserved on HF)
