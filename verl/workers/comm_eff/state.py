@@ -149,13 +149,34 @@ class CommEffState:
         # each substep a distinct mask even within the same trainer step.
         self.substep = 0
 
+        # The spectral filter (third circuit). Constructed in build() when
+        # ``comm_eff.spectral.enabled`` is true; None otherwise. Holds the
+        # (seeded) anchor-EMA cache and applies the paper formula at the
+        # grad-correction hook point. See verl.workers.comm_eff.spectral_filter.
+        self.spectral = None
+
+        # FSDP gradient-representation discovery log (EXP-7 headline deliverable).
+        # The engine's grad-correction hook fills this once, on the first
+        # correction, with type(p.grad), the grad container shape, the logical
+        # 2D matrix shape, the FSDP wrapping/version, and whether correction ran
+        # before/after FSDP gradient reduction and gradient clipping, for >=1
+        # target matrix. Surfaced into metrics so the analyst greps it.
+        self.fsdp_grad_repr: dict = {}
+
+        # Per-target ||G_proj - G_mask|| / ||G_mask|| from the most recent
+        # correction. Logged faithfully (never clamped) per the codex pin: not
+        # provably <=1 for arbitrary anchors. Surfaced under comm_eff/spectral/*.
+        self.spectral_rel_change: dict = {}
+
     def build(self, module: Any) -> None:
-        """Construct the activation masker for the enabled mask circuit.
+        """Construct the enabled circuits (mask and/or spectral).
 
         Idempotent. When ``comm_eff.mask.enabled`` is true this constructs an
         ``ActivationMasker`` (no hooks registered yet — the engine registers
-        them only on entry to the train forward and removes them on exit). Anchor
-        / spectral workspace allocation is deferred to later M2 work.
+        them only on entry to the train forward and removes them on exit). When
+        ``comm_eff.spectral.enabled`` is true this constructs the
+        ``SpectralFilter`` with its (optionally seeded) anchor-EMA cache. Anchor
+        circuit (EXP-8) allocation is still deferred.
         """
         if self._built:
             return
@@ -170,6 +191,27 @@ class CommEffState:
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 state=self,
+            )
+
+        spec_cfg = getattr(self.config, "spectral", None)
+        spec_enabled = bool(getattr(spec_cfg, "enabled", False)) if spec_cfg is not None else False
+        if spec_enabled:
+            # Imported lazily so the disabled path never pays the import cost.
+            from verl.workers.comm_eff.spectral_filter import SpectralFilter
+
+            self.spectral = SpectralFilter(
+                alpha=float(getattr(spec_cfg, "alpha", 0.3)),
+                tau=float(getattr(spec_cfg, "tau", 1e-3)),
+                beta_anc=float(getattr(spec_cfg, "beta_anc", 0.95)),
+                seed_anchor_cache=bool(getattr(spec_cfg, "seed_anchor_cache", True)),
+                anchor_seed=int(getattr(spec_cfg, "anchor_seed", 0)),
+            )
+            logger.info(
+                "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s)",
+                self.spectral.alpha,
+                self.spectral.tau,
+                self.spectral.beta_anc,
+                self.spectral.seed_anchor_cache,
             )
         self._built = True
 
@@ -227,6 +269,39 @@ class CommEffState:
             out[f"comm_eff/mask_ratio/layer_{idx}"] = r
         return out
 
+    def spectral_metrics(self) -> dict:
+        """Return spectral-correction metrics for logging.
+
+        Surfaces ONLY NUMERIC values: the per-target
+        ``||G_proj - G_mask|| / ||G_mask||`` ratios (faithfully, never clamped)
+        plus their mean. Empty when no correction has fired.
+
+        IMPORTANT — these metrics flow into ``actor_output.meta_info["metrics"]``
+        and then through ``verl.utils.metric.utils.reduce_metrics``, which does
+        ``np.mean(val)`` on EVERY value. A string value (e.g. a flattened FSDP
+        discovery field like ``grad_container_type="Tensor"``) makes np.mean
+        raise ``UFuncNoLoopError: ufunc 'add' did not contain a loop ... <U59``
+        and crashes the trainer's metric-reduction at the end of the step (this
+        is exactly what killed the second EXP-7 spectral_on run before it
+        reached global_step=2). So the FSDP gradient-representation DISCOVERY log
+        (string-valued container type / placements / fsdp_version / correction
+        point) is deliberately NOT emitted here. It is the headline deliverable
+        and is surfaced the analyst-greppable way it was designed for: the
+        ``[comm_eff][EXP-7][FSDP-DISCOVERY] {...}`` stdout line and the
+        ``logger.warning`` record, both written by the engine hook. It also
+        stays available in-process on ``state.fsdp_grad_repr`` for any non-metric
+        consumer. Reducible metrics must stay numeric.
+        """
+        if self.spectral is None:
+            return {}
+        out: dict = {}
+        if self.spectral_rel_change:
+            vals = list(self.spectral_rel_change.values())
+            out["comm_eff/spectral/rel_change_mean"] = sum(vals) / len(vals)
+            for name, r in self.spectral_rel_change.items():
+                out[f"comm_eff/spectral/rel_change/{name}"] = r
+        return out
+
     def metrics(self) -> dict:
         """Return the comm_eff operation counters for logging."""
         return {
@@ -264,4 +339,5 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     out = state.metrics()
     out.update(state.path_metrics())
     out.update(state.mask_ratio_metrics())
+    out.update(state.spectral_metrics())
     return out

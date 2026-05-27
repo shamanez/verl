@@ -97,14 +97,76 @@ class CommEffAnchorConfig(BaseConfig):
 class CommEffSpectralConfig(BaseConfig):
     """Spectral-correction sub-config (inert while disabled).
 
+    Implements the M2 paper formula (anchor-EMA -> full thin SVD -> Tikhonov
+    spectral weights -> two-sided projection -> alpha blend) applied to the
+    gradients of selected 2D decoder matrices after the actor backward and
+    before ``optimizer.step()``. See
+    ``verl.workers.comm_eff.spectral_filter.SpectralFilter``.
+
+    The formula (per targeted 2D matrix ``G_mask`` with anchor-EMA ``M_anchor``)::
+
+        M_anchor = beta_anc * M_anchor + (1 - beta_anc) * G_anchor   # EMA
+        M_anchor = U S V^T                                           # full thin SVD
+        d_i      = s_i / (s_i + tau)                                 # Tikhonov weights
+        X        = U^T G_mask V
+        G_filt   = U diag(d) X diag(d) V^T                           # two-sided projection
+        G_proj   = alpha * G_mask + (1 - alpha) * G_filt             # blend
+
+    At ``alpha=1.0`` this is an exact no-op (``G_proj == G_mask``); at
+    ``alpha=0`` it is the pure two-sided Tikhonov projection. The masked
+    gradient is never discarded — the anchor supplies geometry, not a
+    replacement.
+
     Args:
         enabled (bool): Whether spectral correction of masked gradients runs.
             Gated by the parent ``comm_eff.enabled`` regardless of this value.
-        rank (int): Truncation rank for the spectral correction.
-        damping (float): Damping added to the spectrum before inversion.
+            ``false`` (default) ⇒ the grad-correction hook is a strict no-op and
+            the actor path is identical to EXP-5 / dense GRPO.
+        alpha (float): Blend coefficient in ``[0, 1]``: ``alpha * G_mask +
+            (1 - alpha) * G_filt``. ``1.0`` ⇒ no-op; ``0.0`` ⇒ pure projection.
+            Default ``0.3`` (the EXP-7 operating point).
+        tau (float): Tikhonov damping added to each singular value before
+            forming the spectral weight ``d_i = s_i / (s_i + tau)``. Default
+            ``1e-3``.
+        beta_anc (float): EMA decay for the anchor-gradient running matrix
+            ``M_anchor``. Default ``0.95``.
+        seed_anchor_cache (bool): When ``true``, populate ``M_anchor`` with a
+            fixed deterministic PSD basis (seeded) so the filter runs without
+            the (not-yet-built, EXP-8) live anchor circuit. The EXP-7 discovery
+            smoke uses this. When ``false`` the anchor EMA starts empty and is
+            populated by the live anchor circuit.
+        anchor_seed (int): Base seed for the deterministic anchor cache.
+        target_substr (list[str]): Substrings used to SELECT which named 2D
+            parameters receive correction. A parameter is targeted iff its name
+            contains one of these substrings AND its logical shape is 2D.
+            Defaults select the decoder attention/MLP projection matrices and
+            skip norms, biases, embeddings and the lm head.
+        max_targets (int): Cap on the number of target matrices corrected per
+            step (keeps the discovery smoke cheap). ``-1`` ⇒ no cap.
+        rank (int): Retained for back-compat with the EXP-4 scaffold schema
+            (full thin SVD is used; low-rank truncation is a later ablation).
+        damping (float): Legacy alias kept for schema back-compat; the active
+            damping knob is ``tau``.
     """
 
     enabled: bool = False
+    alpha: float = 0.3
+    tau: float = 1e-3
+    beta_anc: float = 0.95
+    seed_anchor_cache: bool = True
+    anchor_seed: int = 0
+    target_substr: list = field(
+        default_factory=lambda: [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+    )
+    max_targets: int = 4
     rank: int = 8
     damping: float = 1e-6
 
@@ -153,5 +215,11 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
         if self.spectral.rank < 1:
             raise ValueError(f"comm_eff.spectral.rank must be >= 1; got {self.spectral.rank}")
+        if not 0.0 <= self.spectral.alpha <= 1.0:
+            raise ValueError(f"comm_eff.spectral.alpha must be in [0, 1]; got {self.spectral.alpha}")
+        if self.spectral.tau <= 0.0:
+            raise ValueError(f"comm_eff.spectral.tau must be > 0; got {self.spectral.tau}")
+        if not 0.0 <= self.spectral.beta_anc <= 1.0:
+            raise ValueError(f"comm_eff.spectral.beta_anc must be in [0, 1]; got {self.spectral.beta_anc}")
         if not 0.0 <= self.anchor.ema_decay <= 1.0:
             raise ValueError(f"comm_eff.anchor.ema_decay must be in [0, 1]; got {self.anchor.ema_decay}")
