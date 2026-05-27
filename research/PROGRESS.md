@@ -36,3 +36,5 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-28T01:45:05+10:00] [analyst #5] verdict=PASS
 [2026-05-28T01:47:15+10:00] [log-writer EXP-5] logged verdict=PASS milestone=M2 pr=https://github.com/shamanez/verl/pull/2
 [2026-05-28T01:51:15+10:00] [orchestrator] EXP-5 COMPLETE: VERDICT=PASS; PR #2 merged to vast-ai-workload (6ac24bf7); local reconciled via merge (HEAD ca98cdda, verl impl present); exp/5-actor-mask deleted local+origin; worktree removed. Instance 38098877 torn down ~$3.70. Milestone M2 first masking finding filed.
+[2026-05-28T01:59:40+10:00] [research-planner #6] plan written
+[2026-05-28T01:59:53+10:00] [triage] dispatched 1 planners, 0 issues already planned

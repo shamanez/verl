@@ -1,13 +1,18 @@
-# Plan EXP-3
+# Plan: baseline
+
+> **The dense control.** verl run with **no modifications** — vanilla GRPO,
+> Qwen2.5-1.5B-Instruct on GSM8K. Every compression experiment overlays its curve
+> against this reference. (Originally filed as EXP-3 / issue #3.) Result:
+> `val/test_score` 0.0872 → 0.7892 over 100 steps on 4×H200.
 
 ## Experiment
-- id:            EXP-3
-- title:         M1 — Qwen2.5-1.5B-Instruct GRPO baseline on GSM8K (real run, multi-GPU)
+- id:            baseline
+- title:         Qwen2.5-1.5B-Instruct dense GRPO baseline on GSM8K (verl, unmodified)
 - issue:         https://github.com/shamanez/verl-compression-research/issues/3
 - kind:          experiment
 - milestone:     M1
 - created_at:    2026-05-26T00:00:00Z
-- baseline_run:  none
+- baseline_run:  none   # this IS the baseline
 
 ## Kind (drives orchestrator routing)
 
