@@ -608,35 +608,72 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
-    def _maybe_comm_eff_mask_hook(self, forward_only: bool) -> None:
-        """comm_eff activation-mask / anchor-circuit hook point (no-op when disabled).
+    def _comm_eff_mask_active(self, forward_only: bool) -> bool:
+        """True iff the activation-mask hooks should be live for this forward.
 
-        Sits at the entry of the forward/backward loop — where the two-circuit
-        method would register the pipeline activation mask and schedule the
-        asynchronous unmasked anchor circuit. When comm_eff is disabled (the
-        default: no ``_comm_eff_state`` attached, or it is ``None``) this returns
-        immediately: no forward hook is registered, no mask is drawn (no RNG),
-        no anchor backward is scheduled, so the forward/backward pass is
-        identical to dense GRPO. The masking branch runs only when a future
-        caller attaches an enabled ``CommEffState`` to the engine, and never
-        during a pure inference pass (``forward_only``).
+        Masking is confined to the actor-train forward/backward. This returns
+        False (strict no-op) unless ALL of:
+          * this is a train pass (``not forward_only`` — never on infer_batch /
+            log-prob / ref / validation),
+          * an enabled ``CommEffState`` is attached,
+          * the worker has set ``state.mask_active`` (set only around
+            ``update_actor``; cleared everywhere else),
+          * a masker was constructed (mask sub-config enabled, ``p > 0``).
         """
         if forward_only:
-            return
+            return False
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
-            return
-        # Enabled path (later M2 work): register activation-mask forward hooks
-        # and schedule the anchor circuit here, bumping state.mask_applications /
-        # state.anchor_backwards.
+            return False
+        if not getattr(state, "mask_active", False):
+            return False
+        return getattr(state, "masker", None) is not None
+
+    def _comm_eff_register_mask_hooks(self) -> bool:
+        """Register the activation-mask forward hooks for this train forward.
+
+        Sets the PRF-key context (global step / optimizer-substep identity /
+        sequence-shard id) and installs the hooks on the boundary decoder
+        blocks. Returns True if hooks were registered (so the caller knows to
+        unregister on exit). The substep counter advances per call so the same
+        rollout batch reused across PPO mini-batches gets a distinct mask per
+        substep.
+        """
+        state = self._comm_eff_state
+        masker = state.masker
+        # global optimizer step (best-effort; threaded by the trainer when set).
+        global_step = int(getattr(self, "_comm_eff_global_step", 0))
+        # sequence-shard identity when Ulysses SP is active (else 0).
+        seq_shard = 0
+        if getattr(self, "ulysses_sequence_parallel_size", 1) and self.ulysses_sequence_parallel_size > 1:
+            try:
+                seq_shard = self.get_data_parallel_rank()
+            except Exception:
+                seq_shard = 0
+        masker.set_context(global_step=global_step, substep=state.substep, seq_shard=seq_shard)
+        masker.register(self.module)
+        # Advance the optimizer-substep identity for the next train forward.
+        state.substep += 1
+        return masker.is_registered
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
-        # comm_eff mask/anchor hook (no-op when disabled): when enabled it would
-        # install activation-mask forward hooks before the micro-batch loop. The
-        # disabled default registers nothing and draws no RNG, so the pass is
-        # byte-identical to dense GRPO.
-        self._maybe_comm_eff_mask_hook(forward_only=forward_only)
+        # comm_eff activation-mask hook lifecycle: register hooks on entry to the
+        # train forward/backward and remove them on exit, so a later log-prob /
+        # infer / ref / validation forward on the same module is clean. When
+        # disabled (default) or not on the actor-train path, nothing is registered
+        # and no RNG is drawn, so the pass is byte-identical to dense GRPO.
+        _mask_hooks_live = False
+        if self._comm_eff_mask_active(forward_only=forward_only):
+            _mask_hooks_live = self._comm_eff_register_mask_hooks()
+        try:
+            return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
+        finally:
+            if _mask_hooks_live:
+                self._comm_eff_state.masker.unregister()
 
+    def _forward_backward_batch_inner(
+        self, data: TensorDict, loss_function: Callable, forward_only=False
+    ) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
 
