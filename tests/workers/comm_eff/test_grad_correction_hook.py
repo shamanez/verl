@@ -271,6 +271,46 @@ def test_hook_fires_on_near_zero_grad():
     assert state.spectral_corrections > 0
 
 
+def test_spectral_metrics_are_all_numeric():
+    """Every value surfaced into the trainer metrics dict must be numeric.
+
+    reduce_metrics() does np.mean() on EVERY metric value; a string value
+    (e.g. a flattened FSDP-discovery field) raises UFuncNoLoopError and crashes
+    the step's metric reduction before global_step is logged. This is the
+    defect that killed the second spectral_on run AFTER the correction fired.
+    The string-valued FSDP discovery must live only on state.fsdp_grad_repr /
+    the stdout line, never in the reducible metrics dict.
+    """
+    import numbers
+
+    module = _TinyDecoder()
+    _run_backward_nonzero(module)
+    state = _build_state()
+    apply_spectral_correction_to_params(
+        module.named_parameters(),
+        spectral=state.spectral,
+        target_substrs=("q_proj", "k_proj", "v_proj", "o_proj"),
+        max_targets=4,
+        state=state,
+        discovery_meta=_DISCOVERY_META,
+        full_grad_of=_full_grad_of,
+        writeback=_writeback,
+    )
+    # The discovery log IS populated (headline deliverable still recorded)...
+    assert state.fsdp_grad_repr
+    # ...but it must NOT leak string values into the reducible metrics.
+    metrics = _st.comm_eff_metrics(state)
+    assert metrics, "expected non-empty comm_eff metrics"
+    for k, v in metrics.items():
+        assert isinstance(v, numbers.Number) and not isinstance(v, bool), (
+            f"metric {k!r}={v!r} is not numeric; reduce_metrics() would crash on np.mean"
+        )
+    # And spectral metrics specifically carry rel_change but no fsdp_grad_repr keys.
+    sm = state.spectral_metrics()
+    assert any("rel_change" in k for k in sm)
+    assert not any("fsdp_grad_repr" in k for k in sm)
+
+
 def test_none_grad_is_skipped():
     module = _TinyDecoder()  # no backward => all grads None
     state = _build_state()

@@ -272,11 +272,25 @@ class CommEffState:
     def spectral_metrics(self) -> dict:
         """Return spectral-correction metrics for logging.
 
-        Surfaces the per-target ``||G_proj - G_mask|| / ||G_mask||`` ratios
-        (faithfully, never clamped) plus their mean, and flattens the FSDP
-        gradient-representation discovery log into stable string keys so the
-        analyst can grep the headline deliverable straight from the metrics
-        JSONL. Empty when no correction has fired.
+        Surfaces ONLY NUMERIC values: the per-target
+        ``||G_proj - G_mask|| / ||G_mask||`` ratios (faithfully, never clamped)
+        plus their mean. Empty when no correction has fired.
+
+        IMPORTANT — these metrics flow into ``actor_output.meta_info["metrics"]``
+        and then through ``verl.utils.metric.utils.reduce_metrics``, which does
+        ``np.mean(val)`` on EVERY value. A string value (e.g. a flattened FSDP
+        discovery field like ``grad_container_type="Tensor"``) makes np.mean
+        raise ``UFuncNoLoopError: ufunc 'add' did not contain a loop ... <U59``
+        and crashes the trainer's metric-reduction at the end of the step (this
+        is exactly what killed the second EXP-7 spectral_on run before it
+        reached global_step=2). So the FSDP gradient-representation DISCOVERY log
+        (string-valued container type / placements / fsdp_version / correction
+        point) is deliberately NOT emitted here. It is the headline deliverable
+        and is surfaced the analyst-greppable way it was designed for: the
+        ``[comm_eff][EXP-7][FSDP-DISCOVERY] {...}`` stdout line and the
+        ``logger.warning`` record, both written by the engine hook. It also
+        stays available in-process on ``state.fsdp_grad_repr`` for any non-metric
+        consumer. Reducible metrics must stay numeric.
         """
         if self.spectral is None:
             return {}
@@ -286,10 +300,6 @@ class CommEffState:
             out["comm_eff/spectral/rel_change_mean"] = sum(vals) / len(vals)
             for name, r in self.spectral_rel_change.items():
                 out[f"comm_eff/spectral/rel_change/{name}"] = r
-        # The FSDP discovery log is string-valued (container type etc.). Emit it
-        # under a stable prefix; the analyst greps these keys for the headline.
-        for k, v in self.fsdp_grad_repr.items():
-            out[f"comm_eff/spectral/fsdp_grad_repr/{k}"] = v
         return out
 
     def metrics(self) -> dict:
