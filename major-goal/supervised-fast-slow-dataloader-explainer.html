@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fast and Anchor Training in comm-eff-ft sim_v2</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #566573;
+      --line: #d7dde5;
+      --accent: #0f6b6d;
+      --accent-soft: #e6f3f3;
+      --code-bg: #101820;
+      --code-text: #f3f7f7;
+      --warn-bg: #fff7e6;
+      --warn-border: #e0a52b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+
+    header {
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 34px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 34px 0 12px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 24px 0 10px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    ul, ol {
+      margin-top: 8px;
+      padding-left: 24px;
+    }
+
+    li {
+      margin: 7px 0;
+    }
+
+    code {
+      background: var(--accent-soft);
+      color: #073f41;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.94em;
+    }
+
+    pre {
+      margin: 14px 0 18px;
+      padding: 16px;
+      overflow-x: auto;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      border-radius: 0;
+      font-size: inherit;
+    }
+
+    .summary {
+      padding: 18px 20px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .note {
+      padding: 14px 16px;
+      background: var(--warn-bg);
+      border-left: 4px solid var(--warn-border);
+      border-radius: 6px;
+      color: #4f3a08;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin: 16px 0 20px;
+    }
+
+    .box {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .box h3 {
+      margin-top: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 20px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      background: var(--accent-soft);
+      color: #073f41;
+      font-weight: 650;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .loop-figure {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      margin: 18px 0 22px;
+    }
+
+    .lane {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .lane-title {
+      margin: 0 0 12px;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .step-card {
+      min-height: 86px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfcfd;
+      font-size: 13px;
+    }
+
+    .step-card strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #111820;
+      font-size: 13px;
+    }
+
+    .step-card.accent {
+      border-color: #8bbec0;
+      background: var(--accent-soft);
+    }
+
+    .flow-caption {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .mini-timeline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 18px;
+    }
+
+    .mini-timeline .step-card {
+      min-height: 100px;
+    }
+
+    @media (max-width: 720px) {
+      main {
+        padding: 28px 16px 48px;
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .steps,
+      .mini-timeline {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Fast and Anchor Training in the Supervised Codebase</h1>
+      <p class="muted">
+        Explanation of how <code>/Users/shamane/Documents/comm-eff-ft/sim_v2</code>
+        runs the paper-style fast masked circuit and slow unmasked anchor circuit,
+        including how batches are sampled and passed between ranks.
+      </p>
+    </header>
+
+    <section class="summary">
+      <p>
+        In <code>comm-eff-ft/sim_v2</code>, this is one distributed training run,
+        not two independent training jobs. It is launched as one
+        <code>torchrun --nproc-per-node=8</code> job on a single 8 GPU node.
+      </p>
+      <pre><code>8 GPU single node
+ranks 0..6: fast training circuit
+rank 7: slow anchor circuit</code></pre>
+      <p>
+        The model used by that simulator is <code>unsloth/Llama-3.2-1B</code>,
+        about 1.2B parameters. Every GPU holds a full model replica. There is no
+        real pipeline slicing in <code>sim_v2</code>; pipeline activation compression
+        is simulated by forward hooks on selected decoder layer outputs.
+      </p>
+    </section>
+
+    <h2>Process Roles</h2>
+    <div class="grid">
+      <article class="box">
+        <h3>Fast Ranks: 0..6</h3>
+        <p>
+          These are the only ranks that own the actual training trajectory.
+          They run masked supervised forward/backward, apply spectral correction
+          when an anchor prior is available, average gradients across the fast
+          group, and step AdamW.
+        </p>
+        <pre><code>fast rank step:
+  sample current batch
+  masked forward
+  backward
+  spectral correction if anchor prior exists
+  all-reduce across ranks 0..6
+  optimizer.step()</code></pre>
+      </article>
+
+      <article class="box">
+        <h3>Anchor Rank: 7</h3>
+        <p>
+          This rank does not maintain its own optimizer trajectory. It waits for
+          rank 0 to send stale weights and a stale batch, loads those weights,
+          runs one unmasked forward/backward, and sends selected clean gradients
+          back to rank 0.
+        </p>
+        <pre><code>anchor rank cycle:
+  wait for stale packet from rank 0
+  load stale weights
+  unmasked forward/backward on stale batch
+  send selected gradients back</code></pre>
+      </article>
+    </div>
+
+    <h2>Data Loading</h2>
+    <p>
+      The simulator does not use a PyTorch <code>DataLoader</code> in the usual
+      epoch/iterator sense. It builds a flat token stream and samples random
+      offsets into that stream.
+    </p>
+
+    <h3>Dataset Formatting</h3>
+    <p>
+      For the QuALITY setup, each dataset row is formatted as text:
+    </p>
+    <pre><code>&lt;article&gt;
+
+Question: &lt;question&gt;
+A) &lt;option 0&gt;
+B) &lt;option 1&gt;
+C) &lt;option 2&gt;
+D) &lt;option 3&gt;
+Answer: &lt;correct letter&gt;
+
+[EOS]</code></pre>
+
+    <p>
+      Then the code tokenizes all formatted examples and concatenates them:
+    </p>
+    <pre><code>QuALITY train rows
+  -> format as text
+  -> tokenize
+  -> concatenate into one long train_stream
+
+QuALITY validation rows
+  -> format as text
+  -> tokenize
+  -> concatenate into one long val_stream</code></pre>
+
+    <h3>Batch Sampling</h3>
+    <p>
+      Every fast rank samples its own mini-batch independently by calling:
+    </p>
+    <pre><code>inp, tgt = get_batch(train_stream, micro_batch_size, seq_len, device, g_train)</code></pre>
+
+    <p>
+      Internally, <code>get_batch()</code> chooses random start offsets:
+    </p>
+    <pre><code>stream: [token0, token1, token2, ... tokenN]
+
+sample random start positions:
+  s1, s2, ...
+
+input batch:
+  stream[s1 : s1 + seq_len]
+  stream[s2 : s2 + seq_len]
+
+labels:
+  input_ids.clone()</code></pre>
+
+    <p>
+      It is standard causal language-model training. The Hugging Face model
+      shifts labels internally when called with <code>labels=input_ids</code>.
+    </p>
+
+    <h2>How Batches Flow Through Fast and Anchor</h2>
+    <p>
+      Each fast rank samples current data from the same flat token stream, but
+      with a rank-specific random generator seed.
+    </p>
+    <pre><code>rank 0 samples current batch_0_t
+rank 1 samples current batch_1_t
+rank 2 samples current batch_2_t
+...
+rank 6 samples current batch_6_t</code></pre>
+
+    <p>
+      Rank 7 does not sample from the data stream. It has no independent active
+      dataloader. It only receives stale batches from rank 0.
+    </p>
+
+    <h3>Rank 0 Staleness Queue</h3>
+    <p>
+      Rank 0 has an extra responsibility: it stores copies of its own old
+      batches together with weight snapshots.
+    </p>
+    <pre><code>rank 0 pushes into StalenessQueue:
+  source_step
+  full trainable weight snapshot
+  rank-0 input batch
+  rank-0 labels</code></pre>
+
+    <p>
+      After the configured delay, usually <code>K = 20</code>, rank 0 pops the
+      old packet and sends it to rank 7.
+    </p>
+    <pre><code>rank 0 -> rank 7:
+  stale input batch
+  stale labels
+  stale weight snapshot</code></pre>
+
+    <p>
+      The anchor gradient is therefore a clean gradient on a stale sample from
+      the same training distribution. It is not the full combined 7-rank fast
+      batch. In the simulator, that is acceptable because the anchor prior is a
+      stochastic clean geometry estimate, not a direct optimizer update.
+    </p>
+
+    <h2>Timeline Example</h2>
+    <p>
+      Assume <code>K = 20</code> and anchor cadence is also 20.
+    </p>
+
+    <h3>Why There Is a K Value</h3>
+    <p>
+      <code>K</code> is the anchor staleness measured in fast optimizer steps.
+      It exists to model the latency of the slow unmasked circuit. While the
+      anchor is pulling a weight snapshot, running the expensive unmasked
+      forward/backward, and returning gradients, the fast masked circuit keeps
+      making progress.
+    </p>
+    <p>
+      If the fast circuit can complete about 20 masked optimizer steps during
+      one anchor cycle, then the clean anchor gradient that arrives now was
+      computed from weights and data that are about 20 fast steps old. That is
+      why the simulator commonly uses <code>K = 20</code>.
+    </p>
+
+    <div class="mini-timeline" aria-label="K staleness timeline">
+      <div class="step-card">
+        <strong>Step 20</strong>
+        Rank 0 saves <code>weights_20</code> and
+        <code>batch_20_rank0</code> into the stale queue.
+      </div>
+      <div class="step-card">
+        <strong>Steps 21-39</strong>
+        Fast ranks keep training on current masked batches.
+      </div>
+      <div class="step-card accent">
+        <strong>Step 40</strong>
+        Rank 0 sends <code>weights_20</code> and
+        <code>batch_20_rank0</code> to the anchor.
+      </div>
+      <div class="step-card">
+        <strong>After Arrival</strong>
+        The returned clean gradient refreshes the spectral correction state.
+      </div>
+    </div>
+
+    <h3>Does Correction Happen Every Optimizer Step?</h3>
+    <p>
+      Once at least one anchor prior has arrived, the fast path can apply
+      correction on every masked optimizer step. Anchor gradients arrive only
+      periodically, but the spectral basis they update is cached and reused.
+    </p>
+    <pre><code>each fast optimizer step:
+  run masked forward/backward
+  produce current masked gradient
+
+  if a new anchor gradient arrived:
+    update anchor EMA
+    recompute spectral basis
+
+  if a spectral basis exists:
+    correct current masked gradient using cached basis
+
+  all-reduce corrected gradients across fast ranks
+  optimizer.step()</code></pre>
+
+    <p>
+      So there are two cadences:
+    </p>
+    <ul>
+      <li>
+        <strong>Anchor cadence:</strong> how often the clean unmasked geometry is
+        refreshed, for example every 20 fast steps.
+      </li>
+      <li>
+        <strong>Optimizer cadence:</strong> how often the fast masked gradients
+        are corrected and stepped, which is every fast training step after a
+        usable spectral basis exists.
+      </li>
+    </ul>
+
+    <h3>Figurative Training Loop</h3>
+    <div class="loop-figure" aria-label="Fast and anchor training loop diagram">
+      <section class="lane">
+        <p class="lane-title">Fast circuit, ranks 0..6, every optimizer step</p>
+        <div class="steps">
+          <div class="step-card">
+            <strong>1. Sample</strong>
+            Each fast rank samples a current batch from the flat token stream.
+          </div>
+          <div class="step-card">
+            <strong>2. Masked F/B</strong>
+            Forward hooks mask selected decoder layer outputs; backward inherits
+            the same mask.
+          </div>
+          <div class="step-card accent">
+            <strong>3. Correct</strong>
+            If a cached anchor basis exists, project and blend the current fast
+            gradient.
+          </div>
+          <div class="step-card">
+            <strong>4. Sync</strong>
+            Average corrected gradients across fast ranks.
+          </div>
+          <div class="step-card">
+            <strong>5. Step</strong>
+            AdamW updates the fast model trajectory.
+          </div>
+        </div>
+        <p class="flow-caption">
+          This row runs on the critical path. It owns the final model.
+        </p>
+      </section>
+
+      <section class="lane">
+        <p class="lane-title">Rank 0 queue and anchor refresh, every K/cadence steps</p>
+        <div class="steps">
+          <div class="step-card">
+            <strong>A. Snapshot</strong>
+            Rank 0 stores current trainable weights plus its current batch.
+          </div>
+          <div class="step-card">
+            <strong>B. Wait K</strong>
+            The packet stays in the queue until it is K fast steps old.
+          </div>
+          <div class="step-card">
+            <strong>C. Send</strong>
+            Rank 0 sends stale weights and stale batch to rank 7.
+          </div>
+          <div class="step-card">
+            <strong>D. Anchor F/B</strong>
+            Rank 7 loads stale weights and runs unmasked backward.
+          </div>
+          <div class="step-card accent">
+            <strong>E. Refresh</strong>
+            Returned gradients update the spectral EMA/SVD cache used by future
+            fast steps.
+          </div>
+        </div>
+        <p class="flow-caption">
+          This row refreshes the correction state. It does not run its own
+          optimizer step.
+        </p>
+      </section>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Fast Step</th>
+          <th>Fast Ranks 0..6</th>
+          <th>Rank 0 Extra Work</th>
+          <th>Anchor Rank 7</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>20</td>
+          <td>Train on current per-rank batches with masking.</td>
+          <td>Save <code>weights_20</code> and <code>batch_20_rank0</code>.</td>
+          <td>Waits or receives no-work control packet.</td>
+        </tr>
+        <tr>
+          <td>40</td>
+          <td>Train on current per-rank batches with masking.</td>
+          <td>
+            Pop <code>weights_20</code> and <code>batch_20_rank0</code>,
+            send them to rank 7, then save <code>weights_40</code> and
+            <code>batch_40_rank0</code>.
+          </td>
+          <td>
+            Load <code>weights_20</code>, run unmasked backward on
+            <code>batch_20_rank0</code>, return selected gradients.
+          </td>
+        </tr>
+        <tr>
+          <td>41+</td>
+          <td>
+            Continue masked training. Use the refreshed spectral basis when
+            applying correction.
+          </td>
+          <td>Broadcast spectral state to fast ranks when updated.</td>
+          <td>Waits for the next stale packet.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>What Is Shared and What Is Independent</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Fast Ranks</th>
+          <th>Anchor Rank</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Process</td>
+          <td>Separate Python processes, ranks 0..6.</td>
+          <td>Separate Python process, rank 7.</td>
+        </tr>
+        <tr>
+          <td>Model</td>
+          <td>Full Llama-3.2-1B replica per GPU.</td>
+          <td>Full Llama-3.2-1B replica, overwritten by stale snapshots.</td>
+        </tr>
+        <tr>
+          <td>Data source</td>
+          <td>Same tokenized train stream, independent random batches per rank.</td>
+          <td>No active independent sampler; consumes stale rank-0 batches.</td>
+        </tr>
+        <tr>
+          <td>Masking</td>
+          <td>Enabled after warmup on selected decoder layers.</td>
+          <td>Always disabled for anchor backward.</td>
+        </tr>
+        <tr>
+          <td>Optimizer</td>
+          <td>AdamW steps every fast step.</td>
+          <td>No optimizer step.</td>
+        </tr>
+        <tr>
+          <td>Output</td>
+          <td>Owns the final trained model trajectory.</td>
+          <td>Only returns gradients used to update spectral correction state.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Important Mental Model</h2>
+    <div class="note">
+      <p>
+        This is not two independent training runs. It is one distributed run
+        with two roles. The fast circuit owns training. The anchor circuit is a
+        stale, unmasked gradient oracle that is periodically refreshed from the
+        fast model and the fast data distribution.
+      </p>
+    </div>
+
+    <pre><code>same torchrun job
+same dataset/token stream
+fast ranks independently sample current batches
+rank 0 queues old copies of its own batch plus weights
+anchor rank consumes only those stale queued batches
+anchor returns clean unmasked gradients
+fast ranks use those gradients as spectral priors
+only fast ranks perform optimizer updates</code></pre>
+
+    <h2>Why This Matters for the verl GRPO Port</h2>
+    <p>
+      In verl, the anchor should follow the same idea, but the stale batch must
+      be the already-processed actor mini-batch, not raw prompts. That actor
+      mini-batch contains GRPO fields such as <code>old_log_probs</code>,
+      <code>advantages</code>, <code>response_mask</code>, and optionally
+      <code>ref_log_prob</code>. The anchor should run the same actor
+      <code>ppo_loss</code> on that stale mini-batch. It should not regenerate
+      responses, recompute rewards, or switch to an SFT loss.
+    </p>
+  </main>
+</body>
+</html>

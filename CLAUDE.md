@@ -9,7 +9,7 @@
 ## 1. What this fork is for
 
 Build and demonstrate the two-circuit compression method described in
-[`major-goal/core-task.md`](major-goal/core-task.md) — pipeline activation
+[`major-goal/Prompt.md`](major-goal/Prompt.md) + [`major-goal/implementation-logic.md`](major-goal/implementation-logic.md) — pipeline activation
 masking + asynchronous unmasked anchor circuit + spectral correction of
 masked gradients before the optimizer step — on top of verl's existing
 GRPO recipe for **Qwen2.5-1.5B-Instruct trained on GSM8K**.
@@ -35,7 +35,7 @@ loop — 16K response context + n=8 rollouts needs the headroom.
 This is **issue-first** development. Everything an agent needs to do its
 job is reachable from the GitHub issue queue plus the harness files
 under `research/`. Agents do **not** read `major-goal/` — that directory
-is human-only reference (the research-goal paper + `core-task.md`).
+is human-only reference (the research-goal paper + `Prompt.md` / `implementation-logic.md`).
 
 | If you need… | Read |
 |---|---|
@@ -47,7 +47,7 @@ is human-only reference (the research-goal paper + `core-task.md`).
 | Vast-ai launcher conventions | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
-| Research goal & method (human-only) | `major-goal/core-task.md` + `major-goal/LLM_adaptation_neurips.pdf` |
+| Research goal & method (human-only) | `major-goal/Prompt.md` + `major-goal/implementation-logic.md` + `major-goal/LLM_adaptation_neurips.pdf` |
 
 The GitHub repo the harness watches is
 **`shamanez/verl-compression-research`** (private). It is set as the local
