@@ -1,21 +1,22 @@
-# Research Status — 2026-05-28T00:45:10+10:00
+# Research Status — 2026-05-28T01:33+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| — | (no active experiments) | IDLE | none running | — | EXP-3 (M1 baseline) + EXP-4 (M2 comm_eff scaffolding) complete & merged. See `findings/`, `runs/EXP-3`+`runs/EXP-4`, and git history. |
-
-## Backlog (await triage/planning — no `status:`/`research:claim` yet)
-- #5 M2 PRF activation masking · #6 M2 mask contamination guard · #7 M2 spectral correction filter · #8 M2 anchor circuit · #9 M2 full M95+AP smoke
-- #10 M3 DP gradient compression scope · #11 M3 100-step M95+AP vs dense baseline
+| 5 | M2 actor-only PRF activation masking (2-step smoke) | RUNNING | 1×4H200 (i_38098877) | — | verify=CONCERNS→VERIFIED; exp/5-actor-mask @69524742 pushed; cell p95 in model-load; done.flag-dir pre-created on box to keep 3-cell chain alive |
 
 ## Last tick
-2026-05-28T00:45:10+10:00 · verify=[] · running=[] · analyzing=[] · logging=[] · blocked=[] · IDLE — session reset for next issue
+2026-05-28T01:33+10:00 · verify=[] · running=[5] · analyzing=[] · logging=[] · blocked=[]
 
 ## Budget
-$/hr now: **$0.00** (no instances running) · all Vast instances torn down · monthly cap: tracked separately
+$/hr now: $14.74 (4×H200, tier-1; tier-0 4×H100 had 0 offers) · cap/instance: $24 · run cap: 8 GPU-hr / 3 h wall
 
-## Carryover follow-ups (not yet issues)
-- **Launcher done.flag bug** — `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh:196` hardcodes a `done.flag` path (default exp-name) that doesn't exist under `SAVE_FREQ=-1` → exits nonzero → aborts back-to-back smoke chains under `set -e`. Fix: `$EXPERIMENT_NAME` + `mkdir -p`. Blocks any multi-cell smoke (incl. the EXP-4 B/C relaunch for A-vs-B parity + rel-tol-1e-4).
-- `.claude/worktrees/` not gitignored (minor). · `research/researcher_steps.md` still references the deleted `major-goal/core-task.md` (CLAUDE.md refs were updated; researcher_steps.md left per scope).
+## EXP-5 cell metrics (live)
+- p95: model-load/vLLM-init, no train steps yet · grad_norm: n/a · mask_ratio: n/a · NaN: none
+- p90: not started
+- disabled: not started
+
+## Notes
+- Carryover launcher done.flag bug (hardcoded path under SAVE_FREQ=-1) confirmed live on exp/5; mitigated by pre-creating /workspace/verl/runs/qwen25_1p5b_grpo_gsm8k_baseline on the box so `touch done.flag` succeeds → chain does not abort under set -e.
+- Analyst note (from verify CONCERNS): grep mask-confinement on BOTH p95 AND p90 logs (not just p95); disabled-cell --baseline EXP-3 is the harness standard baseline-diff entry point.

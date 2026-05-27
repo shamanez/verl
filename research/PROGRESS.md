@@ -27,3 +27,6 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-28T00:45:10+10:00] [reset] Event log cleared for a fresh next-issue session. Prior history is in git (commit 95e8cc38 and earlier): EXP-3 (M1 dense GRPO baseline — PASS, val 0.087→0.789) and EXP-4 (M2 comm_eff no-op scaffolding — merged shamanez/verl#1, issue #4 closed status:done) are complete. Backlog #5–#11 await planning. All Vast instances torn down; runs.jsonl ledger preserved. Carryover follow-up: launcher `vast_baseline_qwen25_1p5b_grpo_gsm8k.sh:196` done.flag bug must be fixed before any multi-cell smoke.
 [2026-05-28T00:51:39+10:00] [research-planner #5] plan written
 [2026-05-28T00:52:01+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-05-28T01:04:41+10:00] [codex-bridge --mode=verify] result=CONCERNS
+[2026-05-28T01:30:02+10:00] [experiment-runner #5] launched on 1 instance (38098877, 4xH200, tier_idx=1) dph=14.74; 3 smoke cells (p95/p90/disabled) running on exp/5-actor-mask
+[2026-05-28T01:33:13+10:00] [orchestrator] tick: EXP-5 RUNNING (i_38098877 4xH200 $14.74/hr); verify=CONCERNS->VERIFIED; cell p95 in model-load; pre-created done.flag dir on box to keep 3-cell chain from aborting under set -e (launcher bug confirmed unpatched on exp/5)
