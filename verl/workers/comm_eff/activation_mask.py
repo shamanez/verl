@@ -62,6 +62,11 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+# The single path tag on which masking is permitted to fire. Imported from the
+# state module (cheap, no torch import there) so the assert below and the state
+# stay in lockstep on the spelling of "train".
+from verl.workers.comm_eff.state import TRAIN_TAG
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -287,6 +292,24 @@ class ActivationMasker:
                 hidden_size,
                 masker.base_seed,
             )
+            # EXP-6 contamination guard: the mask must NEVER fire outside the
+            # actor-train path. The engine only registers these hooks when
+            # state.mask_active is set around update_actor, but a future caller
+            # that mis-sets the flag (or a path-tag mismatch) would silently
+            # corrupt log-prob / ref / rollout / val / checkpoint forwards. We
+            # turn that into a LOUD failure: assert the state's path tag is
+            # "train" before applying the mask. Disabled under `python -O`, but
+            # the per-path counter below still records any leak as a falsifier.
+            state = masker._state
+            if state is not None and hasattr(state, "path_tag"):
+                tag = state.path_tag
+                assert tag == TRAIN_TAG, (
+                    "comm_eff activation mask fired on a non-train path "
+                    f"(path_tag={tag!r}); masking is confined to the actor-train "
+                    "forward/backward. This is contamination of the RL "
+                    "measurement machinery (rollout / log-prob / ref / val / "
+                    "infer / checkpoint) and is a hard falsifier."
+                )
             mask = prf_mask(tuple(h.shape), key, masker.p, device=h.device, dtype=h.dtype)
             # h_tilde = h * mask, in-graph (no 1/(1-p) rescale). The multiply is
             # tracked by autograd so the masked gradient flows to the optimizer.
@@ -294,8 +317,15 @@ class ActivationMasker:
             # Instrumentation (does not affect the graph): measured masked fraction.
             with torch.no_grad():
                 masker.last_mask_ratio[layer_idx] = float(1.0 - mask.mean().item())
-            if masker._state is not None:
-                masker._state.mask_applications += 1
+            if state is not None:
+                # Records both the aggregate and the per-path counter; the
+                # latter is what the analyst greps by KEY PREFIX. Falls back to
+                # the EXP-5 aggregate-only shape if note_mask_application is
+                # absent (e.g. a _FakeState in a unit test).
+                if hasattr(state, "note_mask_application"):
+                    state.note_mask_application()
+                else:
+                    state.mask_applications += 1
             if isinstance(output, tuple):
                 return (h_tilde,) + tuple(output[1:])
             return h_tilde

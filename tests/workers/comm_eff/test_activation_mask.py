@@ -256,3 +256,213 @@ def test_mask_applications_counter_increments():
     hook(nn.Identity(), (), torch.randn(2, 4, 16))
     hook(nn.Identity(), (), torch.randn(2, 4, 16))
     assert state.mask_applications == 2
+
+
+# =========================================================================== #
+# EXP-6: path-isolation / mask-contamination guard
+#
+# These tests prove the activation mask fires on EXACTLY the actor-train path
+# and is a loud failure (assert) + a per-path counter on every RL-measurement
+# path (rollout / old_logprob / ref_logprob / val / infer / ckpt). They run on
+# CPU with a toy model — no GPU, no distributed.
+# =========================================================================== #
+from types import SimpleNamespace
+
+from verl.workers.comm_eff.state import (  # noqa: E402
+    PATH_TAGS,
+    TRAIN_TAG,
+    CommEffState,
+    comm_eff_metrics,
+    maybe_build_comm_eff_state,
+)
+
+
+def _make_enabled_state(p=0.95, pp_size=8, seed=0):
+    """Build a real enabled CommEffState with the mask sub-circuit on."""
+    cfg = SimpleNamespace(
+        enabled=True,
+        mask=SimpleNamespace(enabled=True, p=p, seed=seed, pp_size=pp_size),
+    )
+    state = maybe_build_comm_eff_state(cfg)
+    assert isinstance(state, CommEffState)
+    model = _ToyDecoder(num_layers=16, d=32)
+    state.build(model)
+    assert state.masker is not None
+    return state, model
+
+
+def test_state_defaults_path_tag_none_and_all_paths_zero():
+    state, _ = _make_enabled_state()
+    assert state.path_tag is None
+    for tag in PATH_TAGS:
+        assert state.mask_applications_by_path[tag] == 0
+
+
+def test_set_path_tag_rejects_unknown_tag():
+    state, _ = _make_enabled_state()
+    with pytest.raises(ValueError):
+        state.set_path_tag("not_a_real_path")
+    # None is always allowed (clears the tag)
+    state.set_path_tag(None)
+    assert state.path_tag is None
+
+
+def test_mask_fires_only_on_train_tag():
+    """With tag == train the mask fires and bumps ONLY the train per-path counter."""
+    state, model = _make_enabled_state()
+    state.mask_active = True
+    state.set_path_tag(TRAIN_TAG)
+    state.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    state.masker.register(model)
+    out_masked = model(torch.randn(2, 4, 32))  # noqa: F841
+    state.masker.unregister()
+
+    assert state.mask_applications > 0
+    assert state.mask_applications_by_path[TRAIN_TAG] == state.mask_applications
+    for tag in PATH_TAGS:
+        if tag != TRAIN_TAG:
+            assert state.mask_applications_by_path[tag] == 0
+
+
+@pytest.mark.parametrize("bad_tag", [t for t in PATH_TAGS if t != TRAIN_TAG] + [None])
+def test_mask_hook_asserts_on_non_train_path(bad_tag):
+    """A hook fire while the path tag is anything but 'train' must raise loudly."""
+    state, _ = _make_enabled_state()
+    state.set_path_tag(bad_tag)
+    state.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    hook = state.masker._make_hook(3)
+    with pytest.raises(AssertionError):
+        hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    # And the leak left every per-path counter at 0 (the assert fired before
+    # any increment).
+    for tag in PATH_TAGS:
+        assert state.mask_applications_by_path[tag] == 0
+
+
+def test_per_path_counters_surface_in_metrics_by_key_prefix():
+    """comm_eff_metrics emits one key per path; only train is nonzero after a train fire."""
+    state, model = _make_enabled_state()
+    state.mask_active = True
+    state.set_path_tag(TRAIN_TAG)
+    state.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    state.masker.register(model)
+    model(torch.randn(2, 4, 32))
+    state.masker.unregister()
+
+    metrics = comm_eff_metrics(state)
+    # Every path has a key (so the analyst greps by KEY PREFIX, not substring).
+    for tag in PATH_TAGS:
+        assert f"comm_eff/mask_applications/{tag}" in metrics
+    assert metrics[f"comm_eff/mask_applications/{TRAIN_TAG}"] > 0
+    nonzero_path_keys = [
+        k
+        for k, v in metrics.items()
+        if k.startswith("comm_eff/mask_applications/") and v > 0
+    ]
+    assert nonzero_path_keys == [f"comm_eff/mask_applications/{TRAIN_TAG}"]
+
+
+def test_clean_forward_after_train_on_inactive_tag_is_unmasked():
+    """A simulated log-prob forward (tag old_logprob, hooks unregistered) is mask-free.
+
+    Reproduces the worker contract: update_actor registers hooks under tag=train,
+    then unregisters; compute_log_prob stamps tag=old_logprob and runs a clean
+    forward. The clean forward must be byte-identical to the no-mask forward.
+    """
+    torch.manual_seed(0)
+    state, model = _make_enabled_state()
+    x = torch.randn(2, 4, 32)
+
+    # reference: never-masked forward
+    ref = model(x)
+
+    # train forward (masked)
+    state.mask_active = True
+    state.set_path_tag(TRAIN_TAG)
+    state.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    state.masker.register(model)
+    _ = model(x)
+    state.masker.unregister()
+    state.mask_active = False
+
+    # log-prob forward (inactive path, no hooks) — must equal the reference
+    state.set_path_tag("old_logprob")
+    out_logprob = model(x)
+    assert torch.allclose(out_logprob, ref)
+
+
+# --------------------------------------------------------------------------- #
+# log-prob equality (mask-on vs mask-off) on a fixed batch — the rel-tol 1e-6
+# success criterion, runnable on CPU without the full trainer.
+# --------------------------------------------------------------------------- #
+class _ToyLM(nn.Module):
+    """Toy causal-LM-ish stack: decoder blocks + an LM head, returns log-probs."""
+
+    def __init__(self, num_layers=16, d=32, vocab=11):
+        super().__init__()
+        self.layers = nn.ModuleList([_ToyBlock(d) for _ in range(num_layers)])
+        self.head = nn.Linear(d, vocab)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return torch.log_softmax(self.head(x), dim=-1)
+
+
+def test_logprob_equal_mask_on_vs_off_when_tag_inactive():
+    """old/ref log-prob recompute is unmasked: identical with mask 'enabled' but
+    on an inactive path vs with no masker at all, within rel-tol 1e-6."""
+    torch.manual_seed(1)
+    model = _ToyLM(num_layers=16, d=32)
+    x = torch.randn(3, 5, 32)
+
+    # mask-off reference: no comm_eff state at all
+    lp_off = model(x)
+
+    # mask-"on" but on an RL-measurement path: enabled state, hooks NOT
+    # registered (compute_log_prob never registers; only update_actor does),
+    # tag = old_logprob. The forward must be identical to mask-off.
+    state = maybe_build_comm_eff_state(
+        SimpleNamespace(enabled=True, mask=SimpleNamespace(enabled=True, p=0.95, seed=0, pp_size=8))
+    )
+    state.build(model)
+    state.set_path_tag("old_logprob")  # inactive path
+    lp_on = model(x)
+
+    assert torch.allclose(lp_on, lp_off, rtol=1e-6, atol=1e-6)
+    # and no mask fired on the log-prob path
+    assert state.mask_applications_by_path["old_logprob"] == 0
+    assert state.mask_applications == 0
+
+
+# --------------------------------------------------------------------------- #
+# checkpoint contamination guard: no comm_eff state in a saved state_dict
+# --------------------------------------------------------------------------- #
+def test_checkpoint_guard_passes_on_clean_state_dict():
+    from verl.utils.checkpoint.fsdp_checkpoint_manager import _assert_no_comm_eff_state
+
+    clean = _ToyLM().state_dict()  # plain weights, no comm_eff keys
+    # Must not raise.
+    _assert_no_comm_eff_state(clean)
+
+
+def test_checkpoint_guard_rejects_leaked_comm_eff_state():
+    from verl.utils.checkpoint.fsdp_checkpoint_manager import _assert_no_comm_eff_state
+
+    leaked = _ToyLM().state_dict()
+    leaked["layers.3.comm_eff_mask_buffer"] = torch.zeros(4)
+    with pytest.raises(AssertionError):
+        _assert_no_comm_eff_state(leaked)
+
+
+def test_masker_is_hooks_only_no_params_or_buffers():
+    """The masker adds NO nn.Parameters/buffers to the module, so a state_dict
+    after registration carries no comm_eff tensors (the structural reason the
+    checkpoint guard holds)."""
+    model = _ToyLM(num_layers=16, d=32)
+    keys_before = set(model.state_dict().keys())
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8)
+    masker.register(model)
+    keys_after = set(model.state_dict().keys())
+    masker.unregister()
+    assert keys_before == keys_after
