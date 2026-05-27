@@ -62,6 +62,20 @@ The chain above is the planner default. The runner walks it in order and stops a
 
 Per-experiment plans override only when justified — e.g. M0 smoke chains with cheaper SKUs (RTX 3090/4090), multi-node fan-out for a large sweep, or a single-tier chain when a specific GPU is the experimental variable.
 
+## Vast.ai training footprint (KEEP MINIMAL — this is real money)
+
+State the *smallest* run that can still falsify the hypothesis. Every training
+step on the Vast.ai box burns GPU-hours; fewer cells × fewer steps is always
+better. Count ONLY what actually launches on Vast — codex-verify / local
+assertions are free and do not belong here.
+
+```yaml
+vast_cells:        <N>          # how many training cells actually launch on Vast
+steps_per_cell:    <S>          # global_step target per cell (the smallest that answers the hypothesis)
+total_train_steps: <N*S>        # cross-check against max_gpu_hr — if this climbs, re-justify
+justification:     "<why this is the minimum number of cells × steps that still falsifies the hypothesis>"
+```
+
 **What the plan does NOT specify.** The docker image, container `--shm-size` / `--cap-add`, onstart script (clone fork + pip-install verl `--no-deps`), recommended disk default, and CUDA driver filter all live in the locked Vast.ai Template referenced by `research/.claude/skills/vast-provision/templates.json`. The `vast-provision` skill auto-reads that file and pins the Template; plans MUST NOT name a `template_hash` or `image`. If a future plan needs a different runtime (new vllm major, different image), update `templates.json` and the Vast.ai Template record together — never bypass.
 
 ## Success criteria
