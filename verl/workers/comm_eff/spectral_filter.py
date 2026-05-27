@@ -55,6 +55,7 @@ unshard upstream fails loudly here rather than silently mangling a gradient.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -67,6 +68,7 @@ __all__ = [
     "two_sided_projection",
     "spectral_correct",
     "SpectralFilter",
+    "apply_spectral_correction_to_params",
 ]
 
 
@@ -202,8 +204,17 @@ class SpectralFilter:
         """
         m, n = int(shape[0]), int(shape[1])
         k = min(m, n)
-        # A per-target deterministic seed from a stable hash of the name.
-        h = (hash(name) ^ (self.anchor_seed * 0x9E3779B1)) & 0x7FFFFFFF
+        # A per-target deterministic seed from a STABLE hash of the name.
+        #
+        # DEFECT-3 FIX. Python's builtin hash() is salted per-process via
+        # PYTHONHASHSEED, so two FSDP ranks (separate processes) would seed
+        # DIFFERENT anchors for the same parameter name -> each rank builds a
+        # different M_anchor -> a different G_proj -> cross-rank replica
+        # divergence / corrupted correction once the sharded grads recombine.
+        # sha256 is stable across processes and Python versions, so every rank
+        # derives the IDENTICAL anchor for a given (name, anchor_seed).
+        name_hash = int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:8], "big")
+        h = (name_hash ^ (self.anchor_seed * 0x9E3779B1)) & 0x7FFFFFFF
         gen = torch.Generator(device="cpu").manual_seed(h)
         # Random orthonormal-ish factors with a decaying positive spectrum.
         a = torch.randn(m, k, generator=gen, dtype=torch.float32)
@@ -263,3 +274,85 @@ class SpectralFilter:
         if denom <= 0:
             return 0.0
         return (torch.linalg.norm(gp - gm) / denom).item()
+
+
+def apply_spectral_correction_to_params(
+    named_params,
+    *,
+    spectral: "SpectralFilter",
+    target_substrs,
+    max_targets: int,
+    state,
+    discovery_meta: dict,
+    full_grad_of,
+    writeback,
+) -> int:
+    """FSDP-agnostic core of the spectral grad-correction hook (CPU-testable).
+
+    This is the load-bearing iteration/discovery/correction loop, pulled out of
+    ``FSDPEngine._maybe_comm_eff_grad_correction`` so it runs on CPU with no
+    ``torch.distributed`` / FSDP runtime (see
+    ``tests/workers/comm_eff/test_grad_correction_hook.py``). The FSDP-specific
+    bits are injected as callables:
+
+    * ``full_grad_of(grad) -> (full_2d_tensor, meta)`` resolves the **full
+      logical 2D matrix** for a raw ``.grad`` (identity for a plain CPU/FSDP1-
+      summoned tensor; ``grad.full_tensor()`` for an FSDP2 ``DTensor``) and
+      returns a small ``meta`` dict (container type, is_dtensor, placements,
+      mesh) describing the container — recorded once in the discovery log.
+    * ``writeback(grad, g_proj)`` copies the corrected full matrix back into the
+      (possibly sharded) ``.grad`` in place.
+
+    DEFECT-2 contract this function encodes:
+    * the discovery log is recorded **once**, on the first target with a
+      non-``None`` grad, **regardless of gradient magnitude** (a near-zero grad
+      still proves the hook ran — only ``grad is None`` is skipped); and
+    * ``state.spectral_corrections`` increments per corrected 2D matrix.
+
+    Returns the number of matrices corrected.
+    """
+    instrumented = bool(state.fsdp_grad_repr)  # log discovery only once
+    corrected = 0
+
+    for name, p in named_params:
+        grad = getattr(p, "grad", None)
+        if grad is None:
+            continue
+        if not any(s in name for s in target_substrs):
+            continue
+        if max_targets >= 0 and corrected >= max_targets:
+            break
+
+        full, container_meta = full_grad_of(grad)
+        logical_shape = tuple(full.shape)
+        if full.dim() != 2:
+            # Skip non-2D targets (norms/biases excluded by substr anyway).
+            continue
+
+        if not instrumented:
+            repr_log = {"target_name": name, "logical_2d_shape": str(logical_shape)}
+            repr_log.update(container_meta)
+            repr_log.update(discovery_meta)
+            state.fsdp_grad_repr = repr_log
+            logger.warning("comm_eff FSDP grad-repr discovery: %s", repr_log)
+            print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
+            instrumented = True
+
+        g_proj = spectral.correct_matrix(name, full)
+        rel = spectral.relative_change(full, g_proj)
+        state.spectral_rel_change[name] = rel
+        print(
+            f"[comm_eff][EXP-7][spectral] {name} alpha={spectral.alpha} "
+            f"rel_change=||G_proj-G_mask||/||G_mask||={rel:.6f} "
+            f"shape={logical_shape} grad_type={container_meta.get('grad_container_type')}",
+            flush=True,
+        )
+        with torch.no_grad():
+            writeback(grad, g_proj)
+
+        corrected += 1
+        state.spectral_corrections += 1
+
+    if corrected:
+        logger.info("comm_eff: spectral correction applied to %d target matrices", corrected)
+    return corrected

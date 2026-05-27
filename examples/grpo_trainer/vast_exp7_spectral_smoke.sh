@@ -116,6 +116,21 @@ if [[ "$CELL" == "spectral_on" ]]; then
     actor_rollout_ref.actor.comm_eff.spectral.tau=0.001
     actor_rollout_ref.actor.comm_eff.spectral.beta_anc=0.95
     actor_rollout_ref.actor.comm_eff.spectral.seed_anchor_cache=true
+    # DEFECT-2 FIX (FSDP1 default path): the grad-correction hook needs the
+    # ORIGINAL unflattened 2D params + grads. FSDP1 wraps with
+    # use_orig_params=false by default -> FlatParameter (1-D, name `_flat_param`)
+    # -> zero targets matched -> no discovery print, spectral_corrections=0.
+    # use_orig_params=true keeps original names AND lets
+    # FSDP.summon_full_params(with_grads=true) all-gather the unsharded 2D grad
+    # the hook reads (with_grads is only supported when use_orig_params=true).
+    actor_rollout_ref.actor.fsdp_config.use_orig_params=true
+    # DEFECT-1 FIX (zero gradient): masking is OFF for this cell and the 2-step
+    # base-model GSM8K smoke earns ~zero reward -> zero advantage -> pg_loss=0;
+    # with masking OFF the actor-train fwd == ref fwd so KL=0 -> kl_loss=0;
+    # total grad would be 0 with nothing for the filter to act on. A small
+    # entropy bonus gives a nonzero, finite gradient independent of reward/mask
+    # (dH/dlogits != 0 for any non-degenerate policy) so the hook has signal.
+    actor_rollout_ref.actor.entropy_coeff=0.001
   )
 elif [[ "$CELL" == "disabled" ]]; then
   COMM_EFF_ARGS=(
