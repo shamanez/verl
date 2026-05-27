@@ -1,5 +1,12 @@
 # Research Log (newest first)
 
+## EXP-6 · 2026-05-28T03:25:00+10:00 · M2 · PASS
+M2 — mask contamination guard: invariants for rollout / old-logprob / ref-logprob / validation / checkpoint / infer_batch
+- hypothesis: per-path mask counter strictly 0 on rollout, old-logprob, ref-logprob, validation, checkpoint, infer paths; strictly > 0 only on actor-train forward/backward; old/ref log-probs equal within 1e-6 regardless of mask config; validation unchanged vs masking-off; checkpoints contain no comm_eff/mask state
+- result: key-prefix grep yields only `actor/comm_eff/mask_applications`; 35 unit tests pass (incl 1e-6 log-prob equality + checkpoint guard); live 2-step GRPO smoke with per-path counters train=28/all-RL-paths=0; val ran with parity within noise (0.0508 vs 0.0485-0.0652); checkpoint leak-scan clean; no NaN/Inf
+- run dir: runs/EXP-6/
+- verdict: runs/EXP-6/verdict.md
+
 ## EXP-5 · 2026-05-28T01:45:00+10:00 · M2 · PASS
 M2 actor-only PRF activation masking smoke
 - hypothesis: deterministic PRF masks applied in-graph (h*mask, no rescale) at boundary decoder layers confined to actor-train forward/backward; measured mask ratio tracks configured p within ±0.02; no NaN/Inf in losses/grads; ≥1 param changed between step 0 and 2; disabled cell regresses EXP-4 dense no-op contract
