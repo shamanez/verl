@@ -59,3 +59,5 @@ MILESTONE_PASS: M2
 [2026-05-28T04:52:16+10:00] [analyst #7] verdict=REVISE
 [2026-05-28T05:28:44+10:00] [experiment-runner #7] EXP-7 REVISE re-run: 3 defects fixed (entropy grad signal, FSDP1 summon_full_params grad-correction, sha256 anchor seed); 7 CPU tests green; relaunched on 1 instance (38128433, H200x4, tier1) dph=14.74
 [2026-05-28T05:50:26+10:00] teardown EXP-EXP-7 reason=verdict-written destroyed=1
+[2026-05-28T06:02:24+10:00] [analyst #7] verdict=PASS
+[2026-05-28T06:04:57+10:00] [log-writer #7] logged verdict=PASS milestone=M2 pr=https://github.com/shamanez/verl/pull/4

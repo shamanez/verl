@@ -5,6 +5,7 @@ pruned to keep the repo lean; the durable record is here + git history + the mer
 
 | id | milestone | what | result | merged |
 |---|---|---|---|---|
+| EXP-7 | M2 | Spectral correction filter (anchor-EMA → thin SVD → Tikhonov → two-sided projection → α-blend) + FSDP gradient-application-point discovery | PASS: FSDP1 full 2D `Tensor` via `use_orig_params`, correction AFTER FSDP reduction / BEFORE grad clipping; `spectral_corrections` fired (8→16 mask-off / 8→80 combined 10-step), per-target rel_change in (0,1], grad_norm finite, disabled cell dense no-op | PR #4 → `vast-ai-workload` |
 | **baseline** | M1 | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the control) | `val/test_score` 0.0872 → 0.7892 over 100 steps, 4×H200 | — (no code change) |
 | EXP-4 | M2 | `comm_eff` no-op scaffolding: config group + disabled-by-default integration hooks | Run A no-op parity validated (disabled == dense) | PR #1 → `vast-ai-workload` |
 | EXP-5 | M2 | Actor-only PRF activation masking (in-graph `h*mask`, no rescale) | PASS: mask_ratio tracks p (p95→0.950, p90→0.900, ±0.02); confined to actor-train path; disabled holds EXP-4 no-op; grads finite, no NaN/Inf | PR #2 → `vast-ai-workload` |

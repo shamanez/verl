@@ -1,5 +1,12 @@
 # Research Log (newest first)
 
+## EXP-7 · 2026-05-28T06:01:00+10:00 · M2 · PASS
+M2 — spectral correction filter (paper formula) + FSDP gradient-application-point discovery
+- hypothesis: spectral filter (anchor-EMA → full thin SVD → Tikhonov spectral weights → two-sided projection → alpha blend) is a no-op when alpha=1.0, equals pure two-sided Tikhonov when alpha=0, preserves shape, and is deterministic; when wired into FSDP actor path after backward and before optimizer.step(), reaches global_step=2 with finite actor/grad_norm, logs gradient representation (full Tensor/DTensor/FlatParameter) and correction point relative to FSDP reduction and clipping, with per-target ||G_proj - G_mask||/||G_mask|| in (0, 1] for alpha=0.3, and enabled=false regression matches dense no-op
+- result: unit test VERIFY:PASS (alpha=1 no-op ≤1e-6, alpha=0 = pure Tikhonov, shape preserved, deterministic); FSDP discovery: FSDP1 use_orig_params=true yields full logical 2D Tensor (not DTensor/FlatParameter), correction applied AFTER FSDP gradient reduction and BEFORE grad clipping, world_size=4; spectral_corrections 8→16 (2-step isolation) / 8→80 (10-step combined mask+spectral); rel_change q≈0.0037/k≈0.646/v≈0.642/o≈0.0036 all in (0,1]; actor/grad_norm finite (54.8–300.1, no NaN/Inf); param deltas step0→step10 confirmed; disabled cell = true dense no-op (corrections=0); three fixed defects: entropy_coeff=0.001 for gradient signal, FSDP1 use_orig_params=true for unsharded matrix access, stable sha256 anchor seed for cross-rank determinism
+- run dir: runs/EXP-7/
+- verdict: runs/EXP-7/verdict.md
+
 ## EXP-6 · 2026-05-28T03:25:00+10:00 · M2 · PASS
 M2 — mask contamination guard: invariants for rollout / old-logprob / ref-logprob / validation / checkpoint / infer_batch
 - hypothesis: per-path mask counter strictly 0 on rollout, old-logprob, ref-logprob, validation, checkpoint, infer paths; strictly > 0 only on actor-train forward/backward; old/ref log-probs equal within 1e-6 regardless of mask config; validation unchanged vs masking-off; checkpoints contain no comm_eff/mask state
