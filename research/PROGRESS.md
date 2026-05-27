@@ -34,3 +34,5 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-26T18:18:27+10:00] [vast-teardown #3] destroyed instance 37881404 (reason: EXP-3 closed at global_step_100 — checkpoints preserved on HF)
 [2026-05-27T22:32:42+10:00] [research-planner #4] plan written
 [2026-05-27T22:33:08+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-05-27T22:58:59+10:00] [codex-bridge --mode=verify] result=fail
+[2026-05-27T23:01:24+10:00] [orchestrator] tick: verify=[4→FAIL] running=[] analyzing=[] logging=[] blocked=[] demoted=[4] — EXP-4 codex VERIFY:FAIL @ pre-impl gate, label→status:planned, critique posted, zero GPU spend
