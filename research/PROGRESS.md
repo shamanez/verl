@@ -61,3 +61,4 @@ MILESTONE_PASS: M2
 [2026-05-28T05:50:26+10:00] teardown EXP-EXP-7 reason=verdict-written destroyed=1
 [2026-05-28T06:02:24+10:00] [analyst #7] verdict=PASS
 [2026-05-28T06:04:57+10:00] [log-writer #7] logged verdict=PASS milestone=M2 pr=https://github.com/shamanez/verl/pull/4
+[2026-05-28T06:09:44+10:00] [orchestrator] EXP-7 CLOSED: VERDICT=PASS; PR #4 squash-merged to vast-ai-workload (1aa10d90); local MacBook reconciled via merge (HEAD f2f1456e, spectral source present); exp/7 branch+worktree+tracking-ref all removed; de-bloated (runs/EXP-7 + plans/7.md gone, folded into runs/SUMMARY.md, finding at findings/M2/EXP-7.md); issue #7 status:pass+done CLOSED; instance 38128433 ledger TORN_DOWN (user removed manually). FSDP discovery: FSDP1 full Tensor via use_orig_params, correction AFTER reduction/BEFORE clip. 3 defects fixed: entropy signal, full-tensor grad access, sha256 anchor seed.
