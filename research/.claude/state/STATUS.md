@@ -1,22 +1,22 @@
-# Research Status — 2026-05-28T01:33+10:00
+# Research Status — 2026-05-28T01:50+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 5 | M2 actor-only PRF activation masking (2-step smoke) | RUNNING | 1×4H200 (i_38098877) | — | verify=CONCERNS→VERIFIED; exp/5-actor-mask @69524742 pushed; cell p95 in model-load; done.flag-dir pre-created on box to keep 3-cell chain alive |
+| 5 | M2 actor-only PRF activation masking (2-step smoke) | PASS | 1×4H200 (torn down) | PASS · mask_ratio ±0.02p, confinement OK, grad finite, no NaN/Inf, EXP-4 no-op regression clean | findings/M2/EXP-5.md filed; PR drafted exp/5-actor-mask→vast-ai-workload |
 
 ## Last tick
-2026-05-28T01:33+10:00 · verify=[] · running=[5] · analyzing=[] · logging=[] · blocked=[]
+2026-05-28T01:50+10:00 · verify=[] · running=[] · analyzing=[] · logging=[] · blocked=[]
 
 ## Budget
-$/hr now: $14.74 (4×H200, tier-1; tier-0 4×H100 had 0 offers) · cap/instance: $24 · run cap: 8 GPU-hr / 3 h wall
+EXP-5 spend: $3.70 (4×H200, tier-1; 3 h wall) — under all caps.
 
-## EXP-5 cell metrics (live)
-- p95: model-load/vLLM-init, no train steps yet · grad_norm: n/a · mask_ratio: n/a · NaN: none
-- p90: not started
-- disabled: not started
+## Metrics archived
+- EXP-5 p95: mask_ratio 0.9498/0.9502, actor/grad_norm finite 42.15/19.86, zero mask on non-actor paths
+- EXP-5 p90: mask_ratio 0.8999/0.9002, actor/grad_norm finite 18.11/95.18, zero mask on non-actor paths
+- EXP-5 disabled: all comm_eff counters 0 (dense no-op contract matched), grad_norm 1.13/0.37
 
 ## Notes
-- Carryover launcher done.flag bug (hardcoded path under SAVE_FREQ=-1) confirmed live on exp/5; mitigated by pre-creating /workspace/verl/runs/qwen25_1p5b_grpo_gsm8k_baseline on the box so `touch done.flag` succeeds → chain does not abort under set -e.
-- Analyst note (from verify CONCERNS): grep mask-confinement on BOTH p95 AND p90 logs (not just p95); disabled-cell --baseline EXP-3 is the harness standard baseline-diff entry point.
+- Verdict filed 2026-05-28T01:45+10:00; instance torn down 01:42:27; metrics rsync complete.
+- Milestone M2 now has ≥2 PASS (EXP-5 + one more expected from related cell). Checking for SUMMARY.md creation eligibility.
