@@ -40,6 +40,36 @@ from .checkpoint_manager import BaseCheckpointManager
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# EXP-6: substrings that would indicate comm_eff compression state leaked into a
+# saved/synced model state_dict. The masking circuit is hook-based (no
+# nn.Parameter / buffer), so a correct implementation never produces such a key.
+_COMM_EFF_STATE_KEY_MARKERS = ("comm_eff", "activation_mask", "_mask", "anchor_ema", "spectral_cache")
+
+
+def _assert_no_comm_eff_state(state_dict: dict) -> None:
+    """Raise if any comm_eff/mask/anchor/spectral tensor leaked into ``state_dict``.
+
+    EXP-6 contamination guard for checkpoint save (and, by reuse, the merged HF
+    export). Weight sync to rollout uses the same actor state_dict, so this also
+    proves no compression state rides into the synced rollout weights. The check
+    is a cheap substring scan over the keys; it is a hard failure, not a warning,
+    because a leak silently corrupts the policy used for generation and scoring.
+    """
+    if not isinstance(state_dict, dict):
+        return
+    leaked = [
+        k
+        for k in state_dict
+        if isinstance(k, str) and any(marker in k for marker in _COMM_EFF_STATE_KEY_MARKERS)
+    ]
+    if leaked:
+        raise AssertionError(
+            "comm_eff/mask state leaked into the actor checkpoint state_dict "
+            f"(keys: {leaked[:8]}{'...' if len(leaked) > 8 else ''}). The masking "
+            "circuit must be hook-based (no parameters/buffers) so synced weights "
+            "carry only the normal actor-optimizer update. This is a hard EXP-6 falsifier."
+        )
+
 
 @dataclass
 class FSDPConfig:
@@ -267,6 +297,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
+                    # EXP-6 contamination guard: the comm_eff masking circuit must
+                    # NEVER write its state (masks / anchor EMA / spectral caches)
+                    # into the saved actor weights — the checkpoint, and therefore
+                    # the weights synced to rollout, must carry only the normal
+                    # actor-optimizer update. The masker registers ephemeral
+                    # forward HOOKS (no nn.Parameters / buffers), so a clean
+                    # implementation produces a state_dict with no comm_eff keys;
+                    # this assert makes a future regression (e.g. registering a
+                    # mask buffer) a loud failure at save time.
+                    _assert_no_comm_eff_state(model_state_dict)
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
@@ -344,6 +384,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)
 
             if self.rank == 0:
+                # EXP-6: same contamination guard on the merged HF export.
+                _assert_no_comm_eff_state(state_dict)
                 hf_local_path = os.path.join(local_path, "huggingface")
                 os.makedirs(hf_local_path, exist_ok=True)
 
