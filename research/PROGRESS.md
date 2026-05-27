@@ -36,3 +36,5 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-27T22:33:08+10:00] [triage] dispatched 1 planners, 0 issues already planned
 [2026-05-27T22:58:59+10:00] [codex-bridge --mode=verify] result=fail
 [2026-05-27T23:01:24+10:00] [orchestrator] tick: verify=[4→FAIL] running=[] analyzing=[] logging=[] blocked=[] demoted=[4] — EXP-4 codex VERIFY:FAIL @ pre-impl gate, label→status:planned, critique posted, zero GPU spend
+[2026-05-27T23:21:15+10:00] [codex-bridge --mode=verify] result=concerns
+[2026-05-27T23:33:27+10:00] [orchestrator] EXP-4 OPERATOR-CLEARED — operator waived codex plan-verify (raw: FAIL rev-1 / CONCERNS rev-2, judged out-of-scope for M2 disabled-scaffolding smoke). Reverted plan to rev-1; deleted FAIL demotion comment from #4; posted VERIFY:PASS (operator) comment + artifact runs/EXP-4/verify/20260527T233157Z.md; label status:approved. State=VERIFIED. NO runner dispatched (stop per operator). Next session: dispatch experiment-runner for EXP-4 WITHOUT re-verifying the plan (plan-level gate only; code-level verify of exp/4 diff not waived).
