@@ -608,7 +608,35 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    def _maybe_comm_eff_mask_hook(self, forward_only: bool) -> None:
+        """comm_eff activation-mask / anchor-circuit hook point (no-op when disabled).
+
+        Sits at the entry of the forward/backward loop — where the two-circuit
+        method would register the pipeline activation mask and schedule the
+        asynchronous unmasked anchor circuit. When comm_eff is disabled (the
+        default: no ``_comm_eff_state`` attached, or it is ``None``) this returns
+        immediately: no forward hook is registered, no mask is drawn (no RNG),
+        no anchor backward is scheduled, so the forward/backward pass is
+        identical to dense GRPO. The masking branch runs only when a future
+        caller attaches an enabled ``CommEffState`` to the engine, and never
+        during a pure inference pass (``forward_only``).
+        """
+        if forward_only:
+            return
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        # Enabled path (later M2 work): register activation-mask forward hooks
+        # and schedule the anchor circuit here, bumping state.mask_applications /
+        # state.anchor_backwards.
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
+        # comm_eff mask/anchor hook (no-op when disabled): when enabled it would
+        # install activation-mask forward hooks before the micro-batch loop. The
+        # disabled default registers nothing and draws no RNG, so the pass is
+        # byte-identical to dense GRPO.
+        self._maybe_comm_eff_mask_hook(forward_only=forward_only)
+
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
 
