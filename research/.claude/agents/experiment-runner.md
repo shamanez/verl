@@ -114,11 +114,17 @@ Canonical project facts (vast template hash, secrets path, default compute chain
    - `$PARENT/runs/EXP-<ID>/exp.bundle` if `code_change: true`
    - Any small dataset shards listed in the plan's `## Notes for runner`.
 
-   Example: `rsync -av -e "ssh -p <port>" $PARENT/runs/EXP-<ID>/ root@<host>:/workspace/runs/EXP-<ID>/`.
+   Example: `rsync -av -e "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p <port>" $PARENT/runs/EXP-<ID>/ root@<host>:/workspace/runs/EXP-<ID>/`.
+
+   **The SSH form is fixed — use it verbatim, every connection** (enforced by `project.yaml` `vast_ssh`):
+   ```bash
+   ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p <port> root@<host>
+   ```
+   The handle JSON's `ssh_login` field is this exact command, paste-ready (provision emits it). NEVER use bare `ssh -p <port> root@<host>`: without `-i ~/.ssh/vast_ai` ssh falls back to `id_rsa`/`id_ed25519` and fails `publickey`; without `accept-new` a reused Vast IP trips "Host key verification failed". Pass each flag as its own argv token — do not jam the options into one quoted `$SSH_OPTS` string.
 
 7. **Launch.** SSH into the host and start a detached tmux:
    ```bash
-   ssh -p <port> root@<host> "tmux new -d -s exp-<ID>-<host> 'bash /workspace/runs/EXP-<ID>/launch.sh > /workspace/train.log 2>&1'"
+   ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p <port> root@<host> "tmux new -d -s exp-<ID>-<host> 'bash /workspace/runs/EXP-<ID>/launch.sh > /workspace/train.log 2>&1'"
    ```
 
 8. **Liveness check.** Wait up to 60 s for the first 50 lines of `/workspace/train.log` to appear via a brief `tail`. If nothing appears, retry the launch once. If still nothing, append `LAUNCH_FAILED: EXP-<ID>` to PROGRESS.md and stop. The PROVISIONED ledger row from step 5 is sufficient — the Stop hook's teardown loop covers PROVISIONED state and will destroy the instances on the next session Stop.

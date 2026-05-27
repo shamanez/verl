@@ -463,6 +463,12 @@ except Exception:
 
   CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+  # Paste-ready login command. The fixed SSH form (per project.yaml vast_ssh): always
+  # `-i ~/.ssh/vast_ai` (bare ssh falls back to id_rsa/id_ed25519 -> publickey fail) and
+  # `-o StrictHostKeyChecking=accept-new` (reused Vast IPs otherwise trip host-key verify).
+  # The -L 8080:localhost:8080 tunnel exposes the on-box vLLM/WandB UI on the laptop.
+  SSH_LOGIN="ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p ${SSH_PORT:-22} root@${SSH_HOST} -L 8080:localhost:8080"
+
   HANDLE=$(jq -cn --sort-keys \
     --arg sv  "$SCHEMA_VERSION" \
     --arg iid "$INSTANCE_ID" \
@@ -476,10 +482,11 @@ except Exception:
     --arg ca  "$CREATED_AT" \
     --arg lb  "$LABEL" \
     --arg sid "$SESSION_ID" \
+    --arg sl  "$SSH_LOGIN" \
     '{schema_version:$sv, instance_id:$iid, offer_id:$oid,
       ssh_host:$sh, ssh_port:$sp, public_ipaddr:$pip,
       gpu_name:$gn, num_gpus:$ng, dph_total:$dph,
-      created_at:$ca, label:$lb, session_id:$sid}')
+      created_at:$ca, label:$lb, session_id:$sid, ssh_login:$sl}')
 
   # ---- atomic handle write ----
   HANDLE_PATH="$HANDLE_DIR/${INSTANCE_ID}.json"
@@ -489,6 +496,8 @@ except Exception:
 
   echo "VAST_HANDLE: $HANDLE"
   echo "$PROG: instance $INSTANCE_ID running at $SSH_HOST:$SSH_PORT (handle: $HANDLE_PATH)" >&2
+  echo "$PROG: log in FIRST, then work — copy this verbatim:" >&2
+  echo "  $SSH_LOGIN" >&2
 
   TOTAL_DPH=$(awk -v a="$TOTAL_DPH" -v b="$OPRICE" 'BEGIN { printf "%.4f", a + b }')
   PROVISIONED=$((PROVISIONED + 1))

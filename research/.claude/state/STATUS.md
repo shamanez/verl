@@ -1,22 +1,19 @@
-# Research Status — 2026-05-28T01:50+10:00
+# Research Status — 2026-05-28 (post-cleanup)
 
-## Issue pipeline
+## Pipeline
+| id | milestone | state | verdict | notes |
+|---|---|---|---|---|
+| baseline | M1 | DONE | PASS | dense GRPO control, val 0.087→0.789; `runs/baseline/`, `.claude/plans/baseline.md` |
+| EXP-4 | M2 | DONE | PASS | comm_eff no-op scaffolding, PR #1 merged (see `runs/SUMMARY.md`) |
+| EXP-5 | M2 | DONE | PASS | actor-only PRF activation masking, PR #2 merged (see `runs/SUMMARY.md`) |
 
-| EXP | Title | State | Vast runs | Verdict | Notes |
-|---|---|---|---|---|---|
-| 5 | M2 actor-only PRF activation masking (2-step smoke) | PASS | 1×4H200 (torn down) | PASS · mask_ratio ±0.02p, confinement OK, grad finite, no NaN/Inf, EXP-4 no-op regression clean | findings/M2/EXP-5.md filed; PR drafted exp/5-actor-mask→vast-ai-workload |
-
-## Last tick
-2026-05-28T01:50+10:00 · verify=[] · running=[] · analyzing=[] · logging=[] · blocked=[]
+No instances running. Full story: `runs/SUMMARY.md`. Backlog #6–#11 await planning.
 
 ## Budget
-EXP-5 spend: $3.70 (4×H200, tier-1; 3 h wall) — under all caps.
-
-## Metrics archived
-- EXP-5 p95: mask_ratio 0.9498/0.9502, actor/grad_norm finite 42.15/19.86, zero mask on non-actor paths
-- EXP-5 p90: mask_ratio 0.8999/0.9002, actor/grad_norm finite 18.11/95.18, zero mask on non-actor paths
-- EXP-5 disabled: all comm_eff counters 0 (dense no-op contract matched), grad_norm 1.13/0.37
+$/hr now: $0.00 (all torn down).
 
 ## Notes
-- Verdict filed 2026-05-28T01:45+10:00; instance torn down 01:42:27; metrics rsync complete.
-- Milestone M2 now has ≥2 PASS (EXP-5 + one more expected from related cell). Checking for SUMMARY.md creation eligibility.
+- Repo de-bloated: EXP-4/EXP-5 run dirs removed (incl. 67 MB git bundles), folded into `runs/SUMMARY.md`; skill-test ledger rows + stale vast-handles pruned.
+- `runs/**/*.bundle` + `*.log` now gitignored (history not rewritten — bundles remain in past commits).
+- vast ssh-login fixed: provision emits paste-ready `ssh_login` (`-i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new …`); `experiment-runner.md` examples corrected; "log in FIRST" surfaced on provision.
+- Carryover: launcher `done.flag` bug still unpatched in `vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (workaround applied on-box for EXP-5).

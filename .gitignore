@@ -131,3 +131,7 @@ logs
 log
 outputs
 .history
+# research harness — large run artifacts (untracked; SUMMARY.md is the durable record)
+research/runs/**/*.bundle
+research/runs/**/*.log
+research/runs/**/exp.bundle

@@ -207,9 +207,15 @@ Downstream agents (`experiment-runner`) parse these lines via `grep
   "dph_total":      18.40,
   "created_at":     "2026-05-25T12:30:00Z",
   "label":          "verl-research:<session-id>",
-  "session_id":     "<session-id>"
+  "session_id":     "<session-id>",
+  "ssh_login":      "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 12345 root@ssh4.vast.ai -L 8080:localhost:8080"
 }
 ```
+
+`ssh_login` is the **paste-ready** connect command — the fixed SSH form every consumer must
+use (`-i ~/.ssh/vast_ai` so the right key is offered; `StrictHostKeyChecking=accept-new` so a
+reused Vast IP doesn't trip host-key verification). The skill also prints it to stderr on
+provision (`log in FIRST, then work`). Never hand-build a bare `ssh -p <port> root@<host>`.
 
 Field-name notes (cross-skill contract — do NOT silently rename):
 
