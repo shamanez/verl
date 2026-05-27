@@ -43,6 +43,8 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.workers.comm_eff import maybe_build_comm_eff_state
+from verl.workers.comm_eff.state import comm_eff_metrics
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
@@ -638,11 +640,60 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output.cpu() if output is not None else None
 
+    def _maybe_comm_eff_state(self):
+        """Return this worker's comm_eff state, building it once on first use.
+
+        Disabled is the strict no-op path: ``maybe_build_comm_eff_state`` returns
+        ``None`` without drawing RNG, allocating buffers or registering hooks, so
+        a dense GRPO run with the scaffolding merged is numerically identical to
+        one without it. The result is cached so the per-substep ``update_actor``
+        does not re-read the config each call.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None and not getattr(self, "_comm_eff_state_built", False):
+            comm_eff_cfg = self.config.actor.get("comm_eff", None)
+            state = maybe_build_comm_eff_state(comm_eff_cfg)
+            # object.__setattr__ avoids any frozen-config interplay; these are
+            # plain worker attributes, not config fields.
+            object.__setattr__(self, "_comm_eff_state", state)
+            object.__setattr__(self, "_comm_eff_state_built", True)
+            if state is None and not getattr(self, "_comm_eff_marker_logged", False):
+                logger.info("comm_eff: disabled (no-op) — dense GRPO path unchanged")
+                object.__setattr__(self, "_comm_eff_marker_logged", True)
+        return getattr(self, "_comm_eff_state", None)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        # comm_eff guard. When disabled (default) this resolves to None with zero
+        # side effects (no hook, no buffer, no RNG) and the dense GRPO update runs
+        # exactly as upstream. The compressed circuits are entered only when
+        # comm_eff.enabled=true (later M2 work); the disabled path never touches
+        # the gradient, so the no-op parity holds.
+        comm_eff_state = self._maybe_comm_eff_state()
+
         output = self.actor.train_mini_batch(data=data)
+
+        # Surface the comm_eff operation counters into training metrics. When
+        # disabled we emit explicit zeros (mask_applications / anchor_backwards /
+        # spectral_corrections == 0) so the no-op is machine-checkable; emitting a
+        # constant metric is not a numerical side effect on training. `output` is
+        # None on non-output ranks (train_mini_batch only populates metrics on the
+        # mp-src rank), in which case there is nothing to annotate.
+        if output is not None:
+            if comm_eff_state is None:
+                counters = {
+                    "comm_eff/mask_applications": 0,
+                    "comm_eff/anchor_backwards": 0,
+                    "comm_eff/spectral_corrections": 0,
+                }
+            else:
+                counters = comm_eff_metrics(comm_eff_state)
+            metrics = tu.get(output, "metrics", default=None)
+            if isinstance(metrics, dict):
+                metrics.update(counters)
+
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

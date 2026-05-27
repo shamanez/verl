@@ -22,6 +22,7 @@ from verl.trainer.config import CheckpointConfig, RolloutCorrectionConfig
 from verl.utils.profiler.config import ProfilerConfig
 from verl.utils.qat import QATConfig
 
+from .comm_eff import CommEffConfig
 from .engine import (
     FSDPEngineConfig,
     McoreEngineConfig,
@@ -135,6 +136,9 @@ class ActorConfig(BaseConfig):
         use_fused_kernels (bool): Whether to use custom fused kernels (e.g., FlashAttention, fused MLP).
         data_loader_seed (int): Seed for data loader. If None, uses global seed.
         router_replay (RouterReplayConfig): Configuration for router replay in MoE models.
+        comm_eff (CommEffConfig): Communication-efficient compression config. Disabled by
+            default; when disabled the actor train path is a strict no-op (no hooks, no
+            buffers, no RNG draw).
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {
@@ -184,6 +188,7 @@ class ActorConfig(BaseConfig):
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
+    comm_eff: CommEffConfig = field(default_factory=CommEffConfig)
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size

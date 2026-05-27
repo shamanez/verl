@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import actor, critic, disaggregation, engine, model, optimizer, reward, rollout
+from . import actor, comm_eff, critic, disaggregation, engine, model, optimizer, reward, rollout
 from .actor import *  # noqa: F401
+from .comm_eff import *  # noqa: F401
 from .critic import *  # noqa: F401
 from .disaggregation import *  # noqa: F401
 from .distillation import *  # noqa: F401
@@ -25,6 +26,7 @@ from .rollout import *  # noqa: F401
 
 __all__ = (
     actor.__all__
+    + comm_eff.__all__
     + critic.__all__
     + reward.__all__
     + engine.__all__
