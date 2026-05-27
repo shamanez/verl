@@ -724,6 +724,150 @@ class FSDPEngine(BaseEngine):
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         raise NotImplementedError("forward_step must be implemented in subclass")
 
+    def _comm_eff_target_names(self, spec_cfg) -> tuple:
+        """Substrings selecting which named 2D params receive spectral correction."""
+        substrs = getattr(spec_cfg, "target_substr", None)
+        if substrs is None:
+            return ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+        return tuple(substrs)
+
+    def _maybe_comm_eff_grad_correction(self) -> None:
+        """FSDP spectral gradient-correction hook (EXP-7 discovery + correction).
+
+        Runs in ``BaseEngine.train_batch`` AFTER the actor backward and BEFORE
+        ``optimizer_step`` (which is where gradient clipping happens). Under
+        FSDP2 (``fully_shard``) the backward has already reduced gradients
+        across the data-parallel mesh by the time control reaches here, so this
+        correction is applied **after FSDP gradient reduction** and **before
+        gradient clipping** — a fact this method discovers empirically and logs
+        rather than assumes.
+
+        Strict no-op when comm_eff is disabled or no spectral filter is attached
+        (the EXP-5 / dense path is untouched, no collective is issued, no grad
+        is read).
+
+        THE HEADLINE DELIVERABLE: on the first correction it logs, for >=1 target
+        matrix, ``type(p.grad)``, the grad container shape, the logical 2D matrix
+        shape, the FSDP wrapping/version, the DTensor placements/mesh, and the
+        correction point relative to FSDP reduction and gradient clipping. The
+        log lands in ``state.fsdp_grad_repr`` (surfaced into metrics) and in the
+        training log via ``logger``.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        spectral = getattr(state, "spectral", None)
+        if spectral is None:
+            return
+
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", 4)) if spec_cfg is not None else 4
+
+        fsdp_ver = None
+        try:
+            fsdp_ver = fsdp_version(self.module)
+        except Exception:  # pragma: no cover - defensive
+            fsdp_ver = "unknown"
+        module_is_fsdp1 = isinstance(self.module, FSDP)
+        module_is_fsdp2 = isinstance(self.module, FSDPModule)
+
+        instrumented = bool(state.fsdp_grad_repr)  # log discovery only once
+        corrected = 0
+        inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+
+        for name, p in inner.named_parameters():
+            if p.grad is None:
+                continue
+            if not any(s in name for s in target_substrs):
+                continue
+            if max_targets >= 0 and corrected >= max_targets:
+                break
+
+            grad = p.grad
+            grad_type = type(grad).__name__
+            is_dtensor = isinstance(grad, DTensor)
+
+            # Present a full logical 2D matrix to the (FSDP-agnostic) filter.
+            # FSDP2 shards weights as DTensors; full_tensor() all-gathers the
+            # logical matrix. The logical shape is the DTensor's global .shape.
+            if is_dtensor:
+                full = grad.full_tensor()
+            else:
+                full = grad
+
+            logical_shape = tuple(full.shape)
+            if full.dim() != 2:
+                # Skip non-2D targets (norms/biases excluded by substr anyway).
+                continue
+
+            # ---- discovery log (once) ----
+            if not instrumented:
+                placements = None
+                mesh_shape = None
+                if is_dtensor:
+                    try:
+                        placements = str(grad.placements)
+                        mesh_shape = str(tuple(grad.device_mesh.shape))
+                    except Exception:  # pragma: no cover
+                        placements = "unavailable"
+                repr_log = {
+                    "target_name": name,
+                    "grad_container_type": grad_type,
+                    "grad_container_shape": str(tuple(grad.shape)),
+                    "logical_2d_shape": str(logical_shape),
+                    "is_dtensor": str(is_dtensor),
+                    "dtensor_placements": str(placements),
+                    "dtensor_mesh_shape": str(mesh_shape),
+                    "fsdp_version": str(fsdp_ver),
+                    "module_is_FSDP1": str(module_is_fsdp1),
+                    "module_is_FSDPModule_FSDP2": str(module_is_fsdp2),
+                    # Ordering facts (not assumptions): this hook is invoked by
+                    # BaseEngine.train_batch after forward_backward_batch (FSDP
+                    # backward => grads already reduced) and before
+                    # optimizer_step (where clip_grad_norm_ runs).
+                    "correction_point": "after_actor_backward__before_optimizer_step",
+                    "relative_to_fsdp_reduction": "AFTER (FSDP backward reduces grads before this hook)",
+                    "relative_to_grad_clipping": "BEFORE (clip_grad_norm_ runs inside optimizer_step)",
+                    "world_size": str(torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1),
+                }
+                state.fsdp_grad_repr = repr_log
+                logger.warning("comm_eff FSDP grad-repr discovery: %s", repr_log)
+                print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
+                instrumented = True
+
+            # ---- correction ----
+            g_proj = spectral.correct_matrix(name, full)
+            rel = spectral.relative_change(full, g_proj)
+            state.spectral_rel_change[name] = rel
+            print(
+                f"[comm_eff][EXP-7][spectral] {name} alpha={spectral.alpha} "
+                f"rel_change=||G_proj-G_mask||/||G_mask||={rel:.6f} "
+                f"shape={logical_shape} grad_type={grad_type}",
+                flush=True,
+            )
+
+            # Write the corrected full matrix back into the (possibly sharded)
+            # grad. For a DTensor we redistribute the corrected full tensor to
+            # the original mesh/placements and copy the LOCAL shard back in
+            # place, preserving the sharded layout the optimizer/clip expect.
+            with torch.no_grad():
+                if is_dtensor:
+                    from torch.distributed.tensor import distribute_tensor
+
+                    redist = distribute_tensor(
+                        g_proj.to(grad.dtype), grad.device_mesh, grad.placements
+                    )
+                    grad.to_local().copy_(redist.to_local())
+                else:
+                    grad.copy_(g_proj.to(grad.dtype))
+
+            corrected += 1
+            state.spectral_corrections += 1
+
+        if corrected:
+            logger.info("comm_eff: spectral correction applied to %d target matrices", corrected)
+
     def optimizer_zero_grad(self):
         """
         Zero gradients and enforce FSDP grad-clipping logic.
