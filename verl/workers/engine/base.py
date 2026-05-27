@@ -109,6 +109,24 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def _maybe_comm_eff_grad_correction(self) -> None:
+        """comm_eff spectral gradient-correction hook point (strict no-op when disabled).
+
+        Sits between the backward pass and the optimizer step — the point at
+        which the two-circuit method applies spectral correction to the masked
+        gradients before ``optimizer_step``. When comm_eff is disabled (the
+        default: no ``_comm_eff_state`` is attached to the engine, or it is
+        ``None``) this returns immediately, touching neither the gradients nor
+        any collective op, so the dense GRPO update is byte-identical to
+        upstream. The compressed branch is reached only when a future caller
+        attaches an enabled ``CommEffState`` to the engine.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        # Enabled path (later M2 work): apply spectral correction to gradients
+        # and bump state.spectral_corrections here, before optimizer_step.
+
     def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
         """
         Perform a training step on a batch of data.
@@ -124,6 +142,10 @@ class BaseEngine:
 
         self.optimizer_zero_grad()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+        # comm_eff spectral gradient correction (no-op when disabled) runs after
+        # backward and before the optimizer step, so it would correct grads in
+        # place; disabled => grads are untouched.
+        self._maybe_comm_eff_grad_correction()
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]

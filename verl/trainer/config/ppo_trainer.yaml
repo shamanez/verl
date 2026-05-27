@@ -55,6 +55,15 @@ actor_rollout_ref:
   # Timeout for operations executed against the process group
   nccl_timeout: 600
 
+  # Communication-efficient compression config (two-circuit method) lives on the
+  # actor and is plumbed to the actor train path. It is defined in
+  # trainer/config/actor/actor.yaml (verl.workers.config.CommEffConfig) and is
+  # reachable as actor_rollout_ref.actor.comm_eff.* . Disabled by default
+  # (comm_eff.enabled=false) => the actor train path is a strict no-op: no
+  # forward hooks, no SVD/EMA buffers, no extra all-reduce, no RNG draw. The
+  # key is registered in the schema, so the plain override
+  # actor_rollout_ref.actor.comm_eff.enabled=false works without a `+` prefix.
+
 # config for the algorithm
 algorithm:
 
