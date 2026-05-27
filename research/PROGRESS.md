@@ -50,3 +50,5 @@ MILESTONE_PASS: M2
 [2026-05-28T03:34:57+10:00] [orchestrator] M2 SUMMARY files actually written by orchestrator (prior log-writer returned content as text without writing): findings/M2/SUMMARY.md + runs/SUMMARY.md (EXP-6 folded). Dispatching codex-bridge --mode=adversarial against findings/M2/SUMMARY.md.
 [2026-05-28T03:38:57+10:00] [codex-bridge --mode=adversarial] result=CONTESTED
 [2026-05-28T03:41:29+10:00] [orchestrator] M2 adversarial=CONTESTED triaged: finding#2 (guard-not-in-hook) is a FALSE ALARM (codex read vast-ai-workload; guard verified in exp/6 activation_mask.py:304-308, 35 tests confirm). Findings #1,3,4,5,6 accepted as legitimate -> NOT bypassing codex; softened findings/M2/SUMMARY.md overclaims + added hardening backlog. Per-experiment EXP-6 PASS + PR#3 stand; M2 NOT promoted to settled pending hardening (fresh no-resume control, prod-batch logprob equality, rank-agg counters, full ckpt scan). Box 38107546 torn down, $0/hr.
+[2026-05-28T03:55:13+10:00] [research-planner #7] plan written
+[2026-05-28T03:55:26+10:00] [triage] dispatched 1 planners, 0 issues already planned
