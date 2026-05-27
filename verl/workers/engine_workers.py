@@ -660,6 +660,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if state is None and not getattr(self, "_comm_eff_marker_logged", False):
                 logger.info("comm_eff: disabled (no-op) — dense GRPO path unchanged")
                 object.__setattr__(self, "_comm_eff_marker_logged", True)
+            if state is not None:
+                # Construct the masker (no hooks yet — the engine registers them
+                # only inside the train forward/backward) and attach the state to
+                # the underlying train engine so its forward-hook lifecycle and
+                # grad-correction hook can see it. The state is the single object
+                # shared between the worker (sets mask_active around update_actor)
+                # and the engine (registers/clears hooks gated on mask_active).
+                engine = getattr(getattr(self, "actor", None), "engine", None)
+                if engine is not None:
+                    state.build(getattr(engine, "module", None))
+                    object.__setattr__(engine, "_comm_eff_state", state)
+                    logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
         return getattr(self, "_comm_eff_state", None)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -673,7 +685,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # the gradient, so the no-op parity holds.
         comm_eff_state = self._maybe_comm_eff_state()
 
-        output = self.actor.train_mini_batch(data=data)
+        # Mask-active flag scope: set ONLY around the actor-train forward/backward
+        # so the masking forward-hooks fire exclusively on this path. The engine
+        # registers hooks on entry to its train forward_backward_batch and removes
+        # them on exit, gated on this flag; log_prob / infer / ref / validation /
+        # checkpoint forwards never set it, so they stay byte-identical to dense.
+        if comm_eff_state is not None:
+            comm_eff_state.mask_active = True
+        try:
+            output = self.actor.train_mini_batch(data=data)
+        finally:
+            if comm_eff_state is not None:
+                comm_eff_state.mask_active = False
 
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /
