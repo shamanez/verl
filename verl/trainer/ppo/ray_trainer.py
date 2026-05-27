@@ -597,6 +597,16 @@ class RayPPOTrainer:
         return batch_reward
 
     def _validate(self, merged: bool = False):
+        # EXP-6 mask-contamination invariant: validation must run mask-free even
+        # while comm_eff.mask.enabled=true. This holds structurally, not by
+        # accident: _validate only drives rollout generation (generate_sequences)
+        # and reward scoring — it never calls update_actor, so the actor engine's
+        # mask hooks are never registered (they are installed only inside
+        # update_actor's train forward and removed on exit) and the worker's
+        # comm_eff path_tag is never "train" on this path. Any recompute_log_prob
+        # here routes through compute_log_prob, which stamps the "old_logprob"
+        # tag, so the mask hook's assert would trip on a leak. val/test_score is
+        # therefore identical mask-on vs mask-off (a headline EXP-6 criterion).
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 

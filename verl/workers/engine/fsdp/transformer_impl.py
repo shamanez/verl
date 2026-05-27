@@ -618,6 +618,9 @@ class FSDPEngine(BaseEngine):
           * an enabled ``CommEffState`` is attached,
           * the worker has set ``state.mask_active`` (set only around
             ``update_actor``; cleared everywhere else),
+          * the worker has stamped ``state.path_tag == "train"`` (EXP-6
+            contamination guard — a second, independent gate alongside
+            ``mask_active`` so a leak requires BOTH to be wrong),
           * a masker was constructed (mask sub-config enabled, ``p > 0``).
         """
         if forward_only:
@@ -626,6 +629,12 @@ class FSDPEngine(BaseEngine):
         if state is None or not getattr(state, "enabled", False):
             return False
         if not getattr(state, "mask_active", False):
+            return False
+        # EXP-6: defence in depth. mask_active is the fast flag; the path tag is
+        # the explicit contract. Both must say "this is the train path" before a
+        # hook is installed. Back-compat: a state without path_tag (pre-EXP-6)
+        # falls through on the mask_active gate alone.
+        if hasattr(state, "path_tag") and getattr(state, "path_tag", None) != "train":
             return False
         return getattr(state, "masker", None) is not None
 

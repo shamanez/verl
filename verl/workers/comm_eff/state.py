@@ -48,7 +48,38 @@ if TYPE_CHECKING:  # avoid an import cycle at runtime; only needed for type hint
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["CommEffState", "maybe_build_comm_eff_state", "comm_eff_metrics"]
+__all__ = [
+    "CommEffState",
+    "maybe_build_comm_eff_state",
+    "comm_eff_metrics",
+    "PATH_TAGS",
+    "TRAIN_TAG",
+]
+
+# The exhaustive set of execution-path tags a comm_eff state can carry. The
+# activation mask is allowed to fire on EXACTLY ONE of these (``train``); every
+# other tag is an RL-measurement / serving path that must stay byte-identical to
+# dense GRPO even while masking is enabled. EXP-6 makes contamination of those
+# paths a *loud* failure (an assert in the mask hook) rather than a counter that
+# someone has to remember to grep.
+#
+#   train        -> actor-train forward/backward (the ONLY masked path)
+#   rollout      -> vLLM/sglang generation (policy rollouts + eval generation)
+#   old_logprob  -> compute_log_prob (old policy log-prob recompute)
+#   ref_logprob  -> compute_ref_log_prob (reference policy log-prob)
+#   val          -> validation / eval pass (_validate)
+#   infer        -> generic infer_batch entrypoint (critic infer, etc.)
+#   ckpt         -> checkpoint save / load forward (none expected, tagged for safety)
+TRAIN_TAG = "train"
+PATH_TAGS = (
+    TRAIN_TAG,
+    "rollout",
+    "old_logprob",
+    "ref_logprob",
+    "val",
+    "infer",
+    "ckpt",
+)
 
 
 def _is_enabled(config: Any) -> bool:
@@ -95,6 +126,23 @@ class CommEffState:
         # exit, so log-prob / ref / infer / val / checkpoint forwards stay clean.
         self.mask_active = False
 
+        # Explicit execution-path tag (EXP-6 contamination guard). Defaults to
+        # ``None`` (no path entered). Each entrypoint stamps it before its
+        # forward: ``update_actor`` -> "train"; ``compute_log_prob`` ->
+        # "old_logprob"; ``compute_ref_log_prob`` -> "ref_logprob"; rollout ->
+        # "rollout"; validation -> "val"; ``infer_batch`` -> "infer";
+        # checkpoint save/load -> "ckpt". The mask hook asserts the tag is
+        # "train" before it fires, so a leak onto any other path raises rather
+        # than silently corrupting the RL-measurement machinery. ``mask_active``
+        # remains the fast gate; ``path_tag`` is the loud cross-check.
+        self.path_tag: Optional[str] = None
+
+        # Per-path mask-application counters. The contract: every key except
+        # ``train`` MUST stay 0 for the whole run. They are surfaced into
+        # metrics as ``comm_eff/mask_applications/<tag>`` so the analyst can
+        # confirm confinement by KEY PREFIX (no substring false positives).
+        self.mask_applications_by_path = {tag: 0 for tag in PATH_TAGS}
+
         # Monotonic optimizer-substep counter (microbatch identity for the PRF
         # key). A trainer step reuses one rollout batch over multiple PPO
         # mini-batches, so this advances per actor optimizer substep, giving
@@ -124,6 +172,45 @@ class CommEffState:
                 state=self,
             )
         self._built = True
+
+    def set_path_tag(self, tag: Optional[str]) -> None:
+        """Stamp the current execution-path tag.
+
+        ``tag`` must be one of :data:`PATH_TAGS` or ``None`` (clears the tag).
+        The mask hook reads this and asserts it equals ``train`` before firing.
+        Validating here turns a typo in an entrypoint into an immediate error
+        instead of silent mask leakage.
+        """
+        if tag is not None and tag not in PATH_TAGS:
+            raise ValueError(f"unknown comm_eff path tag {tag!r}; expected one of {PATH_TAGS} or None")
+        self.path_tag = tag
+
+    def note_mask_application(self) -> None:
+        """Record one mask-hook fire against the current path tag.
+
+        Called by the activation masker from inside a hook. Increments both the
+        legacy aggregate counter (``mask_applications``) and the per-path
+        counter for ``self.path_tag``. A fire while the tag is anything other
+        than ``train`` is a contamination event; the masker asserts against it
+        before calling this, but if the assert is ever disabled (``python -O``)
+        the per-path counter still records the leak so the analyst catches it.
+        """
+        self.mask_applications += 1
+        tag = self.path_tag if self.path_tag in self.mask_applications_by_path else TRAIN_TAG
+        self.mask_applications_by_path[tag] += 1
+
+    def path_metrics(self) -> dict:
+        """Per-path mask-application counters, surfaced under a stable KEY prefix.
+
+        Emits ``comm_eff/mask_applications/<tag>`` for every tag. The analyst
+        asserts the only nonzero key is ``.../train``; any other nonzero key is
+        the contamination falsifier. Emitting all keys (including the zeros)
+        makes the confinement machine-checkable without substring grepping.
+        """
+        return {
+            f"comm_eff/mask_applications/{tag}": count
+            for tag, count in self.mask_applications_by_path.items()
+        }
 
     def mask_ratio_metrics(self) -> dict:
         """Return the most-recently-measured masked fraction per boundary layer.
@@ -175,5 +262,6 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     if state is None:
         return {}
     out = state.metrics()
+    out.update(state.path_metrics())
     out.update(state.mask_ratio_metrics())
     return out

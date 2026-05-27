@@ -14,7 +14,7 @@
 import functools
 import logging
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import partial
 from itertools import chain
@@ -629,14 +629,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.ref.infer_batch(data=data)
+        # EXP-6 path tag: reference-policy log-prob is an RL-measurement path;
+        # masking must NOT fire here. The ref forward runs on a separate engine
+        # that has no comm_eff state attached, so this is inherently mask-free;
+        # the tag makes the intent explicit and trips the assert if anything
+        # ever shares the actor engine with the ref path.
+        with self._comm_eff_path("ref_logprob"):
+            output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.actor.infer_batch(data)
+        # EXP-6 path tag: old-policy log-prob recompute is an RL-measurement
+        # path; masking must NOT fire here. Stamp the tag "old_logprob" so the
+        # mask hook's assert would catch any leak. infer_batch runs forward_only
+        # (no hooks registered) so this is belt-and-braces atop mask_active.
+        with self._comm_eff_path("old_logprob"):
+            output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
 
@@ -674,6 +685,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
         return getattr(self, "_comm_eff_state", None)
 
+    @contextmanager
+    def _comm_eff_path(self, tag: str):
+        """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
+
+        EXP-6 contamination guard. The activation-mask hook asserts the state's
+        ``path_tag == "train"`` before firing, so stamping ``"old_logprob"`` /
+        ``"ref_logprob"`` / ``"infer"`` / ``"ckpt"`` here turns any mask leak
+        onto an RL-measurement path into a loud assertion instead of silent
+        gradient corruption. A strict no-op when comm_eff is disabled (no state)
+        — the ``None`` guard keeps the dense GRPO path untouched. The prior tag
+        is restored on exit so nesting (e.g. checkpoint forward inside a train
+        step) does not lose the outer context.
+        """
+        state = self._maybe_comm_eff_state()
+        if state is None:
+            yield
+            return
+        prev = getattr(state, "path_tag", None)
+        state.set_path_tag(tag)
+        try:
+            yield
+        finally:
+            state.set_path_tag(prev)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
@@ -692,11 +727,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # checkpoint forwards never set it, so they stay byte-identical to dense.
         if comm_eff_state is not None:
             comm_eff_state.mask_active = True
+            # EXP-6: stamp the ONLY path tag the mask hook is allowed to fire on.
+            comm_eff_state.set_path_tag("train")
         try:
             output = self.actor.train_mini_batch(data=data)
         finally:
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
+                comm_eff_state.set_path_tag(None)
 
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /
@@ -722,12 +760,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
-        self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        # EXP-6 path tag: a checkpoint load may run a forward on the actor
+        # module; masking must NOT fire. Stamp "ckpt" so the assert trips on any
+        # leak. No-op when comm_eff is disabled.
+        with self._comm_eff_path("ckpt"):
+            self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
-        self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        # EXP-6 path tag: checkpoint save must NOT carry comm_eff/mask state into
+        # the synced weights and must not fire a mask. Stamp "ckpt".
+        with self._comm_eff_path("ckpt"):
+            self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
