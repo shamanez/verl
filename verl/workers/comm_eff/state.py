@@ -86,15 +86,59 @@ class CommEffState:
         self.anchor_backwards = 0
         self.spectral_corrections = 0
 
-    def build(self, module: Any) -> None:
-        """Allocate mask RNG / anchor buffers / spectral workspace and register
-        forward hooks. Implemented by later M2 issues (mask / anchor / spectral).
+        # The activation masker (first circuit). Constructed in build(); None
+        # when the mask sub-config is disabled.
+        self.masker = None
 
-        Intentionally a stub here: EXP-4 only proves the *disabled* path is a
-        no-op, so the enabled machinery is out of scope. Constructing the state
-        but never calling an op keeps the counters at 0.
+        # Whether masking is currently active. Set True only on entry to the
+        # actor-train forward/backward (around update_actor) and cleared on
+        # exit, so log-prob / ref / infer / val / checkpoint forwards stay clean.
+        self.mask_active = False
+
+        # Monotonic optimizer-substep counter (microbatch identity for the PRF
+        # key). A trainer step reuses one rollout batch over multiple PPO
+        # mini-batches, so this advances per actor optimizer substep, giving
+        # each substep a distinct mask even within the same trainer step.
+        self.substep = 0
+
+    def build(self, module: Any) -> None:
+        """Construct the activation masker for the enabled mask circuit.
+
+        Idempotent. When ``comm_eff.mask.enabled`` is true this constructs an
+        ``ActivationMasker`` (no hooks registered yet — the engine registers
+        them only on entry to the train forward and removes them on exit). Anchor
+        / spectral workspace allocation is deferred to later M2 work.
         """
+        if self._built:
+            return
+        mask_cfg = getattr(self.config, "mask", None)
+        mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
+        if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
+            # Imported lazily so the disabled path never pays the import cost.
+            from verl.workers.comm_eff.activation_mask import ActivationMasker
+
+            self.masker = ActivationMasker(
+                p=float(mask_cfg.p),
+                base_seed=int(getattr(mask_cfg, "seed", 0)),
+                pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                state=self,
+            )
         self._built = True
+
+    def mask_ratio_metrics(self) -> dict:
+        """Return the most-recently-measured masked fraction per boundary layer.
+
+        Surfaced as ``comm_eff/mask_ratio`` (mean across boundaries) plus a
+        per-boundary breakdown. Empty when no mask fired this step.
+        """
+        if self.masker is None or not self.masker.last_mask_ratio:
+            return {}
+        ratios = self.masker.last_mask_ratio
+        mean_ratio = sum(ratios.values()) / len(ratios)
+        out = {"comm_eff/mask_ratio": mean_ratio}
+        for idx, r in sorted(ratios.items()):
+            out[f"comm_eff/mask_ratio/layer_{idx}"] = r
+        return out
 
     def metrics(self) -> dict:
         """Return the comm_eff operation counters for logging."""
@@ -125,8 +169,11 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     """Return comm_eff counters for ``state``, or an empty dict when disabled.
 
     Centralises the "disabled means no counters" convention so call sites do
-    not each re-derive it.
+    not each re-derive it. Includes the measured ``comm_eff/mask_ratio`` when a
+    mask fired this step.
     """
     if state is None:
         return {}
-    return state.metrics()
+    out = state.metrics()
+    out.update(state.mask_ratio_metrics())
+    return out

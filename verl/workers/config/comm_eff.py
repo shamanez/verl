@@ -44,15 +44,37 @@ __all__ = [
 class CommEffMaskConfig(BaseConfig):
     """Pipeline activation-masking sub-config (inert while ``comm_eff.enabled=false``).
 
+    Implements Algorithm A: a deterministic PRF Bernoulli mask applied in-graph
+    (``h_tilde = h * mask``, **no** ``1/(1-p)`` rescale) to the hidden-state
+    output of pipeline-boundary decoder blocks, **only** inside the actor train
+    forward/backward. See ``verl.workers.comm_eff.activation_mask``.
+
     Args:
-        p (float): Keep-probability for the activation mask. ``1.0`` means no
-            masking. Only consulted when ``comm_eff.enabled=true``.
-        seed (int): Seed for the mask RNG stream. Only drawn from when
-            ``comm_eff.enabled=true`` — the disabled path never touches RNG.
+        enabled (bool): Whether activation masking runs. Gated by the parent
+            ``comm_eff.enabled`` regardless of this value (so the disabled path
+            stays a strict no-op). Default ``True`` so that flipping the parent
+            ``comm_eff.enabled=true`` activates masking without a second flag;
+            set ``false`` to keep masking off while another circuit is enabled.
+        p (float): **Masked fraction** in ``[0, 1]`` — the probability an
+            element is zeroed (``mask=0``). The measured ``comm_eff/mask_ratio``
+            tracks this value. ``0.0`` means no masking. Only consulted when
+            ``comm_eff.enabled=true``.
+        seed (int): Base seed folded into the mask PRF key. Reproducible across
+            ranks and re-runs. Only drawn from when ``comm_eff.enabled=true`` —
+            the disabled path never touches RNG.
+        pp_size (int): Logical pipeline-shard count used to derive which decoder
+            blocks are masked: the decoder blocks are partitioned into
+            ``pp_size`` contiguous shards and the last block of every shard
+            **except the final shard** is masked. ``L`` is read from
+            ``model.config`` (never hardcoded). For ``L=16, pp_size=8`` the
+            boundaries are ``[1, 3, 5, 7, 9, 11, 13]``. This is a logical knob,
+            not a real pipeline split.
     """
 
+    enabled: bool = True
     p: float = 0.95
     seed: int = 0
+    pp_size: int = 8
 
 
 @dataclass
@@ -127,6 +149,8 @@ class CommEffConfig(BaseConfig):
         """
         if not 0.0 <= self.mask.p <= 1.0:
             raise ValueError(f"comm_eff.mask.p must be in [0, 1]; got {self.mask.p}")
+        if self.mask.pp_size < 1:
+            raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
         if self.spectral.rank < 1:
             raise ValueError(f"comm_eff.spectral.rank must be >= 1; got {self.spectral.rank}")
         if not 0.0 <= self.anchor.ema_decay <= 1.0:
