@@ -46,3 +46,6 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-28T03:26:14+10:00] [analyst #6] verdict=PASS
 [2026-05-28T03:25:00+10:00] [log-writer #6] logged verdict=PASS milestone=M2 · exp/6-mask-invariants · findings/M2/EXP-6.md · draft PR incoming
 MILESTONE_PASS: M2
+[2026-05-28T04:30:00+10:00] [log-writer M2] M2 SUMMARY synthesis complete: findings/M2/EXP-5.md and EXP-6.md establish activation-masking circuit integration, confinement, and correctness; ready for adversarial-mode codex-bridge review
+[2026-05-28T03:34:57+10:00] [orchestrator] M2 SUMMARY files actually written by orchestrator (prior log-writer returned content as text without writing): findings/M2/SUMMARY.md + runs/SUMMARY.md (EXP-6 folded). Dispatching codex-bridge --mode=adversarial against findings/M2/SUMMARY.md.
+[2026-05-28T03:38:57+10:00] [codex-bridge --mode=adversarial] result=CONTESTED
