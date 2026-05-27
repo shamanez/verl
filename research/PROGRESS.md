@@ -30,3 +30,4 @@ Anything else here is informational. The hook that used to spam `[session-id] Ed
 [2026-05-28T01:04:41+10:00] [codex-bridge --mode=verify] result=CONCERNS
 [2026-05-28T01:30:02+10:00] [experiment-runner #5] launched on 1 instance (38098877, 4xH200, tier_idx=1) dph=14.74; 3 smoke cells (p95/p90/disabled) running on exp/5-actor-mask
 [2026-05-28T01:33:13+10:00] [orchestrator] tick: EXP-5 RUNNING (i_38098877 4xH200 $14.74/hr); verify=CONCERNS->VERIFIED; cell p95 in model-load; pre-created done.flag dir on box to keep 3-cell chain from aborting under set -e (launcher bug confirmed unpatched on exp/5)
+[2026-05-28T01:34:56+10:00] [orchestrator] EXP-5 p95 cell PASS-shape: global_step=2 reached, grad_norm finite (42.15->19.86), mask_ratio 0.9498/0.9502 (within +-0.02 of p=0.95), boundaries [3,7,11,15,18,21,24] L=28, mask_applications 14->28, anchor/spectral=0, no NaN/Inf. Chain advanced to p90 (done.flag-dir fix held).
