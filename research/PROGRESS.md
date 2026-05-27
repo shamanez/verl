@@ -58,3 +58,4 @@ MILESTONE_PASS: M2
 [2026-05-28T04:39:51+10:00] [orchestrator] tick: EXP-7 RUNNING on i_38122735 (4×H200 $14.74/hr, tmux exp-7-156_19_254_2). Training logs CONFIRMED live via ssh -i ~/.ssh/vast_ai -p 34292 root@156.19.254.2: validate_config PASSED (spectral comm_eff keys merged clean), datasets loaded (7473/1319), Total training steps:2, Qwen2 1.54B FSDP-wrapped x8 ranks, weights loaded 100%, no errors. FSDP grad-repr discovery point = AFTER reduction/BEFORE clipping (DTensor full_tensor unshard). verify=[] running=[7] analyzing=[] logging=[] blocked=[8-11 not-approved]
 [2026-05-28T04:52:16+10:00] [analyst #7] verdict=REVISE
 [2026-05-28T05:28:44+10:00] [experiment-runner #7] EXP-7 REVISE re-run: 3 defects fixed (entropy grad signal, FSDP1 summon_full_params grad-correction, sha256 anchor seed); 7 CPU tests green; relaunched on 1 instance (38128433, H200x4, tier1) dph=14.74
+[2026-05-28T05:50:26+10:00] teardown EXP-EXP-7 reason=verdict-written destroyed=1
