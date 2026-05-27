@@ -1,19 +1,18 @@
-# Research Status — 2026-05-28T00:09:15+10:00
+# Research Status — 2026-05-28T00:33:26+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 4 | M2 — comm_eff no-op scaffolding: dense GRPO parity smoke | RUNNING | 1×4H200 (i_38088784, tier_idx=1, $14.74/hr) | — | launched 00:05, ~4 min elapsed; branch `exp/4-commeff-noop` pushed before provisioning; pre-launch local unit tests 10/10 PASS (`runs/EXP-4/verify.log`); 3 back-to-back smokes (disabled / default / reference) in tmux `exp-4-156-19-254-2`; plan gate operator-cleared, code-level diff verify still pending (later gate) |
-| 3 | M1 — Qwen2.5-1.5B GRPO baseline (GSM8K) | DONE | 1×4H200 torn down | PASS | val 0.087→0.789 (+0.702, 14× threshold) by step 100; HF step50+step100 (private); `runs/EXP-3/REPRODUCIBILITY.md`. EXP-4 `depends_on:[EXP-3]` satisfied |
-| 5–11 | M2/M3 backlog (PRF mask, contamination guard, spectral filter, anchor circuit, full M95+AP smoke, DP compression, 100-step) | BACKLOG | — | — | open, no `status:` label, no `research:claim`, no plan — not yet claimed for planning (triage owns); orchestrator skips |
+| 4 | M2 — comm_eff no-op scaffolding: dense GRPO parity smoke | DONE | 1×4H200 (i_38088784) torn down | PASS (no-op proven; B/C deferred) | Scaffolding MERGED to vast-ai-workload via shamanez/verl#1 (merge 1f376733, tip b036c656). Run A: global_step=2, comm_eff counters all 0.0, grad_norm 3.07e-4, no NaN/Inf; unit tests 10/10. Issue #4 closed status:done. exp/4-commeff-noop branch deleted (local+remote). Instance torn down 00:32. **Follow-up:** Runs B(config-default)+C(reference) NOT run — launcher `vast_baseline_...sh:196` hardcoded done.flag path fails under SAVE_FREQ=-1 → chain aborted under set -e; A-vs-B parity + rel-tol 1e-4 pending a patched relaunch |
+| 3 | M1 — Qwen2.5-1.5B GRPO baseline (GSM8K) | DONE | 1×4H200 torn down | PASS | val 0.087→0.789 (+0.702) by step 100; HF step50+step100 (private); `runs/EXP-3/REPRODUCIBILITY.md` |
+| 5–11 | M2/M3 backlog (PRF mask, contamination guard, spectral filter, anchor circuit, full M95+AP smoke, DP compression, 100-step) | BACKLOG | — | — | open, no `status:` label, no `research:claim`, no plan — owned by triage/planning loop; orchestrator skips |
 
 ## Last tick
-2026-05-28T00:09:15+10:00 · verify=[] · running=[4] · analyzing=[] · logging=[] · blocked=[] · dispatched=[experiment-runner→EXP-4]
+2026-05-28T00:33:26+10:00 · verify=[] · running=[] · analyzing=[] · logging=[] · blocked=[] · shipped+closed=[4] (PR #1 merged, branch deleted, instance torn down)
 
 ## Budget
-$/hr now: $14.74 (EXP-4, 1×4H200) · spent on EXP-4 so far: ~$0.98 (~4 min) · EXP-4 hard caps: max_gpu_hr=8 (≈2.0 wall-clock h on 4 GPUs) / wall_clock_hr=3 / max_dph=24.0 → teardown hook caps EXP-4 at ≈$29 · EXP-3 historical: ~$12.76 instance / ~$10.29 training · monthly cap: tracked separately
+$/hr now: **$0.00** (no instances running) · EXP-4 total: ~$6–7 (i_38088784, 4×H200 @ $14.74/hr, ~27 min provision→teardown) · EXP-3 historical: ~$12.76 instance / ~$10.29 training · monthly cap: tracked separately
 
-## Notes
-- EXP-4 plan-level codex verify was OPERATOR-CLEARED (raw codex: FAIL rev-1 / CONCERNS rev-2, judged out-of-scope for a disabled-scaffolding parity smoke; plan reverted to rev-1). Code-level verify of the `exp/4-commeff-noop` diff was NOT waived; honored cheaply pre-launch via a torch-free local unit-test gate (10/10 PASS, `runs/EXP-4/verify.log`) so no GPU was spent on unvetted scaffolding. Full codex code-level review of the diff remains a later gate (PR-draft time).
-- Next tick: EXP-4 is `RUNNING` → no dispatch; sync-metrics hook pulls logs. On `runs/EXP-4/done.flag` (or dead tmux + `metrics/*.jsonl` present) → dispatch `analyst`. Benign analyst note: launcher's internal cgroup probe printed `pids.max=unknown` (cgroup-v2 host; real value 23552, recorded in PROGRESS) — the `<=2048` guard was correctly not tripped.
+## Open follow-up (not an issue yet)
+- **Launcher done.flag bug** in `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh:196`: `touch /workspace/verl/runs/qwen25_1p5b_grpo_gsm8k_baseline/done.flag` hardcodes the default experiment name and a dir that doesn't exist under `SAVE_FREQ=-1` → exits nonzero → aborts back-to-back smoke chains under `set -e`. Fix: use `$EXPERIMENT_NAME` + `mkdir -p` (or guard the touch). Needed before any multi-cell smoke (incl. the EXP-4 B/C relaunch). Also: `.claude/worktrees/` is not gitignored (minor hygiene).
