@@ -716,8 +716,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # comm_eff guard. When disabled (default) this resolves to None with zero
         # side effects (no hook, no buffer, no RNG) and the dense GRPO update runs
         # exactly as upstream. The compressed circuits are entered only when
-        # comm_eff.enabled=true (later M2 work); the disabled path never touches
-        # the gradient, so the no-op parity holds.
+        # comm_eff.enabled=true; the disabled path never touches the gradient, so
+        # the no-op parity holds.
+        #
+        # Optimizer-step ordering (EXP-7 spectral, M2 paper):
+        #   masked fwd/bwd -> FSDP grad reduction -> spectral correction -> AdamW.
+        # Building the state here attaches the (seeded) SpectralFilter to the
+        # actor train engine; the engine's _maybe_comm_eff_grad_correction hook
+        # then fires inside BaseEngine.train_batch AFTER backward (grads already
+        # FSDP-reduced) and BEFORE optimizer_step (where clip_grad_norm_ runs).
+        # commutativity with FSDP reduction is discovered empirically by that
+        # hook, not assumed here.
         comm_eff_state = self._maybe_comm_eff_state()
 
         # Mask-active flag scope: set ONLY around the actor-train forward/backward

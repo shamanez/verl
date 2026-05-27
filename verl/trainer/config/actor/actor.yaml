@@ -337,7 +337,10 @@ comm_eff:
     # EMA decay for the anchor circuit's running state
     ema_decay: 0.99
 
-  # Spectral-correction sub-config (inert while enabled=false)
+  # Spectral-correction sub-config (inert while enabled=false). EXP-7 M2 paper
+  # formula: anchor-EMA -> full thin SVD -> Tikhonov weights -> two-sided
+  # projection -> alpha blend, applied after actor backward / FSDP grad
+  # reduction and before optimizer.step() / grad clipping.
   spectral:
 
     # Target dataclass for this configuration
@@ -346,10 +349,36 @@ comm_eff:
     # Whether spectral correction runs (gated by the parent comm_eff.enabled)
     enabled: false
 
-    # Truncation rank for the spectral correction
+    # Blend coefficient in [0,1]: G_proj = alpha*G_mask + (1-alpha)*G_filt.
+    # 1.0 => exact no-op; 0.0 => pure two-sided Tikhonov projection.
+    alpha: 0.3
+
+    # Tikhonov damping: d_i = s_i / (s_i + tau). Must be > 0.
+    tau: 1e-3
+
+    # EMA decay for the anchor-gradient running matrix M_anchor.
+    beta_anc: 0.95
+
+    # Populate M_anchor with a fixed deterministic PSD basis so the filter runs
+    # without the (not-yet-built, EXP-8) live anchor circuit.
+    seed_anchor_cache: true
+
+    # Base seed for the deterministic anchor cache.
+    anchor_seed: 0
+
+    # Substrings selecting which named 2D params receive correction (skips
+    # norms / biases / embeddings / lm head).
+    target_substr: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+    # Cap on target matrices corrected per step (keeps the discovery smoke
+    # cheap). -1 => no cap.
+    max_targets: 4
+
+    # Retained for back-compat with the EXP-4 scaffold schema (full thin SVD is
+    # used; low-rank truncation is a later ablation).
     rank: 8
 
-    # Damping added to the spectrum before inversion
+    # Legacy alias kept for schema back-compat; the active damping knob is tau.
     damping: 1e-6
 
 # QAT (Quantization-Aware Training) configuration
