@@ -1,0 +1,4 @@
+# Restart 2026-05-28T17:57:25+10:00 — clean parser
+ts,g0_util,g1_util,g2_util,g3_util,g0_mem_mb,g1_mem_mb,g2_mem_mb,g3_mem_mb,g0_pwr_w,g1_pwr_w,g2_pwr_w,g3_pwr_w,done_flag
+2026-05-28T17:57:25+10:00,0,0,0,0,4,4,4,4,78.15,78.30,75.82,78.70,
+2026-05-28T17:57:44+10:00,0,0,0,0,4,4,4,4,78.13,78.26,75.78,78.71,
