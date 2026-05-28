@@ -1,5 +1,12 @@
 # Research Log (newest first)
 
+## EXP-13 · 2026-05-28T18:55:00+00:00 · M3 · PASS
+M3 paper-scale comm-eff PP-RL demonstration — 58-step M90+AP GRPO on TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384 (iter1 OOM → iter2 PASS via memory recipe)
+- hypothesis: EXP-9 iter2's PASS knobs (α=0.5, τ=0.01, p=0.9, β_anc=0.9, anchor cadence=5, delay_K=5, mask_recompute=true) scale to paper-scale rollouts without infrastructure regression; model learns on held-out val (TRAIN_BATCH=128 vs EXP-9's 16); all 6 comm-eff guards hold; iter2 reaches step 58 (TOTAL_EPOCHS=1 dataset-epoch limit)
+- result: iter1 OOM (step 2, GPU 0 135 GiB / 140 GiB on actor MLP forward — anchor clone + dynamic-batch wedge exceeded envelope); iter2 PASS with memory fix (PPO_MAX_TOKEN_LEN_PER_GPU 36864→18432, vLLM gpu_mem_util 0.4→0.3, PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True). Validation curve clear improvement: step 0=0.0864, step 25=0.0925 (+7%), step 50=0.1092 (+26% relative gain in 50 GRPO steps); mask_applications/train=2548, /old_logprob=2366; anchor_backwards=44; spectral_corrections=896; all 6 anchor guards held; mask_ratio=0.8999 (target 0.9±0.02); memory plateau 125.44 GB (no leak); H200 headroom margin 14.6 GB. Notes: anchor-memory-cost.md + fast-circuit-vs-anchor-pass.md committed at 6abc2891; TOTAL_EPOCHS=1 → 58 batches (7473 prompts / 128 batch) not a method failure, dataset-epoch math (future M3 use TOTAL_EPOCHS=2 for 100-step curve)
+- run dir: runs/EXP-13/
+- verdict: runs/EXP-13/verdict.md
+
 ## EXP-9 · 2026-05-28T17:15:00+10:00 · M2 · PASS
 M2 capstone — full M90+AP no-KL 20-step GRPO smoke (iter1 REVISE → iter2 PASS via knob relaxation)
 - hypothesis: mask_recompute extension on old-logprob recompute forward, combined with knob relaxation (α 0.3→0.5, τ 0.001→0.01, p 0.95→0.9), yields visible learning trend and sustained peak-reward sequences; criterion 13 passes via inverted reward curvature (second-half mean +82% above first-half); all 12 comm_eff guards held; iter2 reaches global_step=20
