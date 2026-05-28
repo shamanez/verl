@@ -1300,6 +1300,15 @@ class RayPPOTrainer:
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
+        # EXP-8 anchor data flow: the rollout-EXPANDED GRPO batch assembled here
+        # (mini_batch_size = ppo_mini_batch_size * rollout.n, carrying responses /
+        # response_mask / old_log_probs / advantages / optional ref_log_prob)
+        # flows unchanged into update_actor -> train_mini_batch -> per-mini-batch
+        # engine.train_batch(data, loss_fn). The anchor circuit reads THIS same
+        # batch inside FSDPEngine._maybe_comm_eff_anchor_refresh for its unmasked
+        # K-stale fwd/bwd — it generates NO new rollouts and recomputes NO rewards
+        # (those happened upstream of this method). No separate anchor batch is
+        # constructed or synced to rollout replicas.
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.

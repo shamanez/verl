@@ -81,16 +81,31 @@ class CommEffMaskConfig(BaseConfig):
 class CommEffAnchorConfig(BaseConfig):
     """Asynchronous unmasked-anchor-circuit sub-config (inert while disabled).
 
+    The anchor circuit (EXP-8) runs, every ``cadence`` trainer steps, ONE
+    unmasked GRPO-actor-loss forward/backward from a ``delay_K``-stale weight
+    snapshot to produce a clean per-target gradient ``G_anchor``. ``G_anchor`` is
+    read RAW (before any spectral correction) into the anchor-gradient EMA
+    ``M_anchor`` — whose decay is ``spectral.beta_anc`` (the EMA is owned by the
+    spectral filter, NOT a separate anchor knob; that is why the EXP-4 scaffold's
+    ``ema_decay`` is dropped here). The anchor takes NO optimizer step and
+    generates NO rollouts / recomputes NO rewards.
+
     Args:
         enabled (bool): Whether the anchor circuit runs. Gated by the parent
-            ``comm_eff.enabled`` regardless of this value.
-        every_n_steps (int): Cadence of anchor backward passes.
-        ema_decay (float): EMA decay for the anchor circuit's running state.
+            ``comm_eff.enabled`` regardless of this value. ``false`` (default) is
+            a strict no-op — opt-in only.
+        cadence (int): Anchor-refresh cadence in trainer steps (paper ``K``). The
+            anchor fires when ``(step % cadence) == 0``. Smoke uses ``1`` (fire
+            every step); the paper default is ``20``. Must be ``>= 1``.
+        delay_K (int): Staleness of the weight snapshot the anchor forwards
+            from, in trainer steps. ``0`` = current weights; ``1`` = the prior
+            step's weights (smoke). Must be ``>= 0``. Replaces the EXP-4 scaffold
+            field ``every_n_steps`` (which was never consumed).
     """
 
     enabled: bool = False
-    every_n_steps: int = 1
-    ema_decay: float = 0.99
+    cadence: int = 20
+    delay_K: int = 20
 
 
 @dataclass
@@ -143,10 +158,29 @@ class CommEffSpectralConfig(BaseConfig):
             skip norms, biases, embeddings and the lm head.
         max_targets (int): Cap on the number of target matrices corrected per
             step (keeps the discovery smoke cheap). ``-1`` ⇒ no cap.
-        rank (int): Retained for back-compat with the EXP-4 scaffold schema
-            (full thin SVD is used; low-rank truncation is a later ablation).
+        rank (int): Retained low-rank truncation rank. Under ``svd_mode=lowrank``
+            it is the ``q`` passed to ``torch.svd_lowrank``; under ``full`` it is
+            unused. Must be ``>= 1``.
         damping (float): Legacy alias kept for schema back-compat; the active
             damping knob is ``tau``.
+        ema_device (str): Where the anchor-gradient EMA ``M_anchor`` is stored
+            between refreshes — ``"gpu"`` (default, faithful: kept in HBM) or
+            ``"cpu"`` (memory-lean: offloaded to pinned CPU, moved to GPU only
+            inside the refresh/correct call and moved back). ``M_anchor`` is
+            touched only at refresh, so CPU offload costs one H2D/D2H per refresh,
+            not per mini-batch. Validated against {gpu, cpu}.
+        svd_mode (str): How the anchor SVD basis is computed — ``"full"``
+            (default, faithful: ``torch.linalg.svd`` full thin SVD) or
+            ``"lowrank"`` (memory-lean: ``torch.svd_lowrank(M_anchor, q=rank)``,
+            shrinking ``U/S/V`` from ``O(m·k)`` to ``O(m·rank)``). Validated
+            against {full, lowrank}.
+        basis_cache (str): Whether the ``U/S/V`` basis is computed once per
+            refresh and reused across the fast PPO mini-batches — ``"cache"``
+            (default, faithful: compute at refresh, store on GPU, reuse) or
+            ``"recompute"`` (memory-lean inverse: recompute the SVD on every
+            ``correct_matrix`` as the pre-EXP-8 code did). The basis is touched
+            every fast mini-batch, so it stays on-GPU during the refresh window
+            regardless. Validated against {cache, recompute}.
     """
 
     enabled: bool = False
@@ -169,6 +203,11 @@ class CommEffSpectralConfig(BaseConfig):
     max_targets: int = 4
     rank: int = 8
     damping: float = 1e-6
+    # EXP-8 config-driven EMA/SVD storage layer. Defaults stay FAITHFUL
+    # (gpu/full/cache) so cell 1 and the EXP-7 contract are numerically unchanged.
+    ema_device: str = "gpu"
+    svd_mode: str = "full"
+    basis_cache: str = "cache"
 
 
 @dataclass
@@ -221,5 +260,17 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.spectral.tau must be > 0; got {self.spectral.tau}")
         if not 0.0 <= self.spectral.beta_anc <= 1.0:
             raise ValueError(f"comm_eff.spectral.beta_anc must be in [0, 1]; got {self.spectral.beta_anc}")
-        if not 0.0 <= self.anchor.ema_decay <= 1.0:
-            raise ValueError(f"comm_eff.anchor.ema_decay must be in [0, 1]; got {self.anchor.ema_decay}")
+        # EXP-8 anchor cadence/staleness (replaces the unused EXP-4 ema_decay).
+        if self.anchor.cadence < 1:
+            raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
+        if self.anchor.delay_K < 0:
+            raise ValueError(f"comm_eff.anchor.delay_K must be >= 0; got {self.anchor.delay_K}")
+        # EXP-8 storage-layer enums (faithful defaults: gpu/full/cache).
+        if self.spectral.ema_device not in ("gpu", "cpu"):
+            raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")
+        if self.spectral.svd_mode not in ("full", "lowrank"):
+            raise ValueError(f"comm_eff.spectral.svd_mode must be one of (full, lowrank); got {self.spectral.svd_mode!r}")
+        if self.spectral.basis_cache not in ("cache", "recompute"):
+            raise ValueError(
+                f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
+            )

@@ -731,6 +731,284 @@ class FSDPEngine(BaseEngine):
             return ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
         return tuple(substrs)
 
+    def _maybe_comm_eff_anchor_refresh(self, data, loss_function) -> None:
+        """FSDP anchor-circuit refresh (EXP-8): unmasked K-stale GRPO-actor-loss
+        fwd/bwd -> RAW G_anchor -> spectral anchor EMA, NO optimizer step.
+
+        Runs at the TOP of ``BaseEngine.train_batch`` (before the masked fast
+        path). The six non-negotiable invariants this enforces:
+
+        1. **Same GRPO actor-loss, unmasked.** Reuses ``loss_function`` (the fast
+           path's ``ppo_loss``) over THIS rollout-expanded batch — NOT a
+           supervised next-token loss.
+        2. **No rollout / no reward recompute.** It only re-forwards ``data``
+           (which already carries ``responses``/``old_log_probs``/``advantages``);
+           rollout generation + reward scoring live upstream in the trainer and
+           are never invoked here. The ``anchor_rollouts_generated`` /
+           ``anchor_rewards_recomputed`` counters stay 0 structurally.
+        3. **No optimizer step.** The snapshot is detached clones OFF the
+           optimizer's param group; this method never calls ``optimizer_step``.
+        4. **enabled=false ⇒ no-op.** Gated on ``state.enabled`` AND
+           ``anchor.enabled``; the cadence predicate gates per-step firing.
+        5. **GUARD 5 — unmasked.** The pass runs with ``state.mask_active=False``
+           and ``path_tag != "train"`` so the mask hooks are NOT registered;
+           ``anchor_mask_applications`` is recorded as the (asserted-zero) delta
+           of ``state.mask_applications`` around the pass.
+        6. **GUARD 6 — uncorrected.** ``G_anchor`` is read RAW and fed to
+           ``SpectralFilter.update_anchor`` (the EMA) BEFORE any
+           ``correct_matrix``; ``anchor_grad_corrected`` stays 0.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        anchor_cfg = getattr(state.config, "anchor", None)
+        spectral = getattr(state, "spectral", None)
+        if anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)) or spectral is None:
+            return
+
+        from verl.workers.comm_eff.anchor import (
+            AnchorStalenessQueue,
+            anchor_should_fire,
+            assert_anchor_module_isolated,
+            build_anchor_module,
+            extract_target_grads,
+            feed_anchor_grads_into_ema,
+            snapshot_named_params,
+        )
+
+        cadence = int(getattr(anchor_cfg, "cadence", 20))
+        delay_K = int(getattr(anchor_cfg, "delay_K", 20))
+
+        # Advance the trainer-step counter the cadence is keyed on (1-based).
+        state.anchor_step += 1
+        step = state.anchor_step
+
+        # Lazily build the staleness queue on the state (survives across steps).
+        # CommEffState is a plain class with a __dict__, so a direct setattr is
+        # correct; it is the single object shared with the worker.
+        queue = getattr(state, "_anchor_queue", None)
+        if queue is None:
+            queue = AnchorStalenessQueue(delay_K=delay_K)
+            setattr(state, "_anchor_queue", queue)
+
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", 4)) if spec_cfg is not None else 4
+
+        use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
+        module_is_fsdp1 = isinstance(self.module, FSDP)
+        module_is_fsdp2 = isinstance(self.module, FSDPModule)
+
+        def _inner_named_params():
+            return getattr(self.module, "_fsdp_wrapped_module", self.module).named_parameters()
+
+        # --- snapshot THIS step's (full) weights into the staleness ring -------
+        # Snapshot OFF the optimizer's param group (plain detached clones) so no
+        # accidental optimizer step can ever touch them (criterion 7). For FSDP1
+        # we summon the full params to clone the logical matrices; FSDP2 keeps
+        # original names (DTensor) — we clone the local shard's full_tensor.
+        def _summon_ctx():
+            if module_is_fsdp1 and not module_is_fsdp2:
+                if not use_orig:
+                    raise RuntimeError(
+                        "comm_eff anchor circuit under FSDP1 requires "
+                        "actor_rollout_ref.actor.fsdp_config.use_orig_params=true "
+                        "(FSDP.summon_full_params(with_grads=True) is unsupported with "
+                        "use_orig_params=false). Set it in the launcher."
+                    )
+                return FSDP.summon_full_params(self.module, with_grads=True, writeback=True)
+            return nullcontext()
+
+        with _summon_ctx():
+            cur_snapshot = snapshot_named_params(
+                _inner_named_params(), target_substrs=None, device=None, detach=True
+            )
+        queue.push(step, cur_snapshot)
+
+        if not anchor_should_fire(step, cadence, True):
+            return
+
+        # --- fetch the t-K stale snapshot to forward from ----------------------
+        stale = queue.get_stale(step, delay_K)
+        if stale is None:  # pragma: no cover - queue always has >=1 after push
+            return
+
+        # GUARD 5 setup: ensure masking is OFF for the anchor pass and the path
+        # tag is NOT "train" (the mask hook requires both to fire). We measure
+        # mask applications as a delta so a leak is a loud, greppable failure.
+        prev_mask_active = getattr(state, "mask_active", False)
+        prev_path_tag = getattr(state, "path_tag", None)
+        state.mask_active = False
+        if hasattr(state, "set_path_tag"):
+            state.set_path_tag(None)
+        mask_apps_before = int(getattr(state, "mask_applications", 0))
+        opt_steps_before = int(getattr(state, "anchor_optimizer_steps", 0))
+
+        # Shallow-copy the batch so the anchor fwd/bwd never mutates the
+        # TensorDict the masked fast path reuses immediately after.
+        anchor_data = data.copy() if hasattr(data, "copy") else data
+
+        anchor_grads = {}
+        # EXP-12 FIX (criterion 13): the anchor's loss.backward() MUST NOT
+        # trigger the live FSDP1 module's `_post_backward_hook` (which would
+        # call `_check_grad_to_accumulate(flat_param._saved_grad_shard.shape)`
+        # outside the fast-path window where `_saved_grad_shard is None` →
+        # `AttributeError: 'NoneType' object has no attribute 'shape'`).
+        #
+        # Mechanism: deep-copy the underlying nn.Module (after summoning full
+        # FSDP1 params so the deepcopy captures full unsharded weights), load
+        # the K-stale snapshot into the clone, then run fwd/bwd on the CLONE.
+        # The clone has no FSDP _handles, no FlatParameters, no post-backward
+        # hooks → the autograd-hook chain is broken by construction.
+        #
+        # `assert_anchor_module_isolated` is a cheap runtime guard: any future
+        # refactor that lets the clone alias live optimizer/FSDP params will
+        # fire this assertion before we touch the GPU.
+        live_module_swap = None
+        try:
+            with _summon_ctx():
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                # EXP-12 iter04: cache anchor clone across refreshes so we do NOT
+                # allocate a fresh Qwen2ForCausalLM (~3 GB) every step — that was
+                # tripping vLLM v1's sleep_replicas memory assertion at step 2.
+                # The K-stale snapshot is loaded INTO the cached clone below.
+                cached_anchor = getattr(self, "_anchor_module_cache", None)
+                if cached_anchor is None:
+                    anchor_module = build_anchor_module(inner)
+                    # Cache it for subsequent refreshes.
+                    self._anchor_module_cache = anchor_module
+                else:
+                    anchor_module = cached_anchor
+
+            # Belt-and-braces: the clone's params share NO id() with either
+            # the live optimizer's param_groups OR the live FSDP module. Cheap
+            # runtime guard — protects criterion 7 + 13 against future drift.
+            assert_anchor_module_isolated(
+                anchor_module, optimizer=self.optimizer, fsdp_module=inner
+            )
+
+            # Move the clone to the live module's device + dtype so its
+            # forward/backward runs on the same accelerator.
+            try:
+                live_p = next(inner.parameters())
+                anchor_module.to(device=live_p.device, dtype=live_p.dtype)
+            except StopIteration:
+                pass
+
+            # Load the K-stale snapshot weights into the clone (NOT into the
+            # live module — the live optimizer's params remain untouched).
+            with torch.no_grad():
+                for n, p in anchor_module.named_parameters():
+                    if n in stale and stale[n].shape == p.shape:
+                        p.copy_(stale[n].to(p.device, p.dtype))
+
+            # Swap `self.module` to point at the clone for the duration of
+            # _forward_backward_batch_inner — that method calls self.module(...)
+            # inside forward_step. After the anchor backward, restore.
+            live_module_swap = self.module
+            self.module = anchor_module
+
+            # Zero any stray grads on the clone before backward (it just got
+            # built — there should be none, but be defensive).
+            for p in anchor_module.parameters():
+                if p.grad is not None:
+                    p.grad = None
+
+            # UNMASKED GRPO-actor-loss forward/backward on the CLONE. No FSDP
+            # hooks fire (the clone has none). mask_active=False ⇒ no mask
+            # hooks fire on the clone either (the masker is registered on
+            # self.module — now the clone — but mask_active gates the work).
+            # forward_only=False populates .grad on the clone's plain Parameters.
+            self._forward_backward_batch_inner(anchor_data, loss_function, forward_only=False)
+
+            # GUARD 6: read G_anchor RAW per target (NO correct_matrix) off
+            # the clone. full_grad_of is the identity — the clone is a plain
+            # nn.Module so its p.grad is already a full 2D tensor.
+            def _full_grad_of(grad):
+                return grad, {"grad_container_type": type(grad).__name__, "is_dtensor": str(isinstance(grad, DTensor))}
+
+            anchor_grads = extract_target_grads(
+                anchor_module.named_parameters(),
+                target_substrs=target_substrs,
+                max_targets=max_targets,
+                full_grad_of=_full_grad_of,
+            )
+        finally:
+            # Restore self.module to the live FSDP-wrapped actor.
+            if live_module_swap is not None:
+                self.module = live_module_swap
+            # EXP-12 iter04: keep the cached clone alive (reused next refresh)
+            # but zero its grads + clear the reference held by the local name so
+            # the next refresh re-loads the K-stale snapshot into clean params.
+            # Empty PyTorch's CUDA cache so transient allocations from the
+            # per-param copy + fwd/bwd are released back to CUDA before vLLM's
+            # sleep_replicas runs (its freed_bytes>=0 assertion otherwise trips).
+            try:
+                for _p in anchor_module.parameters():
+                    if _p.grad is not None:
+                        _p.grad = None
+            except UnboundLocalError:
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            # Restore the prior mask/path state regardless of outcome.
+            state.mask_active = prev_mask_active
+            if hasattr(state, "set_path_tag"):
+                state.set_path_tag(prev_path_tag)
+            # The live optimizer's param.grads were NEVER touched by the
+            # anchor pass (we ran fwd/bwd on the clone), so the masked fast
+            # path that follows starts from whatever grads were there at
+            # entry — which is exactly the EXP-8 contract.
+
+        # GUARD 5 assertion: the anchor pass must have fired ZERO mask hooks.
+        mask_apps_after = int(getattr(state, "mask_applications", 0))
+        anchor_mask_delta = mask_apps_after - mask_apps_before
+        state.anchor_mask_applications += max(0, anchor_mask_delta)
+        assert anchor_mask_delta == 0, (
+            f"comm_eff anchor pass fired {anchor_mask_delta} mask hooks "
+            "(anchor_mask_applications must be 0 — the anchor runs UNMASKED on "
+            "the actor-train path; GUARD 5 violated)."
+        )
+        # GUARD 7 (criterion): the anchor took no optimizer step.
+        assert int(getattr(state, "anchor_optimizer_steps", 0)) == opt_steps_before, (
+            "comm_eff anchor pass took an optimizer step (anchor_optimizer_steps "
+            "must stay 0; snapshot is OFF the optimizer's param group)."
+        )
+
+        # GUARD 6: feed RAW grads into the EMA (update_anchor, NEVER correct_matrix).
+        deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
+        state.anchor_backwards += 1
+        # anchor_batch_fraction: this implementation consumes the WHOLE batch.
+        state.anchor_batch_fraction = 1.0
+
+        # EMA-evolution log line (numeric ||ΔM_anchor||; the analyst greps these
+        # across refreshes to confirm M_anchor evolves, criterion 3). String
+        # discovery (ema_device/svd_mode) is logged ONCE at build, never here.
+        if deltas:
+            mean_delta = sum(deltas.values()) / len(deltas)
+            max_delta = max(deltas.values())
+            print(
+                f"[comm_eff][EXP-12] anchor refresh step={step} fired backward "
+                f"(cadence={cadence} delay_K={delay_K}) targets={len(deltas)} "
+                f"||dM_anchor||_mean={mean_delta:.6e} ||dM_anchor||_max={max_delta:.6e} "
+                f"anchor_backwards={state.anchor_backwards} "
+                f"anchor_mask_applications={state.anchor_mask_applications} "
+                f"anchor_grad_corrected={state.anchor_grad_corrected} "
+                f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
+                f"anchor_batch_fraction={state.anchor_batch_fraction} "
+                f"anchor_backward_isolation_mode=clone",
+                flush=True,
+            )
+        else:
+            print(
+                f"[comm_eff][EXP-12] anchor refresh step={step} produced NO target grads "
+                f"(targets matched=0); check target_substr / use_orig_params",
+                flush=True,
+            )
+
     def _maybe_comm_eff_grad_correction(self) -> None:
         """FSDP spectral gradient-correction hook (EXP-7 discovery + correction).
 
