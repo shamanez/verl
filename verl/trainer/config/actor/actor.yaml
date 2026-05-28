@@ -322,7 +322,8 @@ comm_eff:
     # [1,3,5,7,9,11,13]. Logical knob, not a real pipeline split.
     pp_size: 8
 
-  # Asynchronous unmasked-anchor-circuit sub-config (inert while enabled=false)
+  # Asynchronous unmasked-anchor-circuit sub-config (inert while enabled=false).
+  # Field names match CommEffAnchorConfig (EXP-8 schema, picked up by EXP-12).
   anchor:
 
     # Target dataclass for this configuration
@@ -331,11 +332,13 @@ comm_eff:
     # Whether the anchor circuit runs (gated by the parent comm_eff.enabled)
     enabled: false
 
-    # Cadence of anchor backward passes
-    every_n_steps: 1
+    # Anchor-refresh cadence in trainer steps (paper "K"). The anchor fires
+    # when (step % cadence) == 0. Smoke=1 (fire every step); paper=20.
+    cadence: 1
 
-    # EMA decay for the anchor circuit's running state
-    ema_decay: 0.99
+    # Staleness of the weight snapshot the anchor forwards from, in trainer
+    # steps. 0 = current weights; 1 = the prior step's weights.
+    delay_K: 1
 
   # Spectral-correction sub-config (inert while enabled=false). EXP-7 M2 paper
   # formula: anchor-EMA -> full thin SVD -> Tikhonov weights -> two-sided
@@ -374,12 +377,24 @@ comm_eff:
     # cheap). -1 => no cap.
     max_targets: 4
 
-    # Retained for back-compat with the EXP-4 scaffold schema (full thin SVD is
-    # used; low-rank truncation is a later ablation).
+    # Retained for back-compat with the EXP-4 scaffold schema. Also used by
+    # svd_mode=lowrank as the retained rank for torch.svd_lowrank.
     rank: 8
 
     # Legacy alias kept for schema back-compat; the active damping knob is tau.
     damping: 1e-6
+
+    # EXP-8 storage layer (cherry-picked into EXP-12). Where the anchor EMA
+    # M_anchor lives: "gpu" (HBM, faithful) | "cpu" (offloaded, memory-lean).
+    ema_device: gpu
+
+    # How the SVD basis is computed: "full" (thin SVD, faithful) | "lowrank"
+    # (torch.svd_lowrank(q=rank), memory-lean).
+    svd_mode: full
+
+    # Whether the U/S/V basis is computed once per refresh and reused across
+    # fast PPO mini-batches: "cache" | "recompute".
+    basis_cache: cache
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

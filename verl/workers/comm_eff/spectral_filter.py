@@ -67,9 +67,51 @@ __all__ = [
     "tikhonov_weights",
     "two_sided_projection",
     "spectral_correct",
+    "compute_basis",
     "SpectralFilter",
     "apply_spectral_correction_to_params",
 ]
+
+
+def compute_basis(m_anchor: torch.Tensor, *, svd_mode: str = "full", rank: int = 8) -> tuple:
+    """Compute the (U, S, V) basis of the anchor used by the two-sided projection.
+
+    ``svd_mode="full"`` uses ``torch.linalg.svd(full_matrices=False)`` — the
+    exact thin SVD the EXP-7 filter used; ``U`` is ``(m, k)``, ``S`` is ``(k,)``,
+    ``V`` is ``(n, k)`` with ``k = min(m, n)``.
+
+    ``svd_mode="lowrank"`` uses ``torch.svd_lowrank(m_anchor, q=rank)``, returning
+    a rank-``min(rank, k)`` basis: ``U (m, r)``, ``S (r,)``, ``V (n, r)``. The
+    two-sided projection contracts ``U^T G V`` so any ``r <= k`` is shape-valid
+    and yields a rank-``r`` reconstruction whose error is non-increasing in
+    ``rank`` (covered by ``test_spectral_filter.py``).
+
+    The SVD is computed at the anchor's dtype (the caller upcasts to >= float32).
+    Returns ``(u, s, v)`` all on ``m_anchor.device``.
+    """
+    assert m_anchor.dim() == 2, f"compute_basis expects a 2D matrix, got {tuple(m_anchor.shape)}"
+    if svd_mode == "lowrank":
+        m, n = m_anchor.shape
+        k = min(m, n)
+        q = max(1, min(int(rank), k))
+        # torch.svd_lowrank returns U (m,q), S (q,), V (n,q) already in the
+        # V (not V^T) convention the two-sided projection expects. It is a
+        # RANDOMIZED algorithm; niter power-iterations sharpen the approximation
+        # of the top-q subspace (default niter=2 can be noisy for ill-separated
+        # spectra). When q == k we are asking for the full rank, where the random
+        # projection adds nothing useful and can perturb tiny singular
+        # directions — fall back to the exact thin SVD for the q==k case so the
+        # full-rank reconstruction is exact (and reconstruction error is
+        # monotone in rank in the limit).
+        if q >= k:
+            u, s, vh = torch.linalg.svd(m_anchor, full_matrices=False)
+            return u, s, vh.transpose(-1, -2)
+        u, s, v = torch.svd_lowrank(m_anchor, q=q, niter=4)
+        return u, s, v
+    # full thin SVD
+    u, s, vh = torch.linalg.svd(m_anchor, full_matrices=False)
+    v = vh.transpose(-1, -2)
+    return u, s, v
 
 
 def tikhonov_weights(singular_values: torch.Tensor, tau: float) -> torch.Tensor:
@@ -115,13 +157,23 @@ def spectral_correct(
     *,
     alpha: float,
     tau: float,
+    svd_mode: str = "full",
+    rank: int = 8,
+    basis: Optional[tuple] = None,
 ) -> torch.Tensor:
     """Apply the full spectral filter to one 2D masked-gradient matrix.
 
-    Computes the thin SVD of the (already EMA-updated) anchor ``m_anchor``,
-    forms the Tikhonov weights, the two-sided projection of ``g_mask``, and the
-    alpha blend. Returns ``G_proj`` with the SAME shape/dtype/device as
-    ``g_mask``.
+    Computes (or reuses) the SVD basis of the (already EMA-updated) anchor
+    ``m_anchor``, forms the Tikhonov weights, the two-sided projection of
+    ``g_mask``, and the alpha blend. Returns ``G_proj`` with the SAME
+    shape/dtype/device as ``g_mask``.
+
+    ``svd_mode`` selects ``full`` thin SVD (EXP-7 behaviour) vs ``lowrank``
+    (``torch.svd_lowrank(q=rank)``). When ``basis`` (a precomputed ``(u, s, v)``)
+    is supplied it is reused verbatim and ``m_anchor`` is consulted only for its
+    shape/dtype — this is the ``basis_cache=cache`` path (compute U/S/V once at
+    refresh, reuse across fast mini-batches). When ``basis is None`` the SVD is
+    computed here (``basis_cache=recompute``).
 
     Numerics: SVD is computed in float32 for stability (the gradients may be
     bf16); the result is cast back to ``g_mask``'s dtype. At ``alpha == 1.0``
@@ -145,11 +197,15 @@ def spectral_correct(
     # accuracy rather than being silently truncated to float32.
     compute_dtype = orig_dtype if orig_dtype in (torch.float32, torch.float64) else torch.float32
     gm = g_mask.to(compute_dtype)
-    anc = m_anchor.to(compute_dtype)
 
-    # Full thin SVD of the anchor: U (m,k), S (k,), V (n,k) with k=min(m,n).
-    u, s, vh = torch.linalg.svd(anc, full_matrices=False)
-    v = vh.transpose(-1, -2)
+    if basis is None:
+        anc = m_anchor.to(compute_dtype)
+        u, s, v = compute_basis(anc, svd_mode=svd_mode, rank=rank)
+    else:
+        u, s, v = basis
+        u = u.to(compute_dtype)
+        s = s.to(compute_dtype)
+        v = v.to(compute_dtype)
     d = tikhonov_weights(s, tau)
 
     g_filt = two_sided_projection(gm, u, d, v)
@@ -181,14 +237,35 @@ class SpectralFilter:
         beta_anc: float = 0.95,
         seed_anchor_cache: bool = True,
         anchor_seed: int = 0,
+        ema_device: str = "gpu",
+        svd_mode: str = "full",
+        basis_cache: str = "cache",
+        rank: int = 8,
     ):
         self.alpha = float(alpha)
         self.tau = float(tau)
         self.beta_anc = float(beta_anc)
         self.seed_anchor_cache = bool(seed_anchor_cache)
         self.anchor_seed = int(anchor_seed)
-        # name -> M_anchor (float32, on the gradient's device)
+        # EXP-8 config-driven storage layer. Defaults faithful (gpu/full/cache);
+        # validation happens in CommEffConfig.__post_init__ so by the time the
+        # filter is built the values are known-good — assert defensively anyway.
+        assert ema_device in ("gpu", "cpu"), ema_device
+        assert svd_mode in ("full", "lowrank"), svd_mode
+        assert basis_cache in ("cache", "recompute"), basis_cache
+        self.ema_device = str(ema_device)
+        self.svd_mode = str(svd_mode)
+        self.basis_cache = str(basis_cache)
+        self.rank = int(rank)
+        # name -> M_anchor (float32). Lives on the gradient's device when
+        # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
+        # gradient's device only inside update_anchor / correct_matrix).
         self._anchor: dict[str, torch.Tensor] = {}
+        # name -> cached SVD basis (u, s, v) on the gradient's device, computed
+        # once per refresh under basis_cache=cache and reused by every fast
+        # mini-batch's correct_matrix until the next refresh. Empty under
+        # basis_cache=recompute (the SVD is recomputed per correct_matrix).
+        self._basis: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------ #
     # anchor cache
@@ -226,29 +303,84 @@ class SpectralFilter:
         anchor = (qa * spectrum.unsqueeze(0)) @ qb.transpose(0, 1)
         return anchor.to(device=device)
 
+    def _ema_storage_device(self, grad_device):
+        """Device the EMA tensor is STORED on between refreshes.
+
+        ``ema_device=cpu`` keeps ``M_anchor`` on CPU (pinned when the grad lives
+        on CUDA so the per-refresh H2D/D2H is fast); ``ema_device=gpu`` keeps it
+        on the gradient's device (HBM, faithful).
+        """
+        return torch.device("cpu") if self.ema_device == "cpu" else grad_device
+
     def ensure_anchor(self, name: str, grad: torch.Tensor) -> torch.Tensor:
-        """Return ``M_anchor`` for ``name``, seeding it on first sight if configured."""
+        """Return ``M_anchor`` for ``name``, seeding it on first sight if configured.
+
+        The returned tensor lives on the EMA storage device (CPU when
+        ``ema_device=cpu``, else the gradient's device). Seeding builds the
+        deterministic basis on the grad's device, then moves it to storage.
+        """
         anc = self._anchor.get(name)
         if anc is None:
+            store_dev = self._ema_storage_device(grad.device)
             if self.seed_anchor_cache:
-                anc = self._seeded_anchor(name, grad.shape, grad.device)
+                anc = self._seeded_anchor(name, grad.shape, grad.device).to(store_dev)
             else:
-                anc = torch.zeros(grad.shape, dtype=torch.float32, device=grad.device)
+                anc = torch.zeros(grad.shape, dtype=torch.float32, device=store_dev)
+            if store_dev.type == "cpu" and grad.device.type == "cuda":
+                anc = anc.pin_memory()
             self._anchor[name] = anc
         return anc
 
-    def update_anchor(self, name: str, g_anchor: torch.Tensor) -> torch.Tensor:
-        """EMA-update ``M_anchor <- beta * M_anchor + (1 - beta) * G_anchor``.
+    def anchor_on(self, name: str, device) -> torch.Tensor:
+        """Return ``M_anchor`` for ``name`` moved to ``device`` (no-op if already there).
 
-        Used by the live anchor circuit (EXP-8). For the EXP-7 seeded smoke the
-        cache is the fixed seeded basis and this is not called; it exists so the
-        EMA path is in place and unit-testable.
+        Used at refresh/correction time to bring a CPU-offloaded EMA onto the
+        compute device. The stored copy is left on its storage device.
         """
-        anc = self.ensure_anchor(name, g_anchor)
+        anc = self._anchor[name]
+        return anc.to(device) if anc.device != torch.device(device) else anc
+
+    def update_anchor(self, name: str, g_anchor: torch.Tensor) -> torch.Tensor:
+        """EMA-update ``M_anchor <- beta * M_anchor + (1 - beta) * G_anchor`` (RAW).
+
+        This is the live-anchor entry point (EXP-8 GUARD 6): ``g_anchor`` is the
+        RAW per-target gradient read BEFORE any ``correct_matrix`` call, so the
+        anchor gradient never passes through the spectral projection. The EMA is
+        computed on the gradient's device (bringing a CPU-offloaded ``M_anchor``
+        up first), then the result is stored back on the EMA storage device.
+
+        Under ``basis_cache=cache`` the cached ``(u, s, v)`` basis for ``name``
+        is refreshed here (once per anchor refresh) so every subsequent fast
+        mini-batch reuses it; under ``recompute`` no basis is cached.
+        """
+        self.ensure_anchor(name, g_anchor)
+        compute_dev = g_anchor.device
+        anc = self.anchor_on(name, compute_dev).to(torch.float32)
         ga = g_anchor.to(torch.float32)
         new = self.beta_anc * anc + (1.0 - self.beta_anc) * ga
-        self._anchor[name] = new
+        # Store back on the EMA storage device (CPU offload re-pins).
+        store_dev = self._ema_storage_device(compute_dev)
+        stored = new.to(store_dev)
+        if store_dev.type == "cpu" and compute_dev.type == "cuda":
+            stored = stored.pin_memory()
+        self._anchor[name] = stored
+        # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
+        if self.basis_cache == "cache":
+            self._basis[name] = compute_basis(new, svd_mode=self.svd_mode, rank=self.rank)
         return new
+
+    def refresh_basis(self, name: str, device=None) -> tuple:
+        """Force-(re)compute and cache the ``(u, s, v)`` basis for ``name``.
+
+        Used when the cache must be primed without an EMA update (e.g. the
+        seeded-cache path the EXP-7 reproduction cell relies on). The basis is
+        cached on ``device`` (defaults to the EMA's current device).
+        """
+        anc = self._anchor[name]
+        dev = device if device is not None else anc.device
+        basis = compute_basis(anc.to(dev).to(torch.float32), svd_mode=self.svd_mode, rank=self.rank)
+        self._basis[name] = basis
+        return basis
 
     # ------------------------------------------------------------------ #
     # correction
@@ -258,9 +390,35 @@ class SpectralFilter:
 
         Returns ``G_proj`` with the same shape/dtype/device as ``g_mask``. The
         anchor for ``name`` is seeded on first sight when configured.
+
+        ``basis_cache=cache`` reuses the cached ``(u, s, v)`` from the most
+        recent refresh (computing it once on first sight if absent — e.g. the
+        seeded-cache reproduction cell); ``basis_cache=recompute`` recomputes the
+        SVD here, exactly as the pre-EXP-8 code did. A CPU-offloaded EMA is
+        brought onto the gradient's device for the (recompute) SVD.
         """
-        anc = self.ensure_anchor(name, g_mask)
-        return spectral_correct(g_mask, anc, alpha=self.alpha, tau=self.tau)
+        self.ensure_anchor(name, g_mask)
+        basis = None
+        if self.basis_cache == "cache":
+            basis = self._basis.get(name)
+            if basis is None:
+                # Prime from the current EMA (seeded or freshly-zeroed) on the
+                # gradient's device so the cache exists for subsequent batches.
+                basis = self.refresh_basis(name, device=g_mask.device)
+            else:
+                # Cached basis may live on a different device after offload moves;
+                # spectral_correct re-casts/moves dtype, but ensure device match.
+                basis = tuple(t.to(g_mask.device) for t in basis)
+        anc = self.anchor_on(name, g_mask.device)
+        return spectral_correct(
+            g_mask,
+            anc,
+            alpha=self.alpha,
+            tau=self.tau,
+            svd_mode=self.svd_mode,
+            rank=self.rank,
+            basis=basis,
+        )
 
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).

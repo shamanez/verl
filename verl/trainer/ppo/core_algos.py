@@ -1291,6 +1291,12 @@ def compute_policy_loss_vanilla(
     Adapted from
     https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
+    EXP-8 anchor reuse (GUARD 1): this vanilla GRPO policy objective is the loss
+    the comm_eff anchor circuit reuses (via ``ppo_loss`` -> ``get_policy_loss_fn(
+    "vanilla")``) for its unmasked K-stale forward/backward over the
+    rollout-expanded batch — NOT a supervised next-token loss. The anchor differs
+    from the fast path only in that masking is disabled around its pass.
+
     Args:
         old_log_prob (torch.Tensor):
             Log-probabilities of actions under the old policy, shape (batch_size, response_length).
