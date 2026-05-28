@@ -135,3 +135,5 @@ outputs
 research/runs/**/*.bundle
 research/runs/**/*.log
 research/runs/**/exp.bundle
+# experiment-runner subagent worktrees (transient; auto-cleaned via `git worktree remove`)
+.claude/worktrees/
