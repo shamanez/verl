@@ -26,15 +26,36 @@ job, deliberately decoupled from this module):
 * rel_change is faithful: 0 at alpha=1, strictly >0 at alpha=0.3
 """
 
+import importlib.util
+import pathlib
+import sys
+import types
+
 import pytest
 import torch
 
-from verl.workers.comm_eff.spectral_filter import (
-    SpectralFilter,
-    spectral_correct,
-    tikhonov_weights,
-    two_sided_projection,
+# Load spectral_filter by FILE PATH so the heavy verl.__init__ chain (tensordict
+# / vllm / ray, absent on the CPU dev box) is not imported — same harness as
+# tests/workers/comm_eff/test_grad_correction_hook.py. The module under test is
+# pure-torch and FSDP-agnostic by design, so this is sufficient and runs on CPU.
+_REPO = pathlib.Path(__file__).resolve().parents[3]
+for _pkg in ("verl", "verl.workers", "verl.workers.comm_eff"):
+    if _pkg not in sys.modules:
+        _m = types.ModuleType(_pkg)
+        _m.__path__ = []
+        sys.modules[_pkg] = _m
+_spec = importlib.util.spec_from_file_location(
+    "verl.workers.comm_eff.spectral_filter", _REPO / "verl/workers/comm_eff/spectral_filter.py"
 )
+_sf = importlib.util.module_from_spec(_spec)
+sys.modules["verl.workers.comm_eff.spectral_filter"] = _sf
+_spec.loader.exec_module(_sf)
+
+SpectralFilter = _sf.SpectralFilter
+compute_basis = _sf.compute_basis
+spectral_correct = _sf.spectral_correct
+tikhonov_weights = _sf.tikhonov_weights
+two_sided_projection = _sf.two_sided_projection
 
 TOL = 1e-6
 
@@ -194,6 +215,131 @@ def test_ema_update_moves_anchor():
     # beta=0.5: M <- 0.5*0 + 0.5*1 = 0.5
     assert torch.allclose(a1, torch.full((4, 4), 0.5), atol=TOL)
     assert not torch.allclose(a0, a1)
+
+
+# =========================================================================== #
+# EXP-8: svd_mode=lowrank reconstruction error is bounded and decreasing in rank
+# =========================================================================== #
+def _recon_error_at_rank(m_anchor, rank):
+    """||M - U_r diag(S_r) V_r^T||_F for the rank-r lowrank basis of M."""
+    u, s, v = compute_basis(m_anchor, svd_mode="lowrank", rank=rank)
+    recon = u @ torch.diag(s) @ v.transpose(-1, -2)
+    return torch.linalg.norm(m_anchor - recon).item()
+
+
+@pytest.mark.parametrize("shape", [(16, 16), (24, 12), (12, 24)])
+def test_lowrank_recon_error_bounded_and_decreasing_in_rank(shape):
+    m, n = shape
+    k = min(m, n)
+    # A matrix with a genuine decaying spectrum so higher rank captures more.
+    g = torch.Generator().manual_seed(101)
+    a = torch.randn(m, k, generator=g, dtype=torch.float64)
+    b = torch.randn(n, k, generator=g, dtype=torch.float64)
+    spectrum = torch.logspace(0, -2, steps=k, dtype=torch.float64)  # 1 .. 0.01
+    qa, _ = torch.linalg.qr(a)
+    qb, _ = torch.linalg.qr(b)
+    M = (qa * spectrum.unsqueeze(0)) @ qb.transpose(0, 1)
+
+    errs = [_recon_error_at_rank(M, r) for r in range(1, k + 1)]
+    # torch.svd_lowrank is RANDOMIZED, so adjacent ranks are not strictly
+    # monotone; assert the trend over WELL-SEPARATED ranks (randomization noise
+    # is small relative to a halving of the truncation level). The exact-SVD
+    # fallback at q==k makes the full-rank point exact.
+    lo_rank_err = errs[0]
+    mid_rank_err = errs[(k // 2) - 1] if k >= 2 else errs[0]
+    full_rank_err = errs[-1]
+    # Bounded: every reconstruction error is finite and the ideal (Eckart-Young)
+    # rank-r error is the tail energy, which is <= ||M||; allow randomization
+    # slack but it must never exceed ||M|| by more than a small factor.
+    norm_M = torch.linalg.norm(M).item()
+    assert all(0.0 <= e <= norm_M + 1e-6 for e in errs), f"recon error unbounded: {errs} (||M||={norm_M})"
+    # Decreasing trend: mid rank beats low rank; full rank reconstructs ~exactly.
+    assert mid_rank_err < lo_rank_err, f"mid-rank not better than low-rank: {errs}"
+    assert full_rank_err <= 1e-6, f"full-rank reconstruction not exact: {full_rank_err}"
+    assert lo_rank_err > full_rank_err, f"low rank should leave residual: {errs}"
+
+
+def test_lowrank_correct_matrix_runs_and_preserves_shape():
+    f = SpectralFilter(alpha=0.3, tau=1e-3, seed_anchor_cache=True, anchor_seed=3, svd_mode="lowrank", rank=4)
+    for shape in [(16, 16), (32, 8), (8, 32)]:
+        g = torch.randn(*shape, dtype=torch.float32)
+        out = f.correct_matrix(f"w{shape}", g.clone())
+        assert out.shape == g.shape
+        assert torch.isfinite(out).all()
+
+
+# =========================================================================== #
+# EXP-8: ema_device=cpu round-trip yields the same M_anchor as on-device
+# =========================================================================== #
+def test_ema_device_cpu_roundtrip_equals_on_device():
+    # On CPU-only CI both "gpu" and "cpu" storage resolve to CPU tensors, so the
+    # EMA arithmetic must be identical; the test guards the offload-move logic
+    # (anchor_on / store-back) does not corrupt values. Same seeds, same grads.
+    g1 = torch.randn(8, 6, generator=torch.Generator().manual_seed(7), dtype=torch.float32)
+    g2 = torch.randn(8, 6, generator=torch.Generator().manual_seed(8), dtype=torch.float32)
+
+    f_gpu = SpectralFilter(beta_anc=0.9, seed_anchor_cache=False, ema_device="gpu")
+    f_cpu = SpectralFilter(beta_anc=0.9, seed_anchor_cache=False, ema_device="cpu")
+
+    for f in (f_gpu, f_cpu):
+        f.update_anchor("w", g1)
+        f.update_anchor("w", g2)
+
+    m_gpu = f_gpu.anchor_on("w", torch.device("cpu"))
+    m_cpu = f_cpu.anchor_on("w", torch.device("cpu"))
+    assert torch.allclose(m_gpu, m_cpu, atol=TOL), "cpu-offloaded EMA diverged from on-device EMA"
+    # The cpu-storage EMA tensor actually lives on CPU between refreshes.
+    assert f_cpu._anchor["w"].device.type == "cpu"
+
+
+def test_ema_device_cpu_correct_matrix_matches_gpu():
+    g_anchor = torch.randn(10, 10, generator=torch.Generator().manual_seed(11), dtype=torch.float32)
+    g_mask = torch.randn(10, 10, generator=torch.Generator().manual_seed(12), dtype=torch.float32)
+
+    f_gpu = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, ema_device="gpu")
+    f_cpu = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, ema_device="cpu")
+    for f in (f_gpu, f_cpu):
+        f.update_anchor("w", g_anchor)
+
+    out_gpu = f_gpu.correct_matrix("w", g_mask.clone())
+    out_cpu = f_cpu.correct_matrix("w", g_mask.clone())
+    assert torch.allclose(out_gpu, out_cpu, atol=1e-5)
+
+
+# =========================================================================== #
+# EXP-8: basis_cache=recompute is numerically equal to basis_cache=cache
+# =========================================================================== #
+def test_basis_cache_recompute_equals_cache():
+    g_anchor = torch.randn(12, 9, generator=torch.Generator().manual_seed(21), dtype=torch.float32)
+    g_mask = torch.randn(12, 9, generator=torch.Generator().manual_seed(22), dtype=torch.float32)
+
+    f_cache = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="cache")
+    f_recompute = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="recompute")
+    for f in (f_cache, f_recompute):
+        f.update_anchor("w", g_anchor)  # cache mode populates _basis here
+
+    # cache mode reuses the basis stored at the last update_anchor; recompute
+    # recomputes SVD inside correct_matrix. Both act on the SAME M_anchor.
+    out_cache = f_cache.correct_matrix("w", g_mask.clone())
+    out_recompute = f_recompute.correct_matrix("w", g_mask.clone())
+    assert torch.allclose(out_cache, out_recompute, atol=1e-5), "cache vs recompute diverged"
+    # cache mode actually stored a basis; recompute mode did not.
+    assert "w" in f_cache._basis
+    assert "w" not in f_recompute._basis
+
+
+def test_basis_cache_reused_across_correct_calls():
+    """Under basis_cache=cache the SAME cached basis serves repeated
+    correct_matrix calls between refreshes (the fast-mini-batch reuse path)."""
+    f = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="cache")
+    f.update_anchor("w", torch.randn(8, 8, generator=torch.Generator().manual_seed(31), dtype=torch.float32))
+    basis_id = id(f._basis["w"])
+    g = torch.randn(8, 8, generator=torch.Generator().manual_seed(32), dtype=torch.float32)
+    f.correct_matrix("w", g.clone())
+    f.correct_matrix("w", g.clone())
+    # No refresh happened between the two corrections => the cached basis object
+    # is unchanged (not recomputed per correction).
+    assert id(f._basis["w"]) == basis_id
 
 
 if __name__ == "__main__":

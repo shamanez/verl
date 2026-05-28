@@ -117,6 +117,35 @@ class CommEffState:
         self.anchor_backwards = 0
         self.spectral_corrections = 0
 
+        # EXP-8 anchor-circuit counters. These are the load-bearing falsifiers
+        # the analyst greps by NAME (see plan ## Success criteria):
+        #   anchor_mask_applications  — mask hooks fired DURING the anchor pass.
+        #                               MUST stay 0 (GUARD 5: the anchor runs
+        #                               unmasked even though it's on the train
+        #                               path). Captured as a delta around the
+        #                               anchor fwd/bwd, not the global counter.
+        #   anchor_grad_corrected     — anchor gradients fed THROUGH correct_matrix.
+        #                               MUST stay 0 (GUARD 6: G_anchor read raw
+        #                               into the EMA before any correction).
+        #   anchor_rollouts_generated — new rollouts the anchor produced. MUST 0.
+        #   anchor_rewards_recomputed — reward recomputations by the anchor. MUST 0.
+        #   anchor_optimizer_steps    — optimizer.step() calls on the anchor pass.
+        #                               MUST stay 0 (snapshot off the optimizer's
+        #                               param group; the anchor only reads grads).
+        #   anchor_batch_fraction     — fraction of the rollout-expanded batch the
+        #                               anchor backward consumed (1.0 = whole
+        #                               batch; <1.0 ⇒ an OOM-bounded subset, which
+        #                               the engine logs with a reason).
+        self.anchor_mask_applications = 0
+        self.anchor_grad_corrected = 0
+        self.anchor_rollouts_generated = 0
+        self.anchor_rewards_recomputed = 0
+        self.anchor_optimizer_steps = 0
+        self.anchor_batch_fraction = 1.0
+        # Monotonic trainer-step counter the anchor cadence is keyed on (advanced
+        # once per actor train_batch). Distinct from the mask substep counter.
+        self.anchor_step = 0
+
         # The activation masker (first circuit). Constructed in build(); None
         # when the mask sub-config is disabled.
         self.masker = None
@@ -205,13 +234,38 @@ class CommEffState:
                 beta_anc=float(getattr(spec_cfg, "beta_anc", 0.95)),
                 seed_anchor_cache=bool(getattr(spec_cfg, "seed_anchor_cache", True)),
                 anchor_seed=int(getattr(spec_cfg, "anchor_seed", 0)),
+                # EXP-8 storage layer (defaults faithful: gpu/full/cache).
+                ema_device=str(getattr(spec_cfg, "ema_device", "gpu")),
+                svd_mode=str(getattr(spec_cfg, "svd_mode", "full")),
+                basis_cache=str(getattr(spec_cfg, "basis_cache", "cache")),
+                rank=int(getattr(spec_cfg, "rank", 8)),
             )
             logger.info(
-                "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s)",
+                "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s "
+                "ema_device=%s svd_mode=%s basis_cache=%s rank=%s)",
                 self.spectral.alpha,
                 self.spectral.tau,
                 self.spectral.beta_anc,
                 self.spectral.seed_anchor_cache,
+                self.spectral.ema_device,
+                self.spectral.svd_mode,
+                self.spectral.basis_cache,
+                self.spectral.rank,
+            )
+            # EXP-12 discovery line (string-valued ⇒ stdout only, NEVER metrics:
+            # reduce_metrics does np.mean on every metric value and crashes on a
+            # string — the EXP-7 lesson). The analyst greps this for cell 3's
+            # "ema_device=cpu + svd_lowrank" confirmation, AND for the EXP-12
+            # anchor-backward isolation-mode confirmation (criterion 13).
+            anc_cfg = getattr(self.config, "anchor", None)
+            anchor_enabled = bool(getattr(anc_cfg, "enabled", False)) if anc_cfg is not None else False
+            isolation_mode = "clone" if anchor_enabled else "n/a (anchor.enabled=false)"
+            print(
+                f"[comm_eff][EXP-12] spectral storage: ema_device={self.spectral.ema_device} "
+                f"svd_mode={self.spectral.svd_mode} basis_cache={self.spectral.basis_cache} "
+                f"rank={self.spectral.rank} seed_anchor_cache={self.spectral.seed_anchor_cache} "
+                f"anchor_backward_isolation_mode={isolation_mode}",
+                flush=True,
             )
         self._built = True
 
@@ -303,11 +357,25 @@ class CommEffState:
         return out
 
     def metrics(self) -> dict:
-        """Return the comm_eff operation counters for logging."""
+        """Return the comm_eff operation counters for logging.
+
+        All values are NUMERIC (the EXP-7 reduce_metrics lesson: a string here
+        crashes np.mean). The anchor counters are emitted unconditionally so the
+        analyst can grep them by name even on a 0-fire step; the contamination /
+        guard counters (anchor_mask_applications, anchor_grad_corrected,
+        anchor_rollouts_generated, anchor_rewards_recomputed,
+        anchor_optimizer_steps) are the load-bearing falsifiers.
+        """
         return {
             "comm_eff/mask_applications": self.mask_applications,
             "comm_eff/anchor_backwards": self.anchor_backwards,
             "comm_eff/spectral_corrections": self.spectral_corrections,
+            "comm_eff/anchor_mask_applications": self.anchor_mask_applications,
+            "comm_eff/anchor_grad_corrected": self.anchor_grad_corrected,
+            "comm_eff/anchor_rollouts_generated": self.anchor_rollouts_generated,
+            "comm_eff/anchor_rewards_recomputed": self.anchor_rewards_recomputed,
+            "comm_eff/anchor_optimizer_steps": self.anchor_optimizer_steps,
+            "comm_eff/anchor_batch_fraction": self.anchor_batch_fraction,
         }
 
 

@@ -719,14 +719,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # comm_eff.enabled=true; the disabled path never touches the gradient, so
         # the no-op parity holds.
         #
-        # Optimizer-step ordering (EXP-7 spectral, M2 paper):
-        #   masked fwd/bwd -> FSDP grad reduction -> spectral correction -> AdamW.
-        # Building the state here attaches the (seeded) SpectralFilter to the
-        # actor train engine; the engine's _maybe_comm_eff_grad_correction hook
-        # then fires inside BaseEngine.train_batch AFTER backward (grads already
-        # FSDP-reduced) and BEFORE optimizer_step (where clip_grad_norm_ runs).
-        # commutativity with FSDP reduction is discovered empirically by that
-        # hook, not assumed here.
+        # Optimizer-step ordering (EXP-7 spectral + EXP-8 anchor, M2 paper). Per
+        # actor train_batch (reached via train_mini_batch -> engine.train_batch):
+        #   [EXP-8 anchor: UNMASKED K-stale fwd/bwd -> RAW G_anchor -> EMA, NO step]
+        #   -> masked fwd/bwd -> FSDP grad reduction -> spectral correction -> AdamW.
+        # Building the state here attaches the SpectralFilter (+ the anchor's
+        # staleness queue, lazily) to the actor train engine; the engine's
+        # _maybe_comm_eff_anchor_refresh hook fires at the TOP of
+        # BaseEngine.train_batch (before the masked path; GUARD 6 reads G_anchor
+        # raw before any correction) and the _maybe_comm_eff_grad_correction hook
+        # fires AFTER backward (grads FSDP-reduced) and BEFORE optimizer_step.
+        # The anchor cadence (comm_eff.anchor.cadence) gates per-step firing.
         comm_eff_state = self._maybe_comm_eff_state()
 
         # Mask-active flag scope: set ONLY around the actor-train forward/backward
@@ -757,6 +760,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/mask_applications": 0,
                     "comm_eff/anchor_backwards": 0,
                     "comm_eff/spectral_corrections": 0,
+                    # EXP-8 anchor counters: explicit zeros on the disabled path so
+                    # the no-op stays machine-checkable (analyst greps by name).
+                    "comm_eff/anchor_mask_applications": 0,
+                    "comm_eff/anchor_grad_corrected": 0,
+                    "comm_eff/anchor_rollouts_generated": 0,
+                    "comm_eff/anchor_rewards_recomputed": 0,
+                    "comm_eff/anchor_optimizer_steps": 0,
+                    "comm_eff/anchor_batch_fraction": 1.0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)
