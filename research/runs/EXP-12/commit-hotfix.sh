@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Capture any in-container edit under /workspace/verl as a git commit +
+# format-patch dropped under /workspace/runs/EXP-12/hotfix-patches/, which
+# sync-metrics rsyncs back to the laptop on its 5-min tick. If
+# GH_PUSH_TOKEN is set in the container env, ALSO push to origin/exp/12-anchor-detach
+# on shamanez/verl right away (best case — instance can die immediately after).
+#
+# Usage:  bash /workspace/runs/EXP-12/commit-hotfix.sh "<short message>"
+set -euo pipefail
+MSG="${1:?usage: commit-hotfix.sh <message>}"
+
+cd /workspace/verl
+if git diff --quiet && git diff --staged --quiet; then
+  echo "commit-hotfix: working tree clean — nothing to commit"
+  exit 0
+fi
+
+git add -A
+git commit -m "[EXP-12] in-container hotfix: $MSG"
+
+# Format-patch under the run dir so sync-metrics rsyncs it back.
+mkdir -p /workspace/runs/EXP-12/hotfix-patches
+N=$(ls /workspace/runs/EXP-12/hotfix-patches/*.patch 2>/dev/null | wc -l | tr -d ' ')
+NEXT=$(printf "%03d" $((N + 1)))
+git format-patch -1 --start-number "$NEXT" -o /workspace/runs/EXP-12/hotfix-patches/
+echo "commit-hotfix: patch dropped in /workspace/runs/EXP-12/hotfix-patches/${NEXT}-*.patch"
+echo "commit-hotfix: will rsync back to laptop within ~5 min (sync-metrics tick)."
+
+# Best-effort in-container push, if a fine-scoped PAT was passed to the container.
+if [[ -n "${GH_PUSH_TOKEN:-}" ]]; then
+  REPO_URL="https://x-access-token:${GH_PUSH_TOKEN}@github.com/shamanez/verl.git"
+  if git push "$REPO_URL" HEAD:"exp/12-anchor-detach"; then
+    echo "commit-hotfix: also pushed to origin/exp/12-anchor-detach on shamanez/verl"
+  else
+    echo "commit-hotfix: push failed (auth?) — relying on rsync round-trip" >&2
+  fi
+else
+  echo "commit-hotfix: no GH_PUSH_TOKEN in env — patch lives only in hotfix-patches/ until rsync"
+fi
