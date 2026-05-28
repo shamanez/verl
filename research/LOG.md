@@ -1,5 +1,12 @@
 # Research Log (newest first)
 
+## EXP-9 · 2026-05-28T17:15:00+10:00 · M2 · PASS
+M2 capstone — full M90+AP no-KL 20-step GRPO smoke (iter1 REVISE → iter2 PASS via knob relaxation)
+- hypothesis: mask_recompute extension on old-logprob recompute forward, combined with knob relaxation (α 0.3→0.5, τ 0.001→0.01, p 0.95→0.9), yields visible learning trend and sustained peak-reward sequences; criterion 13 passes via inverted reward curvature (second-half mean +82% above first-half); all 12 comm_eff guards held; iter2 reaches global_step=20
+- result: iter1 REVISE (one-step spike, declining second half); iter2 PASS (sustained rising trend, mean(11-20)=0.125 vs mean(1-10)=0.0688; three 0.25 peaks at steps 12/17/18 = 4× step 1; mask_applications=420 total, anchor_backwards=10, spectral_corrections=160, ||dM_anchor|| max=1.119); all infrastructure counters exact, GUARD 5/6 held, no KL/entropy, actor/grad_norm finite, 140 tests PASS / 10 skip / 2 pre-existing skip
+- run dir: runs/EXP-9/
+- verdict: runs/EXP-9/verdict-iter2.md (PASS) + runs/EXP-9/verdict.md (iter1 REVISE)
+
 ## EXP-12 · 2026-05-28T05:15:00+00:00 · M2 · PASS
 REVISE child of EXP-8 — anchor backward graph isolation (cloned-no-hook module / no_sync+summon_full_params)
 - hypothesis: same-process anchor refresh every cadence steps from delay_K-stale weight snapshot runs unmasked GRPO-actor-loss forward/backward on a cloned-no-hook module (detached from FSDP registration) to populate live anchor EMA/SVD and cache basis across fast mini-batches; all anchor-semantics guards upheld; cells reach global_step >= 5
