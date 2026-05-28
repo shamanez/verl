@@ -1,3 +1,0 @@
-# EXP-8 PROGRESS
-
-- 2026-05-28T02:19Z monitor EXIT=DONE_AGGREGATE (~6 min watched; all 3 cells + aggregate flag present, tmux DEAD). cell1 faithful + cell3 lean BOTH crashed identically: AttributeError 'NoneType.shape' at FSDP _saved_grad_shard via transformer_impl.py:869 _maybe_comm_eff_anchor_refresh -> loss.backward() colliding with FSDP _post_backward_hook (defect is independent of ema_device/svd_mode/seed_anchor_cache - same trace under both faithful and lean configs). cell2 off reached step 5/5 cleanly with anchor_*=0 (control reproduces EXP-7 mask+spectral baseline; grad_norm 50->125 across steps). artifacts rsynced.
