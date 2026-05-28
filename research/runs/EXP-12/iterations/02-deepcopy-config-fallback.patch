@@ -1,0 +1,36 @@
+diff --git a/verl/workers/comm_eff/anchor.py b/verl/workers/comm_eff/anchor.py
+index 93e1ca49..f551838f 100644
+--- a/verl/workers/comm_eff/anchor.py
++++ b/verl/workers/comm_eff/anchor.py
+@@ -284,7 +284,30 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
+         A plain ``nn.Module`` with the same architecture and a fresh copy of
+         the weights; NO FSDP wrapping, NO hook registrations.
+     """
+-    clone = copy.deepcopy(inner_module)
++    try:
++        clone = copy.deepcopy(inner_module)
++    except TypeError as exc:
++        # EXP-12 iter02: verl/HF monkey-patches install function attributes
++        # holding Python module references on the model class, which are not
++        # picklable. deepcopy uses pickle reductors, so it fails. Fall back
++        # to config-rebuild + state_dict load: structurally identical clone,
++        # no monkey-patched closures travel through the rebuild.
++        if "cannot pickle" not in str(exc):
++            raise
++        cfg = getattr(inner_module, "config", None)
++        if cfg is None:
++            raise RuntimeError(
++                "build_anchor_module: copy.deepcopy failed AND inner_module "
++                "has no .config attribute — cannot rebuild via the HuggingFace "
++                "config path. Original error: " + repr(exc)
++            ) from exc
++        ModelClass = type(inner_module)
++        clone = ModelClass(cfg)
++        # Caller is inside FSDP.summon_full_params, so inner_module is
++        # currently un-sharded; state_dict() returns full logical tensors.
++        # strict=False guards against monkey-patched buffers that may not
++        # be present on the freshly-instantiated clone.
++        clone.load_state_dict(inner_module.state_dict(), strict=False)
+     # Belt-and-braces: explicitly clear any post-accumulate-grad hooks the
+     # deepcopy might have transferred via a custom __deepcopy__ on a parent
+     # class (defensive — torch.nn.Parameter.__deepcopy__ does NOT transfer

@@ -1,5 +1,12 @@
 # Research Log (newest first)
 
+## EXP-12 · 2026-05-28T05:15:00+00:00 · M2 · PASS
+REVISE child of EXP-8 — anchor backward graph isolation (cloned-no-hook module / no_sync+summon_full_params)
+- hypothesis: same-process anchor refresh every cadence steps from delay_K-stale weight snapshot runs unmasked GRPO-actor-loss forward/backward on a cloned-no-hook module (detached from FSDP registration) to populate live anchor EMA/SVD and cache basis across fast mini-batches; all anchor-semantics guards upheld; cells reach global_step >= 5
+- result: four on-box hot-fix iterations closed FSDP autograd-hook collision (iter01 wired missing call site; iter02 config-rebuild fallback for HF monkey-patch unpicklability; iter03 DTensor materialization via .full_tensor(); iter04 cached anchor clone + empty_cache for vLLM sleep_replicas hygiene). Both anchor-enabled cells (faithful HBM EMA + full SVD / lean CPU EMA + low-rank SVD) reached global_step:10 with all 6 anchor-semantics guards held; anchor_backwards:20.0, anchor_mask_applications:0, anchor_grad_corrected:0, anchor_rollouts_generated:0, anchor_rewards_recomputed:0, anchor_optimizer_steps:0 on both cells; within-run anchor-off regression reproduced EXP-7 spectral path (cell 2 step:5 spectral_corrections:40, no anchor activity). Criterion-13 regression test test_fsdp_anchor_backward_no_collision added.
+- run dir: runs/EXP-12/
+- verdict: runs/EXP-12/verdict.md
+
 ## EXP-7 · 2026-05-28T06:01:00+10:00 · M2 · PASS
 M2 — spectral correction filter (paper formula) + FSDP gradient-application-point discovery
 - hypothesis: spectral filter (anchor-EMA → full thin SVD → Tikhonov spectral weights → two-sided projection → alpha blend) is a no-op when alpha=1.0, equals pure two-sided Tikhonov when alpha=0, preserves shape, and is deterministic; when wired into FSDP actor path after backward and before optimizer.step(), reaches global_step=2 with finite actor/grad_norm, logs gradient representation (full Tensor/DTensor/FlatParameter) and correction point relative to FSDP reduction and clipping, with per-target ||G_proj - G_mask||/||G_mask|| in (0, 1] for alpha=0.3, and enabled=false regression matches dense no-op

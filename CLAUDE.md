@@ -40,6 +40,7 @@ is human-only reference (the research-goal paper + `Prompt.md` / `implementation
 | If you need… | Read |
 |---|---|
 | **Single source of truth for all project-level config** | `research/.claude/project.yaml` |
+| **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list against `major-goal/implementation-logic.md` |
 | The autonomous research loop (human operator manual) | `research/researcher_steps.md` |
 | Top-level playbooks (triage, orchestrator) | `research/.claude/playbooks/*.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |

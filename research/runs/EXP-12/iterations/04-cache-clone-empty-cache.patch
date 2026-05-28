@@ -1,0 +1,54 @@
+diff --git a/verl/workers/engine/fsdp/transformer_impl.py b/verl/workers/engine/fsdp/transformer_impl.py
+index 39265486..c560ab90 100644
+--- a/verl/workers/engine/fsdp/transformer_impl.py
++++ b/verl/workers/engine/fsdp/transformer_impl.py
+@@ -868,11 +868,17 @@ class FSDPEngine(BaseEngine):
+         try:
+             with _summon_ctx():
+                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+-                # Build the no-hook clone INSIDE summon_full_params so the
+-                # deepcopy reads full (unsharded) FSDP1 weights, not sharded
+-                # local fragments. FSDP2 / non-FSDP modules: summon is a
+-                # nullcontext and the clone reads params directly.
+-                anchor_module = build_anchor_module(inner)
++                # EXP-12 iter04: cache anchor clone across refreshes so we do NOT
++                # allocate a fresh Qwen2ForCausalLM (~3 GB) every step — that was
++                # tripping vLLM v1's sleep_replicas memory assertion at step 2.
++                # The K-stale snapshot is loaded INTO the cached clone below.
++                cached_anchor = getattr(self, "_anchor_module_cache", None)
++                if cached_anchor is None:
++                    anchor_module = build_anchor_module(inner)
++                    # Cache it for subsequent refreshes.
++                    self._anchor_module_cache = anchor_module
++                else:
++                    anchor_module = cached_anchor
+ 
+             # Belt-and-braces: the clone's params share NO id() with either
+             # the live optimizer's param_groups OR the live FSDP module. Cheap
+@@ -931,12 +937,23 @@ class FSDPEngine(BaseEngine):
+             # Restore self.module to the live FSDP-wrapped actor.
+             if live_module_swap is not None:
+                 self.module = live_module_swap
+-            # Discard the anchor clone — fresh build every refresh by design.
+-            # Python GC reclaims it on exit; explicit del helps HBM pressure.
++            # EXP-12 iter04: keep the cached clone alive (reused next refresh)
++            # but zero its grads + clear the reference held by the local name so
++            # the next refresh re-loads the K-stale snapshot into clean params.
++            # Empty PyTorch's CUDA cache so transient allocations from the
++            # per-param copy + fwd/bwd are released back to CUDA before vLLM's
++            # sleep_replicas runs (its freed_bytes>=0 assertion otherwise trips).
+             try:
+-                del anchor_module
++                for _p in anchor_module.parameters():
++                    if _p.grad is not None:
++                        _p.grad = None
+             except UnboundLocalError:
+                 pass
++            try:
++                if torch.cuda.is_available():
++                    torch.cuda.empty_cache()
++            except Exception:
++                pass
+             # Restore the prior mask/path state regardless of outcome.
+             state.mask_active = prev_mask_active
+             if hasattr(state, "set_path_tag"):
