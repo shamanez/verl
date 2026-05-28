@@ -34,7 +34,8 @@ Determine state by combining the plan file's `kind:` field, `runs.jsonl`, verdic
 | `VERIFY_TIMEOUT` | latest `verify-*.md` starts with `TIMEOUT:` or `BROKER_DIED:`, OR PROGRESS.md contains `VERIFY_TIMEOUT:` / `BROKER_DIED:` for this EXP since last tick, OR plan has been at `NEEDS_VERIFY` for >2 ticks without a verify file appearing | demote label to `status:planned`, post `[codex-bridge timed out — manual review required]` + the partial output as issue comment, append `MANUAL_REVIEW_NEEDED: EXP-<N>` to PROGRESS.md, stop. Codex unavailability NEVER auto-approves a run. |
 | `READY_TO_RUN` | label `status:approved` · `code_change: false` · no runs.jsonl entry for `EXP-<ID>` (no row in any state — RUNNING, PROVISIONED, or TORN_DOWN) | `experiment-runner` |
 | `PROVISIONED` | runs.jsonl row has `status:"PROVISIONED"` (runner captured handles, has not yet promoted to RUNNING) | none — sync-metrics hook is a no-op until status flips; the Stop hook will tear down if the row stays PROVISIONED for >15 min |
-| `RUNNING` | runs.jsonl row has `status:"RUNNING"` · no `verdict.md` yet | none — sync-metrics hook does the work |
+| `RUNNING` (no monitor) | runs.jsonl row has `status:"RUNNING"` · no `runs/<ID>/monitor-detail.log` OR its last line is older than 5 min · no `verdict.md` | `training-log-monitor` (background; Opus) — codifies the 30 s-cadence log+nvidia-smi+WandB cross-check pattern; sync-metrics hook is still running but does NOT catch silent Ray errors / GPU stalls |
+| `RUNNING` (monitor active) | runs.jsonl row has `status:"RUNNING"` · `runs/<ID>/monitor-detail.log` has a poll line in the last 5 min · no `verdict.md` | none — monitor will re-invoke the orchestrator on terminal condition |
 | `RESULTS_READY` | runs.jsonl row exists · `runs/<ID>/done.flag` exists OR tmux session dead AND `metrics/*.jsonl` present · no `verdict.md` | `analyst` |
 | `VERDICT_PASS` | `verdict.md` says PASS · no `LOG.md` entry yet for this id | `log-writer` (idempotent on re-run) |
 | `VERDICT_REVISE` | `verdict.md` says REVISE with `next_actions:` · no child issue created yet | create child issue with `next_actions` body, label it `status:planned`, then dispatch `codex-bridge --mode=verify` on it (auto-promote to `status:approved` on PASS) |
@@ -84,6 +85,7 @@ Issue **all** dispatch `Agent` tool calls in a single turn so they run concurren
 
 - `codex-bridge` — for `NEEDS_VERIFY`, `NEEDS_VERIFY_REVISE`, `STUCK`, `RESCUE_REQUEST`, `MILESTONE_PASS`. Pass the mode via the prompt.
 - `experiment-runner` — for `VERIFIED` and `READY_TO_RUN`.
+- `training-log-monitor` — for `RUNNING (no monitor)`. **Dispatch in background** (`run_in_background: true`) so the orchestrator's tick doesn't block on its 30 s poll loop; the monitor re-invokes the orchestrator on terminal condition (done / dead / stall / env-failure). Runs on Opus (log-reading is reasoning-heavy on this project — Ray-dedup tracebacks, FSDP1 hook-chain frames, env-failure vs experiment-failure classification).
 - `analyst` — for `RESULTS_READY`.
 - `log-writer` — for `VERDICT_PASS` and `VERDICT_STOP`.
 
@@ -138,6 +140,18 @@ Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsyn
 ```
 
 Use `subagent_type=experiment-runner`.
+
+### training-log-monitor
+
+```
+You are training-log-monitor for EXP-<N>.
+Instance handle: runs/EXP-<N>/handles/<id>.json (read ssh_host, ssh_port, instance_id, gpu_name, num_gpus, gpu_ram from it; reconstruct tmux session as exp-<N>-<host-with-underscores>).
+Plan: .claude/plans/<N>.md (read cell names from §Smoke launch commands, expected total_training_steps from §Vast.ai training footprint, WandB project from the launcher env — default project verl_compression_research, entity shamanework-pl).
+Poll every 30 s for up to 40 min: SSH-probe per-cell logs (Traceback/Ray-unhandled/OOM/NaN), nvidia-smi per-GPU util, WandB scalars (every ~3rd poll). Rsync each cell's log + done flag + metrics to runs/EXP-<N>/ as the cell finishes. Append per-poll snapshots to runs/EXP-<N>/monitor-detail.log; do NOT spam PROGRESS.md during the loop.
+Exit on: aggregate done.flag, 3 per-cell done_*.flag + tmux DEAD, tmux DEAD premature, GPU stall (all 4 GPUs 0% for 4 polls AND tmux ALIVE), env-failure (validate_config crash / vLLM init OOM / NCCL init fail / SSH unreachable >2 min), or 40 min timeout. Return a structured report with per-cell state + WandB scalars + recommendation (dispatch_analyst | teardown_and_fallback | teardown_only | continue_in_place_iteration). Never call vast-teardown.
+```
+
+Use `subagent_type=training-log-monitor`. Always dispatch with `run_in_background: true`.
 
 ### analyst
 
