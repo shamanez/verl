@@ -466,3 +466,124 @@ def test_masker_is_hooks_only_no_params_or_buffers():
     keys_after = set(model.state_dict().keys())
     masker.unregister()
     assert keys_before == keys_after
+
+
+# =========================================================================== #
+# EXP-9: mask_recompute tag-eligibility regression
+#
+# These tests prove the activation mask's tag-eligibility set is exactly:
+#   * {train}                 when comm_eff.mask.mask_recompute = false (default)
+#   * {train, old_logprob}    when comm_eff.mask.mask_recompute = true
+# In BOTH regimes, every other path tag (rollout / ref_logprob / val / infer /
+# ckpt) and ``None`` (anchor pass) must remain a loud assert. No GPU, no
+# distributed — CPU-only, on the in-process hook.
+# =========================================================================== #
+from verl.workers.comm_eff.state import (  # noqa: E402
+    MASK_ELIGIBLE_TAGS,
+    OLD_LOGPROB_TAG,
+    mask_eligible_tags,
+)
+
+
+def _make_enabled_state_with_recompute(*, mask_recompute: bool, p=0.95, pp_size=8, seed=0):
+    """Build an enabled CommEffState carrying a ``mask.mask_recompute`` flag."""
+    cfg = SimpleNamespace(
+        enabled=True,
+        mask=SimpleNamespace(enabled=True, p=p, seed=seed, pp_size=pp_size, mask_recompute=mask_recompute),
+    )
+    state = maybe_build_comm_eff_state(cfg)
+    assert isinstance(state, CommEffState)
+    model = _ToyDecoder(num_layers=16, d=32)
+    state.build(model)
+    assert state.masker is not None
+    return state, model
+
+
+def test_mask_eligible_tags_default_is_singleton_train():
+    """The frozenset MASK_ELIGIBLE_TAGS exists as the module-level default, == {train}."""
+    assert MASK_ELIGIBLE_TAGS == frozenset({TRAIN_TAG})
+    assert OLD_LOGPROB_TAG == "old_logprob"
+
+
+def test_mask_eligible_tags_widens_only_when_recompute_true():
+    """mask_eligible_tags(state) extends to {train, old_logprob} iff mask_recompute=true."""
+    s_default, _ = _make_enabled_state_with_recompute(mask_recompute=False)
+    s_recomp, _ = _make_enabled_state_with_recompute(mask_recompute=True)
+    assert mask_eligible_tags(s_default) == frozenset({TRAIN_TAG})
+    assert mask_eligible_tags(s_recomp) == frozenset({TRAIN_TAG, OLD_LOGPROB_TAG})
+    # And a None state is the safe default (singleton train).
+    assert mask_eligible_tags(None) == frozenset({TRAIN_TAG})
+
+
+def test_mask_recompute_path_tag_eligibility():
+    """Headline EXP-9 regression. The hook fires on the eligible tags ONLY:
+
+    * mask_recompute=True  ⇒ hook accepts {train, old_logprob}; rejects every other tag.
+    * mask_recompute=False ⇒ hook accepts {train}; rejects every other tag including old_logprob.
+
+    Anchor pass (path_tag=None) is rejected in BOTH regimes.
+    """
+    # --- mask_recompute=True ---
+    state, _ = _make_enabled_state_with_recompute(mask_recompute=True)
+    state.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    hook = state.masker._make_hook(3)
+
+    # Eligible: train + old_logprob (must not raise).
+    state.set_path_tag(TRAIN_TAG)
+    out_train = hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    assert torch.is_tensor(out_train)
+
+    state.set_path_tag(OLD_LOGPROB_TAG)
+    out_oldlp = hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    assert torch.is_tensor(out_oldlp)
+
+    # Per-path counter records each fire under the right tag.
+    assert state.mask_applications_by_path[TRAIN_TAG] == 1
+    assert state.mask_applications_by_path[OLD_LOGPROB_TAG] == 1
+
+    # Every OTHER path tag in PATH_TAGS, AND None (anchor), must raise.
+    for tag in PATH_TAGS:
+        if tag in (TRAIN_TAG, OLD_LOGPROB_TAG):
+            continue
+        state.set_path_tag(tag)
+        with pytest.raises(AssertionError):
+            hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    state.set_path_tag(None)  # anchor pass
+    with pytest.raises(AssertionError):
+        hook(nn.Identity(), (), torch.randn(2, 4, 32))
+
+    # No new fires were recorded on the rejected tags.
+    assert state.mask_applications_by_path[TRAIN_TAG] == 1
+    assert state.mask_applications_by_path[OLD_LOGPROB_TAG] == 1
+    for tag in PATH_TAGS:
+        if tag in (TRAIN_TAG, OLD_LOGPROB_TAG):
+            continue
+        assert state.mask_applications_by_path[tag] == 0
+
+    # --- mask_recompute=False (regression: pre-EXP-9 behavior preserved) ---
+    state2, _ = _make_enabled_state_with_recompute(mask_recompute=False)
+    state2.masker.set_context(global_step=0, substep=0, seq_shard=0)
+    hook2 = state2.masker._make_hook(3)
+
+    # train still fires:
+    state2.set_path_tag(TRAIN_TAG)
+    _ = hook2(nn.Identity(), (), torch.randn(2, 4, 32))
+    assert state2.mask_applications_by_path[TRAIN_TAG] == 1
+
+    # old_logprob now MUST raise (the EXP-5 ⇒ EXP-12 contract is preserved
+    # exactly when mask_recompute is left at its default false).
+    state2.set_path_tag(OLD_LOGPROB_TAG)
+    with pytest.raises(AssertionError):
+        hook2(nn.Identity(), (), torch.randn(2, 4, 32))
+    assert state2.mask_applications_by_path[OLD_LOGPROB_TAG] == 0
+
+    # Every other tag and None also raise (regression against EXP-6).
+    for tag in PATH_TAGS:
+        if tag == TRAIN_TAG:
+            continue
+        state2.set_path_tag(tag)
+        with pytest.raises(AssertionError):
+            hook2(nn.Identity(), (), torch.randn(2, 4, 32))
+    state2.set_path_tag(None)
+    with pytest.raises(AssertionError):
+        hook2(nn.Identity(), (), torch.randn(2, 4, 32))

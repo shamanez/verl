@@ -69,12 +69,30 @@ class CommEffMaskConfig(BaseConfig):
             ``model.config`` (never hardcoded). For ``L=16, pp_size=8`` the
             boundaries are ``[1, 3, 5, 7, 9, 11, 13]``. This is a logical knob,
             not a real pipeline split.
+        mask_recompute (bool): When ``True`` (EXP-9), the activation mask is
+            ALSO permitted to fire on the ``old_logprob`` recompute path
+            (``compute_log_prob``), in addition to the actor-train forward.
+            This extends the *fast (masked) circuit* to BOTH gradient-feeding
+            forwards in pipeline-parallel RL: the train forward produces
+            ``log_prob_current`` and the old_logp recompute produces
+            ``old_log_prob`` that enters the PPO importance ratio
+            ``r = exp(log_prob_current - old_log_prob)``. Both consume
+            pipeline-boundary bandwidth on the FSDP train engine. ``False``
+            (default) keeps the EXP-5 / EXP-6 / EXP-7 / EXP-8 / EXP-12 behavior
+            where the mask fires ONLY on the train forward. The mask form
+            stays ``h_tilde = h * mask`` (no ``1/(1-p)`` rescale); the
+            substep counter naturally differs between ``compute_log_prob``
+            (one call per trainer step) and the PPO inner loop (N×E calls per
+            trainer step), so masks differ between the two paths by design.
+            Anchor pass (``path_tag=None``) is unaffected and stays unmasked
+            regardless of this flag (GUARD 5).
     """
 
     enabled: bool = True
     p: float = 0.95
     seed: int = 0
     pp_size: int = 8
+    mask_recompute: bool = False
 
 
 @dataclass
@@ -252,6 +270,14 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.p must be in [0, 1]; got {self.mask.p}")
         if self.mask.pp_size < 1:
             raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
+        # EXP-9: mask_recompute is a strict bool. Validation here turns a YAML
+        # typo ("False" string) or a numeric override into a loud error instead
+        # of a silent truthy/falsy surprise that would mis-route masking.
+        if not isinstance(self.mask.mask_recompute, bool):
+            raise ValueError(
+                f"comm_eff.mask.mask_recompute must be a bool; got {type(self.mask.mask_recompute).__name__} "
+                f"({self.mask.mask_recompute!r})"
+            )
         if self.spectral.rank < 1:
             raise ValueError(f"comm_eff.spectral.rank must be >= 1; got {self.spectral.rank}")
         if not 0.0 <= self.spectral.alpha <= 1.0:

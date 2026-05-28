@@ -643,11 +643,40 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         # EXP-6 path tag: old-policy log-prob recompute is an RL-measurement
-        # path; masking must NOT fire here. Stamp the tag "old_logprob" so the
-        # mask hook's assert would catch any leak. infer_batch runs forward_only
-        # (no hooks registered) so this is belt-and-braces atop mask_active.
+        # path. By default (EXP-6) the mask hook's assert catches any leak here
+        # — infer_batch runs forward_only so no hooks are registered, and
+        # mask_active is False. The "old_logprob" tag is belt-and-braces.
+        #
+        # EXP-9: when ``comm_eff.mask.mask_recompute=true`` the fast (masked)
+        # circuit ALSO covers this recompute. We stamp ``mask_active=True``
+        # inside the ``_comm_eff_path("old_logprob")`` context so the engine's
+        # ``_comm_eff_mask_active(forward_only=True)`` permits the masker to
+        # register for this forward (the engine checks the
+        # ``mask_eligible_tags(state)`` set and the pass-type/path consistency).
+        # The bwd-bearing actor train forward is unaffected — it stays the
+        # ``path_tag="train"`` ⇒ ``forward_only=False`` branch.
+        #
+        # The restore in ``finally`` matches the symmetry in ``update_actor``:
+        # the prior ``mask_active`` (always False outside the
+        # update_actor / compute_log_prob entrypoints) is restored on exit so
+        # nesting (a ckpt forward inside the recompute, etc.) does not leak.
         with self._comm_eff_path("old_logprob"):
-            output = self.actor.infer_batch(data)
+            comm_eff_state = self._maybe_comm_eff_state()
+            stamped_mask_active = False
+            prev_mask_active = False
+            if comm_eff_state is not None:
+                mask_cfg = getattr(comm_eff_state.config, "mask", None)
+                mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
+                mask_recompute = bool(getattr(mask_cfg, "mask_recompute", False)) if mask_cfg is not None else False
+                if mask_enabled and mask_recompute and getattr(comm_eff_state, "masker", None) is not None:
+                    prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
+                    comm_eff_state.mask_active = True
+                    stamped_mask_active = True
+            try:
+                output = self.actor.infer_batch(data)
+            finally:
+                if stamped_mask_active and comm_eff_state is not None:
+                    comm_eff_state.mask_active = prev_mask_active
 
         return output.cpu() if output is not None else None
 

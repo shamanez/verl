@@ -322,6 +322,14 @@ comm_eff:
     # [1,3,5,7,9,11,13]. Logical knob, not a real pipeline split.
     pp_size: 8
 
+    # EXP-9: extend the mask to the old-policy log-prob recompute (compute_log_prob)
+    # in addition to the actor-train forward. Off by default — flipping true
+    # widens the eligible-tag set from {train} to {train, old_logprob} so the
+    # fast (masked) circuit covers BOTH gradient-feeding forwards in
+    # pipeline-parallel RL. The anchor pass (path_tag=None) stays unmasked
+    # regardless of this flag (GUARD 5).
+    mask_recompute: false
+
   # Asynchronous unmasked-anchor-circuit sub-config (inert while enabled=false).
   # Field names match CommEffAnchorConfig (EXP-8 schema, picked up by EXP-12).
   anchor:
