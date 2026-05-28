@@ -611,32 +611,57 @@ class FSDPEngine(BaseEngine):
     def _comm_eff_mask_active(self, forward_only: bool) -> bool:
         """True iff the activation-mask hooks should be live for this forward.
 
-        Masking is confined to the actor-train forward/backward. This returns
-        False (strict no-op) unless ALL of:
-          * this is a train pass (``not forward_only`` — never on infer_batch /
-            log-prob / ref / validation),
+        Masking is confined to the actor-train forward/backward by default
+        (EXP-5 ⇒ EXP-12), and additionally to the old-policy log-prob recompute
+        when ``comm_eff.mask.mask_recompute=true`` (EXP-9). This returns False
+        (strict no-op) unless ALL of:
           * an enabled ``CommEffState`` is attached,
           * the worker has set ``state.mask_active`` (set only around
-            ``update_actor``; cleared everywhere else),
-          * the worker has stamped ``state.path_tag == "train"`` (EXP-6
-            contamination guard — a second, independent gate alongside
+            ``update_actor`` and, with mask_recompute, around
+            ``compute_log_prob``; cleared everywhere else),
+          * the path_tag is eligible per ``mask_eligible_tags(state)``
+            (EXP-6 contamination guard — a second, independent gate alongside
             ``mask_active`` so a leak requires BOTH to be wrong),
-          * a masker was constructed (mask sub-config enabled, ``p > 0``).
+          * a masker was constructed (mask sub-config enabled, ``p > 0``),
+          * the pass-type matches the path:
+              - ``train``        ⇒ requires ``forward_only=False`` (the
+                                     gradient-bearing actor train forward),
+              - ``old_logprob``  ⇒ requires ``forward_only=True`` AND
+                                     ``mask.mask_recompute=true`` (the
+                                     compute_log_prob infer pass; consumes
+                                     pipeline-boundary bandwidth, no backward
+                                     against this forward — but the recomputed
+                                     old_logp ENTERS the next train forward via
+                                     the PPO importance ratio).
+        Anchor pass (``path_tag=None``) never enters this method positively —
+        the anchor uses ``state.mask_active=False`` (GUARD 5).
         """
-        if forward_only:
-            return False
+        # Import locally to keep the engine's import surface unchanged.
+        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
+
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
             return False
         if not getattr(state, "mask_active", False):
             return False
-        # EXP-6: defence in depth. mask_active is the fast flag; the path tag is
-        # the explicit contract. Both must say "this is the train path" before a
-        # hook is installed. Back-compat: a state without path_tag (pre-EXP-6)
-        # falls through on the mask_active gate alone.
-        if hasattr(state, "path_tag") and getattr(state, "path_tag", None) != "train":
+        if getattr(state, "masker", None) is None:
             return False
-        return getattr(state, "masker", None) is not None
+        tag = getattr(state, "path_tag", None)
+        eligible = mask_eligible_tags(state)
+        if tag not in eligible:
+            return False
+        # Pass-type / path consistency:
+        if tag == TRAIN_TAG:
+            # Train forward MUST be the bwd-bearing pass.
+            return not forward_only
+        if tag == OLD_LOGPROB_TAG:
+            # old_logprob recompute is forward-only by construction
+            # (compute_log_prob → infer_batch → forward_only=True). Refuse a
+            # backward-bearing pass stamped old_logprob — that would be a
+            # mis-wired entrypoint.
+            return forward_only
+        # Any other eligible tag is unexpected here; bail safely (no mask).
+        return False
 
     def _comm_eff_register_mask_hooks(self) -> bool:
         """Register the activation-mask forward hooks for this train forward.

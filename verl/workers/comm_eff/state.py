@@ -54,6 +54,9 @@ __all__ = [
     "comm_eff_metrics",
     "PATH_TAGS",
     "TRAIN_TAG",
+    "OLD_LOGPROB_TAG",
+    "MASK_ELIGIBLE_TAGS",
+    "mask_eligible_tags",
 ]
 
 # The exhaustive set of execution-path tags a comm_eff state can carry. The
@@ -71,15 +74,53 @@ __all__ = [
 #   infer        -> generic infer_batch entrypoint (critic infer, etc.)
 #   ckpt         -> checkpoint save / load forward (none expected, tagged for safety)
 TRAIN_TAG = "train"
+# The old-policy log-prob recompute path. Always present in PATH_TAGS for
+# contamination accounting; EXP-9 makes it the ONLY other path the mask is
+# permitted to fire on (and only when comm_eff.mask.mask_recompute=true).
+OLD_LOGPROB_TAG = "old_logprob"
 PATH_TAGS = (
     TRAIN_TAG,
     "rollout",
-    "old_logprob",
+    OLD_LOGPROB_TAG,
     "ref_logprob",
     "val",
     "infer",
     "ckpt",
 )
+
+# The set of execution-path tags the activation mask is allowed to fire on by
+# default (EXP-5 → EXP-12 contract): only ``train``. EXP-9 widens this to
+# ``{train, old_logprob}`` *iff* ``state.mask.mask_recompute=True``; the widen
+# is computed at hook-fire time by ``mask_eligible_tags(state)`` so flipping
+# the YAML knob does not require restarting the worker. ``None`` (anchor pass,
+# GUARD 5) is never eligible — anchors stay unmasked unconditionally.
+MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
+
+
+def mask_eligible_tags(state: Any) -> frozenset:
+    """Return the set of path tags the activation mask is allowed to fire on
+    for the given ``state``. Pure read — no side effects, no allocation.
+
+    The default eligibility (``{TRAIN_TAG}``) is widened to
+    ``{TRAIN_TAG, OLD_LOGPROB_TAG}`` *only* when both
+    ``state.mask.enabled`` and ``state.mask.mask_recompute`` are truthy (EXP-9).
+    Anything else (disabled state, missing mask sub-config, ``mask_recompute``
+    unset / falsy) returns the singleton default, preserving the EXP-5 ⇒ EXP-12
+    behavior bit-for-bit.
+
+    ``None`` (anchor pass / GUARD 5) is intentionally NOT in either set: the
+    anchor circuit runs unmasked regardless of this flag.
+    """
+    if state is None:
+        return MASK_ELIGIBLE_TAGS
+    mask_cfg = getattr(getattr(state, "config", None), "mask", None)
+    if mask_cfg is None:
+        return MASK_ELIGIBLE_TAGS
+    if not bool(getattr(mask_cfg, "enabled", False)):
+        return MASK_ELIGIBLE_TAGS
+    if not bool(getattr(mask_cfg, "mask_recompute", False)):
+        return MASK_ELIGIBLE_TAGS
+    return frozenset({TRAIN_TAG, OLD_LOGPROB_TAG})
 
 
 def _is_enabled(config: Any) -> bool:

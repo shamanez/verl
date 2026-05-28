@@ -62,10 +62,19 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-# The single path tag on which masking is permitted to fire. Imported from the
-# state module (cheap, no torch import there) so the assert below and the state
-# stay in lockstep on the spelling of "train".
-from verl.workers.comm_eff.state import TRAIN_TAG
+# The set of execution-path tags on which masking is permitted to fire.
+# Imported from the state module (cheap, no torch import there) so the assert
+# below and the state stay in lockstep. EXP-5 → EXP-12 the only eligible tag is
+# ``train``; EXP-9 widens eligibility to ``{train, old_logprob}`` *iff*
+# ``comm_eff.mask.mask_recompute=true`` via ``mask_eligible_tags(state)``,
+# which is evaluated at hook-fire time (per call) so flipping the knob does
+# not require restarting the worker. ``None`` (the anchor pass / GUARD 5) is
+# never eligible — the anchor runs unmasked unconditionally.
+from verl.workers.comm_eff.state import (
+    MASK_ELIGIBLE_TAGS,
+    TRAIN_TAG,
+    mask_eligible_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -292,23 +301,33 @@ class ActivationMasker:
                 hidden_size,
                 masker.base_seed,
             )
-            # EXP-6 contamination guard: the mask must NEVER fire outside the
-            # actor-train path. The engine only registers these hooks when
-            # state.mask_active is set around update_actor, but a future caller
-            # that mis-sets the flag (or a path-tag mismatch) would silently
-            # corrupt log-prob / ref / rollout / val / checkpoint forwards. We
-            # turn that into a LOUD failure: assert the state's path tag is
-            # "train" before applying the mask. Disabled under `python -O`, but
-            # the per-path counter below still records any leak as a falsifier.
+            # EXP-6 contamination guard (EXP-9 extension). The mask must NEVER
+            # fire outside the set of eligible paths. The default eligibility is
+            # ``{train}`` (EXP-5 → EXP-12); EXP-9 widens it to
+            # ``{train, old_logprob}`` when ``state.mask.mask_recompute=true``
+            # so the fast (masked) circuit covers BOTH gradient-feeding forwards
+            # in pipeline-parallel RL. ``None`` (anchor pass) is NEVER eligible —
+            # the anchor stays unmasked (GUARD 5). The engine only registers
+            # these hooks when ``state.mask_active`` is set (around
+            # ``update_actor`` and, with mask_recompute, around
+            # ``compute_log_prob``), but a future caller that mis-sets the flag
+            # or a path-tag mismatch would silently corrupt
+            # rollout / ref / val / infer / checkpoint forwards. We turn that
+            # into a LOUD failure: assert the tag is in the eligible set.
+            # Disabled under ``python -O``, but the per-path counter below
+            # still records any leak as a falsifier.
             state = masker._state
             if state is not None and hasattr(state, "path_tag"):
                 tag = state.path_tag
-                assert tag == TRAIN_TAG, (
-                    "comm_eff activation mask fired on a non-train path "
-                    f"(path_tag={tag!r}); masking is confined to the actor-train "
-                    "forward/backward. This is contamination of the RL "
-                    "measurement machinery (rollout / log-prob / ref / val / "
-                    "infer / checkpoint) and is a hard falsifier."
+                eligible = mask_eligible_tags(state)
+                assert tag in eligible, (
+                    "comm_eff activation mask fired on an ineligible path "
+                    f"(path_tag={tag!r}, eligible={sorted(eligible)}); masking "
+                    "is confined to the actor-train forward/backward (and, with "
+                    "comm_eff.mask.mask_recompute=true, the old-logprob recompute). "
+                    "Any other path (rollout / ref_logprob / val / infer / ckpt) "
+                    "or the anchor pass (path_tag=None) is contamination of the "
+                    "RL measurement machinery and is a hard falsifier."
                 )
             mask = prf_mask(tuple(h.shape), key, masker.p, device=h.device, dtype=h.dtype)
             # h_tilde = h * mask, in-graph (no 1/(1-p) rescale). The multiply is
