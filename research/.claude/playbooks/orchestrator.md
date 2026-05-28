@@ -1,6 +1,40 @@
 # Playbook: orchestrator
 
-Coordinator for the implementation phase. You are executing in the top-level `/loop` session — dispatch `codex-bridge`, `experiment-runner`, `analyst`, and `log-writer` subagents in parallel via the `Agent` tool. Read state from plan files, `gh`, `runs.jsonl`, verdict files, and PROGRESS.md; advance every eligible issue toward a finding in one turn. Only act on plans labelled `status:approved` (or REVISE children that have passed codex-verify); never spawn a runner against an unapproved plan.
+Coordinator for the implementation phase. You are executing in the top-level Claude Code session — either as `/loop` (autonomous, fires every 30 min) or as `/goal` (one-shot, Stop-hook-gated; this is the user's canonical manual entry). Dispatch `codex-bridge`, `experiment-runner`, `training-log-monitor`, `analyst`, and `log-writer` subagents via the `Agent` tool — parallel where dependencies allow, background where polling-shaped (the monitor). Read state from plan files, `gh`, `runs.jsonl`, verdict files, and PROGRESS.md; advance every eligible issue toward a finding in one turn. Only act on plans labelled `status:approved` (or REVISE children that have passed codex-verify, OR children whose plan declares codex-verify intentionally skipped with a pre-written `runs/EXP-<N>/verify/*.md` containing `VERIFY: PASS` + operator-override note); never spawn a runner against an unapproved plan.
+
+## Entry pattern (`/goal` — the user's canonical invocation)
+
+The user invokes this playbook from a fresh Claude Code session via the `/goal` slash command. That installs a session-scoped Stop hook with the goal string as its condition; the harness blocks session-end until the condition holds. Use this template (copy-paste verbatim, then edit the `<…>` placeholders inline):
+
+```
+/goal Read /Users/shamane/Documents/verl/research/.claude/playbooks/orchestrator.md and execute it for issue #<N> (or the highest-priority eligible issue if not specified).
+
+NON-NEGOTIABLES for this session:
+1. Dispatch `training-log-monitor` (research/.claude/agents/training-log-monitor.md, Opus, run_in_background=true) IMMEDIATELY after experiment-runner returns RUNNING. Never trust done_<cell>.flag alone — cross-check WandB historyLineCount + per-cell Traceback/Ray-unhandled grep + nvidia-smi per-GPU util at 30 s cadence. Look at the Vast.ai training log directly via SSH, not just local artifacts.
+2. Honor every NON-NEGOTIABLE section in the issue's plan file (.claude/plans/<N>.md). If the plan declares "codex-verify intentionally skipped" with a pre-written runs/EXP-<N>/verify/*.md VERIFY:PASS file, treat state as VERIFIED and do not dispatch codex-bridge.
+3. Tear down the Vast.ai instance via the vast-teardown skill BEFORE this session stops. The Stop hook will block stopping until the runs.jsonl ledger row reads TORN_DOWN. (Overrides the playbook's "never call vast-teardown" hard rule for this session only — established override precedent across EXP-5/6/7/8.)
+4. Budget cap: if box lifetime spend exceeds $<MAX_DPH × wall_clock_hr from the plan, default $25>, tear down + write verdict=STOP regardless of cell completion state.
+5. Consumer-card fallback: if a consumer tier (RTX_5090/RTX_4090) returns an env-failure (docker fail / cuda mismatch / vLLM init OOM / NCCL init / SSH unreachable), tear down immediately and re-provision skipping consumer tiers (start at 4×H100). Do NOT retry a second consumer host.
+6. If experiment fails at runtime (FSDP collision, NaN, OOM mid-training, wrong counter values), KEEP the box running through the remaining cells (this is the data we paid for), then dispatch analyst — do not pre-empt. The plan's analyst predicate decides PASS/REVISE/STOP.
+
+Stop only after: (a) analyst has written runs/EXP-<N>/verdict.md, (b) log-writer has updated LOG.md + findings/ (PASS/STOP only — REVISE goes to child-issue path), (c) Vast instance is destroyed and runs.jsonl ledger row reads TORN_DOWN.
+```
+
+**Goal-string design rules (so future you can revise this template safely):**
+
+- The goal string OVERRIDES playbook hard rules for that session only. The teardown override (rule 3) is the canonical example — playbook says "Stop hook owns teardown", but every recent session's operator pattern is "tear down before stop, Stop hook is a safety net". Goal-string overrides take priority; document them inline.
+- Be specific about monitoring intensity. "Watch the training log" is too vague; "Dispatch training-log-monitor at 30 s cadence, cross-check WandB" is what we want. EXP-8 confirmed that vague monitoring missed a silent Ray-FSDP crash.
+- Name the budget cap explicitly. Without it, a hung training loop with healthy-looking GPU util can burn all night.
+- Name the env-failure fallback rule for consumer-card lineages. This is plan-12-specific but the pattern generalises.
+- Distinguish env-failures (tear down + fall back) from experiment-failures (keep running, that's the data). Without this distinction, a single Traceback can trigger a premature teardown and waste the run.
+
+**One-line minimum** (if you don't need to override defaults — e.g. running an already-VERIFIED plan with default monitoring):
+
+```
+/goal Read /Users/shamane/Documents/verl/research/.claude/playbooks/orchestrator.md and execute it for issue #<N>. Dispatch training-log-monitor in background. Tear down before stop.
+```
+
+Anything shorter risks ambiguity around teardown / monitoring intensity. Don't omit those.
 
 ## Operating context
 
