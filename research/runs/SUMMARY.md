@@ -5,6 +5,7 @@ pruned to keep the repo lean; the durable record is here + git history + the mer
 
 | id | milestone | what | result | merged |
 |---|---|---|---|---|
+| EXP-8 | M2 | M2 — anchor circuit: same-process K-stale unmasked GRPO-actor-loss refresh + two-step smoke | REVISE | — |
 | EXP-7 | M2 | Spectral correction filter (anchor-EMA → thin SVD → Tikhonov → two-sided projection → α-blend) + FSDP gradient-application-point discovery | PASS: FSDP1 full 2D `Tensor` via `use_orig_params`, correction AFTER FSDP reduction / BEFORE grad clipping; `spectral_corrections` fired (8→16 mask-off / 8→80 combined 10-step), per-target rel_change in (0,1], grad_norm finite, disabled cell dense no-op | PR #4 → `vast-ai-workload` |
 | **baseline** | M1 | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the control) | `val/test_score` 0.0872 → 0.7892 over 100 steps, 4×H200 | — (no code change) |
 | EXP-4 | M2 | `comm_eff` no-op scaffolding: config group + disabled-by-default integration hooks | Run A no-op parity validated (disabled == dense) | PR #1 → `vast-ai-workload` |
