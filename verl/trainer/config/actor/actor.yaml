@@ -372,6 +372,10 @@ comm_eff:
 
     # Whether spectral correction runs (gated by the parent comm_eff.enabled)
     enabled: false
+    # EXP-16 spectral-correction cadence in optimizer steps. 1 = fire every
+    # step (pre-EXP-16 behavior; strict no-op default). Validated >= 1.
+    # Mirrors anchor.cadence; set == anchor.cadence so corrections use a fresh basis.
+    cadence: 1
 
     # Blend coefficient in [0,1]: G_proj = alpha*G_mask + (1-alpha)*G_filt.
     # 1.0 => exact no-op; 0.0 => pure two-sided Tikhonov projection.
