@@ -15,6 +15,12 @@ CELL="${1:?usage: launch.sh <cell_index 1..6>}"
 RUN_ROOT=/workspace/runs/EXP-16
 LAUNCHER=examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
+# Operator directive (EXP-16 on the manual box): skip the pre-training validation
+# pass for ALL cells (the launcher defaults VAL_BEFORE_TRAIN=True). Per-cell
+# final-step validation still runs via each cell's TEST_FREQ. Exported here so it
+# is inherited by `env "${ENV[@]}" bash "$LAUNCHER"` for every cell.
+export VAL_BEFORE_TRAIN=False
+
 # Git identity for any in-container commits (commit-hotfix.sh uses these).
 git config --global user.email "harness@verl-research.local"
 git config --global user.name  "verl-research-harness"
