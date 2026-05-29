@@ -481,6 +481,21 @@ dense entirely**. Spectral/anchor correction does not.
 - 23:35 clean@5 launched → **23:50 COMPLETE (50/50, score 0.778, done.flag).**
   Box idle again (GPUs 0%), instance UP. Monitor `bna8oj0by` still armed (will catch
   a new run or the box going down). Observation continues until teardown.
+- ~23:53 monitor SSH died (exit 255). Verified: **23:54–23:56 SSH connection-refused
+  5/5 over ~2 min ⇒ INSTANCE TORN DOWN.** (Distinct from the 23:33 false-positive,
+  which was auth flakiness that recovered; this was hard connection-refused,
+  confirmed by spaced retries.) **Observation ENDS — directive satisfied.**
+
+## SESSION CLOSE
+Instance `3.144.230.17:33732` (4×B200) torn down by operator ~23:54 UTC after all
+runs completed. Both directives fully discharged:
+1. **Mask identical per step/prompt across all forward passes — VERIFIED** (source
+   PRF + live per-path counters + behavioural ratio≡1; held in every masked cell
+   incl. the 50-step clean@5; disabled cell a verified no-op). No desync.
+2. **Divergence/convergence — tracked across all runs; no divergence anywhere.**
+   Convergence requires the true dense gradient: clean@5 (0.78) ≈ dense (0.78) ≥
+   clean@4 (0.62) ≫ pure-mask (0.15) ≈ anchor+spectral (0.13).
+Records: this file + memory [[exp16-cleanstep-convergence]], [[exp16-b200-manual-run]].
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
