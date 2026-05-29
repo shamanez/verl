@@ -167,6 +167,24 @@ export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-64}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
+# Static batching for trackability: dynamic batching OFF by default => each
+# micro-batch is exactly ppo_micro_batch_size_per_gpu=1 sequence with
+# deterministic packing (one sequence per forward, easy to follow). Flip
+# USE_DYNAMIC_BSZ=True to restore token-balanced dynamic batching (the
+# per-element mask is packing-invariant, so both modes are correct).
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+
+# Train-inference mismatch DIAGNOSTIC (read-only; does NOT change training).
+# calculate_log_probs=True makes vLLM return its rollout log-probs so the trainer
+# logs training/rollout_probs_diff_* and rollout_corr/* (vLLM rollout vs the
+# train-engine-recomputed old_log_prob). Rollout CORRECTION stays STRICTLY OFF
+# (rollout_is/rollout_rs=null, bypass_mode=false): old_log_prob is always
+# recomputed by the train engine and vLLM log-probs are never used in the loss.
+# NB with comm-eff masking + mask_recompute=true the recompute is masked, so for
+# comm-eff runs the diff also reflects masking — read it on the dense control
+# (COMM_EFF_ENABLED=false) for the pure train-inference mismatch.
+export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
+
 # Context windows — match baseline (16K response).
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
@@ -244,11 +262,12 @@ cat <<EOF
   vLLM mem util:       $ROLLOUT_GPU_MEM_UTIL
   train batch:         $TRAIN_BATCH_SIZE prompts (× $ROLLOUT_N = $(( TRAIN_BATCH_SIZE * ROLLOUT_N )) seqs/step)
   ppo mini batch:      $PPO_MINI_BATCH_SIZE
-  ppo max tokens/GPU:  $PPO_MAX_TOKEN_LEN_PER_GPU (dynamic_bsz=True)
+  batching:            dynamic_bsz=$USE_DYNAMIC_BSZ  (when False: micro_batch_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU, max_tokens/GPU=$PPO_MAX_TOKEN_LEN_PER_GPU ignored)
   prompt / response:   $MAX_PROMPT_LENGTH / $MAX_RESPONSE_LENGTH
   epochs:              $TOTAL_EPOCHS  (save $SAVE_FREQ, validate $TEST_FREQ, total steps $TOTAL_TRAINING_STEPS)
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
+  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
@@ -266,11 +285,18 @@ EOF
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.actor.use_dynamic_bsz=True \
+  actor_rollout_ref.actor.use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$LOG_PROB_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.ref.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+  actor_rollout_ref.rollout.calculate_log_probs="$ROLLOUT_CALC_LOGPROBS" \
+  algorithm.rollout_correction.rollout_is=null \
+  algorithm.rollout_correction.rollout_rs=null \
+  algorithm.rollout_correction.bypass_mode=false \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
