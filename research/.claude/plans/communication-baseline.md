@@ -1,13 +1,20 @@
-# Plan EXP-9 — M2 final smoke (no KL, mask the full fast circuit, end-to-end training)
+# Plan communication-baseline — M2 final smoke (no KL, mask the full fast circuit, end-to-end training)
+
+> **Promoted to a permanent baseline reference.** Originally filed as EXP-9
+> (issue #9). Iter2 PASS established the M90+AP configuration that subsequent
+> comm-eff experiments compare against. The full plan text below is preserved
+> as a historical record of the design constraints; the operational verdicts
+> live in `runs/communication-baseline/verdict.md` (iter1 REVISE) and
+> `runs/communication-baseline/verdict-iter2.md` (iter2 PASS).
 
 ## Experiment
-- id:                EXP-9
+- id:                communication-baseline (formerly EXP-9)
 - title:             M2 final — full M95+AP with mask_recompute=true, no KL, end-to-end 20-step training on 4×H200
 - issue:             https://github.com/shamanez/verl-compression-research/issues/9
 - kind:              experiment
 - milestone:         M2
 - created_at:        2026-05-28T16:00:00+10:00
-- baseline_run:      EXP-3 (id-only, compare against historical WandB curves)
+- baseline_run:      baseline (dense GRPO, id-only — compare against historical WandB curves)
 - lineage_iteration: 1 of 3
 - slug:              m2-final-noKL-maskrecompute-aps
 
@@ -94,7 +101,7 @@ the row to `RUNNING`:
   `run_in_background=true`, prompt at the bottom of this plan). RL-signal watcher.
   Every 5 min while the run is RUNNING, fetches the latest WandB scalars for
   `experiment_name=m2-final-noKL-maskrecompute-aps` and posts a structured
-  curve-snapshot line to `runs/EXP-9/curve-snapshots.log`. Watches:
+  curve-snapshot line to `runs/communication-baseline/curve-snapshots.log`. Watches:
   `critic/score/mean`, `actor/grad_norm`, `actor/pg_clipfrac`, `actor/pg_loss`,
   `response_length/mean`, `comm_eff/mask_applications/train`,
   `comm_eff/mask_applications/old_logprob`, `comm_eff/anchor_backwards`,
@@ -123,7 +130,7 @@ exhausted, (c) hard env-failure on the only provisioned tier.
 
 ### 7. Codex-verify INTENTIONALLY SKIPPED (operator override)
 
-A pre-written `runs/EXP-9/verify/20260528T160000.md` with `VERIFY: PASS` exists
+A pre-written `runs/communication-baseline/verify/20260528T160000.md` with `VERIFY: PASS` exists
 at plan-creation time. This moves the orchestrator state directly from
 `NEEDS_VERIFY` to `VERIFIED` on the next tick; the runner is dispatched without
 going through `codex-bridge --mode=verify`. Precedent: EXP-6, EXP-8, EXP-12 all
@@ -152,7 +159,7 @@ operator-override pattern from every recent session.
 
 `kind: experiment` with `code_change: true`. **Codex-verify is skipped per
 non-negotiable #7.** The pre-written verify file at
-`runs/EXP-9/verify/20260528T160000.md` satisfies the state-machine. The
+`runs/communication-baseline/verify/20260528T160000.md` satisfies the state-machine. The
 orchestrator dispatches `experiment-runner` directly from `status:approved` on
 the next tick.
 
@@ -311,8 +318,8 @@ bash examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.anchor.enabled=true \
   actor_rollout_ref.actor.comm_eff.anchor.cadence=4 \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K=4 \
-  2>&1 | tee /workspace/runs/EXP-9/train.log
-touch /workspace/runs/EXP-9/done.flag
+  2>&1 | tee /workspace/runs/communication-baseline/train.log
+touch /workspace/runs/communication-baseline/done.flag
 ```
 
 Keep the launcher's default `trainer.logger` (console + wandb) so the 20 steps
@@ -354,13 +361,13 @@ similar magnitude over its first 10 steps.
 Greppable proofs:
 
 ```bash
-grep -E 'mask_applications/(train|old_logprob):' runs/EXP-9/train.log | tail -5
-grep -E 'anchor refresh step=' runs/EXP-9/train.log | head
-grep -oE 'actor/comm_eff/anchor_backwards:[0-9.]+' runs/EXP-9/train.log | tail -1
-grep -oE 'actor/comm_eff/spectral_corrections:[0-9.]+' runs/EXP-9/train.log | tail -1
-grep -oE 'training/global_step:[0-9]+' runs/EXP-9/train.log | sort -u | tail
-grep -oE 'critic/score/mean:[0-9.eE+-]+' runs/EXP-9/train.log | head -10
-grep -oE 'anchor_backward_isolation_mode=[a-z/() .]+' runs/EXP-9/train.log
+grep -E 'mask_applications/(train|old_logprob):' runs/communication-baseline/train.log | tail -5
+grep -E 'anchor refresh step=' runs/communication-baseline/train.log | head
+grep -oE 'actor/comm_eff/anchor_backwards:[0-9.]+' runs/communication-baseline/train.log | tail -1
+grep -oE 'actor/comm_eff/spectral_corrections:[0-9.]+' runs/communication-baseline/train.log | tail -1
+grep -oE 'training/global_step:[0-9]+' runs/communication-baseline/train.log | sort -u | tail
+grep -oE 'critic/score/mean:[0-9.eE+-]+' runs/communication-baseline/train.log | head -10
+grep -oE 'anchor_backward_isolation_mode=[a-z/() .]+' runs/communication-baseline/train.log
 ```
 
 ## Analyst predicate
@@ -400,7 +407,7 @@ target_modules:
 ```
 
 The verify gate is **SKIPPED** for this issue (non-negotiable #7). The pre-written
-`runs/EXP-9/verify/20260528T160000.md` file documents the override. Substantive
+`runs/communication-baseline/verify/20260528T160000.md` file documents the override. Substantive
 correctness is checked by:
 
 1. The new CPU unit test in `tests/workers/comm_eff/test_activation_mask.py`
@@ -505,14 +512,14 @@ anomalies on WandB.
   No `comm_eff.enabled=false` regression cell. Comparison is against the EXP-3
   historical WandB curves.
 - **Pre-create on the box at launch:**
-  `mkdir -p /workspace/runs/EXP-9/{iterations,curve-snapshots}` so the
+  `mkdir -p /workspace/runs/communication-baseline/{iterations,curve-snapshots}` so the
   in-place hot-fix patches and curve-analyst snapshots have a canonical
-  location. The aggregate `done.flag` is `/workspace/runs/EXP-9/done.flag`
+  location. The aggregate `done.flag` is `/workspace/runs/communication-baseline/done.flag`
   (touched at end of launch script).
 - **In-place iteration is allowed.** If a `STUCK:` pattern fires mid-run,
-  the operator may SSH in via `runs/EXP-9/handles/<id>.json::ssh_login`,
+  the operator may SSH in via `runs/communication-baseline/handles/<id>.json::ssh_login`,
   hot-fix in `/workspace/verl` on the `exp/9-…` branch, capture a diff to
-  `runs/EXP-9/iterations/<N>.patch`, and relaunch the cell (with
+  `runs/communication-baseline/iterations/<N>.patch`, and relaunch the cell (with
   `EXPERIMENT_NAME=m2-final-noKL-maskrecompute-aps-iter<N>` so WandB
   doesn't auto-resume). Same pattern as EXP-12.
 - Use the locked Vast.ai template via skills only; do not name a
@@ -559,17 +566,17 @@ You are curve-analyst for EXP-9 (M2 final smoke). Member B of the 2-member monit
 team alongside training-log-monitor (Member A — system health).
 
 Operating context:
-- Vast handle: research/runs/EXP-9/handles/<id>.json (read ssh_host/ssh_port/instance_id; you don't SSH yourself — Member A does)
+- Vast handle: research/runs/communication-baseline/handles/<id>.json (read ssh_host/ssh_port/instance_id; you don't SSH yourself — Member A does)
 - WandB project: verl_compression_research
 - WandB entity: shamanework-pl
 - Experiment name: m2-final-noKL-maskrecompute-aps (or m2-final-noKL-maskrecompute-aps-iter<N> if relaunched)
-- Output log: research/runs/EXP-9/curve-snapshots.log
+- Output log: research/runs/communication-baseline/curve-snapshots.log
 
 Loop every 5 minutes for up to 90 minutes:
 
 1. Fetch the latest WandB scalars via `wandb api` for the run with name `m2-final-noKL-maskrecompute-aps*`. If multiple runs match (iter1, iter2, ...), poll the most recent.
 2. Read scalars at the latest logged step: critic/score/mean, actor/grad_norm, actor/pg_clipfrac, actor/pg_loss, response_length/mean, comm_eff/mask_applications/train, comm_eff/mask_applications/old_logprob, comm_eff/anchor_backwards, comm_eff/spectral_corrections, comm_eff/anchor_mask_applications, comm_eff/mask_ratio.
-3. Append one line to research/runs/EXP-9/curve-snapshots.log:
+3. Append one line to research/runs/communication-baseline/curve-snapshots.log:
    `[<ISO>] step=<N> score=<X> grad=<Y> clip=<Z> pg=<W> len=<L> mask_train=<A> mask_old=<B> anchor=<C> spec=<D> anchor_mask=<E> mask_ratio=<F>`
 
 4. Anomaly detection — if ANY of:
@@ -583,7 +590,7 @@ Loop every 5 minutes for up to 90 minutes:
 
    → append `STUCK: EXP-9 <one-line reason>` to research/PROGRESS.md so the orchestrator routes to codex-bridge --mode=code-rescue on the next tick. Then continue polling.
 
-5. Exit on: aggregate done.flag visible at runs/EXP-9/done.flag, Member A's monitor file says tmux DEAD, or 90-min timeout.
+5. Exit on: aggregate done.flag visible at runs/communication-baseline/done.flag, Member A's monitor file says tmux DEAD, or 90-min timeout.
 
 Output a structured report at exit: latest-step snapshot, anomalies detected, recommendation (dispatch_analyst | continue_iteration | teardown).
 

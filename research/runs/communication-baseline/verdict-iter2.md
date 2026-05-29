@@ -1,4 +1,4 @@
-# EXP-9 Verdict (iter2) — 2026-05-28T17:15:00+10:00
+# communication-baseline Verdict (iter2) — formerly EXP-9 — 2026-05-28T17:15:00+10:00
 
 VERDICT: PASS
 

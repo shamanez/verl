@@ -121,9 +121,9 @@ After the refresh:
 - `torch.cuda.empty_cache()` returns the freed pages to the allocator
 - Only the 3 GB parked params remain until the next refresh
 
-### Why this bit EXP-13 but not EXP-9
+### Why this bit EXP-13 but not the smoke (communication-baseline)
 
-| | EXP-9 smoke | EXP-13 paper-scale |
+| | communication-baseline (smoke) | EXP-13 paper-scale |
 |---|---|---|
 | Response length | 256 | 16384 |
 | Train batch | 8 | 128 |

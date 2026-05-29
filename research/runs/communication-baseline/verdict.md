@@ -1,4 +1,4 @@
-# EXP-9 Verdict — 2026-05-28T16:55:35+10:00
+# communication-baseline Verdict — formerly EXP-9 — 2026-05-28T16:55:35+10:00
 
 VERDICT: REVISE
 

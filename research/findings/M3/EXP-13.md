@@ -2,12 +2,12 @@
 
 ## Goal
 
-Demonstrate that EXP-9 iter2's verified PASS knobs (α=0.5, τ=0.01, p=0.9, β_anc=0.9, anchor cadence=5, delay_K=5, mask_recompute=true) scale correctly to paper-scale rollout configurations without infrastructure regression or memory stability failure.
+Demonstrate that the communication-baseline's (formerly EXP-9 iter2) verified PASS knobs (α=0.5, τ=0.01, p=0.9, β_anc=0.9, anchor cadence=5, delay_K=5, mask_recompute=true) scale correctly to paper-scale rollout configurations without infrastructure regression or memory stability failure.
 
 The scaling target:
-- TRAIN_BATCH_SIZE=128 (was 16 in EXP-9 smoke)
-- ROLLOUT_N=8 (was 2 in EXP-9 smoke)
-- MAX_PROMPT=1024, MAX_RESPONSE=16384 (was 512/2048 in EXP-9 smoke)
+- TRAIN_BATCH_SIZE=128 (was 16 in the communication-baseline smoke)
+- ROLLOUT_N=8 (was 2 in the communication-baseline smoke)
+- MAX_PROMPT=1024, MAX_RESPONSE=16384 (was 512/2048 in the communication-baseline smoke)
 - Full held-out validation enabled (val_before_train=True, test_freq=25)
 
 ## Result
@@ -24,7 +24,7 @@ The scaling target:
 
 Under full M90+AP compression (90% masked fast-circuit surface, full anchor+spectral correction circuit live), the policy achieves a **+26.3% relative improvement in GSM8K test accuracy in 50 GRPO update steps** from near-zero baseline on paper-scale rollouts. The trajectory is monotone non-decreasing across all three measured points — no oscillation, no regression, consistent learning signal.
 
-This is the load-bearing result. Compared with EXP-9 iter2 (which showed visible learning on the training reward stream but with no held-out eval), EXP-13 establishes that the compression method is not just preserving optimization stability; it is producing measurable downstream accuracy gain on actual held-out data.
+This is the load-bearing result. Compared with the communication-baseline (which showed visible learning on the training reward stream but with no held-out eval), EXP-13 establishes that the compression method is not just preserving optimization stability; it is producing measurable downstream accuracy gain on actual held-out data.
 
 ## Comm-eff infrastructure scaling (M2 → M3 paper-scale)
 
@@ -70,7 +70,7 @@ Root cause analysis:
 | `actor_rollout_ref.rollout.gpu_memory_utilization` | 0.4 | **0.3** | vLLM KV-cache reservation reduced to leave headroom for actor forward + anchor |
 | `PYTORCH_CUDA_ALLOC_CONF` | unset | `expandable_segments:True` | Allocator fragmentation reduced |
 
-These are **memory-envelope tuning knobs only**. The comm-eff algorithmic knobs (p, α, τ, β_anc, cadence, delay_K, mask_recompute) remain identical to EXP-9 iter2's PASS configuration.
+These are **memory-envelope tuning knobs only**. The comm-eff algorithmic knobs (p, α, τ, β_anc, cadence, delay_K, mask_recompute) remain identical to the communication-baseline's PASS configuration.
 
 ### Memory plateau (iter2)
 
@@ -103,15 +103,15 @@ Evidence of clean exit:
 - WandB run reached step 58 with full metric continuity and no truncation
 - No gradient explosion, no NaN/Inf, no crash trace
 
-The wandb async-writer RuntimeError traceback at the absolute tail of `train_iter2.log` is post-exit benign noise (identical pattern to EXP-9 and EXP-12).
+The wandb async-writer RuntimeError traceback at the absolute tail of `train_iter2.log` is post-exit benign noise (identical pattern to the comm-eff smoke and EXP-12).
 
 **For future M3 paper-scale runs that need the full 100-step curve**: only change is `TOTAL_EPOCHS=2` (or equivalently: keep TOTAL_EPOCHS=1 and shrink TRAIN_BATCH_SIZE so the dataset spans ≥100 batches). Every other knob in the launcher is correctly tuned.
 
-## Knob set and lineage (EXP-9 → EXP-13)
+## Knob set and lineage (communication-baseline → EXP-13)
 
-This experiment inherited EXP-9 iter2's PASS knobs directly:
+This experiment inherited the communication-baseline's PASS knobs directly:
 
-| Knob | EXP-9 iter2 (smoke) | EXP-13 iter2 (paper-scale) | Change |
+| Knob | the communication-baseline (smoke) | EXP-13 iter2 (paper-scale) | Change |
 |---|---|---|---|
 | `spectral.alpha` | 0.5 | 0.5 | none |
 | `spectral.tau` | 0.01 | 0.01 | none |
@@ -141,7 +141,7 @@ These notes serve as operational reference for future M3 and M4 runs that inheri
 
 ## Comparison to baseline
 
-There is no comm-eff-off paper-scale baseline (TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384) on this fork. EXP-9 was smoke-batch shape. EXP-13's primary comparison point is therefore **EXP-9 iter2** (identical algorithmic config, smaller batch shape) — and the comparison shows the method survives the scaling transition cleanly: counters scale correctly, guards hold, memory is bounded with 14+ GB headroom, and learning is **stronger** on held-out validation than EXP-9 iter2's training-reward signal alone (0.0864 → 0.1092 = +26.3% on held-out test vs EXP-9's mean(11-20)=0.125 on training rewards).
+There is no comm-eff-off paper-scale baseline (TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384) on this fork. The communication-baseline was smoke-batch shape. EXP-13's primary comparison point is therefore **the communication-baseline** (identical algorithmic config, smaller batch shape) — and the comparison shows the method survives the scaling transition cleanly: counters scale correctly, guards hold, memory is bounded with 14+ GB headroom, and learning is **stronger** on held-out validation than the communication-baseline's training-reward signal alone (0.0864 → 0.1092 = +26.3% on held-out test vs the communication-baseline's mean(11-20)=0.125 on training rewards).
 
 A future experiment could run plain GRPO (comm_eff.enabled=false) at the paper-scale shape to compute precise compression efficiency. That is out of scope for EXP-13.
 
@@ -171,7 +171,7 @@ The iter2 memory recipe (PPO_MAX_TOKEN_LEN_PER_GPU=18432, gpu_memory_utilization
 
 ## Notes
 
-- Experiment was operator-launched directly from EXP-9 iter2 PASS knobs; no pre-existing `.claude/plans/13.md` issue.
+- Experiment was operator-launched directly from the communication-baseline PASS knobs; no pre-existing `.claude/plans/13.md` issue.
 - All metrics lifted from `train_iter2.log` via direct grep (lines 1065 for step-0 val, 1258 for step-25 val, 1449 for step-50 val, 1494 for step-56 counters, 1513 for step-58 counters).
-- The wandb teardown RuntimeError at the tail of train_iter2.log is post-exit benign noise (same pattern as EXP-9, EXP-12).
+- The wandb teardown RuntimeError at the tail of train_iter2.log is post-exit benign noise (same pattern as the comm-eff smoke and EXP-12).
 - For future paper-scale lineage: consider logging `val/openai/gsm8k/acc/mean@8` (pass@8) in addition to pass@1, since ROLLOUT_N=8 makes the multi-sample accuracy directly recoverable from rollout buffer.

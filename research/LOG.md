@@ -1,45 +1,72 @@
 # Research Log (newest first)
 
-## EXP-13 · 2026-05-28T18:55:00+00:00 · M3 · PASS
-M3 paper-scale comm-eff PP-RL demonstration — 58-step M90+AP GRPO on TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384 (iter1 OOM → iter2 PASS via memory recipe)
-- hypothesis: EXP-9 iter2's PASS knobs (α=0.5, τ=0.01, p=0.9, β_anc=0.9, anchor cadence=5, delay_K=5, mask_recompute=true) scale to paper-scale rollouts without infrastructure regression; model learns on held-out val (TRAIN_BATCH=128 vs EXP-9's 16); all 6 comm-eff guards hold; iter2 reaches step 58 (TOTAL_EPOCHS=1 dataset-epoch limit)
-- result: iter1 OOM (step 2, GPU 0 135 GiB / 140 GiB on actor MLP forward — anchor clone + dynamic-batch wedge exceeded envelope); iter2 PASS with memory fix (PPO_MAX_TOKEN_LEN_PER_GPU 36864→18432, vLLM gpu_mem_util 0.4→0.3, PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True). Validation curve clear improvement: step 0=0.0864, step 25=0.0925 (+7%), step 50=0.1092 (+26% relative gain in 50 GRPO steps); mask_applications/train=2548, /old_logprob=2366; anchor_backwards=44; spectral_corrections=896; all 6 anchor guards held; mask_ratio=0.8999 (target 0.9±0.02); memory plateau 125.44 GB (no leak); H200 headroom margin 14.6 GB. Notes: anchor-memory-cost.md + fast-circuit-vs-anchor-pass.md committed at 6abc2891; TOTAL_EPOCHS=1 → 58 batches (7473 prompts / 128 batch) not a method failure, dataset-epoch math (future M3 use TOTAL_EPOCHS=2 for 100-step curve)
-- run dir: runs/EXP-13/
-- verdict: runs/EXP-13/verdict.md
+## EXP-13 · 2026-05-28T18:55:00+00:00 · M3 · PASS (at-risk, under investigation)
 
-## EXP-9 · 2026-05-28T17:15:00+10:00 · M2 · PASS
-M2 capstone — full M90+AP no-KL 20-step GRPO smoke (iter1 REVISE → iter2 PASS via knob relaxation)
-- hypothesis: mask_recompute extension on old-logprob recompute forward, combined with knob relaxation (α 0.3→0.5, τ 0.001→0.01, p 0.95→0.9), yields visible learning trend and sustained peak-reward sequences; criterion 13 passes via inverted reward curvature (second-half mean +82% above first-half); all 12 comm_eff guards held; iter2 reaches global_step=20
-- result: iter1 REVISE (one-step spike, declining second half); iter2 PASS (sustained rising trend, mean(11-20)=0.125 vs mean(1-10)=0.0688; three 0.25 peaks at steps 12/17/18 = 4× step 1; mask_applications=420 total, anchor_backwards=10, spectral_corrections=160, ||dM_anchor|| max=1.119); all infrastructure counters exact, GUARD 5/6 held, no KL/entropy, actor/grad_norm finite, 140 tests PASS / 10 skip / 2 pre-existing skip
-- run dir: runs/EXP-9/
-- verdict: runs/EXP-9/verdict-iter2.md (PASS) + runs/EXP-9/verdict.md (iter1 REVISE)
+Paper-scale comm-eff PP-RL demonstration — 58-step M90+AP GRPO on
+TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384 (iter1 OOM → iter2 PASS via
+memory recipe).
 
-## EXP-12 · 2026-05-28T05:15:00+00:00 · M2 · PASS
-REVISE child of EXP-8 — anchor backward graph isolation (cloned-no-hook module / no_sync+summon_full_params)
-- hypothesis: same-process anchor refresh every cadence steps from delay_K-stale weight snapshot runs unmasked GRPO-actor-loss forward/backward on a cloned-no-hook module (detached from FSDP registration) to populate live anchor EMA/SVD and cache basis across fast mini-batches; all anchor-semantics guards upheld; cells reach global_step >= 5
-- result: four on-box hot-fix iterations closed FSDP autograd-hook collision (iter01 wired missing call site; iter02 config-rebuild fallback for HF monkey-patch unpicklability; iter03 DTensor materialization via .full_tensor(); iter04 cached anchor clone + empty_cache for vLLM sleep_replicas hygiene). Both anchor-enabled cells (faithful HBM EMA + full SVD / lean CPU EMA + low-rank SVD) reached global_step:10 with all 6 anchor-semantics guards held; anchor_backwards:20.0, anchor_mask_applications:0, anchor_grad_corrected:0, anchor_rollouts_generated:0, anchor_rewards_recomputed:0, anchor_optimizer_steps:0 on both cells; within-run anchor-off regression reproduced EXP-7 spectral path (cell 2 step:5 spectral_corrections:40, no anchor activity). Criterion-13 regression test test_fsdp_anchor_backward_no_collision added.
-- run dir: runs/EXP-12/
-- verdict: runs/EXP-12/verdict.md
+- **hypothesis**: communication-baseline's PASS knobs (α=0.5, τ=0.01, p=0.9,
+  β_anc=0.9, anchor cadence=5, delay_K=5, mask_recompute=true) scale to
+  paper-scale rollouts without infrastructure regression; model learns on
+  held-out val (TRAIN_BATCH=128 vs smoke 16); all 6 comm-eff guards hold;
+  iter2 reaches step 58 (TOTAL_EPOCHS=1 dataset-epoch limit).
+- **infrastructure result (✓)**: iter1 OOM (step 2, GPU 0 135 GiB / 140 GiB on
+  actor MLP forward — anchor clone + dynamic-batch wedge exceeded envelope);
+  iter2 PASS with memory fix (PPO_MAX_TOKEN_LEN_PER_GPU 36864→18432, vLLM
+  gpu_mem_util 0.4→0.3, PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True). All
+  comm-eff counters scale linearly: mask_applications/train=2548,
+  /old_logprob=2366; anchor_backwards=44; spectral_corrections=896; mask_ratio
+  0.8999 ± 0.0001; memory plateau 125.44 GB (no leak).
+- **learning result (✓ but at-risk)**: validation 0.0864 → 0.0925 → 0.1092
+  across steps 0 / 25 / 50 (+26% relative gain). However grad_norm starts at
+  1134 at step 1 and climbs to 1884 by step 56; entropy collapses 6.42 → 0.023;
+  ppo_kl reaches 1.4 — all consistent with policy collapse driven by KL anchor
+  removal AND/OR comm-eff variance amplification (IS variance under
+  independent PRF masks for train/old_logprob, smaller mini-batch + halved
+  wedge, possible spectral-conditioning issues).
+- **investigation queued**: `notes/investigation-prompt-grad-norm.md` enumerates
+  9 candidate root causes and a 4-test discriminating plan (T1 sanity-zero, T2
+  baseline-batch on more GPUs, T3 mask_recompute ablation, T4 α and
+  seed_anchor_cache ablation). KL stays off across all tests.
+- **run dir**: `runs/EXP-13/`
+- **verdict**: `runs/EXP-13/verdict.md`
+- **PR merged**: `shamanez/verl#7` → `vast-ai-workload`
 
-## EXP-7 · 2026-05-28T06:01:00+10:00 · M2 · PASS
-M2 — spectral correction filter (paper formula) + FSDP gradient-application-point discovery
-- hypothesis: spectral filter (anchor-EMA → full thin SVD → Tikhonov spectral weights → two-sided projection → alpha blend) is a no-op when alpha=1.0, equals pure two-sided Tikhonov when alpha=0, preserves shape, and is deterministic; when wired into FSDP actor path after backward and before optimizer.step(), reaches global_step=2 with finite actor/grad_norm, logs gradient representation (full Tensor/DTensor/FlatParameter) and correction point relative to FSDP reduction and clipping, with per-target ||G_proj - G_mask||/||G_mask|| in (0, 1] for alpha=0.3, and enabled=false regression matches dense no-op
-- result: unit test VERIFY:PASS (alpha=1 no-op ≤1e-6, alpha=0 = pure Tikhonov, shape preserved, deterministic); FSDP discovery: FSDP1 use_orig_params=true yields full logical 2D Tensor (not DTensor/FlatParameter), correction applied AFTER FSDP gradient reduction and BEFORE grad clipping, world_size=4; spectral_corrections 8→16 (2-step isolation) / 8→80 (10-step combined mask+spectral); rel_change q≈0.0037/k≈0.646/v≈0.642/o≈0.0036 all in (0,1]; actor/grad_norm finite (54.8–300.1, no NaN/Inf); param deltas step0→step10 confirmed; disabled cell = true dense no-op (corrections=0); three fixed defects: entropy_coeff=0.001 for gradient signal, FSDP1 use_orig_params=true for unsharded matrix access, stable sha256 anchor seed for cross-rank determinism
-- run dir: runs/EXP-7/
-- verdict: runs/EXP-7/verdict.md
+## communication-baseline · 2026-05-28T17:15:00+10:00 · M2 · PASS (reference)
 
-## EXP-6 · 2026-05-28T03:25:00+10:00 · M2 · PASS
-M2 — mask contamination guard: invariants for rollout / old-logprob / ref-logprob / validation / checkpoint / infer_batch
-- hypothesis: per-path mask counter strictly 0 on rollout, old-logprob, ref-logprob, validation, checkpoint, infer paths; strictly > 0 only on actor-train forward/backward; old/ref log-probs equal within 1e-6 regardless of mask config; validation unchanged vs masking-off; checkpoints contain no comm_eff/mask state
-- result: key-prefix grep yields only `actor/comm_eff/mask_applications`; 35 unit tests pass (incl 1e-6 log-prob equality + checkpoint guard); live 2-step GRPO smoke with per-path counters train=28/all-RL-paths=0; val ran with parity within noise (0.0508 vs 0.0485-0.0652); checkpoint leak-scan clean; no NaN/Inf
-- run dir: runs/EXP-6/
-- verdict: runs/EXP-6/verdict.md
+The communication-efficient method's smoke-scale verification (formerly
+EXP-9). Promoted to a permanent baseline reference alongside the dense
+baseline so future comm-eff experiments can compare against it directly.
 
-## EXP-5 · 2026-05-28T01:45:00+10:00 · M2 · PASS
-M2 actor-only PRF activation masking smoke
-- hypothesis: deterministic PRF masks applied in-graph (h*mask, no rescale) at boundary decoder layers confined to actor-train forward/backward; measured mask ratio tracks configured p within ±0.02; no NaN/Inf in losses/grads; ≥1 param changed between step 0 and 2; disabled cell regresses EXP-4 dense no-op contract
-- result: p95/p90 mask_ratio 0.9498/0.8999 ± 0.0002 from configured p; all 7 boundaries [3,7,11,15,18,21,24] masked; zero mask applications on non-actor-train paths; actor/grad_norm finite on all substeps (p95: 42.15/19.86, p90: 18.11/95.18, disabled: 1.13/0.37); no NaN/Inf in any loss/grad/reward/log_prob/kl field; disabled cell all comm_eff counters 0 (dense no-op matched); tests/workers/comm_eff/test_activation_mask.py VERIFY:PASS
-- run dir: runs/EXP-5/
-- verdict: runs/EXP-5/verdict.md
+- **hypothesis**: mask_recompute extension on old-logprob recompute forward,
+  combined with knob relaxation (α 0.3→0.5, τ 0.001→0.01, p 0.95→0.9), yields
+  visible learning trend and sustained peak-reward sequences; all 12 comm_eff
+  guards held; iter2 reaches global_step=20.
+- **result**: iter1 REVISE (one-step spike, declining second half); iter2 PASS
+  (sustained rising trend, mean(11-20)=0.125 vs mean(1-10)=0.0688; three 0.25
+  peaks at steps 12/17/18 = 4× step 1; mask_applications=420 total,
+  anchor_backwards=10, spectral_corrections=160, ||dM_anchor|| max=1.119); all
+  infrastructure counters exact, GUARD 5/6 held, no KL/entropy, actor/grad_norm
+  finite, 140 tests PASS / 10 skip / 2 pre-existing skip.
+- **run dir**: `runs/communication-baseline/`
+- **verdict**: `runs/communication-baseline/verdict-iter2.md` (PASS),
+  `runs/communication-baseline/verdict.md` (iter1 REVISE)
+- **PR merged**: `shamanez/verl#6` → `vast-ai-workload` (mask_recompute
+  extension lives on `vast-ai-workload` as part of the comm-eff implementation)
 
-The `log-writer` subagent prepends one entry per PASS or STOP verdict. Each entry links the experiment id, the verdict file, and the run dir for forensics. Empty until the first verdict.
+## baseline · 2026-05-26 · M1 · PASS (dense reference)
+
+Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the control,
+ran before any comm-eff code change was merged).
+
+- **result**: `val/test_score` 0.0872 → 0.7892 over 100 steps on 4×H200
+- **run dir**: `runs/baseline/`
+- **plan**: `.claude/plans/baseline.md`
+- **reproducibility**: `runs/baseline/REPRODUCIBILITY.md` (launcher SHA pinned)
+
+---
+
+**Older entries (EXP-4 / EXP-5 / EXP-6 / EXP-7 / EXP-8 / EXP-12)** were folded
+into `runs/SUMMARY.md` during de-bloat. The full history is preserved in git
+log + the merged PRs (#1, #2, #3, #4, #5).
