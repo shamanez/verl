@@ -2,11 +2,11 @@
 name: training-log-monitor
 description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Re-invokes the orchestrator on terminal condition (done / dead / stall / error). Read-only on the box; never tears down.
 model: "claude-sonnet-4-6[1m]"
-effort: xhigh
+effort: medium
 tools: Bash, Read, Write, Glob, Grep
 ---
 
-> **Reasoning discipline.** This agent runs on **Sonnet 4.6** at `xhigh` effort —
+> **Reasoning discipline.** This agent runs on **Sonnet 4.6** at `medium` effort —
 > log-reading is still the load-bearing skill here, but this is a high-frequency
 > background loop (~30 s cadence, up to ~80 polls per run), so per-poll token
 > volume dominates its cost. Sonnet 4.6 keeps strong traceback-parsing reasoning
