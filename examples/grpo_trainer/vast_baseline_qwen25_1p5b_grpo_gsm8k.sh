@@ -5,8 +5,8 @@
 # multi-GPU (4..8), FSDP + vLLM rollout, 2 epochs over the train split, eval
 # on the test split. Not a smoke test. Acceptance = pass@1 improvement on test.
 #
-# Objective: NO KL, no entropy (pg_loss only). EXP-14 confirmed this learns
-# cleanly and it matches the comm-eff method's no-KL objective, so dense-vs-
+# Objective: NO KL, no entropy (pg_loss only). This dense control learns cleanly
+# on GSM8K and matches the comm-eff method's no-KL objective, so dense-vs-
 # comm-eff is apples-to-apples. This is THE reference dense run.
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -137,10 +137,10 @@ export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 
-# GRPO objective — NO KL, no entropy. EXP-14 (#14) showed no-KL dense GRPO
-# learns cleanly (val 0.083 -> 0.721 in 10 steps); the comm-eff method is
-# evaluated no-KL, so the dense control is no-KL too for an apples-to-apples
-# comparison. This is THE reference dense run for the comm-eff project.
+# GRPO objective — NO KL, no entropy. No-KL dense GRPO learns cleanly on GSM8K;
+# the comm-eff method is evaluated no-KL, so the dense control is no-KL too for
+# an apples-to-apples comparison. This is THE reference dense run for the
+# comm-eff project.
 export ACTOR_LR="${ACTOR_LR:-1e-6}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 export USE_KL_IN_REWARD="${USE_KL_IN_REWARD:-False}"
