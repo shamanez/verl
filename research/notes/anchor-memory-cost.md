@@ -123,7 +123,7 @@ After the refresh:
 
 ### Why memory bites paper-scale runs but not the smoke
 
-| | communication-baseline (smoke) | paper-scale |
+| | smoke scale | paper scale |
 |---|---|---|
 | Response length | 256 | 16384 |
 | Train batch | 8 | 128 |

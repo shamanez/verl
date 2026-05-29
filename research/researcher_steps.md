@@ -89,7 +89,7 @@ Common body fields (planner reads them; defaults from `.claude/project.yaml`):
 ```
 kind: experiment
 milestone: M3
-baseline_run: communication-baseline   # or 'baseline' or 'none'
+baseline_run: baseline                 # the dense control (= comm-eff OFF); or 'none'
 depends_on: [EXP-N]                    # required for ablation
 budget_gpu_hr: 96
 budget_dph_max: 24.0
@@ -254,12 +254,9 @@ research/
 ├── LOG.md                  newest-first PASS/STOP entries
 ├── PROGRESS.md             append-only structured audit
 ├── runs/
-│   ├── baseline/                   permanent reference: dense GRPO control
-│   ├── communication-baseline/     permanent reference: comm-eff method smoke
 │   ├── EXP-<N>/                    per-experiment dirs (runtime artifacts)
-│   └── SUMMARY.md                  folded history of de-bloated experiments
+│   └── SUMMARY.md                  durable record: baseline, method, knobs, tried-so-far
 ├── findings/
-│   ├── communication-baseline.md   PASS finding for the comm-eff reference
 │   ├── M<N>/EXP-<N>.md             per-experiment PASS findings
 │   └── derivations/                math-rescue outputs (operator-invoked)
 ├── notes/                          conceptual docs (memory, masking semantics, ...)
@@ -268,7 +265,7 @@ research/
     ├── project.yaml                single source of truth (repo, secrets, vast template, defaults, branch policy)
     ├── playbooks/                  triage.md, orchestrator.md
     ├── agents/                     research-planner, experiment-runner, analyst, log-writer, training-log-monitor
-    ├── plans/                      TEMPLATE.md, baseline.md, communication-baseline.md, <N>.md per issue
+    ├── plans/                      TEMPLATE.md, baseline.md, <N>.md per issue
     ├── hooks/                      kill-switch, protect-upstream, sync-metrics, teardown-finished-runs, commit-on-stop
     ├── skills/                     vast-provision, vast-teardown, codex-verify (operator-invoked)
     └── state/                      STATUS.md, runs.jsonl, .last-orchestrator-tick

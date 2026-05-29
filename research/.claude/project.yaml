@@ -76,9 +76,9 @@ default_compute:                                              # planner emits th
   iterations: 3
 
 default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
-  run: communication-baseline                                 # the comm-eff METHOD reference (runs/communication-baseline/) — not the dense control
-  launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh   # what produced runs/communication-baseline/
-  dense_control: baseline                                     # the verl-unmodified dense reference (runs/baseline/) — name it explicitly with `baseline_run: baseline` when a dense comparison is wanted
+  run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)
+  launcher: examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh   # dense control launcher (== comm-eff launcher with COMM_EFF_ENABLED=false)
+  dense_control: baseline                                     # the verl-unmodified dense reference; name it explicitly with `baseline_run: baseline`
 
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
   dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, branch vast-ai-workload)

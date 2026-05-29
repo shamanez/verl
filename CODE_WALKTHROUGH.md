@@ -119,7 +119,7 @@ runtime (a violation raises, it does not silently corrupt a measurement):
 Deferred (later milestones):
 - **DP gradient compression** (PowerSGD + Streaming-DiLoCo) — out of scope until
   the actor mask/anchor/spectral path is correct.
-- **Paper-cadence long runs** and the **100-step compressed-vs-dense comparison**.
+- **Long compressed-vs-dense comparison runs** (the parity + savings curve).
 - **Per-mini-batch anchor gradients** (the heavier variant) — current code is the
   same-loop periodic refresh.
 - **Megatron / Automodel engine integration** — only the FSDP backend overrides

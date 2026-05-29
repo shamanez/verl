@@ -1,89 +1,65 @@
 # Project north-star — the big goal
 
-> **The project's north-star.** This is the single, authoritative statement of
-> what this project is trying to achieve and what "done" means — every plan,
-> verdict, and PR should be checked against it. Agents may read this file
-> freely; the operator keeps it current.
+> The single authoritative statement of what this project is trying to achieve
+> and what "done" means. Every plan, verdict, and PR is checked against it.
+> Agents may read it freely; the operator keeps it current.
 
 ## The goal
 
-**Train Qwen2.5-1.5B-Instruct on GSM8K with the communication-efficient method
-ENABLED in verl — end-to-end and STABLE (no grad_norm explosion / NaN) —
-reaching reward/accuracy PARITY with (or beating) the dense GRPO baseline,
-while MEASURABLY reducing communication.**
+**A communication-efficient, pipeline-parallel verl GRPO trainer.**
 
-**Deliverable:** a reproducible canonical launcher (under
-`examples/grpo_trainer/`) that trains comm-efficient GRPO successfully, plus the
-`findings/` curve that proves parity and the communication-savings number.
+Train Qwen2.5-1.5B-Instruct on GSM8K where the **training** path (the
+forward/backward activation + gradient traffic across pipeline-parallel stage
+boundaries) runs under a communication-efficient method: activation masking at
+the stage boundaries, with optional anchor + spectral correction. Communication
+efficiency is about the **inter-stage traffic during training** — **rollouts
+(generation) may come from ordinary, non-pipeline-parallel verl + vLLM**, that
+is fine and out of scope for compression.
 
-"Done" = all four hold:
+With the method switched off, training is byte-identical to unmodified verl.
 
-1. **Runs** — comm-eff ENABLED trains end-to-end at paper scale with no
-   grad_norm explosion, NaN, or divergence.
-2. **Parity** — final reward / GSM8K accuracy ≥ the dense GRPO baseline
-   (= comm-eff OFF; reference proof EXP-14 `test1_cellA`, val 0.083→0.721 in
-   10 steps), within noise.
-3. **Savings** — communication volume is measured and is materially lower than
-   dense, reported as a concrete number.
-4. **Reproducible** — a promoted canonical launcher reproduces it (the
-   auto-propose-on-PASS → DRAFT PR path in `project.yaml.launchers.promotion`).
+## "Done" means
 
-## Why code changes are mandatory
+1. **Stable** — the method ENABLED trains end-to-end with no grad_norm
+   explosion, NaN, or divergence.
+2. **Parity** — final GSM8K reward/accuracy ≥ the dense control (= method OFF),
+   within noise.
+3. **Savings** — inter-stage communication volume is measured and is materially
+   lower than dense, reported as a concrete number.
+4. **Reproducible** — one canonical launcher under `examples/grpo_trainer/`
+   reproduces it.
 
-The communication-efficient method lives **in the verl source of this fork**
-(mask / anchor / spectral / FSDP integration — see `CODE_WALKTHROUGH.md`).
-"Train comm-efficient GRPO *using verl*" is therefore not a config toggle alone:
-reaching a *stable* run requires **patching that source**. **Code change is in
-scope for the project** — landed as `code_change:true` experiments on
-`exp/<N>-<slug>` branches — even though individual *diagnostic* issues are
-deliberately `code_change:false` (they find the target before anyone patches it).
+## Where we are
 
-## Milestone chain to the goal
+- **Dense control (method OFF) — proven.** Byte-identical to unmodified verl;
+  learns cleanly on GSM8K in a short run. This is the bar to match.
+- **Method implementation — correct.** Masking, anchor, spectral and the FSDP
+  integration are wired and unit-tested; OFF ⇒ dense parity.
+- **Masking — under test.** Plain masked GRPO does not yet learn at high mask
+  rates. The open question is whether, and at what mask rate, it learns; the
+  next step is a mask-rate sweep. Anchor + spectral correction are layered
+  fixes brought in only if masking alone is not enough — **default OFF, kept
+  OFF to start.**
 
-Where we are now → the goal, as a sequence of gated issues. Each step is gated
-by the previous one's verdict; the operator flips `status:planned →
-status:approved` at each human gate.
+## Why code changes are in scope
 
-| State | Step | kind | code_change | Status |
-|---|---|---|---|---|
-| ✅ | Dense GRPO baseline = comm-eff OFF (the control) | experiment | — | proven → EXP-14 `test1_cellA`, 0.083→0.721 / 10 steps (run pruned) |
-| ✅ | Comm-eff implementation (mask/anchor/spectral + FSDP integration, dense-parity-when-off) | implementation | **true** | landed → PRs #1–#8 |
-| ✅ | **#14 — diagnose the paper-scale grad_norm explosion** | investigation → experiment | **true** | **resolved** → mask magnitude-collapse; closed |
-| 🔬 | **#15 — does masked GRPO learn at all?** mask-rate sweep p=0.9→0.5→0.1 (mask + rescale + per-channel); bar = stable low `pg_clipfrac` + sustained val/score | experiment | maybe | `status:planned` |
-| 🔧 | If masking alone doesn't learn → layer anchor + spectral correction back on (default OFF until then) | implementation | maybe | future |
-| 📈 | Parity run — comm-eff ENABLED vs dense baseline, full GSM8K reward/accuracy curve | experiment | maybe | future |
-| 📉 | Communication-savings measurement + report | experiment | maybe | future |
-| 🚀 | Promote the proven launcher (DRAFT PR, base `vast-ai-workload`) | — | — | future |
-
-**The critical-path link the operator asked to make explicit:** #13 is
-diagnostic *on purpose* — you cannot write the fix until the diagnosis names
-*which* mechanism (candidates B–G) dominates the step-1 grad_norm and *which*
-`verl/...` module + knob to patch. So the path is:
-
-```
-#13 (code_change:false)  →  names dominant cause + target module/knob
-        ↓
-NEW fix issue (code_change:true)  →  patches it on exp/13-<slug>, base vast-ai-workload
-        ↓
-stable comm-eff training at paper scale  →  parity run  →  savings report  →  promoted launcher
-```
-
-(#13's own *Code change* and *Notes for runner* sections already anticipate this
-follow-on; that is why the plan is diagnostic-first rather than wrong.)
+The method lives **in the verl source of this fork** (mask / anchor / spectral /
+FSDP integration — see `CODE_WALKTHROUGH.md`). Reaching a stable run requires
+patching that source, so code-change experiments on `exp/<N>-<slug>` branches
+are expected; diagnostic-only issues stay `code_change:false`.
 
 ## Fixed control variables (do not change without separate justification)
 
-From `CLAUDE.md §1`:
-
-- **Model** — Qwen2.5-1.5B-Instruct (every `findings/` curve is anchored to it).
-- **RL loss** — vanilla GRPO (not DAPO / GSPO).
-- **Hardware** — multi-GPU only, **4 ≤ num_gpus ≤ 8**, Vast.ai H100/H200 via the
-  locked `verl-research-vllm020` template.
+- **Model** — Qwen2.5-1.5B-Instruct.
+- **RL loss** — vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
 - **Dataset** — GSM8K.
+- **Hardware** — multi-GPU only, 4 ≤ num_gpus ≤ 8, Vast.ai H100/H200 via the
+  locked `verl-research-vllm020` template.
 
 ## Pointers
 
 - Engineering map of the method → `CODE_WALKTHROUGH.md`
-- Project config (authoritative for operating values) → `.claude/project.yaml`
+- Authoritative operating config → `.claude/project.yaml`
+- Comm-eff launcher (baseline = run it with `COMM_EFF_ENABLED=false`) →
+  `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
 - Dense control launcher → `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`
-- Comm-eff launcher → `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`

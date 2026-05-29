@@ -3,7 +3,8 @@
 # artifacts (run dir incl. *.bundle, its plan file, its stale handle). See SKILL.md.
 #
 # Hard guards:
-#   - NEVER touches the baseline (runs/baseline/, .claude/plans/baseline.md, id 3/EXP-3).
+#   - NEVER touches the baseline (.claude/plans/baseline.md, id 3/EXP-3); the baseline is
+#     comm-eff OFF and keeps no standalone run dir.
 #   - Refuses an experiment that still has a live (RUNNING/PROVISIONED) ledger row.
 #   - Refuses an undone experiment (run dir present but no verdict.md / LOG entry).
 #   - Idempotent: re-running on an already-folded id is a no-op.

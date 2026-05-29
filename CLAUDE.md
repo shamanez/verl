@@ -1,23 +1,27 @@
 # Agent Instructions for this verl fork
 
 > This is **shamanez/verl** — a private fork of `verl-project/verl` used as
-> the substrate for a **communication-efficient pipeline-adaptation research
-> project**. It is **not** for upstream contributions. PRs back to
+> the substrate for building a **communication-efficient, pipeline-parallel
+> GRPO trainer**. It is **not** for upstream contributions. PRs back to
 > `verl-project/verl` are out of scope here; if you want those, read
 > upstream's [`AGENTS.md`](AGENTS.md) (preserved unmodified as the original).
 
 ## 1. What this fork is for
 
-This is **not** vanilla verl. It's a private research fork that adds a
-**communication-efficient training method** on top of verl's GRPO recipe,
-trained on **Qwen2.5-1.5B-Instruct + GSM8K**. With the method disabled,
-training is byte-identical to upstream verl. The project's goal is captured in
+This is **not** vanilla verl. It's a private research fork building a
+**communication-efficient, pipeline-parallel verl GRPO trainer**: the *training*
+path (activation + gradient traffic across pipeline-stage boundaries) runs under
+a communication-efficient method — activation masking at the boundaries, with
+optional anchor + spectral correction. Rollouts may come from ordinary,
+non-pipeline-parallel verl + vLLM. Trained on **Qwen2.5-1.5B-Instruct + GSM8K**.
+With the method disabled, training is byte-identical to upstream verl. The
+project's goal is captured in
 [`research/.claude/GOAL.md`](research/.claude/GOAL.md); the engineering map is
 [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
 
 **Fixed control variables — do not change without a separate justification:**
-- **Model**: Qwen2.5-1.5B-Instruct (every reference curve in `findings/` is anchored to it).
-- **RL loss**: vanilla GRPO (not DAPO / GSPO).
+- **Model**: Qwen2.5-1.5B-Instruct (the dense control is anchored to it).
+- **RL loss**: vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
 - **Hardware**: multi-GPU only, **4 ≤ num_gpus ≤ 8**, on Vast.ai H100/H200 via
   the fixed `verl-research-vllm020` template. Single-GPU runs are forbidden in
   the research loop (16K response context + n=8 rollouts needs the headroom).
@@ -36,8 +40,8 @@ under `research/`. The project's north-star — what "done" means — is
 | The autonomous research loop (human operator manual) | `research/researcher_steps.md` |
 | Top-level playbooks (triage, orchestrator) | `research/.claude/playbooks/*.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
-| **Dense GRPO baseline launcher (the control)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
-| **Comm-eff method launcher (the default baseline)** | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+| **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
+| **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |

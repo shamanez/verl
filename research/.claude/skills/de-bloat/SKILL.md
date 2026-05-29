@@ -35,10 +35,9 @@ It does **not** commit or push — review `git status` and `runs/SUMMARY.md`, th
 ## Hard guards (it refuses rather than risk the baseline or live work)
 
 - **Never the baseline.** `baseline` / id `3` / `EXP-3` / `plans/baseline.md` are the
-  permanent dense control and are always left intact. (The baseline is now defined as
-  **comm-eff OFF**; its standalone `runs/baseline/` run dir was pruned and the dense proof
-  folded into `runs/SUMMARY.md` as EXP-14 `test1_cellA` — so there is no `runs/baseline/`
-  to protect, only the plan.)
+  permanent dense control and are always left intact. (The baseline is defined as
+  **comm-eff OFF** and keeps no standalone `runs/baseline/` run dir — so there is only
+  the plan to protect.)
 - **Never a live experiment.** Refuses if the id has a `RUNNING` or `PROVISIONED` ledger row
   (tear it down first — that's `vast-teardown`'s job).
 - **Never an undone experiment.** Refuses if the run dir exists but there is no
