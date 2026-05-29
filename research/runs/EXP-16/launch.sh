@@ -144,6 +144,11 @@ echo "=== env overrides: ${ENV[*]} ==="
 #   actor_rollout_ref.model.override_config.attn_implementation=sdpa
 # These are passed params, NOT a verl source edit. Empty by default => canonical
 # (flash-attn) config once flash_attn is available.
+# The canonical launcher hard-codes `touch /workspace/verl/runs/<NAME>/done.flag`
+# (its own default LOG dir). We override LOG to the metrics dir, so that path is
+# never created and the touch fails under `set -e`. Pre-create it so the launcher
+# exits 0, then mirror the flag into the metrics dir where run_sequence.sh looks.
+mkdir -p "/workspace/verl/runs/$EXPERIMENT_NAME"
 read -r -a _EXTRA <<< "${EXTRA_HYDRA_ARGS:-}"
 if (( ${#_EXTRA[@]} )); then
   echo "=== EXTRA_HYDRA_ARGS: ${_EXTRA[*]} ==="
@@ -151,5 +156,9 @@ if (( ${#_EXTRA[@]} )); then
 else
   env "${ENV[@]}" bash "$LAUNCHER"
 fi
+
+# Mirror the completion flag into the per-cell metrics dir (run_sequence.sh gates
+# the next cell on $RUN_ROOT/metrics/<NAME>/done.flag, NOT the launcher's path).
+touch "$CELL_LOG_DIR/done.flag"
 
 echo "=== EXP-16 cell $CELL done at $(date -u +%FT%TZ) ==="
