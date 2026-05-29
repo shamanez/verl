@@ -264,10 +264,63 @@ i.e. cell 4 packs the batch into ~2 micro-batches (coarser/dynamic bsz) vs cell 
 256 single-sequence micro-batches. Doesn't affect mask correctness (PRF is
 packing-invariant) but explains the counter magnitudes and cell 4's faster steps.
 
+## CELL 4 FINAL (done.flag) — converged 0.125 → 0.619 over 20 steps (~5×)
+Full reward by step: .125 .152 .139 [.136] .156 .183 .221 [.227] .261 .339 .343
+[.359] .430 .431 .471 [.481] .541 .602 .597 [.619]  ([ ]=clean step 4/8/12/16/20).
+All 5 clean steps fired on schedule with dense grad_norm ~0.39–0.43 and frozen mask
+counters (final 210 train / 119 old_logprob); 15 masked steps grad ~4.3–7.1.
+**Best result of the run.** The clean-step cadence is the decisive ingredient.
+
+## CELL 5 — FAILED (CUDA OOM, 0 steps logged) → SEQUENCE STOPPED
+`grpo_mask_channel_p0p9_rescale_anchor2_spectral2_20steps`, launched 22:52:28,
+`FAILED rc=1` 22:55:14. **`torch.OutOfMemoryError`** on GPU 0 (174/178 GiB used)
+in `update_actor` → `F.linear`. 0 `step:` lines logged ⇒ OOM hit during step 1's
+forward, *after* the anchor+spectral circuits initialised cleanly (the EXP-12
+spectral-storage line and the anchor config dict are both present). **Not a
+mask/determinism or divergence failure — a memory-provisioning failure on the
+heaviest cell.**
+
+Why cell 5 OOMs when 2 & 4 didn't — three new costs stack on GPU 0:
+1. **Dynamic bsz @ 98304 token budget** (`ppo_max_token_len_per_gpu=98304`, vs cell
+   2's 36864) → very large packed micro-batches (huge activations).
+2. **Anchor circuit**, `anchor_backward_isolation_mode=clone` → an extra cloned
+   backward (cadence 2, delay_K 2).
+3. **Spectral circuit**, `ema_device=gpu` + `svd_mode=full` + `basis_cache=cache`
+   (rank 8, max_targets 4) → GPU-resident EMA buffers + full SVD basis.
+
+Fix levers for the operator (then `run_rescale_sequence.sh 5` to resume):
+`spectral.ema_device=cpu`, lower `ppo_max_token_len_per_gpu` (→ ~36864),
+`spectral.svd_mode=lowrank` / smaller `max_targets`/`rank`, and/or enable
+param/optimizer offload. Sequencer halts on failure (`exit rc`), so **cell 6
+(dense reference) was NOT run.**
+
+## CURRENT STATE (post-cell-5 failure)
+- All 4 GPUs **0 MiB / 0%** — box idle. main_ppo process gone. Instance still UP.
+- Sequence halted at cell 5; cells 2 & 4 complete with done.flag; cells 5 & 6 pending.
+- Monitor `b1dyotpya` stays armed: will catch a cell-5 resume (new steps) or the
+  instance going down (SSH stream ends). Observation continues per directive.
+
+## SUMMARY (cells that ran)
+| cell | config | reward | grad_norm (masked) | divergence | mask consistency |
+|---|---|---|---|---|---|
+| no_rescale (pre-amend, superseded) | mask, no rescale | flat ~0.13 | ~2400–3500 | clip-saturated stall | train==old_lp, paths confined |
+| 2 | mask + rescale | 0.126 → 0.147 (10 st) | ~4.1–5.3 | stable, ~flat | ✓ |
+| 4 | mask + rescale + clean@4 | **0.125 → 0.619 (20 st)** | ~4.3–7.1 (clean ~0.4) | **stable, strong convergence** | ✓ + clean-freeze ✓ |
+| 5 | + anchor@2 + spectral@2 | — (OOM) | — | n/a | circuits init OK, then OOM |
+| 6 | dense reference | — (not run) | — | — | n/a |
+
+Primary directive (same mask per step/prompt across all forward passes):
+**VERIFIED** — source PRF has no pass-counter and is keyed on stable token identity;
+live counters show train==old_logprob every masked step with all non-eligible paths
+0; clean steps freeze the counters; behaviour (clip≈0.03, ppo_kl≈0; ratio≡1 on
+clean steps) matches a consistent old↔new mask. No desync, no divergence observed.
+
 ## Live log (running tally)
-- 22:10 cell 2 start; ~96 s/step; cell 2 done (10/10).
-- ~22:31 cell 4 launched (vLLM re-warm), step 1 at 22:33. clean_cadence=4 / 20 steps.
-  Clean step at 4 confirmed; at 22:47 → step 7/20, score climbing (0.22).
+- 22:10 cell 2 start (~96 s/step) → done (10/10), reward 0.126→0.147.
+- 22:41 cell 4 start → done (20/20) 22:52, reward 0.125→0.619; clean@4 verified.
+- 22:52 cell 5 start → **OOM, FAILED 22:55**, sequence STOPPED; cell 6 not run.
+- 22:55 box idle (GPUs 0%), instance UP. Push sent to operator. Watching for
+  resume / teardown.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
