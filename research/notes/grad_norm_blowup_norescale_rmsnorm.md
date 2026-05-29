@@ -169,7 +169,21 @@ norm, gradient-checkpoint recompute) or the RMSNorm math.
 **`grad_diag.py` — single-GPU bf16, raw CE:** dense 30.7, no-rescale 172850 (5620×),
 rescale 71.7 (2.3×), `grad-ckpt effect on masked ON/OFF = 1.000`.
 
-All three methods (GPU-bf16, CPU-fp32-full-model, elementary-autograd) agree:
+**`grad_psweep.py` — grad_norm vs mask-rate `p` × rescale (GPU bf16, cross-entropy / SFT-style, no FSDP):**
+| p | no-rescale (× dense) | rescale (× dense) |
+|---|---|---|
+| 0.1 | 36 (1.2×) | 26 (0.8×) |
+| 0.3 | 1507 (49×) | 25 (0.8×) |
+| 0.5 | 11190 (364×) | 31 (1.0×) |
+| 0.7 | 22648 (737×) | 39 (1.3×) |
+| 0.9 | 172850 (5621×) | 72 (2.3×) |
+- No-rescale explodes super-linearly with `p` (normal at p=0.1, 5621× at p=0.9); rescale
+  stays ~normal (0.8–2.3× dense) across the WHOLE range. This is the SFT regime (CE loss,
+  no FSDP) — so a supervised mask demo with a normal grad norm simply used rescale, or a
+  low `p`, or fewer/post-norm boundaries. "SFT vs GRPO" and "FSDP vs not" are NOT the
+  variable; rescale + p + boundary placement are.
+
+All four methods (GPU-bf16, CPU-fp32-full-model, elementary-autograd, p-sweep) agree:
 forward/backward mask is consistent (not FSDP, not checkpointing, not in-place, not
 fusion); the blow-up is RMSNorm's `1/RMS` backward × the no-rescale residual-RMS
 collapse; rescale restores the RMS and removes it.
