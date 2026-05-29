@@ -201,9 +201,56 @@ larger micro-batch / dynamic bsz (mask is packing-invariant so numerics shouldn'
 move), but that's an operator call — not changing a live run. Whole 4-cell sequence
 ≈ 2 h.
 
+## CELL 4 (running) — `rescale_clean_every4_20steps` — steps 1–7
+
+| step | entropy | grad_norm | pg_clipfrac | clean_steps | train/old_lp (cum) | score/mean |
+|---|---|---|---|---|---|---|
+| 1 | 5.920 | 4.997 | 0.0237 | 0 | 14 / 7 | 0.125 |
+| 2 | 5.927 | 4.324 | 0.0240 | 0 | 28 / 21 | 0.152 |
+| 3 | 5.925 | 4.943 | 0.0263 | 0 | 42 / 35 | 0.139 |
+| **4** | **0.385** | **0.394** | **0.00018** | **1** | **42 / 35 (frozen)** | 0.136 |
+| 5 | 5.923 | 4.482 | 0.0260 | 1 | 56 / 42 | 0.156 |
+| 6 | 5.929 | 4.910 | 0.0323 | 1 | 70 / 49 | 0.183 |
+| 7 | 5.924 | 4.746 | 0.0293 | 1 | 84 / 56 | **0.221** |
+
+### FINDING 1 — clean-step mechanism VERIFIED (step 4)
+On the clean step the mask counters **freeze** (train/old_logprob stay 42/35 — zero
+fires), grad_norm drops to **0.394 = true dense** (~12× below the masked ~4.7),
+and pg_clipfrac→2e-4 / ppo_kl→3e-5 because *both* old-logprob and train forwards
+are unmasked ⇒ importance ratio ≡ 1. Step 5 returns cleanly to the masked regime.
+This is exactly the EXP-14 contract: every 4th step takes an unclipped AdamW step
+on the genuine dense gradient.
+
+### FINDING 2 — the "entropy collapse" is a forward-corruption tell, NOT divergence
+`actor/entropy` ≈ **5.92 on masked steps** but **0.385 on the clean step** (step 4),
+then recovers to 5.92 at step 5. The clean step is the unmasked forward, so **0.385
+is the TRUE policy entropy**; the 5.92 is the entropy of the *masked* forward's
+output distribution. Masking 90% of channels at 7 boundaries (+10× rescale)
+flattens the logits enough to inflate apparent entropy ~15×. Direct evidence that
+the masked forward sits far from the true policy — consistent with the masked
+gradient norm being ~12× dense even after rescale: **constant rescale fixes the
+SCALE; the masked forward's distribution/direction stays heavily perturbed**
+("scale not correlation"). entropy_coeff=0, so this never enters the loss — but it
+is a clean quantitative handle on how much the mask distorts the forward.
+
+### FINDING 3 — cell 4 converging more strongly than cell 2
+score/mean 0.125 → 0.221 over 7 steps (cell 2 reached only 0.147 by step 10). Could
+be partly batch noise, but the trend is clearly up and steeper. Hypothesis to keep
+testing through step 20: the periodic dense (clean) step every 4 re-anchors the
+optimizer to the true gradient and improves convergence vs pure-masked (cell 2).
+Mask consistency on masked steps holds throughout (train & old_logprob both grow;
+frozen only on the clean step).
+
+### Note on batching difference
+Cell 4's mask-fire counts (~14 train/step) are ~128× smaller than cell 2's (~1792),
+i.e. cell 4 packs the batch into ~2 micro-batches (coarser/dynamic bsz) vs cell 2's
+256 single-sequence micro-batches. Doesn't affect mask correctness (PRF is
+packing-invariant) but explains the counter magnitudes and cell 4's faster steps.
+
 ## Live log (running tally)
-- 22:10 cell 2 start; ~96 s/step; **22:2x cell 2 done (10/10)**.
+- 22:10 cell 2 start; ~96 s/step; cell 2 done (10/10).
 - ~22:31 cell 4 launched (vLLM re-warm), step 1 at 22:33. clean_cadence=4 / 20 steps.
+  Clean step at 4 confirmed; at 22:47 → step 7/20, score climbing (0.22).
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
