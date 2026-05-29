@@ -1,41 +1,67 @@
 #!/usr/bin/env bash
 # vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 #
-# COMMUNICATION-EFFICIENT GRPO BASELINE — Qwen2.5-1.5B-Instruct on GSM8K,
-# multi-GPU (4..8), FSDP + vLLM rollout. Mirrors the dense baseline launcher
+# COMMUNICATION-EFFICIENT GRPO — Qwen2.5-1.5B-Instruct on GSM8K, multi-GPU
+# (4..8), FSDP + vLLM rollout. Mirrors the dense baseline launcher
 # (vast_baseline_qwen25_1p5b_grpo_gsm8k.sh) one-for-one in training shape so
-# the two can be compared apples-to-apples; the ONLY differences are the
-# communication-efficient method's hydra knobs (activation mask + anchor
-# circuit + spectral correction) and the no-KL / no-entropy objective.
+# the two compare apples-to-apples; the ONLY differences are the
+# communication-efficient method's hydra knobs and the no-KL / no-entropy
+# objective.
 #
-# Knob defaults are the verified PASS configuration for the comm-eff method
-# at smoke scale; this launcher is THE single source of truth for the
-# comm-eff baseline. Do not duplicate it into runs/*/launch.sh.
+# ===========================================================================
+# THE "moment of truth" launcher for the next runs. EVERY circuit is an
+# independent env toggle so the full ablation grid is one launcher:
+#
+#   comm-eff master ........ COMM_EFF_ENABLED          (true)   off => byte-identical dense
+#   masking ................ COMM_EFF_MASK_ENABLED     (true)
+#   rescale ................ COMM_EFF_MASK_RESCALE     (true)   inverted-dropout h*mask/(1-p)
+#   granularity ............ COMM_EFF_MASK_GRANULARITY (channel) channel | element
+#   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)  full (unmasked) grad every N steps
+#   anchor ................. COMM_EFF_ANCHOR_ENABLED   (false)
+#   spectral correction .... COMM_EFF_SPECTRAL_ENABLED (false)
+#
+# Defaults encode EXP-14's findings (GitHub #14, verdict runs/EXP-14/verdict.md):
+#   * granularity=channel (per-channel mask) — packing-invariant ⇒ EXACT
+#     cross-pass IS consistency, the only no-plumbing route (per-element would
+#     need per-token keying). DEFAULT.
+#   * rescale=true — inverted-dropout h*mask/(1-p) preserves E[h] and tames the
+#     mask's magnitude-collapse grad_norm explosion (paper-scale 771 -> ~1.5).
+#     DEFAULT ON.  ⚠ rescale fixes grad_norm but EXP-14 showed it does NOT, by
+#     itself, recover LEARNING at p=0.9 (val stayed flat). The mask-rate sweep
+#     (p=0.9->0.5->0.1) is the open question — see GitHub #15.
+#   * clean_cadence=0 (OFF). The periodic full-(unmasked)-gradient step is the
+#     NAIVE cadence method; EXP-14 proved it is NOT sustainable — masked steps
+#     still explode and PPO pg_clipfrac climbs toward saturation (0.26->0.44),
+#     which kills learning. Opt-in knob only, do not ship it as the method.
+#   * anchor + spectral OFF — start from the mask-only path; layer these on
+#     only after a masked config is shown to actually LEARN (val/score, not
+#     just a bounded grad_norm).
+# ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
-# template (which clones shamanez/verl @ vast-ai-workload into /workspace/verl
-# and pip-installs verl editable). No scp'd scripts; this file IS the
-# launcher, lives in the fork at examples/grpo_trainer/, and you iterate by
-# editing locally, committing+pushing to vast-ai-workload, then
+# template (clones shamanez/verl @ vast-ai-workload into /workspace/verl and
+# pip-installs verl editable). This file IS the launcher; iterate by editing
+# locally, committing+pushing to vast-ai-workload, then
 # `git pull && bash <thisfile>` on the box.
 #
 # Prereqs on the box:
 #   1. /workspace/verl checked out from shamanez/verl @ vast-ai-workload
 #   2. verl pip-installed --no-deps -e .
-#   3. ~/.config/verl-research/secrets.env present, containing ONLY HF_TOKEN
-#      and WANDB_API_KEY.
+#   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: multi-GPU only. Hard-fails outside 4..8 GPUs. Note: at the
-# default baseline-scale rollout shape (TRAIN_BATCH=128, ROLLOUT_N=8,
-# MAX_RESPONSE=16384), the comm-eff anchor clone (~3 GB per rank) competes
-# with vLLM and FSDP activations for HBM. 4×H200 is tight and may OOM on
-# the actor MLP forward; 8×H100/H200 is the recommended provisioning shape.
-# If forced to 4×H200, halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432 via env.
+# Hardware: multi-GPU only (4..8). With anchor OFF (default) the ~3 GB anchor
+# clone is NOT allocated, so 4×H200 fits the restored baseline knobs
+# (mini=64, wedge=36864, util=0.4) comfortably. Only re-enabling the anchor
+# (COMM_EFF_ANCHOR_ENABLED=true) brings the clone back — then prefer 8×GPU or
+# halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432.
 #
-# Iteration loop (e.g. tuning compression knobs):
-#   laptop: edit this file
-#   laptop: git commit -am "<note>" && git push origin vast-ai-workload
-#   box:    cd /workspace/verl && git pull && bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+# Ablation examples:
+#   # mask-only, no rescale (reproduce the explosion):
+#   COMM_EFF_MASK_RESCALE=false EXPERIMENT_NAME=ce_mask_only bash <thisfile>
+#   # dense control via the same launcher:
+#   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
+#   # mask-rate sweep point:
+#   COMM_EFF_MASK_P=0.5 EXPERIMENT_NAME=ce_p0p5 bash <thisfile>
 #
 # See examples/grpo_trainer/VAST_README.md for the broader Vast.ai pattern.
 set -euo pipefail
@@ -72,21 +98,16 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — multi-GPU MANDATE (4..8). Recommend 8 for the anchor clone
-#    + 16K context envelope; 4 is tight and will need a wedge halving.
+# 2. GPU count — multi-GPU MANDATE (4..8).
 # ---------------------------------------------------------------------------
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
 if (( DETECTED_GPUS < 4 || DETECTED_GPUS > 8 )); then
   echo "FATAL: this recipe requires 4..8 GPUs; detected $DETECTED_GPUS" >&2
-  echo "       (1.5B GRPO with 16K response + ~3 GB anchor clone needs the headroom)" >&2
+  echo "       (1.5B GRPO with 16K response + n=8 rollouts needs the headroom)" >&2
   exit 1
 fi
 export NGPUS_PER_NODE="$DETECTED_GPUS"
 echo "=== detected $NGPUS_PER_NODE GPUs ($(nvidia-smi -L | head -1)) ==="
-if (( DETECTED_GPUS < 8 )); then
-  echo "WARN: only $DETECTED_GPUS GPUs detected; comm-eff anchor clone may OOM with the default" >&2
-  echo "      PPO_MAX_TOKEN_LEN_PER_GPU=36864. Halve to 18432 if you hit an OOM." >&2
-fi
 
 # ---------------------------------------------------------------------------
 # 3. ulimit + cgroup probe.
@@ -121,9 +142,9 @@ echo "=== test:  $(python3 -c "import pyarrow.parquet as p; print(p.read_table('
 
 # ---------------------------------------------------------------------------
 # 5. Model + training config — matches the dense baseline launcher 1:1
-#    EXCEPT the objective is no-KL no-entropy (the communication-efficient
-#    method's design) and `actor.fsdp_config.use_orig_params=true` (so the
-#    spectral correction hook sees full 2D Tensor gradients post-FSDP-reduce).
+#    EXCEPT the objective is no-KL no-entropy (the method's design) and
+#    `actor.fsdp_config.use_orig_params=true` (so the optional spectral hook,
+#    when enabled, sees full 2D Tensor gradients post-FSDP-reduce).
 # ---------------------------------------------------------------------------
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 
@@ -142,15 +163,15 @@ export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 
-# GRPO objective — no KL, no entropy (communication-efficient method design).
+# GRPO objective — no KL, no entropy (communication-efficient method design;
+# this matches the dense baseline, which is also no-KL, for apples-to-apples).
 export ACTOR_LR="${ACTOR_LR:-1e-6}"
 export USE_KL_LOSS="${USE_KL_LOSS:-False}"
 export USE_KL_IN_REWARD="${USE_KL_IN_REWARD:-False}"
 export KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}"   # unused when USE_KL_LOSS=False
 export ENTROPY_COEFF="${ENTROPY_COEFF:-0}"
 
-# Run schedule — match baseline (2 epochs over 7473 prompts ⇒ ~116 batches at
-# TRAIN_BATCH=128, so total_training_steps=100 fits inside one ledger of data).
+# Run schedule — match baseline.
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
 export SAVE_FREQ="${SAVE_FREQ:-50}"
 export TEST_FREQ="${TEST_FREQ:-25}"
@@ -162,50 +183,69 @@ export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_comm_eff_baseline}"
 
 # Token budget per micro-batch for dynamic batching.
-# Default = baseline value (36864). On 4×H200 with the anchor clone, halve
-# this to 18432 via env to fit the envelope.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-36864}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 
 # ---------------------------------------------------------------------------
-# 6. Communication-efficient method — hydra knobs.
+# 6. Communication-efficient method — hydra knob surface (see header).
+#    Every circuit is an independent env toggle. Defaults = the mask-only
+#    "comm-eff baseline" (mask + rescale + per-channel; cadence/anchor/spectral
+#    OFF). Field names mirror verl/trainer/config/actor/actor.yaml exactly —
+#    do NOT reference a knob absent from that schema (Hydra struct-mode rejects
+#    unknown keys regardless of enabled flags; that bit us on clean_cadence).
 # ---------------------------------------------------------------------------
-# Master switch + the three circuits (mask / anchor / spectral).
-# Defaults are the verified-PASS smoke configuration. Override via env.
-export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"
-export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
-export COMM_EFF_SPECTRAL_ALPHA="${COMM_EFF_SPECTRAL_ALPHA:-0.5}"
-export COMM_EFF_SPECTRAL_TAU="${COMM_EFF_SPECTRAL_TAU:-0.01}"
-export COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.9}"
-export COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-gpu}"
-export COMM_EFF_SPECTRAL_SVD_MODE="${COMM_EFF_SPECTRAL_SVD_MODE:-full}"
-export COMM_EFF_SPECTRAL_BASIS_CACHE="${COMM_EFF_SPECTRAL_BASIS_CACHE:-cache}"
-export COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:-4}"
-export COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE="${COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE:-false}"
-export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
-export COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-5}"
+COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
+# --- activation mask ---
+COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
+COMM_EFF_MASK_GRANULARITY="${COMM_EFF_MASK_GRANULARITY:-channel}"     # channel (default) | element (legacy)
+COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
+COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
+COMM_EFF_MASK_CONSISTENT="${COMM_EFF_MASK_CONSISTENT:-true}"          # consistent_across_forwards (no-op under channel)
+COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
+COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
+# --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation, EXP-14). ---
+COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
+# --- anchor circuit (OFF by default) ---
+COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-false}"
+COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
+# --- spectral correction (OFF by default) ---
+COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-false}"
+COMM_EFF_SPECTRAL_ALPHA="${COMM_EFF_SPECTRAL_ALPHA:-0.5}"
+COMM_EFF_SPECTRAL_TAU="${COMM_EFF_SPECTRAL_TAU:-0.01}"
+COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.9}"
+COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-gpu}"
+COMM_EFF_SPECTRAL_SVD_MODE="${COMM_EFF_SPECTRAL_SVD_MODE:-full}"
+COMM_EFF_SPECTRAL_BASIS_CACHE="${COMM_EFF_SPECTRAL_BASIS_CACHE:-cache}"
+COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:-4}"
+COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE="${COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE:-true}"
 
-LOG="${LOG:-/workspace/verl/runs/qwen25_1p5b_grpo_gsm8k_comm_eff_baseline/train.log}"
+if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
+  echo "WARN: anchor enabled -> ~3 GB clone/rank is back; prefer 8×GPU or halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432." >&2
+fi
+
+LOG="${LOG:-/workspace/verl/runs/${EXPERIMENT_NAME}/train.log}"
 mkdir -p "$(dirname "$LOG")"
 
 cat <<EOF
-=== launching communication-efficient GRPO baseline ===
+=== launching communication-efficient GRPO ===
   model:               $MODEL_PATH
   GPUs:                $NGPUS_PER_NODE
   rollout TP × N:      ${ROLLOUT_TP} × ${ROLLOUT_N}
   vLLM mem util:       $ROLLOUT_GPU_MEM_UTIL
-  train batch:         $TRAIN_BATCH_SIZE prompts (× $ROLLOUT_N rollouts = $(( TRAIN_BATCH_SIZE * ROLLOUT_N )) sequences/step)
+  train batch:         $TRAIN_BATCH_SIZE prompts (× $ROLLOUT_N = $(( TRAIN_BATCH_SIZE * ROLLOUT_N )) seqs/step)
   ppo mini batch:      $PPO_MINI_BATCH_SIZE
   ppo max tokens/GPU:  $PPO_MAX_TOKEN_LEN_PER_GPU (dynamic_bsz=True)
   prompt / response:   $MAX_PROMPT_LENGTH / $MAX_RESPONSE_LENGTH
-  epochs:              $TOTAL_EPOCHS  (save every $SAVE_FREQ, validate every $TEST_FREQ, total steps cap $TOTAL_TRAINING_STEPS)
+  epochs:              $TOTAL_EPOCHS  (save $SAVE_FREQ, validate $TEST_FREQ, total steps $TOTAL_TRAINING_STEPS)
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
-  mask:                p=$COMM_EFF_MASK_P, mask_recompute=$COMM_EFF_MASK_RECOMPUTE
-  anchor:              cadence=$COMM_EFF_ANCHOR_CADENCE, delay_K=$COMM_EFF_ANCHOR_DELAY_K
-  spectral:            alpha=$COMM_EFF_SPECTRAL_ALPHA, tau=$COMM_EFF_SPECTRAL_TAU, beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC, max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
-                       ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE, svd_mode=$COMM_EFF_SPECTRAL_SVD_MODE, basis_cache=$COMM_EFF_SPECTRAL_BASIS_CACHE, seed_anchor_cache=$COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE
+  comm_eff master:     $COMM_EFF_ENABLED
+  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P granularity=$COMM_EFF_MASK_GRANULARITY rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE consistent=$COMM_EFF_MASK_CONSISTENT seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
+  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable, EXP-14)
+  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE
+  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -213,7 +253,8 @@ EOF
 
 # ---------------------------------------------------------------------------
 # 7. Launch — reuse upstream's per-recipe script for the verbatim main_ppo
-#    invocation, overriding the OOM-relevant + comm-eff Hydra knobs.
+#    invocation, overriding the OOM-relevant + comm-eff Hydra knobs. Every
+#    enabled flag comes from env so the full ablation grid is a one-liner.
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
@@ -233,11 +274,19 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.entropy_coeff="$ENTROPY_COEFF" \
   trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
   trainer.val_before_train="$VAL_BEFORE_TRAIN" \
-  actor_rollout_ref.actor.comm_eff.enabled=true \
-  actor_rollout_ref.actor.comm_eff.mask.enabled=true \
+  actor_rollout_ref.actor.comm_eff.enabled="$COMM_EFF_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.mask.enabled="$COMM_EFF_MASK_ENABLED" \
   actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
+  actor_rollout_ref.actor.comm_eff.mask.granularity="$COMM_EFF_MASK_GRANULARITY" \
+  actor_rollout_ref.actor.comm_eff.mask.rescale="$COMM_EFF_MASK_RESCALE" \
   actor_rollout_ref.actor.comm_eff.mask.mask_recompute="$COMM_EFF_MASK_RECOMPUTE" \
-  actor_rollout_ref.actor.comm_eff.spectral.enabled=true \
+  actor_rollout_ref.actor.comm_eff.mask.consistent_across_forwards="$COMM_EFF_MASK_CONSISTENT" \
+  actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
+  actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
+  actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.spectral.alpha="$COMM_EFF_SPECTRAL_ALPHA" \
   actor_rollout_ref.actor.comm_eff.spectral.tau="$COMM_EFF_SPECTRAL_TAU" \
   actor_rollout_ref.actor.comm_eff.spectral.beta_anc="$COMM_EFF_SPECTRAL_BETA_ANC" \
@@ -246,11 +295,8 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.svd_mode="$COMM_EFF_SPECTRAL_SVD_MODE" \
   actor_rollout_ref.actor.comm_eff.spectral.basis_cache="$COMM_EFF_SPECTRAL_BASIS_CACHE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
-  actor_rollout_ref.actor.comm_eff.anchor.enabled=true \
-  actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
-  actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
   "$@" \
   2>&1 | tee "$LOG"
 
-touch /workspace/verl/runs/qwen25_1p5b_grpo_gsm8k_comm_eff_baseline/done.flag
+touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
 echo "=== done at $(date -u +%FT%TZ) ==="

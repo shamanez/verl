@@ -7,8 +7,23 @@ artifacts have been pruned to keep the repo lean.
 
 | id | what | result | dir | launcher |
 |---|---|---|---|---|
-| **baseline** | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the control) | `val/test_score` 0.087 → 0.789 over 100 steps, 4×H200 | `runs/baseline/` | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
-| **communication-baseline** | Comm-eff method smoke: PRF mask `p=0.9` on both gradient-feeding forwards, hookless K-stale anchor (cadence=5/delay=5), two-sided Tikhonov spectral correction (`α=0.5, τ=0.01, β_anc=0.9`); no KL, no entropy | PASS 20-step smoke; all comm-eff guards held; mean(steps 11-20)=0.125 vs mean(steps 1-10)=0.069 (+82%); `||dM_anchor||` evolves 0.013→0.49 across 10 anchor fires | `runs/communication-baseline/` | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+| **baseline** | Dense GRPO (the control), Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified, **no-KL no-entropy** (pg_loss only). EXP-14 reconfirmed no-KL dense learns cleanly (val 0.083 → 0.721 in 10 steps); launcher standardized to no-KL. | `val/test_score` 0.087 → 0.789 over 100 steps, 4×H200 | `runs/baseline/` | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+| **communication-baseline** | Comm-eff **smoke-scale** reference (historical, old config): PRF mask `p=0.9` + anchor (cadence=5/delay=5) + two-sided Tikhonov spectral (`α=0.5, τ=0.01, β_anc=0.9`), no-KL. ⚠️ At paper scale **EXP-14 (#14)** showed the masked path does NOT yet learn: step-1 grad_norm explosion (~771) = the mask's **magnitude collapse** (h*mask, no rescale, RMS→0.32×), tamed by inverted-dropout **`rescale`** (771→1.5) but val stays flat; naive `clean_cadence` is unsustainable (PPO `pg_clipfrac` saturates 0.26→0.44). Launcher now **DEFAULTS to mask + rescale + per-channel** (anchor/spectral OFF, cadence off) as the #15 mask-rate-sweep starting point. | PASS 20-step smoke (old config); paper-scale learning unresolved → #15 | `runs/communication-baseline/` | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+
+## Comm-eff knob surface (EXP-14, in `vast_comm_eff_baseline_*.sh`)
+
+All independently env-toggleable; defaults = the mask-only comm-eff baseline.
+
+| knob | default | meaning |
+|---|---|---|
+| `COMM_EFF_ENABLED` | true | master switch (false ⇒ byte-identical dense) |
+| `COMM_EFF_MASK_ENABLED` | true | activation mask on boundary blocks |
+| `COMM_EFF_MASK_P` | 0.9 | masked fraction (sweep 0.9→0.5→0.1, #15) |
+| `COMM_EFF_MASK_GRANULARITY` | channel | per-channel (packing-invariant ⇒ cross-pass IS consistency) vs `element` (legacy) |
+| `COMM_EFF_MASK_RESCALE` | true | inverted-dropout `h*mask/(1-p)` — tames magnitude-collapse grad_norm (NOT a learning fix alone) |
+| `COMM_EFF_CLEAN_CADENCE` | 0 (OFF) | naive periodic full-(unmasked)-grad step — **unsustainable** (PPO clip saturation), opt-in only |
+| `COMM_EFF_ANCHOR_ENABLED` | false | K-stale anchor circuit (re-enable later; ~3 GB clone) |
+| `COMM_EFF_SPECTRAL_ENABLED` | false | two-sided Tikhonov spectral correction (re-enable later) |
 
 ## Folded history (artifacts pruned, durable record below)
 

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # vast_baseline_qwen25_1p5b_grpo_gsm8k.sh
 #
-# REAL GRPO BASELINE — Qwen2.5-1.5B-Instruct on GSM8K, multi-GPU (4..8),
-# FSDP + vLLM rollout, 2 epochs over the train split, eval on the test split.
-# Not a smoke test. The acceptance metric is pass@1 improvement on test.
+# REAL GRPO BASELINE (the DENSE CONTROL) — Qwen2.5-1.5B-Instruct on GSM8K,
+# multi-GPU (4..8), FSDP + vLLM rollout, 2 epochs over the train split, eval
+# on the test split. Not a smoke test. Acceptance = pass@1 improvement on test.
+#
+# Objective: NO KL, no entropy (pg_loss only). EXP-14 confirmed this learns
+# cleanly and it matches the comm-eff method's no-KL objective, so dense-vs-
+# comm-eff is apples-to-apples. This is THE reference dense run.
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
 # template (which clones shamanez/verl @ vast-ai-workload into /workspace/verl
@@ -133,9 +137,14 @@ export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 
-# GRPO objective config.
+# GRPO objective — NO KL, no entropy. EXP-14 (#14) showed no-KL dense GRPO
+# learns cleanly (val 0.083 -> 0.721 in 10 steps); the comm-eff method is
+# evaluated no-KL, so the dense control is no-KL too for an apples-to-apples
+# comparison. This is THE reference dense run for the comm-eff project.
 export ACTOR_LR="${ACTOR_LR:-1e-6}"
-export KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}"
+export USE_KL_LOSS="${USE_KL_LOSS:-False}"
+export USE_KL_IN_REWARD="${USE_KL_IN_REWARD:-False}"
+export KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}"   # unused when USE_KL_LOSS=False
 export ENTROPY_COEFF="${ENTROPY_COEFF:-0}"
 
 # Run schedule.
@@ -169,6 +178,7 @@ cat <<EOF
   ppo max tokens/GPU/micro: $PPO_MAX_TOKEN_LEN_PER_GPU (dynamic_bsz=True)
   prompt / response: $MAX_PROMPT_LENGTH / $MAX_RESPONSE_LENGTH
   epochs:           $TOTAL_EPOCHS  (save every $SAVE_FREQ, validate every $TEST_FREQ)
+  objective:        pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   wandb:            $PROJECT_NAME / $EXPERIMENT_NAME
   log:              $LOG
 === launching ===
@@ -190,6 +200,9 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.actor.use_kl_loss="$USE_KL_LOSS" \
+  algorithm.use_kl_in_reward="$USE_KL_IN_REWARD" \
+  actor_rollout_ref.actor.entropy_coeff="$ENTROPY_COEFF" \
   "$@" \
   2>&1 | tee "$LOG"
 
