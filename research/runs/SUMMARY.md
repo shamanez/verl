@@ -37,7 +37,7 @@ modes are **bias** and **variance**.
 |---|---|
 | mask only, **no rescale** (p=0.9) | **biased mask.** With no `1/(1-p)`, `E[h⊙mask] = (1-p)·h` — the masked forward sits systematically off-distribution, so the GRPO importance ratio is corrupted. The harm is the bias: a direction error Adam cannot correct → a stalled trajectory with a non-vanishing floor. (Dropping rescale makes activations *shrink*, not grow.) |
 | **`rescale`** (inverted-dropout `h⊙mask/(1-p)`) | **a knob, not a fix.** Its only job is to restore `E[h̃] = h` — an *unbiased* mask. It trades bias for variance (`p/(1-p)`): necessary for correctness, not sufficient. Plain masked GRPO with rescale still did not learn in a short run (val flat). The variance is what the anchor + spectral + grad-clip machinery exists to tame. |
-| `consistent_across_forwards` (same seed across forwards) | refuted on its own — the per-element mask is positional and the two forwards pack tokens differently, so equal seed ≠ equal mask. Cross-pass consistency is instead structural via per-channel masking. |
+| `consistent_across_forwards` (same seed across forwards) | refuted on its own — keying the mask positionally over each forward's packing gave a token a different mask in the two differently-packed forwards, so equal seed ≠ equal mask. Cross-pass consistency is now achieved by keying the per-element mask on each token's stable `(sample_id, position_id)`; this knob was removed. |
 | naive `clean_cadence` (periodic unmasked step) | **not sustainable** — the masked steps stay corrupted and the PPO clip fraction climbs toward saturation, so clipped tokens stop contributing gradient and learning dies; any early score rise is the clean steps alone. |
 
 **Open question:** can masked GRPO learn at all, and at what mask rate? Next is a
@@ -55,8 +55,7 @@ sweep from.
 | `COMM_EFF_ENABLED` | true | master switch (false ⇒ byte-identical dense) |
 | `COMM_EFF_MASK_ENABLED` | true | activation mask on pipeline-boundary blocks |
 | `COMM_EFF_MASK_P` | 0.9 | masked fraction (sweep target) |
-| `COMM_EFF_MASK_GRANULARITY` | channel | per-channel (packing-invariant ⇒ identical mask across forwards) vs `element` (legacy) |
-| `COMM_EFF_MASK_RESCALE` | true | inverted-dropout `h*mask/(1-p)` — keeps grad_norm at dense order (not a learning fix on its own) |
+| `COMM_EFF_MASK_RESCALE` | true | inverted-dropout `h*mask/(1-p)` — restores `E[h̃]=h` (unbiased mask; not a learning fix on its own) |
 | `COMM_EFF_CLEAN_CADENCE` | 0 (OFF) | naive periodic unmasked step — unsustainable, opt-in only |
 | `COMM_EFF_ANCHOR_ENABLED` | false | K-stale anchor circuit (layer on later) |
 | `COMM_EFF_SPECTRAL_ENABLED` | false | two-sided Tikhonov spectral correction (layer on later) |

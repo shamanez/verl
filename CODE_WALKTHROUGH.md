@@ -65,7 +65,7 @@ launcher `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 | `verl/workers/comm_eff/spectral_filter.py` | `SpectralFilter`: EMA, full/lowrank SVD, Tikhonov, two-sided projection, α-blend; pure 2D-matrix logic, CPU-unit-testable |
 | `verl/workers/engine/base.py` | `train_batch`: anchor refresh → fwd/bwd → grad correction → optimizer step; base no-op stubs |
 | `verl/workers/engine/fsdp/transformer_impl.py` | the **only** backend overriding the two comm-eff hooks (clone-no-hook anchor refresh; `summon_full_params` → per-target full-tensor spectral correction → write-back) |
-| `verl/workers/engine_workers.py` | `update_actor` stamps `mask_active=True` + `path_tag="train"`; the other entrypoints stamp a non-train tag so the mask hook's guard confines masking to actor-train |
+| `verl/workers/engine_workers.py` | `update_actor` stamps `mask_active=True` + `path_tag="train"` and a stable per-row `comm_eff_sample_id` on the batch (also in `compute_log_prob`) so the mask keys on each token's `(sample_id, position_id)`; the other entrypoints stamp a non-train tag so the mask hook's guard confines masking to actor-train |
 | `tests/workers/comm_eff/` | CPU unit tests: PRF determinism / mask ratio / train-only confinement; spectral α-blend / projection / determinism; anchor staleness / isolation regression |
 
 ---
@@ -89,7 +89,10 @@ RayPPOTrainer.fit() — per step
       │       extract RAW target grads → feed EMA (M_anchor), restore live module,
       │       empty_cache() for vLLM sleep hygiene
       ├─ [FAST]    forward_backward_batch         ActivationMasker hooks fire at
-      │                                           boundary layers iff path_tag=="train"
+      │                                           boundary layers iff path_tag=="train";
+      │                                           per micro-batch, prepare_model_inputs
+      │                                           sets the token-aligned (sample_id,
+      │                                           position_id) PRF context
       ├─ [SPECTRAL] _maybe_comm_eff_grad_correction
       │     summon_full_params (grads FSDP-reduced) → per 2D target:
       │       G_proj = α·G_mask + (1-α)·G_filt → write back into p.grad
@@ -137,6 +140,10 @@ Out of scope (excluded by the method spec):
   `CommEffMaskConfig.rescale`.)
 
 Known caveats:
+- **SP=1 / rmpad only for masking** — the per-element mask aligns its
+  `(sample_id, position_id)` key to the rmpad token axis; Ulysses
+  `ulysses_sequence_parallel_size>1` and the non-rmpad (padded) path raise
+  `NotImplementedError` (the comm-eff launcher runs SP=1 + rmpad).
 - **FSDP1 mandate** — anchor + spectral hooks assume FSDP1 +
   `use_orig_params=true`; FSDP2 (`fully_shard`) is not exercised.
 - **Anchor clone memory** — one cached ~3 GB clone for 1.5B in bf16; a deep
@@ -153,6 +160,7 @@ Known caveats:
 | mixed `Tensor`/`DTensor` in clone state-load | FSDP1+use_orig_params surfaces DTensors — the per-param `.full_tensor()` path in `build_anchor_module` |
 | vLLM `sleep_replicas` memory assertion | anchor clone not released — verify `torch.cuda.empty_cache()` in the refresh `finally` |
 | mask hook fires off-train | a path-tag stamp is missing on that entrypoint (`engine_workers.py`) |
+| `comm_eff mask token-axis mismatch` / `comm_eff_sample_id missing` | the stable per-row id wasn't stamped before micro-batching, or SP>1/non-rmpad packing — see `engine_workers._comm_eff_stamp_sample_ids` and the SP=1 guard in `transformer_impl.py` |
 | `np.mean` crash on metric reduction | a string leaked into `meta_info["metrics"]` — keep comm_eff values numeric |
 | anchor counter stays 0 with `enabled=true` | `_maybe_comm_eff_anchor_refresh` not called — `engine/base.py::train_batch` |
 

@@ -11,8 +11,8 @@
 This is **not** vanilla verl. It's a private research fork building a
 **communication-efficient, pipeline-parallel verl GRPO trainer**: the *training*
 path (activation + gradient traffic across pipeline-stage boundaries) runs under
-a communication-efficient method — activation masking at the boundaries, with
-optional anchor + spectral correction. Rollouts may come from ordinary,
+a communication-efficient method — per-element (per-token, per-dimension)
+activation masking at the boundaries, with optional anchor + spectral correction. Rollouts may come from ordinary,
 non-pipeline-parallel verl + vLLM. Trained on **Qwen2.5-1.5B-Instruct + GSM8K**.
 With the method disabled, training is byte-identical to upstream verl. The
 project's goal is captured in

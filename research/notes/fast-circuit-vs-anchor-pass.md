@@ -71,11 +71,15 @@ def forward_hook(module, args, output):
         return output                              # GUARD 5: anchor path skipped here
     if state.path_tag not in mask_eligible_tags(state):
         return output                              # GUARD: confinement (rollout/ref/val/etc)
-    mask = _prf_bernoulli(state.seed, state.substep, state.layer_idx, output.shape, p=state.mask.p)
+    # per-(token, dim) mask keyed on each token's STABLE identity (sample_id,
+    # position_id) + layer + global_step — packing-invariant, no substep/positional key.
+    mask = prf_token_mask(masker.sample_ids, masker.position_ids,
+                          layer_idx=layer_idx, global_step=masker.global_step,
+                          base_seed=masker.base_seed, hidden_size=output.shape[-1],
+                          p=masker.p)
     state.mask_applications += 1
     state.mask_applications_per_path[state.path_tag] += 1
-    state.mask_ratio_running.update(mask.float().mean().item())
-    return output * mask                           # h_tilde = h * mask    (NO 1/(1-p) rescale)
+    return output * mask                           # h_tilde = h * mask (rescale knob → *1/(1-p), default off)
 ```
 
 Three gates have to be true for the mask to fire:

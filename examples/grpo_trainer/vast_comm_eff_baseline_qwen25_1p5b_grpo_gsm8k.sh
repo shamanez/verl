@@ -64,7 +64,7 @@
 # halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432.
 #
 # Ablation examples:
-#   # mask-only, no rescale (reproduce the explosion):
+#   # mask-only, no rescale (the biased-mask A/B point):
 #   COMM_EFF_MASK_RESCALE=false EXPERIMENT_NAME=ce_mask_only bash <thisfile>
 #   # dense control via the same launcher:
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>

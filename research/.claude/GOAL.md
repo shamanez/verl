@@ -10,8 +10,9 @@
 
 Train Qwen2.5-1.5B-Instruct on GSM8K where the **training** path (the
 forward/backward activation + gradient traffic across pipeline-parallel stage
-boundaries) runs under a communication-efficient method: activation masking at
-the stage boundaries, with optional anchor + spectral correction. Communication
+boundaries) runs under a communication-efficient method: per-element (per-token,
+per-dimension) activation masking at the stage boundaries, with optional anchor +
+spectral correction. Communication
 efficiency is about the **inter-stage traffic during training** — **rollouts
 (generation) may come from ordinary, non-pipeline-parallel verl + vLLM**, that
 is fine and out of scope for compression.
