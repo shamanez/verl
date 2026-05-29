@@ -131,7 +131,7 @@ jq -r '.template_hash_id' runs/baseline/handles/*.json
   - `{knob: TOTAL_EPOCHS, from: 2, to: 3, rationale: "cheap extra epoch if curve is still improving at end"}`
   - On OOM only: `{knob: actor.fsdp_config.param_offload, from: false, to: true, rationale: "CPU-offload the actor optimizer state before reducing MAX_RESPONSE_LENGTH — user mandate forbids reducing 16K"}`
 - **STOP** if any of:
-  - `train/reward_mean` is flat or decreasing across the whole 2 epochs — recipe is broken on this hardware tier; route to codex `code-rescue` with `train.log`
+  - `train/reward_mean` is flat or decreasing across the whole 2 epochs — recipe is broken on this hardware tier; surface to the operator (who may invoke `codex-verify --mode code-rescue` manually with `train.log`)
   - hypothesis is falsified on the headline numeric thresholds (`val/test_score` delta `< 0`, or NaN/Inf in loss/grad/reward)
   - budget exhausted (`spend > $60` OR `wall_clock > 12 h`)
   - 2 REVISE cycles already consumed on this lineage
@@ -142,7 +142,7 @@ code_change: false
 target_modules: []
 ```
 
-The launcher is already committed on `vast-ai-workload` and the template's onstart `git pull`s it. No `verl/` patch in this experiment — this is the dense reference. Compression code changes come in later issues with `code_change: true` and a `codex-bridge --mode=verify` gate.
+The launcher is already committed on `vast-ai-workload` and the template's onstart `git pull`s it. No `verl/` patch in this experiment — this is the dense reference. Compression code changes come in later issues with `code_change: true`; the operator reviews each plan manually before approving (optionally with the `codex-verify` skill as a second-opinion tool).
 
 ## Dependencies
 ```yaml
@@ -153,10 +153,9 @@ This is the first real experiment. No prior PASS required.
 
 ## Rescue triggers
 ```yaml
-escalate_to_codex_if:
+escalate_if:
   - "VAST_API_KEY found in container env"
   - "VAST key leaked into container"
-  - "VERIFY_TIMEOUT:"
   - "no offers in any tier"
   - "cgroup pids.max .* too tight"
   - "RuntimeError: CUDA out of memory"
@@ -167,7 +166,10 @@ escalate_to_codex_if:
   - "MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing"
 ```
 
-The orchestrator greps PROGRESS.md each tick for these patterns and routes to `codex-bridge` in the appropriate mode (security-rescue for the VAST leak patterns, code-rescue for the runtime / CUDA / NaN patterns, provision-rescue for the offers/template patterns).
+The orchestrator surfaces these PROGRESS.md patterns in `STATUS.md` so the
+operator sees them; the operator decides whether to invoke
+`codex-verify --mode code-rescue` (for runtime/CUDA/NaN), tear down + abandon
+(for VAST leak), or hand-edit + re-provision (for template/offer issues).
 
 ## Notes for runner
 
@@ -191,6 +193,6 @@ The orchestrator greps PROGRESS.md each tick for these patterns and routes to `c
 - **Headline criteria:** all checkboxes above, with the *learning signal* being `val/test_score` improving by ≥ +0.05 from step-0 to final. `train/reward_mean` rising monotonically is the secondary indicator (it is noisier than `val/test_score`).
 - **`p95` is n/a here** — this is a dense baseline, not a compression/staleness experiment. The headline is pure learning quality + cost.
 - **OOM mid-run** falsifies the OOM-avoidance posture; produce REVISE with `actor.fsdp_config.param_offload=True` as the first `next_action`. Do NOT propose reducing `MAX_RESPONSE_LENGTH` — the user mandate is 16K.
-- **NaN / Inf in any of `loss`, `grad_norm`, `policy_loss`, `reward`** is automatic STOP + codex `code-rescue` route, not REVISE.
+- **NaN / Inf in any of `loss`, `grad_norm`, `policy_loss`, `reward`** is automatic STOP, not REVISE. The operator decides whether to invoke `codex-verify --mode code-rescue` with `train.log` for a diagnostic.
 - **Spend > $60 or wall-clock > 12 h** is automatic STOP, not REVISE — the budget criterion is part of the hypothesis.
 - **Missing WandB run** is automatic STOP — `trainer.logger=[console,wandb]` is mandatory for the compression-curve overlay in later experiments.

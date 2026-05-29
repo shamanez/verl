@@ -22,9 +22,9 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 2. Parse the issue body for these fields:
    - `kind:` — one of `experiment | ablation | implementation | brainstorm | literature`. **Default: `experiment`** if missing. The kind drives orchestrator routing (see TEMPLATE.md §Kind). Per-kind rules:
      - `experiment` / `ablation`: normal plan. `ablation` MUST include `depends_on:` naming the parent EXP that already PASSED.
-     - `implementation`: write a normal plan but require `code_change: true` and a non-empty `target_modules:`. Skip the `## Experiment design` sweep_grid (no Vast.ai launch). The orchestrator will run only `codex-bridge --mode=verify` against this plan and route to `log-writer` on PASS.
-     - `brainstorm`: write a Discussion-shaped plan — replace `## Experiment design` and `## Compute budget` with a `## Proposal` and `## Open questions` section. No Vast.ai, no codex-verify. The plan itself is the deliverable; the human iterates via issue comments and may later edit `kind: experiment` to promote.
-     - `literature`: do NOT write a normal plan. Append one line `RESCUE_REQUEST: math <issue title>` to PROGRESS.md and stop. The orchestrator routes to codex-bridge math-rescue.
+     - `implementation`: write a normal plan but require `code_change: true` and a non-empty `target_modules:`. Skip the `## Experiment design` sweep_grid (no Vast.ai launch). After the human approves the plan, the orchestrator routes the issue to `log-writer` to draft the PR.
+     - `brainstorm`: write a Discussion-shaped plan — replace `## Experiment design` and `## Compute budget` with a `## Proposal` and `## Open questions` section. No Vast.ai launch. The plan itself is the deliverable; the human iterates via issue comments and may later edit `kind: experiment` to promote.
+     - `literature`: do NOT write a normal plan. Append one line `RESCUE_REQUEST: math <issue title>` to PROGRESS.md and stop. The human operator decides whether to invoke `codex-verify --mode math-rescue` manually against the issue body.
    - `hypothesis:` — required for `experiment` / `ablation` / `implementation`. One paragraph, falsifiable, with numeric thresholds. If missing, the first acceptance criterion becomes `clarification_needed: hypothesis missing or not falsifiable` and you stop early. **Operational thresholds count as numeric falsifiability.** For `milestone:M0` or `kind:smoke` issues, a hypothesis grounded in cost ceilings (`spend <= $5`), wall-clock (`<= 60 min`), correctness invariants (`no NaN/Inf in any loss field`, `train/reward_mean > 0 at step 5`), or environment hygiene (`docker exec verl env | grep VAST returns nothing`) is fully acceptable — do NOT demand an algorithmic performance threshold. Research-experiment issues (no `milestone:M0` / no `kind:smoke`) DO need an algorithm-level numeric threshold (e.g. `target_metric / baseline_metric <= 0.10`). For `brainstorm`, hypothesis is optional — replace with `## Proposal`.
    - `milestone: M<N>` — routing tag only, semantics defined externally by the user.
    - `baseline_run: EXP-<NN>` or `none`. For `ablation`, this MUST be the parent EXP id.
@@ -68,7 +68,38 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    echo "[$(date -Iseconds)] [research-planner #<N>] plan written" >> PROGRESS.md
    ```
 
-9. Stop. Do NOT implement anything, do NOT call `experiment-runner`, do NOT touch any file outside `.claude/plans/` and `PROGRESS.md`.
+9. **Tell the operator how to review the plan** in the issue comment you post. After the plan markdown, append this operator-facing footer:
+
+   ```markdown
+   ---
+   ## Operator review (manual)
+
+   The orchestrator will NOT auto-launch this plan. Before flipping
+   `status:planned → status:approved`:
+
+   1. Read the plan above; check that `## Success criteria` are
+      machine-checkable, `## Compute budget` is sane, and (if
+      `code_change: true`) `target_modules:` is confined to research-allowed
+      paths.
+   2. *Optional* — get a second opinion from codex:
+
+      ```bash
+      bash .claude/skills/codex-verify/run.sh \
+        --mode verify \
+        --out  runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
+        --plan .claude/plans/<N>.md \
+        --cd   /Users/shamane/Documents/verl \
+        --timeout 600 --stall 90
+      cat runs/EXP-<N>/verify/*.md   # first line: VERIFY: PASS | CONCERNS | FAIL
+      ```
+
+      The harness does NOT read this output — it's purely advisory for you.
+   3. When ready: `gh issue edit <N> --remove-label status:planned --add-label status:approved`.
+   ```
+
+   The literal `<N>` should be the issue number (you know it from the dispatch).
+
+10. Stop. Do NOT implement anything, do NOT call `experiment-runner`, do NOT touch any file outside `.claude/plans/` and `PROGRESS.md`.
 
 ### Hard rules
 

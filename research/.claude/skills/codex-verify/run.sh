@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
-# codex_with_watchdog.sh — invoke `codex exec` directly with hang protection.
-# Bypasses the codex-companion@1.0.4 broker entirely (which dies mid-task on
-# this machine — proven twice 2026-05-24). We talk to the codex CLI directly,
-# which `codex doctor` confirms is healthy.
+# codex-verify — operator-invoked wrapper around `codex exec` with hang protection.
+#
+# Invoke this skill MANUALLY between status:planned and status:approved when you
+# want a second opinion on a plan, OR after a STUCK runtime failure for diagnosis,
+# OR before a milestone promotion for an adversarial summary review. The
+# autonomous harness (orchestrator playbook) does NOT call this skill — it stays
+# operator-driven because the codex CLI's broker is occasionally flaky and the
+# autonomous-loop "verify before launch" gate was empirically more friction than
+# value (see SKILL.md "Why this is operator-invoked").
 #
 # Two layers of hang protection:
 #   - Layer 1: hard wall-clock timeout (default 600 s).
 #   - Layer 2: stall watchdog (default 90 s with no stdout growth -> SIGKILL).
 #
 # Exit codes:
-#   0    success
+#   0    success — output file holds the Codex response (session header stripped)
 #   64   bad usage
-#   124  hard wall-clock exceeded
-#   125  stall (no output growth for STALL_SEC)
-#   126  codex exec returned non-zero (CLI error / broken auth / etc.)
-#
-# Output:
-#   On success, the codex stdout is written to <out> verbatim (with leading
-#   session header stripped — only the assistant turn is kept).
-#   On timeout/error, <out> begins with TIMEOUT:/BROKER_DIED: marker so the
-#   codex-bridge agent and the orchestrator's VERIFY_TIMEOUT state can react.
+#   124  hard wall-clock exceeded (output starts with TIMEOUT: hard wall-clock)
+#   125  stall (output starts with TIMEOUT: stalled)
+#   126  codex exec returned non-zero (output starts with BROKER_DIED:)
 #
 # Usage:
-#   codex_with_watchdog.sh --mode verify|code-rescue|math-rescue|adversarial \
+#   codex-verify --mode verify|code-rescue|math-rescue|adversarial \
 #       --out  <output-path> \
 #       [--plan <plan-path>] [--diff <diff>] [--ctx <free text>] \
 #       [--cd <workdir>] [--timeout 600] [--stall 90] [--model gpt-5.5]
+#
+# See .claude/skills/codex-verify/SKILL.md for per-mode recipes.
 set -euo pipefail
 
 MODE=""

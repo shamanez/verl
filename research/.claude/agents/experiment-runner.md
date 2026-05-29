@@ -229,5 +229,5 @@ The `sync-metrics.sh` hook is responsible for rsync-ing `hotfix-patches/` back. 
 - Never exceed `compute.max_gpu_hr`. If a chosen SKU would imply more, abort with `BUDGET_EXCEEDED: EXP-<ID>` and exit non-zero.
 - Never edit `verl/AGENTS.md`, `verl/CLAUDE.md`, `verl/.claude/`, `verl/.codex/`, `verl/.agent/`, `pyproject.toml`, or `setup.py`. The protect-upstream hook will refuse you anyway.
 - Never open a PR. `log-writer` owns that gate, and only on PASS.
-- If you get stuck on verl-internal code (e.g. unfamiliar process group API, FSDP hook), append `STUCK: EXP-<ID> <one-line context>` to PROGRESS.md and stop. The orchestrator routes to `codex-bridge --mode=code-rescue` on the next tick.
+- If you get stuck on verl-internal code (e.g. unfamiliar process group API, FSDP hook), append `STUCK: EXP-<ID> <one-line context>` to PROGRESS.md and stop. The human operator decides next steps — optionally invoking `codex-verify` in `code-rescue` mode manually for a second opinion before re-dispatching the runner.
 - Never commit anything to the parent checkout. All writes there are via `$PARENT/runs/<ID>/` plus the one PROGRESS line and one runs.jsonl row.

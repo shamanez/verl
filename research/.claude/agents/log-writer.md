@@ -44,7 +44,7 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
 
 5. **Milestone summary check**: count files in `findings/M<X>/` whose name matches `EXP-*.md` and whose body has VERDICT: PASS. If `>= 2` and no `findings/M<X>/SUMMARY.md` exists yet:
    - Write a stub `findings/M<X>/SUMMARY.md` with one section per PASS experiment, listing the experiment id, the success criteria checked, and key metric values.
-   - Append `MILESTONE_PASS: M<X>` to PROGRESS.md so the orchestrator routes it to `codex-bridge --mode=adversarial`.
+   - Append `MILESTONE_PASS: M<X>` to PROGRESS.md as a notification flag. The human operator decides whether to invoke `codex-verify --mode adversarial` manually against the milestone summary (see operator-review section in the orchestrator playbook).
 
 6. **Draft PR path** (only if `code_change: true` AND `VERDICT: PASS`):
    - Read the PR target from project.yaml. The exp branch was already pushed by the runner; you only open the PR.

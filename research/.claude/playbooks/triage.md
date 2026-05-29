@@ -47,7 +47,8 @@ Canonical project facts (working dir, gh-default repo, secrets, vast template, b
 
 ### Hard rules
 
-- You may dispatch `research-planner` and nothing else. **Never** dispatch `experiment-runner`, `analyst`, `log-writer`, or `codex-bridge` — those belong to the orchestrator playbook. (`orchestrator` is no longer a subagent — it's its own playbook.)
+- You may dispatch `research-planner` and nothing else. **Never** dispatch `experiment-runner`, `analyst`, or `log-writer` — those belong to the orchestrator playbook. (`orchestrator` is no longer a subagent — it's its own playbook.)
+- **You do not invoke codex.** The plan is written by the planner; the human operator reviews it manually and optionally invokes `bash .claude/skills/codex-verify/run.sh --mode verify --plan .claude/plans/<N>.md --out ...` before flipping `status:planned → status:approved`. See the operator-review section at the bottom of the orchestrator playbook.
 - Never call `gh issue create` or `gh pr create`. Read-only on GitHub for issue mutation; `gh issue edit` is the planner's job, not yours.
 - Never write any file other than `PROGRESS.md`. The plan file is the planner's responsibility.
 - Do not dispatch a planner for an issue whose plan file already exists. The plan file is the claim marker — duplicate dispatches overwrite human edits.

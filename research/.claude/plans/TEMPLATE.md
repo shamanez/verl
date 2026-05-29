@@ -17,9 +17,9 @@ The `research-planner` subagent fills this template by parsing the GitHub issue 
 |---|---|---|---|---|
 | `experiment` (default) | maybe | yes | runs the plan's predicate | verdict + LOG entry; draft PR on PASS+code_change |
 | `ablation` | maybe | yes | runs the plan's predicate | same as experiment; requires `depends_on:` parent EXP that PASSED |
-| `implementation` | **true** (required) | NO | n/a | codex-bridge verify only; draft PR on VERIFY:PASS |
+| `implementation` | **true** (required) | NO | n/a | plan is the deliverable; draft PR after human approval |
 | `brainstorm` | no | NO | n/a | plan is the deliverable; iterate as comments; promote to `experiment` later by editing kind |
-| `literature` | no | NO | n/a | codex-bridge math-rescue writes `findings/derivations/<topic>.md` |
+| `literature` | no | NO | n/a | plan/issue is the deliverable; operator can invoke `codex-verify --mode math-rescue` manually if a derivation review is wanted |
 
 If `kind:` is missing in the issue body, the planner defaults to `experiment`.
 
@@ -66,8 +66,8 @@ Per-experiment plans override only when justified — e.g. M0 smoke chains with 
 
 State the *smallest* run that can still falsify the hypothesis. Every training
 step on the Vast.ai box burns GPU-hours; fewer cells × fewer steps is always
-better. Count ONLY what actually launches on Vast — codex-verify / local
-assertions are free and do not belong here.
+better. Count ONLY what actually launches on Vast — local assertions and
+operator-invoked plan reviews are free and do not belong here.
 
 ```yaml
 vast_cells:        <N>          # how many training cells actually launch on Vast
@@ -107,7 +107,7 @@ target_modules:                    # only meaningful when code_change=true
   - verl/<path>/<module>.py
 ```
 
-If `code_change: true`, the orchestrator routes this plan through `codex-bridge --mode=verify` before any Vast.ai launch. The runner is the only agent allowed to write under `verl/`, and only while on an `exp/*` branch inside its worktree.
+If `code_change: true`, the human operator reviews the plan before flipping `status:planned → status:approved` (optionally invoking `codex-verify` manually on the plan). The runner is the only agent allowed to write under `verl/`, and only while on an `exp/*` branch inside its worktree.
 
 ## Dependencies
 ```yaml
@@ -118,12 +118,15 @@ The orchestrator refuses to dispatch the runner until every `depends_on` entry h
 
 ## Rescue triggers
 ```yaml
-escalate_to_codex_if:
+escalate_if:
   - <pattern the runner or analyst might emit in PROGRESS.md>
   - <another pattern>
 ```
 
-The orchestrator greps PROGRESS.md each tick for these patterns and routes to `codex-bridge` in the appropriate mode.
+The orchestrator surfaces these PROGRESS.md patterns in `STATUS.md` so the
+human operator sees them; the operator decides whether to invoke
+`codex-verify` (in `code-rescue` or `math-rescue` mode), edit the plan,
+abandon the experiment, or just keep going.
 
 ## Notes for runner
 <Anything the planner discovered that the runner should not have to rediscover: verl-internal API gotchas, dataset paths to rsync, environment variables to set on the Vast.ai node, etc. Free-form prose; keep it tight.>

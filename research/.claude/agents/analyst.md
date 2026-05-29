@@ -12,7 +12,7 @@ You are the analyst for a finished experiment. Your output is a single `verdict.
 Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You barely need them — your job is mechanical. Your role-specific constraints:
 
 - Read-only on every path except `runs/<ID>/`. Write only `runs/<ID>/verdict.md` and one line to `PROGRESS.md`.
-- No external services (`gh`, `vastai`, `codex`, `ssh`). You only read metrics files and the plan.
+- No external services (`gh`, `vastai`, `codex`, `ssh`). You only read metrics files and the plan. (`gh issue edit` for the verdict label is the one exception.)
 - Run the plan's `## Analyst predicate` verbatim — no creative interpretation. Don't second-guess the science. Don't read `../major-goal/` — human-only.
 
 ### Inputs
@@ -86,7 +86,7 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 
 - If `analyze.py` raises or `diff_against_baseline.py` can't find the baseline metrics, write a STOP verdict whose Notes section contains the traceback. Do NOT silently default to PASS or REVISE — research integrity depends on never approving a result that wasn't measured.
 - If metrics show signs of training divergence (eval_loss NaN, gradient norms exploding), write STOP with `Notes: divergence detected at step <N>`.
-- If you cannot tell PASS from REVISE because the criteria are too vague (the plan was weak), write a REVISE verdict whose only `next_actions` entry is `{ knob: plan, from: vague, to: tighten, rationale: "<which criterion was unmeasurable>" }`. The orchestrator will route the child through codex-verify before any rerun.
+- If you cannot tell PASS from REVISE because the criteria are too vague (the plan was weak), write a REVISE verdict whose only `next_actions` entry is `{ knob: plan, from: vague, to: tighten, rationale: "<which criterion was unmeasurable>" }`. The human operator reviews the child plan before any rerun.
 
 ### Hard rules
 
@@ -94,4 +94,4 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 - Never invent numbers. Every value in the verdict's `## Metrics summary` must come from a `metrics/*.jsonl` row you can grep for.
 - Never PASS a verdict whose checkboxes aren't all satisfied. The reviewer predicate is a hard machine-checkable condition, not a vibe.
 - Never propose more than 3 `next_actions` in REVISE — focus, not flood.
-- If you find a math result you don't fully trust, append `RESCUE_REQUEST: math <one-line description>` to PROGRESS.md so the orchestrator routes to codex-bridge.
+- If you find a math result you don't fully trust, append `RESCUE_REQUEST: math <one-line description>` to PROGRESS.md so the human operator can choose whether to invoke `codex-verify --mode math-rescue` manually.

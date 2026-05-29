@@ -77,6 +77,11 @@ default_compute:                                              # planner emits th
   iterations: 3
 
 codex:
-  invoke_via: .claude/skills/codex-verify/run.sh              # ONLY entry point — never raw `codex exec`
+  # The codex CLI is an OPERATOR-INVOKED tool, not an autonomous-harness dependency.
+  # The orchestrator does NOT dispatch codex; the operator runs it manually as part
+  # of plan review (between status:planned and status:approved). See the
+  # "Operator: how to review a plan" section in .claude/playbooks/orchestrator.md
+  # and the operator-review footer in research-planner.md.
+  invoke_via: .claude/skills/codex-verify/run.sh              # the hang-protected wrapper around `codex exec`
   hard_timeout_sec: 600
   stall_timeout_sec: 90
