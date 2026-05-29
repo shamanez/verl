@@ -1,4 +1,4 @@
-# EXP-3 config — single cell (sweep_grid empty per plan).
+# baseline config — single cell (sweep_grid empty per plan).
 #
 # This file is the runner-side record of what we provisioned and launched. All
 # training-knob values are FIXED by the committed launcher
@@ -7,7 +7,7 @@
 # The runner does NOT pass any Hydra overrides — the launcher is the contract.
 
 experiment:
-  id: EXP-3
+  id: baseline
   title: "M1 — Qwen2.5-1.5B-Instruct GRPO baseline on GSM8K (real run, multi-GPU)"
   issue: https://github.com/shamanez/verl-compression-research/issues/3
   kind: experiment

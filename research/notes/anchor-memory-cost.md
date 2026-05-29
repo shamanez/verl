@@ -1,8 +1,8 @@
 # Why the anchor circuit needs a separate ~3 GB of GPU memory
 
 > Author note: this is a conceptual / mental-model doc, not an experimental
-> finding. The numbers come from EXP-12 (which fixed the FSDP-collision bug by
-> introducing the cloned-no-hook anchor module) and EXP-13 (which surfaced the
+> finding. The numbers come from the anchor isolation fix (which fixed the FSDP-collision bug by
+> introducing the cloned-no-hook anchor module) and the paper-scale dry run (which surfaced the
 > memory pressure at paper-scale settings).
 
 ## The short answer
@@ -38,7 +38,7 @@ mask-hooked blocks, GUARD 5 (`comm_eff/anchor_mask_applications == 0`) fails
 by definition.
 
 You can try to disable the hook with a flag (`state.mask_active = False` inside
-the anchor's forward call). EXP-8 actually tried that path. It failed for a
+the anchor's forward call). the prior anchor attempt actually tried that path. It failed for a
 *different* reason — see #2.
 
 ### 2. FSDP1's `_post_backward_hook` is single-shot per param per backward
@@ -50,7 +50,7 @@ FSDP1 wraps each parameter in a flat-param shard and registers a
 - Zeros / consumes `flat_param._saved_grad_shard`
 - Marks the shard as "this backward done"
 
-When EXP-8 ran a second backward through the same FSDP-wrapped module (the
+When the prior anchor attempt ran a second backward through the same FSDP-wrapped module (the
 anchor pass, immediately after the training backward), the hook re-fired with
 `flat_param._saved_grad_shard == None` (because the training backward had
 consumed it). Result: `AttributeError: 'NoneType' object has no attribute
@@ -76,7 +76,7 @@ the projection redefines the basis that the projection used. GUARD 6
 
 ## The fix: a hookless, FSDP-free, full-precision clone
 
-EXP-12 introduced `build_anchor_module(live_module)`, which returns a
+the anchor isolation fix introduced `build_anchor_module(live_module)`, which returns a
 **fresh `nn.Module`** that:
 
 - Holds **its own bf16 parameters** (the K-stale snapshot of the live weights)
@@ -94,7 +94,7 @@ anchor is meant to produce.
 
 ### Static cost (parked between refreshes)
 
-After EXP-12 iter04, the clone is **cached on `self._anchor_module_cache`** —
+After the the anchor isolation fix cache fix, the clone is **cached on `self._anchor_module_cache`** —
 we don't rebuild it every refresh, which would have allocated/freed 3 GB per
 anchor step (and tripped vLLM v1's `sleep_replicas` `freed_bytes` assertion).
 So between refreshes:
@@ -121,9 +121,9 @@ After the refresh:
 - `torch.cuda.empty_cache()` returns the freed pages to the allocator
 - Only the 3 GB parked params remain until the next refresh
 
-### Why this bit EXP-13 but not the smoke (communication-baseline)
+### Why memory bites paper-scale runs but not the smoke
 
-| | communication-baseline (smoke) | EXP-13 paper-scale |
+| | communication-baseline (smoke) | paper-scale |
 |---|---|---|
 | Response length | 256 | 16384 |
 | Train batch | 8 | 128 |
@@ -139,7 +139,7 @@ the smoke's footprint and a 2% chunk of the paper-scale footprint. The
 budget at paper-scale is so tight that 3 GB is the difference between fit and
 OOM.
 
-EXP-13's fix wasn't to shrink the anchor — it was to lower
+the paper-scale dry run's fix wasn't to shrink the anchor — it was to lower
 `PPO_MAX_TOKEN_LEN_PER_GPU` (the dynamic-batch wedge that decides how many
 sequences go through actor forward in one micro-batch) from 36 864 to
 18 432 tokens, dropping vLLM's `gpu_memory_utilization` from 0.4 to 0.3,
@@ -150,7 +150,7 @@ fragmentation. The anchor itself was untouched.
 
 | Option | Memory savings | Why we don't (yet) |
 |---|---|---|
-| FSDP-wrap the clone too | ~75% (sharded across 4 ranks → ~750 MB each) | Brings back the `_post_backward_hook` collision that EXP-12 fixed. Would need a separate FSDP wrap instance with no cross-talk to the live wrap — possible but non-trivial to get correct |
+| FSDP-wrap the clone too | ~75% (sharded across 4 ranks → ~750 MB each) | Brings back the `_post_backward_hook` collision that the anchor isolation fix fixed. Would need a separate FSDP wrap instance with no cross-talk to the live wrap — possible but non-trivial to get correct |
 | `ema_device=cpu` + clone-on-CPU between refreshes | Park-cost goes to host memory | Anchor refresh now has to H2D copy 3 GB before forward and D2H after — slow (`cadence=5` means this fires often) |
 | Clone only the targeted layers (q/k/v/o_proj of `model.layers.0`) | ~99% (4 matrices × 9 MB ≈ 36 MB) | Can't run a full-model GRPO loss on a 4-matrix sub-model — the loss needs the lm_head, which needs every layer's forward |
 | Quantize the clone to int8 / 4-bit | ~75–87% | Quantization noise contaminates the gold-signal gradient — defeats the anchor's purpose. The anchor is supposed to be MORE precise than the masked training path, not less |
@@ -163,7 +163,7 @@ spectral filter is built around.
 
 ## What the runtime telemetry confirms
 
-From EXP-13 iter2 at step 11 (after 8 anchor refreshes):
+From the paper-scale dry run iter2 at step 11 (after 8 anchor refreshes):
 
 ```
 comm_eff/anchor_backwards:           8       ✓ (cadence=5 × 2 substeps/step × 11 / 5 ≈ 4 expected; we see 8 because the refresh fires per-PPO-inner-batch in this regime)
@@ -172,7 +172,7 @@ comm_eff/anchor_grad_corrected:      0       ✓ GUARD 6 — clone's grads aren'
 comm_eff/anchor_rollouts_generated:  0       ✓ no extra rollouts
 comm_eff/anchor_rewards_recomputed:  0       ✓ no extra reward calls
 comm_eff/anchor_optimizer_steps:     0       ✓ no optimizer.step on the clone
-anchor_backward_isolation_mode:      clone   ✓ EXP-12 isolation mode active
+anchor_backward_isolation_mode:      clone   ✓ the anchor isolation fix isolation mode active
 ||dM_anchor||_mean (step 40 refresh): 0.144  ✓ EMA evolving non-trivially
 ```
 

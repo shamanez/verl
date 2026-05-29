@@ -30,7 +30,7 @@ To make this concrete, here are all the forwards that happen during one
 | # | Forward pass | Where it runs | What it produces | Masked? | Why / Why not |
 |---|---|---|---|---|---|
 | 1 | **Rollout generation** (`vllm_rollout`) | vLLM engine | `response` tokens for each prompt | **NO** | Rollouts are the *data*, not part of the gradient. Masking the rollout would mean the agent is sampling from a different distribution than it's being trained on. `mask_applications/rollout == 0` |
-| 2 | **Old-logprob recompute** (`compute_log_prob`) | FSDP train engine | `old_log_prob` for the importance ratio `r = exp(log_prob_current − old_log_prob)` | **YES** (when `mask_recompute=true`) | This forward runs on the actor — same pipeline-boundary bandwidth pressure as #3. Both feed the PPO importance ratio that defines the gradient. the communication-baseline's central contribution (formerly EXP-9): stamp `mask_active=True` around `compute_log_prob` so the mask hook accepts `path_tag="old_logprob"` |
+| 2 | **Old-logprob recompute** (`compute_log_prob`) | FSDP train engine | `old_log_prob` for the importance ratio `r = exp(log_prob_current − old_log_prob)` | **YES** (when `mask_recompute=true`) | This forward runs on the actor — same pipeline-boundary bandwidth pressure as #3. Both feed the PPO importance ratio that defines the gradient. The communication-baseline's central contribution: stamp `mask_active=True` around `compute_log_prob` so the mask hook accepts `path_tag="old_logprob"` |
 | 3 | **Actor train forward** (PPO inner loop) | FSDP train engine | `log_prob_current` for the policy gradient; autograd records the graph that `loss.backward()` walks | **YES** | The headline compression target. The mask fires on every pipeline-boundary block. `mask_applications/train > 0` |
 | 4 | **Reference-policy logprob** (`ref_log_prob`) | Ref worker (if spawned) | `ref_log_prob` for the KL-vs-ref term | n/a — ref worker not spawned | Disabled in this run: `use_kl_loss=False` AND `use_kl_in_reward=False` → `need_reference_policy()` returns False → ref worker never instantiated. `mask_applications/ref_logprob == 0` |
 | 5 | **Validation forward** | FSDP train engine in eval mode | `val/test_score/mean@1` for the curve | **NO** | Validation reads the model's *current state* for evaluation. Masking it would mean validation is reporting performance of a different model than the one being trained. `mask_applications/val == 0` |
@@ -55,7 +55,7 @@ record will be replayed by `loss.backward()`:
   with structurally different forwards — that's a train-inference mismatch
   inside the actor itself.
 
-Earlier comm-eff experiments masked only #3; the communication-baseline (formerly EXP-9) extended
+The communication-baseline extended this
 `mask_recompute=true` extends masking to #2 as well, so **both
 gradient-feeding forwards see the same pipeline-boundary bandwidth pattern**.
 
@@ -186,7 +186,7 @@ Your model is essentially right; the precision improvement is just being
 specific about *which* forwards count as "fast circuit" and what "everything"
 means in the anchor context.
 
-## Runtime confirmation (EXP-13 iter2, step 11)
+## Runtime confirmation (the paper-scale dry run iter2, step 11)
 
 ```
 mask_applications/train:        497   ← #3 firing on every PPO inner micro-batch
@@ -204,7 +204,7 @@ anchor_grad_corrected:            0   ← uncorrected, every time
 anchor_rollouts_generated:        0   ← no new rollouts
 anchor_rewards_recomputed:        0   ← no reward recompute
 anchor_optimizer_steps:           0   ← no optimizer update on the clone
-anchor_backward_isolation_mode:  clone  ← EXP-12 hookless clone in use
+anchor_backward_isolation_mode:  clone  ← the anchor isolation work hookless clone in use
 ```
 
 Every measurement matches the design intent. The fast circuit is masked on

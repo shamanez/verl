@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# EXP-3 in-container launcher (rsync'd to /workspace/runs/EXP-3/launch.sh).
+# Dense baseline in-container launcher (mirror of vast_baseline_qwen25_1p5b_grpo_gsm8k.sh).
 #
 # code_change=false: we do NOT apply any bundle. The template's onstart has
 # already cloned shamanez/verl @ vast-ai-workload into /workspace/verl and

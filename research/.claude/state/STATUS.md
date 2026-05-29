@@ -1,54 +1,47 @@
-# Research Status — 2026-05-29 — investigation phase
+# Research Status — fresh research cycle
 
 ## Permanent reference runs
 
-- **baseline** (`runs/baseline/`) — dense GRPO on Qwen2.5-1.5B + GSM8K, verl
-  unmodified. 100 steps, val 0.087 → 0.789. The control, ran before any
-  comm-eff code change.
-- **communication-baseline** (`runs/communication-baseline/`) — comm-eff M90+AP
-  smoke proof (p=0.9, α=0.5, τ=0.01, β_anc=0.9, anchor cadence=5/delay=5,
-  mask_recompute=true), no KL, no entropy. 20-step verification at smoke
-  rollout shape. PASS — all comm-eff guards held, visible learning. Formerly
-  EXP-9 iter2; promoted to a permanent reference alongside the dense
-  baseline.
+- **baseline** (`runs/baseline/`) — dense GRPO on Qwen2.5-1.5B + GSM8K,
+  verl unmodified. 100 steps, val 0.087 → 0.789. The dense control.
+  Launcher: `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`.
+- **communication-baseline** (`runs/communication-baseline/`) — comm-eff
+  method smoke verification: PRF mask `p=0.9` on both gradient-feeding
+  forwards, hookless K-stale anchor (cadence=5/delay=5), two-sided Tikhonov
+  spectral correction (`α=0.5, τ=0.01, β_anc=0.9`); no KL, no entropy.
+  20-step smoke PASS — all comm-eff guards held, visible learning.
+  Launcher: `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`.
 
-## Active experiment
+## Active
 
-- **EXP-13** (`runs/EXP-13/`) — paper-scale extension of communication-baseline
-  (TRAIN_BATCH=128, ROLLOUT_N=8, MAX_RESPONSE=16384). 58 of 100 steps reached
-  (dataset-epoch limit; TOTAL_EPOCHS=1 ⇒ 58.4 batches per epoch). Verdict:
-  **PASS at-risk** — infrastructure healthy (counters scale, memory bounded,
-  guards hold, +26% val gain), but `grad_norm` starts at 1134 at step 1 and
-  `entropy` collapses 6.4 → 0.023 by step 58. Investigation queued.
+- **Investigation queued**: `notes/investigation-prompt-grad-norm.md`.
+  Paste into a fresh session to draft the GitHub issue. Documents 9
+  candidate root causes (IS variance under independent PRF masks, spectral
+  conditioning on empty M_anchor, FSDP integration audit, anchor harvest,
+  variance amplification from smaller mini-batch + token wedge, etc.) and
+  a four-test discriminating plan. KL stays off in all tests.
 
-## Investigation queued
+## Implementation locus
 
-- `notes/investigation-prompt-grad-norm.md` — paste into a fresh session to
-  draft the GitHub issue. Documents 9 candidate root causes and a 4-test
-  discriminating plan. KL stays off across all tests (operator constraint).
+- `verl/workers/config/comm_eff.py` — Hydra config schema
+- `verl/workers/comm_eff/{state.py, activation_mask.py, anchor.py, spectral_filter.py}` — runtime
+- `verl/workers/engine_workers.py` — `compute_log_prob` `mask_active` stamp
+- `verl/workers/engine/fsdp/transformer_impl.py` — `_comm_eff_mask_active` gating
+- `tests/workers/comm_eff/` — CPU unit tests
 
-## Repo hygiene
+## Conceptual notes
 
-- **De-bloated**: EXP-4, EXP-5, EXP-6, EXP-7, EXP-8, EXP-12 (folded into
-  `runs/SUMMARY.md`).
-- **Renamed**: EXP-9 → `communication-baseline` (run dir, plan file, finding).
-- **Notes** (`research/notes/`):
-  - `anchor-memory-cost.md` — the EXP-12 anchor clone's ~3 GB explanation
-  - `fast-circuit-vs-anchor-pass.md` — masking semantics across the 5 GRPO
-    forward passes
-  - `investigation-prompt-grad-norm.md` — the next investigation issue draft
+- `notes/anchor-memory-cost.md` — why the anchor clone takes ~3 GB
+- `notes/fast-circuit-vs-anchor-pass.md` — masking semantics across the 5 GRPO forwards
+- `notes/investigation-prompt-grad-norm.md` — the investigation issue draft
 
 ## Vast.ai
 
-No instances running. All ledger rows TORN_DOWN. `runs.jsonl` carries
-historical records of every provisioning event; handle files have been
-cleaned up.
+No instances running. All ledger rows TORN_DOWN.
 
 ## Git
 
-Local `vast-ai-workload` synced to `origin/vast-ai-workload`. PRs merged
-this research cycle: `#1` (comm_eff scaffolding), `#2` (actor-only mask),
-`#3` (mask contamination guard), `#4` (spectral correction + FSDP discovery),
-`#5` (anchor backward isolation), `#6` (mask_recompute extension + EXP-9
-iter2 PASS lineage), `#7` (paper-scale EXP-13 launcher + notes + findings).
-All `exp/*` branches deleted local + remote.
+Local `vast-ai-workload` synced to `origin/vast-ai-workload`. All prior
+experiment branches deleted local + remote. The two canonical launchers
+live in `examples/grpo_trainer/`; there are no duplicate launcher scripts
+under `runs/*/`.

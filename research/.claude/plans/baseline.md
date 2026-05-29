@@ -2,7 +2,7 @@
 
 > **The dense control.** verl run with **no modifications** — vanilla GRPO,
 > Qwen2.5-1.5B-Instruct on GSM8K. Every compression experiment overlays its curve
-> against this reference. (Originally filed as EXP-3 / issue #3.) Result:
+> against this reference. () Result:
 > `val/test_score` 0.0872 → 0.7892 over 100 steps on 4×H200.
 
 ## Experiment
@@ -40,7 +40,7 @@ sweep_grid:
   (n/a): []
 baselines:
   - dense_grpo_qwen25_1p5b_gsm8k    # this run IS the dense reference; no further baseline to compare against
-ablations: []                        # ablations belong to later issues with depends_on: [EXP-3]
+ablations: []                        # ablations belong to later issues with depends_on: [baseline]
 seed_replicates:  1                  # single seed for the reference curve; replicates come later if needed
 fanout_max:       1                  # one cell, one instance
 ```
@@ -93,21 +93,21 @@ The template's image, container `--shm-size=10g --cap-add=SYS_ADMIN`, onstart sc
 - [ ] Total Vast.ai spend on this instance **≤ $60** from `vastai create` to last criterion verification
 - [ ] Total wall-clock from launcher start to final eval **≤ 12 hours**
 
-All criteria are machine-checkable — the analyst greps `runs/EXP-3/metrics/*.jsonl`, the rsynced `train.log`, the Vast.ai instance ledger, and queries WandB for the literals above.
+All criteria are machine-checkable — the analyst greps `runs/baseline/metrics/*.jsonl`, the rsynced `train.log`, the Vast.ai instance ledger, and queries WandB for the literals above.
 
 ## Verification commands
 
-The analyst runs exactly these commands and captures stdout to `runs/EXP-3/analysis.log`.
+The analyst runs exactly these commands and captures stdout to `runs/baseline/analysis.log`.
 
 ```bash
 # 1. Train log + numeric criteria
 grep -E 'global_step|nan|NaN|inf|Inf|reward_mean|grad_norm|val/' \
-    runs/EXP-3/metrics/train.log | head -200
+    runs/baseline/metrics/train.log | head -200
 
-python research/scripts/analyze.py runs/EXP-3 --emit verdict.md
+python research/scripts/analyze.py runs/baseline --emit verdict.md
 
 # 2. Budget + wall-clock
-python research/scripts/check_budget.py runs/EXP-3
+python research/scripts/check_budget.py runs/baseline
 
 # 3. No baseline diff yet (this run IS the dense baseline). Skip diff_against_baseline.py.
 
@@ -115,10 +115,10 @@ python research/scripts/check_budget.py runs/EXP-3
 wandb run --project verl_compression_research --name qwen25_1p5b_grpo_gsm8k_baseline
 
 # 5. Secret-hygiene grep on the rsynced train.log + on-box env dump
-grep -E 'VAST_API_KEY|VAST_API|^VAST=' runs/EXP-3/metrics/train.log || echo "OK: no VAST leak in log"
+grep -E 'VAST_API_KEY|VAST_API|^VAST=' runs/baseline/metrics/train.log || echo "OK: no VAST leak in log"
 
 # 6. Template hash attribution (from the PROVISIONED ledger row)
-jq -r '.template_hash_id' runs/EXP-3/handles/*.json
+jq -r '.template_hash_id' runs/baseline/handles/*.json
 ```
 
 ## Analyst predicate
@@ -182,7 +182,7 @@ The orchestrator greps PROGRESS.md each tick for these patterns and routes to `c
   ```bash
   ssh -p <port> root@<host> 'tmux new -ds grpo-baseline "cd /workspace/verl && git pull && bash examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh"'
   ```
-- **`done.flag`** — the launcher touches `runs/qwen25_1p5b_grpo_gsm8k_baseline/done.flag` on clean exit. Rsync that path back to `runs/EXP-3/done.flag` for the orchestrator's `RESULTS_READY` transition.
+- **`done.flag`** — the launcher touches `runs/qwen25_1p5b_grpo_gsm8k_baseline/done.flag` on clean exit. Rsync that path back to `runs/baseline/done.flag` for the orchestrator's `RESULTS_READY` transition.
 - **`runs.jsonl` row** — the runner registers PROVISIONED immediately after handle capture (before rsync), per `experiment-runner.md` step 5, so the Stop hook can tear down even on launch failure.
 - **Model + training knobs are FIXED** by the launcher and the issue body's Model + training config table — `MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct`, `ROLLOUT_N=8`, `TRAIN_BATCH_SIZE=128`, `PPO_MINI_BATCH_SIZE=64`, `MAX_PROMPT_LENGTH=1024`, `MAX_RESPONSE_LENGTH=16384`, `ppo_max_token_len_per_gpu=36864`, `use_dynamic_bsz=True`, `enable_gradient_checkpointing=True`, `ref.param_offload=True`, `actor.param_offload=False`, `ROLLOUT_TP=2`, `ROLLOUT_GPU_MEM_UTIL=0.4`, `ACTOR_LR=1e-6`, `KL_LOSS_COEF=0.001`, `ENTROPY_COEFF=0`, `TOTAL_EPOCHS=2`, `SAVE_FREQ=50`, `TEST_FREQ=25`, `trainer.logger=[console,wandb]`. Do not deviate without a REVISE plan.
 

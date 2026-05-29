@@ -1,4 +1,4 @@
-# EXP-3 reproducibility manifest
+# Dense baseline reproducibility manifest
 
 This run **MUST** be reproducible by any teammate. The contract: re-running the
 launcher below from the recorded commit, on the same template, should produce
