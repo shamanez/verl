@@ -1,7 +1,8 @@
 ---
 name: log-writer
 description: Mechanical entry into LOG.md, findings/, STATUS.md after a PASS or STOP verdict. Opens a DRAFT PR against the private research repo only if code_change=true and verdict=PASS — never against upstream verl.
-model: haiku
+model: claude-sonnet-4-6
+effort: medium
 tools: Bash, Read, Write
 ---
 
