@@ -1,38 +1,38 @@
 # Research Log (newest first)
 
-## Two permanent references
+## The one baseline + the method under test
 
-This research operates against two baselines, kept as permanent reference
-runs:
+This research has a single baseline and one method under test. Both are the
+same launcher; the baseline is just the method switched off.
 
-### `baseline` — dense GRPO (the control)
+### Baseline = dense GRPO == comm-eff OFF
 
-- Qwen2.5-1.5B-Instruct on GSM8K, verl unmodified, 100 steps on 4×H200.
-- **NO KL, no entropy** (pg_loss only) — launcher standardized to no-KL so it
-  matches the comm-eff objective for apples-to-apples; EXP-14 reconfirmed
-  no-KL dense learns cleanly (val 0.083 → 0.721 in 10 steps).
-- `val/test_score` 0.087 → 0.789.
-- Run dir: `runs/baseline/`
-- Launcher: `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`
-- Plan: `.claude/plans/baseline.md`
+- The dense control *is* `vast_comm_eff_baseline_*.sh` with
+  `COMM_EFF_ENABLED=false` — byte-identical to unmodified verl (PR #1).
+  No-KL, no-entropy (pg_loss only). (The convenience dense launcher
+  `vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` has the identical objective.)
+- **Proof the codebase trains dense-perfect:** EXP-14 `test1_cellA`
+  (comm-eff OFF), **10 steps**, 4×H200 — `val/test_score` **0.083 → 0.721**,
+  clean monotone improvement. 10 steps is enough to see clear learning, so
+  that's the standing control horizon.
+- We **no longer keep the old 100-step dense baseline run** (artifacts +
+  plan + finding pruned). The dense proof is now this 10-step cellA.
 
-### `communication-baseline` — the comm-eff method's smoke-scale verification
+### Comm-eff method — implementation correct, masking still under test
 
-- Qwen2.5-1.5B-Instruct on GSM8K with the full comm-eff pipeline enabled:
-  PRF activation mask `p=0.9` on both gradient-feeding forwards
-  (`mask_recompute=true`), hookless K-stale anchor circuit
-  (cadence=5/delay=5), two-sided Tikhonov spectral correction
-  (`α=0.5, τ=0.01, β_anc=0.9`). No KL, no entropy.
-- 20-step smoke on 4×H200; mean reward steps 11-20 = +82% above mean steps
-  1-10; all six anchor guards held; visible learning trend.
-- Run dir: `runs/communication-baseline/`
-- Launcher: `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
-- Plan: `.claude/plans/communication-baseline.md`
-- Reproducibility manifest: `runs/communication-baseline/REPRODUCIBILITY.md`
-- ⚠️ **Superseded at paper scale by EXP-14 (below).** This smoke PASS used the
-  old mask+anchor+spectral config; the paper-scale investigation found the
-  masked path does not yet learn. The launcher now defaults to a simpler
-  mask+rescale+per-channel config (anchor/spectral OFF) — see EXP-14.
+- **Implementation is correct:** comm-eff OFF ⇒ byte-identical dense (PR #1);
+  masking ON fires on exactly the gradient-feeding forwards, `mask_ratio`
+  tracks `p`, grads finite (PRs #2–#6, 127 unit tests).
+- **The masking side still needs a lot of testing** — at paper scale pure
+  masked GRPO does not yet learn (see EXP-14 below). Open → #15
+  (mask-rate sweep p=0.9→0.5→0.1).
+- **Anchor + spectral correction are layered fixes for later** — bring them
+  in only when the plain masked path isn't enough. They default OFF and
+  should stay OFF to start.
+- The old **communication-baseline** smoke run (old mask+anchor+spectral
+  config, 20-step PASS) is superseded by EXP-14; its artifacts/plan/finding
+  were pruned.
+- Launcher: `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`.
 
 ## EXP-14 — paper-scale grad_norm explosion: RESOLVED (diagnosis), GitHub #14 (closed), #15 follow-ups
 

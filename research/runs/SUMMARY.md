@@ -3,12 +3,44 @@
 Permanent references + a folded history of the experiments whose heavy
 artifacts have been pruned to keep the repo lean.
 
-## Permanent reference runs
+## The two reference points
 
-| id | what | result | dir | launcher |
-|---|---|---|---|---|
-| **baseline** | Dense GRPO (the control), Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified, **no-KL no-entropy** (pg_loss only). EXP-14 reconfirmed no-KL dense learns cleanly (val 0.083 → 0.721 in 10 steps); launcher standardized to no-KL. | `val/test_score` 0.087 → 0.789 over 100 steps, 4×H200 | `runs/baseline/` | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
-| **communication-baseline** | Comm-eff **smoke-scale** reference (historical, old config): PRF mask `p=0.9` + anchor (cadence=5/delay=5) + two-sided Tikhonov spectral (`α=0.5, τ=0.01, β_anc=0.9`), no-KL. ⚠️ At paper scale **EXP-14 (#14)** showed the masked path does NOT yet learn: step-1 grad_norm explosion (~771) = the mask's **magnitude collapse** (h*mask, no rescale, RMS→0.32×), tamed by inverted-dropout **`rescale`** (771→1.5) but val stays flat; naive `clean_cadence` is unsustainable (PPO `pg_clipfrac` saturates 0.26→0.44). Launcher now **DEFAULTS to mask + rescale + per-channel** (anchor/spectral OFF, cadence off) as the #15 mask-rate-sweep starting point. | PASS 20-step smoke (old config); paper-scale learning unresolved → #15 | `runs/communication-baseline/` | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+Run artifacts are pruned (de-bloated). The durable record is here + git
+history + the merged PRs on `vast-ai-workload`.
+
+### Baseline = dense GRPO == comm-eff OFF
+
+There is **one** baseline: the dense control, which *is* the comm-eff launcher
+with the master switch off. `COMM_EFF_ENABLED=false` is byte-identical to
+unmodified verl (validated PR #1). No-KL, no-entropy (pg_loss only).
+
+- **Proof the codebase trains dense-perfect:** EXP-14 `test1_cellA`
+  (comm-eff OFF), **10 steps**, 4×H200 — `val/test_score` **0.083 → 0.721**,
+  clean monotone improvement. This is the dense-correctness proof; we **no
+  longer keep the old 100-step baseline run** (artifacts pruned). 10 steps is
+  enough to see clear learning, so it's the standing control horizon.
+- Launcher: `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
+  with `COMM_EFF_ENABLED=false`, or the convenience dense launcher
+  `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (identical
+  no-KL objective).
+
+### Comm-eff method = implementation correct, masking still under test
+
+- **Implementation is correct.** comm-eff OFF ⇒ byte-identical dense (PR #1);
+  with masking ON the mask fires on exactly the gradient-feeding forwards,
+  `mask_ratio` tracks `p`, grads stay finite (PRs #2–#6, 127 unit tests).
+- **The masking side still needs a lot of testing.** EXP-14 (#14) showed that
+  at paper scale pure masked GRPO does **NOT yet learn**: mask magnitude
+  collapse explodes grad_norm (~771); inverted-dropout `rescale` tames it
+  (→1.5) but val stays flat; naive `clean_cadence` is unsustainable (PPO
+  `pg_clipfrac` saturates 0.26→0.44). Open question → **#15**: can masked GRPO
+  learn at all, and at what mask rate? Default config = mask + rescale +
+  per-channel — the #15 mask-rate-sweep (p=0.9→0.5→0.1) starting point.
+- **Anchor + spectral correction are layered fixes for LATER** — the
+  corrections you bring in *only once the plain masked path is understood*
+  (i.e. when masking alone is not enough). They **default OFF and must stay
+  OFF to start** (`COMM_EFF_ANCHOR_ENABLED=false`,
+  `COMM_EFF_SPECTRAL_ENABLED=false`).
 
 ## Comm-eff knob surface (EXP-14, in `vast_comm_eff_baseline_*.sh`)
 
@@ -29,8 +61,12 @@ All independently env-toggleable; defaults = the mask-only comm-eff baseline.
 
 The communication-efficient implementation arrived through a sequence of
 incremental experiments, each merged to `vast-ai-workload` via its own PR.
-The two permanent baselines above subsume the result; the table below is
-the audit trail.
+The reference points above subsume the result; the table below is the audit
+trail. The old dense **100-step baseline** run (`val/test_score`
+0.087→0.789) and the **communication-baseline** smoke run (old
+mask+anchor+spectral config, 20-step PASS) have both had their artifacts +
+plan + finding pruned — the dense proof is now EXP-14 `test1_cellA` (above)
+and the comm-eff result is EXP-14 (#14) / row below.
 
 | what | result | PR |
 |---|---|---|

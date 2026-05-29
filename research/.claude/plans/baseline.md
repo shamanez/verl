@@ -1,9 +1,15 @@
 # Plan: baseline
 
-> **The dense control.** verl run with **no modifications** — vanilla GRPO,
-> Qwen2.5-1.5B-Instruct on GSM8K. Every compression experiment overlays its curve
-> against this reference. () Result:
-> `val/test_score` 0.0872 → 0.7892 over 100 steps on 4×H200.
+> **The dense control = comm-eff OFF.** verl with **no modifications** — vanilla
+> GRPO, Qwen2.5-1.5B-Instruct on GSM8K, **no-KL no-entropy** (pg_loss only).
+> `COMM_EFF_ENABLED=false` is byte-identical to this (PR #1). Every compression
+> experiment overlays its curve against this reference.
+>
+> **Current proof (run artifacts pruned):** EXP-14 `test1_cellA` (comm-eff OFF),
+> `val/test_score` **0.083 → 0.721 over 10 steps** on 4×H200 — clean monotone
+> improvement. The old standalone 100-step baseline run (0.087→0.789) has been
+> pruned; this plan is kept as the dense-control design reference / re-run
+> template.
 
 ## Experiment
 - id:            baseline

@@ -1,5 +1,14 @@
 # Investigation prompt — paste into a new session to draft the GitHub issue
 
+> ⚠️ **HISTORICAL / SUPERSEDED.** This draft predates EXP-14. The paper-scale
+> grad_norm explosion it describes is now **diagnosed and resolved** — root
+> cause = mask **magnitude collapse** (`h*mask`, no rescale, RMS→0.32×); see
+> GitHub #14 (closed), `research/LOG.md` (EXP-14 section), and
+> `research/runs/SUMMARY.md`. Open follow-up is #15 (does masked GRPO learn at
+> all). The `runs/baseline/` and `runs/communication-baseline/` paths referenced
+> below have been pruned — their durable record lives in `runs/SUMMARY.md`.
+> Kept only as the original investigation artifact.
+
 > Paste the block below (everything between the long horizontal rules) into
 > a fresh Claude Code session. It is self-contained: the new session does
 > not need access to any prior conversation. Its output will be a single

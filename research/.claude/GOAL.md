@@ -21,7 +21,8 @@ while MEASURABLY reducing communication.**
 1. **Runs** — comm-eff ENABLED trains end-to-end at paper scale with no
    grad_norm explosion, NaN, or divergence.
 2. **Parity** — final reward / GSM8K accuracy ≥ the dense GRPO baseline
-   (`runs/baseline/`), within noise.
+   (= comm-eff OFF; reference proof EXP-14 `test1_cellA`, val 0.083→0.721 in
+   10 steps), within noise.
 3. **Savings** — communication volume is measured and is materially lower than
    dense, reported as a concrete number.
 4. **Reproducible** — a promoted canonical launcher reproduces it (the
@@ -45,10 +46,11 @@ status:approved` at each human gate.
 
 | State | Step | kind | code_change | Status |
 |---|---|---|---|---|
-| ✅ | Dense GRPO baseline (the control) | experiment | — | landed → `runs/baseline/` |
-| ✅ | Comm-eff smoke baseline (method toggles on, small scale) | experiment | — | landed → `runs/communication-baseline/` (PASS) |
-| 🔬 | **#13 — diagnose the paper-scale grad_norm explosion** | investigation → experiment | **false** | `status:planned` |
-| 🔧 | **Fix issue (opened after #13)** — patch the `verl/` module #13 names; restore stable training at paper scale | implementation | **true** | not yet opened |
+| ✅ | Dense GRPO baseline = comm-eff OFF (the control) | experiment | — | proven → EXP-14 `test1_cellA`, 0.083→0.721 / 10 steps (run pruned) |
+| ✅ | Comm-eff implementation (mask/anchor/spectral + FSDP integration, dense-parity-when-off) | implementation | **true** | landed → PRs #1–#8 |
+| ✅ | **#14 — diagnose the paper-scale grad_norm explosion** | investigation → experiment | **true** | **resolved** → mask magnitude-collapse; closed |
+| 🔬 | **#15 — does masked GRPO learn at all?** mask-rate sweep p=0.9→0.5→0.1 (mask + rescale + per-channel); bar = stable low `pg_clipfrac` + sustained val/score | experiment | maybe | `status:planned` |
+| 🔧 | If masking alone doesn't learn → layer anchor + spectral correction back on (default OFF until then) | implementation | maybe | future |
 | 📈 | Parity run — comm-eff ENABLED vs dense baseline, full GSM8K reward/accuracy curve | experiment | maybe | future |
 | 📉 | Communication-savings measurement + report | experiment | maybe | future |
 | 🚀 | Promote the proven launcher (DRAFT PR, base `vast-ai-workload`) | — | — | future |
