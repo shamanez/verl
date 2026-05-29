@@ -34,9 +34,13 @@ NEED_APPLY=1
 if [[ -d /workspace/verl/.git ]]; then
   CUR=$(git -C /workspace/verl rev-parse HEAD 2>/dev/null || echo none)
   CURBR=$(git -C /workspace/verl rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
-  if [[ "$CUR" == "$BUNDLE_HEAD" && "$CURBR" == "$EXP_BRANCH" ]]; then
+  # Trust any checkout already on the exp branch — its HEAD may be AHEAD of the
+  # bundle due to in-container hotfixes (commit-hotfix.sh). Re-cloning on a HEAD
+  # mismatch would WIPE those fixes, so only re-apply if the repo is missing or
+  # on a different branch.
+  if [[ "$CURBR" == "$EXP_BRANCH" ]]; then
     NEED_APPLY=0
-    echo "=== /workspace/verl already on $EXP_BRANCH @ $CUR — skip bundle apply ==="
+    echo "=== /workspace/verl already on $EXP_BRANCH @ $CUR (bundle=$BUNDLE_HEAD) — skip bundle apply, preserve in-container hotfixes ==="
   fi
 fi
 if [[ "$NEED_APPLY" == "1" ]]; then
