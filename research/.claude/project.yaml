@@ -85,3 +85,42 @@ codex:
   invoke_via: .claude/skills/codex-verify/run.sh              # the hang-protected wrapper around `codex exec`
   hard_timeout_sec: 600
   stall_timeout_sec: 90
+
+agent_models:
+  # DOCUMENTATION ONLY — and the one block where the "project.yaml wins" rule at the
+  # top of this file is INVERTED. The authoritative control for an agent's model and
+  # reasoning effort is its own frontmatter (`model:` + `effort:` in
+  # .claude/agents/<name>.md), which is what Claude Code actually reads at spawn time.
+  # project.yaml cannot re-point an agent. This block records the policy + rationale so
+  # the whole spread is reviewable in one place; if you change an agent's frontmatter,
+  # update the matching row here by hand (and vice versa).
+  #
+  # Policy: reasoning-heavy agents run on Opus 4.8 at max effort. The two lower-reasoning
+  # agents run on Sonnet 4.6 to cut cost (Sonnet $3/$15 vs Opus $5/$25 per MTok; all
+  # Opus 4.x versions are the same price, so version != cost lever — tier is). No agent
+  # runs on Haiku.
+  #
+  # Reasoning-effort rule: xhigh or max for every reasoning agent. Exactly one sanctioned
+  # exception — log-writer @ medium, because it is mechanical templating, not reasoning.
+  reasoning_effort_rule: "xhigh|max for all reasoning agents; log-writer @ medium is the one intentional exception"
+  agents:
+    analyst:
+      model: claude-opus-4-8
+      effort: max
+      why: writes PASS/REVISE/STOP verdicts that gate expensive compute — highest-stakes judgment
+    research-planner:
+      model: claude-opus-4-8
+      effort: max
+      why: designs falsifiable experiment plans — heaviest reasoning load in the harness
+    experiment-runner:
+      model: claude-opus-4-8
+      effort: max
+      why: provisioning + branch/payload ops where a mistake burns real GPU money
+    training-log-monitor:
+      model: claude-sonnet-4-6
+      effort: xhigh
+      why: high-frequency 30s polling loop (~80 polls/run) where per-poll token volume dominates cost; Sonnet 4.6 keeps strong traceback parsing at ~40% less than Opus
+    log-writer:
+      model: claude-sonnet-4-6
+      effort: medium
+      why: mechanical append/copy/rewrite + draft PR; Sonnet for reliable PR-base guardrails, medium effort because it is not reasoning work (the sanctioned exception to the effort rule)
