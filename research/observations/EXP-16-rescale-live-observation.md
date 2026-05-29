@@ -159,9 +159,52 @@ The directive's core claim is now backed by live evidence on the rescale run:
 pre-amendment attempt sharing a recycled Ray pid; the completed no_rescale run
 that defines the baseline is pid 25828 with grad_norm ~2400–3500.)
 
+## CELL 2 COMPLETE (done.flag present) — full trajectory
+
+| step | grad_norm | pg_clipfrac | ppo_kl | score/mean |
+|---|---|---|---|---|
+| 1 | 4.374 | 0.0282 | −0.00015 | 0.1260 |
+| 2 | 4.387 | 0.0274 | +0.00027 | 0.1328 |
+| 3 | 5.323 | 0.0258 | +0.00097 | 0.1318 |
+| 4 | 4.760 | 0.0290 | +0.00033 | 0.1338 |
+| 5 | 4.595 | 0.0299 | −0.00014 | 0.1367 |
+| 6 | 4.970 | 0.0286 | +0.00052 | 0.1260 |
+| 7 | 4.056 | 0.0277 | +0.00108 | 0.1406 |
+| 8 | 4.771 | 0.0277 | +0.00011 | 0.1367 |
+| 9 | 4.888 | 0.0303 | +0.00176 | 0.1455 |
+| 10 | 4.508 | 0.0307 | +0.00108 | **0.1475** |
+
+**Verdict cell 2: STABLE + mildly CONVERGING.** grad_norm bounded [4.06, 5.32]
+(no drift), clip frac flat ~0.03, ppo_kl < 0.002 throughout. score/mean rises
+0.126 → 0.147; back-half mean (steps 7–10 ≈ 0.143) > front-half (1–4 ≈ 0.131).
+Small (lr 1e-6, 10 steps) but the right sign and monotone-ish late. Mask
+train==old_logprob held at every step (final 17920 == 17920). No divergence.
+
+## CELL 4 (running) — `rescale_clean_every4_20steps`, clean_cadence=4, 20 steps
+What to verify here (the clean-step mechanism):
+- `comm_eff/clean_steps` should step to 1,2,3,4,5 at global steps **4,8,12,16,20**.
+- On those clean steps masking is forced OFF for the *whole* step (train AND
+  old-logprob recompute), so `mask_applications/train` should **not increase**
+  that step, and grad_norm should drop toward the **true dense** value
+  (memory: dense GRPO grad ≈ 0.38, i.e. ~10× below the masked ~4.7) then jump
+  back up on the next masked step. That alternation is the falsifier that the
+  clean step is genuinely taking a dense AdamW step.
+- Mask consistency on the masked steps must still show train==old_logprob.
+
+## Perf footnote (operator's "is it slow?" question)
+~96 s/step, MFU ≈ 0.76% on 4×B200 — slow *by design*, not a fault. Bottleneck:
+`update_actor` ~64 s (67%) driven by `ppo_micro_batch_size_per_gpu=1` +
+`use_dynamic_bsz=False` (one sequence per forward). `mask_recompute=true` adds the
+~20 s second masked forward (`old_log_prob`); grad-checkpointing adds ~33%. Rollout
+is only ~9 s (responses avg ~280 tok ≪ 16 K cap). A 5–10× speedup is available via
+larger micro-batch / dynamic bsz (mask is packing-invariant so numerics shouldn't
+move), but that's an operator call — not changing a live run. Whole 4-cell sequence
+≈ 2 h.
+
 ## Live log (running tally)
-- 22:10 start; FSDP loaded; cell-2 stepping at ~96 s/step. At 22:18 → step 5/10.
-- Robust single-SSH monitor `boktw39kl` armed (per-step stream across all cells).
-  First monitor (`bs5my088x`) false-positived "instance down" from concurrent-SSH
-  handshake collisions — box was up throughout; replaced.
-- (cells 4/5/6 + steps 6–10 appended as they land)
+- 22:10 cell 2 start; ~96 s/step; **22:2x cell 2 done (10/10)**.
+- ~22:31 cell 4 launched (vLLM re-warm), step 1 at 22:33. clean_cadence=4 / 20 steps.
+- Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
+  (First monitor false-positived "instance down" on concurrent-SSH collisions; box
+  was up throughout; replaced.)
+- (cells 4 steps + cells 5/6 appended as they land)
