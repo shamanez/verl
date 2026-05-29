@@ -30,6 +30,50 @@ If `kind:` is missing in the issue body, the planner defaults to `experiment`.
 - prior findings: findings/M<N>/EXP-NN.md, findings/M<N>/EXP-MM.md   # or "(none)"
 - referenced docs: <optional paths/URLs the issue body called out; planner does NOT read any fixed background doc by default>
 
+## Experiment sequence (REQUIRED when tuning / testing / comparing)
+
+**If this plan tunes a training job, tests logic, or compares
+configurations, list every run needed in execution order.** A single
+hypothesis often requires multiple sequential runs (e.g. dense baseline →
+method enabled → ablation → re-tightening). Spell them out here so the
+operator can plan compute and the runner knows the contract. Free-form
+single runs may use `(n/a — single cell, see ## Experiment design)`.
+
+```yaml
+sequence:
+  - id:        1
+    name:      <short slug, e.g. "dense-baseline-reproduce">
+    goal:      <one sentence — what this run answers>
+    config:    <key deltas from the plan defaults>
+    success:   <metric threshold that gates step 2>
+    on_fail:   stop  # or "retry with <knob change>", "skip step 2", etc.
+  - id:        2
+    name:      <e.g. "method-enabled-knob-A">
+    depends_on: 1
+    goal:      <…>
+    config:    <…>
+    success:   <…>
+  - id:        3
+    name:      <…>
+    depends_on: 2
+    goal:      <…>
+    config:    <…>
+    success:   <…>
+```
+
+Rules:
+- Number runs 1, 2, 3, … so the operator and analyst can refer to them
+  unambiguously.
+- Every run after #1 declares `depends_on:` so the analyst can short-circuit
+  the sequence on a hard failure of an earlier step.
+- If two runs are truly parallelizable (no data dependency), say so:
+  `parallel_with: [<id>]` instead of `depends_on:`. Then the runner may
+  fan out across the same provisioned box (see Vast.ai utilization
+  discipline below).
+- `success:` for each run is a single line gating the next run — NOT the
+  plan's overall ## Success criteria. The latter is the headline metric
+  for the whole hypothesis.
+
 ## Experiment design
 ```yaml
 sweep_grid:
@@ -75,6 +119,40 @@ steps_per_cell:    <S>          # global_step target per cell (the smallest that
 total_train_steps: <N*S>        # cross-check against max_gpu_hr — if this climbs, re-justify
 justification:     "<why this is the minimum number of cells × steps that still falsifies the hypothesis>"
 ```
+
+### Vast.ai utilization discipline (HARD RULE)
+
+Provisioned instances cost money every second they exist, whether they're
+training or not. **Plans MUST NOT leave Vast.ai instances stale**, and MUST
+maximize utilization while they're up.
+
+- **One instance for the whole `## Experiment sequence`, not one per run.**
+  If steps 1, 2, 3 are sequential on the same hardware tier, the runner
+  chains them on the same provisioned box (back-to-back tmux sessions or
+  cells, sharing the docker / verl checkout / dataset cache). Tearing down
+  + reprovisioning between sequential runs is forbidden — the warm-up cost
+  alone (vLLM init, weight load, dataset preprocess) is 5-8 min per
+  re-provision and the provision itself takes 1-3 min.
+- **Parallelize within the box.** If `## Experiment sequence` declares
+  runs `parallel_with:` each other, launch them as concurrent tmux sessions
+  on the same box, partitioning GPUs (TP/PP) explicitly. Don't waste idle
+  GPUs while one cell is running on a subset.
+- **Tear down the instant the science is captured.** When the last cell in
+  the sequence writes its `done.flag` and metrics are rsynced to the
+  laptop, the runner / Stop hook tears down within the next tick. The plan
+  must NOT include "leave it up for the analyst to look at later" — the
+  analyst reads metrics from the laptop, not the box.
+- **No keep-alive between sessions.** If a session ends with an active
+  instance, the Stop hook destroys it. There is no `--keep-warm` flag.
+  Always design with "ephemeral box" in mind: state lives in
+  `runs/EXP-<ID>/` on the laptop, not in `/workspace/` on the box.
+- **GPU-stall watchdog**: the orchestrator's `training-log-monitor` exits
+  with `teardown_only` if all GPUs sit ≤ 5% util for 4 consecutive 30-s
+  polls while tmux is ALIVE. That budget assumes the operator did NOT
+  design a known-idle phase into the plan. If the plan legitimately needs
+  an idle gap (e.g. a long evaluation between training cells), say so
+  explicitly in `## Notes for runner` so the monitor's thresholds get
+  loosened for that window.
 
 **What the plan does NOT specify.** The docker image, container `--shm-size` / `--cap-add`, onstart script (clone fork + pip-install verl `--no-deps`), recommended disk default, and CUDA driver filter all live in the locked Vast.ai Template referenced by `research/.claude/skills/vast-provision/templates.json`. The `vast-provision` skill auto-reads that file and pins the Template; plans MUST NOT name a `template_hash` or `image`. If a future plan needs a different runtime (new vllm major, different image), update `templates.json` and the Vast.ai Template record together — never bypass.
 
