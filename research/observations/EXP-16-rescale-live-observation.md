@@ -428,6 +428,21 @@ entropy easing 0.38→0.24 (growing confidence), counters absent (no-op confirme
   resume → 23:15 cell6 → **23:27 RESCALE_SEQUENCE_DONE (all 4 complete).**
 - Box now idle, instance UP. Per-step monitor exited on the DONE marker. Switching to
   an instance-liveness watch; continuing per directive until the box is down.
+
+## ADDENDUM — instance NOT down; operator launched a follow-up run
+- 23:33 liveness watch reported INSTANCE_DOWN after 5 consecutive ssh fails — **FALSE
+  POSITIVE.** Confirming SSH at 23:34 succeeded; uptime 10:48 (no reboot) ⇒ it was a
+  ~5-min patch of Vast SSH-auth flakiness, not a teardown. (Same flakiness that
+  tripped the first monitor. Lesson: instance-down needs a much higher fail
+  threshold / re-verify before concluding.)
+- **23:27–23:34 operator launched a NEW ad-hoc cell:
+  `grpo_mask_channel_p0p9_rescale_clean_every5_50steps`** — mask p0.9 + rescale +
+  **clean_cadence=5, 50 steps**, anchor/spectral OFF. A longer-horizon follow-up to
+  the cell-4 clean-step result (the winning mechanism). Logs to the standard metrics
+  dir. Re-armed per-step monitor `bna8oj0by` (no DONE-exit; runs until SSH truly
+  dies). Watching: does clean@5 over 50 steps sustain/extend the convergence (cell 4
+  hit ~0.62 in 20 steps with clean@4)? clean steps now fall on 5,10,15,…,50.
+- Observation continues per directive until the box is actually torn down.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
