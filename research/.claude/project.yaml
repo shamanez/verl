@@ -110,39 +110,46 @@ agent_models:
   # the whole spread is reviewable in one place; if you change an agent's frontmatter,
   # update the matching row here by hand (and vice versa).
   #
-  # Policy: the two heaviest-reasoning agents (analyst, research-planner) run on Opus 4.8
-  # at max effort. The Opus coding/ops agent (experiment-runner) runs at xhigh — per
-  # Anthropic's effort guidance, xhigh is the recommended starting tier for long-horizon
-  # coding/agentic work, and max can overthink + add cost for little gain. The two Sonnet
-  # 4.6 support agents run there to cut cost (Sonnet $3/$15 vs Opus $5/$25 per MTok; all
-  # Opus 4.x versions are the same price, so version != cost lever — tier is). No agent
-  # runs on Haiku.
+  # Policy: effort is tiered by role and pushed toward the top of each model's range.
+  #   • max  — the two agents that AUTHOR the load-bearing artifacts: research-planner
+  #            (designs the experiment plan) and experiment-runner (writes/patches the verl
+  #            code + launch payload). Both gate everything downstream, so they get Opus
+  #            4.8's absolute ceiling. (Operator directive: this overrides Anthropic's
+  #            "xhigh is the starting tier for coding" guidance for experiment-runner — the
+  #            operator wants the code author at max because a wrong patch burns GPU money.)
+  #   • xhigh — other Opus agents (analyst): deep verdict reasoning, one notch below max.
+  #            max is reserved for the plan/code authors; xhigh ("extended capability for
+  #            long-horizon work") keeps the gate-the-compute judgment strong without it.
+  #   • high  — both Sonnet 4.6 support agents (training-log-monitor, log-writer). Sonnet is
+  #            the cost lever (Sonnet $3/$15 vs Opus $5/$25 per MTok; all Opus 4.x are the
+  #            same price, so version != cost lever — tier is). `high` is Sonnet's strongest
+  #            tier BELOW max: Sonnet 4.6 has NO xhigh (low/medium/high/max only — xhigh is
+  #            Opus 4.8/4.7 exclusive), so high is the faithful "xhigh-equivalent" here.
+  # No agent runs on Haiku.
   #
-  # Reasoning-effort rule: Opus reasoning agents run at max (analyst, research-planner) or
-  # xhigh (experiment-runner, the coding/ops agent, per Anthropic's coding guidance). The
-  # two Sonnet 4.6 agents run at medium — medium is Sonnet's recommended tier for
-  # tool-heavy loops, and xhigh is NOT an available effort level on Sonnet 4.6 (xhigh is
-  # Opus 4.8/4.7 only).
-  reasoning_effort_rule: "Opus reasoning agents @ max|xhigh; both Sonnet 4.6 agents @ medium (xhigh is Opus-only, unavailable on Sonnet 4.6)"
+  # Reasoning-effort rule: max for the plan/code authors (research-planner, experiment-runner);
+  # xhigh for other Opus agents (analyst); high for both Sonnet 4.6 agents (Sonnet has no
+  # xhigh — high is its top tier below max).
+  reasoning_effort_rule: "Opus plan/code authors @ max (research-planner, experiment-runner); other Opus @ xhigh (analyst); both Sonnet 4.6 agents @ high (Sonnet has no xhigh; high is its top tier below max)"
   context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]). NOTE: Claude Code may currently STRIP [1m] from subagents at spawn time (ref GH claude-code#45169), so the suffix is correct + future-proof but may be a no-op until that bug is fixed. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent Opus/Sonnet tiers below."
   agents:
     analyst:
       model: "claude-opus-4-8[1m]"
-      effort: max
-      why: writes PASS/REVISE/STOP verdicts that gate expensive compute — highest-stakes judgment
+      effort: xhigh
+      why: writes PASS/REVISE/STOP verdicts that gate expensive compute — deep judgment, but not a plan/code author, so xhigh (max is reserved for research-planner + experiment-runner)
     research-planner:
       model: "claude-opus-4-8[1m]"
       effort: max
-      why: designs falsifiable experiment plans — heaviest reasoning load in the harness
+      why: designs falsifiable experiment plans — heaviest reasoning load in the harness; the plan author, one of the two max agents
     experiment-runner:
       model: "claude-opus-4-8[1m]"
-      effort: xhigh
-      why: long-horizon coding/payload/provisioning ops; Anthropic recommends xhigh as the starting tier for coding/agentic work on Opus 4.8 (max risks overthinking + extra cost for little gain). xhigh is also ultracode's effort tier — ultracode = xhigh + a main-session permission to launch multi-agent workflows, which a leaf subagent cannot hold (so only the effort half applies here).
+      effort: max
+      why: writes/patches verl code on exp/* branches + authors launch.sh/config/provisioning payload — the code author, one of the two max agents. Operator directive — max (not Anthropic's xhigh coding-default) because a wrong patch or mis-provision burns real GPU money and corrupts the run.
     training-log-monitor:
       model: "claude-sonnet-4-6[1m]"
-      effort: medium
-      why: high-frequency 30s polling loop (~80 polls/run) where per-poll token volume dominates cost; medium is Sonnet 4.6's recommended tier for tool-heavy loops. (Was xhigh, which is invalid on Sonnet 4.6 — xhigh is Opus 4.8/4.7 only — so it silently fell back to the Sonnet default.)
+      effort: high
+      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains) so it gets Sonnet's top non-max tier; high rather than max because it is a high-frequency ~80-poll/run loop where per-poll cost compounds. xhigh is unavailable here (Opus 4.8/4.7 only).
     log-writer:
       model: "claude-sonnet-4-6[1m]"
-      effort: medium
-      why: mechanical append/copy/rewrite + draft PR; Sonnet for reliable PR-base guardrails, medium effort because it is not reasoning work (the sanctioned exception to the effort rule)
+      effort: high
+      why: mechanical append/copy/rewrite + draft PR (genuinely not reasoning-heavy), but bumped to high under the uniform all-Sonnet-agents policy per operator directive. high is Sonnet's xhigh-equivalent (xhigh is Opus-only).

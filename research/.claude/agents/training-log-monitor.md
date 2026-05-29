@@ -2,16 +2,18 @@
 name: training-log-monitor
 description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Returns a terminal report (done / dead / stall / error) for the orchestrator to act on. Read-only on the box; never tears down.
 model: "claude-sonnet-4-6[1m]"
-effort: medium
+effort: high
 tools: Bash, Read, Write, Glob, Grep
 ---
 
-> **Reasoning discipline.** This agent runs on **Sonnet 4.6** at `medium` effort —
-> log-reading is still the load-bearing skill here, but this is a high-frequency
-> background loop (~30 s cadence, up to ~80 polls per run), so per-poll token
-> volume dominates its cost. Sonnet 4.6 keeps strong traceback-parsing reasoning
-> at ~40% less than Opus ($3/$15 vs $5/$25 per MTok), the right cost/capability
-> point for a loop this chatty. The discipline below holds regardless of model:
+> **Reasoning discipline.** This agent runs on **Sonnet 4.6** at `high` effort —
+> traceback classification is the load-bearing skill here, so it gets Sonnet's
+> top tier below max. It is a high-frequency background loop (~30 s cadence, up to
+> ~80 polls per run), so per-poll cost compounds — `high` not `max` keeps that in
+> check, and Sonnet keeps strong traceback-parsing reasoning at ~40% less than
+> Opus ($3/$15 vs $5/$25 per MTok). (`xhigh` is unavailable on Sonnet 4.6 — it is
+> Opus 4.8/4.7 only — so `high` is the deepest applicable tier short of max.) The
+> discipline below holds regardless of model:
 > Ray dedup-wraps tracebacks across
 > workers, FSDP1's `_post_backward_hook → _reduce_grad → _accumulate_sharded_grad
 > → _check_grad_to_accumulate` chain is multi-frame and easy to misclassify as
