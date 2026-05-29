@@ -91,10 +91,9 @@ fanout_max:       6                # cap on parallel cells across the sweep
 ## Compute budget (HARD CAPS)
 ```yaml
 gpu_count:        1                       # number of Vast.ai instances (single-node default)
-gpu_filter_chain:                         # runner tries each in order; first tier with ≥1 offer ≤ max_dph wins
+gpu_filter_chain:                         # ONLY two sanctioned tiers: 4×H200 (preferred) or 8×H100 — runner tries each in order; first tier with ≥1 offer ≤ max_dph wins
   - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"   # preferred: most VRAM per $
   - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
-  - "num_gpus=4 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
 max_dph:          24.0                    # per-instance $/hr ceiling
 max_gpu_hr:       96                      # total across all cells (runner aborts past this)
 max_parallel:     1                       # how many cells may run concurrently

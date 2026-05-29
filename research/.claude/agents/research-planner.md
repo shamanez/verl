@@ -28,7 +28,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
      - `literature`: do NOT write a normal plan. Append one line `RESCUE_REQUEST: math <issue title>` to PROGRESS.md and stop. The human operator decides whether to invoke `codex-verify --mode math-rescue` manually against the issue body.
    - `hypothesis:` — required for `experiment` / `ablation` / `implementation`. One paragraph, falsifiable, with numeric thresholds. If missing, the first acceptance criterion becomes `clarification_needed: hypothesis missing or not falsifiable` and you stop early. **Operational thresholds count as numeric falsifiability.** For `milestone:M0` or `kind:smoke` issues, a hypothesis grounded in cost ceilings (`spend <= $5`), wall-clock (`<= 60 min`), correctness invariants (`no NaN/Inf in any loss field`, `train/reward_mean > 0 at step 5`), or environment hygiene (`docker exec verl env | grep VAST returns nothing`) is fully acceptable — do NOT demand an algorithmic performance threshold. Research-experiment issues (no `milestone:M0` / no `kind:smoke`) DO need an algorithm-level numeric threshold (e.g. `target_metric / baseline_metric <= 0.10`). For `brainstorm`, hypothesis is optional — replace with `## Proposal`.
    - `milestone: M<N>` — routing tag only, semantics defined externally by the user.
-   - `baseline_run: EXP-<NN>` or `none`. For `ablation`, this MUST be the parent EXP id.
+   - `baseline_run: EXP-<NN>` or `none`. **Default: `communication-baseline`** (the comm-eff method reference, from `project.yaml.default_baseline.run`) if the issue body omits it. Use `baseline_run: baseline` to compare against the dense control instead. For `ablation`, this MUST be the parent EXP id.
    - `depends_on: [EXP-<N>, EXP-<M>]` — required for `ablation`; optional for `experiment`.
    - `budget_gpu_hr:`, `budget_dph_max:`, `gpu_filter:` — optional; fill defaults from `.claude/project.yaml.default_compute` if missing. Skip for `brainstorm` / `implementation` / `literature`.
    - `code_change: true|false` — auto-`true` for `kind: implementation`.
@@ -44,10 +44,9 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 5. **Compute defaults** (write these into the plan's `## Compute budget` section unless the issue overrode them):
    ```yaml
    gpu_count:        1                       # number of Vast.ai instances (single-node default)
-   gpu_filter_chain:                         # runner tries each in order; first tier with ≥1 offer ≤ max_dph wins
+   gpu_filter_chain:                         # ONLY two sanctioned tiers: 4×H200 (preferred) or 8×H100 — runner tries each in order; first tier with ≥1 offer ≤ max_dph wins
      - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"   # preferred: most VRAM per $
      - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
-     - "num_gpus=4 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
    max_dph:          24.0                    # per-instance $/hr ceiling
    max_gpu_hr:       96                      # total across all cells (runner aborts past this)
    max_parallel:     1

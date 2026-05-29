@@ -175,7 +175,7 @@ Each tick, the orchestrator advances every approved plan:
 | `verdict.md` says STOP | `log-writer`, label `status:stop` |
 
 `experiment-runner` defaults: **single Vast.ai node, $24/hr per-instance cap,
-96 GPU-hr total**, walking the H200 → 8×H100 → 4×H100 fallback chain unless
+96 GPU-hr total**, walking the 4×H200 → 8×H100 fallback chain unless
 the plan overrides it.
 
 ### When to invoke codex manually (outside the autonomous loop)

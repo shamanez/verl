@@ -31,7 +31,7 @@ NON-NEGOTIABLES for this session:
 2. Honor every NON-NEGOTIABLE section in the issue's plan file (.claude/plans/<N>.md).
 3. Tear down the Vast.ai instance via the vast-teardown skill BEFORE this session stops. The Stop hook will block stopping until the runs.jsonl ledger row reads TORN_DOWN.
 4. Budget cap: if box lifetime spend exceeds $<MAX_DPH × wall_clock_hr from the plan, default $25>, tear down + write verdict=STOP regardless of cell completion state.
-5. Consumer-card fallback: if a consumer tier (RTX_5090/RTX_4090) returns an env-failure (docker fail / cuda mismatch / vLLM init OOM / NCCL init / SSH unreachable), tear down immediately and re-provision skipping consumer tiers (start at 4×H100). Do NOT retry a second consumer host.
+5. Consumer-card fallback: if a consumer tier (RTX_5090/RTX_4090) returns an env-failure (docker fail / cuda mismatch / vLLM init OOM / NCCL init / SSH unreachable), tear down immediately and re-provision skipping consumer tiers (start at the first sanctioned datacenter tier, 4×H200). Do NOT retry a second consumer host.
 6. If experiment fails at runtime (FSDP collision, NaN, OOM mid-training, wrong counter values), KEEP the box running through the remaining cells (this is the data we paid for), then dispatch analyst — do not pre-empt. The plan's analyst predicate decides PASS/REVISE/STOP.
 
 Stop only after: (a) analyst has written runs/EXP-<N>/verdict.md, (b) log-writer has updated LOG.md + findings/ (PASS/STOP only — REVISE goes to child-issue path), (c) Vast instance is destroyed and runs.jsonl ledger row reads TORN_DOWN.
@@ -182,7 +182,7 @@ agent needs but cannot derive.
 ```
 You are experiment-runner for EXP-<N>.
 Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree).
-The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (H200 → 8×H100 → 4×H100) is what the planner emits unless this plan overrides.
+The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true, branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main) and apply target_modules patches; commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
 Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsync payload, launch in tmux, promote to RUNNING, label `status:running`, append one PROGRESS line, stop. Never call vast-teardown.
 ```

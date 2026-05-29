@@ -66,15 +66,19 @@ vast_ssh:                                                     # SSH identity the
 
 default_compute:                                              # planner emits these defaults unless the issue overrides
   gpu_count: 1
-  gpu_filter_chain:
+  gpu_filter_chain:                                           # ONLY two sanctioned tiers: 4×H200 (preferred) or 8×H100. No 4×H100 fallback.
     - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
     - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
-    - "num_gpus=4 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
   max_dph: 24.0
   max_gpu_hr: 96
   max_parallel: 1
   wall_clock_hr: 12
   iterations: 3
+
+default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
+  run: communication-baseline                                 # the comm-eff METHOD reference (runs/communication-baseline/) — not the dense control
+  launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh   # what produced runs/communication-baseline/
+  dense_control: baseline                                     # the verl-unmodified dense reference (runs/baseline/) — name it explicitly with `baseline_run: baseline` when a dense comparison is wanted
 
 codex:
   # The codex CLI is an OPERATOR-INVOKED tool, not an autonomous-harness dependency.
