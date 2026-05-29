@@ -4,7 +4,9 @@ Qwen2.5-1.5B-Instruct / GSM8K, 4xB200. Masked-GRPO comm-eff method (per-(token,c
 activation masking at p=0.9 + rescale at 7 pipeline-stage boundaries). PRIMARY FOCUS: cell 7,
 `grpo_mask_channel_p0p9_rescale_clean_every5_50steps` (rescale + clean dense step every 5).
 
-> Status placeholder — final numbers for cell 7 filled in from the completed 50-step run.
+> Status: COMPLETE. Cell 7 finished all 50 steps; end-of-run GSM8K val acc logged. The post-training
+> DataLoader-worker "killed by signal" traceback is benign shutdown noise after the step-50 checkpoint
+> save — training and validation both completed.
 
 ## Two policies (the "Sooo important" question)
 

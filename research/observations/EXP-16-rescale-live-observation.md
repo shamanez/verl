@@ -453,6 +453,34 @@ by clip; clip frac ~0.04, ppo_kl ~0 — no divergence). **By step 24 clean@5 (0.
 already exceeds clean@4's 20-step final (0.619)**, on track well above it over 50
 steps — a clean replication+extension of the clean-step convergence result, with
 mask determinism intact throughout. Monitor `bna8oj0by` streaming; box healthy.
+
+### CLEAN@5 / 50-step COMPLETE (done.flag) — converged to DENSE level
+Reward 0.128 → **0.778** (final, step 50). Back-half plateau ~0.73–0.79, peak 0.791
+@ s47. **This matches the dense reference (~0.78)** — i.e. at p=0.9 masking, a clean
+(dense) step every 5 recovers essentially DENSE-level convergence, vs pure-masked
+~0.13. All 10 clean steps (5,10,…,50) verified (dense grad ~0.31–0.45, entropy
+~0.26–0.39, mask counters frozen each time); masked steps grad ~5–9 (rising with
+policy confidence, bounded by clip; clip ~0.03–0.04, ppo_kl ~0). Mask determinism
+held to the last step (final train/old 560/322, both frozen on clean steps).
+NB: an ERROR_SIGS count=5 fired at completion — **benign teardown noise**
+(`DataLoader worker killed by signal: Killed`, `UnixTransport closed` in `__del__`
+during clean process exit); done.flag present, run succeeded.
+
+### UPDATED SCOREBOARD (reward, p=0.9 rescale mask)
+| mechanism | reward | verdict |
+|---|---|---|
+| pure mask (cell 2) | 0.13 → 0.15 | flat |
+| mask + anchor@2 + spectral@2 (cell 5) | 0.14 → 0.13 | flat (rel_change ~24%) |
+| **mask + clean@4 (cell 4, 20 st)** | 0.13 → 0.62 | converges |
+| **mask + clean@5 (follow-up, 50 st)** | 0.13 → **0.78** | converges to DENSE level |
+| dense reference (cell 6, 25 st) | 0.13 → ~0.78 | gold standard |
+
+⇒ The clean step is not just *a* fix — with enough steps it **closes the gap to
+dense entirely**. Spectral/anchor correction does not.
+
+- 23:35 clean@5 launched → **23:50 COMPLETE (50/50, score 0.778, done.flag).**
+  Box idle again (GPUs 0%), instance UP. Monitor `bna8oj0by` still armed (will catch
+  a new run or the box going down). Observation continues until teardown.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
