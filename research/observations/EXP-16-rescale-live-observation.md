@@ -330,6 +330,34 @@ clean steps) matches a consistent old↔new mask. No desync, no divergence obser
   (packing-invariant PRF), so unequal path fire-counts are not a desync.
   Watching: spectral/anchor cadence (every 2 steps), spectral rel_change, and
   whether anchor+spectral correction helps vs cell 4's clean-step convergence.
+
+## CELL 5 (running, resumed) — anchor@2 + spectral@2 — steps 1–10
+Circuits ACTIVE and firing EVERY step (not the nominal cadence 2):
+`spectral_corrections` +4/step (= max_targets 4 matrices/firing),
+`anchor_backwards` +1/step. (Effective cadence 1 — operator may have changed it on
+the OOM-fix resume; unconfirmed.) No clean steps (clean_cadence=0).
+
+Three-way reward comparison (same model/init/p=0.9 rescale mask):
+| step | cell 2 pure-mask | cell 4 clean@4 | cell 5 anchor+spectral |
+|---|---|---|---|
+| 1 | 0.126 | 0.125 | 0.140 |
+| 3 | 0.132 | 0.139 | 0.115 |
+| 5 | 0.137 | 0.156 | 0.133 |
+| 7 | 0.141 | 0.221 | 0.120 |
+| 8 | 0.137 | 0.227 | 0.121 |
+| 9 | 0.146 | 0.261 | 0.135 |
+| 10 | 0.147 | **0.339** | 0.125 |
+
+### FINDING 4 (mid-run, preliminary) — spectral+anchor ≠ clean step for convergence
+At the halfway mark **cell 5 is flat ~0.12–0.145, statistically indistinguishable
+from pure-masked cell 2, and far below clean-step cell 4 (0.339 @ step10).** The
+spectral grad-correction does tighten the PPO ratio a little (clip frac ~0.02–0.028
+vs cell 4's ~0.03–0.045) and grad_norm stays controlled (~4–5, ppo_kl ~0, no
+divergence), but that local tightening does NOT translate into reward gains.
+Tentative read: with these hyperparams (alpha 0.5, tau 0.01, beta_anc 0.9,
+effective cadence 1), the spectral correction is not recovering the true-gradient
+*direction* the way a periodic dense (clean) step does. CAVEAT: cell 4's climb was
+back-loaded (steps 9–20), so this is not final until cell 5 step 20.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
