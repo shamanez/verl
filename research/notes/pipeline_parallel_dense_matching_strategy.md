@@ -70,6 +70,59 @@ anchor + spectral correction.
    training dense-equivalent.**
 6. **Grad clip stays** (`grad_clip=1.0`) as a safety net (not a fix).
 
+## Magnitude-restoration modes: `constant` vs `rms_match` — implemented & measured (`grad_modecmp.py`)
+
+The masker now has a switchable, non-destructive `mask.rescale_mode ∈
+{none, constant, rms_match, auto}` (the legacy `rescale` bool maps via `auto`:
+true→constant, false→none). The three boundary formulas:
+
+- `none`: `h⊙m` (raw).
+- `constant`: `h⊙m/(1−p)` (inverted dropout; Idea 1).
+- `rms_match`: `h⊙m · detach(rms_true/rms_masked)` (Idea 2b, self-contained &
+  comms-valid: a **detached** per-token gain that forces the masked activation's
+  RMS to equal the **true** pre-mask RMS, so the downstream pre-norm RMSNorm
+  divides by the true RMS. Comms: `rms_true` is a 1-float/token side channel
+  (~0.6% at p=0.9); `rms_masked` is recoverable on the receiver from the kept
+  entries. Gain ≈ √(1/(1−p)) ⇒ far milder than constant's 1/(1−p), so it is
+  *more* bf16-safe per element).
+
+Measured on real Qwen2.5-1.5B (4×B200, CE on a fixed batch, mask at all 7
+boundaries, via the REAL `ActivationMasker`; all 52 existing mask unit tests
+still pass — the switch is non-destructive):
+
+| mode | p | RMS(h̃)/dense | cos→dense | grad_norm/dense |
+|---|---|---|---|---|
+| none | 0.5 | 0.706 | 0.012 | 259 |
+| constant | 0.5 | 1.413 | 0.087 | **1.26** |
+| rms_match | 0.5 | **1.000** | 0.049 | 6.41 |
+| none | 0.9 | 0.311 | 0.00 | 1603 |
+| constant | 0.9 | 3.115 | 0.012 | **2.30** |
+| rms_match | 0.9 | **1.000** | 0.020 | 35.7 |
+| none | 0.95 | 0.216 | 0.005 | 1309 |
+| constant | 0.95 | 4.327 | −0.004 | **5.05** |
+| rms_match | 0.95 | **1.000** | 0.016 | 27.9 |
+
+Two findings, one of them counter to the original prediction:
+
+1. **`rms_match` delivers EXACT activation RMS** (1.000 per token at every p) — the
+   "exact norm" design claim is correct *at the activation level*, validated on
+   the real hook.
+2. **But `rms_match` does NOT beat `constant` on the GRADIENT norm — it is worse**
+   (6–36× dense vs 1.3–5×). Mechanism: `constant` *overshoots* the RMS
+   (1.4–4.3×), which **damps** the downstream RMSNorm `1/RMS` backward at each of
+   the 7 boundaries, and that damping **compounds** (≈1.41⁷≈7.5× at p=0.5 —
+   matches the 6.4/1.26 gap). `rms_match` removes that damping by hitting exactly
+   the dense RMS. **So constant's overshoot is a *feature* for grad-norm
+   stability, not a bug.**
+3. Neither touches **direction**: cos→dense stays ≈0 at high p for both, and the
+   constant-vs-rms_match cos gap is noise-level. Direction is the spectral job.
+
+**Verdict:** keep **`constant`** (the default `rescale=true`) as the grad-norm
+stabilizer — its overshoot is beneficial. Reach for **`rms_match`** only when you
+need exact *forward* activation statistics or low-bit quantization at the
+boundary (milder, bounded per-element gain), accepting a larger grad norm. The
+sublayer-output variant (Idea 2a) stays ruled out — it never crosses the wire.
+
 ## The masked-gradient bias is LOW-RANK — the spectral premise is validated (`grad_lowrank_probe.py`)
 
 The key question for "can we reach dense": is the bias `R = g_dense − g_masked`
@@ -127,7 +180,11 @@ clean cadence until the trajectory matches, then trade back toward comms savings
 
 ## Honest bottom line
 
-- **Norm:** solved (rescale → norm/dense ≈ 1 up to p=0.7).
+- **Norm:** solved by the **`constant`** rescale (`h⊙m/(1−p)` → grad_norm/dense
+  1.3–5× across p). Implemented as a switchable `mask.rescale_mode`; the new
+  `rms_match` mode gives *exact* activation RMS but a *larger* grad norm (its
+  overshoot-free RMS removes the beneficial downstream damping), so `constant`
+  stays the stabilizer; `rms_match` is for forward-stat fidelity / quantization.
 - **Dense-identical at high mask rate:** NOT achievable by masking+rescale alone —
   the expected masked gradient is biased and near-orthogonal at p≥0.7, and averaging
   doesn't fix it (the gap is bias, not noise).
