@@ -231,15 +231,30 @@ class ActivationMasker:
         base_seed: int,
         pp_size: int,
         rescale: bool = False,
+        rescale_mode: str = "auto",
         state: Any = None,
     ):
         self.p = float(p)
         self.base_seed = int(base_seed)
         self.pp_size = int(pp_size)
-        # rescale=True applies inverted-dropout h*mask/(1-p) (preserves
-        # E[h_tilde]=h); False (default) writes the raw product.
+        # Magnitude-restoration scheme applied to h*mask. `rescale_mode` selects
+        # it; the legacy `rescale` bool is honoured when rescale_mode == "auto".
+        #   "none"      -> h*mask                             (raw product)
+        #   "constant"  -> h*mask/(1-p)                        (inverted dropout; E[h_tilde]=h)
+        #   "rms_match" -> h*mask*detach(rms_true/rms_masked)  (per-token EXACT RMS match: the
+        #                  downstream pre-norm RMSNorm divides by the TRUE pre-mask RMS)
+        #   "auto"      -> "constant" if rescale else "none"
         self.rescale = bool(rescale)
-        self._rescale_gain = (1.0 / (1.0 - self.p)) if (self.rescale and self.p < 1.0) else 1.0
+        mode = str(rescale_mode).lower()
+        if mode == "auto":
+            mode = "constant" if self.rescale else "none"
+        if mode not in ("none", "constant", "rms_match"):
+            raise ValueError(
+                "mask rescale_mode must be one of none|constant|rms_match|auto; "
+                f"got {rescale_mode!r}"
+            )
+        self.rescale_mode = mode
+        self._rescale_gain = (1.0 / (1.0 - self.p)) if (mode == "constant" and self.p < 1.0) else 1.0
         self._state = state  # CommEffState, for the mask_applications counter
         self._handles: list[Any] = []
         self._boundary_set: set[int] = set()
@@ -314,7 +329,24 @@ class ActivationMasker:
                 device=h.device,
                 dtype=h.dtype,
             ).view(h.shape)
-            h_tilde = h * mask * masker._rescale_gain if masker._rescale_gain != 1.0 else h * mask
+            if masker.rescale_mode == "rms_match":
+                # Idea 2b, realized self-contained and comms-valid: rescale the
+                # masked activation by a DETACHED per-token gain so its RMS equals
+                # the TRUE (pre-mask) RMS. The downstream pre-norm RMSNorm then
+                # divides by the true RMS -> benign 1/RMS backward (no collapse
+                # blow-up). Comms: rms_true is a 1-float/token side channel
+                # (~1/((1-p)*H) overhead); rms_masked is recoverable on the
+                # receiver from the kept (communicated) entries. The gain is
+                # detached -> backward is mask*const (benign), like the constant
+                # path but per-token exact. fp32 for bf16 safety; an all-masked
+                # token yields h_tilde=0 (0 * finite gain), never NaN.
+                hm = h * mask
+                rms_true = h.float().pow(2).mean(dim=-1, keepdim=True).add(1e-8).sqrt()
+                rms_masked = hm.float().pow(2).mean(dim=-1, keepdim=True).add(1e-8).sqrt()
+                gain = (rms_true / rms_masked).detach().to(h.dtype)
+                h_tilde = hm * gain
+            else:
+                h_tilde = h * mask * masker._rescale_gain if masker._rescale_gain != 1.0 else h * mask
             with torch.no_grad():
                 masker.last_mask_ratio[layer_idx] = float(1.0 - mask.mean().item())
             if state is not None:

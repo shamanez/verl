@@ -78,6 +78,7 @@ class CommEffMaskConfig(BaseConfig):
     pp_size: int = 8
     mask_recompute: bool = False
     rescale: bool = False
+    rescale_mode: str = "auto"
 
 
 @dataclass

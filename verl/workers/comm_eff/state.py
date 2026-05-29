@@ -279,6 +279,7 @@ class CommEffState:
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 rescale=bool(getattr(mask_cfg, "rescale", False)),
+                rescale_mode=str(getattr(mask_cfg, "rescale_mode", "auto")),
                 state=self,
             )
 
