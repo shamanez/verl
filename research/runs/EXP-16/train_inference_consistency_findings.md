@@ -56,25 +56,30 @@ dense reference. Toggling the mask flips the gap on/off.
 
 ## Verdict 3 — Over 50 steps the divergence is FLAT, and training is BOUNDED-STABLE (not instability)
 
-Cell 7, regression over masked steps:
-- Pearson corr: slope ~+6e-5/step (R^2~0.2, noise) -> flat at ~0.004. **Does not grow.**
-- rollout_corr/kl: slope ~+0.004/step -> +0.66% over the run on a base of 16.8. **Flat.**
-- actor/ppo_kl (within-training IS ratio): stays ~5e-4, slope ~0 -> exp(logp-old_logp)~=1, cross-pass
-  consistency confirmed end-to-end, not just structurally.
-- grad_norm: sawtooth — masked-block peaks (~5-8) reset to ~0.4 on every clean step; bounded, never near the
-  no-rescale failure mode (~2700). pg_clipfrac ~0.02-0.05, **not saturating** (no_rescale was ~0.15).
-- reward: climbs strongly (slope ~+0.024/step, R^2~0.97). Learning proceeds despite the persistent mismatch.
+Cell 7, regression over the 24 masked steps of the full 50-step run:
+- Pearson corr: slope +4e-5/step (R^2=0.14, noise) -> flat at mean 0.0047, total change +0.0018 over 48 steps.
+  **Does not grow.**
+- rollout_corr/kl: slope +0.0056/step -> +0.27 over the run (16.7 -> 16.9) on a base of 16.8 = +1.6%. **Flat.**
+- probs_diff_mean: slope +0.0011/step -> +0.05 (0.84 -> 0.85). **Flat.**
+- actor/ppo_kl (within-training IS ratio): mean 5e-4, slope +1e-5/step (R^2=0.09) -> exp(logp-old_logp)~=1
+  for all 50 steps; cross-pass consistency confirmed end-to-end, not just structurally.
+- grad_norm: sawtooth — masked-block peaks (~5-8) reset to ~0.4 on every clean step; mean 6.1, bounded, never
+  near the no-rescale failure mode (~2700). pg_clipfrac mean 0.036, slope ~0 (R^2=0.05), **not saturating**
+  (no_rescale was ~0.15).
+- reward: climbs strongly (slope +0.015/step, R^2=0.88), 0.13 -> 0.778. Learning proceeds despite the mismatch.
+- **Step 50 is a clean step** (clean_steps=10): pearson 0.9993, kl 0.0004, grad 0.36 — identical to dense.
+- **Final GSM8K val acc = 0.729 vs dense 0.741 — within 1.2 points.** clean@5 over 50 steps nearly matches dense.
 
 So the IS mismatch is real and big but **stationary** — GRPO tolerates it here because (i) within-training the
 ratio is ~1 and (ii) clean steps every 5 inject on-policy (actor==rollout) gradient that anchors learning.
 
 ## What needs to be done (ranked, grounded in numbers)
 
-1. **Clean steps are the working lever — keep/tune them.** clean-every-4 reaches GSM8K val acc 0.696 vs dense
-   0.741 (within 4.5 pts). Anchor@2+spectral@2 with NO clean steps gets 0.080 (~base/random) and reward stalls
-   at ~0.13. **Anchor+spectral as implemented does NOT close the train-inference gap** (pearson still ~0.004).
-   Action: sweep clean cadence (every-3/4/5/8) for the accuracy/comm-cost trade; cell 7 (every-5, 50 steps) is the
-   long-horizon point.
+1. **Clean steps are the working lever — keep/tune them.** clean-every-5 over 50 steps (cell 7) reaches GSM8K
+   val acc **0.729 vs dense 0.741 (within 1.2 pts)**; clean-every-4 over 20 steps reaches 0.696. Anchor@2+spectral@2
+   with NO clean steps gets 0.080 (~base/random) and reward stalls at ~0.13. **Anchor+spectral as implemented does
+   NOT close the train-inference gap** (pearson still ~0.004). The longer-horizon cell 7 confirms the gap stays flat
+   and accuracy keeps climbing. Action: sweep clean cadence (every-3/4/5/8/never) for the accuracy/comm-cost trade.
 2. **The gap is structural to per-(token,channel) masking at p=0.9, not a bug.** To shrink it without clean steps:
    (i) lower p (less aggressive masking -> higher correlation); (ii) mask the rollout too / on-policy masked
    generation so actor==rollout function; (iii) explicit IS-correction. Each should be measured by pearson and
@@ -90,4 +95,4 @@ ratio is ~1 and (ii) clean steps every 5 inject on-policy (actor==rollout) gradi
 | mask_norescale_10 | 10 | 0 | 0.019 | 11.85 | ~2683 | 0.130 | 0.082 |
 | mask_rescale_clean4_20 | 20 | 5 | 0.005 | 16.72 | ~5.8 (saw) | 0.619 | 0.696 |
 | mask_rescale_anchor2_spectral2_20 | 20 | 0 | 0.0045 | 16.75 | ~4.6 | 0.131 | 0.080 |
-| mask_rescale_clean5_50 (cell 7) | 50 | 10 | 0.004 | 16.75 | ~5.9 (saw) | TBD | TBD |
+| mask_rescale_clean5_50 (cell 7) | 50 | 10 | 0.0047 | 16.82 | ~6.1 (saw) | 0.778 | **0.729** |

@@ -35,7 +35,7 @@
 </style></head>
 <body><div class="wrap">
 <h1>EXP-16 &mdash; Train-vs-Inference Consistency &amp; IS-Mismatch Report</h1>
-<div class="sub">Qwen2.5-1.5B-Instruct / GSM8K &middot; 4&times;B200 &middot; comm-eff masked GRPO (per-(token,channel) activation mask p=0.9 + rescale, 7 pipeline boundaries [3,7,11,15,18,21,24]) &middot; generated 2026-05-29 23:51 UTC &middot; focus cell: <code>grpo_mask_channel_p0p9_rescale_clean_every5_50steps</code> (logged through step 50)</div>
+<div class="sub">Qwen2.5-1.5B-Instruct / GSM8K &middot; 4&times;B200 &middot; comm-eff masked GRPO (per-(token,channel) activation mask p=0.9 + rescale, 7 pipeline boundaries [3,7,11,15,18,21,24]) &middot; generated 2026-05-29 23:53 UTC &middot; focus cell: <code>grpo_mask_channel_p0p9_rescale_clean_every5_50steps</code> (logged through step 50)</div>
 
 
 <h2>Executive summary</h2>
@@ -47,7 +47,7 @@ masking at p=0.9 + rescale at the pipeline-stage boundaries. The masked actor is
 <div class="kpi">
  <div>Mask cross-pass consistency<b class="green">CONSISTENT</b>0 routing violations / 50 steps</div>
  <div>Train&harr;Rollout Pearson (masked)<b class="red">~0.0047</b>dense control ~0.999</div>
- <div>Divergence over 50 steps<b class="green">GROWING</b>pearson slope 0.00004/step</div>
+ <div>Divergence over 50 steps<b class="green">FLAT</b>pearson slope 0.00004/step</div>
  <div>Stability<b class="green">BOUNDED</b>grad sawtooth, clipfrac&lt;0.05</div>
 </div>
 <ul>
@@ -110,9 +110,9 @@ the mask is off in both forwards, so actor == rollout and the gap vanishes &mdas
 <table>
 <thead><tr><th>metric</th><th>mean</th><th>slope / step</th><th>total &Delta; over run</th><th>R&sup2;</th><th>verdict</th></tr></thead>
 <tbody>
-<tr><td>Pearson corr</td><td>0.0047</td><td>0.00004</td><td>0.0018</td><td>0.14</td><td class="green">GROWING</td></tr>
+<tr><td>Pearson corr</td><td>0.0047</td><td>0.00004</td><td>0.0018</td><td>0.14</td><td class="green">FLAT</td></tr>
 <tr><td>rollout_corr/kl</td><td>16.82</td><td>0.0056</td><td>0.269</td><td>0.87</td><td class="green">FLAT</td></tr>
-<tr><td>rollout_probs_diff_mean</td><td>0.8488</td><td>0.00109</td><td>0.0525</td><td>0.83</td><td class="green">GROWING</td></tr>
+<tr><td>rollout_probs_diff_mean</td><td>0.8488</td><td>0.00109</td><td>0.0525</td><td>0.83</td><td class="green">FLAT</td></tr>
 <tr><td>actor/ppo_kl (within-train IS)</td><td>0.0005</td><td>0.000009</td><td>0.00044</td><td>0.08</td><td class="green">FLAT &asymp;0</td></tr>
 <tr><td>actor/pg_clipfrac</td><td>0.0357</td><td>0.00010</td><td>0.0046</td><td>0.05</td><td class="amber">mild rise, not saturating</td></tr>
 <tr><td>actor/grad_norm</td><td>6.12</td><td>0.0362</td><td>1.74</td><td>0.28</td><td class="amber">sawtooth, bounded</td></tr>
