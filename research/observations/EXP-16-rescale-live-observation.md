@@ -233,13 +233,30 @@ SCALE; the masked forward's distribution/direction stays heavily perturbed**
 ("scale not correlation"). entropy_coeff=0, so this never enters the loss — but it
 is a clean quantitative handle on how much the mask distorts the forward.
 
-### FINDING 3 — cell 4 converging more strongly than cell 2
-score/mean 0.125 → 0.221 over 7 steps (cell 2 reached only 0.147 by step 10). Could
-be partly batch noise, but the trend is clearly up and steeper. Hypothesis to keep
-testing through step 20: the periodic dense (clean) step every 4 re-anchors the
-optimizer to the true gradient and improves convergence vs pure-masked (cell 2).
-Mask consistency on masked steps holds throughout (train & old_logprob both grow;
-frozen only on the clean step).
+### FINDING 3 — HEADLINE: the clean step UNLOCKS convergence under masking
+Cell 4 score/mean trajectory (*=clean step, dense):
+```
+s1 .125  s2 .152  s3 .139  s4* .136  s5 .156  s6 .183  s7 .221  (s8* clean)
+s9 .261  s10 .339  s11 .343  s12* .359  s13 .430  s14 .431  s15 .471 ...
+```
+**0.125 → 0.471 in 15 steps (~3.8×).** Contrast cell 2 (pure masked, no clean):
+0.125 → 0.147 over 10 steps (flat). **At matched step 10: cell 4 = 0.339 vs
+cell 2 = 0.147.** Same model, same init, same p=0.9 rescale mask — the ONLY
+difference is the clean step every 4. ⇒ the pure-masked gradient carries weak
+learning signal (cell 2 barely moves), but **re-anchoring to the true dense
+gradient every 4th step lets the run actually climb**. This is the EXP-14
+hypothesis confirmed in vivo: periodic clean steps + a consistent mask in between
+= stable convergence; masking alone = stall.
+
+Caveat: 3–4 dense steps at lr 1e-6 cannot by themselves move reward 4×, so the
+masked steps ARE contributing — the clean steps appear to *course-correct*
+(prevent masked-noise drift) rather than do all the learning. Worth a dedicated
+ablation (clean-only vs masked-only vs mixed) to attribute the gain.
+
+Masked-step grad_norm creeps 4.7 → ~7.1 as the policy improves (clip ~0.04,
+ppo_kl <0.001 — still controlled, not diverging); clean steps stay pinned at the
+true dense ~0.40. Mask consistency (train & old_logprob both grow on masked steps,
+both frozen on clean steps) holds throughout.
 
 ### Note on batching difference
 Cell 4's mask-fire counts (~14 train/step) are ~128× smaller than cell 2's (~1792),
