@@ -187,6 +187,19 @@ class CommEffState:
         # once per actor train_batch). Distinct from the mask substep counter.
         self.anchor_step = 0
 
+        # EXP-14 periodic clean-step counter. Incremented once per trainer step
+        # whose (global_step % clean_cadence) == 0 while clean_cadence > 0 — i.e.
+        # every step on which masking is forced OFF and AdamW takes a step on the
+        # true dense gradient. Surfaced as comm_eff/clean_steps so the analyst can
+        # prove the clean step fired at exactly steps clean_cadence, 2*clean_cadence,
+        # ... (incremented from the train stamp in update_actor, NOT the old_logprob
+        # stamp, so a step is counted once even when mask_recompute also forces the
+        # recompute clean). Stays 0 when clean_cadence == 0 (every prior config).
+        self.clean_steps = 0
+        # The trainer global_step most recently threaded in. -1 = never threaded
+        # (e.g. a unit test, or the dense/disabled path). Read by is_clean_step().
+        self.global_step = -1
+
         # The activation masker (first circuit). Constructed in build(); None
         # when the mask sub-config is disabled.
         self.masker = None
@@ -260,6 +273,8 @@ class CommEffState:
                 p=float(mask_cfg.p),
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                rescale=bool(getattr(mask_cfg, "rescale", False)),
+                granularity=str(getattr(mask_cfg, "granularity", "channel")),
                 state=self,
             )
 
@@ -321,6 +336,30 @@ class CommEffState:
         if tag is not None and tag not in PATH_TAGS:
             raise ValueError(f"unknown comm_eff path tag {tag!r}; expected one of {PATH_TAGS} or None")
         self.path_tag = tag
+
+    def is_clean_step(self, global_step: Optional[int] = None) -> bool:
+        """EXP-14: True iff the given trainer ``global_step`` is a clean step.
+
+        A clean step is one on which masking is forced OFF for the whole step
+        and AdamW refreshes its moments on the true dense gradient. The rule is
+        ``clean_cadence > 0 and (global_step % clean_cadence) == 0``. When
+        ``global_step`` is ``None`` the most-recently-threaded ``self.global_step``
+        is used. Pure read — no side effects, no allocation.
+
+        ``clean_cadence`` is read from the config (default 0 ⇒ always False, so
+        every pre-EXP-14 config and the disabled path keep their exact behavior).
+        ``global_step <= 0`` is never a clean step: step 0 is the pre-train
+        ``val_before_train`` / first-increment boundary (the trainer's first
+        train step is global_step=1), and a negative sentinel means "never
+        threaded" — masking stays ON in both cases.
+        """
+        cadence = int(getattr(self.config, "clean_cadence", 0) or 0)
+        if cadence <= 0:
+            return False
+        gs = self.global_step if global_step is None else int(global_step)
+        if gs <= 0:
+            return False
+        return (gs % cadence) == 0
 
     def note_mask_application(self) -> None:
         """Record one mask-hook fire against the current path tag.
@@ -417,6 +456,10 @@ class CommEffState:
             "comm_eff/anchor_rewards_recomputed": self.anchor_rewards_recomputed,
             "comm_eff/anchor_optimizer_steps": self.anchor_optimizer_steps,
             "comm_eff/anchor_batch_fraction": self.anchor_batch_fraction,
+            # EXP-14: cumulative count of clean (unmasked) optimizer steps fired.
+            # Monotonic; increments at exactly steps clean_cadence, 2*clean_cadence,
+            # ... so the analyst can grep that the clean cadence fired correctly.
+            "comm_eff/clean_steps": self.clean_steps,
         }
 
 

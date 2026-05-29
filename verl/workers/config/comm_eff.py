@@ -86,6 +86,87 @@ class CommEffMaskConfig(BaseConfig):
             trainer step), so masks differ between the two paths by design.
             Anchor pass (``path_tag=None``) is unaffected and stays unmasked
             regardless of this flag (GUARD 5).
+        consistent_across_forwards (bool): EXP-14 on-policy-consistency fix.
+            When ``True`` (default), the PRF mask is realized IDENTICALLY across
+            every forward pass that belongs to the SAME global gradient update —
+            i.e. the ``compute_log_prob`` old-logprob recompute (when
+            ``mask_recompute=true``) AND all micro-batches of the actor-train
+            forward at a given ``global_step`` draw the same mask per boundary
+            block. The PRF key drops its per-forward ``substep`` component (it is
+            held at a fixed sentinel ``0``) so the key is
+            ``f(layer_idx, global_step, seq_shard, hidden_size, seed)`` —
+            independent of WHICH forward pass fired it. This restores on-policy
+            correctness: ``pi_old`` (old_logprob) and ``pi_new`` (train forward)
+            are computed under the SAME masked subnetwork, so the PPO importance
+            ratio ``r = exp(log_prob_current - old_log_prob)`` is ≈1 at the
+            first inner step (as in vanilla on-policy GRPO) instead of being
+            corrupted by mask resampling between the two gradient-feeding
+            forwards (the EXP-14 test2_cellA grad_norm=771 explosion). The
+            ``substep`` counter still ADVANCES per masked forward so metrics and
+            the ``consistent_across_forwards=false`` path are byte-unchanged; it
+            is simply NOT folded into the PRF key in consistent mode. When
+            ``False`` the legacy EXP-5⇒EXP-12 behavior is preserved exactly: the
+            advancing ``substep`` keys the mask, so every forward (and every PPO
+            mini-batch) gets a distinct mask. ``True`` is the default because a
+            consistent mask is the on-policy-correct choice; flip ``false`` only
+            for the A/B comparison that isolates the resampling effect.
+        rescale (bool): EXP-14 magnitude-preservation knob (a DELIBERATE
+            DESIGN-CHANGE candidate — see the warning below). When ``False``
+            (default) the mask form is the spec's pure-simulated-pipeline-parallel
+            ``h_tilde = h * mask``: a masked (zeroed) boundary activation is
+            literally a dropped activation, so at ``p=0.9`` the boundary
+            hidden-state RMS collapses to ``sqrt(1-p) ≈ 0.316×`` and the masked
+            forward sees a large distribution shift from the weights' training
+            regime — the suspected driver of the test2_cellA/cellC step-1
+            grad_norm explosion (clean_cadence works precisely because its clean
+            step runs the UNMASKED, full-magnitude network). When ``True`` the
+            hook applies inverted-dropout-style magnitude preservation
+            ``h_tilde = h * mask / (1 - p)`` so the kept activations are scaled up
+            to hold ``E[h_tilde] = h`` (the boundary RMS is preserved in
+            expectation), at the cost of departing from the "dropped activations
+            are zeros" pipeline-parallel analogy. ``DESIGN NOTE``: the method spec
+            (CODE_WALKTHROUGH §1 + the "Out of scope" list) explicitly EXCLUDES a
+            forward ``1/(1-p)`` rescale, both because it breaks the pure-PP
+            interpretation and because it was observed to destabilise bf16 at
+            ``p=0.95``. This knob exists to TEST whether the no-rescale magnitude
+            collapse — not the importance-sampling inconsistency — dominates the
+            grad_norm explosion; treat a PASS here as evidence for a design
+            change to be ratified, not as a silently-adopted default. Default
+            ``False`` keeps every pre-EXP-14 run byte-identical.
+        granularity (str): EXP-14 mask granularity — ``"channel"`` (the new
+            DEFAULT) or ``"element"`` (legacy). This is the on-policy-consistency
+            fix that supersedes ``consistent_across_forwards``.
+
+            ``"channel"`` draws ONE ``(hidden,)`` keep/zero vector keyed on
+            ``(layer, global_step, seed)`` — NO token / substep / sequence-shard
+            / packing component — and drops the SAME hidden channels for EVERY
+            token at the boundary (``h_tilde = h * mask`` with ``mask`` broadcast
+            over the token axis). Because the mask is CONSTANT along the token
+            axis, it is IDENTICAL across every forward pass of one global update
+            no matter how dynamic-bsz packs / length-sorts / shuffles the tokens
+            (the ``compute_log_prob`` old-logprob recompute and the actor-train
+            forward run different micro-batch counts — ~21 vs ~28 — so a
+            per-element positional mask hits a given token at different flat
+            indices in the two phases, corrupting ``log pi_new / pi_old``;
+            per-channel makes the two phases bit-identical by construction, like
+            a single supervised forward). It is also a faithful model of
+            structured pipeline-boundary communication compression (transmit a
+            fixed random subset of the hidden channels for all tokens), and the
+            measured ``comm_eff/mask_ratio`` still tracks ``p`` (fraction of
+            zeroed channels). The ``rescale`` knob (``h * mask / (1-p)``) applies
+            unchanged and remains the magnitude-collapse / grad_norm fix.
+
+            ``"element"`` is the legacy per-element mask (an independent draw per
+            ``(token, channel)``): packing-dependent, with cross-forward
+            consistency only APPROXIMATED by ``consistent_across_forwards``
+            holding the substep fixed (which is insufficient — see cellC). Kept
+            for A/B comparison. Note: a packing-invariant per-element mask is
+            impossible without keying on stable per-token identity (rejected
+            plumbing), so ``"channel"`` is the only no-plumbing route to exact
+            cross-forward consistency. ``consistent_across_forwards`` is a no-op
+            under ``"channel"`` (channel masks are inherently consistent) and
+            stays functional only for the ``"element"`` path. Default
+            ``"channel"`` so all comm-eff experiments get the consistent mask.
     """
 
     enabled: bool = True
@@ -93,6 +174,9 @@ class CommEffMaskConfig(BaseConfig):
     seed: int = 0
     pp_size: int = 8
     mask_recompute: bool = False
+    consistent_across_forwards: bool = True
+    rescale: bool = False
+    granularity: str = "channel"
 
 
 @dataclass
@@ -253,12 +337,30 @@ class CommEffConfig(BaseConfig):
         mask (CommEffMaskConfig): Pipeline activation-masking sub-config.
         anchor (CommEffAnchorConfig): Asynchronous anchor-circuit sub-config.
         spectral (CommEffSpectralConfig): Spectral-correction sub-config.
+        clean_cadence (int): EXP-14 periodic clean (unmasked) optimizer-step
+            cadence, in trainer steps. ``0`` (default) = off, so the disabled
+            path AND every pre-EXP-14 method config stay a strict no-op. When
+            ``> 0``, the trainer step ``s`` runs **entirely unmasked** whenever
+            ``(s % clean_cadence) == 0`` — both gradient-feeding forwards (the
+            ``compute_log_prob`` old-logprob recompute AND the actor-train
+            forward) have masking forced OFF for that step, and the normal
+            single ``optimizer.step()`` runs on the true dense gradient so
+            AdamW's ``m``/``v`` are periodically refreshed (the design's own
+            "naive synchronous fix"). It does NOT add a second optimizer step:
+            the clean step REPLACES the masked step at that index. The other
+            ``clean_cadence - 1`` of every ``clean_cadence`` steps stay masked
+            exactly as today (≈90% of the pipeline-boundary savings retained at
+            ``clean_cadence=10``). Gated by the parent ``comm_eff.enabled``; on
+            the disabled path the threading short-circuits on the ``None`` state
+            so there is no numerical side effect. No anchor/spectral machinery is
+            touched — the clean step rides the existing dense optimizer path.
     """
 
     enabled: bool = False
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
+    clean_cadence: int = 0
 
     def __post_init__(self):
         """Validate comm_eff configuration parameters.
@@ -277,6 +379,36 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.mask.mask_recompute must be a bool; got {type(self.mask.mask_recompute).__name__} "
                 f"({self.mask.mask_recompute!r})"
+            )
+        # EXP-14: consistent_across_forwards is a strict bool (same rationale as
+        # mask_recompute — a YAML "False" string or numeric override must fail
+        # loud, not silently flip the on-policy-consistency contract).
+        if not isinstance(self.mask.consistent_across_forwards, bool):
+            raise ValueError(
+                "comm_eff.mask.consistent_across_forwards must be a bool; got "
+                f"{type(self.mask.consistent_across_forwards).__name__} "
+                f"({self.mask.consistent_across_forwards!r})"
+            )
+        # EXP-14: rescale is a strict bool (same rationale as the other mask
+        # flags). It also requires p < 1 so the 1/(1-p) factor is finite; p==1
+        # with rescale would divide by zero (and p==1 masks everything anyway).
+        if not isinstance(self.mask.rescale, bool):
+            raise ValueError(
+                f"comm_eff.mask.rescale must be a bool; got {type(self.mask.rescale).__name__} "
+                f"({self.mask.rescale!r})"
+            )
+        if self.mask.rescale and self.mask.p >= 1.0:
+            raise ValueError(
+                "comm_eff.mask.rescale=true requires comm_eff.mask.p < 1.0 (the 1/(1-p) "
+                f"magnitude-preservation factor is undefined at p>=1); got p={self.mask.p}"
+            )
+        # EXP-14: mask granularity enum (channel = new packing-invariant default,
+        # element = legacy per-element). A typo must fail loud, not silently fall
+        # back to a different masking regime.
+        if self.mask.granularity not in ("channel", "element"):
+            raise ValueError(
+                "comm_eff.mask.granularity must be one of (channel, element); "
+                f"got {self.mask.granularity!r}"
             )
         if self.spectral.rank < 1:
             raise ValueError(f"comm_eff.spectral.rank must be >= 1; got {self.spectral.rank}")
@@ -300,3 +432,8 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
             )
+        # EXP-14 periodic clean-step cadence. 0 = off (strict no-op for the
+        # disabled path and every pre-EXP-14 config). A negative value is a
+        # config error, not a silent disable.
+        if self.clean_cadence < 0:
+            raise ValueError(f"comm_eff.clean_cadence must be >= 0; got {self.clean_cadence}")
