@@ -443,6 +443,16 @@ entropy easing 0.38→0.24 (growing confidence), counters absent (no-op confirme
   dies). Watching: does clean@5 over 50 steps sustain/extend the convergence (cell 4
   hit ~0.62 in 20 steps with clean@4)? clean steps now fall on 5,10,15,…,50.
 - Observation continues per directive until the box is actually torn down.
+
+## CLEAN@5 / 50-step follow-up — steps 1–24 (replicates & extends cell 4)
+Reward: s1 0.128 … s5*[clean] 0.133 … s10* 0.244 … s14 0.388 s15* 0.417 … s20* 0.597
+s21 0.594 s22 0.564 s23 0.646 **s24 0.662** (*=clean step at 5/10/15/20). Clean
+cadence every 5 verified each time (dense grad ~0.36–0.45, entropy ~0.38, mask
+counters freeze). Masked-step grad_norm rises with policy confidence ~5→8 (bounded
+by clip; clip frac ~0.04, ppo_kl ~0 — no divergence). **By step 24 clean@5 (0.662)
+already exceeds clean@4's 20-step final (0.619)**, on track well above it over 50
+steps — a clean replication+extension of the clean-step convergence result, with
+mask determinism intact throughout. Monitor `bna8oj0by` streaming; box healthy.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
