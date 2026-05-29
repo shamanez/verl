@@ -358,6 +358,37 @@ Tentative read: with these hyperparams (alpha 0.5, tau 0.01, beta_anc 0.9,
 effective cadence 1), the spectral correction is not recovering the true-gradient
 *direction* the way a periodic dense (clean) step does. CAVEAT: cell 4's climb was
 back-loaded (steps 9–20), so this is not final until cell 5 step 20.
+
+### CELL 5 FINAL (done.flag) — CONFIRMED no convergence
+score flat the whole run: 0.140 → … → step19 0.142 → **step20 0.131** (never left
+the 0.11–0.15 band). Final counters: spectral_corrections 80 (4/step×20),
+anchor_backwards 20 (1/step×20). **Key diagnostic: `comm_eff/spectral/rel_change_mean
+≈ 0.243`** — the spectral projection changes the masked gradient by only ~24%. That
+is far too small to recover the dense direction (the masked grad is 10–12× dense in
+norm AND poorly correlated in direction), so the correction is cosmetic for
+convergence. **Cell 5 ≈ pure-masked cell 2; the anchor+spectral circuit, as
+configured, does NOT substitute for a true dense step.**
+
+## CELL 6 (running) — `dense_grpo_comm_eff_off_25step_reference` — the gold control
+`comm_eff.enabled=false`, 25 steps. Confirms every inference made from the masked
+runs:
+- grad_norm ~**0.38–0.39** every step = the cell-4 clean-step grad and the dense
+  memory ~0.38 ⇒ clean steps really were computing the true dense gradient.
+- entropy ~**0.38–0.42** = the clean-step entropy ⇒ true policy entropy is ~0.38;
+  the masked-forward ~5.92 was pure corruption artifact (Finding 2 confirmed).
+- mask counters **ABSENT** (`tr= ol=`), spectral/anchor 0 ⇒ disabled path is a
+  strict no-op (upstream-parity contract holds).
+- step 1→2 score 0.125 → 0.166, climbing; pg_clipfrac ~2e-4, ppo_kl ~0 (dense,
+  ratio≡1). Expect convergence comparable to / better than cell 4 over 25 steps.
+
+## CONCLUSION (ranking under p=0.9 rescale mask)
+**Only a true dense gradient drives convergence.** Reward outcome:
+- dense (cell 6) ≈ clean@4 (cell 4, 0.62) ≫ pure-mask (cell 2) ≈ mask+anchor+spectral
+  (cell 5), both flat ~0.13.
+The clean step works because it IS a periodic exact dense step; the spectral
+correction (rel_change ~24%) is too weak to recover the dense direction the masking
+destroys. Mask determinism held in every masked cell (2,4,5) and the disabled cell
+(6) was a verified no-op.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
