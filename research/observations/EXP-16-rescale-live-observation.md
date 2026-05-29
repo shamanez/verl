@@ -389,6 +389,45 @@ The clean step works because it IS a periodic exact dense step; the spectral
 correction (rel_change ~24%) is too weak to recover the dense direction the masking
 destroys. Mask determinism held in every masked cell (2,4,5) and the disabled cell
 (6) was a verified no-op.
+
+## SEQUENCE COMPLETE — RESCALE_SEQUENCE_DONE @ 23:27:49 (all 4 cells)
+
+Cell 6 (dense ref) trajectory: 0.125 .166 .239 .340 .388 .605 .585 .619 .679 .724
+.722 .687 .759 .687 .743 .743 .742 .778 .778 .776 .798 .760 .775 **.813** .779 —
+converges to a ~0.78 plateau (peak 0.813 @ s24), grad ~0.35–0.45 throughout,
+entropy easing 0.38→0.24 (growing confidence), counters absent (no-op confirmed).
+
+### FINAL SCOREBOARD (reward = GSM8K mean, same model/init, p=0.9 rescale mask)
+| cell | mechanism | reward (start→end) | steps | grad_norm | verdict |
+|---|---|---|---|---|---|
+| 2 | mask + rescale | 0.126 → 0.147 | 10 | ~4–5 (masked) | flat, no learning |
+| 4 | + clean step @4 | 0.125 → **0.619** | 20 | masked ~4–7 / clean ~0.4 | **converges** |
+| 5 | + anchor@2 + spectral@2 | 0.140 → 0.131 | 20 | ~4–5 (masked) | flat (rel_change ~24%, too weak) |
+| 6 | DENSE (comm_eff off) | 0.125 → **~0.78** | 25 | ~0.38 (dense) | **converges fastest/best** |
+
+### TAKEAWAYS
+1. **Convergence requires the true dense gradient.** Dense (cell 6) > clean@4
+   (cell 4) ≫ pure-mask (cell 2) ≈ mask+anchor+spectral (cell 5, flat).
+2. **The clean step is the only masking-compatible mechanism that worked** — because
+   it injects a periodic *exact* dense step. The spectral correction (rel_change
+   ~24%) and anchor did NOT recover the dense direction under p=0.9.
+3. **Masked forward is heavily corrupted yet consistently so** — entropy 5.92
+   (masked) vs 0.38 (dense), grad 10–12× dense even after rescale. The corruption is
+   what kills pure-masked learning; consistency (verified) is necessary but not
+   sufficient.
+4. **Primary directive — mask determinism — VERIFIED end-to-end:** source PRF has no
+   pass counter (keyed on stable token id); live counters showed mask confined to
+   train+old_logprob (all other paths 0), frozen on clean steps; behaviour (ratio≡1
+   on clean/dense steps; clip≈0.03 masked) is consistent with a stable old↔new mask.
+   No desync, no NaN/Inf, no divergence in any cell.
+5. **Cell 5 OOM was provisioning, not logic** — fixed on resume; the anchor/spectral
+   circuits ran correctly, they just don't help convergence at these hyperparams.
+
+## Live log (final)
+- 22:10 cell2 → 22:41 cell4 → 22:52 cell5 OOM/STOP → (operator mem-fix) 23:02 cell5
+  resume → 23:15 cell6 → **23:27 RESCALE_SEQUENCE_DONE (all 4 complete).**
+- Box now idle, instance UP. Per-step monitor exited on the DONE marker. Switching to
+  an instance-liveness watch; continuing per directive until the box is down.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
