@@ -7,19 +7,6 @@ finding per tick. Dispatches `experiment-runner`, `training-log-monitor`,
 dependencies allow, in the background for the polling-shaped monitor. Reads
 state from plan files, `gh`, `runs.jsonl`, verdict files, and `PROGRESS.md`.
 
-## Invocation
-
-Paste into a fresh Claude Code session at `research/` (Session B — executor, per `researcher_steps.md` §3):
-
-```
-/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
-```
-
-The loop re-fires every 30 min; each firing runs one `## Each tick` pass. Between
-ticks the session Stops, firing the `commit-on-stop` + `teardown-finished-runs`
-hooks — so the teardown backstop runs after every tick. To drive a single issue
-instead of the whole queue, append `… execute it for issue #<N>.`
-
 **Plan-review gate is operator-owned and out of band.** The orchestrator NEVER
 dispatches a code-review subagent and NEVER launches a `status:planned` plan.
 The human reviews each plan and flips `status:planned → status:approved` (see
