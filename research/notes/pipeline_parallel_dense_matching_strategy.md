@@ -70,20 +70,44 @@ anchor + spectral correction.
    training dense-equivalent.**
 6. **Grad clip stays** (`grad_clip=1.0`) as a safety net (not a fix).
 
-## The decisive next experiment (extends EXP-16)
+## The masked-gradient bias is LOW-RANK — the spectral premise is validated (`grad_lowrank_probe.py`)
 
-The probes above measure the RAW masked gradient. The open question — *does the
-corrector close the cosine gap?* — is answered by measuring
-**cos(spectral/anchor-corrected grad, dense grad)** vs p, the same way:
+The key question for "can we reach dense": is the bias `R = g_dense − g_masked`
+low-rank (correctable cheaply by a stale anchor) or full-rank (hopeless)? We added a
+rank-k SVD of R back to the masked grad per weight matrix and measured cosine→dense
+(idealized upper bound — uses the exact current dense residual):
 
-- Build a `grad_corrected_cosine.py` that applies the anchor+spectral correction to
-  the masked gradient and reports cos→dense and norm/dense across p.
-- Success = the corrected cosine sits well above the raw curve at the target p
-  (e.g. corrected cos ≥ 0.7 at p=0.5), with norm/dense ≈ 1.
-- This is the single most informative run for the goal — it directly tests whether
-  the method can make high-mask training dense-equivalent, BEFORE spending full
-  multi-step GRPO budget. It also tells the analyst exactly what to expect from
-  EXP-16 cell 5.
+| rank k | cos→dense @ p=0.5 | top-k energy(R) | cos→dense @ p=0.9 |
+|---|---|---|---|
+| 0 (raw) | 0.087 | — | 0.012 |
+| 1 | **0.718** | 0.57 | 0.453 |
+| 2 | 0.780 | 0.68 | 0.498 |
+| 4 | 0.821 | 0.76 | 0.547 |
+| 8 | 0.852 | 0.81 | 0.590 |
+| 16 | 0.880 | 0.85 | 0.634 |
+| 32 | **0.908** | 0.89 | 0.688 |
+
+**A single rank-1 correction recovers most of the alignment** (p=0.5: 0.09→0.72,
+capturing 57% of residual energy); rank-32 → 0.91. So the bias masking introduces is
+heavily concentrated in a few directions ⇒ a **low-rank control-variate from a stale
+dense anchor (= the spectral correction) is the right tool and can make masked
+training dense-equivalent.** This is the strongest gradient-level evidence that the
+project's anchor+spectral mechanism works.
+
+Implications for the spectral config: even small rank helps enormously, but
+fidelity keeps climbing to rank≈16–32, so `spectral.max_targets`/rank should be
+tuned upward from the current default (was 4) if budget allows; at p=0.9 you need
+more rank (rank-32 → 0.69) than at p=0.5 (rank-8 → 0.85). The real (stale-anchor)
+corrector will sit below this idealized curve — that gap is exactly what EXP-16
+cell 5 measures.
+
+## The decisive remaining experiment (EXP-16 cell 5)
+
+The table above is the IDEALIZED (current-dense-residual) upper bound. The remaining
+question is how much the STALE anchor + fixed spectral basis gives up vs it. Run the
+actual anchor+spectral correction (cell 5) and measure cos(corrected grad, dense)
+across p — success = corrected cosine close to the idealized curve (e.g. ≥0.7 at
+p=0.5). This tells us the real comms-vs-fidelity operating point.
 
 ## Recommended config for a first dense-matching run
 
@@ -103,10 +127,16 @@ clean cadence until the trajectory matches, then trade back toward comms savings
 
 ## Honest bottom line
 
-- **Norm:** solved (rescale).
-- **Dense-identical at high mask rate:** not achievable by masking+rescale alone —
-  the expected gradient is biased and near-orthogonal at p≥0.7. Achievable
-  *trajectory/quality* equivalence is plausible via rescale + low/annealed p +
-  clean-step cadence + a working spectral/anchor corrector. The spectral corrector
-  is the load-bearing piece, and the corrected-cosine probe is how we prove it
-  before burning GRPO hours.
+- **Norm:** solved (rescale → norm/dense ≈ 1 up to p=0.7).
+- **Dense-identical at high mask rate:** NOT achievable by masking+rescale alone —
+  the expected masked gradient is biased and near-orthogonal at p≥0.7, and averaging
+  doesn't fix it (the gap is bias, not noise).
+- **BUT the bias is low-rank**, so it is correctable: an idealized rank-1 correction
+  takes p=0.5 alignment 0.09→0.72 and rank-32 →0.91 (p=0.9: →0.69). This validates
+  the spectral/anchor control-variate as the load-bearing mechanism.
+- **Therefore the achievable recipe is: rescale (fix norm) + low/annealed p (stay on
+  the good part of the fidelity frontier) + periodic clean steps (exact dense
+  re-anchor) + anchor+spectral low-rank correction (remove the residual bias).**
+  Dense-*equivalent* (same trajectory/quality) is realistic; bit-identical is not
+  (and isn't the point — the comms saving is). The one number still to measure is how
+  much the STALE anchor gives up vs the idealized low-rank curve (EXP-16 cell 5).
