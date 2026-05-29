@@ -21,31 +21,59 @@ plan file, do NOT provision compute.
 
 ### What kind of issue this is (read before drafting)
 
-This is a **hybrid "peel-and-fix" issue**, not a pure diagnostic. It does
-two things in one sequence:
+This is a **hybrid "peel-and-fix" issue**, not a pure diagnostic, and it is
+sequenced around one governing principle:
 
-1. **Diagnose** *where* the paper-scale `grad_norm` explosion lives by
-   **peeling the comm-eff method apart one circuit at a time** — full
-   method → spectral blend off → mask-only (no anchor, no spectral). Each
-   peel removes machinery so the next verdict localises the cause.
-2. **Validate two minimal candidate fixes**, both targeting the prime
-   suspect (the biased masked gradient — §3.5):
-   - **fp32 mask rescale** (Test 3 Cell C) — restore the `1/(1-p)` rescale
-     in fp32 so the masked forward is *unbiased*, fixing the bias **at
-     source**.
-   - **periodic clean (unmasked) optimizer step** (Test 4, the headline
-     **mandatory** test) — every `N` steps let AdamW step on the *true*
-     gradient, fixing the accumulated bias **in optimizer-state space**.
-     It touches none of the FSDP-fragile anchor/spectral code, so it is
-     also the safest.
+> **Exhaust the lean, FSDP-clean, no-anchor/no-spectral path FIRST. Descend
+> into the anchor/spectral machinery ONLY if that lean path fails to localise
+> or stabilise the explosion.**
 
-Consequence for labelling: **most cells are `code_change:false`** (they
-are reachable with existing config knobs). **Two cells are
-`code_change:true`** — the fp32-rescale mask (Test 3 Cell C) and the
-periodic-clean-step (Test 4) — each needs a tiny code change and must ride
-an `exp/<N>-<slug>` branch (base `vast-ai-workload`). Mark `code_change`
-per-cell in the body; the issue overall carries `code_change:true` because
-it contains mandatory code-change experiments.
+That splits the work into two phases:
+
+**Phase A — the lean path (no anchor, no spectral; Tests 1–3).** Everything
+here runs with `anchor.enabled=false, spectral.enabled=false` — a pure-config
+path verified to be a strict no-op (§3.6), so none of the FSDP-fragile
+clone / SVD / DTensor surfaces are even allocated. It does two things:
+1. **Observe** whether the explosion survives peeling the method down to
+   *pure masked GRPO* — mask straight to AdamW, no anchor, no spectral
+   (Test 2). This is diagnosis-only: we are watching whether masked
+   gradients alone diverge, **fixing nothing yet**.
+2. **Validate the one minimal candidate fix** that lives entirely on this
+   lean path: the **periodic clean (unmasked) optimizer step** (Test 3, the
+   headline **mandatory** test) — every `N` steps let AdamW step on the
+   *true* dense gradient, fixing the accumulated bias **in optimizer-state
+   space**. It touches none of the anchor/spectral code, so it is the safest
+   possible stabiliser and the cheapest to ship.
+
+**Phase B — the anchor/spectral audit (Test 4; CONDITIONAL, last resort).**
+Only if Phase A implicates the anchor/spectral machinery (mask-only is
+*stable* yet the full method explodes, or the clean step cannot stabilise
+masked GRPO) do we enable the anchor+spectral circuits and instrument them —
+including an α=1.0 cell that makes the spectral blend an exact no-op while
+the anchor still fires. Fully validating the lean path before this is a HARD
+discipline: it keeps GPU-hr and FSDP risk off the table until the cheap
+explanations are exhausted.
+
+A second deviation — the biased no-rescale mask (§3.5 D-1) — has an obvious
+candidate fix (an fp32 `1/(1-p)` rescale). It is **documented and made
+verifiable here but NOT tested in this issue** (§10 out of scope); Phase A is
+deliberately observation plus the optimizer-state fix only.
+
+Consequence for labelling: **all of Phase A's observational cells and all of
+Phase B are `code_change:false` by expectation** — they are reachable with
+existing config knobs, and the per-circuit `.enabled` flags are *verified*
+real toggles (§3.6). **Exactly one cell is unconditionally `code_change:true`**
+— the periodic-clean-step (Test 3) — which needs a tiny `clean_cadence` knob
+and must ride an `exp/<N>-<slug>` branch (base `vast-ai-workload`). **One
+in-scope exception** can flip a lean-path cell (Test 1/Test 2) to
+`code_change:true`: a *corrective* patch, if the test reveals that the
+comm-eff scaffolding inadvertently regressed the FSDP backend on the
+disabled/lean path. Masking is an activation multiply and should be
+backend-transparent (§3.6), so any backend breakage on the lean path is our
+own scaffolding's bug, and fixing it is in scope — a correction, not new
+method functionality. Mark `code_change` per-cell in the body; the issue
+overall carries `code_change:true` because it contains at least that one
+mandatory code-change experiment.
 
 ### Operator constraints (load-bearing — read these first)
 
@@ -56,17 +84,23 @@ it contains mandatory code-change experiments.
    Cell A), which reproduces the dense baseline WITH KL purely as a
    reference / sanity point — it is not part of the method evaluation.
 
-2. **The peel is the plan.** Tests run as a sequence that removes one
-   circuit at a time. Test 1 is the gate. Tests 2–3 peel the method down.
-   **Test 4 (the periodic clean step) is MANDATORY — it runs regardless
-   of what Tests 2–3 conclude**, because it is simultaneously the sharpest
-   diagnostic (is the instability an optimizer-state problem?) and the
-   leading candidate fix. Test 5 (the FSDP/anchor integration audit) is
-   the only *conditional* test — run it only if the peel implicates the
-   anchor/spectral machinery.
+2. **Lean path first, anchor/spectral last.** The tests run as a sequence
+   that exhausts the no-anchor/no-spectral path before touching the
+   anchor/spectral machinery. Test 1 is the gate. Test 2 peels the method
+   down to pure masked GRPO and *observes* whether it diverges (no fix).
+   **Test 3 (the periodic clean step) is MANDATORY — it runs regardless of
+   what Test 2 concludes** (gated only on Test 1 passing), because it is
+   simultaneously the sharpest diagnostic (is the instability an
+   optimizer-state problem?) and the leading candidate fix, and it stays on
+   the lean, FSDP-clean path. Test 4 (the anchor/spectral integration audit,
+   which now also carries the α=1.0 spectral-no-op peel) is the only
+   *conditional* test — run it only if the lean path implicates the
+   anchor/spectral machinery. Fully validating the lean path before Test 4 is
+   a HARD discipline, not a preference: the FSDP backend should not need
+   touching at all until then (§3.6).
 
 3. **`comm_eff.enabled=true` for every method cell.** The only cells that
-   disable the method are the gate's Cell B (regression check) and Test 5
+   disable the method are the gate's Cell B (regression check) and Test 4
    Cell A (no-comm-eff baseline for the FSDP audit).
 
 4. **FSDP-no-errors is a HARD acceptance criterion for every cell.** Any
@@ -135,8 +169,8 @@ separate, because the fixes are different:
 `response_length/max` repeatedly hits the truncation cap, consistent with
 policy collapse generating repetitive output until truncation.
 
-The mandatory periodic-clean-step test (Test 4) targets the **accumulation**
-timescale; the peel (Tests 2–3) localises the **step-1** contribution.
+The mandatory periodic-clean-step test (Test 3) targets the **accumulation**
+timescale; the mask-only peel (Test 2) localises the **step-1** contribution.
 
 ## 2. Reference: dense baseline step-1 numbers (WITH KL loss)
 
@@ -264,7 +298,7 @@ reason the explosion shows up at paper-scale RL but never in the masked-SFT
 setting. This does not mean masked RL can't work — it is exactly the
 project's research bet — but the diagnosis must treat the explosion as
 **partly a regime-mismatch**, and it is another reason the regime-agnostic
-clean-step (Test 4) is attractive: clean gradients re-anchor AdamW
+clean-step (Test 3) is attractive: clean gradients re-anchor AdamW
 regardless of SFT-vs-RL.
 
 ### Anchor / spectral implementation review — candidate deviations to verify (and possibly fix)
@@ -278,12 +312,15 @@ the clone is correctly isolated from the optimizer/FSDP. The candidate
 confirmed, fix on the `exp/` branch — are:
 
 - **D-1 (no-rescale bias — primary).** The mask is biased (above).
-  *Verify:* boundary-layer `mean(h_tilde)/mean(h) ≈ (1-p)` and the
-  post-RMSNorm magnitude inflation. *Fix — tested directly as Test 3 Cell
-  C:* restore the `1/(1-p)` rescale **computed in fp32** (upcast surviving
-  activations, rescale, cast back) so the estimator is unbiased without
-  bf16 overflow — directly addressing the "spectral filter cannot remove a
-  structured bias" property.
+  *Verify (in this issue):* boundary-layer `mean(h_tilde)/mean(h) ≈ (1-p)`
+  and the post-RMSNorm magnitude inflation. *Candidate fix (documented here,
+  NOT implemented or tested in this issue — §10):* restore the `1/(1-p)`
+  rescale **computed in fp32** (upcast surviving activations, rescale, cast
+  back) so the estimator is unbiased without bf16 overflow — directly
+  addressing the "spectral filter cannot remove a structured bias" property.
+  Phase A deliberately *observes* this bias rather than fixing it; the
+  optimizer-state fix (Test 3 clean step) is the only fix this issue
+  validates.
 - **D-2 (spectral filter on empty `M_anchor` halves the gradient).** With
   `seed_anchor_cache=false`, `M_anchor=0` until the first refresh ⇒
   SVD-of-zeros ⇒ Tikhonov `d=0` ⇒ `G_filt=0` ⇒ `G_proj = α·G_mask =
@@ -304,7 +341,7 @@ confirmed, fix on the `exp/` branch — are:
   bug, but the dry-run sits in an un-analysed (fresher) regime; paper-scale
   runs of the *full* method should also test `K∈{10,20}`.
 
-**Why Test 4 is the clean cut through all of this.** The mandatory
+**Why Test 3 is the clean cut through all of this.** The mandatory
 periodic-clean-step test (below) is the design's own explicitly-named
 *"naive synchronous fix"* — periodically disable masking and run a full
 unmasked forward–backward pass through the main pipeline. The design
@@ -317,6 +354,62 @@ property of masked GRPO — it is in the **masking bias (D-1)** and/or the
 **anchor/spectral implementation (D-2/D-3)**, and the simplest correct
 method is the clean-step variant itself (no anchor, no spectral, none of
 D-1…D-4's risk surfaces, ~5× PP savings at cadence=10 / p=0.9).
+
+## 3.6 The peel is pure-config and backend-transparent — with one corrective caveat
+
+Phase A needs `anchor.enabled=false, spectral.enabled=false` while
+`mask.enabled=true`. This is reachable with **existing config knobs only — no
+code change** — and the disable is a *verified* strict no-op, not a hopeful
+one:
+
+- **`anchor.enabled=false`** → the FSDP anchor-refresh override early-returns
+  before building the clone
+  (`transformer_impl.py::_maybe_comm_eff_anchor_refresh` returns when
+  `anchor.enabled` is false), so **no ~3 GB clone is allocated, no staleness
+  queue, no `summon_full_params` all-gather.**
+- **`spectral.enabled=false`** → `CommEffState.build`
+  (`verl/workers/comm_eff/state.py`) never constructs the `SpectralFilter`,
+  so `state.spectral is None` and the grad-correction hook
+  (`transformer_impl.py::_maybe_comm_eff_grad_correction`) is a strict no-op
+  — no SVD/EMA buffers, no extra collective.
+- **`mask.enabled=true` + `mask.p=0.9`** → only the `ActivationMasker` is
+  built; the mask hook fires on the train forward (and the `old_logprob`
+  recompute iff `mask_recompute=true`).
+
+**Why the FSDP backend should not need touching until Phase B.** The mask is
+an *in-graph activation multiply* (`h_tilde = h * mask`) at the logical
+pipeline-boundary decoder blocks — it simulates the pipeline-parallel
+activation reduction by zeroing a fraction of the residual stream. The FSDP
+backend is **agnostic** to it: a masked activation produces a perfectly
+ordinary gradient as far as parameter sharding, the gradient all-reduce, and
+DTensor are concerned — nothing about the parameter layout, the reduction, or
+the collective schedule changes. The **first** comm-eff component that
+genuinely reaches into the backend is the *spectral correction*, which reads
+and rewrites `p.grad` post-reduce and is the sole reason
+`use_orig_params=true` is required; the *anchor* is next (it clones the FSDP
+module and runs an isolated backward). So **no test up to — but not including
+— the spectral correction and the anchor circuit should need to touch the
+FSDP backend at all.** That is the expectation, and it is precisely *why* the
+lean path is tested first: the fragile backend-interacting machinery is
+provably absent, so any explosion there is unambiguously the mask's own
+doing.
+
+**The one corrective caveat.** That expectation can be violated only by our
+*own* scaffolding. Bringing comm-eff in added `use_orig_params=true` (set
+even on the disabled/lean path), the EXP-6 path-tag stamps, the hook
+registration/removal points, and the `_maybe_comm_eff_*` insertions at the
+top of and inside `train_batch`. Any of those could have *inadvertently*
+perturbed the backend even while every circuit is disabled — "our development
+might have nuked something." **Test 1 (the gate) is the designed check for
+exactly this**, and Test 2 is the first cell where the mask hook actually
+fires. **If Test 1 or Test 2 reveals such a regression** (an FSDP/DTensor
+error, or a step-1 `grad_norm` that disagrees with the dense reference even
+with comm-eff disabled), **a corrective patch to restore backend-cleanliness
+is IN SCOPE** — and that, and only that, flips the affected lean-path cell to
+`code_change:true` (on an `exp/<N>-<slug>` branch). It is a *correction*, not
+new method functionality: the goal is to make the lean path as
+backend-transparent as the math says it already is, *before* any conclusion
+is drawn about the mask.
 
 ---
 
@@ -349,7 +442,8 @@ of the variance effect. Either or both can drive the step-1 `grad_norm`.
 **This bias is a deviation from the intended design** (which requires
 approximately-unbiased masking — §3.5 D-1), and the spectral filter
 provably *cannot* remove a structured bias. Candidate fix: an fp32
-`1/(1-p)` rescale (tested as Test 3 Cell C).
+`1/(1-p)` rescale (documented in §3.5 D-1; **NOT tested in this issue** —
+§10 out of scope).
 > **Diagnostic:** at step 1, log the per-token `(log_p_current −
 > log_p_old)` histogram (expect non-zero spread even though
 > `π_new == π_old`), AND the boundary-layer `mean(h_tilde)/mean(h)` ratio
@@ -410,7 +504,7 @@ overhead.
 > restore baseline batch knobs and provision enough headroom that the
 > smaller-batch variance does not confound the comm-eff signal.
 
-### H. AdamW optimizer-state poisoning by biased + high-variance masked gradients — **the accumulation-timescale cause; the one Test 4 treats**
+### H. AdamW optimizer-state poisoning by biased + high-variance masked gradients — **the accumulation-timescale cause; the one Test 3 treats**
 Because `G_mask` is both **biased** (no `1/(1-p)` rescale, cause B) and
 **high-variance** (PRF mask realisations, cause B), feeding it to AdamW on
 *every* step poisons the optimizer state itself:
@@ -422,13 +516,13 @@ Over ~50 steps this is exactly the entropy-collapse + `grad_norm`-growth
 trajectory in §1. Note AdamW's memory horizons: `β1≈0.9` ⇒ `m` remembers
 ~10 steps, `β2≈0.999` ⇒ `v` remembers ~1000 steps. A clean (unmasked)
 optimizer step every 10 steps therefore strongly re-aligns `m` but only
-weakly refreshes `v` — Test 4 measures whether that is *sufficient*.
+weakly refreshes `v` — Test 3 measures whether that is *sufficient*.
 
 The anchor+spectral apparatus attacks this same bias in **gradient space**
 (project `G_mask` onto an anchor-derived basis). The periodic clean step
 attacks it directly in **optimizer-state space** (let AdamW step on the
 true gradient periodically), with none of the FSDP-fragile machinery
-(causes C/D/E/F all vanish). Test 4 asks whether the cheap optimizer-state
+(causes C/D/E/F all vanish). Test 3 asks whether the cheap optimizer-state
 fix makes the expensive gradient-space fix unnecessary.
 > **Diagnostic:** log per-target AdamW `||m||` and `||v||` every step for
 > the mask-only cell vs the mask-only+clean cell; expect `v` to inflate and
@@ -436,32 +530,39 @@ fix makes the expensive gradient-space fix unnecessary.
 
 ---
 
-## 5. Test plan — peel the method down, then test the stabiliser (Tests 1 → 5)
+## 5. Test plan — exhaust the lean path, then (conditionally) audit anchor/spectral (Tests 1 → 4)
 
-Run them **in order**. The conditional structure is the fail-fast learning
-loop: each verdict prunes the search before more GPU-hr is spent. The
-runner encodes the headline predicate per test (e.g. step-1 `grad_norm`
-ratio vs the dense reference, or "does entropy hold past step 40") and
-evaluates it inline. **Test 4 is mandatory and is NOT gated on Tests 2–3's
-verdicts** — only on Test 1 passing the gate.
+Run them **in order**. The structure is two phases: **Phase A (Tests 1–3)**
+runs the lean, no-anchor/no-spectral path — backend-transparent, FSDP-clean
+(§3.6); **Phase B (Test 4)** enables and instruments the anchor/spectral
+machinery and is reached **only** if Phase A implicates it. The conditional
+structure is the fail-fast learning loop: each verdict prunes the search
+before more GPU-hr is spent. The runner encodes the headline predicate per
+test (e.g. step-1 `grad_norm` ratio vs the dense reference, or "does entropy
+hold past step 40") and evaluates it inline. **Test 3 (the periodic clean
+step) is mandatory and is NOT gated on Test 2's verdict** — only on Test 1
+passing the gate.
 
 ### Execution & GPU-utilization discipline (per `.claude/plans/TEMPLATE.md` §"Vast.ai utilization discipline", HARD RULE)
 
-- **One box for the whole Test 1 → 5 sequence.** Provision a single
+- **One box for the whole Test 1 → 4 sequence.** Provision a single
   instance on the standard default tier (**4×H200 preferred, else 8×H100** —
   per `project.yaml.default_compute.gpu_filter_chain`) up front and chain
   all tests back-to-back (shared docker / verl checkout / dataset cache).
   Do NOT tear down and re-provision between tests.
 - **Restore baseline batch knobs + provision headroom for method cells**
-  (cause G): mini=64, wedge=36864, util=0.4 — the mask-only and clean-step
-  cells drop the ~3 GB anchor clone, so they fit comfortably; do not
-  re-introduce the smaller-batch confound.
+  (cause G): mini=64, wedge=36864, util=0.4 — the lean-path cells (Tests
+  1–3) drop the ~3 GB anchor clone entirely, so they fit comfortably; do not
+  re-introduce the smaller-batch confound. Only Test 4's full-method cells
+  re-introduce the clone.
 - **Keep every GPU busy.** Saturate whatever was provisioned; declare any
   legitimately idle window (e.g. a long eval between cells) in the plan's
   `## Notes for runner` so the stall-watchdog thresholds get loosened.
 - **Fail-fast.** If Test 1 fails the gate, short-circuit — do not spend
-  GPU-hr on Tests 2–5. Tear down the instant the sequence resolves and
-  metrics are rsynced to the laptop.
+  GPU-hr on Tests 2–4. If Phase A (Tests 2–3) fully explains and fixes the
+  explosion on the lean path, Test 4 may be skipped (it is conditional). Tear
+  down the instant the sequence resolves and metrics are rsynced to the
+  laptop.
 
 ### Test 1 — `scaffold-noop-at-baseline-knobs` (the GATE) — `code_change:false`
 
@@ -488,94 +589,78 @@ total_epochs=2, val_before_train=True, test_freq=25),
 
 **Verdict:**
 - Cell A in tolerance AND Cell B within tolerance of Cell A → **GATE PASS.**
-  Scaffolding is clean; the explosion is in the method itself. Proceed to
-  the peel (Test 2).
-- Cell A in tolerance, Cell B step-1 grad_norm > 1.0 → **scaffold regressed**
-  by one of {`use_orig_params=true`, schema additions, hook structure} even
-  with comm-eff disabled (fix likely targets FSDP integration, cause D).
-  **Do not proceed** — it would conflate the scaffold bug with the method.
+  Scaffolding is clean AND backend-transparent; the explosion is in the
+  method itself. Proceed to the peel (Test 2).
+- Cell A in tolerance, Cell B step-1 grad_norm > 1.0 → **scaffold regressed
+  the backend** via one of {`use_orig_params=true`, schema additions, the
+  path-tag stamps, the `_maybe_comm_eff_*` insertions in `train_batch`} even
+  with comm-eff disabled (likely cause D — FSDP integration). Per §3.6 this is
+  a **corrective-code-change trigger** (`code_change:true`, `exp/` branch),
+  NOT a dead end: fix the backend regression the scaffolding introduced,
+  re-run the gate until it is clean, *then* proceed. Do **not** run the method
+  tests on a dirty gate — it would conflate the scaffold bug with the method.
 - Cell A outside tolerance → the branch itself doesn't reproduce dense
   baseline. Diff this branch against the recorded baseline commit
   (`runs/baseline/REPRODUCIBILITY.md`) before going further.
 
-### Test 2 — `peel-1-spectral-coefficient-off` (α=1.0) — `code_change:false`
+### Test 2 — `peel-mask-only` (no anchor, no spectral) — `code_change:false` (corrective exception, §3.6)
 
 **Runs only if Test 1 passes the gate.**
 
-**Question:** does the spectral *blend* contribute to the explosion? At
-α=1.0 the correction is an exact no-op (`G_proj == G_mask`) while the
-anchor circuit still fires (harvest → EMA → SVD all run, but do not touch
-the grads). So this peels off only the spectral *effect*, keeping every
-other circuit live.
-
-**Config:** two cells, baseline batch knobs, no KL, no entropy, full
-comm-eff otherwise (p=0.9, anchor cadence=5/delay=5, τ=0.01, β_anc=0.9).
-
-| Cell | `spectral.alpha` | What it tests |
-|---|---|---|
-| **A — α=0.5 (current default)** | `0.5` | reproduce the explosion on this box (control) |
-| **B — α=1.0 (spectral off)** | `1.0` | spectral blend is an exact no-op; isolates whether the spectral projection is amplifying |
-
-**10 trainer steps each** (step-1 + early-trajectory headline).
-
-**Verdict:**
-- Cell A explodes, Cell B **<<** Cell A at step 1 → the spectral projection
-  is amplifying (causes C/F). The anchor/spectral path is implicated →
-  schedule Test 5.
-- Cell A ≈ Cell B (both explode) → spectral is NOT the driver; the
-  explosion is upstream in the mask itself. Continue peeling (Test 3).
-
-### Test 3 — `peel-2-mask-only` (no anchor, no spectral) — `code_change:false`
-
-**Question:** does **pure masked GRPO** — mask straight to AdamW, with the
-entire anchor+spectral apparatus removed — explode on its own? This peel
-deletes causes C/D/E/F *and* the ~3 GB anchor clone (so cause G's memory
-pressure is gone too). Whatever remains is the mask's own bias/variance
-(cause B) and its effect on the optimizer (cause H).
+**Question — observation only, no fix:** does **pure masked GRPO** — mask
+straight to AdamW, with the entire anchor+spectral apparatus *not even
+allocated* — explode on its own? This peel removes causes C/D/E/F *and* the
+~3 GB anchor clone (so cause G's memory pressure is gone too). Whatever
+remains is the mask's own bias/variance (cause B) and its effect on the
+optimizer (cause H). **This test fixes nothing** — it exists purely to *see*
+whether masked gradients alone diverge; the candidate fix is Test 3.
 
 **Config:** baseline batch knobs, no KL, no entropy,
 `comm_eff.enabled=true`, `mask.enabled=true`, `mask.p=0.9`,
-**`anchor.enabled=false`, `spectral.enabled=false`**.
-`use_orig_params=true` kept for config parity (this path does not depend on
-it — a further FSDP-risk reduction).
+**`anchor.enabled=false`, `spectral.enabled=false`** — a pure-config path,
+verified strict no-op (§3.6), **no code change**. `use_orig_params=true`
+kept for config parity (this path does not depend on it — a further
+FSDP-risk reduction; the mask is backend-transparent, §3.6).
 
-| Cell | mask config | `code_change` | What it tests |
+| Cell | mask config | `code_change` | What it observes |
 |---|---|---|---|
-| **A — recompute=true (biased)** | `mask_recompute=true`, no rescale | false | mask fires on both gradient-feeding forwards (the dry-run setting), now with no anchor/spectral confound — the biased estimator as shipped |
-| **B — recompute=false** | `mask_recompute=false`, no rescale | false | mask fires only on the actor-train forward; `compute_log_prob` runs unmasked so `log_p_old` is clean — isolates the IS-mask-mismatch (variance half of cause B) |
-| **C — fp32 rescale (unbiased) — the D-1 fix** | `mask_recompute=true` + fp32 `1/(1-p)` rescale | **true** | restores an *unbiased* masked forward (the prime-suspect fix, §3.5 D-1) — does removing the bias at source stop the explosion? |
+| **A — recompute=true (biased, as shipped)** | `mask_recompute=true`, no rescale | false | mask fires on both gradient-feeding forwards (the dry-run setting), now with no anchor/spectral confound — the biased estimator exactly as shipped. The headline observation. |
+| **B — recompute=false** | `mask_recompute=false`, no rescale | false | mask fires only on the actor-train forward; `compute_log_prob` runs unmasked so `log_p_old` is clean — isolates the IS-mask-mismatch (the variance half of cause B) from the pure bias. |
 
-**Cell C minimal patch (`code_change`, on the `exp/` branch):** gate it
-behind a new `comm_eff.mask.rescale` bool (default `false` ⇒ strict no-op);
-when set, the mask hook (`activation_mask.py`) computes
-`h_tilde = ((h * mask).to(float32) * (1/(1-p))).to(h.dtype)` — unbiased
-forward, the `1/(1-p)` blow-up contained in fp32 so bf16 never overflows.
+**`code_change` for this test is `false` by expectation** (pure-config,
+§3.6). **The one in-scope exception is corrective:** if Cell A surfaces an
+FSDP/DTensor error or a scaffold-induced backend regression rather than a
+clean `grad_norm` explosion, fixing that backend-cleanliness bug is in scope
+and flips the affected cell to `code_change:true` (§3.6) — the mask should be
+backend-transparent, so any backend breakage here is our own scaffolding's,
+not the method's.
 
-**10 trainer steps each** (Cell C may want ≥ 25 to confirm the trajectory
-stays bounded once the bias is removed).
+**10 trainer steps each** (step-1 magnitude + early trajectory).
 
-**Verdict:**
+**Verdict (diagnostic only — no fix is applied or expected here):**
 - Cell A explodes → pure masking alone is unstable at paper scale; the
   anchor/spectral apparatus is **not** what drives the explosion (consistent
-  with §3.5 — it is a faithful port). Motivates both fixes (Cell C, Test 4).
-- **Cell C ≪ Cell A → the no-rescale bias (D-1) is the dominant cause and
-  the fp32 rescale fixes it.** Cleanest possible outcome: a one-line rescale,
-  no anchor/spectral, no clean step needed.
-- Cell A **>>** Cell B → the IS-mask-mismatch (cause B, variance half) also
-  contributes; note it (share PRF keys, or `mask_recompute=false`).
-- Cell C still explodes → bias is not the whole story; the variance (cause
-  B) and optimizer-state poisoning (cause H) remain → Test 4 (clean step) is
-  the next fix to try.
-- Cell A is *stable* (grad_norm bounded, entropy holds) → the explosion
-  lives in the anchor/spectral machinery, not the mask → Test 5 is now
-  required to find which integration surface (D/E/F) is responsible.
+  with §3.5 — it is a faithful port). This is the expected outcome; it
+  motivates the Test 3 fix and means Phase B (Test 4) is likely unnecessary.
+- Cell A **>>** Cell B → the IS-mask-mismatch (cause B, variance half) is a
+  meaningful contributor; note it for a follow-up (share PRF keys, or run
+  with `mask_recompute=false`).
+- Cell A ≈ Cell B (both explode) → the bias half dominates the variance half;
+  the documented fp32-rescale candidate (§3.5 D-1) is the natural follow-up
+  fix to try, alongside Test 3.
+- **Cell A is *stable* (grad_norm bounded, entropy holds) → the explosion
+  does NOT live in the mask; it must live in the anchor/spectral machinery.
+  This is the one outcome that makes Phase B (Test 4) MANDATORY** — it is the
+  trigger condition for the otherwise-conditional audit.
 
-### Test 4 — `mask-only-plus-periodic-clean-step` (MANDATORY; the candidate fix) — `code_change:true`
+### Test 3 — `mask-only-plus-periodic-clean-step` (MANDATORY; the candidate fix) — `code_change:true`
 
-**Runs whenever Test 1 passed the gate — independent of Tests 2–3.** This
-is the headline test and the leading candidate stabiliser.
+**Runs whenever Test 1 passed the gate — independent of Test 2's verdict.**
+This is the headline test and the leading candidate stabiliser, and it stays
+entirely on the lean, FSDP-clean path (anchor/spectral still not allocated;
+the only backend touch-point is the existing optimizer step, §3.6).
 
-**Idea.** Run pure masked GRPO (exactly Test 3's config — no anchor, no
+**Idea.** Run pure masked GRPO (exactly Test 2's config — no anchor, no
 spectral), but **every `clean_cadence = 10` trainer steps, run that whole
 step unmasked on the live module (mask off / `p=0`) and take the normal
 `optimizer.step()`**, so AdamW's moments are periodically refreshed with
@@ -603,7 +688,7 @@ savings at cadence=10 / `p=0.9`.
 
 | Cell | `comm_eff.clean_cadence` | What it tests |
 |---|---|---|
-| **A — no clean step (control)** | `0` | pure masked GRPO with no refresh — the same config as Test 3 Cell A (reuse that run if already on the box; do not re-run needlessly). Expected to drift toward collapse. |
+| **A — no clean step (control)** | `0` | pure masked GRPO with no refresh — the same config as Test 2 Cell A (reuse that run if already on the box; do not re-run needlessly). Expected to drift toward collapse. |
 | **B — clean every 10** | `10` | masked GRPO with a clean unmasked optimizer step at steps 10, 20, 30, … Expected to bound `grad_norm` and hold entropy. |
 
 **Run length: ≥ 60 trainer steps, target 100.** Unlike the step-1
@@ -617,48 +702,70 @@ on the dense baseline's 100-step `val/test_score` trajectory.
 - Cell B holds entropy and keeps `grad_norm` bounded past step 40 while
   Cell A drifts/collapses → **the periodic clean step is a real
   stabiliser.** This is the minimal-fix result: it sidesteps the entire
-  anchor/spectral path and stays FSDP-clean. Flag for the parity follow-up
-  (does it reach dense-baseline reward?) and report the realised
-  communication savings (fraction of masked steps × per-step mask saving).
+  anchor/spectral path and stays FSDP-clean, and it **likely makes Phase B
+  (Test 4) unnecessary**. Flag for the parity follow-up (does it reach
+  dense-baseline reward?) and report the realised communication savings
+  (fraction of masked steps × per-step mask saving).
 - Cell B is no better than Cell A → the optimizer-state refresh at
   cadence 10 is insufficient (consistent with `v`'s ~1000-step memory; see
   cause H). Report the `||m||`/`||v||` diagnostic so the follow-up can
-  decide between a shorter cadence and a gradient-space fix.
+  decide between a shorter cadence and a gradient-space fix — and this, paired
+  with a *stable* mask-only Test 2, is a second trigger for Phase B (Test 4).
 - **Either way, the FSDP-no-errors checklist in §6 must pass for Cell B**;
   an FSDP error there is a STOP and is itself a finding.
 
-### Test 5 — `fsdp-anchor-spectral-integration-audit` (CONDITIONAL, diagnostic) — `code_change:false`
+### Test 4 — `fsdp-anchor-spectral-integration-audit` (Phase B; CONDITIONAL, diagnostic) — `code_change:false`
 
-**Runs only if the peel implicated the anchor/spectral machinery** — i.e.
-Test 2 Cell B (α=1.0) was much calmer than Cell A, or Test 3 Cell A
-(mask-only) was *stable* while the full method explodes.
+**Phase B. Runs only if Phase A implicated the anchor/spectral machinery** —
+i.e. Test 2 (mask-only) was *stable* while the full method explodes, or
+Test 3's clean step failed to stabilise masked GRPO. This is the LAST resort
+by design: it is the only phase that enables the FSDP-fragile anchor+spectral
+circuits and therefore the only one that can legitimately interact with the
+backend (§3.6). If Phase A already explained and fixed the explosion, **skip
+this test.**
 
-**Question:** are causes D and E (FSDP integration + anchor harvest
-correctness) producing silent shape inconsistencies or silent no-ops?
+**Question:** (i) is the **spectral blend itself** amplifying — α=0.5 vs the
+α=1.0 exact no-op, anchor still firing (the folded-in α=1.0 peel)? and
+(ii) are causes D and E (FSDP integration + anchor harvest correctness)
+producing silent shape inconsistencies or silent no-ops?
 
-| Cell | `comm_eff.enabled` | What it produces |
+**Config:** baseline batch knobs, no KL, no entropy, **full comm-eff**
+(`comm_eff.enabled=true`, `mask.enabled=true`, `mask.p=0.9`,
+`anchor.enabled=true` cadence=5/delay=5, `spectral.enabled=true`, τ=0.01,
+β_anc=0.9), `use_orig_params=true`, with per-cause C/D/E/F diagnostic logging
+on the method cells.
+
+| Cell | config | What it produces |
 |---|---|---|
-| **A — disabled** | `false` | baseline grad shape + FSDP behaviour for comparison (same as Test 1 Cell B) |
-| **B — full method, instrumented** | `true` | the full method with diagnostic logging per causes C/D/E/F (grad-type, rank-local vs full shapes, before/after-reduce values, target-match counts, `M_anchor` condition numbers across the first 10 anchor refreshes) |
+| **A — disabled** | `comm_eff.enabled=false` | baseline grad shape + FSDP behaviour for comparison (same as Test 1 Cell B) |
+| **B — full method, α=0.5, instrumented** | full comm-eff, `spectral.alpha=0.5` | the full method as shipped — reproduce the explosion on this box (control) with diagnostic logging per causes C/D/E/F (grad-type, rank-local vs full shapes, before/after-reduce values, target-match counts, `M_anchor` condition numbers across the first 10 anchor refreshes) |
+| **C — full method, α=1.0 (spectral no-op), instrumented** | full comm-eff, `spectral.alpha=1.0` | the spectral blend is an exact no-op (`G_proj == G_mask`) while the anchor circuit STILL fires (harvest → EMA → SVD all run, but do not touch the grads). Isolates whether the spectral *projection* is what amplifies — the folded-in α=1.0 peel. |
 
-**5 trainer steps each** (the logs at step 1 and the first anchor refresh
-are the deliverable).
+**10 trainer steps each** (the step-1 logs and the first anchor refresh are
+the structural deliverable; the early trajectory gives the α=0.5-vs-α=1.0
+comparison).
 
-**Verdict — structural, not numeric.** Call out the **specific module
-path(s)** where each anomaly was logged so the follow-up fix can target
-them precisely:
-- target silently mis-typed (DTensor vs Tensor) → cause D(b);
-- anchor harvest's three target counts differ → cause E;
-- spectral hook sees `p.grad` before the FSDP all-reduce → cause D(a);
-- any `M_anchor` condition number > 1e6 → cause F.
+**Verdict — numeric (B vs C) AND structural (per-cause logs):**
+- **B explodes, C `<<` B at step 1** → the spectral projection is amplifying
+  (causes C/F): the blend, not the mask, drives it. Point the follow-up fix
+  at the spectral path (e.g. force α=1 until `M_anchor` is populated — D-2).
+- **B ≈ C (both explode)** → the spectral blend is NOT the driver; the
+  explosion is in the anchor harvest / FSDP integration (causes D/E) or
+  upstream — read the structural logs to localise.
+- Call out the **specific module path(s)** where each anomaly was logged so
+  the follow-up fix can target them precisely:
+  - target silently mis-typed (DTensor vs Tensor) → cause D(b);
+  - anchor harvest's three target counts differ → cause E;
+  - spectral hook sees `p.grad` before the FSDP all-reduce → cause D(a);
+  - any `M_anchor` condition number > 1e6 → cause F.
 
 ---
 
 ## 6. The periodic clean step — exact spec, FSDP-safety checklist, minimal patch
 
-This section is for Test 4 (the only `code_change:true` cell). Put it in
-the issue body so the implementer who opens the `exp/<N>-<slug>` branch has
-an exact, FSDP-safe target.
+This section is for Test 3 (the only mandatory `code_change:true` cell). Put
+it in the issue body so the implementer who opens the `exp/<N>-<slug>` branch
+has an exact, FSDP-safe target.
 
 ### Semantics
 - On trainer step `s`: if `clean_cadence > 0 and (s % clean_cadence) == 0`,
@@ -672,7 +779,7 @@ an exact, FSDP-safe target.
 - There is **one** optimizer / param-group shared across masked and clean
   steps, so AdamW's `m`/`v` are genuinely refreshed (not a separate state).
 
-### FSDP-no-errors acceptance checklist (HARD — Test 4 Cell B must satisfy all)
+### FSDP-no-errors acceptance checklist (HARD — Test 3 Cell B must satisfy all)
 1. **Reuses the existing dense path.** The clean step takes the standard
    `train_batch` flow with the mask hook inert — no clone, no
    `summon_full_params` correction, no DTensor surgery. It is, by
@@ -740,8 +847,11 @@ an exact, FSDP-safe target.
 
 **Labels:** `kind:experiment`, `milestone:M2`. (The body declares
 `code_change` per cell; the issue overall is `code_change:true` because it
-contains two mandatory code-change cells — the fp32-rescale mask (Test 3
-Cell C) and the periodic clean step (Test 4).)
+contains one mandatory code-change cell — the periodic clean step (Test 3).
+Every other cell, including the entire Phase-B audit, is `code_change:false`
+by expectation — the per-circuit `.enabled` flags are verified real toggles
+(§3.6); the only exception is a *corrective* lean-path patch if Test 1/Test 2
+reveals the scaffolding regressed the FSDP backend.)
 
 **Body sections (markdown):**
 1. **Why this matters** — north-star linkage (§0): the explosion blocks
@@ -767,24 +877,38 @@ Cell C) and the periodic clean step (Test 4).)
    empty-`M_anchor` halving; staleness-queue memory; cadence below the
    design's K-range) as concrete, verifiable items with their candidate fixes
    — the things the operator wants on record as "possibly wrong, confirm
-   and fix."
+   and fix." Also carry **§3.6** — masking is an in-graph activation multiply,
+   so the FSDP backend should be transparent to it all the way up to (not
+   including) the spectral correction and anchor circuits; the lean-path
+   disable is a verified pure-config no-op, and the only thing that could
+   break backend-cleanliness there is our own scaffolding (the
+   corrective-`code_change` caveat).
 6. **Candidate root causes A–H**, each with its diagnostic. Cause A is
    documented as a known late-step driver but is NOT proposed for
    toggle-back-on. Cause H is the accumulation-timescale cause the clean
    step treats.
-7. **Test plan — Tests 1→5** (the peel). Mark `code_change` per test. State
-   that **Test 4 is mandatory and runs independent of Tests 2–3** (gated
-   only on Test 1). Include the per-cell tables, step counts, and verdicts.
-   Carry the GPU-utilization discipline block.
+7. **Test plan — Tests 1→4** (Phase A: lean no-anchor/no-spectral path,
+   Tests 1–3; Phase B: conditional anchor/spectral audit, Test 4). Mark
+   `code_change` per test. State that **Test 3 (the clean step) is mandatory
+   and runs independent of Test 2** (gated only on Test 1), and that **Test 4
+   is the only conditional test** (reached only if the lean path implicates
+   anchor/spectral). Note (§3.6) that Phase A is a verified pure-config,
+   backend-transparent no-op path needing no code change — bar the corrective
+   exception. Include the per-cell tables, step counts, and verdicts. Carry
+   the GPU-utilization discipline block.
 8. **The periodic clean step** — the exact spec, the FSDP-no-errors
    acceptance checklist, and the minimal patch (§6). Be explicit that
-   FSDP-no-errors is a hard pass/fail for Test 4 Cell B.
+   FSDP-no-errors is a hard pass/fail for Test 3 Cell B.
 9. **Reference artifacts** (§7 file paths).
 10. **Out of scope:** the parity run and the savings-measurement run
-   (separate follow-ups) and any code beyond the minimal `clean_cadence`
-   patch. This issue's deliverables are (a) a verdict on where the
-   explosion lives, from the peel, and (b) a pass/fail on whether the
-   periodic clean step stabilises pure masked GRPO with zero FSDP errors.
+   (separate follow-ups); the **fp32 `1/(1-p)` mask-rescale fix** (§3.5 D-1 —
+   documented and made verifiable here, but not implemented or tested in this
+   issue); and any code beyond the minimal `clean_cadence` patch (plus any
+   corrective lean-path backend fix per §3.6, should Test 1/Test 2 require
+   one). This issue's deliverables are (a) a verdict on where the explosion
+   lives, from the lean peel (and, only if reached, the Phase-B audit), and
+   (b) a pass/fail on whether the periodic clean step stabilises pure masked
+   GRPO with zero FSDP errors.
 
 **Do NOT** reference any prior issue by number. **Do NOT** request
 `status:approved` — the human operator decides whether to dispatch.
