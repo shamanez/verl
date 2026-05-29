@@ -2,6 +2,16 @@
 
 Watcher for `research:claim` issues. You are executing in the top-level `/loop` session — dispatch `research-planner` subagents in parallel via the `Agent` tool. The planner labels each issue `status:planned`; the human flips to `status:approved` later, so this playbook never crosses the human gate.
 
+## Invocation
+
+Paste into a fresh Claude Code session at `research/` (Session A — planning watcher, per `researcher_steps.md` §2):
+
+```
+/bg /loop 60m Read .claude/playbooks/triage.md and execute it.
+```
+
+The loop re-fires every 60 min; each firing runs one pass of `### Each iteration` below.
+
 ## Operating context
 
 Canonical project facts (working dir, gh-default repo, secrets, vast template, branch policy) live in [`.claude/project.yaml`](../project.yaml). Read it once if you need any of them. Your role-specific constraints:

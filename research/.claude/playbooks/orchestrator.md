@@ -9,22 +9,16 @@ state from plan files, `gh`, `runs.jsonl`, verdict files, and `PROGRESS.md`.
 
 ## Invocation
 
-Canonical (matches `researcher_steps.md` §3 and `CLAUDE.md` §4):
+Paste into a fresh Claude Code session at `research/` (Session B — executor, per `researcher_steps.md` §3):
 
 ```
 /bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
 ```
 
-The loop re-fires this playbook every 30 min; each firing is one tick (the
-`## Each tick` steps below). Between ticks the session Stops, which fires the
-`commit-on-stop` and `teardown-finished-runs` hooks — so the Stop-hook teardown
-backstop runs after every tick, not only at end of day.
-
-To drive a single issue to completion instead of looping the whole queue, add
-an explicit target: `… execute it for issue #<N>.` You may optionally gate the
-session with `/goal <completion condition>` (the optional milestone-watcher
-"Session C" in README.md) — but `/loop 30m` is the orchestrator's normal
-driver, and `/goal` adds no teardown or dispatch semantics of its own.
+The loop re-fires every 30 min; each firing runs one `## Each tick` pass. Between
+ticks the session Stops, firing the `commit-on-stop` + `teardown-finished-runs`
+hooks — so the teardown backstop runs after every tick. To drive a single issue
+instead of the whole queue, append `… execute it for issue #<N>.`
 
 **Plan-review gate is operator-owned and out of band.** The orchestrator NEVER
 dispatches a code-review subagent and NEVER launches a `status:planned` plan.
