@@ -12,46 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pipeline-boundary activation masking (Algorithm A, actor-train only).
+"""Pipeline-boundary activation masking (actor-train only).
 
-This implements the *first circuit* of the two-circuit compression method: a
-deterministic pseudo-random-function (PRF) Bernoulli mask applied **in-graph**
-to the hidden-state output of selected pipeline-boundary decoder blocks during
-the actor train forward/backward pass.
+A deterministic per-(token, dimension) PRF Bernoulli mask applied in-graph
+(``h_tilde = h * mask``) to the hidden-state output of selected pipeline-boundary
+decoder blocks. Each token independently keeps ``round((1-p)*H)`` of its ``H``
+dims.
 
-Key properties (each is load-bearing and unit-tested in
-``tests/workers/comm_eff/test_activation_mask.py``):
-
-* **Form:** ``h_tilde = h * mask`` element-wise, in-graph. There is **no**
-  ``1 / (1 - p)`` forward rescale — the direct product is written. Rescaling at
-  ``p=0.95`` destabilises bf16; we do not claim unbiasedness for the no-rescale
-  port.
-
-* **``p`` is the masked fraction.** ``mask`` is ``0`` (zeroed) with probability
-  ``p`` and ``1`` (kept) with probability ``1 - p``. So the measured
-  *mask ratio* (fraction of zeroed elements) tracks the configured ``p``. This
-  matches the EXP-5 success criterion ``comm_eff/mask_ratio ≈ p ± 0.02``.
-
-* **PRF key, not activation values.** The mask is drawn from a seeded PRF whose
-  key is ``(boundary id, global optimizer step, optimizer-substep / microbatch
-  identity, sequence-shard identity, hidden size, base run seed)``. The mask
-  **never** depends on the activation tensor values — only on its shape and the
-  key. So the same key reproduces the same mask across ranks and re-runs, and
-  two different activation tensors with the same key/shape get the same mask.
-
-* **Boundary layers from ``model.config``.** ``num_layers`` and ``hidden_size``
-  are read from the live module (or its config), never hardcoded. The block
-  indices are partitioned into ``pp_size`` contiguous shards and the **last
-  block of each shard except the final shard** is masked. For ``L=16,
-  pp_size=8`` this is ``[1, 3, 5, 7, 9, 11, 13]``.
-
-* **Top-k masking is forbidden** — only random PRF masking. Top-k introduces
-  structured bias the later spectral filter cannot remove.
-
-* **Hooks are train-only and ephemeral.** They are registered on entry to the
-  actor train forward/backward and removed on exit, so a later log-prob / ref /
-  ``infer_batch`` / validation / checkpoint forward on the same module sees no
-  masking.
+The mask is keyed on each token's stable identity ``(sample_id, position_id)``,
+not its position inside a packed micro-batch, so it is packing-invariant: a token
+gets the same mask in the old-logprob recompute and the actor-train forward and
+across every PPO mini-batch / epoch of one ``global_step``. ``p`` is the masked
+(zeroed) fraction. The draw uses a counter-based splitmix64 PRF (no Generator
+state), so it is identical on CPU/GPU, across ranks, and under
+forward-recomputation (gradient checkpointing). Hooks are registered only for the
+masked forward and removed on exit. Top-k masking is forbidden (random only).
 """
 
 from __future__ import annotations
@@ -62,14 +37,6 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-# The set of execution-path tags on which masking is permitted to fire.
-# Imported from the state module (cheap, no torch import there) so the assert
-# below and the state stay in lockstep. EXP-5 → EXP-12 the only eligible tag is
-# ``train``; EXP-9 widens eligibility to ``{train, old_logprob}`` *iff*
-# ``comm_eff.mask.mask_recompute=true`` via ``mask_eligible_tags(state)``,
-# which is evaluated at hook-fire time (per call) so flipping the knob does
-# not require restarting the worker. ``None`` (the anchor pass / GUARD 5) is
-# never eligible — the anchor runs unmasked unconditionally.
 from verl.workers.comm_eff.state import (
     MASK_ELIGIBLE_TAGS,
     TRAIN_TAG,
@@ -81,38 +48,25 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "decoder_boundary_indices",
     "find_decoder_layers",
-    "prf_mask",
-    "prf_channel_mask",
+    "prf_token_mask",
     "ActivationMasker",
 ]
 
-# A large odd 64-bit constant mixed into the PRF seed so the mask stream is well
-# separated from any other RNG stream in the run. Splitmix64-style finaliser.
+# Splitmix64 finaliser constants.
 _PRF_GOLDEN = 0x9E3779B97F4A7C15
+_PRF_MIX1 = 0xBF58476D1CE4E5B9
+_PRF_MIX2 = 0x94D049BB133111EB
 _U64 = (1 << 64) - 1
+# Uniform is the top 53 bits of the hash (exact in a float64 mantissa / int64).
+_PRF_2POW53 = 1 << 53
 
 
 def decoder_boundary_indices(num_layers: int, pp_size: int) -> list[int]:
-    """Return pipeline-boundary block indices for masking.
+    """Return the pipeline-boundary block indices to mask.
 
-    The ``num_layers`` decoder blocks are partitioned into ``pp_size``
-    contiguous shards (the same near-even split a real pipeline-parallel layout
-    would use). The boundary of shard ``i`` is its **last** block index; we mask
-    every shard boundary **except the final shard's** (the final shard's last
-    block is the model's last decoder block, which feeds the LM head — masking
-    it is masking the output, not a pipeline boundary).
-
-    For ``L=16, pp_size=8`` the shards are
-    ``[0,1] [2,3] [4,5] [6,7] [8,9] [10,11] [12,13] [14,15]`` whose last indices
-    are ``[1,3,5,7,9,11,13,15]``; dropping the final shard's ``15`` gives
-    ``[1,3,5,7,9,11,13]``.
-
-    Args:
-        num_layers: Number of decoder blocks ``L`` (from ``model.config``).
-        pp_size: Logical pipeline-shard count (a config knob, not a real split).
-
-    Returns:
-        Sorted list of boundary block indices, length ``min(pp_size, L) - 1``.
+    The ``num_layers`` decoder blocks are split into ``pp_size`` contiguous
+    shards; the last block of every shard *except the final shard* is a boundary.
+    ``L=16, pp_size=8`` -> ``[1, 3, 5, 7, 9, 11, 13]``.
     """
     if num_layers < 1:
         raise ValueError(f"num_layers must be >= 1; got {num_layers}")
@@ -123,9 +77,6 @@ def decoder_boundary_indices(num_layers: int, pp_size: int) -> list[int]:
     if eff_pp == 1:
         return []
 
-    # Contiguous near-even partition: shard i covers [starts[i], starts[i+1]).
-    # last index of shard i is starts[i+1] - 1. We take shards 0..eff_pp-2
-    # (every shard except the final one).
     base = num_layers // eff_pp
     rem = num_layers % eff_pp
     boundaries: list[int] = []
@@ -133,24 +84,18 @@ def decoder_boundary_indices(num_layers: int, pp_size: int) -> list[int]:
     for i in range(eff_pp):
         shard_len = base + (1 if i < rem else 0)
         cursor += shard_len
-        last_idx = cursor - 1
         if i < eff_pp - 1:  # skip the final shard's boundary
-            boundaries.append(last_idx)
+            boundaries.append(cursor - 1)
     return boundaries
 
 
 def find_decoder_layers(module: nn.Module) -> Optional[nn.ModuleList]:
     """Locate the decoder-block ``nn.ModuleList`` inside a (possibly wrapped) model.
 
-    Walks the module tree (FSDP / DDP / PEFT wrappers are transparent because we
-    use ``named_modules``) and returns the first ``nn.ModuleList`` whose entries
-    look like transformer decoder blocks (heuristic: the attribute is named
-    ``layers`` / ``h`` / ``blocks`` and contains >1 modules). This avoids
-    hardcoding a model class so the masker works for any HF causal-LM verl
-    trains.
-
-    Returns ``None`` if no decoder-block list is found (the masker then no-ops
-    rather than crashing — surfaced via a warning so the analyst sees it).
+    Returns the longest ``nn.ModuleList`` named ``layers``/``h``/``blocks``/
+    ``decoder`` (falling back to the longest list of >1 modules), so the masker
+    works for any HF causal-LM without hardcoding a model class. ``None`` if none
+    is found (the masker then no-ops with a warning).
     """
     candidates: list[tuple[str, nn.ModuleList]] = []
     for name, sub in module.named_modules():
@@ -159,7 +104,6 @@ def find_decoder_layers(module: nn.Module) -> Optional[nn.ModuleList]:
             if leaf in ("layers", "h", "blocks", "decoder"):
                 candidates.append((name, sub))
     if not candidates:
-        # fall back to the longest ModuleList of >1 modules
         all_lists = [
             (name, sub)
             for name, sub in module.named_modules()
@@ -169,154 +113,115 @@ def find_decoder_layers(module: nn.Module) -> Optional[nn.ModuleList]:
             return None
         all_lists.sort(key=lambda kv: len(kv[1]), reverse=True)
         return all_lists[0][1]
-    # Prefer the longest matching list (the decoder stack dominates layer count).
     candidates.sort(key=lambda kv: len(kv[1]), reverse=True)
     return candidates[0][1]
 
 
 def _splitmix64(x: int) -> int:
-    """One round of the splitmix64 finaliser. Deterministic, well-distributed."""
+    """One scalar round of the splitmix64 finaliser."""
     x = (x + _PRF_GOLDEN) & _U64
     z = x
-    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _U64
-    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _U64
+    z = ((z ^ (z >> 30)) * _PRF_MIX1) & _U64
+    z = ((z ^ (z >> 27)) * _PRF_MIX2) & _U64
     z = z ^ (z >> 31)
     return z & _U64
 
 
 def _derive_seed(key: tuple[int, ...]) -> int:
-    """Fold a PRF key tuple into a single 64-bit seed.
-
-    Pure function of the key only — never of activation values. Order-sensitive
-    so distinct key components do not alias.
-    """
+    """Fold a PRF key tuple into a 64-bit seed (order-sensitive, value-free)."""
     acc = 0
     for component in key:
-        # Mix each component in turn; cast to a non-negative 64-bit int first.
         acc = _splitmix64(acc ^ (int(component) & _U64))
     return acc & _U64
 
 
-def prf_mask(
-    shape: tuple[int, ...],
-    key: tuple[int, ...],
-    p: float,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Build a deterministic Bernoulli keep/zero mask from a PRF key.
+def _u64_to_i64(value: int) -> int:
+    """Reinterpret a uint64 value as the signed int64 with the same bits.
 
-    The mask is ``0`` (zeroed) with probability ``p`` and ``1`` (kept) with
-    probability ``1 - p``, drawn from a ``torch.Generator`` seeded purely by
-    ``key`` (folded via splitmix64). Identical ``key`` + ``shape`` => identical
-    mask, on any rank, in any process, independent of the activation values.
-
-    Args:
-        shape: Shape of the activation tensor to mask.
-        key: PRF key tuple (boundary id, global step, substep id, seq-shard id,
-            hidden size, base seed). Must NOT include activation values.
-        p: Masked fraction in ``[0, 1]`` (probability an element is zeroed).
-        device: Device for the returned mask.
-        dtype: Dtype for the returned mask (matches the activation).
-
-    Returns:
-        A ``mask`` tensor of ``shape`` with entries in ``{0, 1}``.
+    torch has no uint64; the tensor PRF runs on int64, whose two's-complement
+    arithmetic matches uint64 mod 2**64.
     """
-    if not 0.0 <= p <= 1.0:
-        raise ValueError(f"mask p must be in [0, 1]; got {p}")
-    seed = _derive_seed(key)
-    # torch.Generator takes a signed int64; fold the high bit in.
-    gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
-    # Draw uniform on CPU for cross-device reproducibility, then move. keep iff
-    # u >= p  =>  P(zero) = P(u < p) = p, so the masked fraction is exactly p in
-    # expectation, independent of device RNG implementation.
-    u = torch.rand(shape, generator=gen, dtype=torch.float32)
-    keep = (u >= p).to(dtype=dtype)
-    return keep.to(device=device, non_blocking=True)
+    return value - (1 << 64) if value >= (1 << 63) else value
 
 
-def prf_channel_mask(
+_GOLDEN_I64 = _u64_to_i64(_PRF_GOLDEN)
+_MIX1_I64 = _u64_to_i64(_PRF_MIX1)
+_MIX2_I64 = _u64_to_i64(_PRF_MIX2)
+
+
+def _logical_rshift(x: torch.Tensor, n: int) -> torch.Tensor:
+    """Unsigned right shift of a signed int64 tensor (clear the sign-extended bits)."""
+    return (x >> n) & ((1 << (64 - n)) - 1)
+
+
+def _splitmix64_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Vectorized splitmix64 finaliser, bit-identical to :func:`_splitmix64`."""
+    x = x + _GOLDEN_I64
+    x = x ^ _logical_rshift(x, 30)
+    x = x * _MIX1_I64
+    x = x ^ _logical_rshift(x, 27)
+    x = x * _MIX2_I64
+    x = x ^ _logical_rshift(x, 31)
+    return x
+
+
+def prf_token_mask(
+    sample_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    *,
+    layer_idx: int,
+    global_step: int,
+    base_seed: int,
     hidden_size: int,
-    key: tuple[int, ...],
     p: float,
-    *,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Build a deterministic PER-CHANNEL Bernoulli keep/zero mask.
+    """Deterministic per-(token, dim) Bernoulli keep/zero mask.
 
-    Unlike :func:`prf_mask` (which draws an independent value for every
-    ``(token, channel)`` ELEMENT over the packed activation tensor), this draws
-    ONE ``(hidden_size,)`` keep/zero vector — the SAME hidden channels are kept
-    or dropped for EVERY token at the boundary — and returns it shaped
-    ``(1, 1, hidden_size)`` so it broadcasts across the leading (batch / packed
-    token) dimensions of the activation in ``h * mask``.
-
-    Why per-channel is the on-policy-consistent default (EXP-14): the mask is a
-    pure function of ``key`` (``(layer, global_step, base_seed)`` — NO token /
-    substep / sequence-shard / packing component) and is CONSTANT along the token
-    axis. So it is IDENTICAL across every forward pass of one global update
-    regardless of how dynamic-bsz packs / length-sorts / shuffles the tokens
-    (old_logprob's ~21 micro-batches vs the train phase's ~28). That makes
-    ``log pi_new / pi_old`` consistent — exactly like a single supervised
-    forward — which a per-element positional draw cannot guarantee without
-    keying on stable per-token identity (the rejected per-token plumbing). It is
-    also a faithful model of structured pipeline-boundary communication
-    compression: transmit a fixed random subset of the hidden channels for all
-    tokens. The measured ``mask_ratio`` (fraction of zeroed channels) tracks
-    ``p`` exactly as the per-element form does.
+    Entry ``(t, j)`` is keyed on ``(base_seed, layer_idx, global_step,
+    sample_ids[t], position_ids[t], j)`` and kept iff its PRF draw ``>= p``, so
+    the zeroed fraction tracks ``p``.
 
     Args:
-        hidden_size: Number of hidden channels ``H`` (the last dim of ``h``).
-        key: PRF key tuple; for per-channel masking this is
-            ``(layer_idx, global_step, base_seed)`` — it MUST NOT carry any
-            token-axis component (substep / seq-shard / token id) or the mask
-            would stop being packing-invariant.
-        p: Masked fraction in ``[0, 1]`` (probability a channel is zeroed).
-        device: Device for the returned mask.
-        dtype: Dtype for the returned mask (matches the activation).
+        sample_ids: ``(N,)`` per-token stable sample identity.
+        position_ids: ``(N,)`` per-token position within its sequence.
+        hidden_size: ``H`` channels the mask is drawn over.
+        p: Masked fraction in ``[0, 1]``.
 
     Returns:
-        A ``mask`` tensor of shape ``(1, 1, hidden_size)`` with entries in
-        ``{0, 1}`` (broadcasts over the token / batch dims of ``h``).
+        ``(N, hidden_size)`` mask of ``{0, 1}`` in ``dtype`` on ``device``.
     """
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"mask p must be in [0, 1]; got {p}")
-    seed = _derive_seed(key)
-    gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
-    # Draw H uniforms on CPU for cross-device reproducibility; keep iff u >= p so
-    # P(zero) = p (the zeroed-channel fraction is p in expectation). Reshape to
-    # (1, 1, H) so it broadcasts across leading dims regardless of whether h is
-    # (1, total_nnz, H) (rmpad) or (batch, seq, H) (padded).
-    u = torch.rand((hidden_size,), generator=gen, dtype=torch.float32)
-    keep = (u >= p).to(dtype=dtype).view(1, 1, hidden_size)
-    return keep.to(device=device, non_blocking=True)
+    sid = sample_ids.reshape(-1).to(device=device, dtype=torch.int64)
+    pos = position_ids.reshape(-1).to(device=device, dtype=torch.int64)
+    if sid.numel() != pos.numel():
+        raise ValueError(f"sample_ids and position_ids length mismatch: {sid.numel()} vs {pos.numel()}")
+
+    # Fold the scalar prefix, then the per-token ids, then the channel index.
+    # Left-fold equivalence makes this bit-identical to _derive_seed over the
+    # full key tuple per (token, channel).
+    prefix = _u64_to_i64(_derive_seed((base_seed, layer_idx, global_step)))
+    acc = _splitmix64_tensor(sid ^ prefix)  # fold sample_id   -> (N,)
+    acc = _splitmix64_tensor(acc ^ pos)  # fold position_id -> (N,)
+    channel = torch.arange(hidden_size, device=device, dtype=torch.int64)
+    h = _splitmix64_tensor(acc.unsqueeze(1) ^ channel.unsqueeze(0))  # (N, H)
+
+    # keep iff (top-53-bit uniform) >= p, done in integer space (no float tile).
+    hash53 = _logical_rshift(h, 11)
+    threshold = int(p * _PRF_2POW53)
+    return (hash53 >= threshold).to(dtype=dtype)
 
 
 class ActivationMasker:
-    """Registers/clears in-graph activation-mask forward hooks on boundary blocks.
+    """Installs/clears in-graph activation-mask forward hooks on boundary blocks.
 
-    One instance is owned by the engine. ``register(module)`` installs a forward
-    hook on each boundary decoder block; ``unregister()`` removes them. The hooks
-    must be live **only** during the actor train forward/backward — the engine
-    registers on entry to ``forward_backward_batch`` (train) and unregisters on
-    exit, so log-prob / ref / infer / validation / checkpoint forwards never see
-    a mask.
-
-    The PRF key per hook fire is composed from:
-      * the boundary block index (stable per hook),
-      * ``global_step`` (trainer optimizer step),
-      * ``substep`` (optimizer-substep / microbatch identity within the step),
-      * a sequence-shard id (0 when no SP; set by the engine when present),
-      * ``hidden_size`` (last dim of the activation),
-      * ``base_seed`` (``comm_eff.mask.seed``).
-
-    ``global_step`` / ``substep`` / ``seq_shard`` are set by the engine via
-    ``set_context(...)`` before each forward so the same rollout batch reused
-    over multiple PPO mini-batches gets distinct masks per substep.
+    ``register(module)`` installs a forward hook on each boundary decoder block;
+    ``unregister()`` removes them. The engine pairs register/unregister around the
+    masked forward only. Before each micro-batch forward the engine calls
+    ``set_context(...)`` with ``global_step`` and the token-aligned
+    ``sample_ids`` / ``position_ids`` that key the per-element mask.
     """
 
     def __init__(
@@ -326,136 +231,93 @@ class ActivationMasker:
         base_seed: int,
         pp_size: int,
         rescale: bool = False,
-        granularity: str = "channel",
         state: Any = None,
     ):
         self.p = float(p)
         self.base_seed = int(base_seed)
         self.pp_size = int(pp_size)
-        # EXP-14 magnitude-preservation knob. False (default) => spec form
-        # h_tilde = h * mask (dropped activations are zeros, pure simulated PP).
-        # True => inverted-dropout h_tilde = h * mask / (1 - p) so kept
-        # activations are scaled up to hold E[h_tilde] = h (a flagged DESIGN
-        # CHANGE; see CommEffMaskConfig.rescale). Precompute the gain.
+        # rescale=True applies inverted-dropout h*mask/(1-p) (preserves
+        # E[h_tilde]=h); False (default) writes the raw product.
         self.rescale = bool(rescale)
         self._rescale_gain = (1.0 / (1.0 - self.p)) if (self.rescale and self.p < 1.0) else 1.0
-        # EXP-14 mask granularity. "channel" (default) => per-channel mask
-        # (prf_channel_mask): the SAME hidden channels are dropped for every
-        # token, keyed on (layer, global_step, base_seed) — constant along the
-        # token axis, so the mask is IDENTICAL across all forwards of one global
-        # update regardless of dynamic-bsz packing/shuffle (on-policy-consistent
-        # by construction). "element" => legacy per-element mask (prf_mask): an
-        # independent draw per (token, channel), which is packing-dependent and
-        # whose cross-forward consistency is only approximated by the substep-
-        # fixing of consistent_across_forwards. See CommEffMaskConfig.granularity.
-        if granularity not in ("channel", "element"):
-            raise ValueError(f"mask granularity must be one of (channel, element); got {granularity!r}")
-        self.granularity = str(granularity)
         self._state = state  # CommEffState, for the mask_applications counter
         self._handles: list[Any] = []
         self._boundary_set: set[int] = set()
         self.boundary_indices: list[int] = []
-        # Per-forward context, set by the engine before forward_backward.
+        # Per-forward context, set by the engine before each micro-batch forward.
         self._global_step = 0
-        self._substep = 0
-        self._seq_shard = 0
-        # Last-measured masked fraction per boundary, surfaced as comm_eff/mask_ratio.
+        self._sample_ids: Optional[torch.Tensor] = None
+        self._position_ids: Optional[torch.Tensor] = None
+        # Last-measured masked fraction per boundary (comm_eff/mask_ratio).
         self.last_mask_ratio: dict[int, float] = {}
 
-    def set_context(self, *, global_step: int, substep: int, seq_shard: int = 0) -> None:
-        """Set the PRF-key context for the next forward pass."""
+    def set_context(
+        self,
+        *,
+        global_step: int,
+        sample_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> None:
+        """Set the PRF-key context (step + per-token stable ids) for the next forward."""
         self._global_step = int(global_step)
-        self._substep = int(substep)
-        self._seq_shard = int(seq_shard)
+        self._sample_ids = None if sample_ids is None else sample_ids.reshape(-1)
+        self._position_ids = None if position_ids is None else position_ids.reshape(-1)
 
     def _make_hook(self, layer_idx: int):
         masker = self
 
         def _hook(_mod: nn.Module, _inputs: tuple, output: Any):
-            # HF decoder blocks return either a Tensor or a tuple whose first
-            # element is the hidden state. Mask the hidden state in-graph.
-            if isinstance(output, tuple):
-                h = output[0]
-            else:
-                h = output
+            h = output[0] if isinstance(output, tuple) else output
             if not torch.is_tensor(h):
                 return output
-            hidden_size = h.shape[-1]
-            if masker.granularity == "channel":
-                # Per-channel key: token-axis components (substep / seq_shard)
-                # are DELIBERATELY excluded so the mask is constant along the
-                # token axis and identical across every forward of one global
-                # update (packing-invariant). hidden_size stays in the key so a
-                # shape change is still reflected.
-                key = (
-                    layer_idx,
-                    masker._global_step,
-                    hidden_size,
-                    masker.base_seed,
-                )
-            else:
-                # Legacy per-element key (packing-dependent; cross-forward
-                # consistency only via consistent_across_forwards holding substep).
-                key = (
-                    layer_idx,
-                    masker._global_step,
-                    masker._substep,
-                    masker._seq_shard,
-                    hidden_size,
-                    masker.base_seed,
-                )
-            # EXP-6 contamination guard (EXP-9 extension). The mask must NEVER
-            # fire outside the set of eligible paths. The default eligibility is
-            # ``{train}`` (EXP-5 → EXP-12); EXP-9 widens it to
-            # ``{train, old_logprob}`` when ``state.mask.mask_recompute=true``
-            # so the fast (masked) circuit covers BOTH gradient-feeding forwards
-            # in pipeline-parallel RL. ``None`` (anchor pass) is NEVER eligible —
-            # the anchor stays unmasked (GUARD 5). The engine only registers
-            # these hooks when ``state.mask_active`` is set (around
-            # ``update_actor`` and, with mask_recompute, around
-            # ``compute_log_prob``), but a future caller that mis-sets the flag
-            # or a path-tag mismatch would silently corrupt
-            # rollout / ref / val / infer / checkpoint forwards. We turn that
-            # into a LOUD failure: assert the tag is in the eligible set.
-            # Disabled under ``python -O``, but the per-path counter below
-            # still records any leak as a falsifier.
+
+            # Confinement guard: the mask must fire only on eligible paths
+            # ({train}, plus old_logprob when mask_recompute). Any other tag (or
+            # None, the anchor pass) is contamination. The per-path counter below
+            # still records a leak if asserts are disabled under -O.
             state = masker._state
             if state is not None and hasattr(state, "path_tag"):
                 tag = state.path_tag
                 eligible = mask_eligible_tags(state)
                 assert tag in eligible, (
-                    "comm_eff activation mask fired on an ineligible path "
-                    f"(path_tag={tag!r}, eligible={sorted(eligible)}); masking "
-                    "is confined to the actor-train forward/backward (and, with "
-                    "comm_eff.mask.mask_recompute=true, the old-logprob recompute). "
-                    "Any other path (rollout / ref_logprob / val / infer / ckpt) "
-                    "or the anchor pass (path_tag=None) is contamination of the "
-                    "RL measurement machinery and is a hard falsifier."
+                    f"comm_eff mask fired on an ineligible path (path_tag={tag!r}, "
+                    f"eligible={sorted(eligible)}); masking is confined to the "
+                    "actor-train forward (and old-logprob recompute when "
+                    "mask_recompute=true)."
                 )
-            if masker.granularity == "channel":
-                # (1, 1, hidden) mask broadcast across the token/batch dims —
-                # identical for every token, identical across packings.
-                mask = prf_channel_mask(hidden_size, key, masker.p, device=h.device, dtype=h.dtype)
-            else:
-                mask = prf_mask(tuple(h.shape), key, masker.p, device=h.device, dtype=h.dtype)
-            # h_tilde = h * mask, in-graph. The multiply is tracked by autograd so
-            # the masked gradient flows to the optimizer. EXP-14: when rescale is
-            # on, multiply by the inverted-dropout gain 1/(1-p) so kept activations
-            # are scaled up to preserve E[h_tilde] = h (magnitude preservation, a
-            # flagged design change). rescale off (default) => gain 1.0 => the
-            # spec's pure h * mask (dropped activations are zeros).
-            if masker._rescale_gain != 1.0:
-                h_tilde = h * mask * masker._rescale_gain
-            else:
-                h_tilde = h * mask
-            # Instrumentation (does not affect the graph): measured masked fraction.
+
+            hidden_size = h.shape[-1]
+            n_tokens = h.numel() // hidden_size
+            sample_ids = masker._sample_ids
+            position_ids = masker._position_ids
+            if sample_ids is None or position_ids is None:
+                raise RuntimeError(
+                    "comm_eff mask fired without per-token identity: call "
+                    "set_context(sample_ids=..., position_ids=...) before each masked "
+                    "forward (the per-element mask has no positional fallback)."
+                )
+            if sample_ids.numel() != n_tokens or position_ids.numel() != n_tokens:
+                raise RuntimeError(
+                    f"comm_eff mask token-axis mismatch: activation has {n_tokens} "
+                    f"tokens but got {sample_ids.numel()} sample_ids / "
+                    f"{position_ids.numel()} position_ids (SP>1 / non-rmpad is out of scope)."
+                )
+
+            mask = prf_token_mask(
+                sample_ids,
+                position_ids,
+                layer_idx=layer_idx,
+                global_step=masker._global_step,
+                base_seed=masker.base_seed,
+                hidden_size=hidden_size,
+                p=masker.p,
+                device=h.device,
+                dtype=h.dtype,
+            ).view(h.shape)
+            h_tilde = h * mask * masker._rescale_gain if masker._rescale_gain != 1.0 else h * mask
             with torch.no_grad():
                 masker.last_mask_ratio[layer_idx] = float(1.0 - mask.mean().item())
             if state is not None:
-                # Records both the aggregate and the per-path counter; the
-                # latter is what the analyst greps by KEY PREFIX. Falls back to
-                # the EXP-5 aggregate-only shape if note_mask_application is
-                # absent (e.g. a _FakeState in a unit test).
                 if hasattr(state, "note_mask_application"):
                     state.note_mask_application()
                 else:
@@ -467,39 +329,37 @@ class ActivationMasker:
         return _hook
 
     def register(self, module: nn.Module) -> None:
-        """Install forward hooks on the boundary decoder blocks of ``module``.
+        """Install forward hooks on the boundary decoder blocks (idempotent).
 
-        Idempotent guard: if hooks are already registered this is a no-op (the
-        engine pairs register/unregister, but a defensive guard avoids double
-        registration leaking a mask onto a later pass).
+        Clears any stale per-token context so a fire before ``set_context`` fails
+        loud rather than reusing the previous forward's identities.
         """
         if self._handles:
             return
+        self._sample_ids = None
+        self._position_ids = None
         layers = find_decoder_layers(module)
         if layers is None:
             logger.warning(
                 "comm_eff.activation_mask: could not locate decoder layers on %s; "
-                "no mask hooks registered (masking is a no-op this pass)",
+                "no mask hooks registered (no-op this pass)",
                 type(module).__name__,
             )
             return
-        num_layers = len(layers)
-        self.boundary_indices = decoder_boundary_indices(num_layers, self.pp_size)
+        self.boundary_indices = decoder_boundary_indices(len(layers), self.pp_size)
         self._boundary_set = set(self.boundary_indices)
         for idx in self.boundary_indices:
-            handle = layers[idx].register_forward_hook(self._make_hook(idx))
-            self._handles.append(handle)
+            self._handles.append(layers[idx].register_forward_hook(self._make_hook(idx)))
         logger.info(
-            "comm_eff.activation_mask: registered mask hooks on boundaries %s "
-            "(L=%d, pp_size=%d, p=%.4f)",
+            "comm_eff.activation_mask: registered hooks on boundaries %s (L=%d, pp_size=%d, p=%.4f)",
             self.boundary_indices,
-            num_layers,
+            len(layers),
             self.pp_size,
             self.p,
         )
 
     def unregister(self) -> None:
-        """Remove all mask hooks. Must be called on exit of the train forward."""
+        """Remove all mask hooks. Called on exit of the masked forward."""
         for handle in self._handles:
             handle.remove()
         self._handles = []

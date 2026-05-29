@@ -12,21 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-14 magnitude-preservation (inverted-dropout rescale) knob.
+"""Magnitude-preservation (inverted-dropout rescale) knob.
 
-THE SECOND SUSPECT (after the substep-RNG fix was refuted): the explosion may be
-the mask's BIAS, not importance-sampling inconsistency. ``h_tilde = h * mask``
-with NO ``1/(1-p)`` rescale drops ~90% of boundary-block activations at p=0.9, so
-the residual-stream RMS at those positions collapses to ``sqrt(1-p) ≈ 0.316×`` —
-a large distribution shift from the weights' training regime, which produces
-large gradients. clean_cadence works precisely because its clean step runs the
-UNMASKED (full-magnitude) network.
-
-``comm_eff.mask.rescale`` (default False, a flagged DESIGN-CHANGE candidate)
-applies inverted-dropout ``h_tilde = h * mask / (1 - p)`` so kept activations are
-scaled up to hold ``E[h_tilde] = h``. These CPU tests assert the form and the
-magnitude-preservation property; they do NOT assert anything about training
-stability (that is what test2_cellD measures on the box).
+``rescale=False`` (default) writes the raw product ``h * mask``; ``rescale=True``
+applies ``h * mask / (1 - p)`` so kept elements are scaled up to hold
+``E[h_tilde] = h``. These CPU tests assert the form and the magnitude property;
+they say nothing about training stability.
 """
 
 import pytest
@@ -36,103 +27,79 @@ import torch.nn as nn
 from verl.workers.comm_eff.activation_mask import ActivationMasker
 
 
-# --------------------------------------------------------------------------- #
-# default (rescale off): pure h * mask, kept elements unchanged
-# --------------------------------------------------------------------------- #
+def _set_ctx(masker, b, s, step=0):
+    sid = torch.arange(b).repeat_interleave(s)
+    pos = torch.arange(s).repeat(b)
+    masker.set_context(global_step=step, sample_ids=sid, position_ids=pos)
+
+
 def test_default_no_rescale_keeps_kept_elements_unchanged():
     masker = ActivationMasker(p=0.9, base_seed=0, pp_size=8)
     assert masker.rescale is False
     assert masker._rescale_gain == 1.0
-    masker.set_context(global_step=0, substep=0, seq_shard=0)
-    hook = masker._make_hook(3)
-    h = torch.full((2, 4, 16), 2.0)
-    out = hook(nn.Identity(), (), h)
+    _set_ctx(masker, 2, 4)
+    out = masker._make_hook(3)(nn.Identity(), (), torch.full((2, 4, 16), 2.0))
     nonzero = out[out != 0]
-    # kept elements equal h exactly (2.0), no scale-up.
     assert torch.allclose(nonzero, torch.full_like(nonzero, 2.0))
 
 
-# --------------------------------------------------------------------------- #
-# rescale on: kept elements scaled by 1/(1-p)
-# --------------------------------------------------------------------------- #
 def test_rescale_scales_kept_elements_by_inverse_keep_prob():
     p = 0.9
     masker = ActivationMasker(p=p, base_seed=0, pp_size=8, rescale=True)
     assert masker.rescale is True
     assert masker._rescale_gain == pytest.approx(1.0 / (1.0 - p))
-    masker.set_context(global_step=0, substep=0, seq_shard=0)
-    hook = masker._make_hook(3)
-    h = torch.full((2, 4, 16), 2.0)
-    out = hook(nn.Identity(), (), h)
+    _set_ctx(masker, 2, 4)
+    out = masker._make_hook(3)(nn.Identity(), (), torch.full((2, 4, 16), 2.0))
     nonzero = out[out != 0]
-    # kept elements equal h * 1/(1-p) = 2.0 * 10 = 20.0
     assert torch.allclose(nonzero, torch.full_like(nonzero, 2.0 / (1.0 - p)))
 
 
 def test_rescale_preserves_expected_magnitude():
-    """E[h_tilde] = h: over a large tensor the masked+rescaled mean ~= the
-    unmasked mean (inverted-dropout is unbiased in expectation), whereas the
-    no-rescale variant collapses the mean by (1-p)."""
     p = 0.9
-    shape = (16, 64, 256)
-    h = torch.ones(shape)
+    h = torch.ones(16, 64, 256)
 
     m_off = ActivationMasker(p=p, base_seed=1, pp_size=8, rescale=False)
-    m_off.set_context(global_step=0, substep=0, seq_shard=0)
+    _set_ctx(m_off, 16, 64)
     out_off = m_off._make_hook(3)(nn.Identity(), (), h)
 
     m_on = ActivationMasker(p=p, base_seed=1, pp_size=8, rescale=True)
-    m_on.set_context(global_step=0, substep=0, seq_shard=0)
+    _set_ctx(m_on, 16, 64)
     out_on = m_on._make_hook(3)(nn.Identity(), (), h)
 
-    # no-rescale mean collapses to ~ (1-p) = 0.1
     assert out_off.mean().item() == pytest.approx(1.0 - p, abs=0.02)
-    # rescaled mean is preserved at ~ 1.0
     assert out_on.mean().item() == pytest.approx(1.0, abs=0.05)
 
 
 def test_rescale_same_zero_pattern_as_no_rescale():
-    """Rescale changes only the MAGNITUDE of kept elements — the zero/keep
-    pattern (which the IS-ratio / boundary structure depends on) is identical to
-    the no-rescale mask for the same key."""
     p = 0.9
-    shape = (4, 8, 32)
-    h = torch.randn(shape)
+    h = torch.randn(4, 8, 32)
 
     m_off = ActivationMasker(p=p, base_seed=7, pp_size=8, rescale=False)
-    m_off.set_context(global_step=3, substep=0, seq_shard=0)
+    _set_ctx(m_off, 4, 8, step=3)
     out_off = m_off._make_hook(5)(nn.Identity(), (), h)
 
     m_on = ActivationMasker(p=p, base_seed=7, pp_size=8, rescale=True)
-    m_on.set_context(global_step=3, substep=0, seq_shard=0)
+    _set_ctx(m_on, 4, 8, step=3)
     out_on = m_on._make_hook(5)(nn.Identity(), (), h)
 
-    # Same positions zeroed.
     assert torch.equal((out_off == 0), (out_on == 0))
-    # And the rescaled kept values equal the no-rescale kept values * gain.
     keep = out_off != 0
     assert torch.allclose(out_on[keep], out_off[keep] / (1.0 - p))
 
 
 def test_rescale_mask_ratio_metric_unaffected():
-    """last_mask_ratio reads the binary mask, not h_tilde, so the measured zeroed
-    fraction still tracks p regardless of the rescale gain."""
     p = 0.9
     masker = ActivationMasker(p=p, base_seed=0, pp_size=8, rescale=True)
-    masker.set_context(global_step=0, substep=0, seq_shard=0)
-    hook = masker._make_hook(3)
-    hook(nn.Identity(), (), torch.randn(8, 64, 256))
+    _set_ctx(masker, 8, 64)
+    masker._make_hook(3)(nn.Identity(), (), torch.randn(8, 64, 256))
     assert abs(masker.last_mask_ratio[3] - p) <= 0.02
 
 
 def test_rescale_is_in_graph():
-    """The rescaled multiply stays autograd-tracked."""
     masker = ActivationMasker(p=0.9, base_seed=0, pp_size=8, rescale=True)
-    masker.set_context(global_step=0, substep=0, seq_shard=0)
-    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 4)
     h = torch.randn(2, 4, 16, requires_grad=True)
-    out = hook(nn.Identity(), (), h)
-    out.sum().backward()
+    masker._make_hook(3)(nn.Identity(), (), h).sum().backward()
     assert h.grad is not None
 
 

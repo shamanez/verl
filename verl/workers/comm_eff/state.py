@@ -184,7 +184,7 @@ class CommEffState:
         self.anchor_optimizer_steps = 0
         self.anchor_batch_fraction = 1.0
         # Monotonic trainer-step counter the anchor cadence is keyed on (advanced
-        # once per actor train_batch). Distinct from the mask substep counter.
+        # once per actor train_batch).
         self.anchor_step = 0
 
         # EXP-14 periodic clean-step counter. Incremented once per trainer step
@@ -225,12 +225,6 @@ class CommEffState:
         # metrics as ``comm_eff/mask_applications/<tag>`` so the analyst can
         # confirm confinement by KEY PREFIX (no substring false positives).
         self.mask_applications_by_path = {tag: 0 for tag in PATH_TAGS}
-
-        # Monotonic optimizer-substep counter (microbatch identity for the PRF
-        # key). A trainer step reuses one rollout batch over multiple PPO
-        # mini-batches, so this advances per actor optimizer substep, giving
-        # each substep a distinct mask even within the same trainer step.
-        self.substep = 0
 
         # The spectral filter (third circuit). Constructed in build() when
         # ``comm_eff.spectral.enabled`` is true; None otherwise. Holds the
@@ -274,7 +268,6 @@ class CommEffState:
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 rescale=bool(getattr(mask_cfg, "rescale", False)),
-                granularity=str(getattr(mask_cfg, "granularity", "channel")),
                 state=self,
             )
 

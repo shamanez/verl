@@ -15,7 +15,6 @@
 #   comm-eff master ........ COMM_EFF_ENABLED          (true)   off => byte-identical dense
 #   masking ................ COMM_EFF_MASK_ENABLED     (true)
 #   rescale ................ COMM_EFF_MASK_RESCALE     (true)   inverted-dropout h*mask/(1-p)
-#   granularity ............ COMM_EFF_MASK_GRANULARITY (channel) channel | element
 #   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)  full (unmasked) grad every N steps
 #   anchor ................. COMM_EFF_ANCHOR_ENABLED   (false)
 #   spectral correction .... COMM_EFF_SPECTRAL_ENABLED (false)
@@ -25,9 +24,9 @@
 # cancels any constant gradient scaling) and bounded to ~order(lr), and verl
 # grad-clips on top — so a big raw norm cannot itself "explode" the update. The
 # two real failure modes are BIAS and VARIANCE.
-#   * granularity=channel (per-channel mask) — packing-invariant => EXACT
-#     cross-pass consistency, the only no-plumbing route (per-element would
-#     need per-token keying). DEFAULT.
+#   * the mask is per-element, keyed on each token's stable (sample_id,
+#     position_id) so it is packing-invariant across the differently-packed
+#     old_logprob and train forwards (exact cross-pass consistency).
 #   * rescale=true — inverted-dropout h*mask/(1-p) restores E[h*mask/(1-p)]=h,
 #     i.e. an UNBIASED mask. This is the load-bearing correctness property, not
 #     a "grad_norm tamer". WITHOUT it the mask is biased (E[h*mask]=(1-p)*h: the
@@ -199,7 +198,7 @@ REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method — hydra knob surface (see header).
 #    Every circuit is an independent env toggle. Defaults = the mask-only
-#    "comm-eff baseline" (mask + rescale + per-channel; cadence/anchor/spectral
+#    "comm-eff baseline" (mask + rescale; cadence/anchor/spectral
 #    OFF). Field names mirror verl/trainer/config/actor/actor.yaml exactly —
 #    do NOT reference a knob absent from that schema (Hydra struct-mode rejects
 #    unknown keys regardless of enabled flags; that bit us on clean_cadence).
@@ -208,12 +207,12 @@ COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master s
 # --- activation mask ---
 COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
 COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
-COMM_EFF_MASK_GRANULARITY="${COMM_EFF_MASK_GRANULARITY:-channel}"     # channel (default) | element (legacy)
 COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
 COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
-COMM_EFF_MASK_CONSISTENT="${COMM_EFF_MASK_CONSISTENT:-true}"          # consistent_across_forwards (no-op under channel)
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
+# Fallback if training is unstable: try N unmasked warmup steps (not yet
+# implemented) and/or COMM_EFF_MASK_RESCALE=true (theory's 1/(1-p), bf16-risky).
 # --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation). ---
 COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
 # --- anchor circuit (OFF by default) ---
@@ -251,7 +250,7 @@ cat <<EOF
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   comm_eff master:     $COMM_EFF_ENABLED
-  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P granularity=$COMM_EFF_MASK_GRANULARITY rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE consistent=$COMM_EFF_MASK_CONSISTENT seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
+  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
@@ -287,10 +286,8 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \
   actor_rollout_ref.actor.comm_eff.mask.enabled="$COMM_EFF_MASK_ENABLED" \
   actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
-  actor_rollout_ref.actor.comm_eff.mask.granularity="$COMM_EFF_MASK_GRANULARITY" \
   actor_rollout_ref.actor.comm_eff.mask.rescale="$COMM_EFF_MASK_RESCALE" \
   actor_rollout_ref.actor.comm_eff.mask.mask_recompute="$COMM_EFF_MASK_RECOMPUTE" \
-  actor_rollout_ref.actor.comm_eff.mask.consistent_across_forwards="$COMM_EFF_MASK_CONSISTENT" \
   actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \

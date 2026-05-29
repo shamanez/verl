@@ -19,9 +19,12 @@ GRPO's actor update normally runs one dense forward/backward over the
 rollout-expanded batch, then `optimizer.step()`. The method splits that update
 into two coupled circuits on the **same process, same batch, same optimizer**:
 
-1. **Fast (masked) circuit** — every step applies an in-graph PRF activation
-   mask at pipeline-boundary decoder blocks (`h_tilde = h * mask`, no
-   `1/(1-p)` rescale), producing a noisy gradient `G_mask`.
+1. **Fast (masked) circuit** — every step applies an in-graph per-(token, dim)
+   PRF activation mask at pipeline-boundary decoder blocks (`h_tilde = h * mask`),
+   keyed on each token's stable `(sample_id, position_id)` so it is
+   packing-invariant across the old-logprob and train forwards, producing a noisy
+   gradient `G_mask`. The optional `mask.rescale` knob applies the theory's
+   `1/(1-p)` (default off, matching the supervised reference).
 2. **Anchor (unmasked) circuit** — every `cadence` steps, an *unmasked*
    GRPO-actor-loss forward/backward runs from a `delay_K`-stale weight
    snapshot on a **no-hook clone** of the module, producing a clean
@@ -57,7 +60,7 @@ launcher `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 |---|---|
 | `verl/workers/config/comm_eff.py` | `CommEffConfig` + `Mask`/`Anchor`/`Spectral` sub-configs; all defaults DISABLED; bounds validated in `__post_init__` (no allocation) |
 | `verl/workers/comm_eff/state.py` | `CommEffState` + `maybe_build_comm_eff_state` factory + path-tag set + numeric counters; the single object owning masker, spectral filter, anchor queue |
-| `verl/workers/comm_eff/activation_mask.py` | `ActivationMasker`, splitmix64 `prf_mask`, decoder-boundary index selection; train-only forward hooks |
+| `verl/workers/comm_eff/activation_mask.py` | `ActivationMasker`, counter-based splitmix64 `prf_token_mask` (per-(token, dim), keyed on stable `(sample_id, position_id)`), decoder-boundary index selection; train-only forward hooks |
 | `verl/workers/comm_eff/anchor.py` | staleness queue, snapshot/extract/feed helpers, `anchor_should_fire`, `build_anchor_module` (clone-no-hook), `assert_anchor_module_isolated` — the FSDP-agnostic, CPU-testable pieces |
 | `verl/workers/comm_eff/spectral_filter.py` | `SpectralFilter`: EMA, full/lowrank SVD, Tikhonov, two-sided projection, α-blend; pure 2D-matrix logic, CPU-unit-testable |
 | `verl/workers/engine/base.py` | `train_batch`: anchor refresh → fwd/bwd → grad correction → optimizer step; base no-op stubs |
@@ -127,9 +130,11 @@ Deferred (later milestones):
 - **OOM microbatch-split for the anchor pass** — counter plumbed, path not coded.
 
 Out of scope (excluded by the method spec):
-- Top-k masking (random PRF only); forward `1/(1-p)` rescale; separate anchor
-  GPU/rank; non-Qwen2.5-1.5B ports; masking any path other than actor-train;
-  forking GRPO into a separate algorithm.
+- Top-k masking (random PRF only); separate anchor GPU/rank; non-Qwen2.5-1.5B
+  ports; masking any path other than actor-train; forking GRPO into a separate
+  algorithm. (The `1/(1-p)` rescale is an optional knob, default off — the
+  theory wants it but the supervised reference omits it; see
+  `CommEffMaskConfig.rescale`.)
 
 Known caveats:
 - **FSDP1 mandate** — anchor + spectral hooks assume FSDP1 +
