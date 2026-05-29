@@ -95,7 +95,73 @@ real problem, reward stays flat even with sane grad_norm.
 
 ---
 
-## Live log (rescale run)
-- 22:10 start; model FSDP-loaded; vLLM rollout for step 1 in progress at first
-  check (~22:12). GPUs read 0% only because it was mid-rollout setup at connect.
-- (step metrics appended below as they arrive)
+## SCOPE UPDATE — this is a 4-cell rescale-only sequence
+
+Driver `run_rescale_sequence.sh` runs cells **strictly sequentially**, skipping any
+with a `done.flag` (warm resume). Operator directive baked in: *"do not do anything
+without grad rescaling"* — the old no-rescale cells (1,3) are permanently removed.
+
+| cell | name | config | steps |
+|---|---|---|---|
+| **2** (running) | grpo_mask_channel_p0p9_rescale_10steps | mask p0.9 + rescale | 10 |
+| 4 | ..._rescale_clean_every4_20steps | + clean-step @ cadence 4 | 20 |
+| 5 | ..._rescale_anchor2_spectral2_20steps | + anchor@2 + spectral@2 | 20 |
+| 6 | dense_grpo_comm_eff_off_25step_reference | DENSE control (mask OFF) | 25 |
+
+"Until the instance is down" therefore spans all four. Mask-consistency directive
+applies to cells 2/4/5; cell 6 is the dense reference.
+
+---
+
+## Live results — CELL 2 (rescale), steps 1–5  [22:10–22:18 UTC, ~96 s/step]
+
+| step | grad_norm | pg_clipfrac | clipfrac_lower | ppo_kl | score/mean | entropy | mask_ratio | train==old_lp |
+|---|---|---|---|---|---|---|---|---|
+| 1 | **4.374** | 0.0282 | 0.00079 | −1.5e-4 | 0.1260 | 5.925 | 0.9003 | 1792 = 1792 ✓ |
+| 2 | **4.387** | 0.0274 | 0.00065 | +2.7e-4 | 0.1328 | 5.923 | 0.9002 | 3584 = 3584 ✓ |
+| 3 | **5.323** | 0.0258 | 0.00063 | +9.7e-4 | 0.1318 | 5.926 | 0.9003 | 5376 = 5376 ✓ |
+| 4 | **4.760** | 0.0290 | 0.00085 | +3.3e-4 | 0.1338 | 5.919 | 0.8998 | 7168 = 7168 ✓ |
+| 5 | **4.595** | 0.0299 | 0.00081 | −1.4e-4 | 0.1367 | 5.920 | 0.9003 | 8960 = 8960 ✓ |
+
+All other mask paths (rollout/ref_logprob/val/infer/ckpt) = 0 every step;
+anchor_*/spectral_* = 0 (correct, OFF in cell 2).
+
+### Insight A — rescale tames the gradient (CONVERGING, not diverging)
+Constant rescale (gain 10×) drops grad_norm from no_rescale's **~2400–3500** to
+**~4.4–5.3** — a ~500–600× reduction, into a sane band just above the clip
+threshold. The PPO health metrics follow:
+- **pg_clipfrac ~0.03** (rescale) vs **~0.16** (no_rescale): ~5× fewer clipped
+  tokens ⇒ importance ratios sit much closer to 1.
+- **ppo_kl ~±3e-4** (rescale) vs ±0.01–0.016 (no_rescale): per-update policy move
+  is tiny and controlled.
+- **entropy 5.92, flat** across all 5 steps — no entropy collapse, no blow-up.
+- **score/mean 0.126→0.133→0.132→0.134→0.137** — a gentle *upward* drift (vs
+  no_rescale's flat ~0.13 noise). Small (lr 1e-6, 10 steps) but the right sign.
+
+Verdict so far: the rescale cell is **stable / mildly converging**, not diverging.
+This is the cleanest behaviour seen for the masked path. Whether the upward score
+drift is real learning or batch noise needs more steps / the longer cells (4,5).
+
+### Insight B — mask consistency confirmed LIVE (behavioural fingerprint)
+The directive's core claim is now backed by live evidence on the rescale run:
+1. **Counters:** `mask_applications/train` == `mask_applications/old_logprob`
+   *exactly*, every step (+1792/step each). Same fire-count on both
+   gradient-feeding forwards is the mask_recompute=true signature; the source PRF
+   guarantees they are the *same* masks (identical key tuple).
+2. **mask_ratio = 0.900 ± 0.0005** every step, all 7 boundaries — the per-element
+   Bernoulli draw is stable and calibrated to p.
+3. **Behavioural tell:** pg_clipfrac ≈ 0.03 and ppo_kl ≈ 0 are exactly what a
+   *consistent* old↔new mask produces (ratio≈1 because the same tokens are zeroed
+   in both log-prob computations). A per-pass mask *desync* would inflate the
+   ratio spread and clip fraction from step 1 — not observed.
+
+(Note: the lone earlier "no_rescale step:1 grad_norm 4.37" line was a stale
+pre-amendment attempt sharing a recycled Ray pid; the completed no_rescale run
+that defines the baseline is pid 25828 with grad_norm ~2400–3500.)
+
+## Live log (running tally)
+- 22:10 start; FSDP loaded; cell-2 stepping at ~96 s/step. At 22:18 → step 5/10.
+- Robust single-SSH monitor `boktw39kl` armed (per-step stream across all cells).
+  First monitor (`bs5my088x`) false-positived "instance down" from concurrent-SSH
+  handshake collisions — box was up throughout; replaced.
+- (cells 4/5/6 + steps 6–10 appended as they land)
