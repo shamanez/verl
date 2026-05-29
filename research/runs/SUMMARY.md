@@ -41,6 +41,7 @@ the audit trail.
 | Anchor backward graph isolation (hookless clone, no FSDP wrap, K-stale snapshot) | resolves the FSDP1 `_post_backward_hook` collision a second backward on the live wrapped module would hit; anchor produces full gradient without re-triggering FSDP all-reduce | #5 |
 | Mask extension to `compute_log_prob` (`mask_recompute=true`) — the mask now fires on BOTH gradient-feeding forwards | smoke PASS at p=0.9 / α=0.5 / τ=0.01 / β_anc=0.9; +82% second-half reward; all 13 success criteria green | #6 |
 | Paper-scale dry run + the two conceptual notes (anchor memory cost + fast-circuit vs anchor-pass) | revealed the grad-norm + entropy-collapse symptoms now queued for investigation in `notes/investigation-prompt-grad-norm.md`; no algorithmic regression — symptoms classed under variance amplification + IS / FSDP audit hypotheses | #7 |
+| **EXP-14** — paper-scale grad_norm explosion: peel-and-fix diagnosis (GitHub #14, closed) | Root cause = mask **magnitude collapse** (`h*mask` no rescale, RMS→0.32×) → step-1 grad_norm ~771. `rescale` (inverted-dropout `h*mask/(1-p)`) tames it 771→1.5 but masked path does NOT learn (val flat at p=0.9); `consistent_across_forwards` refuted; naive `clean_cadence` unsustainable (PPO `pg_clipfrac` saturates 0.26→0.44). Added env-toggleable knobs (clean_cadence / rescale / granularity[**channel** default] / consistent / mask.seed); anchor + spectral default OFF. Open → #15 (mask-rate sweep; bar = stable low pg_clipfrac + sustained val/score). | #8 |
 
 ## Implementation locus
 
