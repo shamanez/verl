@@ -17,6 +17,27 @@ magnitude, so there is nothing to amplify (`grad_norm` ≈ 4.4).
 fused-kernel artifact.** It is the autograd math of RMSNorm + no-rescale masking,
 and it reproduces on a single GPU with no FSDP.
 
+**Picture:** `research/runs/EXP-16/grad_sketch.png` — left: `grad_norm` by config
+(dense 0.38 / rescale 4.5 / no-rescale 2700, log scale); right: the gradient leaving
+RMSNorm vs its input RMS, sitting on the `1/RMS` line.
+
+Forward/backward round trip at ONE masked boundary (what the whole note is about):
+
+```
+FORWARD
+  h  ──[mask: zero 90% of channels]──►  h̃   (RMS collapses ~50× if NO rescale)
+  h̃ ──[RMSNorm: ÷ RMS(h̃)]──►  y            (y looks fine — the norm re-normalizes magnitude)
+  y  ──► rest of network ──► loss
+BACKWARD
+  g_y ──[RMSNorm backward: × ~1/RMS(h̃)]──►  g_h̃   ◄── BLOWS UP when RMS(h̃) is tiny
+  g_h̃ ──[mask backward: × m  (× 1/(1-p) if rescale)]──►  g_h
+  g_h ──► upstream layers 0,1,2…  ◄── enormous  ⇒  big grad_norm
+```
+
+We zero **activations** (the residual-stream hidden state), NOT parameters. The small
+activation RMS is what the downstream norm divides by, so its backward multiplies the
+gradient by `1/RMS` → bigger gradient. That is the entire effect.
+
 ## Evidence (triangulated)
 
 Isolated single-GPU probe (`research/runs/EXP-16/grad_diag.py`; no FSDP, no Ray,
@@ -62,6 +83,10 @@ Qwen is pre-norm; the next block applies `y = RMSNorm(x) = x / RMS(x) · γ`,
 - **Forward** is scale-invariant: `RMSNorm(c·x) = RMSNorm(x)`. So masking does **not**
   change the forward output scale — which is exactly why this is invisible as a
   forward problem.
+  *Intuition for the backward:* if scaling the input by `c` leaves the output unchanged,
+  the Jacobian MUST scale by `1/c`. Shrink the input 50× and the output is identical, so
+  the output is "50× more sensitive" per unit of input → the backward gradient is ×50.
+  That `1/c = 1/RMS` is the whole effect; the formula below just makes it exact.
 - **Backward** Jacobian:
   `∂y_i/∂x_k = (γ_i / RMS(x)) · [ δ_ik − x_i x_k /(H·RMS(x)²) ]`.
   The leading factor is **`1/RMS(x)`**. Gradient flowing back into the (masked)
@@ -96,6 +121,49 @@ Rescale by `1/(1-p)` puts the surviving activations back at the right magnitude 
 nothing to compound. grad_norm returns to dense scale. The forward was always fine
 (norm is scale-invariant); rescale's real job is keeping the **backward** pass
 well-conditioned.
+
+## This is architecture-general: every pre-norm transformer (Llama 3.2, Mistral, Gemma, …)
+
+This is **not** a Qwen quirk. The blow-up needs only two ingredients, and both hold for
+essentially every modern LLM:
+
+1. the mask is applied to the **residual-stream activation**, and
+2. a **scale-invariant normalization** (RMSNorm *or* LayerNorm) sits **downstream** of it.
+
+Pre-norm architectures place a normalization at the input of *every* block, so a masked
+residual point *always* feeds a norm immediately — they are the maximally-exposed case.
+**Llama (all versions incl. 3.2), Qwen2.5, Mistral, Gemma, Phi are pre-RMSNorm → identical
+behaviour.** GPT-2/3-style **pre-LayerNorm** models hit the same thing via LayerNorm's
+`1/std` backward (LayerNorm is also scale-invariant). Even **post-norm** models are not
+immune: any masked activation that subsequently flows through a norm gets the same
+`1/scale` backward amplification — pre-norm just guarantees one is always right there.
+
+Precise statement: *masking an activation that is later normalized by a scale-invariant
+op ⇒ backward gain ∝ `1/scale`.* The **fix (inverted-dropout rescale) is equally
+architecture-general** — restore `E[activation]` and the collapse disappears on any of
+these models. Only the *magnitude* shifts with depth, hidden size, mask-rate `p`, and
+where the boundaries land; the law and its fix do not. (So a Llama-3.2
+dense-vs-norescale-vs-rescale probe would show the same dense « rescale « no-rescale
+ordering we measured on Qwen2.5-1.5B.)
+
+## Why rescale still sits ~12× above dense on the FSDP run (0.38 → 4.5)
+
+Rescale removes the *catastrophic* part (the RMS-collapse `1/RMS` blow-up: 7100× → gone),
+but a **bounded** gap remains — on the real FSDP/GRPO run, dense `grad_norm ≈ 0.38` vs
+rescale `≈ 4.5`, i.e. **~12×**. Two honest, non-bug sources:
+
+1. **Mask backward gain.** `g_h = (m/(1-p))·g_h̃` amplifies the 10% kept channels ×10; in
+   L2 that is `√(1/(1-p)) ≈ 3.2×` vs dense, independent of any norm.
+2. **Stochastic-mask variance.** A *fresh random* 90% mask every step makes the forward
+   (hence loss and gradient) a **noisy** estimate of the dense one — variance inflated
+   `~p/(1-p) ≈ 9×` at `p=0.9`.
+
+Together ≈ 12×. This is the documented **variance cost** of masking (bounded, shrinks
+with lower `p`), not an unbounded bias-driven explosion. It is exactly what anchor +
+spectral correction + lower-`p` exist to reduce — rescale's only job is to kill the
+RMS-collapse blow-up, which it does. (NB: rescale's second moment *overshoots* —
+`RMS ≈ 3042` vs dense `52.6`, measured — so the `1/RMS` factor actually goes slightly
+*below* 1; the residual 12× is the variance/backward-gain above, not a leftover `1/RMS`.)
 
 ## Wrong hypotheses, ruled out
 
