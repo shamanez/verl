@@ -321,6 +321,15 @@ clean steps) matches a consistent old↔new mask. No desync, no divergence obser
 - 22:52 cell 5 start → **OOM, FAILED 22:55**, sequence STOPPED; cell 6 not run.
 - 22:55 box idle (GPUs 0%), instance UP. Push sent to operator. Watching for
   resume / teardown.
+- **23:05 cell 5 RESUMED** (operator applied a mem fix). Now running with
+  anchor+spectral ACTIVE — first circuit firings observed: step 1
+  `spectral_corrections=4` (= max_targets, 4 matrices/firing), `anchor_backwards=1`,
+  score 0.140, grad_norm 4.90, clip 0.027 (healthy, no OOM).
+  NB cell 5 counters train≠old_logprob (28 vs 21) — EXPECTED under dynamic-bsz
+  (different micro-batch counts per path); mask consistency is per-token
+  (packing-invariant PRF), so unequal path fire-counts are not a desync.
+  Watching: spectral/anchor cadence (every 2 steps), spectral rel_change, and
+  whether anchor+spectral correction helps vs cell 4's clean-step convergence.
 - Monitor `boktw39kl` (single persistent SSH) streaming per-step across all cells.
   (First monitor false-positived "instance down" on concurrent-SSH collisions; box
   was up throughout; replaced.)
