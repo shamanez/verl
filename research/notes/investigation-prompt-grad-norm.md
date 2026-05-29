@@ -183,6 +183,110 @@ Launcher encoding this as defaults:
 consistency with this verified-PASS config (the schema default is 0.95;
 do not change it without a separate justification).
 
+## 3.5 How the method is *supposed* to work (the paper) vs how this fork implements it — read before the causes
+
+The method is from the paper *"Communication-Efficient LLM Adaptation over
+Decentralized GPU Meshes"* (local copy:
+`/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf`). Two facts
+from it reframe every cause below.
+
+**(1) The anchor runs continuously on separate hardware — it is *delayed*,
+not periodic.** In the paper the mesh is split into an `(X−Z)×Y` *masked
+fast circuit* and a `Z×Y` (Z=1) *unmasked anchor circuit*. The anchor
+circuit runs **full unmasked forward/backward passes continuously, on its
+own dedicated GPUs, off the critical path**. Its clean gradients arrive at
+the fast circuit **asynchronously, delayed by a staleness of K ≈ 20–25
+fast-circuit steps**, so they "can only inform optimization *geometry*,"
+never serve as exact updates. The fast circuit keeps an EMA `M^anc` over
+*arriving* anchor gradients and refreshes its SVD basis when a new one
+lands (~every K steps). So: the anchor IS running all the time, and the
+grad-correction machinery updates roughly every K steps — the second of
+the two mental models is the correct one.
+
+This fork has **no second mesh**. It *simulates* the async anchor on the
+*same* GPUs by running the unmasked fwd/bwd **every `anchor.cadence`
+trainer steps from a `delay_K`-stale weight snapshot**
+(`anchor.py`, `transformer_impl.py::_maybe_comm_eff_anchor_refresh`). The
+paper's operating range is **K ∈ {10, 20}** (its ablation shows **K=50
+collapses** — "by the time a prior this stale arrives, the masked
+trajectory has drifted beyond its effective correction horizon"). The
+verified-PASS smoke + the dry-run use `cadence=delay_K=5` — *below* the
+paper's range (conservative / fresher), not a bug.
+
+**(2) The paper's masking is *approximately unbiased*; this fork's masking
+is *biased* — a deliberate, acknowledged deviation.** The paper
+deliberately uses **random PRF masking** precisely because it "produces an
+approximately unbiased gradient estimator that the spectral filter can
+denoise, while top-K masking introduces a structured bias the filter
+cannot remove." The whole spectral-correction guarantee rests on this: it
+"contracts zero-mean isotropic noise **but cannot remove a structured
+bias**."
+
+This fork's mask is `h_tilde = h * mask` with **no `1/(1-p)` rescale** —
+and `activation_mask.py` says so explicitly: *"There is no `1/(1-p)`
+forward rescale … we do not claim unbiasedness for the no-rescale port"*
+(the rescale was dropped because `1/(1-0.95)=20×` amplification
+destabilises bf16). So `E[h_tilde] = (1-p)·h`: at `p=0.9` the masked
+residual stream is scaled to ~10% of its magnitude, and the **downstream
+RMSNorm then re-normalises that shrunken residual, amplifying the surviving
+~10% of entries by ~3×**, compounded across all 7 boundary layers. **This
+injects exactly the structured bias the paper's own analysis says the
+spectral filter cannot remove** — making it a prime suspect for the
+paper-scale grad_norm explosion, and a *deviation from the paper*, not the
+paper's method.
+
+### Anchor / spectral implementation review — candidate deviations to verify (and possibly fix)
+
+The spectral math (`spectral_filter.py`: EMA → full SVD → Tikhonov
+`d_i = s_i/(s_i+τ)` → two-sided projection → α-blend, with `α=1` an exact
+no-op) is a **faithful** implementation of the paper's equations; the
+staleness queue returns an exactly-`delay_K`-stale snapshot after warm-up;
+the clone is correctly isolated from the optimizer/FSDP. The candidate
+**deviations** to list in the issue as things to verify — and, if
+confirmed, fix on the `exp/` branch — are:
+
+- **D-1 (no-rescale bias — primary).** The mask is biased (above).
+  *Verify:* boundary-layer `mean(h_tilde)/mean(h) ≈ (1-p)` and the
+  post-RMSNorm magnitude inflation. *Possible fix:* restore the `1/(1-p)`
+  rescale **computed in fp32** (upcast surviving activations, rescale, cast
+  back) so the estimator is unbiased without bf16 overflow — directly
+  addressing the paper's "filter cannot remove structured bias."
+- **D-2 (spectral filter on empty `M_anchor` halves the gradient).** With
+  `seed_anchor_cache=false`, `M_anchor=0` until the first refresh ⇒
+  SVD-of-zeros ⇒ Tikhonov `d=0` ⇒ `G_filt=0` ⇒ `G_proj = α·G_mask =
+  0.5·G_mask`. The filter **silently halves** the gradient before any
+  anchor prior exists, instead of passing it through. *Possible fix:* force
+  `α=1` (masked-only) until the first anchor refresh has populated
+  `M_anchor` — which is what the paper does (no correction before a prior
+  arrives).
+- **D-3 (staleness-queue memory at paper K).** A **full-model** snapshot is
+  pushed **every** step and the queue retains `delay_K+1` of them on GPU;
+  at the paper's `delay_K=20` that is ~21 × (full bf16 params) of snapshots
+  in HBM, plus a `summon_full_params` all-gather every step. This is a
+  large part of why the dry-run had to shrink batch knobs (cause G).
+  *Possible fix:* snapshot only the target matrices, offload the queue to
+  CPU, or only snapshot on steps that will be read.
+- **D-4 (cadence below the paper's analysed range).**
+  `cadence=delay_K=5` is outside the paper's `K∈{10,20}` envelope. Not a
+  bug, but the dry-run sits in an un-analysed (fresher) regime; paper-scale
+  runs of the *full* method should also test `K∈{10,20}`.
+
+**Why Test 4 is the clean cut through all of this.** The mandatory
+periodic-clean-step test (below) is the paper's own explicitly-named
+*"naive synchronous fix"* — "periodically disable masking and run a full
+unmasked forward–backward pass through the main pipeline." The paper
+rejects it **only for bandwidth** (it stalls the pipeline and pays full
+activation transfer on the clean step), **not for optimization** — the
+async anchor exists precisely to *approximate this same denoising benefit*
+without the stall. So if periodic clean steps stabilise training while the
+full async-anchor method explodes, the explosion is **not** an inherent
+property of masked GRPO — it is in the **masking bias (D-1)** and/or the
+**anchor/spectral implementation (D-2/D-3)**, and the simplest correct
+method is the clean-step variant itself (no anchor, no spectral, none of
+D-1…D-4's risk surfaces, ~5× PP savings at cadence=10 / p=0.9).
+
+---
+
 ## 4. Candidate root causes — enumerate ALL of these in the issue body
 
 ### A. KL anchor removal — known LATE-step driver, **NOT under test**
@@ -206,9 +310,13 @@ mask-realisation mismatch; `Var(log r)` scales like `2·Var(masked logit)`
 per token. **(Bias):** because `h_tilde = h · mask` carries **no
 `1/(1-p)` rescale**, the masked forward is a *biased* estimator
 (`E[h_tilde] = (1-p)·h`; at `p=0.9` boundary activations are scaled to
-~10% magnitude). The gradient computed through a biased forward is itself
-biased — independent of the variance effect. Either or both can drive the
-step-1 `grad_norm`.
+~10% magnitude, then re-amplified ~3× by the downstream RMSNorm). The
+gradient computed through a biased forward is itself biased — independent
+of the variance effect. Either or both can drive the step-1 `grad_norm`.
+**This bias is a deviation from the paper** (which requires
+approximately-unbiased masking — §3.5 D-1), and the paper's spectral filter
+provably *cannot* remove a structured bias. Candidate fix: an fp32
+`1/(1-p)` rescale.
 > **Diagnostic:** at step 1, log the per-token `(log_p_current −
 > log_p_old)` histogram (expect non-zero spread even though
 > `π_new == π_old`), AND the boundary-layer `mean(h_tilde)/mean(h)` ratio
@@ -422,13 +530,24 @@ is the headline test and the leading candidate stabiliser.
 
 **Idea.** Run pure masked GRPO (exactly Test 3's config — no anchor, no
 spectral), but **every `clean_cadence = 10` trainer steps, run that whole
-step unmasked on the live module and take the normal `optimizer.step()`**,
-so AdamW's moments are periodically refreshed with the *true* dense
-gradient. The other 9 of every 10 steps stay masked (so ~90% of the
-communication savings is retained). This is fundamentally different from
-the anchor circuit, which runs unmasked on a **stale clone** and **never**
-steps the optimizer — here the **live** optimizer state is the thing being
-corrected.
+step unmasked on the live module (mask off / `p=0`) and take the normal
+`optimizer.step()`**, so AdamW's moments are periodically refreshed with
+the *true* dense gradient. The other 9 of every 10 steps stay masked (so
+~90% of the communication savings is retained). This is fundamentally
+different from the anchor circuit, which runs unmasked on a **stale clone**
+and **never** steps the optimizer — here the **live** optimizer state is
+the thing being corrected.
+
+This is, exactly, the paper's own explicitly-named **"naive synchronous
+fix"** (periodically disable masking and run a full unmasked fwd/bwd
+through the main pipeline; §3.5). The paper rejects it **only for
+bandwidth**, never for optimization — the async anchor exists to
+*approximate this very benefit* without the pipeline stall. That makes this
+test simultaneously (a) the sharpest diagnostic — if it stabilises
+training, the explosion is the masking bias (D-1) and/or the anchor/spectral
+implementation (D-2/D-3), not masked GRPO itself — and (b) a candidate
+*method* in its own right: dramatically simpler, FSDP-clean, ~5× PP
+savings at cadence=10 / `p=0.9`.
 
 **Config:** baseline batch knobs, no KL, no entropy,
 `comm_eff.enabled=true`, `mask.enabled=true`, `mask.p=0.9`,
@@ -549,6 +668,7 @@ an exact, FSDP-safe target.
 
 ## 7. Reference artifacts (cite these in the issue body)
 
+- **The method paper** — `/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf` ("Communication-Efficient LLM Adaptation over Decentralized GPU Meshes"): §3.1 masking (`h̃ = h⊙m`, random PRF, approximately unbiased), §3.2 async anchor circuit (continuous on a separate mesh, staleness K≈20–25) + eqs (1)–(3) spectral correction, and the §3.2 "naive synchronous fix" that Test 4 is
 - `research/runs/baseline/config.yaml` — dense baseline fixed config (source of the step-1 `grad_norm=0.36` reference)
 - `research/runs/baseline/REPRODUCIBILITY.md` — baseline launcher SHA pin
 - `research/runs/communication-baseline/verdict.md` — comm-eff baseline PASS
@@ -586,19 +706,27 @@ Test 4 is a mandatory code-change experiment.)
    entropy=0.37 / score=0.12` with KL=0.001) + the 0.087→0.789 100-step
    curve as the parity target.
 4. **Full comm-eff baseline configuration** — the verified-PASS knob table.
-5. **Candidate root causes A–H**, each with its diagnostic. Cause A is
+5. **Paper vs this fork** (§3.5) — the anchor is continuous-on-separate-mesh
+   in the paper (priors arrive ~every K≈20 steps), *simulated* periodically
+   here; the mask is approximately-unbiased in the paper but **biased** here
+   (no `1/(1-p)` rescale). Include the **anchor/spectral implementation
+   review D-1…D-4** (no-rescale bias; empty-`M_anchor` halving;
+   staleness-queue memory; cadence below the paper's K-range) as concrete,
+   verifiable items with their candidate fixes — these are the things the
+   operator wants on record as "possibly wrong, confirm and fix."
+6. **Candidate root causes A–H**, each with its diagnostic. Cause A is
    documented as a known late-step driver but is NOT proposed for
    toggle-back-on. Cause H is the accumulation-timescale cause the clean
    step treats.
-6. **Test plan — Tests 1→5** (the peel). Mark `code_change` per test. State
+7. **Test plan — Tests 1→5** (the peel). Mark `code_change` per test. State
    that **Test 4 is mandatory and runs independent of Tests 2–3** (gated
    only on Test 1). Include the per-cell tables, step counts, and verdicts.
    Carry the GPU-utilization discipline block.
-7. **The periodic clean step** — the exact spec, the FSDP-no-errors
+8. **The periodic clean step** — the exact spec, the FSDP-no-errors
    acceptance checklist, and the minimal patch (§6). Be explicit that
    FSDP-no-errors is a hard pass/fail for Test 4 Cell B.
-8. **Reference artifacts** (§7 file paths).
-9. **Out of scope:** the parity run and the savings-measurement run
+9. **Reference artifacts** (§7 file paths).
+10. **Out of scope:** the parity run and the savings-measurement run
    (separate follow-ups) and any code beyond the minimal `clean_cadence`
    patch. This issue's deliverables are (a) a verdict on where the
    explosion lives, from the peel, and (b) a pass/fail on whether the
