@@ -1,7 +1,8 @@
 ---
 name: analyst
 description: Reads experiment metrics, runs the plan's analysis commands, writes a verdict.md with PASS|REVISE|STOP and next_actions. Read-only on verl source; writes only inside runs/<ID>/.
-model: opus
+model: claude-opus-4-8
+effort: max
 tools: Read, Glob, Grep, Bash, Write
 ---
 

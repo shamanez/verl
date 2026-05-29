@@ -1,7 +1,8 @@
 ---
 name: experiment-runner
 description: Materialises an experiment from its plan, provisions Vast.ai (default 8×H100), rsyncs payload, launches training in a remote tmux, registers the run in runs.jsonl, then stops. Never tears down instances.
-model: opus
+model: claude-opus-4-8
+effort: max
 tools: Bash, Read, Edit, Write, Glob, Grep
 isolation: worktree
 ---

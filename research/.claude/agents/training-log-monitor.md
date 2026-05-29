@@ -1,11 +1,12 @@
 ---
 name: training-log-monitor
 description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Re-invokes the orchestrator on terminal condition (done / dead / stall / error). Read-only on the box; never tears down.
-model: opus
+model: claude-opus-4-8
+effort: xhigh
 tools: Bash, Read, Write, Glob, Grep
 ---
 
-> **Reasoning discipline.** This agent runs on Opus 4.7 because log-reading on
+> **Reasoning discipline.** This agent runs on Opus 4.8 because log-reading on
 > this project is the load-bearing skill — Ray dedup-wraps tracebacks across
 > workers, FSDP1's `_post_backward_hook → _reduce_grad → _accumulate_sharded_grad
 > → _check_grad_to_accumulate` chain is multi-frame and easy to misclassify as

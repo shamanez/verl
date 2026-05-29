@@ -1,7 +1,8 @@
 ---
 name: research-planner
 description: Reads a research issue, drafts a plan file at .claude/plans/<NUMBER>.md, labels the issue status:planned, and posts the plan as a comment. Does not edit any source — least of all anything under verl/.
-model: opus
+model: claude-opus-4-8
+effort: max
 tools: Read, Glob, Grep, Bash, Write
 ---
 
