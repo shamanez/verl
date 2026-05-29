@@ -18,18 +18,19 @@ are kept — the control is just the method switched off.
   ON the mask fires on exactly the gradient-feeding forwards and grads stay
   finite (unit-tested).
 - **Masking still needs a lot of testing.** At high mask rates plain masked GRPO
-  does not yet learn — for two *distinct* reasons, neither of which is a
-  grad_norm explosion. **Without rescale** the mask is biased
-  (`E[h⊙mask] = (1-p)·h`): the forward sits off-distribution, the GRPO
+  does not yet learn — and the thing to judge on is **val/score, not grad_norm**
+  (Adam's update is scale-invariant and grad-clipped, so the raw norm is a
+  symptom at best). Two *distinct* problems. **Without rescale** the mask is
+  biased (`E[h⊙mask] = (1-p)·h`): the forward sits off-distribution, the GRPO
   importance ratio is corrupted, and the gradient carries a systematic bias Adam
-  cannot correct → a stalled trajectory with a non-vanishing floor. (The large
-  *measured* grad_norm there is a symptom of the corrupted ratio; Adam's update
-  is scale-invariant and grad-clipped, so "explosion" is the wrong model.)
-  **With rescale** the estimator is unbiased (`E[h̃] = h`, `r ≈ 1`) but
-  high-variance (`p/(1-p)`), and with no denoising (grad-clip / EMA / spectral /
-  anchor) the unbiased-but-noisy gradient is a random walk → val still flat. The
-  fix is variance control + a lower mask rate, not the rescale alone. The next
-  step is a mask-rate sweep judged on val/score, not on a bounded grad_norm.
+  cannot correct → a stalled trajectory with a non-vanishing floor. **With
+  rescale** the mask is unbiased (`E[h̃] = h`) but high-variance (`p/(1-p)`),
+  and with no denoising (grad-clip / EMA / spectral / anchor) the
+  unbiased-but-noisy gradient is a random walk → val still flat. So rescale is a
+  correctness knob, not a fix; the path forward is variance control + a lower
+  mask rate. *(We do not attribute observed grad_norm differences across cells
+  to any one knob — those cells stacked changes and the artifacts are pruned. An
+  earlier "rescale reduces grad_norm" claim was a mistake and has been removed.)*
 - **Anchor + spectral correction are layered fixes for later** — brought in only
   if masking alone is not enough. Default OFF; kept OFF to start.
 

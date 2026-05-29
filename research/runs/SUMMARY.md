@@ -17,16 +17,26 @@ of testing — at high mask rates plain masked GRPO does not yet learn.
 
 ### What we tried, and what it told us
 
-Headline up front: **a large grad_norm was never the disease.** Adam's
-per-coordinate update is scale-invariant (`m̂/√v̂` cancels any constant scaling
-of the gradient) and bounded to order `η`, and verl grad-clips on top — so a big
-raw norm cannot, by itself, produce a large or "exploding" update. The two real
-failure modes are **bias** and **variance**.
+Headline up front: **judge on val/score, not grad_norm.** Adam's per-coordinate
+update is scale-invariant (`m̂/√v̂` cancels any constant scaling of the gradient)
+and bounded to order `η`, and verl grad-clips on top — so a large raw norm
+cannot, by itself, produce a large or "exploding" update. The two real failure
+modes are **bias** and **variance**.
 
-| tried | result |
+> ⚠️ **Correction — a mistake we made.** An earlier version of this record
+> claimed *"rescale reduces / tames the grad_norm."* **That is wrong and has
+> been removed.** Theory says the opposite: rescale *adds* variance. We do
+> **not** attribute the grad_norm differences seen across cells to rescale, or
+> to any single knob — those cells stacked several changes (consistency +
+> rescale + packing/seed differences), the artifacts are pruned, and the
+> comparison is confounded. The lower grad_norm we observed most likely came
+> from something else (e.g. mask consistency / per-token effects / run
+> randomness), not from rescale.
+
+| tried | what it is / what it told us |
 |---|---|
-| mask only, **no rescale** (p=0.9) | **biased.** With no `1/(1-p)`, `E[h⊙mask] = (1-p)·h` — the masked forward sits systematically off-distribution, so the GRPO importance ratio `r = exp(Δlogp)` is corrupted (and *that* is what inflates the *measured* grad_norm; the activations themselves *shrink*, they do not grow). The harm is the bias — a direction error Adam cannot correct → a stalled trajectory with a non-vanishing floor. |
-| **`rescale`** (inverted-dropout `h⊙mask/(1-p)`) | **unbiased, but high-variance.** Restores `E[h̃] = h` → forward back on-distribution → `r ≈ 1`, `ppo_kl ≈ 0`, grad_norm back to dense order. **Still does not learn:** rescale trades bias for variance (`p/(1-p)`), and with no denoising (hard grad-clip / slow EMA / spectral contraction / keeping the anchor gradient out of Adam's moments) the unbiased-but-noisy gradient is a random walk in a short run; val stays flat. The *variance* — not the rescale — is what the anchor + spectral machinery exists to tame. |
+| mask only, **no rescale** (p=0.9) | **biased mask.** With no `1/(1-p)`, `E[h⊙mask] = (1-p)·h` — the masked forward sits systematically off-distribution, so the GRPO importance ratio is corrupted. The harm is the bias: a direction error Adam cannot correct → a stalled trajectory with a non-vanishing floor. (Dropping rescale makes activations *shrink*, not grow.) |
+| **`rescale`** (inverted-dropout `h⊙mask/(1-p)`) | **a knob, not a fix.** Its only job is to restore `E[h̃] = h` — an *unbiased* mask. It trades bias for variance (`p/(1-p)`): necessary for correctness, not sufficient. Plain masked GRPO with rescale still did not learn in a short run (val flat). The variance is what the anchor + spectral + grad-clip machinery exists to tame. |
 | `consistent_across_forwards` (same seed across forwards) | refuted on its own — the per-element mask is positional and the two forwards pack tokens differently, so equal seed ≠ equal mask. Cross-pass consistency is instead structural via per-channel masking. |
 | naive `clean_cadence` (periodic unmasked step) | **not sustainable** — the masked steps stay corrupted and the PPO clip fraction climbs toward saturation, so clipped tokens stop contributing gradient and learning dies; any early score rise is the clean steps alone. |
 
