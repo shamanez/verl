@@ -685,6 +685,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
+            # Stamp the stable per-row id so the masked old-logprob recompute keys
+            # each token's per-element mask on the SAME (sample_id, position_id) as
+            # the actor-train forward (no-op when disabled / no masker).
+            self._comm_eff_stamp_sample_ids(data, comm_eff_state)
             try:
                 output = self.actor.infer_batch(data)
             finally:
@@ -699,8 +703,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         Disabled is the strict no-op path: ``maybe_build_comm_eff_state`` returns
         ``None`` without drawing RNG, allocating buffers or registering hooks, so
         a dense GRPO run with the scaffolding merged is numerically identical to
-        one without it. The result is cached so the per-substep ``update_actor``
-        does not re-read the config each call.
+        one without it. The result is cached so repeated ``update_actor`` calls
+        do not re-read the config each time.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None and not getattr(self, "_comm_eff_state_built", False):
@@ -726,6 +730,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     object.__setattr__(engine, "_comm_eff_state", state)
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
         return getattr(self, "_comm_eff_state", None)
+
+    def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
+        """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
+
+        The per-element mask keys on each token's ``(sample_id, position_id)``;
+        ``sample_id`` is the row's index in this rank's batch. compute_log_prob
+        and update_actor receive that batch in identical row order, so the id is
+        consistent across both forwards and rides each row through PPO mini-batch
+        splitting / dynamic-bsz repacking. No-op when masking is off.
+        """
+        if state is None or getattr(state, "masker", None) is None:
+            return
+        if "comm_eff_sample_id" in data.keys():
+            return
+        bsz = data.batch_size[0]
+        data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
 
     def _comm_eff_thread_global_step(self, data: TensorDict, state) -> Optional[int]:
         """EXP-14: thread the trainer step onto the comm_eff state.
@@ -831,9 +851,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # AdamW on the true dense gradient. The path_tag stays "train" (the clean
         # step is still the actor-train path, merely unmasked); _comm_eff_mask_active
         # short-circuits on mask_active=False so no hooks fire regardless of tag.
-        # The masker's substep counter only advances when hooks register, so the
-        # masked-step PRF schedule stays deterministic across mixed masked/clean
-        # steps (§8 checklist item 4).
+        # The per-element mask is keyed on each token's stable (sample_id,
+        # position_id) + global_step, so the masked-step PRF schedule is
+        # deterministic across mixed masked/clean steps regardless of packing.
+        #
+        # Stamp the stable per-row id BEFORE train_mini_batch splits the batch
+        # into PPO mini-batches, so each token carries the same sample_id in the
+        # train forward and the old-logprob recompute (no-op when disabled).
+        self._comm_eff_stamp_sample_ids(data, comm_eff_state)
         if comm_eff_state is not None:
             comm_eff_state.mask_active = not clean_step
             # EXP-6: stamp the ONLY path tag the mask hook is allowed to fire on.
@@ -841,8 +866,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if clean_step:
                 # Count the clean step once per trainer step (the train stamp
                 # fires once per update_actor; train_mini_batch's PPO inner loop
-                # reuses this same mask_active=False, so we do NOT increment per
-                # substep). Surfaced as comm_eff/clean_steps.
+                # reuses this same mask_active=False). Surfaced as
+                # comm_eff/clean_steps.
                 comm_eff_state.clean_steps += 1
         try:
             output = self.actor.train_mini_batch(data=data)

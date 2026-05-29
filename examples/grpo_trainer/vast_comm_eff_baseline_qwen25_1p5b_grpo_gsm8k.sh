@@ -15,7 +15,6 @@
 #   comm-eff master ........ COMM_EFF_ENABLED          (true)   off => byte-identical dense
 #   masking ................ COMM_EFF_MASK_ENABLED     (true)
 #   rescale ................ COMM_EFF_MASK_RESCALE     (true)   inverted-dropout h*mask/(1-p)
-#   granularity ............ COMM_EFF_MASK_GRANULARITY (channel) channel | element
 #   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)  full (unmasked) grad every N steps
 #   anchor ................. COMM_EFF_ANCHOR_ENABLED   (false)
 #   spectral correction .... COMM_EFF_SPECTRAL_ENABLED (false)
@@ -25,9 +24,9 @@
 # cancels any constant gradient scaling) and bounded to ~order(lr), and verl
 # grad-clips on top — so a big raw norm cannot itself "explode" the update. The
 # two real failure modes are BIAS and VARIANCE.
-#   * granularity=channel (per-channel mask) — packing-invariant => EXACT
-#     cross-pass consistency, the only no-plumbing route (per-element would
-#     need per-token keying). DEFAULT.
+#   * the mask is per-element, keyed on each token's stable (sample_id,
+#     position_id) so it is packing-invariant across the differently-packed
+#     old_logprob and train forwards (exact cross-pass consistency).
 #   * rescale=true — inverted-dropout h*mask/(1-p) restores E[h*mask/(1-p)]=h,
 #     i.e. an UNBIASED mask. This is the load-bearing correctness property, not
 #     a "grad_norm tamer". WITHOUT it the mask is biased (E[h*mask]=(1-p)*h: the
@@ -65,7 +64,7 @@
 # halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432.
 #
 # Ablation examples:
-#   # mask-only, no rescale (reproduce the explosion):
+#   # mask-only, no rescale (the biased-mask A/B point):
 #   COMM_EFF_MASK_RESCALE=false EXPERIMENT_NAME=ce_mask_only bash <thisfile>
 #   # dense control via the same launcher:
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
@@ -168,6 +167,24 @@ export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-64}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
+# Static batching for trackability: dynamic batching OFF by default => each
+# micro-batch is exactly ppo_micro_batch_size_per_gpu=1 sequence with
+# deterministic packing (one sequence per forward, easy to follow). Flip
+# USE_DYNAMIC_BSZ=True to restore token-balanced dynamic batching (the
+# per-element mask is packing-invariant, so both modes are correct).
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+
+# Train-inference mismatch DIAGNOSTIC (read-only; does NOT change training).
+# calculate_log_probs=True makes vLLM return its rollout log-probs so the trainer
+# logs training/rollout_probs_diff_* and rollout_corr/* (vLLM rollout vs the
+# train-engine-recomputed old_log_prob). Rollout CORRECTION stays STRICTLY OFF
+# (rollout_is/rollout_rs=null, bypass_mode=false): old_log_prob is always
+# recomputed by the train engine and vLLM log-probs are never used in the loss.
+# NB with comm-eff masking + mask_recompute=true the recompute is masked, so for
+# comm-eff runs the diff also reflects masking — read it on the dense control
+# (COMM_EFF_ENABLED=false) for the pure train-inference mismatch.
+export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
+
 # Context windows — match baseline (16K response).
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
@@ -199,7 +216,7 @@ REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method — hydra knob surface (see header).
 #    Every circuit is an independent env toggle. Defaults = the mask-only
-#    "comm-eff baseline" (mask + rescale + per-channel; cadence/anchor/spectral
+#    "comm-eff baseline" (mask + rescale; cadence/anchor/spectral
 #    OFF). Field names mirror verl/trainer/config/actor/actor.yaml exactly —
 #    do NOT reference a knob absent from that schema (Hydra struct-mode rejects
 #    unknown keys regardless of enabled flags; that bit us on clean_cadence).
@@ -208,12 +225,12 @@ COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master s
 # --- activation mask ---
 COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
 COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
-COMM_EFF_MASK_GRANULARITY="${COMM_EFF_MASK_GRANULARITY:-channel}"     # channel (default) | element (legacy)
 COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
 COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
-COMM_EFF_MASK_CONSISTENT="${COMM_EFF_MASK_CONSISTENT:-true}"          # consistent_across_forwards (no-op under channel)
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
+# Fallback if training is unstable: try N unmasked warmup steps (not yet
+# implemented) and/or COMM_EFF_MASK_RESCALE=true (theory's 1/(1-p), bf16-risky).
 # --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation). ---
 COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
 # --- anchor circuit (OFF by default) ---
@@ -245,13 +262,14 @@ cat <<EOF
   vLLM mem util:       $ROLLOUT_GPU_MEM_UTIL
   train batch:         $TRAIN_BATCH_SIZE prompts (× $ROLLOUT_N = $(( TRAIN_BATCH_SIZE * ROLLOUT_N )) seqs/step)
   ppo mini batch:      $PPO_MINI_BATCH_SIZE
-  ppo max tokens/GPU:  $PPO_MAX_TOKEN_LEN_PER_GPU (dynamic_bsz=True)
+  batching:            dynamic_bsz=$USE_DYNAMIC_BSZ  (when False: micro_batch_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU, max_tokens/GPU=$PPO_MAX_TOKEN_LEN_PER_GPU ignored)
   prompt / response:   $MAX_PROMPT_LENGTH / $MAX_RESPONSE_LENGTH
   epochs:              $TOTAL_EPOCHS  (save $SAVE_FREQ, validate $TEST_FREQ, total steps $TOTAL_TRAINING_STEPS)
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
+  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P granularity=$COMM_EFF_MASK_GRANULARITY rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE consistent=$COMM_EFF_MASK_CONSISTENT seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
+  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
@@ -267,11 +285,18 @@ EOF
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.actor.use_dynamic_bsz=True \
+  actor_rollout_ref.actor.use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$LOG_PROB_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.rollout.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU" \
-  actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+  actor_rollout_ref.ref.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+  actor_rollout_ref.rollout.calculate_log_probs="$ROLLOUT_CALC_LOGPROBS" \
+  algorithm.rollout_correction.rollout_is=null \
+  algorithm.rollout_correction.rollout_rs=null \
+  algorithm.rollout_correction.bypass_mode=false \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
@@ -287,10 +312,8 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \
   actor_rollout_ref.actor.comm_eff.mask.enabled="$COMM_EFF_MASK_ENABLED" \
   actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
-  actor_rollout_ref.actor.comm_eff.mask.granularity="$COMM_EFF_MASK_GRANULARITY" \
   actor_rollout_ref.actor.comm_eff.mask.rescale="$COMM_EFF_MASK_RESCALE" \
   actor_rollout_ref.actor.comm_eff.mask.mask_recompute="$COMM_EFF_MASK_RECOMPUTE" \
-  actor_rollout_ref.actor.comm_eff.mask.consistent_across_forwards="$COMM_EFF_MASK_CONSISTENT" \
   actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \

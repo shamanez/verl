@@ -144,7 +144,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
         with self.assertRaises(ValueError):
             CommEffConfig(spectral=CommEffSpectralConfig(rank=0))
         with self.assertRaises(ValueError):
-            CommEffConfig(anchor=CommEffAnchorConfig(ema_decay=2.0))
+            CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
 
 
 class TestCommEffStateInert(unittest.TestCase):
