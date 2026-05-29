@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GRPO Update and Forward Count</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --ink: #1d2433;
+      --muted: #5e6878;
+      --line: #ccd4e0;
+      --blue: #2f6fed;
+      --green: #1f8f64;
+      --amber: #b66d00;
+      --red: #b42318;
+      --panel: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 6px;
+      letter-spacing: 0;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 26px 0 12px;
+      letter-spacing: 0;
+    }
+    p { margin: 0 0 14px; color: var(--muted); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 12px;
+      margin: 20px 0 24px;
+    }
+    .metric {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 96px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 26px;
+      line-height: 1.1;
+      margin-bottom: 6px;
+      color: var(--ink);
+    }
+    .metric span { color: var(--muted); }
+    .flow {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      overflow-x: auto;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: 170px 46px 190px 46px 210px 46px 250px;
+      align-items: stretch;
+      gap: 0;
+      min-width: 960px;
+    }
+    .box {
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      min-height: 108px;
+    }
+    .box .label {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .box .value {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .box .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .rollout { border-color: var(--blue); }
+    .old { border-color: var(--amber); }
+    .train { border-color: var(--green); }
+    .skip { border-color: var(--red); }
+    .arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .updates {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+      min-width: 960px;
+    }
+    .update {
+      border: 2px solid var(--green);
+      border-radius: 8px;
+      padding: 12px;
+      background: #f3fbf7;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      background: #eef2f7;
+      font-weight: 700;
+    }
+    tr:last-child td { border-bottom: 0; }
+    code {
+      background: #eef2f7;
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+    .formula {
+      background: #101828;
+      color: #f9fafb;
+      padding: 14px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 10px 0 0;
+    }
+    @media (max-width: 900px) {
+      main { padding: 18px; }
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GRPO Update and Forward Count</h1>
+    <p>Settings traced from <code>examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh</code>. Counts exclude validation and checkpoint save/load.</p>
+
+    <section class="grid" aria-label="Key settings">
+      <div class="metric"><strong>128</strong><span>prompts per global step</span></div>
+      <div class="metric"><strong>8</strong><span>rollouts per prompt</span></div>
+      <div class="metric"><strong>1024</strong><span>generated sequences per step</span></div>
+      <div class="metric"><strong>512</strong><span>sequences per PPO mini-batch</span></div>
+      <div class="metric"><strong>2</strong><span>PPO optimizer updates per global step</span></div>
+    </section>
+
+    <h2>Per-Global-Step Flow</h2>
+    <section class="flow" aria-label="Per step dataflow">
+      <div class="lane">
+        <div class="box">
+          <div class="label">Input batch</div>
+          <div class="value">128 prompts</div>
+          <div class="small">One trainer global step starts at step 1.</div>
+        </div>
+        <div class="arrow">x8</div>
+        <div class="box rollout">
+          <div class="label">Rollout generation</div>
+          <div class="value">1024 seqs</div>
+          <div class="small"><code>responses</code>, <code>response_mask</code>, <code>input_ids</code></div>
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="box old">
+          <div class="label">Old log-prob forward</div>
+          <div class="value">1 pass</div>
+          <div class="small">stores <code>old_log_probs</code>; emits entropy only for metrics</div>
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="box train">
+          <div class="label">Actor PPO train</div>
+          <div class="value">2 passes</div>
+          <div class="small">two 512-sequence mini-batches; each pass has backward + optimizer step</div>
+        </div>
+      </div>
+      <div class="updates">
+        <div class="update">
+          <strong>PPO update 1</strong><br>
+          512 generated sequences -> current <code>log_probs</code> -> backward -> optimizer step.
+        </div>
+        <div class="update">
+          <strong>PPO update 2</strong><br>
+          512 generated sequences -> current <code>log_probs</code> -> backward -> optimizer step.
+        </div>
+      </div>
+    </section>
+
+    <h2>Forward Outputs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Forward or stage</th>
+          <th>Count per global step</th>
+          <th>Outputs used by training</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>vLLM rollout generation</td>
+          <td>1 generation stage over 1024 requests</td>
+          <td><code>responses</code>, <code>response_mask</code>, <code>input_ids</code>, <code>attention_mask</code>, <code>position_ids</code>. <code>rollout_log_probs</code> is absent unless rollout log-prob calculation is enabled.</td>
+        </tr>
+        <tr>
+          <td>Actor old-log-prob forward</td>
+          <td>1 logical actor inference forward</td>
+          <td>worker <code>log_probs</code> becomes trainer <code>old_log_probs</code>; worker <code>entropy</code> becomes <code>entropys</code> for metrics then is removed.</td>
+        </tr>
+        <tr>
+          <td>Reference log-prob</td>
+          <td>0</td>
+          <td>Skipped because <code>use_kl_loss=False</code> and <code>use_kl_in_reward=False</code>. If enabled, output would be <code>ref_log_prob</code>.</td>
+        </tr>
+        <tr>
+          <td>Actor train forward/backward</td>
+          <td>2 logical train forwards</td>
+          <td>model output <code>log_probs</code> is the current-policy <code>log_prob</code> consumed by PPO loss with <code>old_log_probs</code>, <code>advantages</code>, and <code>response_mask</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Formula</h2>
+    <pre class="formula">generated sequences = 128 prompts * 8 rollouts = 1024
+effective PPO mini-batch = 64 prompts * 8 rollouts = 512 sequences
+PPO optimizer updates/global step = (1024 / 512) * ppo_epochs(1) = 2
+configured run total = 100 global steps * 2 = 200 actor optimizer updates</pre>
+
+    <h2>Strict Micro-Batch-1 Count</h2>
+    <section class="flow" aria-label="Masking verdict">
+      <div class="box train" style="min-height:auto">
+        <div class="label">Verdict</div>
+        <div class="small">For communication-efficient PPO/GRPO simulation, every actor FSDP forward inside the trainer update must be masked: the old-log-prob forward, the current-policy train forward, and any checkpoint replay inside the masked train backward region. The mask must be keyed by global step and token/activation identity, not by forward call. If one path is dense, or if each path samples a different mask, <code>exp(log_prob - old_log_prob)</code> compares different subnetworks.</div>
+      </div>
+    </section>
+    <table>
+      <thead>
+        <tr>
+          <th>Scope</th>
+          <th>Count</th>
+          <th>Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Per trajectory</td>
+          <td><strong>2 actor forwards</strong></td>
+          <td>1 old-log-prob forward producing <code>old_log_probs</code>, then 1 train forward producing current <code>log_probs</code> for PPO loss.</td>
+        </tr>
+        <tr>
+          <td>Per global step, all DP ranks</td>
+          <td><strong>2048 actor FSDP micro-forwards</strong></td>
+          <td>1024 old-log-prob micro-forwards + 1024 train micro-forwards, with per-GPU micro-batch size 1.</td>
+        </tr>
+        <tr>
+          <td>Per rank</td>
+          <td><strong>2048 / dp_size</strong></td>
+          <td>For 4 GPUs: 512 per rank. For 8 GPUs: 256 per rank.</td>
+        </tr>
+        <tr>
+          <td>Required masked full forwards</td>
+          <td><strong>2048 per global step</strong></td>
+          <td>Hard rule for this research setup: all trainer actor micro-forwards should be masked. This is 2 per trajectory, plus any checkpoint replay inside train backward. The reference path is skipped here.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>FSDP DP Division</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Question</th>
+          <th>Answer</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>What is DP here?</td>
+          <td>Actor FSDP data-parallel size is <code>world_size / ulysses_sequence_parallel_size</code>. This launcher uses SP=1, so DP equals <code>NGPUS_PER_NODE</code>: 4 on 4x H200, 8 on 8x H200.</td>
+        </tr>
+        <tr>
+          <td>Is FSDP pure DDP?</td>
+          <td>No. FSDP shards parameters, gradients, and optimizer state. But it is still data-parallel for batch flow: each rank receives different trajectories and runs the same forward/backward program.</td>
+        </tr>
+        <tr>
+          <td>How are trajectories assigned?</td>
+          <td>The driver chunks the 1024-trajectory <code>DataProto</code> evenly along batch dimension. It is deterministic/even after any trainer batch balancing, not random assignment.</td>
+        </tr>
+        <tr>
+          <td>Why divide by DP size?</td>
+          <td>Only for per-rank local forward counts. Global actor micro-forwards remain 2048. Per rank they are <code>2048 / dp_size</code>, run in parallel across ranks.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Symbolic Mask Rule</h2>
+    <pre class="formula">trajectory z = (prompt_index i, rollout_index r)
+token position = s
+masked boundary/layer = b
+hidden channel = c
+global step = t
+
+Good key:
+M_t(z,s,b,c) = BernoulliKeep(seed, t, z, s, b, c)
+
+Forbidden key terms:
+forward_call_id, ppo_minibatch_id, microbatch_id,
+fsdp_rank, packed_token_offset, checkpoint_replay_id
+
+For every trainer actor pass a in the same global step:
+a in P_t = {old_logprob pass, train pass, checkpoint replay passes}
+
+h'_{a,t,z,s,b,c} = h_{a,t,z,s,b,c} * M_t(z,s,b,c) / keep_prob
+
+Clean PPO ratio:
+ratio_t(z,s) =
+  exp(log pi_theta^M_t(y_{z,s} | x_z)
+      - log pi_old^M_t(y_{z,s} | x_z))
+
+Noisy ablation, not the clean baseline:
+ratio_bad(z,s) =
+  exp(log pi_theta^M_train(y_{z,s} | x_z)
+      - log pi_old^M_old(y_{z,s} | x_z)), where M_train != M_old</pre>
+
+    <h2>Micro-Batch Note</h2>
+    <p>The FSDP engine uses dynamic batching with a 36864-token-per-GPU budget, so the exact number of low-level <code>self.module(...)</code> calls depends on sampled response lengths. The stable PPO-level count is still 2 optimizer updates per global step.</p>
+    <p>Gradient checkpointing can replay internal forward regions during train backward. Those are not extra trainer micro-batches, but they are inside the trainer-side actor execution and should remain masked under the hard rule.</p>
+
+    <h2>Repo/Paper Check</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Point</th>
+          <th>Check</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>What the paper-derived masking note proves</td>
+          <td>The local note at <code>/Users/shamane/Desktop/major-goal/Activation_Masking_logic.html</code> describes supervised-learning pipeline-boundary activation masking: in-graph random masks, PRF regeneration, forward/backward matched sparsity, and <code>1/(1-p)</code> rescale for unbiased masked activations. That proof is not an RL/PPO theorem.</td>
+        </tr>
+        <tr>
+          <td>What the repo implements</td>
+          <td><code>ActivationMasker</code> installs forward hooks on logical decoder boundary blocks, builds a deterministic PRF mask keyed by <code>base_seed</code>, layer index, trainer global step, stable sample id, token position, and hidden channel, then applies <code>h * mask</code> or <code>h * mask / keep_prob</code>. The launcher sets rescale on.</td>
+        </tr>
+        <tr>
+          <td>RL-specific requirement</td>
+          <td>Because GRPO/PPO forms <code>exp(log_prob - old_log_prob)</code>, the supervised masking result is not enough. In RL, every trainer actor forward for the sampled trajectories in a global step must be masked with the same keyed mask for the same token/activation coordinate. This is an additional on-policy consistency condition.</td>
+        </tr>
+        <tr>
+          <td>Implementation alignment</td>
+          <td>The repo is mechanically aligned with that RL condition for the paths counted here: the old-log-prob and train paths both stamp the same trainer step and stable per-row ids, and the PRF key does not include forward call, micro-batch id, rank, packed offset, or checkpoint replay id.</td>
+        </tr>
+        <tr>
+          <td>Important caveat</td>
+          <td>The current code path is per-token/per-hidden-channel elementwise masking. If a launcher/comment says <code>granularity=channel</code>, that wording should not be read as a separate implemented shared-channel mask here. The mask function in this repo uses token identity plus channel id.</td>
+        </tr>
+        <tr>
+          <td>Verdict</td>
+          <td>The implementation is consistent with the paper's masking mechanism, but the RL/on-policy claim is a stricter condition we impose for GRPO. It is not inherited from the supervised-learning proof. For this research run, the correct theoretical stance is: mask every trainer actor forward in the global step, with stable per-token masks across all such passes.</td>
+        </tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>
