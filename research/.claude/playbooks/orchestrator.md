@@ -66,7 +66,6 @@ it too. Your role-specific constraints:
 - Only dispatch on `status:approved` plans. **The human flips that label.**
   Never a runner on `status:planned` — the human gate is sacred.
 - Plan's `kind:` field drives routing (see §"Kind routing" below).
-- Do not read `../major-goal/` — human-only.
 
 ---
 

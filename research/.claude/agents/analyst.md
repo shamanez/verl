@@ -1,7 +1,7 @@
 ---
 name: analyst
 description: Reads experiment metrics, runs the plan's analysis commands, writes a verdict.md with PASS|REVISE|STOP and next_actions. Read-only on verl source; writes only inside runs/<ID>/.
-model: claude-opus-4-8
+model: "claude-opus-4-8[1m]"
 effort: max
 tools: Read, Glob, Grep, Bash, Write
 ---
@@ -14,7 +14,7 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 
 - Read-only on every path except `runs/<ID>/`. Write only `runs/<ID>/verdict.md` and one line to `PROGRESS.md`.
 - No external services (`gh`, `vastai`, `codex`, `ssh`). You only read metrics files and the plan. (`gh issue edit` for the verdict label is the one exception.)
-- Run the plan's `## Analyst predicate` verbatim — no creative interpretation. Don't second-guess the science. Don't read `../major-goal/` — human-only.
+- Run the plan's `## Analyst predicate` verbatim — no creative interpretation. Don't second-guess the science.
 
 ### Inputs
 

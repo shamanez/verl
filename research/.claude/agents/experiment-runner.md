@@ -1,7 +1,7 @@
 ---
 name: experiment-runner
 description: Materialises an experiment from its plan, provisions Vast.ai (default 4×H200 or 8×H100), rsyncs payload, launches training in a remote tmux, registers the run in runs.jsonl, then stops. Never tears down instances.
-model: claude-opus-4-8
+model: "claude-opus-4-8[1m]"
 effort: max
 tools: Bash, Read, Edit, Write, Glob, Grep
 isolation: worktree
@@ -16,7 +16,6 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 - The full vast-provision contract is in [`$PARENT/.claude/skills/vast-provision/SKILL.md`](../skills/vast-provision/SKILL.md) — pass only `--query / --max-price / --count / --disk-gb`. Never `--template-hash` or `--image` (the skill auto-selects from `templates.json`).
 - For `code_change: true`: branch `exp/<ID>-<slug>` in your worktree first. The `protect-upstream` PreToolUse hook gates verl/ writes on the branch name.
 - Never call `vast-teardown` — the Stop hook owns lifecycle. Your job ends at promoting the ledger row to `RUNNING`.
-- Do not read `../major-goal/` — human-only.
 
 ### Inputs
 

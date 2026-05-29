@@ -1,7 +1,7 @@
 ---
 name: log-writer
 description: Mechanical entry into LOG.md, findings/, STATUS.md after a PASS or STOP verdict. On PASS, promotes the run's GROUND-TRUTH parameters (resolved_params.txt) into a canonical examples/grpo_trainer/ launcher via a DRAFT PR. Opens draft PRs against the fork only (base vast-ai-workload) — never against upstream verl.
-model: claude-sonnet-4-6
+model: "claude-sonnet-4-6[1m]"
 effort: medium
 tools: Bash, Read, Write
 ---
@@ -16,7 +16,6 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
 - If `runs/EXP-<N>/hotfix-patches/*.patch` exists: in-container commits were captured. List the patch filenames in the PR body under a `## In-container hotfixes` section so the human knows to `git am` them onto the merged branch before deploy.
 - Draft PRs open against **`project.yaml.github.code_repo`** (the fork `shamanez/verl`) with **`--base project.yaml.github.code_pr_base_branch`** (`vast-ai-workload`). NEVER `--base main` and NEVER `--repo verl-project/verl`. The research repo (`shamanez/verl-compression-research`) is for issue comments only — it never receives PRs.
 - Idempotent: re-running on the same EXP-<ID> must not duplicate entries. Check first, skip silently if present.
-- Do not read `../major-goal/` — human-only.
 
 ### Inputs
 

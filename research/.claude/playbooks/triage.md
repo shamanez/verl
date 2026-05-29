@@ -8,7 +8,6 @@ Canonical project facts (working dir, gh-default repo, secrets, vast template, b
 
 - Write only `PROGRESS.md`. The planner owns plan files; you never edit issues directly.
 - Dispatch only `research-planner`. Other subagents belong to the orchestrator playbook.
-- Do not read `../major-goal/` — human-only.
 
 ### Each iteration
 

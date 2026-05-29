@@ -11,8 +11,8 @@
 This is **not** vanilla verl. It's a private research fork that adds a
 **communication-efficient training method** on top of verl's GRPO recipe,
 trained on **Qwen2.5-1.5B-Instruct + GSM8K**. With the method disabled,
-training is byte-identical to upstream verl. The method's design and math are
-human-only reference under `major-goal/`; the engineering map is
+training is byte-identical to upstream verl. The project's goal is captured in
+[`research/.claude/GOAL.md`](research/.claude/GOAL.md); the engineering map is
 [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
 
 **Fixed control variables — do not change without a separate justification:**
@@ -26,13 +26,13 @@ human-only reference under `major-goal/`; the engineering map is
 
 This is **issue-first** development. Everything an agent needs to do its
 job is reachable from the GitHub issue queue plus the harness files
-under `research/`. Agents do **not** read `major-goal/` — that directory
-is human-only reference (the research-goal paper + `Prompt.md` / `implementation-logic.md`).
+under `research/`. The project's north-star — what "done" means — is
+[`research/.claude/GOAL.md`](research/.claude/GOAL.md) (agents may read it freely).
 
 | If you need… | Read |
 |---|---|
 | **Single source of truth for all project-level config** | `research/.claude/project.yaml` |
-| **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list against `major-goal/implementation-logic.md` |
+| **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list |
 | The autonomous research loop (human operator manual) | `research/researcher_steps.md` |
 | Top-level playbooks (triage, orchestrator) | `research/.claude/playbooks/*.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
@@ -41,7 +41,7 @@ is human-only reference (the research-goal paper + `Prompt.md` / `implementation
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
-| Research goal & method (human-only) | `major-goal/Prompt.md` + `major-goal/implementation-logic.md` + `major-goal/LLM_adaptation_neurips.pdf` |
+| **Project north-star (what "done" means)** | `research/.claude/GOAL.md` |
 
 The GitHub repo the harness watches is
 **`shamanez/verl-compression-research`** (private). It is set as the local
@@ -53,7 +53,7 @@ The GitHub repo the harness watches is
 ### Do not edit upstream verl code outside `exp/*` branches
 
 Everything under `/Users/shamane/Documents/verl/` **except** `research/`,
-`major-goal/`, this `CLAUDE.md`, and `.gitignore` is considered
+this `CLAUDE.md`, and `.gitignore` is considered
 upstream-owned. Writes are blocked by
 `research/.claude/hooks/protect-upstream.sh` (a PreToolUse hook) for any
 session opened in `research/`. The only legitimate way to patch verl code

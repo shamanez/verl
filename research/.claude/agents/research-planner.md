@@ -1,7 +1,7 @@
 ---
 name: research-planner
 description: Reads a research issue, drafts a plan file at .claude/plans/<NUMBER>.md, labels the issue status:planned, and posts the plan as a comment. Does not edit any source — least of all anything under verl/.
-model: claude-opus-4-8
+model: "claude-opus-4-8[1m]"
 effort: max
 tools: Read, Glob, Grep, Bash, Write
 ---
@@ -14,7 +14,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 
 - Write ONE file: `.claude/plans/<NUMBER>.md`. Plus one line to `PROGRESS.md`. Nothing else.
 - Plan structure: follow [`.claude/plans/TEMPLATE.md`](../plans/TEMPLATE.md) exactly. Mark unused sections `(n/a)`; do not delete them.
-- Scope comes from the issue body and any `findings/M<N>/EXP-NN.md` paths it references. Do not read `../major-goal/` — human-only.
+- Scope comes from the issue body and any `findings/M<N>/EXP-NN.md` paths it references.
 
 ### Contract
 
@@ -36,7 +36,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    - `promote_launcher_as:` — the canonical `examples/grpo_trainer/vast_*.sh` filename a PASS should promote into (log-writer derives it from `resolved_params.txt`, opens a draft PR). Default `none` for exploratory/throwaway probes. Set a concrete `vast_<scenario>_<model>_<algo>_<dataset>.sh` name when the issue's intent is to establish or update a reference config. See TEMPLATE §Code change + `examples/grpo_trainer/VAST_README.md` §"Stability contract".
    - `seed_replicates:`, `escalate_to_codex_if:`.
 
-3. Read any prior findings the issue references (e.g. `findings/M<N>/EXP-NN.md` paths) so the plan is grounded in known results. **Do NOT read any pinned background doc** (e.g. `verl/major-goal/...`). The planner is research-agnostic by contract — scope comes from the issue body.
+3. Read any prior findings the issue references (e.g. `findings/M<N>/EXP-NN.md` paths) so the plan is grounded in known results. **Do NOT read any pinned background doc.** The planner is research-agnostic by contract — scope comes from the issue body.
 
 4. **Determine if `code_change: true`**. If so:
    - Record the `target_modules:` from the issue body (a yaml list of verl source paths the experiment will patch).

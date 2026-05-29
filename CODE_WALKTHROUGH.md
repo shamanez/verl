@@ -7,9 +7,9 @@ byte-for-byte no-op against upstream verl; everything below only activates
 when it's on.
 
 This file is the engineering map: what lives where, how a step flows, and
-what's deliberately not built yet. The mathematics live in the human-only
-`major-goal/` reference — agents work from the code + the issue queue, not
-from that directory.
+what's deliberately not built yet. Agents work from the code + the issue
+queue; the project's north-star is
+[`research/.claude/GOAL.md`](research/.claude/GOAL.md).
 
 ---
 

@@ -9,13 +9,12 @@
 #   2. source_tree.path + protect/exception paths (if you fork a different upstream)
 #   3. vast_template.* (only if you maintain a different Vast.ai template)
 #   4. default_compute.gpu_filter_chain (only if the new project needs a different shape)
-#   5. major_goal_dir contents (research goal + paper) — human-only
+#   5. .claude/GOAL.md (the project north-star — what "done" means)
 
 project:
   name: verl-compression-research
   description: Communication-efficient pipeline-adaptation research on verl GRPO + GSM8K.
-  major_goal_dir: ../major-goal/        # human-only reference (research/<-./major-goal/>); agents must not read it
-  north_star_doc: .claude/GOAL.md       # agent-READABLE restatement of the big goal (operator-approved); agents may read this instead of major_goal_dir
+  north_star_doc: .claude/GOAL.md       # the project north-star — what "done" means (agent-readable, operator-approved); THE single source of project intent
 
 workspace:
   working_dir: /Users/shamane/Documents/verl/research/
@@ -119,24 +118,25 @@ agent_models:
   # Reasoning-effort rule: xhigh or max for every reasoning agent. Exactly one sanctioned
   # exception — log-writer @ medium, because it is mechanical templating, not reasoning.
   reasoning_effort_rule: "xhigh|max for all reasoning agents; log-writer @ medium is the one intentional exception"
+  context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]). NOTE: Claude Code may currently STRIP [1m] from subagents at spawn time (ref GH claude-code#45169), so the suffix is correct + future-proof but may be a no-op until that bug is fixed. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent Opus/Sonnet tiers below."
   agents:
     analyst:
-      model: claude-opus-4-8
+      model: "claude-opus-4-8[1m]"
       effort: max
       why: writes PASS/REVISE/STOP verdicts that gate expensive compute — highest-stakes judgment
     research-planner:
-      model: claude-opus-4-8
+      model: "claude-opus-4-8[1m]"
       effort: max
       why: designs falsifiable experiment plans — heaviest reasoning load in the harness
     experiment-runner:
-      model: claude-opus-4-8
+      model: "claude-opus-4-8[1m]"
       effort: max
       why: provisioning + branch/payload ops where a mistake burns real GPU money
     training-log-monitor:
-      model: claude-sonnet-4-6
+      model: "claude-sonnet-4-6[1m]"
       effort: xhigh
       why: high-frequency 30s polling loop (~80 polls/run) where per-poll token volume dominates cost; Sonnet 4.6 keeps strong traceback parsing at ~40% less than Opus
     log-writer:
-      model: claude-sonnet-4-6
+      model: "claude-sonnet-4-6[1m]"
       effort: medium
       why: mechanical append/copy/rewrite + draft PR; Sonnet for reliable PR-base guardrails, medium effort because it is not reasoning work (the sanctioned exception to the effort rule)

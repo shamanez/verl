@@ -273,7 +273,6 @@ research/
     ├── skills/                     vast-provision, vast-teardown, codex-verify (operator-invoked)
     └── state/                      STATUS.md, runs.jsonl, .last-orchestrator-tick
 
-verl/major-goal/                    HUMAN-ONLY (agents must not read this)
 verl/examples/grpo_trainer/
 ├── vast_baseline_qwen25_1p5b_grpo_gsm8k.sh             dense reference launcher
 └── vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh    comm-eff reference launcher
@@ -282,8 +281,8 @@ verl/CLAUDE.md                      fork-specific agent instructions
 ```
 
 The harness is **transferable**: edit `.claude/project.yaml`, swap the
-GitHub repo, swap `major-goal/` contents, and the agents/playbooks/hooks
-come along unchanged.
+GitHub repo, rewrite `.claude/GOAL.md` for the new project, and the
+agents/playbooks/hooks come along unchanged.
 
 ---
 

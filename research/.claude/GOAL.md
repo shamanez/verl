@@ -1,12 +1,9 @@
 # Project north-star — the big goal
 
-> **Agent-readable restatement** of this project's objective. The authoritative
-> source is the human-only `../major-goal/` (the research-goal paper +
-> `Prompt.md` + `implementation-logic.md`), which **agents must not read**
-> (hard rule, `CLAUDE.md §3`). This file is the operator-approved summary that
-> agents *are* allowed to read, so every plan, verdict, and PR can be checked
-> against one shared target. If this file and `major-goal/` ever conflict,
-> `major-goal/` wins and the operator updates this file.
+> **The project's north-star.** This is the single, authoritative statement of
+> what this project is trying to achieve and what "done" means — every plan,
+> verdict, and PR should be checked against it. Agents may read this file
+> freely; the operator keeps it current.
 
 ## The goal
 
@@ -88,4 +85,3 @@ From `CLAUDE.md §1`:
 - Project config (authoritative for operating values) → `.claude/project.yaml`
 - Dense control launcher → `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`
 - Comm-eff launcher → `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
-- Human-only goal source (**DO NOT READ** — hard rule) → `../major-goal/`

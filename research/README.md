@@ -13,7 +13,8 @@ The setup is **task-agnostic** — what research it runs is decided per-issue by
 ## Don't touch
 
 - `../verl/`, `../verl/.claude/`, `../verl/.codex/`, `../verl/.agent/`, `../AGENTS.md`, `../pyproject.toml`, `../setup.py` — those belong to upstream. The `protect-upstream.sh` PreToolUse hook enforces this at the harness level. (`../CLAUDE.md` is fork-specific now; edit it from the repo root, not from here.)
-- `../major-goal/` — **human-only reference** (research goal + paper draft). The harness is issue-first: agents must NOT read this directory. Every operating fact an agent needs lives in this `research/` tree.
+
+The project **north-star** — what "done" means — lives at [`.claude/GOAL.md`](.claude/GOAL.md). The harness is issue-first: every operating fact an agent needs lives in this `research/` tree.
 
 ## How to start the loop
 

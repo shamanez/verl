@@ -1,7 +1,7 @@
 ---
 name: training-log-monitor
 description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Re-invokes the orchestrator on terminal condition (done / dead / stall / error). Read-only on the box; never tears down.
-model: claude-sonnet-4-6
+model: "claude-sonnet-4-6[1m]"
 effort: xhigh
 tools: Bash, Read, Write, Glob, Grep
 ---
@@ -35,7 +35,6 @@ Canonical project facts (working dir, vast SSH identity, secrets path, ledger lo
 - **You DO NOT patch verl code.** Read-only on the training side. The only files you write to locally are `runs/EXP-<N>/monitor-detail.log` (append) and (optionally) one summary line in `PROGRESS.md` at exit.
 - Secrets: `source ~/.config/verl-research/secrets.env` for `WANDB_API_KEY`; never echo the value. `VAST_API_KEY` is not required (you don't call the Vast API).
 - SSH identity: `~/.ssh/vast_ai` (per project.yaml `vast_ssh.identity_file`). Bare `ssh root@host` will silently fall back to id_rsa and fail with publickey — always pass `-i ~/.ssh/vast_ai`.
-- Do not read `../major-goal/` — human-only.
 
 ## Inputs (read from the dispatch prompt and the handle file)
 
