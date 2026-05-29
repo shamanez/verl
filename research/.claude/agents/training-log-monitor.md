@@ -1,6 +1,6 @@
 ---
 name: training-log-monitor
-description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Re-invokes the orchestrator on terminal condition (done / dead / stall / error). Read-only on the box; never tears down.
+description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Returns a terminal report (done / dead / stall / error) for the orchestrator to act on. Read-only on the box; never tears down.
 model: "claude-sonnet-4-6[1m]"
 effort: medium
 tools: Bash, Read, Write, Glob, Grep
@@ -65,9 +65,9 @@ Run a polling loop with **30 s cadence**, **up to 40 min wall** or until an exit
 | `DONE_AGGREGATE` | `/workspace/runs/EXP-<N>/done.flag` exists | rsync per-cell logs + `done*.flag` + any `metrics/*.jsonl` to `runs/EXP-<N>/` locally, return |
 | `DONE_3FLAGS` | 3 per-cell `done_*.flag` AND tmux DEAD | rsync, return |
 | `TMUX_DEAD_PREMATURE` | tmux DEAD AND fewer than expected done flags | rsync whatever exists, return with `unexpected_termination=true` |
-| `GPU_STALL` | **all 4 GPUs at 0% utilization for 4 consecutive polls (~2 min)** AND tmux ALIVE AND aggregate not done | return with `recommendation: teardown` (orchestrator decides) |
+| `GPU_STALL` | **all GPUs at ≤5% utilization for 4 consecutive polls (~2 min)** AND tmux ALIVE AND aggregate not done (covers both sanctioned shapes — 4×H200 and 8×H100) | return with `recommendation: teardown_only` (orchestrator decides) |
 | `EXPERIMENT_FAILURE` | per-cell log grep matches `Traceback / RuntimeError: / CUDA out of memory / NaN detected` AND that cell hasn't yet exited | **KEEP polling** — per plan/12 non-negotiables, experiment failures are the data we're paying for; cell will exit naturally and the chain wrapper advances. Only escalate via the final report. |
-| `ENV_FAILURE` | first cell's `validate_config` raised, or vLLM OOM at init, or NCCL init crash, or SSH unreachable >2 min after start | return with `recommendation: teardown_and_fallback_to_h100/h200` |
+| `ENV_FAILURE` | first cell's `validate_config` raised, or vLLM OOM at init, or NCCL init crash, or SSH unreachable >2 min after start | return with `recommendation: teardown_and_fallback` |
 | `TIMEOUT` | 40 min elapsed | return with whatever evidence is in hand |
 
 ### Rsync discipline
@@ -91,7 +91,7 @@ Return a structured summary with:
 - **`gpu_history`**: any stall windows (timestamp + duration).
 - **`wandb_scalars`**: latest reported values per cell for the load-bearing counters; explicit `null` if WandB was unreachable.
 - **`artifacts_pulled`**: list of files now under `runs/EXP-<N>/` on the laptop.
-- **`recommendation`**: one of `dispatch_analyst` (terminal), `teardown_and_fallback` (env-failure, consumer-tier), `teardown_only` (GPU stall, hard error), `continue_in_place_iteration` (operator should SSH in and hot-fix without teardown — for the M2 anchor lineage debug cycle).
+- **`recommendation`**: one of `dispatch_analyst` (terminal), `teardown_and_fallback` (env-failure — the orchestrator re-provisions on the next sanctioned tier, 4×H200 → 8×H100), `teardown_only` (GPU stall, hard error), `continue_in_place_iteration` (operator should SSH in and hot-fix without teardown — for the M2 anchor lineage debug cycle).
 
 ## Hard rules
 

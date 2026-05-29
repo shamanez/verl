@@ -1,14 +1,14 @@
 # research/ — long-running Claude Code + Codex research harness
 
-This subtree is an **additive scaffold** sitting beside the upstream verl codebase. It does NOT modify verl. The harness orchestrates research experiments (hypothesis → plan → codex-verify → Vast.ai launch → analysis → finding) on a fleet of three long-running Claude Code sessions plus a Codex bridge.
+This subtree is an **additive scaffold** sitting beside the upstream verl codebase. It does NOT modify verl. The harness orchestrates research experiments (hypothesis → plan → [human gate] → Vast.ai launch → analysis → finding) across two long-running Claude Code `/loop` sessions (planning + implementation), with Codex available as an **operator-invoked** review skill (`codex-verify`) — never on the autonomous path.
 
 The setup is **task-agnostic** — what research it runs is decided per-issue by you, not by any pinned doc.
 
 ## Start here
 
-1. Read **`researcher_steps.md`** — the single operator manual. It walks you through the two-phase workflow (planning vs implementation), the hybrid gate, the M0 smoke test, the compute profile, codex-bridge, and troubleshooting.
-2. Skim the **design plan** at `/Users/shamane/.claude/plans/first-go-throuhg-the-deep-pearl.md` — that is the contract this directory implements.
-3. Inspect **`.claude/agents/`** — five leaf-subagent definitions (research-planner, codex-bridge, experiment-runner, analyst, log-writer). The two coordinator workflows (`triage`, `orchestrator`) live under **`.claude/playbooks/`** and are executed at the top level of the `/loop` session, because Claude Code subagents cannot spawn other subagents.
+1. Read **`researcher_steps.md`** — the single operator manual. It walks you through the two-phase workflow (planning vs implementation), the human gate, the compute profile, the operator-invoked codex review, and troubleshooting.
+2. Read **`.claude/GOAL.md`** (the project north-star — what "done" means) and **`.claude/project.yaml`** (the authoritative operating config: repos, secrets, vast template, compute defaults, branch policy). Together they are the contract this directory implements.
+3. Inspect **`.claude/agents/`** — five leaf-subagent definitions (research-planner, experiment-runner, training-log-monitor, analyst, log-writer). The two coordinator workflows (`triage`, `orchestrator`) live under **`.claude/playbooks/`** and are executed at the top level of the `/loop` session, because Claude Code subagents cannot spawn other subagents.
 
 ## Don't touch
 

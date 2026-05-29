@@ -1,60 +1,70 @@
 # Playbook: orchestrator
 
-Coordinator for the implementation phase. Runs in the top-level Claude Code
-session — either as `/loop` (autonomous, fires every 30 min) or as `/goal`
-(one-shot, Stop-hook-gated). Dispatches `experiment-runner`,
-`training-log-monitor`, `analyst`, and `log-writer` subagents via the `Agent`
-tool — parallel where dependencies allow, background where polling-shaped
-(the monitor). Reads state from plan files, `gh`, `runs.jsonl`, verdict
-files, and `PROGRESS.md`; advances every eligible issue toward a finding in
-one turn.
+Coordinator for the implementation phase. Runs at the top level of a Claude
+Code `/loop` session and advances every approved issue one step toward a
+finding per tick. Dispatches `experiment-runner`, `training-log-monitor`,
+`analyst`, and `log-writer` subagents via the `Agent` tool — in parallel where
+dependencies allow, in the background for the polling-shaped monitor. Reads
+state from plan files, `gh`, `runs.jsonl`, verdict files, and `PROGRESS.md`.
 
-**Plan-review gate is operator-owned and out of band.** The orchestrator
-NEVER dispatches a code-review subagent. The human reviews each plan before
-flipping `status:planned → status:approved` (see "Operator: how to review a
-plan" at the bottom of this file). The harness becomes simpler and more
-stable as a result.
+## Invocation
 
-## Entry pattern (`/goal` — the user's canonical invocation)
-
-The user invokes this playbook from a fresh Claude Code session via the
-`/goal` slash command. That installs a session-scoped Stop hook with the
-goal string as its condition; the harness blocks session-end until the
-condition holds. Use this template (copy-paste verbatim, then edit the
-`<…>` placeholders inline):
+Canonical (matches `researcher_steps.md` §3 and `CLAUDE.md` §4):
 
 ```
-/goal Read /Users/shamane/Documents/verl/research/.claude/playbooks/orchestrator.md and execute it for issue #<N> (or the highest-priority eligible issue if not specified).
-
-NON-NEGOTIABLES for this session:
-1. Dispatch `training-log-monitor` (research/.claude/agents/training-log-monitor.md, Opus, run_in_background=true) IMMEDIATELY after experiment-runner returns RUNNING. Never trust done_<cell>.flag alone — cross-check WandB historyLineCount + per-cell Traceback/Ray-unhandled grep + nvidia-smi per-GPU util at 30 s cadence. Look at the Vast.ai training log directly via SSH, not just local artifacts.
-2. Honor every NON-NEGOTIABLE section in the issue's plan file (.claude/plans/<N>.md).
-3. Tear down the Vast.ai instance via the vast-teardown skill BEFORE this session stops. The Stop hook will block stopping until the runs.jsonl ledger row reads TORN_DOWN.
-4. Budget cap: if box lifetime spend exceeds $<MAX_DPH × wall_clock_hr from the plan, default $25>, tear down + write verdict=STOP regardless of cell completion state.
-5. Consumer-card fallback: if a consumer tier (RTX_5090/RTX_4090) returns an env-failure (docker fail / cuda mismatch / vLLM init OOM / NCCL init / SSH unreachable), tear down immediately and re-provision skipping consumer tiers (start at the first sanctioned datacenter tier, 4×H200). Do NOT retry a second consumer host.
-6. If experiment fails at runtime (FSDP collision, NaN, OOM mid-training, wrong counter values), KEEP the box running through the remaining cells (this is the data we paid for), then dispatch analyst — do not pre-empt. The plan's analyst predicate decides PASS/REVISE/STOP.
-
-Stop only after: (a) analyst has written runs/EXP-<N>/verdict.md, (b) log-writer has updated LOG.md + findings/ (PASS/STOP only — REVISE goes to child-issue path), (c) Vast instance is destroyed and runs.jsonl ledger row reads TORN_DOWN.
+/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
 ```
 
-**Goal-string design rules:**
+The loop re-fires this playbook every 30 min; each firing is one tick (the
+`## Each tick` steps below). Between ticks the session Stops, which fires the
+`commit-on-stop` and `teardown-finished-runs` hooks — so the Stop-hook teardown
+backstop runs after every tick, not only at end of day.
 
-- The goal string OVERRIDES playbook defaults for that session only. Document
-  any override inline so future you can revise this template safely.
-- Be specific about monitoring intensity. "Watch the training log" is too
-  vague; "Dispatch training-log-monitor at 30 s cadence, cross-check WandB"
-  is what we want.
-- Name the budget cap explicitly. Without it, a hung training loop with
-  healthy-looking GPU util can burn all night.
-- Name the env-failure fallback rule for consumer-card lineages.
-- Distinguish env-failures (tear down + fall back) from experiment-failures
-  (keep running, that's the data).
+To drive a single issue to completion instead of looping the whole queue, add
+an explicit target: `… execute it for issue #<N>.` You may optionally gate the
+session with `/goal <completion condition>` (the optional milestone-watcher
+"Session C" in README.md) — but `/loop 30m` is the orchestrator's normal
+driver, and `/goal` adds no teardown or dispatch semantics of its own.
 
-**One-line minimum** (if you don't need to override defaults):
+**Plan-review gate is operator-owned and out of band.** The orchestrator NEVER
+dispatches a code-review subagent and NEVER launches a `status:planned` plan.
+The human reviews each plan and flips `status:planned → status:approved` (see
+"Operator: how to review a plan" at the bottom of this file). That keeps the
+harness simple and keeps the human in control of every dollar spent.
 
-```
-/goal Read /Users/shamane/Documents/verl/research/.claude/playbooks/orchestrator.md and execute it for issue #<N>. Dispatch training-log-monitor in background. Tear down before stop.
-```
+## Operating constraints (non-negotiables)
+
+These hold every tick, regardless of how you were invoked:
+
+1. **Monitor every RUNNING box, immediately.** The instant `experiment-runner`
+   returns RUNNING, dispatch `training-log-monitor` with
+   `run_in_background: true`. Never trust `done_<cell>.flag` alone — the
+   chain-doesn't-abort wrapper writes those flags through silent Ray errors.
+   The monitor cross-checks WandB `historyLineCount` + per-cell
+   `Traceback/Ray-unhandled/OOM/NaN` greps + per-GPU `nvidia-smi` util at 30 s
+   cadence, reading the box's training log directly over SSH. (Its model and
+   effort are fixed in its own frontmatter — do not restate or override them.)
+2. **Honor every NON-NEGOTIABLE in the plan file** (`.claude/plans/<N>.md`).
+   The approved plan is the contract for the runner, analyst, and log-writer.
+3. **Respect the budget caps.** The plan's `max_gpu_hr` (default 96) and
+   `max_dph` (default $24/hr per instance) are the hard caps. The
+   `teardown-finished-runs` Stop hook is the automatic backstop — it tears down
+   any run that exceeds `max_gpu_hr`, goes heartbeat-stale (>30 min), reaches a
+   verdict, or sits PROVISIONED >15 min. If you observe a mid-tick breach,
+   dispatch `vast-teardown` now rather than waiting for the backstop's next
+   firing.
+4. **Distinguish env-failure from experiment-failure** — the load-bearing rule:
+   - **Experiment-failure** (FSDP collision, NaN, OOM mid-training, wrong
+     counter values): KEEP the box running through the remaining cells. That
+     failure IS the data we paid for. Let the cells finish, then dispatch
+     `analyst`; the plan's predicate decides PASS/REVISE/STOP. Do not pre-empt.
+   - **Env-failure** (docker bring-up fail, CUDA/driver mismatch, vLLM init OOM,
+     NCCL init crash, SSH unreachable >2 min): the box is unusable. On the
+     monitor's `teardown_and_fallback` recommendation, dispatch `vast-teardown`
+     immediately, then re-provision by walking to the next tier in the plan's
+     `gpu_filter_chain`. The only two sanctioned tiers are 4×H200 (preferred)
+     and 8×H100 — there is no consumer-card or 4×H100 fallback in the research
+     loop.
 
 ## Operating context
 
@@ -89,8 +99,8 @@ verdict files, and the issue's GitHub label.
 | `PLAN_READY` | plan file exists · label is `status:planned` | none — wait for human to flip to `status:approved` (the human may run codex-verify manually as part of the review) |
 | `READY_TO_RUN` | label `status:approved` · no runs.jsonl entry for `EXP-<ID>` (no row in any state — RUNNING, PROVISIONED, or TORN_DOWN) | `experiment-runner` |
 | `PROVISIONED` | runs.jsonl row has `status:"PROVISIONED"` (runner captured handles, has not yet promoted to RUNNING) | none — sync-metrics hook is a no-op until status flips; the Stop hook will tear down if the row stays PROVISIONED for >15 min |
-| `RUNNING` (no monitor) | runs.jsonl row has `status:"RUNNING"` · no `runs/<ID>/monitor-detail.log` OR its last line is older than 5 min · no `verdict.md` | `training-log-monitor` (background; Opus) |
-| `RUNNING` (monitor active) | runs.jsonl row has `status:"RUNNING"` · `runs/<ID>/monitor-detail.log` has a poll line in the last 5 min · no `verdict.md` | none — monitor will re-invoke the orchestrator on terminal condition |
+| `RUNNING` (no monitor) | runs.jsonl row has `status:"RUNNING"` · no `runs/<ID>/monitor-detail.log` OR its last line is older than 5 min · no `verdict.md` | `training-log-monitor` (background) |
+| `RUNNING` (monitor active) | runs.jsonl row has `status:"RUNNING"` · `runs/<ID>/monitor-detail.log` has a poll line in the last 5 min · no `verdict.md` | none — the monitor returns a terminal report; act on it when the background task completes (or next tick) |
 | `RESULTS_READY` | runs.jsonl row exists · `runs/<ID>/done.flag` exists OR tmux session dead AND `metrics/*.jsonl` present · no `verdict.md` | `analyst` |
 | `VERDICT_PASS` | `verdict.md` says PASS · no `LOG.md` entry yet for this id | `log-writer` (idempotent on re-run) |
 | `VERDICT_REVISE` | `verdict.md` says REVISE with `next_actions:` · no child issue created yet | create child issue with `next_actions` body, label it `status:planned`, then **stop** — the human reviews the child plan and flips it to `status:approved` (running codex-verify manually if they want) |
@@ -141,8 +151,9 @@ bottom of this file:
 - `experiment-runner` — for `READY_TO_RUN`.
 - `training-log-monitor` — for `RUNNING (no monitor)`. **Dispatch in
   background** (`run_in_background: true`) so the orchestrator's tick
-  doesn't block on its 30 s poll loop; the monitor re-invokes the
-  orchestrator on terminal condition (done / dead / stall / env-failure).
+  doesn't block on its 30 s poll loop; the monitor returns a terminal report
+  (done / dead / stall / env-failure) that you act on when the background task
+  completes or on the next tick.
 - `analyst` — for `RESULTS_READY`.
 - `log-writer` — for `VERDICT_PASS` and `VERDICT_STOP`.
 
@@ -195,7 +206,7 @@ You are training-log-monitor for EXP-<N>.
 Instance handle: runs/EXP-<N>/handles/<id>.json (read ssh_host, ssh_port, instance_id, gpu_name, num_gpus, gpu_ram from it; reconstruct tmux session as exp-<N>-<host-with-underscores>).
 Plan: .claude/plans/<N>.md (read cell names from §Smoke launch commands, expected total_training_steps from §Vast.ai training footprint, WandB project from the launcher env — default project verl_compression_research, entity shamanework-pl).
 Poll every 30 s for up to 40 min: SSH-probe per-cell logs (Traceback/Ray-unhandled/OOM/NaN), nvidia-smi per-GPU util, WandB scalars (every ~3rd poll). Rsync each cell's log + done flag + metrics to runs/EXP-<N>/ as the cell finishes. Append per-poll snapshots to runs/EXP-<N>/monitor-detail.log; do NOT spam PROGRESS.md during the loop.
-Exit on: aggregate done.flag, 3 per-cell done_*.flag + tmux DEAD, tmux DEAD premature, GPU stall (all 4 GPUs 0% for 4 polls AND tmux ALIVE), env-failure (validate_config crash / vLLM init OOM / NCCL init fail / SSH unreachable >2 min), or 40 min timeout. Return a structured report with per-cell state + WandB scalars + recommendation (dispatch_analyst | teardown_and_fallback | teardown_only | continue_in_place_iteration). Never call vast-teardown.
+Exit on: aggregate done.flag, 3 per-cell done_*.flag + tmux DEAD, tmux DEAD premature, GPU stall (all GPUs ≤5% for 4 polls AND tmux ALIVE), env-failure (validate_config crash / vLLM init OOM / NCCL init fail / SSH unreachable >2 min), or 40 min timeout. Return a structured report with per-cell state + WandB scalars + recommendation (dispatch_analyst | teardown_and_fallback | teardown_only | continue_in_place_iteration). Never call vast-teardown.
 ```
 
 Use `subagent_type=training-log-monitor`. Always dispatch with
@@ -228,7 +239,7 @@ Use `subagent_type=log-writer`.
 
 ---
 
-## Operator: how to review a plan (the manual step that replaced codex-bridge)
+## Operator: how to review a plan
 
 The harness used to autonomously dispatch a codex review of every plan
 before launching expensive compute. That gate proved more flaky than
@@ -331,8 +342,14 @@ $/hr now: <X> · spent today: $<Y> · monthly cap remaining: $<Z>
   `kind: brainstorm` or `kind: literature`. Those are discussion-only /
   math-only routes. A runner dispatch on those kinds is a contract
   violation — burns money for no science.
-- Never call `vast-teardown` or `vastai destroy` from this agent — only
-  the Stop hook does that, on the next session Stop.
+- Dispatch `vast-teardown` ONLY on an explicit trigger: a
+  `training-log-monitor` returning `teardown_only` (GPU stall / hard error) or
+  `teardown_and_fallback` (env-failure), or a mid-tick budget breach. Never
+  tear down a healthy RUNNING box, and never call `vastai destroy` directly —
+  always go through the skill so the ledger row is flipped to `TORN_DOWN`. For
+  every case you don't explicitly handle, the `teardown-finished-runs` Stop
+  hook is the automatic backstop (verdict / stale heartbeat / budget /
+  PROVISIONED-stale), firing after each tick.
 - If a `gh` call errors, log it and skip that issue for this tick. Do not
   abort the whole tick.
 - If `runs.jsonl` is malformed, append the malformed line to
