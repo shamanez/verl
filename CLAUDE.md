@@ -8,27 +8,19 @@
 
 ## 1. What this fork is for
 
-Build and demonstrate the two-circuit compression method described in
-[`major-goal/Prompt.md`](major-goal/Prompt.md) + [`major-goal/implementation-logic.md`](major-goal/implementation-logic.md) — pipeline activation
-masking + asynchronous unmasked anchor circuit + spectral correction of
-masked gradients before the optimizer step — on top of verl's existing
-GRPO recipe for **Qwen2.5-1.5B-Instruct trained on GSM8K**.
+This is **not** vanilla verl. It's a private research fork that adds a
+**communication-efficient training method** on top of verl's GRPO recipe,
+trained on **Qwen2.5-1.5B-Instruct + GSM8K**. With the method disabled,
+training is byte-identical to upstream verl. The method's design and math are
+human-only reference under `major-goal/`; the engineering map is
+[`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
 
-**Model choice**: Qwen2.5-1.5B-Instruct (Apache-2.0, no HF gating, fits
-multi-GPU H100/H200 comfortably with 16K response context). The
-compression curves are reported on this model; do NOT swap to Qwen3-4B
-or any other base without a separate justification — every reference
-curve in `findings/` is anchored to 1.5B.
-
-**Algorithm choice**: GRPO (vanilla, dense, well-trodden in verl). Treat
-the RL loss as a control variable — never swap it for DAPO / GSPO without
-an explicit, separate justification.
-
-**Hardware mandate**: multi-GPU only, **4 ≤ num_gpus ≤ 8** on Vast.ai
-H100/H200 tiers via the fixed `verl-research-vllm020` template
-(hash `6485b9625ddd6d25a5f2f09b9f7fde17`). The training launcher hard-fails
-outside that GPU range. Single-GPU runs are forbidden in the research
-loop — 16K response context + n=8 rollouts needs the headroom.
+**Fixed control variables — do not change without a separate justification:**
+- **Model**: Qwen2.5-1.5B-Instruct (every reference curve in `findings/` is anchored to it).
+- **RL loss**: vanilla GRPO (not DAPO / GSPO).
+- **Hardware**: multi-GPU only, **4 ≤ num_gpus ≤ 8**, on Vast.ai H100/H200 via
+  the fixed `verl-research-vllm020` template. Single-GPU runs are forbidden in
+  the research loop (16K response context + n=8 rollouts needs the headroom).
 
 ## 2. Where to look
 
@@ -44,8 +36,9 @@ is human-only reference (the research-goal paper + `Prompt.md` / `implementation
 | The autonomous research loop (human operator manual) | `research/researcher_steps.md` |
 | Top-level playbooks (triage, orchestrator) | `research/.claude/playbooks/*.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
-| **Real GRPO baseline launcher (Qwen2.5-1.5B)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
-| Vast-ai launcher conventions | `examples/grpo_trainer/VAST_README.md` |
+| **Dense GRPO baseline launcher (the control)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
+| **Comm-eff method launcher (the default baseline)** | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+| Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
 | Research goal & method (human-only) | `major-goal/Prompt.md` + `major-goal/implementation-logic.md` + `major-goal/LLM_adaptation_neurips.pdf` |

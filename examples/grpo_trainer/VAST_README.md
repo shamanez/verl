@@ -51,10 +51,9 @@ the delta.
 
 ### Provenance — the real settings are always captured
 
-Hand-written notes drift. **Real example:** the comm-eff baseline's
-`REPRODUCIBILITY.md` and this launcher's defaults both say
-`anchor.cadence=5 / delay_K=5`, but the validated PASS run actually used
-`4 / 4` (recovered from `train.log`). To stop this:
+Hand-written manifests and plan tables drift from the command that actually
+ran — after enough experiments you can no longer trust prose to tell you the
+real settings. So we never rely on prose: we read the launched command back.
 
 - Every launcher runs under `set -x`, so `train.log` contains the fully
   shell-expanded `python3 -m verl.trainer.main_ppo …` command.
@@ -136,8 +135,7 @@ The cgroup file is read-only from inside the container even with
 `--cap-add=SYS_ADMIN` (Vast silently strips it). The only fix is
 host-selection. Full diagnostic notes in
 `research/.claude/skills/vast-provision/SKILL.md` ("Container limits on
-Vast.ai (cgroup PIDs cap)" section) and the post-mortem at
-`research/runs/EXP-vast-1p5b-smoke/PROGRESS.md`.
+Vast.ai (cgroup PIDs cap)" section).
 
 ## ulimit -n bump (already in the launcher)
 

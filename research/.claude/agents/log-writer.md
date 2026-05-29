@@ -75,7 +75,7 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
      ```
    - **NEVER** pass `--repo verl-project/verl` or any upstream remote, and **NEVER** `--base main`. The protect-upstream hook and the harness contract forbid auto-PR upstream OR onto the upstream-tracking branch.
 
-6b. **Launcher promotion** (only if `VERDICT: PASS`) — land the proven settings in a canonical launcher carrying the EXACT values that ran. Derive everything from `runs/EXP-<ID>/resolved_params.txt`. NEVER from the plan or a hand-written manifest — that is how `anchor.cadence` drifted from 4 (real) to 5 (documented).
+6b. **Launcher promotion** (only if `VERDICT: PASS`) — land the proven settings in a canonical launcher carrying the EXACT values that ran. Derive everything from `runs/EXP-<ID>/resolved_params.txt`. NEVER from the plan or a hand-written manifest — prose drifts from the launched command, so the canonical launcher must carry the values that actually ran.
    - If `runs/EXP-<ID>/resolved_params.txt` is missing, append `PROMOTE_BLOCKED: EXP-<ID> reason="no resolved_params.txt"` to PROGRESS.md and skip promotion (the analyst should have produced it; do not fabricate values).
    - Read `promote_launcher_as:` from the plan. If `none`/missing, append `PROMOTE_SKIPPED: EXP-<ID> reason="no promote_launcher_as"` and skip — a human promotes manually.
    - **(a) Regenerate the manifest from ground truth.** Rewrite `runs/EXP-<ID>/REPRODUCIBILITY.md` as a GENERATED file: every comm_eff + headline knob with its `resolved_params.txt` value, the run commit (`git rev-parse HEAD`), the verdict's headline metric, and the verbatim `resolved_cmd.txt`.
