@@ -28,19 +28,24 @@ two things in one sequence:
    **peeling the comm-eff method apart one circuit at a time** — full
    method → spectral blend off → mask-only (no anchor, no spectral). Each
    peel removes machinery so the next verdict localises the cause.
-2. **Validate a minimal candidate stabiliser** — a periodic **clean
-   (unmasked) optimizer step** that refreshes AdamW's moments with the
-   *true* gradient every `N` steps. This is the headline, **mandatory**
-   test (Test 4). It is potentially the smallest possible fix and, because
-   it touches none of the FSDP-fragile anchor/spectral code, also the
-   safest.
+2. **Validate two minimal candidate fixes**, both targeting the prime
+   suspect (the biased masked gradient — §3.5):
+   - **fp32 mask rescale** (Test 3 Cell C) — restore the `1/(1-p)` rescale
+     in fp32 so the masked forward is *unbiased*, fixing the bias **at
+     source**.
+   - **periodic clean (unmasked) optimizer step** (Test 4, the headline
+     **mandatory** test) — every `N` steps let AdamW step on the *true*
+     gradient, fixing the accumulated bias **in optimizer-state space**.
+     It touches none of the FSDP-fragile anchor/spectral code, so it is
+     also the safest.
 
 Consequence for labelling: **most cells are `code_change:false`** (they
-are reachable with existing config knobs). The **periodic-clean-step cell
-is `code_change:true`** — it needs a tiny new knob + train-loop hook and
-must ride an `exp/<N>-<slug>` branch (base `vast-ai-workload`). Mark
-`code_change` per-cell in the body; the issue overall carries
-`code_change:true` because it contains a mandatory code-change experiment.
+are reachable with existing config knobs). **Two cells are
+`code_change:true`** — the fp32-rescale mask (Test 3 Cell C) and the
+periodic-clean-step (Test 4) — each needs a tiny code change and must ride
+an `exp/<N>-<slug>` branch (base `vast-ai-workload`). Mark `code_change`
+per-cell in the body; the issue overall carries `code_change:true` because
+it contains mandatory code-change experiments.
 
 ### Operator constraints (load-bearing — read these first)
 
@@ -88,9 +93,10 @@ single symptom that currently blocks "Done":
 
 The peel localises the cause; the periodic clean step is a candidate that,
 if it works, reaches the north-star with **far less code and FSDP risk**
-than the full anchor+spectral apparatus while keeping ~90% of the
-communication savings (9 of every 10 steps remain masked). That is why it
-is mandatory, not optional.
+than the full anchor+spectral apparatus while still cutting communication
+by **~80% (≈5× vs dense at p=0.9** — 9 of every 10 steps stay masked at
+~10% transmission, 1 is a full step). That is why it is mandatory, not
+optional.
 
 ## 1. Observation
 
@@ -183,30 +189,28 @@ Launcher encoding this as defaults:
 consistency with this verified-PASS config (the schema default is 0.95;
 do not change it without a separate justification).
 
-## 3.5 How the method is *supposed* to work (the paper) vs how this fork implements it — read before the causes
+## 3.5 How the method is *designed* to work vs how this fork implements it — read before the causes
 
-The method is from the paper *"Communication-Efficient LLM Adaptation over
-Decentralized GPU Meshes"* (local copy:
-`/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf`). Two facts
-from it reframe every cause below.
+The method's design intent — distilled here so this prompt is fully
+self-contained (no external source needed) — reframes every cause below.
+Three facts matter.
 
 **(1) The anchor is a periodic refresh-and-recompute circuit — NOT a
-separately-trained model.** Algorithm A (paper §A) is explicit: **only
-`w^fast` is updated by AdamW** (line 15). The anchor (line 16)
-*"asynchronously refreshes weights, runs unmasked forward–backward, returns
-`G_t^anc`"* — i.e. it periodically **pulls a slightly stale weight snapshot
-from the fast circuit** (it has no independent optimizer state and does not
-train on its own), runs a **real full unmasked fwd/bwd on the data**, and
-**ships the clean gradient `G^anc` back** to the fast circuit, which folds
-it into the EMA `M^anc` (lines 7–8) that defines the spectral basis. The
-anchor supplies **delayed correction *geometry* only** — never an exact
-update. Its gradients are stale by Δ ≈ 20–25 fast-circuit steps, so the
-basis refreshes roughly every **K ∈ {10, 20}** steps when a new prior
-arrives (**K=50 collapses** — "the masked trajectory has drifted beyond its
-correction horizon"). The paper allocates a `Z×Y` (Z=1) mesh slice to the
-anchor **purely so it runs in parallel and the fast circuit never waits** —
-that slice is a *slaved, periodically-refreshed copy* of the model, not an
-independently-training one.
+separately-trained model.** The intended design is explicit: **only the
+fast circuit's weights `w^fast` are updated by AdamW.** The anchor circuit
+periodically **pulls a slightly stale weight snapshot from the fast
+circuit** (it has no independent optimizer state and does not train on its
+own), runs a **real full unmasked fwd/bwd on the data**, and **ships the
+clean gradient `G^anc` back** to the fast circuit, which folds it into the
+EMA `M^anc` that defines the spectral basis. The anchor supplies **delayed
+correction *geometry* only** — never an exact update. Its gradients are
+stale by Δ ≈ 20–25 fast-circuit steps, so the basis refreshes roughly every
+**K ∈ {10, 20}** steps when a new prior arrives (**K=50 collapses** — the
+masked trajectory drifts beyond its correction horizon). The design
+allocates a small `Z×Y` (Z=1) mesh slice to the anchor **purely so it runs
+in parallel and the fast circuit never waits** — that slice is a *slaved,
+periodically-refreshed copy* of the model, not an independently-training
+one.
 
 This fork implements the **same gradient semantics**: every
 `anchor.cadence` steps it loads a `delay_K`-stale snapshot of the live
@@ -214,22 +218,22 @@ weights into a hookless **clone**, runs an unmasked fwd/bwd on the **same
 training batch**, harvests the raw `G^anc` into `M^anchor`, takes **no
 optimizer step**, and discards the clone (`anchor.py`,
 `transformer_impl.py::_maybe_comm_eff_anchor_refresh`). The one real
-difference from the paper is that the fork runs this **synchronously
+difference from the design is that the fork runs this **synchronously
 inline** (the fast path waits for the clone) instead of on a parallel mesh
 slice — a *throughput* difference, not a correctness one. So the anchor
 mechanism here is a **faithful port**; the verified-PASS smoke + the dry-run
-use `cadence=delay_K=5` (below the paper's K-range — conservative/fresher,
+use `cadence=delay_K=5` (below the design's K-range — conservative/fresher,
 not a bug). The likelier culprit for the explosion is therefore the masking
 bias (D-1), not the anchor.
 
-**(2) The paper's masking is *approximately unbiased*; this fork's masking
-is *biased* — a deliberate, acknowledged deviation.** The paper
-deliberately uses **random PRF masking** precisely because it "produces an
-approximately unbiased gradient estimator that the spectral filter can
-denoise, while top-K masking introduces a structured bias the filter
-cannot remove." The whole spectral-correction guarantee rests on this: it
-"contracts zero-mean isotropic noise **but cannot remove a structured
-bias**."
+**(2) The method is *designed* with approximately-unbiased masking; this
+fork's masking is *biased* — a deliberate, acknowledged deviation.** The
+design deliberately uses **random PRF masking** precisely because it
+produces an approximately-unbiased gradient estimator that the spectral
+filter can denoise, whereas top-K masking introduces a structured bias the
+filter cannot remove. The whole spectral-correction guarantee rests on
+this: it contracts zero-mean isotropic noise **but cannot remove a
+structured bias**.
 
 This fork's mask is `h_tilde = h * mask` with **no `1/(1-p)` rescale** —
 and `activation_mask.py` says so explicitly: *"There is no `1/(1-p)`
@@ -239,27 +243,26 @@ destabilises bf16). So `E[h_tilde] = (1-p)·h`: at `p=0.9` the masked
 residual stream is scaled to ~10% of its magnitude, and the **downstream
 RMSNorm then re-normalises that shrunken residual, amplifying the surviving
 ~10% of entries by ~3×**, compounded across all 7 boundary layers. **This
-injects exactly the structured bias the paper's own analysis says the
-spectral filter cannot remove** — making it a prime suspect for the
-paper-scale grad_norm explosion, and a *deviation from the paper*, not the
-paper's method.
+injects exactly the structured bias that the spectral filter — by its own
+stated property — cannot remove**, making it a prime suspect for the
+paper-scale grad_norm explosion, and a *deviation from the intended
+design*.
 
-**(3) The paper validates this method for masked *SFT / continual
+**(3) The method is *designed and validated* for masked *SFT / continual
 pretraining* — NOT for RL. This project applies it *during* GRPO RL, a
-regime the paper never tests.** Every headline result (Tables 1–8, §5.6) is
-masked **SFT**, and the convergence analysis (Appendix E) assumes
-*fine-tuning* gradients — "low effective rank" and a "slowly-drifting
-subspace" — and explicitly "predicts no benefit" where the gradient
-subspace is high-dimensional or shifts fast. Appendix D tests RL only as a
-*downstream amenability check*: it runs GSPO on the masked-SFT checkpoint
-**with masking turned OFF** ("The DPO and GSPO phases are identical in both
-runs … and **no masking**"). So the paper's own evidence is: *mask the SFT,
-then do RL unmasked.* Our project masks the RL itself. RL adds the PPO/GRPO
-importance ratio `r = exp(log_p_current − log_p_old)` — which does not exist
-in SFT and which **amplifies** the mask-induced variance/bias (cause B). A
-plausible reason the explosion shows up at paper-scale RL but never in the
-paper's SFT curves. This does not mean masked RL can't work — it is exactly
-the project's research bet — but the diagnosis must treat the explosion as
+regime it was never validated in.** All of the method's reported results are
+masked **SFT**, and its convergence analysis assumes *fine-tuning*
+gradients — "low effective rank" and a "slowly-drifting subspace" — and
+explicitly predicts no benefit where the gradient subspace is
+high-dimensional or shifts fast. Its only RL evidence is a *downstream
+amenability check*: RL is run on the masked-SFT checkpoint **with masking
+turned OFF**. So the established evidence is: *mask the SFT, then do RL
+unmasked.* This project masks the RL itself. RL adds the PPO/GRPO importance
+ratio `r = exp(log_p_current − log_p_old)` — which does not exist in SFT and
+which **amplifies** the mask-induced variance/bias (cause B). A plausible
+reason the explosion shows up at paper-scale RL but never in the masked-SFT
+setting. This does not mean masked RL can't work — it is exactly the
+project's research bet — but the diagnosis must treat the explosion as
 **partly a regime-mismatch**, and it is another reason the regime-agnostic
 clean-step (Test 4) is attractive: clean gradients re-anchor AdamW
 regardless of SFT-vs-RL.
@@ -268,7 +271,7 @@ regardless of SFT-vs-RL.
 
 The spectral math (`spectral_filter.py`: EMA → full SVD → Tikhonov
 `d_i = s_i/(s_i+τ)` → two-sided projection → α-blend, with `α=1` an exact
-no-op) is a **faithful** implementation of the paper's equations; the
+no-op) is a **faithful** implementation of the method's equations; the
 staleness queue returns an exactly-`delay_K`-stale snapshot after warm-up;
 the clone is correctly isolated from the optimizer/FSDP. The candidate
 **deviations** to list in the issue as things to verify — and, if
@@ -276,34 +279,35 @@ confirmed, fix on the `exp/` branch — are:
 
 - **D-1 (no-rescale bias — primary).** The mask is biased (above).
   *Verify:* boundary-layer `mean(h_tilde)/mean(h) ≈ (1-p)` and the
-  post-RMSNorm magnitude inflation. *Possible fix:* restore the `1/(1-p)`
-  rescale **computed in fp32** (upcast surviving activations, rescale, cast
-  back) so the estimator is unbiased without bf16 overflow — directly
-  addressing the paper's "filter cannot remove structured bias."
+  post-RMSNorm magnitude inflation. *Fix — tested directly as Test 3 Cell
+  C:* restore the `1/(1-p)` rescale **computed in fp32** (upcast surviving
+  activations, rescale, cast back) so the estimator is unbiased without
+  bf16 overflow — directly addressing the "spectral filter cannot remove a
+  structured bias" property.
 - **D-2 (spectral filter on empty `M_anchor` halves the gradient).** With
   `seed_anchor_cache=false`, `M_anchor=0` until the first refresh ⇒
   SVD-of-zeros ⇒ Tikhonov `d=0` ⇒ `G_filt=0` ⇒ `G_proj = α·G_mask =
   0.5·G_mask`. The filter **silently halves** the gradient before any
   anchor prior exists, instead of passing it through. *Possible fix:* force
   `α=1` (masked-only) until the first anchor refresh has populated
-  `M_anchor` — which is what the paper does (no correction before a prior
-  arrives).
-- **D-3 (staleness-queue memory at paper K).** A **full-model** snapshot is
-  pushed **every** step and the queue retains `delay_K+1` of them on GPU;
-  at the paper's `delay_K=20` that is ~21 × (full bf16 params) of snapshots
-  in HBM, plus a `summon_full_params` all-gather every step. This is a
-  large part of why the dry-run had to shrink batch knobs (cause G).
-  *Possible fix:* snapshot only the target matrices, offload the queue to
-  CPU, or only snapshot on steps that will be read.
-- **D-4 (cadence below the paper's analysed range).**
-  `cadence=delay_K=5` is outside the paper's `K∈{10,20}` envelope. Not a
+  `M_anchor` — which is what the design intends (no correction before a
+  prior arrives).
+- **D-3 (staleness-queue memory at the design's K).** A **full-model**
+  snapshot is pushed **every** step and the queue retains `delay_K+1` of
+  them on GPU; at the design's `delay_K=20` that is ~21 × (full bf16 params)
+  of snapshots in HBM, plus a `summon_full_params` all-gather every step.
+  This is a large part of why the dry-run had to shrink batch knobs (cause
+  G). *Possible fix:* snapshot only the target matrices, offload the queue
+  to CPU, or only snapshot on steps that will be read.
+- **D-4 (cadence below the design's analysed range).**
+  `cadence=delay_K=5` is outside the design's `K∈{10,20}` envelope. Not a
   bug, but the dry-run sits in an un-analysed (fresher) regime; paper-scale
   runs of the *full* method should also test `K∈{10,20}`.
 
 **Why Test 4 is the clean cut through all of this.** The mandatory
-periodic-clean-step test (below) is the paper's own explicitly-named
-*"naive synchronous fix"* — "periodically disable masking and run a full
-unmasked forward–backward pass through the main pipeline." The paper
+periodic-clean-step test (below) is the design's own explicitly-named
+*"naive synchronous fix"* — periodically disable masking and run a full
+unmasked forward–backward pass through the main pipeline. The design
 rejects it **only for bandwidth** (it stalls the pipeline and pays full
 activation transfer on the clean step), **not for optimization** — the
 async anchor exists precisely to *approximate this same denoising benefit*
@@ -342,23 +346,27 @@ per token. **(Bias):** because `h_tilde = h · mask` carries **no
 ~10% magnitude, then re-amplified ~3× by the downstream RMSNorm). The
 gradient computed through a biased forward is itself biased — independent
 of the variance effect. Either or both can drive the step-1 `grad_norm`.
-**This bias is a deviation from the paper** (which requires
-approximately-unbiased masking — §3.5 D-1), and the paper's spectral filter
+**This bias is a deviation from the intended design** (which requires
+approximately-unbiased masking — §3.5 D-1), and the spectral filter
 provably *cannot* remove a structured bias. Candidate fix: an fp32
-`1/(1-p)` rescale.
+`1/(1-p)` rescale (tested as Test 3 Cell C).
 > **Diagnostic:** at step 1, log the per-token `(log_p_current −
 > log_p_old)` histogram (expect non-zero spread even though
 > `π_new == π_old`), AND the boundary-layer `mean(h_tilde)/mean(h)` ratio
 > (expect ≈ `1-p`, confirming the un-rescaled bias).
 
-### C. Spectral filter on empty `M_anchor` at startup
+### C. Spectral filter on empty `M_anchor` at startup — silently HALVES the gradient
 `seed_anchor_cache=false` → `M_anchor = 0` for the substeps before the
-first anchor refresh fires. The SVD basis of a zero matrix is degenerate;
-the filter may silently identity-pass or produce NaN-quietly-replaced-by-zero,
-so the gradient applied in those first substeps is not what the theory
-prescribes.
-> **Diagnostic:** at substep 1, log `||M_anchor||_fro` and
-> `||G_proj − G_mask||` per target.
+first anchor refresh fires. The SVD of a zero matrix gives zero singular
+values ⇒ Tikhonov weights `d_i = 0` ⇒ `G_filt = 0` ⇒ the blend collapses to
+`G_proj = α·G_mask + (1−α)·0 = α·G_mask` — at the default α=0.5 the gradient
+is **silently halved** for every substep before the first prior arrives,
+instead of passing through unfiltered (§3.5 D-2). This *shrinks* rather than
+explodes the early gradient, so it is a **fidelity bug, not the explosion
+driver** — but it is not what the method prescribes (no correction should
+apply before a prior exists). Fix: force α=1 until the first refresh.
+> **Diagnostic:** at substep 1, log `||M_anchor||_fro` (expect 0) and
+> `||G_proj − G_mask|| / ||G_mask||` per target (expect ≈ `1−α` = 0.5).
 
 ### D. FSDP integration of the spectral correction hook — implementation-bug class
 The spectral correction runs at `after_actor_backward__before_optimizer_step`
@@ -531,23 +539,33 @@ pressure is gone too). Whatever remains is the mask's own bias/variance
 `use_orig_params=true` kept for config parity (this path does not depend on
 it — a further FSDP-risk reduction).
 
-| Cell | `mask.mask_recompute` | What it tests |
-|---|---|---|
-| **A — recompute=true** | `true`  | mask fires on both gradient-feeding forwards (the dry-run setting), now with no anchor/spectral confound |
-| **B — recompute=false** | `false` | mask fires only on the actor-train forward; `compute_log_prob` runs unmasked so `log_p_old` is a clean estimate — isolates the IS-mask-mismatch half of cause B |
+| Cell | mask config | `code_change` | What it tests |
+|---|---|---|---|
+| **A — recompute=true (biased)** | `mask_recompute=true`, no rescale | false | mask fires on both gradient-feeding forwards (the dry-run setting), now with no anchor/spectral confound — the biased estimator as shipped |
+| **B — recompute=false** | `mask_recompute=false`, no rescale | false | mask fires only on the actor-train forward; `compute_log_prob` runs unmasked so `log_p_old` is clean — isolates the IS-mask-mismatch (variance half of cause B) |
+| **C — fp32 rescale (unbiased) — the D-1 fix** | `mask_recompute=true` + fp32 `1/(1-p)` rescale | **true** | restores an *unbiased* masked forward (the prime-suspect fix, §3.5 D-1) — does removing the bias at source stop the explosion? |
 
-**10 trainer steps each.**
+**Cell C minimal patch (`code_change`, on the `exp/` branch):** gate it
+behind a new `comm_eff.mask.rescale` bool (default `false` ⇒ strict no-op);
+when set, the mask hook (`activation_mask.py`) computes
+`h_tilde = ((h * mask).to(float32) * (1/(1-p))).to(h.dtype)` — unbiased
+forward, the `1/(1-p)` blow-up contained in fp32 so bf16 never overflows.
+
+**10 trainer steps each** (Cell C may want ≥ 25 to confirm the trajectory
+stays bounded once the bias is removed).
 
 **Verdict:**
-- Cell A explodes → pure masking alone is unstable; the anchor/spectral
-  apparatus is not the cause (it was masking the symptom at smoke scale).
-  This is the strongest motivation for Test 4's optimizer-state fix.
-- Cell A **>>** Cell B → the IS-mask-mismatch (cause B, variance half) is a
-  real contributor; note it for the fix (share PRF keys between the two
-  paths, or set `mask_recompute=false`).
-- Cell A ≈ Cell B but both explode → the mismatch is not the driver; the
-  remaining suspects are the no-rescale bias (cause B, bias half) and
-  optimizer-state poisoning (cause H) — exactly what Test 4 addresses.
+- Cell A explodes → pure masking alone is unstable at paper scale; the
+  anchor/spectral apparatus is **not** what drives the explosion (consistent
+  with §3.5 — it is a faithful port). Motivates both fixes (Cell C, Test 4).
+- **Cell C ≪ Cell A → the no-rescale bias (D-1) is the dominant cause and
+  the fp32 rescale fixes it.** Cleanest possible outcome: a one-line rescale,
+  no anchor/spectral, no clean step needed.
+- Cell A **>>** Cell B → the IS-mask-mismatch (cause B, variance half) also
+  contributes; note it (share PRF keys, or `mask_recompute=false`).
+- Cell C still explodes → bias is not the whole story; the variance (cause
+  B) and optimizer-state poisoning (cause H) remain → Test 4 (clean step) is
+  the next fix to try.
 - Cell A is *stable* (grad_norm bounded, entropy holds) → the explosion
   lives in the anchor/spectral machinery, not the mask → Test 5 is now
   required to find which integration surface (D/E/F) is responsible.
@@ -567,9 +585,9 @@ different from the anchor circuit, which runs unmasked on a **stale clone**
 and **never** steps the optimizer — here the **live** optimizer state is
 the thing being corrected.
 
-This is, exactly, the paper's own explicitly-named **"naive synchronous
+This is, exactly, the method's own explicitly-named **"naive synchronous
 fix"** (periodically disable masking and run a full unmasked fwd/bwd
-through the main pipeline; §3.5). The paper rejects it **only for
+through the main pipeline; §3.5). The design rejects it **only for
 bandwidth**, never for optimization — the async anchor exists to
 *approximate this very benefit* without the pipeline stall. That makes this
 test simultaneously (a) the sharpest diagnostic — if it stabilises
@@ -697,7 +715,6 @@ an exact, FSDP-safe target.
 
 ## 7. Reference artifacts (cite these in the issue body)
 
-- **The method paper** — `/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf` ("Communication-Efficient LLM Adaptation over Decentralized GPU Meshes"): §3.1 masking (`h̃ = h⊙m`, random PRF, approximately unbiased — no rescale shown but the gradient is claimed unbiased); §3.2 + **Algorithm A (§A)** the anchor (periodically refreshes weights from the fast circuit, runs unmasked fwd/bwd, returns `G^anc`; only `w^fast` is AdamW-updated) + eqs (1)–(3) spectral correction; the §3.2 "naive synchronous fix" that Test 4 is; and **Appendix D** (RL is tested on the masked-SFT checkpoint with **masking OFF** — the method is never applied during RL)
 - `research/runs/baseline/config.yaml` — dense baseline fixed config (source of the step-1 `grad_norm=0.36` reference)
 - `research/runs/baseline/REPRODUCIBILITY.md` — baseline launcher SHA pin
 - `research/runs/communication-baseline/verdict.md` — comm-eff baseline PASS
@@ -722,8 +739,9 @@ an exact, FSDP-safe target.
 "Comm-eff paper-scale grad_norm explosion: peeling-ablation diagnosis + mandatory periodic clean-step optimizer-refresh test (KL stays off in the method evaluation)"
 
 **Labels:** `kind:experiment`, `milestone:M2`. (The body declares
-`code_change` per cell; the issue overall is `code_change:true` because
-Test 4 is a mandatory code-change experiment.)
+`code_change` per cell; the issue overall is `code_change:true` because it
+contains two mandatory code-change cells — the fp32-rescale mask (Test 3
+Cell C) and the periodic clean step (Test 4).)
 
 **Body sections (markdown):**
 1. **Why this matters** — north-star linkage (§0): the explosion blocks
@@ -735,19 +753,19 @@ Test 4 is a mandatory code-change experiment.)
    entropy=0.37 / score=0.12` with KL=0.001) + the 0.087→0.789 100-step
    curve as the parity target.
 4. **Full comm-eff baseline configuration** — the verified-PASS knob table.
-5. **Paper vs this fork** (§3.5) — three points: (1) the anchor is a
-   *periodic refresh-and-recompute* circuit (Algorithm A: pulls stale
+5. **Design vs this fork** (§3.5) — three points: (1) the anchor is a
+   *periodic refresh-and-recompute* circuit (by design: pulls stale
    weights from the fast circuit, runs unmasked fwd/bwd, returns `G^anc`;
    only `w^fast` is AdamW-updated), faithfully ported here (synchronously
    inline rather than on a parallel slice) — NOT a separately-trained
-   model; (2) the mask is approximately-unbiased in the paper but **biased**
-   here (no `1/(1-p)` rescale); (3) **the paper validates the method for
-   masked SFT, never for RL** (Appendix D runs RL with masking OFF) — this
-   project masks GRPO RL, a regime the paper does not test, and the PPO
+   model; (2) the mask is approximately-unbiased by design but **biased**
+   here (no `1/(1-p)` rescale); (3) **the method is validated for masked
+   SFT, never for RL** (its only RL evidence runs with masking OFF) — this
+   project masks GRPO RL, a regime it was not validated in, and the PPO
    importance ratio amplifies the mask bias/variance. Include the
    **anchor/spectral implementation review D-1…D-4** (no-rescale bias;
    empty-`M_anchor` halving; staleness-queue memory; cadence below the
-   paper's K-range) as concrete, verifiable items with their candidate fixes
+   design's K-range) as concrete, verifiable items with their candidate fixes
    — the things the operator wants on record as "possibly wrong, confirm
    and fix."
 6. **Candidate root causes A–H**, each with its diagnostic. Cause A is
