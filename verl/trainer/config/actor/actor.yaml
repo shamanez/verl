@@ -298,6 +298,14 @@ comm_eff:
   # Master switch. false => every comm_eff hook is a no-op
   enabled: false
 
+  # EXP-14 periodic clean (unmasked) optimizer-step cadence, in trainer steps.
+  # 0 (default) = off => strict no-op for the disabled path and every pre-EXP-14
+  # config. >0 => every (global_step % clean_cadence == 0)-th step runs entirely
+  # unmasked so AdamW refreshes m/v on the true dense gradient. Mirrors the
+  # CommEffConfig.clean_cadence dataclass default; declared here so Hydra's
+  # struct-mode merge accepts actor_rollout_ref.actor.comm_eff.clean_cadence=N.
+  clean_cadence: 0
+
   # Pipeline activation-masking sub-config (inert while parent enabled=false).
   # Algorithm A: in-graph h_tilde = h * mask (NO 1/(1-p) rescale) on the
   # pipeline-boundary decoder blocks, ONLY inside the actor train forward/backward.
@@ -329,6 +337,49 @@ comm_eff:
     # pipeline-parallel RL. The anchor pass (path_tag=None) stays unmasked
     # regardless of this flag (GUARD 5).
     mask_recompute: false
+
+    # EXP-14 on-policy-consistency fix. true (default) => the PRF mask is
+    # realized IDENTICALLY across every forward of the SAME global gradient
+    # update: the old-logprob recompute AND all actor-train micro-batches at a
+    # given global_step draw the same mask per boundary block (the PRF key drops
+    # its per-forward substep component). This keeps pi_old and pi_new under the
+    # SAME masked subnetwork so the PPO importance ratio is ~1 at the first inner
+    # step (vanilla on-policy GRPO) instead of being corrupted by mask
+    # resampling between forwards (the test2_cellA grad_norm=771 explosion).
+    # false => legacy EXP-5=>EXP-12 behavior (advancing substep keys the mask, so
+    # every forward / PPO mini-batch gets a distinct mask). Mirrors the
+    # CommEffMaskConfig.consistent_across_forwards dataclass default; declared
+    # here so Hydra struct-mode merge accepts
+    # actor_rollout_ref.actor.comm_eff.mask.consistent_across_forwards=<bool>.
+    consistent_across_forwards: true
+
+    # EXP-14 magnitude-preservation knob (a flagged DESIGN-CHANGE candidate).
+    # false (default) => spec form h_tilde = h * mask (pure simulated pipeline
+    # parallelism: a masked boundary activation is a DROPPED activation, so at
+    # p=0.9 the boundary hidden-state RMS collapses to sqrt(1-p)~=0.316x — the
+    # suspected driver of the test2_cellA/cellC grad_norm explosion). true =>
+    # inverted-dropout h_tilde = h * mask / (1-p), scaling kept activations up to
+    # preserve E[h_tilde]=h, departing from the "dropped activations are zeros"
+    # PP analogy. The spec deliberately EXCLUDES rescale; this knob exists to
+    # TEST whether the no-rescale magnitude collapse (not the IS inconsistency)
+    # dominates. Mirrors CommEffMaskConfig.rescale; declared so Hydra struct-mode
+    # accepts actor_rollout_ref.actor.comm_eff.mask.rescale=<bool>.
+    rescale: false
+
+    # EXP-14 mask granularity — the on-policy-consistency fix (supersedes
+    # consistent_across_forwards). "channel" (DEFAULT) drops the SAME hidden
+    # channels for every token, keyed on (layer, global_step, seed) with NO
+    # token/packing component, so the mask is IDENTICAL across all forwards of
+    # one global update regardless of dynamic-bsz packing/shuffle (old_logprob
+    # ~21 micro vs train ~28) — log pi_new/pi_old stays consistent like a single
+    # supervised forward. Also a faithful structured-comms model (send a fixed
+    # channel subset); mask_ratio still tracks p; rescale applies unchanged.
+    # "element" = legacy per-element mask (packing-dependent; cross-forward
+    # consistency only approximated by consistent_across_forwards — insufficient,
+    # see cellC), kept for A/B. consistent_across_forwards is a no-op under
+    # "channel". Mirrors CommEffMaskConfig.granularity; declared so Hydra
+    # struct-mode accepts actor_rollout_ref.actor.comm_eff.mask.granularity=<str>.
+    granularity: channel
 
   # Asynchronous unmasked-anchor-circuit sub-config (inert while enabled=false).
   # Field names match CommEffAnchorConfig (EXP-8 schema, picked up by EXP-12).

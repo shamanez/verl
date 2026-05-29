@@ -82,6 +82,7 @@ __all__ = [
     "decoder_boundary_indices",
     "find_decoder_layers",
     "prf_mask",
+    "prf_channel_mask",
     "ActivationMasker",
 ]
 
@@ -236,6 +237,65 @@ def prf_mask(
     return keep.to(device=device, non_blocking=True)
 
 
+def prf_channel_mask(
+    hidden_size: int,
+    key: tuple[int, ...],
+    p: float,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build a deterministic PER-CHANNEL Bernoulli keep/zero mask.
+
+    Unlike :func:`prf_mask` (which draws an independent value for every
+    ``(token, channel)`` ELEMENT over the packed activation tensor), this draws
+    ONE ``(hidden_size,)`` keep/zero vector — the SAME hidden channels are kept
+    or dropped for EVERY token at the boundary — and returns it shaped
+    ``(1, 1, hidden_size)`` so it broadcasts across the leading (batch / packed
+    token) dimensions of the activation in ``h * mask``.
+
+    Why per-channel is the on-policy-consistent default (EXP-14): the mask is a
+    pure function of ``key`` (``(layer, global_step, base_seed)`` — NO token /
+    substep / sequence-shard / packing component) and is CONSTANT along the token
+    axis. So it is IDENTICAL across every forward pass of one global update
+    regardless of how dynamic-bsz packs / length-sorts / shuffles the tokens
+    (old_logprob's ~21 micro-batches vs the train phase's ~28). That makes
+    ``log pi_new / pi_old`` consistent — exactly like a single supervised
+    forward — which a per-element positional draw cannot guarantee without
+    keying on stable per-token identity (the rejected per-token plumbing). It is
+    also a faithful model of structured pipeline-boundary communication
+    compression: transmit a fixed random subset of the hidden channels for all
+    tokens. The measured ``mask_ratio`` (fraction of zeroed channels) tracks
+    ``p`` exactly as the per-element form does.
+
+    Args:
+        hidden_size: Number of hidden channels ``H`` (the last dim of ``h``).
+        key: PRF key tuple; for per-channel masking this is
+            ``(layer_idx, global_step, base_seed)`` — it MUST NOT carry any
+            token-axis component (substep / seq-shard / token id) or the mask
+            would stop being packing-invariant.
+        p: Masked fraction in ``[0, 1]`` (probability a channel is zeroed).
+        device: Device for the returned mask.
+        dtype: Dtype for the returned mask (matches the activation).
+
+    Returns:
+        A ``mask`` tensor of shape ``(1, 1, hidden_size)`` with entries in
+        ``{0, 1}`` (broadcasts over the token / batch dims of ``h``).
+    """
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"mask p must be in [0, 1]; got {p}")
+    seed = _derive_seed(key)
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
+    # Draw H uniforms on CPU for cross-device reproducibility; keep iff u >= p so
+    # P(zero) = p (the zeroed-channel fraction is p in expectation). Reshape to
+    # (1, 1, H) so it broadcasts across leading dims regardless of whether h is
+    # (1, total_nnz, H) (rmpad) or (batch, seq, H) (padded).
+    u = torch.rand((hidden_size,), generator=gen, dtype=torch.float32)
+    keep = (u >= p).to(dtype=dtype).view(1, 1, hidden_size)
+    return keep.to(device=device, non_blocking=True)
+
+
 class ActivationMasker:
     """Registers/clears in-graph activation-mask forward hooks on boundary blocks.
 
@@ -259,10 +319,38 @@ class ActivationMasker:
     over multiple PPO mini-batches gets distinct masks per substep.
     """
 
-    def __init__(self, *, p: float, base_seed: int, pp_size: int, state: Any = None):
+    def __init__(
+        self,
+        *,
+        p: float,
+        base_seed: int,
+        pp_size: int,
+        rescale: bool = False,
+        granularity: str = "channel",
+        state: Any = None,
+    ):
         self.p = float(p)
         self.base_seed = int(base_seed)
         self.pp_size = int(pp_size)
+        # EXP-14 magnitude-preservation knob. False (default) => spec form
+        # h_tilde = h * mask (dropped activations are zeros, pure simulated PP).
+        # True => inverted-dropout h_tilde = h * mask / (1 - p) so kept
+        # activations are scaled up to hold E[h_tilde] = h (a flagged DESIGN
+        # CHANGE; see CommEffMaskConfig.rescale). Precompute the gain.
+        self.rescale = bool(rescale)
+        self._rescale_gain = (1.0 / (1.0 - self.p)) if (self.rescale and self.p < 1.0) else 1.0
+        # EXP-14 mask granularity. "channel" (default) => per-channel mask
+        # (prf_channel_mask): the SAME hidden channels are dropped for every
+        # token, keyed on (layer, global_step, base_seed) — constant along the
+        # token axis, so the mask is IDENTICAL across all forwards of one global
+        # update regardless of dynamic-bsz packing/shuffle (on-policy-consistent
+        # by construction). "element" => legacy per-element mask (prf_mask): an
+        # independent draw per (token, channel), which is packing-dependent and
+        # whose cross-forward consistency is only approximated by the substep-
+        # fixing of consistent_across_forwards. See CommEffMaskConfig.granularity.
+        if granularity not in ("channel", "element"):
+            raise ValueError(f"mask granularity must be one of (channel, element); got {granularity!r}")
+        self.granularity = str(granularity)
         self._state = state  # CommEffState, for the mask_applications counter
         self._handles: list[Any] = []
         self._boundary_set: set[int] = set()
@@ -293,14 +381,29 @@ class ActivationMasker:
             if not torch.is_tensor(h):
                 return output
             hidden_size = h.shape[-1]
-            key = (
-                layer_idx,
-                masker._global_step,
-                masker._substep,
-                masker._seq_shard,
-                hidden_size,
-                masker.base_seed,
-            )
+            if masker.granularity == "channel":
+                # Per-channel key: token-axis components (substep / seq_shard)
+                # are DELIBERATELY excluded so the mask is constant along the
+                # token axis and identical across every forward of one global
+                # update (packing-invariant). hidden_size stays in the key so a
+                # shape change is still reflected.
+                key = (
+                    layer_idx,
+                    masker._global_step,
+                    hidden_size,
+                    masker.base_seed,
+                )
+            else:
+                # Legacy per-element key (packing-dependent; cross-forward
+                # consistency only via consistent_across_forwards holding substep).
+                key = (
+                    layer_idx,
+                    masker._global_step,
+                    masker._substep,
+                    masker._seq_shard,
+                    hidden_size,
+                    masker.base_seed,
+                )
             # EXP-6 contamination guard (EXP-9 extension). The mask must NEVER
             # fire outside the set of eligible paths. The default eligibility is
             # ``{train}`` (EXP-5 → EXP-12); EXP-9 widens it to
@@ -329,10 +432,22 @@ class ActivationMasker:
                     "or the anchor pass (path_tag=None) is contamination of the "
                     "RL measurement machinery and is a hard falsifier."
                 )
-            mask = prf_mask(tuple(h.shape), key, masker.p, device=h.device, dtype=h.dtype)
-            # h_tilde = h * mask, in-graph (no 1/(1-p) rescale). The multiply is
-            # tracked by autograd so the masked gradient flows to the optimizer.
-            h_tilde = h * mask
+            if masker.granularity == "channel":
+                # (1, 1, hidden) mask broadcast across the token/batch dims —
+                # identical for every token, identical across packings.
+                mask = prf_channel_mask(hidden_size, key, masker.p, device=h.device, dtype=h.dtype)
+            else:
+                mask = prf_mask(tuple(h.shape), key, masker.p, device=h.device, dtype=h.dtype)
+            # h_tilde = h * mask, in-graph. The multiply is tracked by autograd so
+            # the masked gradient flows to the optimizer. EXP-14: when rescale is
+            # on, multiply by the inverted-dropout gain 1/(1-p) so kept activations
+            # are scaled up to preserve E[h_tilde] = h (magnitude preservation, a
+            # flagged design change). rescale off (default) => gain 1.0 => the
+            # spec's pure h * mask (dropped activations are zeros).
+            if masker._rescale_gain != 1.0:
+                h_tilde = h * mask * masker._rescale_gain
+            else:
+                h_tilde = h * mask
             # Instrumentation (does not affect the graph): measured masked fraction.
             with torch.no_grad():
                 masker.last_mask_ratio[layer_idx] = float(1.0 - mask.mean().item())

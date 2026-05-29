@@ -1,0 +1,102 @@
+# EXP-14 run config — materialised by experiment-runner from .claude/plans/14.md
+# + issue #14 §7/§8. AUDIT TRAIL of what each cell runs; launch.sh is the
+# executable source of truth, generated from the same cell matrix.
+# resolved_params.txt (analyst-captured from train.log set -x trace) is ground truth.
+#
+# Branch: exp/14-clean-cadence (origin/vast-ai-workload @ 25b15653, patch tip deeab0e0).
+# code_change=true: the clean_cadence knob (§8).
+#
+# ONE box, strictly sequential (fanout_max=1). Cells chain back-to-back as
+# sequential tmux sessions sharing /workspace/verl + docker + dataset cache.
+# Test 4 is CONDITIONAL (analyst-triggered), NOT in this tick's chain.
+
+experiment: EXP-14
+issue: https://github.com/shamanez/verl-compression-research/issues/14
+
+fixed_control_vars:           # CLAUDE.md / plan ## Notes for runner — every cell
+  model:            Qwen/Qwen2.5-1.5B-Instruct
+  rl_loss:          vanilla GRPO (adv_estimator=grpo)
+  dataset:          GSM8K
+  train_batch:      128
+  rollout_n:        8
+  max_prompt:       1024
+  max_response:     16384
+  use_orig_params:  true        # EVERY cell
+
+restored_baseline_knobs:      # method cells (cause G) — lean cells drop ~3 GB clone
+  ppo_mini_batch_size:          64
+  ppo_max_token_len_per_gpu:    36864      # the "wedge"
+  rollout_gpu_memory_utilization: 0.4
+
+# KL discipline: every METHOD cell is no-KL no-entropy. ONLY with-KL cell = Test 1 Cell A.
+
+cells:
+  - id:            test1_cellA
+    test:          1
+    name:          dense-reference-reproduction (with-KL)   # GATE
+    base_launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+    steps:         10        # operator override: capped 25 -> 10
+    comm_eff_enabled: false
+    overrides: {use_kl_loss: true, kl_loss_coef: 0.001, use_kl_in_reward: false, entropy_coeff: 0}
+    purpose: "Reproduce dense step-1 shape (grad_norm=0.36/entropy=0.37/score=0.12) on this branch."
+
+  - id:            test1_cellB
+    test:          1
+    name:          scaffold-noop (KL off)                   # GATE
+    base_launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+    steps:         10        # operator override: capped 25 -> 10
+    comm_eff_enabled: false
+    overrides: {use_kl_loss: false, kl_loss_coef: 0, use_kl_in_reward: false, entropy_coeff: 0}
+    gate_check: "step-1 grad_norm within 0.10 of Cell A AND <= 1.0; else corrective trigger."
+
+  - id:            test2_cellA
+    test:          2
+    name:          peel-mask-only recompute=true (biased, as-shipped)   # diagnosis-only
+    base_launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+    steps:         10
+    comm_eff_enabled: true
+    overrides: {mask_enabled: true, mask_p: 0.9, mask_recompute: true, anchor_enabled: false, spectral_enabled: false, clean_cadence: 0, use_kl_loss: false, use_kl_in_reward: false, entropy_coeff: 0}
+    purpose: "Pure masked GRPO, biased as shipped, no anchor/spectral. REUSED as Test 3 Cell A."
+
+  - id:            test2_cellB
+    test:          2
+    name:          peel-mask-only recompute=false           # diagnosis-only
+    base_launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+    steps:         10
+    comm_eff_enabled: true
+    overrides: {mask_enabled: true, mask_p: 0.9, mask_recompute: false, anchor_enabled: false, spectral_enabled: false, clean_cadence: 0, use_kl_loss: false, use_kl_in_reward: false, entropy_coeff: 0}
+    purpose: "Isolate IS-mask-mismatch (variance half of cause B) from pure bias."
+
+  - id:            test3_cellA
+    test:          3
+    name:          mask-only no-clean (control)
+    reuse_of:      test2_cellA       # IDENTICAL — launch.sh copies test2_cellA.jsonl -> test3_cellA.jsonl, NOT re-run
+    note: "Plan + prompt: REUSE Test 2 Cell A."
+
+  - id:            test3_cellB
+    test:          3
+    name:          mask-only + periodic clean step           # MANDATORY HEADLINE — code_change
+    base_launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+    steps:         10        # operator override: capped 100 -> 10 (step-1 + early trajectory only)
+    comm_eff_enabled: true
+    overrides: {mask_enabled: true, mask_p: 0.9, mask_recompute: true, anchor_enabled: false, spectral_enabled: false, clean_cadence: 10, use_kl_loss: false, use_kl_in_reward: false, entropy_coeff: 0}
+    purpose: "Does a clean unmasked optimizer.step() every 10 steps bound grad_norm + hold entropy?"
+    success: "entropy>=1.0 @step60 while Cell A <0.5; masked grad_norm <= 0.5x Cell A @40-100; clean_steps@10,20,...; ZERO FSDP errors."
+
+test4_conditional:
+  launched_this_tick: false
+  trigger: "Test 2 stable while full method explodes, OR Test 3 clean step failed."
+  cells: "A: comm_eff.enabled=false (=Test1 CellB); B: full method alpha=0.5 (10 steps); C: full method alpha=1.0 spectral no-op, anchor fires (10 steps)."
+
+metrics_naming:
+  dir:   /workspace/runs/EXP-14/metrics/
+  files: "test1_cellA.jsonl test1_cellB.jsonl test2_cellA.jsonl test2_cellB.jsonl test3_cellA.jsonl[reuse] test3_cellB.jsonl"
+  logs:  /workspace/runs/EXP-14/logs/<test>_<cell>.log
+
+compute:
+  gpu_filter_chain:
+    - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
+    - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
+  max_dph:      24.0
+  max_gpu_hr:   96
+  max_parallel: 1

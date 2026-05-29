@@ -95,8 +95,13 @@ def test_prf_mask_is_binary():
 
 
 def test_mask_independent_of_activation_values():
-    """The mask must depend only on the PRF key + shape, never on h's values."""
-    masker = ActivationMasker(p=0.9, base_seed=7, pp_size=8)
+    """The mask must depend only on the PRF key + shape, never on h's values.
+
+    Pinned to granularity="element" (the per-element draw this test re-derives via
+    prf_mask). EXP-14 made "channel" the default; per-channel value-independence
+    is covered in test_mask_per_channel.py.
+    """
+    masker = ActivationMasker(p=0.9, base_seed=7, pp_size=8, granularity="element")
     layer_idx = 3
     hook = masker._make_hook(layer_idx)
 

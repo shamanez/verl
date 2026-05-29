@@ -1264,6 +1264,14 @@ class RayPPOTrainer:
 
     def _compute_old_log_prob(self, batch: DataProto):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
+        # EXP-14: stamp the trainer step BEFORE to_tensordict so the comm_eff
+        # worker's old-logprob recompute sees the same global_step as the matching
+        # update_actor and can run unmasked on a clean step (both gradient-feeding
+        # forwards clean ⇒ IS ratio r≈1). A comm_eff-private meta key (NOT bare
+        # "global_steps", which the vLLM rollout already emits as a per-sample
+        # batch column ⇒ to_tensordict meta-vs-column collision). No-op for
+        # dense/disabled runs.
+        batch.meta_info["comm_eff_global_step"] = self.global_steps
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to nopadding
@@ -1313,6 +1321,14 @@ class RayPPOTrainer:
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
+        # EXP-14: stamp the trainer step so the comm_eff worker can gate the
+        # periodic clean (unmasked) optimizer step. to_tensordict() carries
+        # meta_info into the worker `data`; engine_workers.update_actor reads it
+        # back via tu.get(data, "comm_eff_global_step"). A comm_eff-private key
+        # (NOT bare "global_steps", which the vLLM rollout already emits as a
+        # per-sample batch column ⇒ to_tensordict meta-vs-column collision).
+        # Harmless for dense/disabled runs (the worker short-circuits on None).
+        batch.meta_info["comm_eff_global_step"] = self.global_steps
         # update actor
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding

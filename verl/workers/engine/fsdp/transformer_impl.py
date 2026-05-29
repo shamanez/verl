@@ -669,9 +669,25 @@ class FSDPEngine(BaseEngine):
         Sets the PRF-key context (global step / optimizer-substep identity /
         sequence-shard id) and installs the hooks on the boundary decoder
         blocks. Returns True if hooks were registered (so the caller knows to
-        unregister on exit). The substep counter advances per call so the same
-        rollout batch reused across PPO mini-batches gets a distinct mask per
-        substep.
+        unregister on exit).
+
+        EXP-14 on-policy-consistency fix. The PRF key's ``substep`` component is
+        what decides whether the mask is RE-RANDOMIZED between the two
+        gradient-feeding forwards of one global update (the ``compute_log_prob``
+        old-logprob recompute and the actor-train forward) — and even between the
+        train forward's own micro-batches. Resampling there breaks on-policy
+        correctness: ``pi_old`` and ``pi_new`` get computed under DIFFERENT masked
+        subnetworks, so the PPO importance ratio ``r = exp(logp_new - logp_old)``
+        is no longer ≈1 at the first inner step (the test2_cellA grad_norm=771
+        explosion). When ``comm_eff.mask.consistent_across_forwards`` is true
+        (default) we therefore HOLD the substep component of the key at a fixed
+        sentinel (0), so the mask is ``f(layer_idx, global_step, seq_shard,
+        hidden_size, seed)`` — identical across every forward of the same global
+        update. When false we pass the advancing ``state.substep`` exactly as the
+        EXP-5⇒EXP-12 code did (legacy per-forward resampling, for the A/B test).
+        ``state.substep`` still ADVANCES per call either way so the counters and
+        the legacy path stay byte-identical; it is just not folded into the key in
+        consistent mode.
         """
         state = self._comm_eff_state
         masker = state.masker
@@ -684,9 +700,18 @@ class FSDPEngine(BaseEngine):
                 seq_shard = self.get_data_parallel_rank()
             except Exception:
                 seq_shard = 0
-        masker.set_context(global_step=global_step, substep=state.substep, seq_shard=seq_shard)
+        # EXP-14: resolve the substep component of the PRF key. Consistent mode
+        # (default) holds it at 0 so the mask is identical across all forwards of
+        # this global update; legacy mode keys on the advancing substep.
+        mask_cfg = getattr(state.config, "mask", None)
+        consistent = bool(getattr(mask_cfg, "consistent_across_forwards", True)) if mask_cfg is not None else True
+        key_substep = 0 if consistent else state.substep
+        masker.set_context(global_step=global_step, substep=key_substep, seq_shard=seq_shard)
         masker.register(self.module)
-        # Advance the optimizer-substep identity for the next train forward.
+        # Advance the optimizer-substep identity for the next train forward. This
+        # is unconditional so metrics and the consistent_across_forwards=false
+        # path are byte-identical; only whether substep is FOLDED INTO the PRF key
+        # (above) depends on the knob.
         state.substep += 1
         return masker.is_registered
 

@@ -662,13 +662,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # nesting (a ckpt forward inside the recompute, etc.) does not leak.
         with self._comm_eff_path("old_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
+            # EXP-14: thread the trainer step so the clean-step gate below (and
+            # the mask PRF key) see the real global_step. No-op when disabled.
+            global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_mask_active = False
             prev_mask_active = False
             if comm_eff_state is not None:
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
                 mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
                 mask_recompute = bool(getattr(mask_cfg, "mask_recompute", False)) if mask_cfg is not None else False
-                if mask_enabled and mask_recompute and getattr(comm_eff_state, "masker", None) is not None:
+                # EXP-14: on a clean step the old-logprob recompute MUST run
+                # unmasked too (both gradient-feeding forwards clean ⇒ the PPO
+                # IS ratio r≈1 and the train forward sees the true dense grad).
+                # So suppress the mask_recompute stamp when is_clean_step().
+                clean_step = comm_eff_state.is_clean_step(global_step)
+                if (
+                    mask_enabled
+                    and mask_recompute
+                    and not clean_step
+                    and getattr(comm_eff_state, "masker", None) is not None
+                ):
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
@@ -713,6 +726,44 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     object.__setattr__(engine, "_comm_eff_state", state)
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
         return getattr(self, "_comm_eff_state", None)
+
+    def _comm_eff_thread_global_step(self, data: TensorDict, state) -> Optional[int]:
+        """EXP-14: thread the trainer step onto the comm_eff state.
+
+        The trainer stamps ``batch.meta_info["comm_eff_global_step"]`` before each
+        ``update_actor`` / ``compute_log_prob`` call; ``DataProto.to_tensordict``
+        carries ``meta_info`` into the worker ``data`` as non-tensor entries, so
+        we read it back here with ``tu.get``. The value is stored on
+        ``state.global_step`` (and mirrored onto the train engine's
+        ``_comm_eff_global_step`` so the mask PRF key is keyed on the real
+        trainer step instead of the stale 0 default) and returned for the
+        clean-step decision.
+
+        We use a comm_eff-private meta_info key (``comm_eff_global_step``) rather
+        than the bare ``global_steps``: the vLLM rollout already emits
+        ``global_steps`` as a per-sample batch column (``extra_fields`` in
+        vllm_async_server.py), so adding ``global_steps`` to ``meta_info`` would
+        collide in ``to_tensordict``'s "meta key must not be a batch column"
+        assert. A private key cannot collide with any batch column.
+
+        Returns ``None`` and is a strict no-op when ``state`` is ``None`` (the
+        disabled / dense path) or when the key is absent (an entrypoint the
+        trainer did not stamp, e.g. a unit test) — in which case the prior
+        ``state.global_step`` is left untouched so behavior is unchanged.
+        """
+        if state is None:
+            return None
+        gs = tu.get(data, key="comm_eff_global_step", default=None)
+        if gs is None:
+            return None
+        gs = int(gs)
+        state.global_step = gs
+        # Mirror onto the train engine so ActivationMasker.set_context keys the
+        # PRF mask on the real trainer step (was hard-defaulted to 0 before).
+        engine = getattr(getattr(self, "actor", None), "engine", None)
+        if engine is not None:
+            object.__setattr__(engine, "_comm_eff_global_step", gs)
+        return gs
 
     @contextmanager
     def _comm_eff_path(self, tag: str):
@@ -761,15 +812,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # The anchor cadence (comm_eff.anchor.cadence) gates per-step firing.
         comm_eff_state = self._maybe_comm_eff_state()
 
+        # EXP-14: thread the trainer step and decide whether this whole step runs
+        # unmasked (the periodic clean optimizer-state refresh). No-op when
+        # disabled (state None ⇒ global_step None ⇒ clean_step False).
+        global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
+        clean_step = comm_eff_state.is_clean_step(global_step) if comm_eff_state is not None else False
+
         # Mask-active flag scope: set ONLY around the actor-train forward/backward
         # so the masking forward-hooks fire exclusively on this path. The engine
         # registers hooks on entry to its train forward_backward_batch and removes
         # them on exit, gated on this flag; log_prob / infer / ref / validation /
         # checkpoint forwards never set it, so they stay byte-identical to dense.
+        #
+        # EXP-14: on a clean step, force mask_active=False so NO mask hooks
+        # register for this train forward — the step takes the byte-identical
+        # dense path (no clone, no spectral surgery; it inherits that path's FSDP
+        # correctness) and the single optimizer.step() (base.py:178) refreshes
+        # AdamW on the true dense gradient. The path_tag stays "train" (the clean
+        # step is still the actor-train path, merely unmasked); _comm_eff_mask_active
+        # short-circuits on mask_active=False so no hooks fire regardless of tag.
+        # The masker's substep counter only advances when hooks register, so the
+        # masked-step PRF schedule stays deterministic across mixed masked/clean
+        # steps (§8 checklist item 4).
         if comm_eff_state is not None:
-            comm_eff_state.mask_active = True
+            comm_eff_state.mask_active = not clean_step
             # EXP-6: stamp the ONLY path tag the mask hook is allowed to fire on.
             comm_eff_state.set_path_tag("train")
+            if clean_step:
+                # Count the clean step once per trainer step (the train stamp
+                # fires once per update_actor; train_mini_batch's PPO inner loop
+                # reuses this same mask_active=False, so we do NOT increment per
+                # substep). Surfaced as comm_eff/clean_steps.
+                comm_eff_state.clean_steps += 1
         try:
             output = self.actor.train_mini_batch(data=data)
         finally:
@@ -797,6 +871,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_rewards_recomputed": 0,
                     "comm_eff/anchor_optimizer_steps": 0,
                     "comm_eff/anchor_batch_fraction": 1.0,
+                    # EXP-14: explicit zero on the disabled path (Test 1 gate cells
+                    # run comm_eff.enabled=false) so the no-op stays greppable.
+                    "comm_eff/clean_steps": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)
