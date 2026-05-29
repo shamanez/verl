@@ -1103,6 +1103,21 @@ class FSDPEngine(BaseEngine):
         if spectral is None:
             return
 
+        # EXP-16 spectral-correction cadence gate. Advance the monotonic
+        # per-optimizer-step counter (1-based, in lockstep with anchor_step:
+        # both +1 per train_batch) and fire ONLY on cadence steps. This MIRRORS
+        # the clean-step gate (CommEffState.is_clean_step) and the anchor gate
+        # (anchor_should_fire): default cadence=1 ⇒ fire every step ⇒ the
+        # pre-EXP-16 behavior, so the disabled path AND every prior method config
+        # are a STRICT no-op. With spectral.cadence==anchor.cadence the correction
+        # fires on exactly the steps the anchor EMA was just refreshed at the TOP
+        # of this same train_batch (a fresh basis, never a stale one on the
+        # in-between steps). The counter advances only AFTER the enabled+spectral
+        # guards above, so a dense/disabled run never touches it.
+        state.spectral_step += 1
+        if not state.should_run_spectral_correction():
+            return
+
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
         max_targets = int(getattr(spec_cfg, "max_targets", 4)) if spec_cfg is not None else 4

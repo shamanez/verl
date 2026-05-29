@@ -187,6 +187,17 @@ class CommEffState:
         # once per actor train_batch).
         self.anchor_step = 0
 
+        # EXP-16 monotonic optimizer-step counter the SPECTRAL cadence is keyed
+        # on. Advanced once per actor train_batch by the grad-correction hook
+        # (_maybe_comm_eff_grad_correction), in lockstep with anchor_step (both
+        # +1 per train_batch), so when anchor.cadence == spectral.cadence the
+        # spectral correction fires on EXACTLY the steps the anchor EMA was just
+        # refreshed (a fresh basis, never a stale one). Kept independent of
+        # anchor_step so spectral cadence still works when the anchor circuit is
+        # disabled. Stays 0 on the dense/disabled path (the hook short-circuits
+        # on the None/enabled guard before advancing it).
+        self.spectral_step = 0
+
         # EXP-14 periodic clean-step counter. Incremented once per trainer step
         # whose (global_step % clean_cadence) == 0 while clean_cadence > 0 — i.e.
         # every step on which masking is forced OFF and AdamW takes a step on the
@@ -354,6 +365,33 @@ class CommEffState:
             return False
         return (gs % cadence) == 0
 
+    def should_run_spectral_correction(self, step: Optional[int] = None) -> bool:
+        """EXP-16: True iff the spectral grad-correction fires on this opt step.
+
+        Mirrors :meth:`is_clean_step` (and ``anchor_should_fire``): a pure
+        predicate keyed on the monotonic per-optimizer-step counter
+        ``self.spectral_step`` (1-based — the grad-correction hook advances it
+        before calling this). The rule is ``(step % cadence) == 0`` with
+        ``cadence = comm_eff.spectral.cadence`` (default ``1`` ⇒ always True ⇒
+        fire every step ⇒ the pre-EXP-16 behavior, so every prior config and the
+        disabled path keep their exact behavior).
+
+        ``cadence=2`` fires on steps 2, 4, 6, … — aligned with an
+        ``anchor.cadence=2`` refresh (both counters advance once per
+        ``train_batch``), so the correction always sees a freshly-refreshed
+        anchor EMA. ``step <= 0`` never fires (the "never advanced" sentinel /
+        pre-train boundary), matching ``is_clean_step``'s ``gs <= 0`` guard.
+        Pure read — no side effects, no allocation.
+        """
+        spec_cfg = getattr(getattr(self, "config", None), "spectral", None)
+        cadence = int(getattr(spec_cfg, "cadence", 1)) if spec_cfg is not None else 1
+        if cadence < 1:
+            return False
+        s = self.spectral_step if step is None else int(step)
+        if s <= 0:
+            return False
+        return (s % cadence) == 0
+
     def note_mask_application(self) -> None:
         """Record one mask-hook fire against the current path tag.
 
@@ -453,6 +491,11 @@ class CommEffState:
             # Monotonic; increments at exactly steps clean_cadence, 2*clean_cadence,
             # ... so the analyst can grep that the clean cadence fired correctly.
             "comm_eff/clean_steps": self.clean_steps,
+            # EXP-16: monotonic per-optimizer-step counter the spectral cadence is
+            # keyed on. Numeric (the reduce_metrics-must-stay-numeric contract).
+            # Lets the analyst confirm spectral_corrections increments only on the
+            # cadence steps (spectral_step % spectral.cadence == 0), not every step.
+            "comm_eff/spectral_step": self.spectral_step,
         }
 
 

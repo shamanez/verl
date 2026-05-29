@@ -236,11 +236,22 @@ COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
 # --- anchor circuit (OFF by default) ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-false}"
 COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
+# EXP-16: staleness (in optimizer steps) of the weight snapshot the anchor
+# forwards from. Config field already exists (comm_eff.anchor.delay_K, default
+# 20, validated >=0); EXP-16 plumbs it through env. Default keeps the schema
+# default so non-EXP-16 runs are unchanged.
+COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
 # --- spectral correction (OFF by default) ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-false}"
 COMM_EFF_SPECTRAL_ALPHA="${COMM_EFF_SPECTRAL_ALPHA:-0.5}"
 COMM_EFF_SPECTRAL_TAU="${COMM_EFF_SPECTRAL_TAU:-0.01}"
 COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.9}"
+# EXP-16: spectral-correction cadence in optimizer steps. NEW config field
+# (comm_eff.spectral.cadence). Default 1 = fire every step = the pre-EXP-16
+# behavior (strict no-op for every prior config + the disabled path). Set to 2
+# (aligned with COMM_EFF_ANCHOR_CADENCE=2) so the correction fires only on the
+# steps the anchor EMA was just refreshed (a fresh basis, never a stale one).
+COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-gpu}"
 COMM_EFF_SPECTRAL_SVD_MODE="${COMM_EFF_SPECTRAL_SVD_MODE:-full}"
 COMM_EFF_SPECTRAL_BASIS_CACHE="${COMM_EFF_SPECTRAL_BASIS_CACHE:-cache}"
@@ -271,12 +282,49 @@ cat <<EOF
   comm_eff master:     $COMM_EFF_ENABLED
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
-  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE
-  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
+  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K
+  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
 EOF
+
+# ---------------------------------------------------------------------------
+# 6b. EXP-16 early-stop instrumentation (greppable). A lightweight background
+#     watcher tails the LIVE training log for the corrupting-failure patterns
+#     the training-log-monitor kills a cell on (non-finite grad_norm/loss, FSDP
+#     backward/hook errors, DTensor/aten::copy_ writeback errors, the
+#     string-metric reduce crash, use_orig_params guard, spectral crashes). On
+#     the FIRST match it writes a one-line `EARLY_STOP_SIGNAL: <pattern> @ <line>`
+#     to the log AND a `runs/<EXP>/EARLY_STOP_SIGNAL` sentinel file, then exits.
+#     This is a SIGNAL ONLY — it does NOT kill training (the monitor/runner owns
+#     teardown). It just gives the monitor a single high-signal grep target so it
+#     does not have to re-derive the regex from the rescue-trigger list. Strict
+#     opt-in side effect: writes only into this run's own dir.
+# ---------------------------------------------------------------------------
+RUN_DIR="$(dirname "$LOG")"
+EARLY_STOP_SENTINEL="$RUN_DIR/EARLY_STOP_SIGNAL"
+rm -f "$EARLY_STOP_SENTINEL"
+# Patterns mirror the plan's ## Rescue triggers (numeric-only stability + FSDP/
+# spectral safety). \bnan/inf word-boundary guards avoid matching "infer"/
+# "information". The watcher is a no-op until $LOG starts filling.
+EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_params.*(error|Error|assert)|could not convert string to float|aten::copy_.*(mismatch|size)|torch\.distributed\.fsdp.*(error|Error)|(loss|grad_norm|pg_loss|policy_loss|reward)[^A-Za-z].{0,80}\b([Nn]a[Nn]|[Ii]nf)\b|\b([Nn]a[Nn]|[Ii]nf)\b.{0,40}(loss|grad_norm))'
+(
+  # Wait for the log to exist (training start), then stream-match once.
+  for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
+  # --line-buffered so the match is emitted the instant the line is written.
+  if MATCH=$(stdbuf -oL tail -n +1 -F "$LOG" 2>/dev/null | grep -m1 -nE "$EARLY_STOP_RE"); then
+    {
+      echo "EARLY_STOP_SIGNAL: matched corrupting-failure pattern in $EXPERIMENT_NAME"
+      echo "EARLY_STOP_SIGNAL: $MATCH"
+      echo "EARLY_STOP_SIGNAL: training-log-monitor should classify + recommend kill-switch for this cell."
+    } | tee -a "$LOG"
+    printf '%s\t%s\n' "$EXPERIMENT_NAME" "$MATCH" > "$EARLY_STOP_SENTINEL"
+  fi
+) &
+EARLY_STOP_WATCHER_PID=$!
+# Make sure the watcher never outlives this script (it would tail a stale log).
+trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill "$EARLY_STOP_WATCHER_PID" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # 7. Launch — reuse upstream's per-recipe script for the verbatim main_ppo
@@ -318,6 +366,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.spectral.alpha="$COMM_EFF_SPECTRAL_ALPHA" \
   actor_rollout_ref.actor.comm_eff.spectral.tau="$COMM_EFF_SPECTRAL_TAU" \
@@ -327,6 +376,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.svd_mode="$COMM_EFF_SPECTRAL_SVD_MODE" \
   actor_rollout_ref.actor.comm_eff.spectral.basis_cache="$COMM_EFF_SPECTRAL_BASIS_CACHE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
+  actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
   "$@" \
   2>&1 | tee "$LOG"
 
