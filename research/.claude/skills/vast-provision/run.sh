@@ -43,6 +43,12 @@ TEMPLATE_HASH=""             # optional vast.ai Template hash_id
 NO_DEFAULT_FILTERS=false
 DRY_RUN=false
 
+# SSH identity offered to the provisioned box (per project.yaml vast_ssh).
+# Override with VAST_SSH_IDENTITY to rotate keys without editing this file.
+# Both ~/.ssh/vast_ai_name (id 890294) and the legacy ~/.ssh/vast_ai (id 835115)
+# are registered on the account, so the box accepts either; we OFFER this one.
+SSH_IDENTITY="${VAST_SSH_IDENTITY:-~/.ssh/vast_ai_name}"
+
 # ---- usage ----------------------------------------------------------------
 usage() {
   if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
@@ -464,10 +470,10 @@ except Exception:
   CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   # Paste-ready login command. The fixed SSH form (per project.yaml vast_ssh): always
-  # `-i ~/.ssh/vast_ai` (bare ssh falls back to id_rsa/id_ed25519 -> publickey fail) and
+  # `-i $SSH_IDENTITY` (bare ssh falls back to id_rsa/id_ed25519 -> publickey fail) and
   # `-o StrictHostKeyChecking=accept-new` (reused Vast IPs otherwise trip host-key verify).
   # The -L 8080:localhost:8080 tunnel exposes the on-box vLLM/WandB UI on the laptop.
-  SSH_LOGIN="ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p ${SSH_PORT:-22} root@${SSH_HOST} -L 8080:localhost:8080"
+  SSH_LOGIN="ssh -i ${SSH_IDENTITY} -o StrictHostKeyChecking=accept-new -p ${SSH_PORT:-22} root@${SSH_HOST} -L 8080:localhost:8080"
 
   HANDLE=$(jq -cn --sort-keys \
     --arg sv  "$SCHEMA_VERSION" \

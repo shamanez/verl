@@ -10,7 +10,7 @@ DEBOUNCE="$PROJECT_DIR/.claude/state/.last-sync"
 DEBOUNCE_SEC=300
 
 # SSH identity — sourced from project.yaml (vast_ssh.identity_file). Falls back
-# to ~/.ssh/vast_ai if project.yaml is missing/unparseable. Bare `ssh root@host`
+# to ~/.ssh/vast_ai_name if project.yaml is missing/unparseable. Bare `ssh root@host`
 # silently picks id_rsa/id_ed25519 and gets `Permission denied (publickey)` from
 # Vast.ai boxes, which is what kept this hook broken before.
 SSH_IDENTITY="$(awk '/^[[:space:]]*identity_file:/ {
@@ -19,7 +19,7 @@ SSH_IDENTITY="$(awk '/^[[:space:]]*identity_file:/ {
   gsub(/["'"'"']/, "", $0)
   print; exit
 }' "$PROJECT_DIR/.claude/project.yaml" 2>/dev/null)"
-SSH_IDENTITY="${SSH_IDENTITY:-~/.ssh/vast_ai}"
+SSH_IDENTITY="${SSH_IDENTITY:-~/.ssh/vast_ai_name}"
 SSH_IDENTITY="${SSH_IDENTITY/#~/$HOME}"   # expand leading ~
 SSH_OPTS=(-i "$SSH_IDENTITY" -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 

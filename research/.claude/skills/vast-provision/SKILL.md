@@ -208,12 +208,12 @@ Downstream agents (`experiment-runner`) parse these lines via `grep
   "created_at":     "2026-05-25T12:30:00Z",
   "label":          "verl-research:<session-id>",
   "session_id":     "<session-id>",
-  "ssh_login":      "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 12345 root@ssh4.vast.ai -L 8080:localhost:8080"
+  "ssh_login":      "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 12345 root@ssh4.vast.ai -L 8080:localhost:8080"
 }
 ```
 
 `ssh_login` is the **paste-ready** connect command — the fixed SSH form every consumer must
-use (`-i ~/.ssh/vast_ai` so the right key is offered; `StrictHostKeyChecking=accept-new` so a
+use (`-i ~/.ssh/vast_ai_name` so the right key is offered; `StrictHostKeyChecking=accept-new` so a
 reused Vast IP doesn't trip host-key verification). The skill also prints it to stderr on
 provision (`log in FIRST, then work`). Never hand-build a bare `ssh -p <port> root@<host>`.
 
@@ -470,7 +470,7 @@ bash $CLAUDE_PROJECT_DIR/.claude/skills/vast-provision/run.sh \
 HANDLE=$(ls $CLAUDE_PROJECT_DIR/.claude/state/vast-handles/*.json | tail -1)
 HOST=$(jq -r .ssh_host  "$HANDLE")
 PORT=$(jq -r .ssh_port  "$HANDLE")
-PIDS_MAX=$(ssh -i ~/.ssh/vast_ai -p $PORT root@$HOST \
+PIDS_MAX=$(ssh -i ~/.ssh/vast_ai_name -p $PORT root@$HOST \
               'cat /sys/fs/cgroup/pids/pids.max')
 
 # 3. if <= 1792, tear down and retry on a different host

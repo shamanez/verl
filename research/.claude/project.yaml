@@ -60,8 +60,9 @@ vast_template:                                                # the locked Vast.
   registry_file: .claude/skills/vast-provision/templates.json
 
 vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
-  identity_file: ~/.ssh/vast_ai                               # private key — the matching .pub is already registered on Vast (id 835115)
-  pubkey_file: ~/.ssh/vast_ai.pub                             # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
+  identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Rotated 2026-05-30 from the legacy ~/.ssh/vast_ai (id 835115) after that key failed container SSH-key injection on H200 instance 38444745. Override at runtime with VAST_SSH_IDENTITY.
+  pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
+  # NOTE: both keys remain registered on the account, so `vastai create instance --ssh` injects both and a box accepts either; we OFFER vast_ai_name. Legacy ~/.ssh/vast_ai (id 835115) kept as fallback.
   # sync-metrics.sh, experiment-runner SSH/rsync calls, and any future on-box helpers MUST pass `-i $(eval echo "$identity_file")` so the right key is offered. Bare `ssh root@host` will silently fall back to id_rsa/id_ed25519 and fail with publickey.
 
 default_compute:                                              # planner emits these defaults unless the issue overrides
