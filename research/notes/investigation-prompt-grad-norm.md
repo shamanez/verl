@@ -190,28 +190,37 @@ Decentralized GPU Meshes"* (local copy:
 `/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf`). Two facts
 from it reframe every cause below.
 
-**(1) The anchor runs continuously on separate hardware — it is *delayed*,
-not periodic.** In the paper the mesh is split into an `(X−Z)×Y` *masked
-fast circuit* and a `Z×Y` (Z=1) *unmasked anchor circuit*. The anchor
-circuit runs **full unmasked forward/backward passes continuously, on its
-own dedicated GPUs, off the critical path**. Its clean gradients arrive at
-the fast circuit **asynchronously, delayed by a staleness of K ≈ 20–25
-fast-circuit steps**, so they "can only inform optimization *geometry*,"
-never serve as exact updates. The fast circuit keeps an EMA `M^anc` over
-*arriving* anchor gradients and refreshes its SVD basis when a new one
-lands (~every K steps). So: the anchor IS running all the time, and the
-grad-correction machinery updates roughly every K steps — the second of
-the two mental models is the correct one.
+**(1) The anchor is a periodic refresh-and-recompute circuit — NOT a
+separately-trained model.** Algorithm A (paper §A) is explicit: **only
+`w^fast` is updated by AdamW** (line 15). The anchor (line 16)
+*"asynchronously refreshes weights, runs unmasked forward–backward, returns
+`G_t^anc`"* — i.e. it periodically **pulls a slightly stale weight snapshot
+from the fast circuit** (it has no independent optimizer state and does not
+train on its own), runs a **real full unmasked fwd/bwd on the data**, and
+**ships the clean gradient `G^anc` back** to the fast circuit, which folds
+it into the EMA `M^anc` (lines 7–8) that defines the spectral basis. The
+anchor supplies **delayed correction *geometry* only** — never an exact
+update. Its gradients are stale by Δ ≈ 20–25 fast-circuit steps, so the
+basis refreshes roughly every **K ∈ {10, 20}** steps when a new prior
+arrives (**K=50 collapses** — "the masked trajectory has drifted beyond its
+correction horizon"). The paper allocates a `Z×Y` (Z=1) mesh slice to the
+anchor **purely so it runs in parallel and the fast circuit never waits** —
+that slice is a *slaved, periodically-refreshed copy* of the model, not an
+independently-training one.
 
-This fork has **no second mesh**. It *simulates* the async anchor on the
-*same* GPUs by running the unmasked fwd/bwd **every `anchor.cadence`
-trainer steps from a `delay_K`-stale weight snapshot**
-(`anchor.py`, `transformer_impl.py::_maybe_comm_eff_anchor_refresh`). The
-paper's operating range is **K ∈ {10, 20}** (its ablation shows **K=50
-collapses** — "by the time a prior this stale arrives, the masked
-trajectory has drifted beyond its effective correction horizon"). The
-verified-PASS smoke + the dry-run use `cadence=delay_K=5` — *below* the
-paper's range (conservative / fresher), not a bug.
+This fork implements the **same gradient semantics**: every
+`anchor.cadence` steps it loads a `delay_K`-stale snapshot of the live
+weights into a hookless **clone**, runs an unmasked fwd/bwd on the **same
+training batch**, harvests the raw `G^anc` into `M^anchor`, takes **no
+optimizer step**, and discards the clone (`anchor.py`,
+`transformer_impl.py::_maybe_comm_eff_anchor_refresh`). The one real
+difference from the paper is that the fork runs this **synchronously
+inline** (the fast path waits for the clone) instead of on a parallel mesh
+slice — a *throughput* difference, not a correctness one. So the anchor
+mechanism here is a **faithful port**; the verified-PASS smoke + the dry-run
+use `cadence=delay_K=5` (below the paper's K-range — conservative/fresher,
+not a bug). The likelier culprit for the explosion is therefore the masking
+bias (D-1), not the anchor.
 
 **(2) The paper's masking is *approximately unbiased*; this fork's masking
 is *biased* — a deliberate, acknowledged deviation.** The paper
@@ -234,6 +243,26 @@ injects exactly the structured bias the paper's own analysis says the
 spectral filter cannot remove** — making it a prime suspect for the
 paper-scale grad_norm explosion, and a *deviation from the paper*, not the
 paper's method.
+
+**(3) The paper validates this method for masked *SFT / continual
+pretraining* — NOT for RL. This project applies it *during* GRPO RL, a
+regime the paper never tests.** Every headline result (Tables 1–8, §5.6) is
+masked **SFT**, and the convergence analysis (Appendix E) assumes
+*fine-tuning* gradients — "low effective rank" and a "slowly-drifting
+subspace" — and explicitly "predicts no benefit" where the gradient
+subspace is high-dimensional or shifts fast. Appendix D tests RL only as a
+*downstream amenability check*: it runs GSPO on the masked-SFT checkpoint
+**with masking turned OFF** ("The DPO and GSPO phases are identical in both
+runs … and **no masking**"). So the paper's own evidence is: *mask the SFT,
+then do RL unmasked.* Our project masks the RL itself. RL adds the PPO/GRPO
+importance ratio `r = exp(log_p_current − log_p_old)` — which does not exist
+in SFT and which **amplifies** the mask-induced variance/bias (cause B). A
+plausible reason the explosion shows up at paper-scale RL but never in the
+paper's SFT curves. This does not mean masked RL can't work — it is exactly
+the project's research bet — but the diagnosis must treat the explosion as
+**partly a regime-mismatch**, and it is another reason the regime-agnostic
+clean-step (Test 4) is attractive: clean gradients re-anchor AdamW
+regardless of SFT-vs-RL.
 
 ### Anchor / spectral implementation review — candidate deviations to verify (and possibly fix)
 
@@ -668,7 +697,7 @@ an exact, FSDP-safe target.
 
 ## 7. Reference artifacts (cite these in the issue body)
 
-- **The method paper** — `/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf` ("Communication-Efficient LLM Adaptation over Decentralized GPU Meshes"): §3.1 masking (`h̃ = h⊙m`, random PRF, approximately unbiased), §3.2 async anchor circuit (continuous on a separate mesh, staleness K≈20–25) + eqs (1)–(3) spectral correction, and the §3.2 "naive synchronous fix" that Test 4 is
+- **The method paper** — `/Users/shamane/Desktop/major-goal/LLM_adaptation_neurips.pdf` ("Communication-Efficient LLM Adaptation over Decentralized GPU Meshes"): §3.1 masking (`h̃ = h⊙m`, random PRF, approximately unbiased — no rescale shown but the gradient is claimed unbiased); §3.2 + **Algorithm A (§A)** the anchor (periodically refreshes weights from the fast circuit, runs unmasked fwd/bwd, returns `G^anc`; only `w^fast` is AdamW-updated) + eqs (1)–(3) spectral correction; the §3.2 "naive synchronous fix" that Test 4 is; and **Appendix D** (RL is tested on the masked-SFT checkpoint with **masking OFF** — the method is never applied during RL)
 - `research/runs/baseline/config.yaml` — dense baseline fixed config (source of the step-1 `grad_norm=0.36` reference)
 - `research/runs/baseline/REPRODUCIBILITY.md` — baseline launcher SHA pin
 - `research/runs/communication-baseline/verdict.md` — comm-eff baseline PASS
@@ -706,14 +735,21 @@ Test 4 is a mandatory code-change experiment.)
    entropy=0.37 / score=0.12` with KL=0.001) + the 0.087→0.789 100-step
    curve as the parity target.
 4. **Full comm-eff baseline configuration** — the verified-PASS knob table.
-5. **Paper vs this fork** (§3.5) — the anchor is continuous-on-separate-mesh
-   in the paper (priors arrive ~every K≈20 steps), *simulated* periodically
-   here; the mask is approximately-unbiased in the paper but **biased** here
-   (no `1/(1-p)` rescale). Include the **anchor/spectral implementation
-   review D-1…D-4** (no-rescale bias; empty-`M_anchor` halving;
-   staleness-queue memory; cadence below the paper's K-range) as concrete,
-   verifiable items with their candidate fixes — these are the things the
-   operator wants on record as "possibly wrong, confirm and fix."
+5. **Paper vs this fork** (§3.5) — three points: (1) the anchor is a
+   *periodic refresh-and-recompute* circuit (Algorithm A: pulls stale
+   weights from the fast circuit, runs unmasked fwd/bwd, returns `G^anc`;
+   only `w^fast` is AdamW-updated), faithfully ported here (synchronously
+   inline rather than on a parallel slice) — NOT a separately-trained
+   model; (2) the mask is approximately-unbiased in the paper but **biased**
+   here (no `1/(1-p)` rescale); (3) **the paper validates the method for
+   masked SFT, never for RL** (Appendix D runs RL with masking OFF) — this
+   project masks GRPO RL, a regime the paper does not test, and the PPO
+   importance ratio amplifies the mask bias/variance. Include the
+   **anchor/spectral implementation review D-1…D-4** (no-rescale bias;
+   empty-`M_anchor` halving; staleness-queue memory; cadence below the
+   paper's K-range) as concrete, verifiable items with their candidate fixes
+   — the things the operator wants on record as "possibly wrong, confirm
+   and fix."
 6. **Candidate root causes A–H**, each with its diagnostic. Cause A is
    documented as a known late-step driver but is NOT proposed for
    toggle-back-on. Cause H is the accumulation-timescale cause the clean
