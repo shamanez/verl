@@ -20,22 +20,31 @@
 #   anchor ................. COMM_EFF_ANCHOR_ENABLED   (false)
 #   spectral correction .... COMM_EFF_SPECTRAL_ENABLED (false)
 #
-# Defaults encode EXP-14's findings (GitHub #14, verdict runs/EXP-14/verdict.md):
-#   * granularity=channel (per-channel mask) — packing-invariant ⇒ EXACT
-#     cross-pass IS consistency, the only no-plumbing route (per-element would
+# Defaults encode the project's findings on masked GRPO. NB a large grad_norm is
+# a SYMPTOM, not the disease: Adam's update is scale-invariant (mhat/sqrt(vhat)
+# cancels any constant gradient scaling) and bounded to ~order(lr), and verl
+# grad-clips on top — so a big raw norm cannot itself "explode" the update. The
+# two real failure modes are BIAS and VARIANCE.
+#   * granularity=channel (per-channel mask) — packing-invariant => EXACT
+#     cross-pass consistency, the only no-plumbing route (per-element would
 #     need per-token keying). DEFAULT.
-#   * rescale=true — inverted-dropout h*mask/(1-p) preserves E[h] and tames the
-#     mask's magnitude-collapse grad_norm explosion (paper-scale 771 -> ~1.5).
-#     DEFAULT ON.  ⚠ rescale fixes grad_norm but EXP-14 showed it does NOT, by
-#     itself, recover LEARNING at p=0.9 (val stayed flat). The mask-rate sweep
-#     (p=0.9->0.5->0.1) is the open question — see GitHub #15.
+#   * rescale=true — inverted-dropout h*mask/(1-p) restores E[h*mask/(1-p)]=h,
+#     i.e. an UNBIASED mask. This is the load-bearing correctness property, not
+#     a "grad_norm tamer". WITHOUT it the mask is biased (E[h*mask]=(1-p)*h: the
+#     forward sits off-distribution, the GRPO importance ratio is corrupted),
+#     and Adam cannot fix a biased direction. DEFAULT ON.  ⚠ rescale is
+#     NECESSARY but NOT sufficient — it trades bias for VARIANCE (~p/(1-p)), so
+#     plain masked GRPO at high p is unbiased-but-noisy and still does not learn
+#     in a short run. That variance is what the anchor + spectral + grad-clip
+#     machinery (and a lower mask rate) exist to tame. Open: the mask-rate sweep
+#     p=0.9 -> 0.5 -> 0.1.
 #   * clean_cadence=0 (OFF). The periodic full-(unmasked)-gradient step is the
-#     NAIVE cadence method; EXP-14 proved it is NOT sustainable — masked steps
-#     still explode and PPO pg_clipfrac climbs toward saturation (0.26->0.44),
-#     which kills learning. Opt-in knob only, do not ship it as the method.
-#   * anchor + spectral OFF — start from the mask-only path; layer these on
-#     only after a masked config is shown to actually LEARN (val/score, not
-#     just a bounded grad_norm).
+#     NAIVE cadence method; it is NOT sustainable — the masked steps stay
+#     corrupted and the PPO clip fraction climbs toward saturation, so clipped
+#     tokens stop contributing gradient. Opt-in knob only, do not ship it.
+#   * anchor + spectral OFF — start from the mask-only path; layer these on only
+#     after a masked config is shown to actually LEARN (val/score), and to
+#     control the rescale's variance. Judge on learning, not on the grad_norm.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -205,7 +214,7 @@ COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the
 COMM_EFF_MASK_CONSISTENT="${COMM_EFF_MASK_CONSISTENT:-true}"          # consistent_across_forwards (no-op under channel)
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
-# --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation, EXP-14). ---
+# --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation). ---
 COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
 # --- anchor circuit (OFF by default) ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-false}"
@@ -243,7 +252,7 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   comm_eff master:     $COMM_EFF_ENABLED
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P granularity=$COMM_EFF_MASK_GRANULARITY rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE consistent=$COMM_EFF_MASK_CONSISTENT seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
-  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable, EXP-14)
+  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME

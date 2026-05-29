@@ -4,5 +4,5 @@ The orchestrator subagent rewrites this file each tick (every 30 min when its lo
 
 To see live progress in the meantime, tail `PROGRESS.md`:
 ```bash
-tail -30 PROGRESS.md
+tail -5 PROGRESS.md
 ```

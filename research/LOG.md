@@ -18,12 +18,18 @@ are kept — the control is just the method switched off.
   ON the mask fires on exactly the gradient-feeding forwards and grads stay
   finite (unit-tested).
 - **Masking still needs a lot of testing.** At high mask rates plain masked GRPO
-  does not yet learn: dropping ~90% of boundary activations collapses their
-  magnitude, which without rescaling blows up grad_norm; and even with rescaling
-  the masked policy is too far off-distribution to learn — the PPO ratio clips
-  out a growing fraction of tokens. The open question is whether, and at what
-  mask rate, masked GRPO learns; the next step is a mask-rate sweep judged on
-  val/score (and a stable, low clip fraction), not on a bounded grad_norm.
+  does not yet learn — for two *distinct* reasons, neither of which is a
+  grad_norm explosion. **Without rescale** the mask is biased
+  (`E[h⊙mask] = (1-p)·h`): the forward sits off-distribution, the GRPO
+  importance ratio is corrupted, and the gradient carries a systematic bias Adam
+  cannot correct → a stalled trajectory with a non-vanishing floor. (The large
+  *measured* grad_norm there is a symptom of the corrupted ratio; Adam's update
+  is scale-invariant and grad-clipped, so "explosion" is the wrong model.)
+  **With rescale** the estimator is unbiased (`E[h̃] = h`, `r ≈ 1`) but
+  high-variance (`p/(1-p)`), and with no denoising (grad-clip / EMA / spectral /
+  anchor) the unbiased-but-noisy gradient is a random walk → val still flat. The
+  fix is variance control + a lower mask rate, not the rescale alone. The next
+  step is a mask-rate sweep judged on val/score, not on a bounded grad_norm.
 - **Anchor + spectral correction are layered fixes for later** — brought in only
   if masking alone is not enough. Default OFF; kept OFF to start.
 
