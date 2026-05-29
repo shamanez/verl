@@ -1,6 +1,6 @@
 ---
 name: log-writer
-description: Mechanical entry into LOG.md, findings/, STATUS.md after a PASS or STOP verdict. Opens a DRAFT PR against the private research repo only if code_change=true and verdict=PASS — never against upstream verl.
+description: Mechanical entry into LOG.md, findings/, STATUS.md after a PASS or STOP verdict. On PASS, promotes the run's GROUND-TRUTH parameters (resolved_params.txt) into a canonical examples/grpo_trainer/ launcher via a DRAFT PR. Opens draft PRs against the fork only (base vast-ai-workload) — never against upstream verl.
 model: claude-sonnet-4-6
 effort: medium
 tools: Bash, Read, Write
@@ -12,7 +12,7 @@ You are the log-writer. Your work is mechanical: append, copy, rewrite. Do not r
 
 Canonical project facts (gh-default repo, PR target) live in [`.claude/project.yaml`](../project.yaml). Your role-specific constraints:
 
-- Writes: `LOG.md` (prepend), `findings/M<N>/EXP-<N>.md` (copy), `.claude/state/STATUS.md` (rewrite), optional `findings/M<N>/SUMMARY.md`, one line to `PROGRESS.md`. Nothing else.
+- Writes: `LOG.md` (prepend), `findings/M<N>/EXP-<N>.md` (copy), `.claude/state/STATUS.md` (rewrite), optional `findings/M<N>/SUMMARY.md`, one line to `PROGRESS.md`. On PASS, also: `runs/EXP-<N>/REPRODUCIBILITY.md` (regenerate from `resolved_params.txt`) and `runs/EXP-<N>/promote/<launcher>.sh` (the promotion artifact). Nothing else under `research/`.
 - If `runs/EXP-<N>/hotfix-patches/*.patch` exists: in-container commits were captured. List the patch filenames in the PR body under a `## In-container hotfixes` section so the human knows to `git am` them onto the merged branch before deploy.
 - Draft PRs open against **`project.yaml.github.code_repo`** (the fork `shamanez/verl`) with **`--base project.yaml.github.code_pr_base_branch`** (`vast-ai-workload`). NEVER `--base main` and NEVER `--repo verl-project/verl`. The research repo (`shamanez/verl-compression-research`) is for issue comments only — it never receives PRs.
 - Idempotent: re-running on the same EXP-<ID> must not duplicate entries. Check first, skip silently if present.
@@ -21,8 +21,9 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
 ### Inputs
 
 - `EXP-<ID>` (your prompt names this)
-- Plan: `.claude/plans/<ID>.md`
+- Plan: `.claude/plans/<ID>.md` (read `promote_launcher_as:` from its `## Code change` block)
 - Verdict: `runs/EXP-<ID>/verdict.md`
+- **Ground truth:** `runs/EXP-<ID>/resolved_params.txt` (the analyst's extracted real settings — the ONLY source for promoted values)
 
 ### Contract
 
@@ -73,6 +74,27 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
      notes:          AI-assisted research patch from EXP-<ID>; human must review and defend before merge.
      ```
    - **NEVER** pass `--repo verl-project/verl` or any upstream remote, and **NEVER** `--base main`. The protect-upstream hook and the harness contract forbid auto-PR upstream OR onto the upstream-tracking branch.
+
+6b. **Launcher promotion** (only if `VERDICT: PASS`) — land the proven settings in a canonical launcher carrying the EXACT values that ran. Derive everything from `runs/EXP-<ID>/resolved_params.txt`. NEVER from the plan or a hand-written manifest — that is how `anchor.cadence` drifted from 4 (real) to 5 (documented).
+   - If `runs/EXP-<ID>/resolved_params.txt` is missing, append `PROMOTE_BLOCKED: EXP-<ID> reason="no resolved_params.txt"` to PROGRESS.md and skip promotion (the analyst should have produced it; do not fabricate values).
+   - Read `promote_launcher_as:` from the plan. If `none`/missing, append `PROMOTE_SKIPPED: EXP-<ID> reason="no promote_launcher_as"` and skip — a human promotes manually.
+   - **(a) Regenerate the manifest from ground truth.** Rewrite `runs/EXP-<ID>/REPRODUCIBILITY.md` as a GENERATED file: every comm_eff + headline knob with its `resolved_params.txt` value, the run commit (`git rev-parse HEAD`), the verdict's headline metric, and the verbatim `resolved_cmd.txt`.
+   - **(b) Write the promotion artifact (always safe — under `research/`).** `runs/EXP-<ID>/promote/<promote_launcher_as>`: a self-contained `vast_*.sh` whose `export COMM_EFF_*` / batch-knob DEFAULTS equal the `resolved_params.txt` values, with a provenance header: `# validated by EXP-<ID> · <commit> · PASS · <headline metric> · derived from resolved_params.txt`. Append `PROMOTE_ARTIFACT_READY: EXP-<ID> path=runs/EXP-<ID>/promote/<promote_launcher_as>` to PROGRESS.md so the proven config is never lost even if the PR step fails.
+   - **(c) Open a draft PR carrying it into `examples/grpo_trainer/`** (base `code_pr_base_branch`). Use an `exp/*` head branch via a worktree so the parent checkout's branch is untouched:
+     ```bash
+     ROOT=$(git rev-parse --show-toplevel); WT=$(mktemp -d)
+     BR=exp/<ID>-promote          # or the runner's exp/<ID>-<slug> when code_change=true
+     git -C "$ROOT" worktree add -B "$BR" "$WT" vast-ai-workload
+     cp runs/EXP-<ID>/promote/<promote_launcher_as> "$WT/examples/grpo_trainer/<promote_launcher_as>"
+     git -C "$WT" add examples/grpo_trainer/<promote_launcher_as>
+     git -C "$WT" commit -s -m "promote: EXP-<ID> validated launcher (values from resolved_params.txt)"
+     git -C "$WT" push -u origin "$BR"
+     gh pr create --draft --repo "$REPO" --base "$BASE" --head "$BR" \
+       --title "[promote EXP-<ID>] <scenario> validated launcher" \
+       --body "Promotes the GROUND-TRUTH config of EXP-<ID> (PASS). Values derived from runs/EXP-<ID>/resolved_params.txt — headline knobs: <paste>. Verdict: runs/EXP-<ID>/verdict.md. Draft: human reviews the diff before this launcher becomes canonical."
+     git -C "$ROOT" worktree remove "$WT"
+     ```
+     If any git/`gh` step fails, the (b) artifact + PROGRESS flag stand on their own — append `PROMOTE_PR_FAILED: EXP-<ID>` and stop. Promotion must NEVER block the LOG/findings entries or silently drop the proven config.
 
 7. **Append PROGRESS line**: `echo "[$(date -Iseconds)] [log-writer #<ID>] logged verdict=<X> milestone=<M>" >> PROGRESS.md`.
 

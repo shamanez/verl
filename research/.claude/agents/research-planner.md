@@ -33,6 +33,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    - `budget_gpu_hr:`, `budget_dph_max:`, `gpu_filter:` — optional; fill defaults from `.claude/project.yaml.default_compute` if missing. Skip for `brainstorm` / `implementation` / `literature`.
    - `code_change: true|false` — auto-`true` for `kind: implementation`.
    - `target_modules:` — required when `code_change: true`. List of verl source paths.
+   - `promote_launcher_as:` — the canonical `examples/grpo_trainer/vast_*.sh` filename a PASS should promote into (log-writer derives it from `resolved_params.txt`, opens a draft PR). Default `none` for exploratory/throwaway probes. Set a concrete `vast_<scenario>_<model>_<algo>_<dataset>.sh` name when the issue's intent is to establish or update a reference config. See TEMPLATE §Code change + `examples/grpo_trainer/VAST_README.md` §"Stability contract".
    - `seed_replicates:`, `escalate_to_codex_if:`.
 
 3. Read any prior findings the issue references (e.g. `findings/M<N>/EXP-NN.md` paths) so the plan is grounded in known results. **Do NOT read any pinned background doc** (e.g. `verl/major-goal/...`). The planner is research-agnostic by contract — scope comes from the issue body.

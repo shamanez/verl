@@ -24,6 +24,55 @@ Each launcher:
    `run_qwen3_4b_fsdp.sh`) and overrides Hydra knobs via CLI. This keeps
    the upstream-mergeable surface narrow.
 
+## Stability contract: experiment sandbox vs. promoted launcher
+
+The whole point of this convention is that, after dozens of experiments, you
+can still answer *"what were the real settings that worked?"* in one place.
+Two zones, one direction of flow:
+
+| Zone | What lives here | Stability |
+|---|---|---|
+| **Experiment sandbox** — `research/runs/EXP-<ID>/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
+| **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `vast-ai-workload`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
+
+**Canonical launcher + CLI overrides.** A run never re-types the baseline. It
+calls the canonical `vast_*.sh` and overrides only the knob(s) it's testing —
+either via the launcher's `${VAR:-default}` env vars or via Hydra args
+forwarded through the launcher's trailing `"$@"`. Example (issue-13 Test 2B):
+
+```bash
+COMM_EFF_MASK_RECOMPUTE=false EXPERIMENT_NAME=exp13-t2-cellB \
+  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
+  trainer.total_training_steps=10
+```
+
+Everything the baseline run used stays in one file; the run log records only
+the delta.
+
+### Provenance — the real settings are always captured
+
+Hand-written notes drift. **Real example:** the comm-eff baseline's
+`REPRODUCIBILITY.md` and this launcher's defaults both say
+`anchor.cadence=5 / delay_K=5`, but the validated PASS run actually used
+`4 / 4` (recovered from `train.log`). To stop this:
+
+- Every launcher runs under `set -x`, so `train.log` contains the fully
+  shell-expanded `python3 -m verl.trainer.main_ppo …` command.
+- The analyst runs `research/scripts/capture_resolved_config.py runs/EXP-<ID>`
+  on **every** completed run, emitting `resolved_params.txt` (Hydra last-wins,
+  one `key=value` per line) + `resolved_cmd.txt`. That file — not prose — is
+  the source of truth for what ran, and the verdict pastes its headline knobs.
+
+### Promotion (auto-propose on PASS, human-merge)
+
+When a run PASSes, `log-writer` **derives the promoted launcher's parameters
+from `resolved_params.txt`** (never from the plan or a manifest), regenerates
+the run's `REPRODUCIBILITY.md` from it, and opens a **draft** PR (base
+`vast-ai-workload`) so a human reviews the exact diff before it becomes
+canonical. A proven config thus lands in `examples/grpo_trainer/` carrying the
+exact values that worked, plus a provenance header (EXP-ID, commit, verdict,
+headline metric). Draft = nothing becomes canonical without your merge.
+
 ## How this composes with the harness
 
 The `verl-research-vllm020` vast.ai Template (in

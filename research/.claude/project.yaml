@@ -80,6 +80,17 @@ default_baseline:                                             # the reference a 
   launcher: examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh   # what produced runs/communication-baseline/
   dense_control: baseline                                     # the verl-unmodified dense reference (runs/baseline/) — name it explicitly with `baseline_run: baseline` when a dense comparison is wanted
 
+launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
+  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, branch vast-ai-workload)
+  naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
+  override_model: canonical-launcher + CLI/env overrides      # a run calls the canonical launcher and overrides only the knobs it varies (${VAR:-default} env vars + Hydra "$@" passthrough) — never re-types the baseline
+  sandbox: research/runs/EXP-<ID>/                            # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth
+  promotion: auto-propose-on-PASS                             # log-writer opens a DRAFT PR (base vast-ai-workload) baking the proven values into a canonical launcher; human merges
+  provenance:                                                 # "what settings actually ran" must never be lost to drift
+    capture_script: research/scripts/capture_resolved_config.py
+    artifact: resolved_params.txt                             # Hydra last-wins key=value, extracted from train.log set -x trace; ground truth, NOT the plan or a manifest
+    rule: "promotion + manifests derive from resolved_params.txt, never from prose"
+
 codex:
   # The codex CLI is an OPERATOR-INVOKED tool, not an autonomous-harness dependency.
   # The orchestrator does NOT dispatch codex; the operator runs it manually as part

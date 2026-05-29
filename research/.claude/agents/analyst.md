@@ -39,6 +39,12 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
    ```
    Capture stdout/stderr into `runs/EXP-<ID>/analysis.log`.
 
+3b. **Capture the ground-truth resolved parameters** (provenance — runs on PASS, REVISE, *and* STOP so the real settings are never lost):
+   ```bash
+   python research/scripts/capture_resolved_config.py runs/EXP-<ID>
+   ```
+   This writes `runs/EXP-<ID>/resolved_params.txt` (one `key=value` per line, Hydra last-wins) and `resolved_cmd.txt` (the verbatim expanded `main_ppo` command) by parsing the launcher's `set -x` trace in `train.log`. These are the single source of truth for "what actually ran" — hand-written manifests and plan tables drift from reality (the comm-eff baseline's manifest said `anchor.cadence=5`; the run truly used `4`). If the script can't find a `main_ppo` invocation, append `RESOLVED_CONFIG_MISSING: EXP-<ID>` to PROGRESS.md and continue — but flag it in the verdict Notes, because a run whose real parameters can't be recovered is not reproducible.
+
 4. **Compute the verdict** by applying the plan's predicate to the success-criteria checkboxes:
    - PASS iff every criterion in `## Success criteria` is satisfied.
    - REVISE if some criteria fail but a concrete next ablation could fix it. List 1–3 `next_actions:` entries — each is a yaml object like `{ knob: tau_p, from: 1e-3, to: 1e-4, rationale: "spectral filter too aggressive" }`.
@@ -62,6 +68,13 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 
    ## Comparisons to baseline_run: <EXP-NN | none>
    <one-paragraph or one-table comparison; empty if baseline=none>
+
+   ## Resolved parameters (ground truth)
+   Source: `resolved_params.txt` (extracted from train.log, NOT the plan).
+   Paste the comm-eff + headline-knob lines verbatim here so the verdict is
+   self-contained. Call out ANY divergence between what the plan/issue
+   specified and what actually ran (e.g. plan said `anchor.cadence=5`,
+   run used `4`) — that divergence is itself a finding.
 
    ## next_actions (REVISE only)
    - knob: <name>

@@ -168,13 +168,23 @@ if [[ -f exp.bundle ]]; then
   uv pip install --no-deps -e . > /workspace/pip.log 2>&1
 fi
 
-cd /workspace/runs/EXP-<ID>
-# Cross-product cell index from the tmux session name, if you launch multi-cell.
-python -m <plan-specified-entrypoint> --config config.yaml \
-  --output_dir /workspace/runs/EXP-<ID>/metrics \
-  > train.log 2>&1
+cd /workspace/verl
+# PREFER THE CANONICAL LAUNCHER + CLI/ENV OVERRIDES (see examples/grpo_trainer/VAST_README.md
+# §"Stability contract"). When a vast_*.sh launcher already exists for this scenario, call it
+# and override ONLY the knobs this cell varies — via its ${VAR:-default} env vars and/or Hydra
+# args forwarded through its trailing "$@". This keeps the baseline in one file and makes the
+# run's delta auditable. Only fall back to a bare `python -m verl.trainer.main_ppo` for a brand-new
+# scenario that has no promoted launcher yet (and expect that run to be promoted on PASS).
+#
+# The launcher runs under `set -x`, so train.log records the fully-expanded main_ppo command —
+# that trace is what the analyst extracts into resolved_params.txt (the ground-truth settings).
+COMM_EFF_ANCHOR_CADENCE=<cell-value> EXPERIMENT_NAME=exp-<ID>-<cell> \
+  bash examples/grpo_trainer/<canonical-launcher>.sh \
+  <hydra.key=value overrides for this cell> \
+  > /workspace/runs/EXP-<ID>/train.log 2>&1
 echo "$(date -Iseconds) done" > /workspace/runs/EXP-<ID>/done.flag
 ```
+The plan's `## Experiment design` lists each cell's overrides; the plan's `promote_launcher_as:` field (TEMPLATE §Code change) names the canonical launcher this scenario maps to. If the plan declares no launcher and none exists, inline `python -m verl.trainer.main_ppo … "$@"` under `set -x` so the resolved command is still traceable.
 
 ### commit-hotfix.sh template (you write this per experiment — Vast volatility safety)
 

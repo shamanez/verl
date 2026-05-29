@@ -182,9 +182,12 @@ python research/scripts/diff_against_baseline.py runs/EXP-<ID> --baseline <basel
 code_change: false                 # if true, runner branches exp/<ID>-<slug> from origin/vast-ai-workload (NEVER from main — main tracks upstream)
 target_modules:                    # only meaningful when code_change=true
   - verl/<path>/<module>.py
+promote_launcher_as: none          # on PASS, log-writer derives THIS canonical launcher from resolved_params.txt and opens a draft PR into examples/grpo_trainer/. `none` = no promotion (human promotes manually). Name e.g. vast_<scenario>_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
 If `code_change: true`, the human operator reviews the plan before flipping `status:planned → status:approved` (optionally invoking `codex-verify` manually on the plan). The runner is the only agent allowed to write under `verl/`, and only while on an `exp/*` branch inside its worktree.
+
+`promote_launcher_as` is the stability valve (see `examples/grpo_trainer/VAST_README.md` §"Stability contract"): the experiment sandbox stays volatile, but a PASS auto-proposes the proven config — taken from `resolved_params.txt`, never from this plan's prose — into a named canonical launcher via a draft PR a human merges. Leave `none` for throwaway probes; set it once a scenario's config is meant to become the reference.
 
 ## Dependencies
 ```yaml
