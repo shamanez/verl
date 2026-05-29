@@ -126,6 +126,20 @@ echo "=== env overrides: ${ENV[*]} ==="
 # Run the canonical comm-eff launcher under `set -x` tracing (the launcher itself
 # enables it via run_qwen3_4b_fsdp.sh) with the per-cell env in front. The fully
 # expanded main_ppo command lands in $LOG for resolved_params.txt extraction.
-env "${ENV[@]}" bash "$LAUNCHER"
+#
+# EXTRA_HYDRA_ARGS: optional space-separated Hydra overrides appended to the
+# launcher's trailing "$@" (Hydra last-wins). Used here ONLY to select an
+# attention backend that does not require the (still-building) flash_attn pkg:
+#   actor_rollout_ref.model.use_remove_padding=False
+#   actor_rollout_ref.model.override_config.attn_implementation=sdpa
+# These are passed params, NOT a verl source edit. Empty by default => canonical
+# (flash-attn) config once flash_attn is available.
+read -r -a _EXTRA <<< "${EXTRA_HYDRA_ARGS:-}"
+if (( ${#_EXTRA[@]} )); then
+  echo "=== EXTRA_HYDRA_ARGS: ${_EXTRA[*]} ==="
+  env "${ENV[@]}" bash "$LAUNCHER" "${_EXTRA[@]}"
+else
+  env "${ENV[@]}" bash "$LAUNCHER"
+fi
 
 echo "=== EXP-16 cell $CELL done at $(date -u +%FT%TZ) ==="
