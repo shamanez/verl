@@ -15,6 +15,7 @@ project:
   name: verl-compression-research
   description: Communication-efficient pipeline-adaptation research on verl GRPO + GSM8K.
   major_goal_dir: ../major-goal/        # human-only reference (research/<-./major-goal/>); agents must not read it
+  north_star_doc: .claude/GOAL.md       # agent-READABLE restatement of the big goal (operator-approved); agents may read this instead of major_goal_dir
 
 workspace:
   working_dir: /Users/shamane/Documents/verl/research/
