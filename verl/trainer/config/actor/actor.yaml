@@ -343,6 +343,16 @@ comm_eff:
     # p < 1). Mirrors CommEffMaskConfig.rescale.
     rescale: false
 
+    # Magnitude-restoration scheme applied to h*mask (overrides `rescale` unless
+    # "auto"). Switchable, non-destructive:
+    #   none      -> h*mask                                  (raw; == rescale:false)
+    #   constant  -> h*mask/(1-p)                            (inverted dropout; == rescale:true)
+    #   rms_match -> h*mask * detach(rms_true/rms_masked)    (per-token EXACT RMS match: the
+    #                downstream pre-norm RMSNorm then divides by the TRUE pre-mask RMS ->
+    #                benign 1/RMS backward. Needs a 1-float/token RMS side channel ~0.6% comms.)
+    #   auto      -> derive from `rescale` (true->constant, false->none).
+    rescale_mode: auto
+
   # Asynchronous unmasked-anchor-circuit sub-config (inert while enabled=false).
   # Field names match CommEffAnchorConfig (EXP-8 schema, picked up by EXP-12).
   anchor:
@@ -372,6 +382,10 @@ comm_eff:
 
     # Whether spectral correction runs (gated by the parent comm_eff.enabled)
     enabled: false
+    # EXP-16 spectral-correction cadence in optimizer steps. 1 = fire every
+    # step (pre-EXP-16 behavior; strict no-op default). Validated >= 1.
+    # Mirrors anchor.cadence; set == anchor.cadence so corrections use a fresh basis.
+    cadence: 1
 
     # Blend coefficient in [0,1]: G_proj = alpha*G_mask + (1-alpha)*G_filt.
     # 1.0 => exact no-op; 0.0 => pure two-sided Tikhonov projection.
