@@ -78,6 +78,7 @@ class CommEffMaskConfig(BaseConfig):
     pp_size: int = 8
     mask_recompute: bool = False
     rescale: bool = False
+    rescale_mode: str = "auto"
 
 
 @dataclass
@@ -184,12 +185,24 @@ class CommEffSpectralConfig(BaseConfig):
             ``correct_matrix`` as the pre-EXP-8 code did). The basis is touched
             every fast mini-batch, so it stays on-GPU during the refresh window
             regardless. Validated against {cache, recompute}.
+        cadence (int): EXP-16 spectral-correction cadence in optimizer steps.
+            The grad-correction hook (``_maybe_comm_eff_grad_correction``) fires
+            only when ``(spectral_step % cadence) == 0`` on the monotonic
+            per-optimizer-step counter, MIRRORING the anchor cadence
+            (``anchor_should_fire``) and the clean-step cadence
+            (``CommEffState.is_clean_step``). ``1`` (default) fires EVERY step =
+            the pre-EXP-16 behavior, so every prior method config and the
+            disabled path are a STRICT no-op. Set ``> 1`` (e.g. ``2``) to align
+            spectral correction with a matching ``anchor.cadence`` so the
+            correction always uses a freshly-refreshed anchor basis instead of a
+            stale one on the in-between steps. Must be ``>= 1``.
     """
 
     enabled: bool = False
     alpha: float = 0.3
     tau: float = 1e-3
     beta_anc: float = 0.95
+    cadence: int = 1
     seed_anchor_cache: bool = True
     anchor_seed: int = 0
     target_substr: list = field(
@@ -302,6 +315,12 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.spectral.tau must be > 0; got {self.spectral.tau}")
         if not 0.0 <= self.spectral.beta_anc <= 1.0:
             raise ValueError(f"comm_eff.spectral.beta_anc must be in [0, 1]; got {self.spectral.beta_anc}")
+        # EXP-16 spectral-correction cadence. 1 = fire every step (the pre-EXP-16
+        # behavior, so every prior config and the disabled path stay a strict
+        # no-op). A value < 1 is a config error (it would never fire), not a
+        # silent disable — mirrors the anchor.cadence >= 1 contract above.
+        if self.spectral.cadence < 1:
+            raise ValueError(f"comm_eff.spectral.cadence must be >= 1; got {self.spectral.cadence}")
         # EXP-8 anchor cadence/staleness (replaces the unused EXP-4 ema_decay).
         if self.anchor.cadence < 1:
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
