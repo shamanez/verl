@@ -33,9 +33,16 @@ import datasets
 
 # Prompt instructs \boxed{} output; reward verifier must extract \boxed{}.
 INSTRUCTION = "Let's think step by step and output the final answer within \\boxed{}."
-# "math_bigmath" routes to math_reward.compute_score wrapped to return {score: ±1, acc: bool}.
-# See verl/utils/reward_score/__init__.py for the routing entry.
-DATA_SOURCE = "math_bigmath"
+# data_source is a ROUTING KEY (not the literal HF id). "DigitalLearningGmbH/MATH-lighteval"
+# routes to math_reward.compute_score (last \boxed{} over the full solution + is_equiv
+# normalised comparison), returning a plain float 0.0/1.0. This mirrors the proven
+# min_rl_add recipe (examples/data_preprocess/math_dataset.py + examples/min_rl_trainer/
+# run_llama3.2_1b_minrl.sh, exp "big-math-minirl-...-mathstyle").
+# Do NOT use "math_bigmath": that custom entry returned {"pred": None}, and verl's
+# process_validation_metrics does np.mean over every reward-extra key -> np.mean([None,...])
+# -> "NoneType / int" TypeError that crashes val_before_train. A float return carries no
+# "pred" key, so validation aggregation is safe (string preds are skipped; None is not).
+DATA_SOURCE = "DigitalLearningGmbH/MATH-lighteval"
 
 
 def make_map_fn(split: str):

@@ -4,8 +4,11 @@
 #
 # Purpose: stress-test the EXP-17 comm-eff config (per-(token,channel) mask p=0.9,
 # rescale ON, clean_cadence=20, anchor+spectral OFF) on gshasiri/Big-Math-RL-Verified-filtered
-# (verl parquet at /root/data/bigmath, data_source=math_dapo => \boxed{} reward) to see
-# whether COLLAPSE/divergence appears on a much harder math distribution than GSM8K.
+# (verl parquet at /root/data/bigmath, data_source=DigitalLearningGmbH/MATH-lighteval =>
+# math_reward \boxed{} verifier with is_equiv normalization) to see whether COLLAPSE/divergence
+# appears on a much harder math distribution than GSM8K.
+# NOTE: v2 — the first attempt used data_source=math_dapo whose default verifier scrapes for
+# an "Answer:" token (not \boxed{}), producing a confounded/biased reward; fixed to math_reward.
 #
 # Pure-config + new dataset; NO method patch (same launcher knobs as EXP-17).
 set -euo pipefail
@@ -24,7 +27,7 @@ LOG_PROB_MAX_TOKEN_LEN_PER_GPU=98304 \
 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=98304 \
 DATA_DIR=/root/data/bigmath \
 PROJECT_NAME=verl_compression_research \
-EXPERIMENT_NAME=grpo_mask_p0p9_clean20_bigmath_collapse \
+EXPERIMENT_NAME=grpo_mask_p0p9_clean20_bigmath_collapse_v2 \
 COMM_EFF_ENABLED=true COMM_EFF_MASK_ENABLED=true COMM_EFF_MASK_P=0.9 \
 COMM_EFF_MASK_RESCALE=true COMM_EFF_MASK_RECOMPUTE=true \
 COMM_EFF_CLEAN_CADENCE=20 COMM_EFF_ANCHOR_ENABLED=false COMM_EFF_SPECTRAL_ENABLED=false \
