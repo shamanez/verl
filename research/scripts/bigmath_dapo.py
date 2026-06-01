@@ -1,11 +1,17 @@
 """Preprocess gshasiri/Big-Math-RL-Verified-filtered to verl parquet format.
 
-Mirrors examples/data_preprocess/gsm8k.py's row schema, but routes the reward to
-verl's DAPO math verifier (data_source="math_dapo" -> math_dapo.compute_score),
-which extracts the last \\boxed{...} from the model output and does a normalized
-LaTeX/numeric comparison against the verified ground-truth answer. This is the
-robust, established math-RL reward (GSM8K's "#### <num>" regex is numeric-only and
-would mis-grade Big-Math's diverse answers).
+Mirrors examples/data_preprocess/gsm8k.py's row schema, routing the reward to
+"math_bigmath" (verl.utils.reward_score.__init__ -> math_reward.compute_score).
+math_reward pulls the last \\boxed{} from the full solution string (no truncation)
+and checks it with is_equiv (normalized LaTeX/numeric equivalence: 1/2 == \\frac{1}{2}).
+The routing wrapper maps the 0/1 float to a {score: ±1, acc: bool} dict so WandB
+metrics are consistent with GSM8K runs.
+
+Do NOT use data_source="math_dapo" for Big-Math: math_dapo's default verify path is
+is_correct_minerva, which searches for an "Answer:" regex token and ignores \\boxed{}.
+It only accidentally scores +1 when a very short numeric answer appears in the last
+300-char tail AND the normalization round-trip happens to be lossless. Confirmed broken
+on 2026-06-01 (EXP-18: all rollouts scored -1.0 despite correct \\boxed{} outputs).
 
 Source columns: problem (str), answer (str, verified final answer), source,
 domain (list), llama8b_solve_rate (float, difficulty proxy; lower = harder).
@@ -25,9 +31,11 @@ import os
 
 import datasets
 
-# DAPO/MATH-style instruction — the reward extracts the final \boxed{} answer.
+# Prompt instructs \boxed{} output; reward verifier must extract \boxed{}.
 INSTRUCTION = "Let's think step by step and output the final answer within \\boxed{}."
-DATA_SOURCE = "math_dapo"  # routes to verl.utils.reward_score.math_dapo.compute_score
+# "math_bigmath" routes to math_reward.compute_score wrapped to return {score: ±1, acc: bool}.
+# See verl/utils/reward_score/__init__.py for the routing entry.
+DATA_SOURCE = "math_bigmath"
 
 
 def make_map_fn(split: str):
