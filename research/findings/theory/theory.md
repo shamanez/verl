@@ -326,6 +326,42 @@ projection onto g_true (eq. 6 averaged), AND the clean step fires often enough t
 accumulated bias never rotates that projection negative before the next reset.
 clean@20 satisfies this on GSM8K. **[INFERENCE]**
 
+### B.5 Connection to the literature, and a stronger mechanism for the sawtooth's stability. [grounding + INFERENCE]
+
+The error-feedback analogy is corroborated and, importantly, **sharpened** by
+recent RLVR-specific results (`literature.md` tags):
+
+- **The strongest mechanism — RLVR is near-rank-1 (B4 RELEX, B5 Linear-RLVR).**
+  These document that RLVR's *entire* parameter-space trajectory is approximately
+  rank-1 (a single dominant update direction; R²>0.7 weight/logprob linearity), and
+  that **high training-signal variance acts as a low-pass filter that *enforces*
+  this linearity.** This gives a cleaner, more robust account of why the sawtooth
+  does not diverge than my curvature-accumulation argument alone: the 19 masked
+  steps are **noisy projections of the same 1-D capability direction**, so masking
+  corrupts mostly the *magnitude/phase* along that line (which rescale and Adam
+  handle) rather than rotating *off* it; the clean step re-defines the 1-D
+  direction every 20 steps. If the trajectory is genuinely rank-1, the windowed
+  projection (6) is structurally protected — there is essentially one direction for
+  the bias to be projected onto. **This is now my primary mechanism for B; the
+  curvature-bias-accumulation picture (B.4) is the second-order refinement on top.**
+  **[INFERENCE — contingent on the rank-1 claim transferring to our masked setting;
+  the B5 prediction that *more* masking → *more* enforced linearity is directly
+  testable.]**
+- **EF21 / total-error-minimization (C1, C2):** the clean step as a periodic
+  error-accumulator reset is exactly C2's "balance compression error across
+  iterations" optimality picture; C1 supplies the convergence framework (with the
+  A.5 caveat that our gradient bias must fit inside the contraction constant).
+- **The clean step does ≥3 jobs, not one (A2, C9).** (i) Error-accumulator reset
+  (C2). (ii) It re-anchors the rank-1 direction (B4/B5). (iii) **C9 (Mroueh 2025)**:
+  GRPO's success-amplification recurrence converges to a fixed point *above the
+  reference policy* as long as the reward has nonzero correlation with the true
+  advantage — *independent of gradient quality* — giving a lower bound that the
+  masked windows alone cannot fall below. (iv) **A2 (Chen et al., ICLR 2026)**: the
+  clip bias compresses entropy toward high-prior modes *every* step (our
+  `pg_clipfrac≈0.03` is active on masked steps too), so even masked windows do
+  *some* directional work via clip bias — which is itself a partial explanation for
+  within-window reward rise (the empiricist's P1 test). **[grounding]**
+
 ---
 
 ## C. Why GSM8K parity but Big-Math stall? Elicitation tolerates a lossy gradient; learning does not.
@@ -367,8 +403,16 @@ to what each task demands**.
 ### C.2 Elicitation vs learning: a signal-to-noise argument. [INFERENCE — the core claim]
 
 Frame both tasks through condition (6) and the structure of what RLVR does to a
-**Qwen base model** (lit-scout to supply the "RLVR elicits not teaches" + spurious-
-reward citations; the mechanism here stands on its own):
+**Qwen base model**. The mechanism stands on its own and is strongly corroborated by
+the literature (`literature.md`): **B1 (Yue et al., NeurIPS 2025 Oral)** gives the
+minimal *sufficient* condition — RLVR cannot learn if the base produces zero correct
+rollouts (0/1 reward → no gradient); all RL-found solutions already live in the
+base's sampling distribution (pass@1 ↑, pass@k flat). **A3 (1-shot RLVR, NeurIPS
+2025)** and **A1 (Spurious Rewards)** show a single example or even *random* rewards
+elicit latent Qwen-math capability — i.e. easy tasks need almost no gradient
+*content*. The masked gradient is just a further-degraded signal, which tightens
+B1's sufficient condition into a *necessary* one for us: the task must be elicitable
+enough that even a corrupted gradient raises pass@1.
 
 **GSM8K is an ELICITATION task for this model.** The base eval settles this
 quantitatively: Qwen2.5-1.5B-Instruct **already solves 71.5% of GSM8K with zero RL**
@@ -410,6 +454,20 @@ steps cannot, by themselves, *learn a new capability* (dense needs hundreds of
 plus weakly-correlated masked windows suffice because the task only needed
 elicitation. **[INFERENCE — this is the central thesis of C.]**
 
+**This SNR argument is made quantitative by C4 (Kolomvaki et al. 2026):** an NTK
+analysis of masked-input training shows linear convergence *to an error region whose
+floor scales with the mask variance* `∝ p/(1−p) ≈ 9`. Reading C4 into our setting:
+the masked error floor is a fixed, task-independent quantity; GSM8K's achievable
+gain (the +0.02 headroom on top of an already-dominant 0.715 mode) sits *above* that
+floor → reachable; Big-Math's achievable gain (dense extracts only ~+0.06, slowly)
+plausibly sits *below* the masked error floor → unreachable, hence the flat stall.
+**B6 (Unlearnability, ICML 2026)** is the complementary statement in
+gradient-similarity terms: hard examples have low gradient similarity to the
+training distribution and are unlearnable even with correct rollouts present; masking
+lowers the already-weak SNR further. C4 and B6 are two views (variance floor vs
+gradient-similarity) of the same SNR collapse. **[INFERENCE, now quantitatively
+anchored]**
+
 Compact statement: **the masked gradient destroys high-frequency, low-amplitude
 gradient information and preserves low-frequency, high-amplitude information.**
 Elicitation lives in the low-frequency/high-amplitude band (sharpen the dominant
@@ -434,6 +492,58 @@ If C.2 is right, three predictions follow (hand these to empiricist / future run
   threshold p\* below which Big-Math starts to climb. GSM8K should be insensitive to
   p down to high values (elicitation is robust). **[predicted; the p-sweep in
   SUMMARY.md's open question is the test.]**
+
+### C.4 Two alternative hypotheses I cannot rule out (intellectual honesty). [SPECULATION / confounders]
+
+The elicitation story (C.2) is the best fit, but two literature-grounded
+alternatives are *consistent with the same data* and must be flagged for the
+synthesizer rather than waved away:
+
+1. **Memorization-shortcut, not elicitation (A5, Spurious Rewards Paradox, Yan et
+   al. 2026).** A5 argues Qwen2.5's apparent RLVR gains can be *circuit-level
+   memorization retrieval* — a "Functional Anchor" at **layers L18–20** retrieving
+   memorized solutions, "Structural Adapters" at **L21+** — not genuine reasoning,
+   evidenced by a perplexity paradox (answer-token ppl drops while prompt coherence
+   degrades). **Two things make this a live confounder for us, one of which is
+   striking:** (a) our masked model has a *huge* train-inference perplexity gap
+   (`training_log_ppl≈17` vs `rollout_log_ppl≈0.31`), superficially the same family
+   of perplexity anomaly A5 fingerprints (though ours is provably a mask artifact,
+   not weight memorization — it resets at every clean step); and (b) **two of our 7
+   masked boundaries are layers 18 and 21** (`[3,7,11,15,18,21,24]`) — *exactly* the
+   layers A5 identifies as the memorization-retrieval circuit. If A5's mechanism is
+   real, masking at L18/L21 would specifically perturb the retrieval circuit, and
+   the GSM8K-tolerance / Big-Math-stall split is *also* explainable as "memorization
+   retrieval survives a corrupted gradient (GSM8K has memorizable templates) but
+   competition math has no template to retrieve." **This does NOT invalidate the
+   communication-efficiency result** — validation is on the true unmasked weights, so
+   whatever mechanism produces 0.735 is the real deployed behavior — but it means
+   "the masked gradient elicits a *reasoning* capability" is *not established*; it
+   could be eliciting a retrieval shortcut. The two are observationally equivalent at
+   our measurement resolution. **[SPECULATION — genuine alternative; the L18/L21
+   overlap is a concrete, testable hook, not decoration.]**
+
+2. **Skill-sharpening, not pure elicitation (B2, Wang et al. 2026).** B2 argues RLVR
+   *does* teach: it sharpens atomic-step probabilities so multi-step chains stop
+   decaying exponentially. Under pure elicitation, the clean step's *direction*
+   barely matters (any positive push helps); under skill-sharpening, the clean
+   step's direction is **load-bearing**. The historical EXP-16 evidence cuts toward
+   B2 on a fine scale: **mask-only stalls (0.13→0.15) but clean@4 unlocks
+   convergence (→0.62)** — i.e. the clean step provides *directional* information the
+   masked windows cannot, which is more than "any push helps." So the honest
+   position is a **spectrum**: GSM8K sits near the elicitation end (coarse gradient
+   suffices), Big-Math near the genuine-learning end (precise gradient required), and
+   the clean step's direction matters *more* as you move toward the learning end.
+   This is fully compatible with the SNR argument (C.2) — it just refines "coarse
+   direction suffices" into "the *required directional precision* rises with task
+   difficulty, and that is exactly the axis the mask degrades." **[INFERENCE —
+   strengthens rather than threatens C, but corrects an over-strong reading of "pure
+   elicitation."]**
+
+**Net for C:** the SNR/error-floor mechanism (C.2, C4/B6) is robust and
+quantitative. Whether the *thing being elicited* on GSM8K is reasoning or retrieval
+(A5) is unresolved at 1.5B scale and does not affect the comms-efficiency claim. The
+elicitation-vs-learning framing should be stated as a **spectrum of required
+gradient precision** (B2), not a binary. **[the calibrated conclusion]**
 
 ---
 
@@ -463,12 +573,31 @@ not a missing-headroom artifact — the cleanest possible separation of the two.
 ---
 
 ## Open coordination items
-- **empiricist:** confirm (a) EXP-17 vs EXP-19 clean steps are equivalently healthy
-  (asked); (b) P1 — does GSM8K reward rise *within* masked windows while Big-Math is
-  flat between clean steps? This is the direct test of condition (6)/(SNR) and the
-  load-bearing evidence for C.2.
-- **lit-scout:** citations for (A) dropout-as-regularizer curvature bias (Wager
-  2013), DropConnect (Wan 2013), sketched/sparsified SGD; (B) error-feedback
-  (Karimireddy 2019), Local-SGD (Stich 2018), SVRG (Johnson&Zhang 2013); (C) RLVR-
-  elicits-not-teaches + spurious/1-shot rewards on Qwen. theory.md cites
-  literature.md by tag.
+- **empiricist (still open, load-bearing for C.2):** P1 — does GSM8K reward rise
+  *measurably within* masked windows (between consecutive clean steps) while Big-Math
+  is flat between clean steps? Direct test of condition (6)/(SNR). [base-eval +
+  clean-step-health already delivered and folded in.]
+- **empiricist (new, from A5 confounder):** the A5 memorization-shortcut hypothesis
+  predicts our EXP-17 masked model should have *lower pass@k at k≥128* than dense
+  EXP-16 on the same val set (elicitation/retrieval, not new capability). Testable
+  from existing checkpoints if available. Also: does masked GSM8K show increased
+  code-reasoning frequency (A1's amplification channel)?
+- **lit-scout (DELIVERED):** `literature.md` complete; citations folded into A.5,
+  B.5, C.2, C.4. Key load-bearing tags now cited: C3/C10 (estimator class), C1/C2
+  (error-feedback), B4/B5 (rank-1 trajectory — now my primary B mechanism), C9/A2
+  (clean step does multiple jobs), B1/A1/A3 (elicitation), C4/B6 (SNR error floor),
+  A5/B2 (the two alternative hypotheses in C.4).
+
+## Caveats / what would change the conclusions
+- The **rank-1-trajectory** mechanism (B.5) is contingent on B4/B5's rank-1 finding
+  transferring to our *masked* setting; if masking rotates the update *off* the rank-1
+  line (rather than perturbing magnitude along it), B.5 weakens and the
+  curvature-accumulation picture (B.4) carries more weight. B5's prediction (more
+  masking → more enforced linearity) is the test.
+- The **A5 memorization-vs-reasoning** question is unresolved at 1.5B scale and the
+  L18/L21 mask-boundary overlap is suggestive but not proof. It does not affect the
+  *comms-efficiency* claim (validation is on true weights) but it does bound how
+  strongly we may claim "elicits reasoning."
+- The masked **gradient is not a literal EF21 compressor** (A.5): convergence
+  theory frames but does not prove our case; the curvature bias must fit inside the
+  contraction constant, which is exactly the task-dependent SNR question (C).
