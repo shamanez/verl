@@ -19,9 +19,15 @@ cd /workspace/verl
 
 mkdir -p /workspace/runs/EXP-20
 
-PPO_MAX_TOKEN_LEN_PER_GPU=98304 \
-LOG_PROB_MAX_TOKEN_LEN_PER_GPU=98304 \
-REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=98304 \
+# Token budget 32768 (not 98304): the ALL-DENSE path has higher peak activation
+# memory than EXP-19's masked path (mask_recompute lowers peak); on 143GB H200 the
+# dense update left too little for vLLM KV-cache wake_up -> CUDA OOM at step 18.
+# 32768 (> 17408 = max single seq, so dynamic-bsz still valid) lowers peak. This is a
+# packing/perf knob, NOT a learning hyperparam (effective batch 128/64/n8 unchanged),
+# so the masked-vs-dense comparison is unaffected.
+PPO_MAX_TOKEN_LEN_PER_GPU=32768 \
+LOG_PROB_MAX_TOKEN_LEN_PER_GPU=32768 \
+REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=32768 \
 DATA_DIR=/root/data/bigmath \
 PROJECT_NAME=verl_compression_research \
 EXPERIMENT_NAME=grpo_dense_bigmath_baseline \
