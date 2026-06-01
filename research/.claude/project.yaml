@@ -51,8 +51,8 @@ source_tree:                                                  # the upstream cod
 
 vast_template:                                                # the locked Vast.ai docker template the runner provisions
   name: verl-research-vllm020
-  hash: 6485b9625ddd6d25a5f2f09b9f7fde17
-  id: 435160
+  hash: 3b0f8b726ac3036d6c007bfa13b6d75f
+  id: 447527
   image: verlai/verl:vllm020.dev1
   bundled_torch: 2.11.0+cu130
   bundled_vllm: 0.20.2

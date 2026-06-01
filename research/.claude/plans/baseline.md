@@ -23,7 +23,7 @@
 
 ## Hypothesis
 
-A clean dense GRPO baseline of **Qwen2.5-1.5B-Instruct** on **GSM8K** runs end-to-end on a Vast.ai multi-GPU instance (**4..8 H100/H200**, never single-GPU), provisioned from the locked `verl-research-vllm020` template (hash `6485b9625ddd6d25a5f2f09b9f7fde17`) which auto-clones `shamanez/verl @ vast-ai-workload` and pip-installs verl editable. The launcher `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (committed on that branch) runs **2 epochs over the GSM8K train split** (~7.5K prompts, ~117 GRPO optimizer steps total) with rollout `n=8`, prompt context `1024`, response context up to `16384`, global train batch `128`, PPO mini-batch `64`, dynamic-token-batched microbatching (`ppo_max_token_len_per_gpu=36864`), FSDP without offload, gradient checkpointing on, vLLM TP=2, validating on the GSM8K test split every 25 steps. Falsifiable thresholds (all must hold): within **12 hours wall-clock** and under **$60 total Vast.ai spend**, the run completes both epochs with **no NaN/Inf in any loss/grad/reward field**, **`train/reward_mean` strictly increases by ≥ 0.05** between the first 25-step window and the final logged step, **`train/grad_norm` median over the run < 5.0**, and **`val/test_score` improves by ≥ +0.05** (5 percentage points pass@1) between step 0 and the final eval. WandB logs the full curve under project `verl_compression_research` / experiment `qwen25_1p5b_grpo_gsm8k_baseline`. This produces the dense reference curve later compression experiments overlay against. **Not a smoke test.**
+A clean dense GRPO baseline of **Qwen2.5-1.5B-Instruct** on **GSM8K** runs end-to-end on a Vast.ai multi-GPU instance (**4..8 H100/H200**, never single-GPU), provisioned from the locked `verl-research-vllm020` template (hash `3b0f8b726ac3036d6c007bfa13b6d75f`) which auto-clones `shamanez/verl @ vast-ai-workload` and pip-installs verl editable. The launcher `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (committed on that branch) runs **2 epochs over the GSM8K train split** (~7.5K prompts, ~117 GRPO optimizer steps total) with rollout `n=8`, prompt context `1024`, response context up to `16384`, global train batch `128`, PPO mini-batch `64`, dynamic-token-batched microbatching (`ppo_max_token_len_per_gpu=36864`), FSDP without offload, gradient checkpointing on, vLLM TP=2, validating on the GSM8K test split every 25 steps. Falsifiable thresholds (all must hold): within **12 hours wall-clock** and under **$60 total Vast.ai spend**, the run completes both epochs with **no NaN/Inf in any loss/grad/reward field**, **`train/reward_mean` strictly increases by ≥ 0.05** between the first 25-step window and the final logged step, **`train/grad_norm` median over the run < 5.0**, and **`val/test_score` improves by ≥ +0.05** (5 percentage points pass@1) between step 0 and the final eval. WandB logs the full curve under project `verl_compression_research` / experiment `qwen25_1p5b_grpo_gsm8k_baseline`. This produces the dense reference curve later compression experiments overlay against. **Not a smoke test.**
 
 ## Background pointers
 - prior findings: (none) — this is the first real experiment on the harness
@@ -32,7 +32,7 @@ A clean dense GRPO baseline of **Qwen2.5-1.5B-Instruct** on **GSM8K** runs end-t
   - `examples/grpo_trainer/VAST_README.md` (vast-ai launcher conventions)
   - `research/.claude/skills/vast-provision/templates.json` (locked Vast.ai template registry)
   - `research/.claude/skills/vast-provision/SKILL.md` (`cuda_max_good>=13.0` rationale)
-  - Vast template `verl-research-vllm020` hash `6485b9625ddd6d25a5f2f09b9f7fde17` (image `verlai/verl:vllm020.dev1`, torch 2.11.0+cu130, vllm 0.20.2)
+  - Vast template `verl-research-vllm020` hash `3b0f8b726ac3036d6c007bfa13b6d75f` (image `verlai/verl:vllm020.dev1`, torch 2.11.0+cu130, vllm 0.20.2)
 
 ## Experiment design
 ```yaml
@@ -72,7 +72,7 @@ The template's image, container `--shm-size=10g --cap-add=SYS_ADMIN`, onstart sc
 ## Success criteria
 
 ### Provision + access
-- [ ] Instance provisioned via the `verl-research-vllm020` Template (hash `6485b9625ddd6d25a5f2f09b9f7fde17`) — verified by `vastai show instance <id> --raw | jq .template_hash_id` matching the recorded hash
+- [ ] Instance provisioned via the `verl-research-vllm020` Template (hash `3b0f8b726ac3036d6c007bfa13b6d75f`) — verified by `vastai show instance <id> --raw | jq .template_hash_id` matching the recorded hash
 - [ ] `nvidia-smi -L | wc -l` inside the container returns a value in **{4, 5, 6, 7, 8}**; single-GPU offers are HARD-FAILED by the launcher
 - [ ] `cat /sys/fs/cgroup/pids/pids.max` inside the container is `>= 4096` (Vast cgroup PIDs gotcha — the launcher hard-fails on `<= 2048`)
 - [ ] `/workspace/verl` exists and `git -C /workspace/verl rev-parse --abbrev-ref HEAD` returns `vast-ai-workload`
@@ -176,7 +176,7 @@ operator sees them; the operator decides whether to invoke
 
 ## Notes for runner
 
-- **Provision via the skill only.** Call `/vast-provision count=1 query="<tier>" disk_gb=200 max_price=24.0` per tier; let the skill auto-select the locked Template from `templates.json`. Do NOT pass `--template-hash` or `--image`. Before the offer search starts, confirm the stderr line `vast-provision: auto-selected template 'verl-research-vllm020' hash=6485b9625ddd6d25a5f2f09b9f7fde17 image=verlai/verl:vllm020.dev1` appears; if not, abort and append `MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing` to PROGRESS.md.
+- **Provision via the skill only.** Call `/vast-provision count=1 query="<tier>" disk_gb=200 max_price=24.0` per tier; let the skill auto-select the locked Template from `templates.json`. Do NOT pass `--template-hash` or `--image`. Before the offer search starts, confirm the stderr line `vast-provision: auto-selected template 'verl-research-vllm020' hash=3b0f8b726ac3036d6c007bfa13b6d75f image=verlai/verl:vllm020.dev1` appears; if not, abort and append `MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing` to PROGRESS.md.
 - **Walk the chain cheapest-first.** Stop at the first tier with ≥1 offer ≤ `max_dph`. Record the chosen tier on the PROVISIONED ledger row so the analyst can attribute results.
 - **Teardown via the skill only.** `.claude/skills/vast-teardown/run.sh <instance_id>` or the `teardown-finished-runs.sh` Stop hook. Never call `vastai destroy instance` directly.
 - **Do not change the template.** The template's `verl_repo`/`verl_branch` are the only valid source of `/workspace/verl`. Code iteration flows: laptop edit → `git push origin vast-ai-workload` → `git pull` on the box → re-run the launcher. **No scp'd scripts. No `/tmp/` workarounds. No per-experiment template recreation.**

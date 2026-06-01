@@ -1,7 +1,7 @@
 {
   "verl-research-vllm020": {
-    "hash_id": "6485b9625ddd6d25a5f2f09b9f7fde17",
-    "id": 435160,
+    "hash_id": "3b0f8b726ac3036d6c007bfa13b6d75f",
+    "id": 447527,
     "image": "verlai/verl:vllm020.dev1",
     "verl_repo": "https://github.com/shamanez/verl.git",
     "verl_branch": "vast-ai-workload",

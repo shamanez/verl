@@ -37,7 +37,7 @@ Template record on Vast.ai and is referenced by `templates.json`.
 | Field | Value | Source |
 |---|---|---|
 | Active template name | `verl-research-vllm020` | `templates.json` |
-| Active template hash | `6485b9625ddd6d25a5f2f09b9f7fde17` | `templates.json` |
+| Active template hash | `3b0f8b726ac3036d6c007bfa13b6d75f` | `templates.json` |
 | Image | `verlai/verl:vllm020.dev1` (torch 2.11.0+cu130, vllm 0.20.2) | Template (Vast) |
 | Onstart | clones `shamanez/verl @ vast-ai-workload`, `pip install --no-deps -e .` | `onstart.verl-vllm020.sh` |
 | Docker options | `--shm-size=10g --cap-add=SYS_ADMIN -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false -e RAY_DISABLE_USAGE_STATS=1` | Template (Vast) |
@@ -336,9 +336,9 @@ If you provision with too-loose a filter, CUDA kernel launches return
 Python imports still work because nothing has touched a kernel yet — the
 failure surface is at `torch.cuda.get_device_name(0)` / vllm engine init.
 
-The current Template (`6485b9625ddd6d25a5f2f09b9f7fde17`) encodes
+The current Template (`3b0f8b726ac3036d6c007bfa13b6d75f`) encodes
 `cuda_max_good >= 13.0` in its `extra_filters`, so when you provision via
-`--template-hash 6485b9625ddd6d25a5f2f09b9f7fde17` you get this filter for
+`--template-hash 3b0f8b726ac3036d6c007bfa13b6d75f` you get this filter for
 free. (Always re-check `templates.json` for the current hash — the hash
 mutates on every template update.)
 
@@ -351,7 +351,7 @@ research harness owns one Template:
 
 | Name | hash_id | id | Purpose |
 |---|---|---|---|
-| `verl-research-vllm020` | `6485b9625ddd6d25a5f2f09b9f7fde17` | `435160` | base for all M0+ verl GRPO experiments on shamanez/verl@vast-ai-workload |
+| `verl-research-vllm020` | `3b0f8b726ac3036d6c007bfa13b6d75f` | `447527` | base for all M0+ verl GRPO experiments on shamanez/verl@vast-ai-workload |
 
 The Template's onstart script (`onstart.verl-vllm020.sh` in this dir) clones
 `https://github.com/shamanez/verl @ vast-ai-workload` into `/workspace/verl`
