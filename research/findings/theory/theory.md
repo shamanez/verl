@@ -172,6 +172,30 @@ stochastic estimator of the true GRPO gradient on π_θ**. Rescale removes the
 noise SGD with a curvature bias**, i.e. dropout-noise repurposed as a gradient
 compressor. **[INFERENCE]**
 
+### A.5 Connection to the literature (see `literature.md` tags). [grounding]
+
+- **C3 (Mohtashami et al., AISTATS 2022)** is the most direct theoretical analogue:
+  it proves convergence for *arbitrary* (not just symmetric-random) gradient masking
+  where the gradient inherits a forward perturbation — exactly our case — under
+  NTK-style assumptions for shallow nets. It legitimizes the estimator class but its
+  guarantee does not transfer cleanly to transformer fine-tuning (the very
+  nonlinearity of A.3 is what its NTK linearization assumes away). **Use as
+  framing, not proof.**
+- **C10 (Gradient Routing, Cloud et al. 2024)** confirms the chain-rule mechanics of
+  A.3.ii: a forward/backward mask induces a structured gradient-masking pattern that
+  localizes — but does not destroy — learning.
+- **Important reconciliation with C1 (EF21, Richtárik et al. 2021):** lit-scout
+  notes EF21 requires a *contractive* compressor and that rescale makes our binary
+  mask "contractive." Be precise: EF21's contractivity is a property of the
+  **gradient compressor** `C(g)` with `E‖C(g)−g‖² ≤ (1−δ)‖g‖²`. Our rescale makes
+  the **activation** an unbiased compressor, NOT the parameter gradient — the
+  gradient still carries the curvature bias b (eq. 4). So EF21 is the right
+  *framework* (biased compressor + periodic error correction ⇒ convergence) but our
+  mask is **not** an EF21 compressor in the literal sense; the curvature bias is a
+  term EF21's analysis would have to absorb into its `(1−δ)` contraction constant,
+  and whether it stays inside `δ<1` is exactly the task-dependent question C asks.
+  **[INFERENCE — flag this as the gap between the clean theory and our setting.]**
+
 ---
 
 ## B. Why does a ~20-million× train-inference perplexity gap still LEARN (GSM8K)?
