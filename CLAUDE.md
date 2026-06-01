@@ -160,7 +160,7 @@ bash research/.claude/skills/vast-provision/run.sh \
 ```
 
 The Vast.ai template (`verl-research-vllm020`, hash
-`6485b9625ddd6d25a5f2f09b9f7fde17`) handles docker bring-up, verl install,
+`3b0f8b726ac3036d6c007bfa13b6d75f`) handles docker bring-up, verl install,
 and HF/WandB auth via its onstart script — no separate bootstrap script
 is needed.
 
