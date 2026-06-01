@@ -21,7 +21,7 @@ EXP-16 (#16, PASS, PR #10) established, on 4×B200 Qwen2.5-1.5B/GSM8K (B200 was 
 
 ```yaml
 kind: experiment
-code_change: false            # every knob already exists (clean_cadence, test_freq, epochs) — pure config
+code_change: true             # config-run at heart (every knob already exists), but on-box source edits — extra prints / instrumentation / diagnostics — are allowed mid-run without re-filing the issue
 milestone: M3
 baseline_run: EXP-16 dense_ref (no-KL, 25-step, val 0.741)   # nearest no-KL control; EXP-3 (with-KL, 0.789) for reference only
 depends_on: [16]
@@ -29,7 +29,7 @@ seed_replicates: 1
 budget_gpu_hr: 96
 budget_dph_max: 24.0
 max_parallel: 1
-target_modules: []            # no source edits; config-only run from vast-ai-workload
+target_modules: []            # no pre-planned method edits; ad-hoc instrumentation (prints/diagnostics) is fine on the exp/ branch if a question needs it
 escalate_to_codex_if:
   - "actor/grad_norm non-finite"
   - "NaN detected"
@@ -85,7 +85,7 @@ Schedule: GSM8K train ≈ 7473 ex / 128 ≈ 58 steps/epoch → 2 epochs ≈ **11
 
 ## What to measure — grouped by question (one run answers all the main claims)
 
-> All metrics below are **existing WandB scalars** or analyst-side post-processing of them (binning, trajectory overlay, slope fits). No new logging ⇒ `code_change:false` holds. "Masked step" = any step not a multiple of 20; "clean step" = 20/40/60/80/100.
+> Every metric below is already an **existing WandB scalar** or analyst-side post-processing of one (binning, trajectory overlay, slope fits) — so no source change is *required*. `code_change:true` only leaves the door open for ad-hoc instrumentation (extra prints / diagnostics) if a question needs a closer look; it is not a license to alter the method. "Masked step" = any step not a multiple of 20; "clean step" = 20/40/60/80/100.
 
 ### Group A — Does it learn, and how fast vs the true dense gradient?
 1. **LEARNING** — `critic/score/mean` (reward) + `val/test_score` every 10 steps. Monotone climb toward the dense reference (0.741 no-KL / 0.789 with-KL)?
