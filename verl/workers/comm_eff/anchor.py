@@ -75,6 +75,7 @@ __all__ = [
     "extract_target_grads",
     "feed_anchor_grads_into_ema",
     "anchor_should_fire",
+    "anchor_pg_loss",
     "build_anchor_module",
     "assert_anchor_module_isolated",
 ]
@@ -109,6 +110,100 @@ def anchor_should_fire(step: int, cadence: int, enabled: bool) -> bool:
     if not enabled or cadence < 1:
         return False
     return (step % cadence) == 0
+
+
+def anchor_pg_loss(config, model_output, data, dp_group=None):
+    """CLEAN policy-gradient loss for the anchor pass (EXP-18 / M4 candidate C4).
+
+    **Why this replaces the fast-path ``ppo_loss`` for the anchor refresh.**
+    The anchor circuit does ONE forward/backward per refresh, so the PPO
+    *importance ratio* ``exp(logπ_new − old_log_probs)`` is not just unnecessary,
+    it is actively *wrong* here: the batch's ``old_log_probs`` were produced by
+    the MASKED fast path, while the anchor re-forwards UNMASKED at the
+    ``delay_K``-stale weights. That mismatch drives the ratio away from 1, the
+    PPO clip then mangles the per-token loss, and the resulting ``G_anchor`` is
+    NOT the clean unmasked policy gradient the M4 method assumes ``M_anchor`` to
+    be. C1/C2/C3 all tested that corrupted signal and degraded the policy
+    (reward → 0). See ``runs/EXP-18/candidate-04-C4-cleangrad-spec.md``.
+
+    **What this computes instead — the clean true gradient at θ_{t-K}.**
+    With ratio ≡ 1 (no ``old_log_probs``, no clip), ``compute_policy_loss_vanilla``
+    provably reduces to the per-token loss ``-advantages · logπ`` aggregated by
+    ``agg_loss``; its gradient is ``-(A · ∇logπ_unmasked)`` — exactly "the clean
+    step's gradient, evaluated at the stale weights". We reuse the SAME log-prob
+    extraction (``no_padding_2_padding``), the SAME field selection/padding, and
+    the SAME ``agg_loss`` + ``global_batch_info`` normalization as ``ppo_loss``
+    so ``M_anchor`` lands at the identical scale as the fast-path clean gradient
+    (under the default ``token-mean`` this equals the spec's
+    ``-(A·logπ·mask).sum()/mask.sum()``; for other agg modes it stays faithful
+    to the fast path).
+
+    Signature mirrors ``verl.workers.utils.losses.ppo_loss`` so it can be bound
+    with ``functools.partial(anchor_pg_loss, config=actor_config)`` and dropped
+    into ``_forward_backward_batch_inner`` in place of the fast-path loss. It is
+    used ONLY by ``FSDPEngine._maybe_comm_eff_anchor_refresh`` (the anchor pass);
+    the fast path's real PPO ratio/clip loss is left completely untouched.
+
+    Args:
+        config: the actor ``ActorConfig`` (carries ``loss_agg_mode``,
+            ``loss_scale_factor``, ``global_batch_info``). Bound via ``partial``.
+        model_output: dict with ``log_probs`` (per-token log-probs of the
+            response, possibly nested) exactly as ``ppo_loss`` consumes.
+        data: the rollout-expanded ``TensorDict`` (carries ``response_mask`` and
+            ``advantages``; ``old_log_probs`` is deliberately IGNORED).
+        dp_group: data-parallel process group (unused here; kept for signature
+            parity with ``ppo_loss``).
+
+    Returns:
+        ``(loss, metrics)`` — ``metrics`` carries ``actor/anchor_pg_loss`` plus
+        ``actor/anchor_ratio_mean`` (≡ 1.0 by construction, the on-box
+        ratio-corruption falsifier) under MEAN aggregation.
+    """
+    # Lazy imports: keep module import cheap + CPU-testable; the engine path and
+    # the CPU tests both have these available.
+    from verl.utils.metric import AggregationType, Metric
+    from verl.trainer.ppo.core_algos import agg_loss
+    from verl.workers.utils.padding import no_padding_2_padding
+
+    # Per-token log-probs of the response, padded to (bsz, max_response_len) —
+    # IDENTICAL extraction to ppo_loss.
+    log_prob = no_padding_2_padding(model_output["log_probs"], data)
+
+    # Mirror ppo_loss's global-batch bookkeeping so agg_loss normalizes exactly
+    # like the fast path (loss invariant to FSDP sharding).
+    config.global_batch_info["dp_size"] = data["dp_size"]
+    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+    config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+    metric_aggregation = AggregationType.SUM
+
+    # Select ONLY the fields the clean PG needs — NOT old_log_probs. This is the
+    # whole point: no importance ratio, so old_log_probs never enters.
+    selected = data.select("response_mask", "advantages").to_padded_tensor()
+    response_mask = selected["response_mask"].to(bool)
+    advantages = selected["advantages"]
+
+    loss_agg_mode = config.loss_agg_mode
+
+    # ratio ≡ 1 (no clip): the per-token PPO loss collapses to -A·logπ, whose
+    # gradient is the clean unmasked policy gradient -(A·∇logπ). agg_loss applies
+    # the response_mask and the same normalization the fast path uses.
+    per_token_pg = -advantages * log_prob
+    pg_loss = agg_loss(
+        loss_mat=per_token_pg,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        **config.global_batch_info,
+    )
+
+    metrics = {
+        "actor/anchor_pg_loss": Metric(value=pg_loss, aggregation=metric_aggregation),
+        # ratio is identically 1 here (no old_log_probs / no clip); surfaced so
+        # the on-box log can confirm the ratio-corruption is gone (the C4 check).
+        "actor/anchor_ratio_mean": Metric(value=1.0, aggregation=AggregationType.MEAN),
+    }
+    return pg_loss, metrics
 
 
 class AnchorStalenessQueue:
