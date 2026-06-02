@@ -431,6 +431,19 @@ comm_eff:
     # fast PPO mini-batches: "cache" | "recompute".
     basis_cache: cache
 
+    # EXP-18/M4: correction mode. "reweight" (default) = the as-implemented
+    # two-sided Tikhonov reweighting of G_mask (byte-identical to every prior
+    # config). "inject" = ADD the scale-matched complement of the stale anchor
+    # EMA M_anchor (supply the missing true-gradient component; the M4 redesign).
+    # Declared here so Hydra's struct-mode merge accepts
+    # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=inject.
+    correction_mode: reweight
+
+    # EXP-18/M4: injection strength for correction_mode="inject" (force along the
+    # stale true-gradient direction, scale-matched to ||G_mask||). Unused under
+    # "reweight". >= 0.
+    inject_gamma: 1.0
+
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training
