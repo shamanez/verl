@@ -224,6 +224,15 @@ class CommEffSpectralConfig(BaseConfig):
     ema_device: str = "gpu"
     svd_mode: str = "full"
     basis_cache: str = "cache"
+    # EXP-18/M4: correction mode. "reweight" (default) = the as-implemented
+    # two-sided Tikhonov reweighting of G_mask (byte-identical to every prior
+    # config). "inject" = ADD the scale-matched complement of the stale anchor
+    # EMA M_anchor (supply the missing true-gradient component; the M4 redesign).
+    correction_mode: str = "reweight"
+    # EXP-18/M4: injection strength for correction_mode="inject" (force along the
+    # stale true-gradient direction, scale-matched to ||G_mask||). Unused under
+    # "reweight". >= 0.
+    inject_gamma: float = 1.0
 
 
 @dataclass
@@ -335,6 +344,13 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
             )
+        if self.spectral.correction_mode not in ("reweight", "inject"):
+            raise ValueError(
+                f"comm_eff.spectral.correction_mode must be one of (reweight, inject); "
+                f"got {self.spectral.correction_mode!r}"
+            )
+        if self.spectral.inject_gamma < 0.0:
+            raise ValueError(f"comm_eff.spectral.inject_gamma must be >= 0; got {self.spectral.inject_gamma}")
         # EXP-14 periodic clean-step cadence. 0 = off (strict no-op for the
         # disabled path and every pre-EXP-14 config). A negative value is a
         # config error, not a silent disable.

@@ -300,6 +300,8 @@ class CommEffState:
                 svd_mode=str(getattr(spec_cfg, "svd_mode", "full")),
                 basis_cache=str(getattr(spec_cfg, "basis_cache", "cache")),
                 rank=int(getattr(spec_cfg, "rank", 8)),
+                correction_mode=str(getattr(spec_cfg, "correction_mode", "reweight")),
+                inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s "

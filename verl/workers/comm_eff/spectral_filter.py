@@ -241,6 +241,8 @@ class SpectralFilter:
         svd_mode: str = "full",
         basis_cache: str = "cache",
         rank: int = 8,
+        correction_mode: str = "reweight",
+        inject_gamma: float = 1.0,
     ):
         self.alpha = float(alpha)
         self.tau = float(tau)
@@ -257,6 +259,13 @@ class SpectralFilter:
         self.svd_mode = str(svd_mode)
         self.basis_cache = str(basis_cache)
         self.rank = int(rank)
+        # EXP-18/M4 correction mode. "reweight" = the as-implemented two-sided
+        # Tikhonov reweighting (correct_matrix); "inject" = additive injection of
+        # the scale-matched stale-anchor complement (inject_matrix). Validated in
+        # CommEffConfig.__post_init__; assert defensively here too.
+        assert correction_mode in ("reweight", "inject"), correction_mode
+        self.correction_mode = str(correction_mode)
+        self.inject_gamma = float(inject_gamma)
         # name -> M_anchor (float32). Lives on the gradient's device when
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / correct_matrix).
@@ -365,7 +374,10 @@ class SpectralFilter:
             stored = stored.pin_memory()
         self._anchor[name] = stored
         # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
-        if self.basis_cache == "cache":
+        # EXP-18/M4 inject mode needs NO SVD basis (it adds the scale-matched
+        # anchor complement directly), so skip the cache — computing the full
+        # SVD of every targeted matrix per refresh would stall the run.
+        if self.basis_cache == "cache" and self.correction_mode != "inject":
             self._basis[name] = compute_basis(new, svd_mode=self.svd_mode, rank=self.rank)
         return new
 
@@ -419,6 +431,36 @@ class SpectralFilter:
             rank=self.rank,
             basis=basis,
         )
+
+    def inject_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-18/M4 additive injection: G_corr = G_mask + gamma*scale*(M_anchor - P_Gmask(M_anchor)).
+
+        Supplies the component of the stale true-gradient EMA M_anchor that G_mask
+        does NOT already span (the part masking rotated away), scale-matched to
+        ||G_mask|| (rescale inflates ||G_mask|| ~9x; Adam+grad-clip make the
+        *direction* the load-bearing quantity). Under orthogonality (cos≈0) the
+        projection ~0 and this is scale-matched direct injection of M_anchor.
+        Returns G_corr with g_mask's shape/dtype/device.
+        """
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        gm_norm = torch.linalg.norm(gm)
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps or gm_norm <= eps:
+            return g_mask  # anchor not warmed / zero grad → no-op
+        coeff = (gm * anc).sum() / (gm_norm * gm_norm + eps)   # <G_mask,M_anchor>/||G_mask||^2
+        complement = anc - coeff * gm
+        scale = gm_norm / (anc_norm + eps)
+        g_corr = gm + self.inject_gamma * scale * complement
+        # Diagnostic: cosine(G_mask, M_anchor) — measures orthogonality on the LIVE anchor.
+        cos = (coeff * gm_norm / (anc_norm + eps)).item()
+        print(f"[comm_eff][EXP-18][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
+              f"gamma={self.inject_gamma} scale={scale.item():.4f} "
+              f"||inj||/||G_mask||={(torch.linalg.norm(self.inject_gamma*scale*complement)/(gm_norm+eps)).item():.4f}",
+              flush=True)
+        return g_corr.to(g_mask.dtype)
 
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
@@ -496,7 +538,10 @@ def apply_spectral_correction_to_params(
             print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
-        g_proj = spectral.correct_matrix(name, full)
+        if getattr(spectral, "correction_mode", "reweight") == "inject":
+            g_proj = spectral.inject_matrix(name, full)
+        else:
+            g_proj = spectral.correct_matrix(name, full)
         rel = spectral.relative_change(full, g_proj)
         state.spectral_rel_change[name] = rel
         print(
