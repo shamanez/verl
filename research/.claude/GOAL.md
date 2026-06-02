@@ -48,9 +48,14 @@ In brief:
 - **Anchor + spectral as implemented did NOT work** (GSM8K 0.080, inert) — fails by
   **orthogonality** (reweights the masked gradient in a subspace instead of applying
   the true gradient). The clean step is the only lever that worked.
-- **Frontier** — redesign anchor + spectral as a **cheap, continuous surrogate** for
-  the periodic clean step, grounded in the delta-method curvature bias (not
-  anchor-gradient-SVD). Gated by a **p-sweep** and a **clean-only ablation**.
+- **Frontier** — redesign the anchor + spectral correction into a **cheap, continuous
+  surrogate** for the periodic clean step, grounded in the curvature-bias analysis (not
+  anchor-gradient-SVD). This is RL, not supervised learning — there is no recipe to
+  copy, so the correction must be found **empirically**. Concrete target: make the
+  **masked+correction training curve match the dense training curve within ≤50 steps**
+  (GSM8K, anchor `cadence`=5, staleness `delay_K`=5, `clean_cadence` OFF), via an agent
+  that **recursively** proposes a correction, runs it, compares curves, and refines.
+  See `research/findings/NEXT_RESEARCH.md`.
 
 ## The moment of truth
 

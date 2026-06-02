@@ -23,27 +23,44 @@ EXP-16 `anchor@2+spectral@2`, no clean steps → GSM8K **0.080 (≈random)**, in
 
 On Big-Math even clean@20 stalls (~0.55) while dense learns (~0.61); the clean step's grad_norm there is ~2× smaller (smaller `‖g_true‖`). If hard tasks are in scope, the correction must recover signal the clean step itself does not.
 
-## Experiment protocol (new runs)
+## The empirical target — match the dense training curve
 
-**GSM8K, ≤25 steps** — the standard fast/cheap testbed for this cycle (the spectral-correction iteration and the two gating runs below). 25 steps is more than enough to see the early trajectory, the clean/correction re-anchoring, and the within-window reward slope. Use a **short clean cadence (≈5)** so several cycles fit in 25 steps (clean@20 would give only one). Hold the rest of the EXP-17 shape: rescale ON, `mask_recompute=true`, no-KL no-entropy, lr=1e-6, n=8, train_batch=128, mini_batch=64. **Big-Math is an optional later confirmation** once something works on the cheap GSM8K testbed — not part of the fast loop. (25-step runs are for development/comparison; a final parity claim needs one longer confirmation run — see Success bar.)
+This is RL, not supervised learning: there is no recipe to port, so the correction must be **found empirically**. The concrete, measurable target:
 
-## Run these two cheap experiments FIRST (pure-config, before any redesign)
+**Make the masked+correction training curve match the dense training curve within ≤50 steps** — GSM8K, anchor `cadence`=5, staleness `delay_K`=5 (the anchor refreshes every 5 steps from 5-step-stale weights — a realistic latency, see `runs/SUMMARY.md`).
 
-**EXP-A — p-sweep.** Sweep `COMM_EFF_MASK_P ∈ {0.9,0.7,0.5,0.3,0.1}` on GSM8K, ≤25 steps, clean@5.
-- *Question:* how p-sensitive is GSM8K learning? Theory predicts it stays ~insensitive at high p (elicitation needs only a coarse gradient); p is also itself a savings knob (boundary volume ∝ p).
-- *Optional confirmation (later, 1 run):* repeat at the most informative p on Big-Math for the decisive `p*` question — does lowering p unlock the hard task, or is the bias not a mask-rate artifact (→ the correction must attack `b`)?
+- **Reference:** dense run (`COMM_EFF_ENABLED=false`), ≤50 steps, GSM8K, EXP-17 shape (lr=1e-6, n=8, train_batch=128, mini_batch=64). Log the per-step curve (reward + loss + val); cache it.
+- **Candidate:** masked (p=0.9, rescale ON, `mask_recompute=true`) + the correction under test, anchor `cadence`=5, `delay_K`=5, **`clean_cadence` OFF** (the correction must stand on its own — no leaning on frequent clean steps). ≤50 steps, same logging.
+- **Match metric:** per-step distance between the curves (mean |reward_masked − reward_dense| over the 50 steps + the final gap + the within-window slope). "Match" = the candidate **tracks dense across the whole trajectory** within a stated tolerance, not just at the end — the strong evidence that the correction recovers the true gradient step-by-step, under realistic staleness.
 
-**EXP-B — clean-only ablation (honesty check).** GSM8K, ≤25 steps, K=5: Arm 1 = dense step every K, **no update between**; Arm 2 = masked+clean@K.
-- *Question:* is masking contributing learning, or are the clean steps doing it all? Compare val + within-window reward slope.
-- *Decides framing:* Arm2 ≫ Arm1 → "masking supports learning" is honest; Arm1 ≈ Arm2 → downgrade to "masking doesn't destroy what clean steps learn."
+## The recursive search loop
 
-## The redesign (only after EXP-A/B)
+A pure-research issue runs an agent that **recursively explores corrections**, every iteration backed by a real run:
 
-Attack `b`; use the anchor as a stale true-gradient **reference that contributes a component `G_mask` lacks**; apply the correction **continuously**. Starting hypotheses:
-1. Estimate `b`'s dominant component (closed-form delta-method term, or an EMA of `(g_anchor_stale − g_mask)` on refresh steps) and subtract it every masked step.
-2. The anchor is already plumbed (`anchor.py`: K-stale isolated clone, raw unmasked grad) but its gradient is never applied — making it reach the optimizer as a correction is the load-bearing code change.
-3. Prefer correcting at the boundary activations (cheap, local) over a full parameter-gradient correction.
+1. Establish the dense reference curve (one run, cached).
+2. Propose a correction (a refinement of a prior attempt, or a new approach).
+3. Patch it on an `exp/*` branch; run masked+correction (≤50 steps, cadence 5, delay_K 5, clean_cadence OFF); log the curve.
+4. Compare to dense; compute the match metric; record what improved / regressed.
+5. Not matched → refine and loop. Matched → lock it, confirm on a longer run.
 
-**Success bar (ties to GOAL "done"):** on the 25-step GSM8K testbed, the correction (clean step OFF or sparser) must **hold the masked+clean@K trajectory** at **net inter-stage comm strictly below the clean@K baseline** (savings reported *net of the correction's overhead*). The final **parity claim (GSM8K val ≥ 0.7415)** is confirmed on **one longer run** once the 25-step testbed looks good; Big-Math improvement only if its optional p-run shows the wall is correctable, else clear Constraint 2.
+No correction is "good" until its ≤50-step curve is shown next to dense. The agent is expected to go **beyond** the starting list below.
 
-*Savings metric:* boundary-activation volume not communicated. masked+clean@K = `((K-1)/K)·p` (EXP-17 K=20,p=0.9 → ~85.5%). A continuous correction targets ~p every step but must subtract its own comm cost. (Distinct from "clean-step sparsity," the looser ~95% figure.)
+## Candidate corrections to explore (open — starting points, not a prescription)
+
+All must respect Constraint 1 (supply the component `G_mask` lacks — don't merely reweight `G_mask` in a subspace) and work under `delay_K`=5 staleness:
+- Estimate and **remove the masking bias `b`** using the anchor's (stale) true-gradient signal, applied as a force on the masked gradient (with a staleness-aware decay).
+- Act on the **boundary activations** (cheap, local) rather than the full parameter gradient.
+- Subspace methods that **add a missing component** rather than reweight an existing one.
+- Different aggregations / decays of the anchor signal across its 5-step staleness.
+
+*Where the code is:* the anchor circuit is already plumbed (`verl/workers/comm_eff/anchor.py`: a `delay_K`-stale isolated clone producing the raw unmasked gradient; today it only feeds the EMA, never the optimizer). Wiring its signal into the actual update is the load-bearing code change.
+
+## Success bar
+- **Primary (this cycle):** the masked+correction ≤50-step GSM8K training curve matches the dense curve within tolerance, at cadence 5 / delay_K 5 / `clean_cadence` OFF.
+- **Then:** confirm on one longer run (curve still tracks; final GSM8K val ≥ dense within noise) and report **net inter-stage comm vs dense**. cadence-5 anchor passes count against savings; raising cadence for savings is the follow-on **once matching holds** — match first, optimize comm second.
+
+## Supporting diagnostics (optional, as the search needs them)
+- **p-sweep** — `COMM_EFF_MASK_P ∈ {0.9,0.7,0.5,0.3,0.1}`: how p-sensitive is GSM8K learning, and how much a lower p alone closes the curve gap (p is also a savings knob).
+- **clean-only ablation** — dense-every-K vs masked+clean@K: is masking contributing learning, or are the clean steps doing it? (Honesty check on the framing.)
+
+*Savings metric:* boundary-activation volume not communicated; report **net of the correction's (and the cadence-5 anchor's) overhead**, vs dense.
