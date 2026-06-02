@@ -271,6 +271,7 @@ class SpectralFilter:
         rank: int = 8,
         correction_mode: str = "reweight",
         inject_gamma: float = 1.0,
+        blend_eta: float = 0.5,
     ):
         self.alpha = float(alpha)
         self.tau = float(tau)
@@ -289,11 +290,13 @@ class SpectralFilter:
         self.rank = int(rank)
         # EXP-18/M4 correction mode. "reweight" = the as-implemented two-sided
         # Tikhonov reweighting (correct_matrix); "inject" = additive injection of
-        # the scale-matched stale-anchor complement (inject_matrix). Validated in
-        # CommEffConfig.__post_init__; assert defensively here too.
-        assert correction_mode in ("reweight", "inject"), correction_mode
+        # the scale-matched stale-anchor complement (inject_matrix); "blend" =
+        # convex blend toward the scale-matched stale anchor (blend_matrix, C2).
+        # Validated in CommEffConfig.__post_init__; assert defensively here too.
+        assert correction_mode in ("reweight", "inject", "blend"), correction_mode
         self.correction_mode = str(correction_mode)
         self.inject_gamma = float(inject_gamma)
+        self.blend_eta = float(blend_eta)
         # name -> M_anchor (float32). Lives on the gradient's device when
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / correct_matrix).
@@ -405,10 +408,11 @@ class SpectralFilter:
             stored = stored.pin_memory()
         self._anchor[name] = stored
         # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
-        # EXP-18/M4 inject mode needs NO SVD basis (it adds the scale-matched
-        # anchor complement directly), so skip the cache — computing the full
-        # SVD of every targeted matrix per refresh would stall the run.
-        if self.basis_cache == "cache" and self.correction_mode != "inject":
+        # EXP-18/M4 inject AND blend modes need NO SVD basis (they combine the
+        # scale-matched anchor with G_mask directly), so skip the cache —
+        # computing the full SVD of every targeted matrix per refresh would
+        # stall the run.
+        if self.basis_cache == "cache" and self.correction_mode not in ("inject", "blend"):
             self._basis[name] = compute_basis(new, svd_mode=self.svd_mode, rank=self.rank)
         return new
 
@@ -496,6 +500,36 @@ class SpectralFilter:
               flush=True)
         return g_corr.to(g_mask.dtype)
 
+    def blend_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-18/M4 C2 convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
+
+        REPLACES (downweights) the biased G_mask with the scale-matched stale
+        true-gradient EMA M_anchor, scale=||G_mask||/||M_anchor||. Unlike inject
+        (which ADDS an orthogonal force and inflates magnitude to sqrt(2)*||G_mask||
+        at eta=1, C1's collapse cause), the convex blend keeps a stable magnitude:
+        for orthogonal terms ||G_corr|| = ||G_mask||*sqrt((1-eta)^2 + eta^2) <= ||G_mask||.
+        eta->0 returns G_mask exactly; eta->1 returns the scale-matched M_anchor.
+        Returns G_corr with g_mask's shape/dtype/device.
+        """
+        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        gm_norm = torch.linalg.norm(gm)
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps or gm_norm <= eps:
+            return g_mask  # anchor not warmed / zero grad → no-op (returns G_mask)
+        eta = self.blend_eta
+        scale = gm_norm / (anc_norm + eps)
+        g_corr = (1.0 - eta) * gm + eta * scale * anc
+        # Diagnostic: cosine(G_mask, M_anchor) on the LIVE anchor + magnitude ratio.
+        cos = ((gm * anc).sum() / (gm_norm * anc_norm + eps)).item()
+        print(f"[comm_eff][EXP-18][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
+              f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
+              flush=True)
+        return g_corr.to(g_mask.dtype)
+
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
 
@@ -572,8 +606,11 @@ def apply_spectral_correction_to_params(
             print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
-        if getattr(spectral, "correction_mode", "reweight") == "inject":
+        _mode = getattr(spectral, "correction_mode", "reweight")
+        if _mode == "inject":
             g_proj = spectral.inject_matrix(name, full)
+        elif _mode == "blend":
+            g_proj = spectral.blend_matrix(name, full)
         else:
             g_proj = spectral.correct_matrix(name, full)
         rel = spectral.relative_change(full, g_proj)

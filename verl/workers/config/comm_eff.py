@@ -227,12 +227,20 @@ class CommEffSpectralConfig(BaseConfig):
     # EXP-18/M4: correction mode. "reweight" (default) = the as-implemented
     # two-sided Tikhonov reweighting of G_mask (byte-identical to every prior
     # config). "inject" = ADD the scale-matched complement of the stale anchor
-    # EMA M_anchor (supply the missing true-gradient component; the M4 redesign).
+    # EMA M_anchor (supply the missing true-gradient component; C1). "blend" =
+    # REPLACE via a convex blend G_corr=(1-eta)*G_mask + eta*scale*M_anchor with
+    # scale=||G_mask||/||M_anchor|| (C2 — steer toward the stale true gradient at
+    # a stable magnitude; fixes C1's sqrt(2) blow-up).
     correction_mode: str = "reweight"
     # EXP-18/M4: injection strength for correction_mode="inject" (force along the
     # stale true-gradient direction, scale-matched to ||G_mask||). Unused under
-    # "reweight". >= 0.
+    # "reweight"/"blend". >= 0.
     inject_gamma: float = 1.0
+    # EXP-18/M4 C2: convex-blend weight for correction_mode="blend":
+    # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor. 0 => pure G_mask
+    # (floor), 1 => scale-matched stale true gradient. Unused under
+    # "reweight"/"inject". Validated to [0, 1].
+    blend_eta: float = 0.5
 
 
 @dataclass
@@ -344,13 +352,17 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
             )
-        if self.spectral.correction_mode not in ("reweight", "inject"):
+        if self.spectral.correction_mode not in ("reweight", "inject", "blend"):
             raise ValueError(
-                f"comm_eff.spectral.correction_mode must be one of (reweight, inject); "
+                f"comm_eff.spectral.correction_mode must be one of (reweight, inject, blend); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if self.spectral.inject_gamma < 0.0:
             raise ValueError(f"comm_eff.spectral.inject_gamma must be >= 0; got {self.spectral.inject_gamma}")
+        # EXP-18/M4 C2 convex-blend weight. [0, 1]: 0 => pure G_mask, 1 =>
+        # scale-matched stale true gradient. Unused unless correction_mode=blend.
+        if not 0.0 <= self.spectral.blend_eta <= 1.0:
+            raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
         # EXP-14 periodic clean-step cadence. 0 = off (strict no-op for the
         # disabled path and every pre-EXP-14 config). A negative value is a
         # config error, not a silent disable.

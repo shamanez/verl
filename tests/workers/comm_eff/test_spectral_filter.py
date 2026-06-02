@@ -424,5 +424,88 @@ def test_correct_matrix_also_consistent_across_infix():
     assert torch.linalg.norm(out - g_mask).item() > 1e-6
 
 
+# =========================================================================== #
+# EXP-18/M4 C2 convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
+# eta=0 => G_mask exactly; eta=1 => scale-matched M_anchor; the blend must fire
+# across the FSDP name infix (the same key-consistency the inject path needs).
+# =========================================================================== #
+def test_blend_eta_zero_returns_g_mask_exactly():
+    """eta=0 => the convex blend collapses to G_mask verbatim (the floor)."""
+    f = SpectralFilter(
+        beta_anc=0.5, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.0
+    )
+    gen = torch.Generator().manual_seed(21)
+    # A nonzero anchor so the no-op short-circuit (anc_norm<=eps) is NOT what
+    # produces the result — eta=0 itself must give G_mask.
+    f.update_anchor("w", torch.randn(16, 16, generator=gen, dtype=torch.float32))
+    g_mask = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    out = f.blend_matrix("w", g_mask.clone())
+    assert torch.allclose(out, g_mask, atol=TOL), "eta=0 must return G_mask exactly"
+
+
+def test_blend_eta_one_is_scale_matched_anchor():
+    """eta=1 => G_corr ≈ scale*M_anchor with scale=||G_mask||/||M_anchor||, i.e.
+    a vector PARALLEL to M_anchor whose magnitude equals ||G_mask||."""
+    f = SpectralFilter(
+        beta_anc=1.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=1.0
+    )
+    gen = torch.Generator().manual_seed(22)
+    # beta_anc=1.0 over a zero start keeps M_anchor == 0 (EMA = 1*0 + 0*g), so
+    # feed the anchor with beta_anc<1 instead via a fresh filter for a real anchor.
+    f2 = SpectralFilter(
+        beta_anc=0.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=1.0
+    )
+    m_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    f2.update_anchor("w", m_anchor)  # beta=0 => M_anchor == m_anchor exactly
+    g_mask = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    out = f2.blend_matrix("w", g_mask.clone()).to(torch.float32)
+    gm_norm = torch.linalg.norm(g_mask.to(torch.float32))
+    anc_norm = torch.linalg.norm(m_anchor)
+    expected = (gm_norm / anc_norm) * m_anchor  # scale-matched anchor
+    assert torch.allclose(out, expected, atol=1e-4), "eta=1 must return scale*M_anchor"
+    # Magnitude is matched to ||G_mask|| and direction is M_anchor's.
+    assert abs(torch.linalg.norm(out).item() - gm_norm.item()) < 1e-3
+    cos = (out * m_anchor).sum() / (torch.linalg.norm(out) * anc_norm)
+    assert cos.item() > 1.0 - 1e-4, "eta=1 output must be parallel to M_anchor"
+
+
+def test_blend_magnitude_stable_at_eta_0p7():
+    """The C2 fix vs C1: ||G_corr||/||G_mask|| <= 1 (never the sqrt(2) blow-up).
+    For orthogonal terms it equals sqrt((1-eta)^2 + eta^2) < 1; for any anchor it
+    is bounded by 1 under the convex blend (triangle ineq with scale-match)."""
+    f = SpectralFilter(
+        beta_anc=0.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.7
+    )
+    gen = torch.Generator().manual_seed(23)
+    f.update_anchor("w", torch.randn(32, 32, generator=gen, dtype=torch.float32))
+    g_mask = torch.randn(32, 32, generator=gen, dtype=torch.float32)
+    out = f.blend_matrix("w", g_mask.clone()).to(torch.float32)
+    ratio = (torch.linalg.norm(out) / torch.linalg.norm(g_mask.to(torch.float32))).item()
+    assert ratio <= 1.0 + 1e-5, f"||G_corr||/||G_mask|| must be <= 1; got {ratio}"
+
+
+def test_blend_finds_anchor_across_fsdp_infix():
+    """Key-consistency for the blend path (mirrors test_inject_finds_anchor...):
+    feed M_anchor under the CLONE (non-infixed) name, blend under the LIVE
+    (infixed) name. The blend MUST fire (result != G_mask) AND must NOT equal the
+    eta=0 floor — proving M_anchor was found nonzero under the canonical key."""
+    f = SpectralFilter(
+        beta_anc=0.5, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.7
+    )
+    gen = torch.Generator().manual_seed(24)
+    g_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    f.update_anchor(CLONE_NAME, g_anchor)  # feed under clone (non-infixed) name
+    g_mask = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    g_corr = f.blend_matrix(LIVE_NAME, g_mask.clone())  # blend under live (infixed) name
+    diff = torch.linalg.norm(g_corr.to(torch.float32) - g_mask).item()
+    assert diff > 1e-6, (
+        "blend_matrix returned g_mask unchanged — M_anchor read as zero across "
+        "the FSDP infix (the EXP-18 bug). The blend must fire."
+    )
+    # Exactly one canonical EMA entry (no divergent live/clone buffers).
+    assert list(f._anchor.keys()) == [CLONE_NAME]
+    assert LIVE_NAME not in f._anchor
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

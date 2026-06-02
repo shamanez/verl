@@ -302,6 +302,7 @@ class CommEffState:
                 rank=int(getattr(spec_cfg, "rank", 8)),
                 correction_mode=str(getattr(spec_cfg, "correction_mode", "reweight")),
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
+                blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
             )
             logger.info(
                 "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s "
