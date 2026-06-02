@@ -32,15 +32,25 @@ With the method switched off, training is byte-identical to unmodified verl.
 
 ## Where we are
 
-- **Dense control (method OFF) — proven.** Byte-identical to unmodified verl;
-  learns cleanly on GSM8K in a short run. This is the bar to match.
-- **Method implementation — correct.** Masking, anchor, spectral and the FSDP
-  integration are wired and unit-tested; OFF ⇒ dense parity.
-- **Masking — under test.** Plain masked GRPO does not yet learn at high mask
-  rates. The open question is whether, and at what mask rate, it learns; the
-  next step is a mask-rate sweep. Anchor + spectral correction are layered
-  fixes brought in only if masking alone is not enough — **default OFF, kept
-  OFF to start.**
+The base is **settled**. Operational detail + knobs → `research/runs/SUMMARY.md`;
+scientific "why" → `research/findings/theory/REPORT.md`; next-cycle plan →
+`research/findings/NEXT_RESEARCH.md`. In brief:
+
+- **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
+- **Settled comm-eff base** = mask (p=0.9, per-(token,channel), 7 boundaries) **+
+  rescale (ON, permanent — its job is unbias, not a learning fix) + a true dense
+  clean gradient every K steps (`clean_cadence`)**. Mask cross-pass consistency is
+  solved; judge on **val/score, not grad_norm**. Do not relitigate these.
+- **Proven result** — masked+clean@K is **stable** (clean-resettable sawtooth, no
+  ratchet) and reaches **GSM8K dense parity** (EXP-17: 0.735 vs 0.741) — but that is
+  **elicitation** (base already 0.715). On **Big-Math** (base 0.48) it **stalls flat
+  ~0.55** while dense reaches ~0.61: a gradient-fidelity limit, not a missing ceiling.
+- **Anchor + spectral as implemented did NOT work** (GSM8K 0.080, inert) — fails by
+  **orthogonality** (reweights the masked gradient in a subspace instead of applying
+  the true gradient). The clean step is the only lever that worked.
+- **Frontier** — redesign anchor + spectral as a **cheap, continuous surrogate** for
+  the periodic clean step, grounded in the delta-method curvature bias (not
+  anchor-gradient-SVD). Gated by a **p-sweep** and a **clean-only ablation**.
 
 ## Why code changes are in scope
 
@@ -59,8 +69,10 @@ are expected; diagnostic-only issues stay `code_change:false`.
 
 ## Pointers
 
+- **Canonical evidence + theory synthesis → `research/findings/theory/REPORT.md`**
+- Durable run record → `research/runs/SUMMARY.md`
 - Engineering map of the method → `CODE_WALKTHROUGH.md`
 - Authoritative operating config → `.claude/project.yaml`
-- Comm-eff launcher (baseline = run it with `COMM_EFF_ENABLED=false`) →
+- Comm-eff launcher (dense control = run it with `COMM_EFF_ENABLED=false`) →
   `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
 - Dense control launcher → `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`

@@ -4,6 +4,23 @@ This subtree is an **additive scaffold** sitting beside the upstream verl codeba
 
 The setup is **task-agnostic** — what research it runs is decided per-issue by you, not by any pinned doc.
 
+## The project, in three bullets (read the canonical docs for detail)
+
+A **communication-efficient, pipeline-parallel GRPO trainer** — per-(token,channel) activation masking at the pipeline-stage boundaries; Qwen2.5-1.5B-Instruct + GSM8K.
+
+- **Settled base.** Mask (p=0.9 at the 7 boundaries) **+ rescale (inverted-dropout `1/(1-p)`, ON, permanent) + a true dense "clean" gradient every K steps (`clean_cadence`)**. Mask cross-pass consistency is solved; rescale is settled (its job is unbias, not grad-norm); judge on **val/score, not grad_norm**.
+- **Proven result.** masked+clean@K is **stable** (clean-resettable sawtooth, no ratchet) and reaches **dense parity on GSM8K** (0.735 vs 0.741) — but that is **elicitation** (base already 0.715). On harder **Big-Math** it **stalls flat (~0.55)** while dense learns (~0.61): a gradient-fidelity limit, not a missing ceiling. Anchor + spectral *as implemented* did **not** work (GSM8K 0.080, fails by orthogonality) — the clean step is the only lever that worked.
+- **Frontier.** Redesign anchor + spectral as a **cheap, continuous surrogate** for the periodic clean step, grounded in the delta-method curvature bias — not the failed anchor-gradient-SVD. Gated by two cheap experiments: the **p-sweep** and the **clean-only ablation**.
+
+**Canonical docs** (one coherent story; start here):
+
+| For… | Read |
+|---|---|
+| What "done" means + where we are | [`.claude/GOAL.md`](.claude/GOAL.md) |
+| Full evidence + theory synthesis (the entry point) | [`findings/theory/REPORT.md`](findings/theory/REPORT.md) |
+| Durable run record + knob surface + settled decisions | [`runs/SUMMARY.md`](runs/SUMMARY.md) |
+| Engineering map of the method | [`../CODE_WALKTHROUGH.md`](../CODE_WALKTHROUGH.md) |
+
 ## Start here
 
 1. Read **`researcher_steps.md`** — the single operator manual. It walks you through the two-phase workflow (planning vs implementation), the human gate, the compute profile, the operator-invoked codex review, and troubleshooting.

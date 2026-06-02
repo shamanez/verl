@@ -1,6 +1,6 @@
 # REPORT — Why masked+clean@20 GRPO matches dense on GSM8K but stalls on Big-Math
 
-**comm-eff-theory team** (synthesizer: theorist; inputs: theory.md, literature.md, empirical_check.md, base_capability_eval.md). 2026-06-01.
+**comm-eff-theory team** (synthesizer: theorist). 2026-06-01. Self-contained; supporting inputs folded in.
 
 This is the single self-contained answer to the operator's three questions: (1) What policy is the masked actor following, vs dense? (2) Why does a ~20M× train-inference perplexity mismatch still learn (GSM8K)? (3) Why does it work on GSM8K but stall on Big-Math?
 

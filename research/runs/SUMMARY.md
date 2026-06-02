@@ -1,101 +1,98 @@
 # Research runs — summary
 
-Concise, self-contained record of the method, what's been tried, and the knob
-surface. No per-run artifacts are kept; this is the durable record.
+Durable, self-contained operational record: the method, the proven result, the
+settled decisions, and the knob surface. No per-run artifacts are kept. The
+scientific "why" is `findings/theory/REPORT.md`; the next-cycle plan is
+`findings/NEXT_RESEARCH.md`.
 
 ## Baseline = dense GRPO == method OFF
 
-The dense control is the comm-eff launcher with `COMM_EFF_ENABLED=false` —
-byte-identical to unmodified verl, no-KL no-entropy. It learns cleanly on GSM8K
-in a short run and is the bar every compression run must match.
+The comm-eff launcher with `COMM_EFF_ENABLED=false` — byte-identical to unmodified
+verl, no-KL no-entropy. Learns cleanly on GSM8K; the bar every compression run must match.
 
-## Comm-eff method — implementation correct, masking under test
+## The settled comm-eff base
 
-The implementation is correct (OFF ⇒ dense parity; the mask fires on exactly
-the gradient-feeding forwards; unit-tested). The masking side still needs a lot
-of testing — at high mask rates plain masked GRPO does not yet learn.
+`mask (p=0.9, per-(token,channel) at the 7 pipeline boundaries [3,7,11,15,18,21,24])`
+**+ rescale (inverted-dropout `1/(1-p)`) + a true dense "clean" gradient every K
+steps (`clean_cadence`)**. All three settled (see "Settled decisions"). Anchor +
+spectral as implemented are **not** part of the base.
 
-### What we tried, and what it told us
+## Proven result — stable; GSM8K parity (elicitation), Big-Math stall (fidelity limit)
 
-Headline up front: **judge on val/score, not grad_norm.** Adam's per-coordinate
-update is scale-invariant (`m̂/√v̂` cancels any constant scaling of the gradient)
-and bounded to order `η`, and verl grad-clips on top — so a large raw norm
-cannot, by itself, produce a large or "exploding" update. The two real failure
-modes are **bias** and **variance**.
+With `clean_cadence` the masked path learns and does not diverge: the
+train-inference gap is a **clean-resettable sawtooth** (masked steps `kl≈17 /
+pearson≈0.004` → clean steps `kl≈0.0004 / pearson≈0.9996`, resets fully every clean
+step), clean-step grad_norm trends **down**, true-policy entropy stays sharp — no
+ratchet, no drift to random (EXP-17 PASS). The PPO ratio is masked-old-vs-masked-new
+(self-consistent, ≈1), so the gap never enters the loss and the unmasked deployed
+policy still improves. Full treatment: `findings/theory/REPORT.md`.
 
-> ⚠️ **Correction — a mistake we made.** An earlier version of this record
-> claimed *"rescale reduces / tames the grad_norm."* **That is wrong and has
-> been removed.** Theory says the opposite: rescale *adds* variance. We do
-> **not** attribute the grad_norm differences seen across cells to rescale, or
-> to any single knob — those cells stacked several changes (consistency +
-> rescale + packing/seed differences), the artifacts are pruned, and the
-> comparison is confounded. The lower grad_norm we observed most likely came
-> from something else (e.g. mask consistency / per-token effects / run
-> randomness), not from rescale.
-
-| tried | what it is / what it told us |
-|---|---|
-| mask only, **no rescale** (p=0.9) | **biased mask.** With no `1/(1-p)`, `E[h⊙mask] = (1-p)·h` — the masked forward sits systematically off-distribution, so the GRPO importance ratio is corrupted. The harm is the bias: a direction error Adam cannot correct → a stalled trajectory with a non-vanishing floor. (Dropping rescale makes activations *shrink*, not grow.) |
-| **`rescale`** (inverted-dropout `h⊙mask/(1-p)`) | **a knob, not a fix.** Its only job is to restore `E[h̃] = h` — an *unbiased* mask. It trades bias for variance (`p/(1-p)`): necessary for correctness, not sufficient. Plain masked GRPO with rescale still did not learn in a short run (val flat). The variance is what the anchor + spectral + grad-clip machinery exists to tame. |
-| `consistent_across_forwards` (same seed across forwards) | refuted on its own — keying the mask positionally over each forward's packing gave a token a different mask in the two differently-packed forwards, so equal seed ≠ equal mask. Cross-pass consistency is now achieved by keying the per-element mask on each token's stable `(sample_id, position_id)`; this knob was removed. |
-| naive `clean_cadence` (periodic unmasked step) | **not sustainable** — the masked steps stay corrupted and the PPO clip fraction climbs toward saturation, so clipped tokens stop contributing gradient and learning dies; any early score rise is the clean steps alone. |
-
-**Open question:** can masked GRPO learn at all, and at what mask rate? Next is a
-mask-rate sweep (p = 0.9 → 0.5 → 0.1) judged on val/score and a stable, low PPO
-clip fraction. **Anchor + spectral correction stay OFF** until a masked config
-is shown to actually learn.
-
-## Update 2026-06-01 — clean_cadence@20 reaches dense parity on GSM8K; dataset-difficulty-dependent
-
-Supersedes the pessimistic "naive clean_cadence not sustainable" row above for **K=20 on
-GSM8K**: with per-(token,channel) mask p=0.9 + rescale + `clean_cadence=20` (true dense gradient
-every 20 steps; anchor+spectral OFF), the PPO clip fraction did **not** saturate (`pg_clipfrac`
-stayed ~0.03–0.04) and the run reached **dense parity**.
-
-| run | dataset | method | val (start→end) | vs dense |
+| run | dataset | method | val (start→end) | reading |
 |---|---|---|---|---|
-| EXP-16 cell6 | GSM8K | dense | → 0.741 | — |
-| **EXP-17** | GSM8K | mask p=0.9 + **clean@20** | 0.085 → **0.735** | ≈ parity (95% comm cut) |
-| **EXP-19** | Big-Math | mask p=0.9 + **clean@20** | 0.56 → **0.55 (flat)** | stalls |
-| **EXP-20** | Big-Math | **dense** | 0.558 → **~0.59–0.61** | learns (modest) |
+| dense (EXP-16 cell6) | GSM8K | dense | → 0.741 | bar |
+| **EXP-17** | GSM8K | mask p=0.9 + **clean@20** | 0.085 → **0.735** | ≈ parity (−0.8%, ~85.5% comm cut) → **elicitation** |
+| **EXP-19** | Big-Math | mask p=0.9 + **clean@20** | 0.56 → **0.55 flat** | **stalls** = gradient-fidelity limit |
+| **EXP-20** | Big-Math | dense | 0.558 → **~0.59–0.61** | learns → headroom exists |
 
-**Why the surprise (clean@20 ≈ dense on GSM8K but stalls on Big-Math):** base Qwen2.5-1.5B-Instruct,
-zero RL, same `\boxed` format + `math_reward` verifier (200 each): **GSM8K 0.715 vs Big-Math 0.480**.
-GSM8K is *easy* for this model → RL only **elicits/sharpens** a latent capability (small headroom
-0.715→0.735), which a coarse 95%-compressed gradient achieves → parity. Big-Math is *hard* → genuine
-learning is needed; dense extracts a modest real gain, the lossy masked+clean@20 gradient cannot →
-flat. The mask's information loss is **tolerable for elicitation, fatal for learning**; easy tasks
-hide the degradation, hard tasks expose it. Headroom *exists* on Big-Math (dense finds it) → the
-masked stall is a gradient-fidelity limitation, not lack of headroom.
+**Why** (base Qwen2.5-1.5B, zero RL, `\boxed`+`math_reward`, 200 each): **GSM8K 0.715
+vs Big-Math 0.480**. GSM8K is easy → RL only *elicits* a latent skill (a coarse
+compressed gradient suffices → parity). Big-Math is hard → genuine learning needed;
+dense finds +0.06, the lossy masked gradient cannot → flat. Mask information loss is
+tolerable for elicitation, fatal for learning. Dense reaching 0.61 proves headroom
+*exists* → the stall is a fidelity limit, not a ceiling.
 
-**rollout_corr (train-inference gap), masked clean@20:** masked steps `kl≈16.8 / pearson≈0.004 /
-ppl_ratio≈2e7` (masked forward ≈ decorrelated from the vLLM sampler) vs clean steps `kl≈0.0003 /
-pearson≈0.9996 / ppl_ratio≈1.0` — a **clean-resettable sawtooth** (not a ratchet). The PPO ratio is
-masked-old-vs-masked-new (self-consistent, ratio≈1), so the deployed policy (evaluated unmasked) still
-improves despite the huge train-time mismatch. Full theoretical treatment + RLVR-noisy-reward
-literature: `findings/theory/REPORT.md`; capability/trajectory data: `findings/theory/base_capability_eval.md`.
+## Anchor + spectral, as implemented — did NOT work
 
-**Big-Math dataset (in inventory):** `gshasiri/Big-Math-RL-Verified-filtered`, prepped by
-`research/scripts/bigmath_dapo.py` → verl parquet with `data_source=DigitalLearningGmbH/MATH-lighteval`
-(→ `math_reward.compute_score`: last `\boxed{}` + `is_equiv`; 20k train / 500 val, `\boxed` instruction).
-NOTE: do **not** use `data_source=math_dapo` for \boxed prompts (its default `is_correct_minerva`
-scrapes "Answer:" not \boxed → biased reward); a custom route returning `pred=None` crashes
-`process_validation_metrics`.
+EXP-16 `anchor@2+spectral@2` (no clean steps): **GSM8K val 0.080 ≈ random**, pearson
+still ~0.004, inert. Root cause **orthogonality** — spectral is a *linear reweighting
+of the masked gradient* in the unmasked anchor's SVD basis, but masking rotates that
+gradient nearly orthogonal to the true direction (cos≈0), so no linear projection of
+it manufactures the missing direction; and the clean anchor gradient is **never
+applied** (only feeds the EMA basis). The clean step works because it *applies* the
+true gradient; anchor+spectral only *used* it as projection geometry. This is the
+load-bearing lesson for the frontier (`findings/NEXT_RESEARCH.md`).
+
+## Settled decisions (do not relitigate)
+
+- **Rescale (`h⊙mask/(1-p)`) is ON, permanent.** Job = unbias the masked activation
+  (`E[h̃]=h`); without it the forward sits off-distribution and RMSNorm's `1/RMS`
+  backward compounds over 7 boundaries → grad_norm ~2700 (vs ~0.38 dense). It trades
+  bias for bounded variance (`p/(1-p)≈9×`); **necessary for correctness, not a
+  learning fix** (plain masked+rescale still doesn't learn — `clean_cadence` is what
+  made it learn). Do **not** attribute grad_norm differences to rescale (confounded).
+  **Judge on val/score, not grad_norm** — Adam's `m̂/√v̂` is scale-invariant + verl
+  grad-clips, so a large raw norm cannot by itself produce a large update.
+- **Mask cross-pass consistency is solved.** Keyed on each token's stable
+  `(sample_id, position_id)` (+ layer + global_step), no per-call/packing term → the
+  old-logprob and train forwards see the **bit-identical** mask → IS ratio ≈ 1.
+  Test-locked (`tests/workers/comm_eff/test_activation_mask.py`).
+- **The every-K clipfrac drop is the clean step, not a bug** — both forwards unmasked
+  → ratio ≡ 1 → `pg_clipfrac → ~4e-4`, grad_norm → dense ~0.4. A *spike* there would
+  signal mask inconsistency; the *collapse* is the positive correctness signal.
+- **`clean_cadence` scales to sparse K.** K=4/5/20 all reach GSM8K parity; larger K is
+  only *slower* (steps-to-reward≥0.5 = 17/18/44) — the classic Local-SGD speed/comm
+  tradeoff. `pg_clipfrac` stays ~0.035 (≪0.15), never saturates.
+
+## Big-Math dataset (in inventory)
+
+`gshasiri/Big-Math-RL-Verified-filtered`, prepped by `scripts/bigmath_dapo.py` → verl
+parquet with `data_source=DigitalLearningGmbH/MATH-lighteval` (→ `math_reward`: last
+`\boxed{}` + `is_equiv`; 20k train / 500 val). **Do not** use `data_source=math_dapo`
+for `\boxed` prompts (its `is_correct_minerva` scrapes "Answer:" → biased reward); a
+custom route returning `pred=None` crashes `process_validation_metrics`.
 
 ## Knob surface (in `vast_comm_eff_baseline_*.sh`)
-
-All independently env-toggleable; defaults = the mask-only baseline to start the
-sweep from.
 
 | knob | default | meaning |
 |---|---|---|
 | `COMM_EFF_ENABLED` | true | master switch (false ⇒ byte-identical dense) |
 | `COMM_EFF_MASK_ENABLED` | true | activation mask on pipeline-boundary blocks |
-| `COMM_EFF_MASK_P` | 0.9 | masked fraction (sweep target) |
-| `COMM_EFF_MASK_RESCALE` | true | inverted-dropout `h*mask/(1-p)` — restores `E[h̃]=h` (unbiased mask; not a learning fix on its own) |
-| `COMM_EFF_CLEAN_CADENCE` | 0 (OFF) | naive periodic unmasked step — unsustainable, opt-in only |
-| `COMM_EFF_ANCHOR_ENABLED` | false | K-stale anchor circuit (layer on later) |
-| `COMM_EFF_SPECTRAL_ENABLED` | false | two-sided Tikhonov spectral correction (layer on later) |
+| `COMM_EFF_MASK_P` | 0.9 | masked fraction (p-sweep target on the frontier) |
+| `COMM_EFF_MASK_RESCALE` | true | inverted-dropout `h*mask/(1-p)` — **settled ON** (unbias) |
+| `COMM_EFF_MASK_RECOMPUTE` | true | mask the old-logprob forward too (keeps IS ratio ≈ 1) |
+| `COMM_EFF_CLEAN_CADENCE` | 0 | true dense gradient every K steps — **the lever that makes masked GRPO learn** (K≤20 reaches GSM8K parity) |
+| `COMM_EFF_ANCHOR_ENABLED` | false | K-stale anchor circuit — implemented form inert (frontier redesign target) |
+| `COMM_EFF_SPECTRAL_ENABLED` | false | two-sided Tikhonov spectral correction — implemented form inert by orthogonality (frontier redesign target) |
 
 ## Implementation locus (on `vast-ai-workload`)
 
@@ -104,8 +101,3 @@ sweep from.
 - `verl/workers/engine_workers.py` — `compute_log_prob` mask stamp
 - `verl/workers/engine/fsdp/transformer_impl.py` — boundary-block mask gating
 - `tests/workers/comm_eff/` — CPU unit tests
-
-## Conceptual notes
-
-- `notes/anchor-memory-cost.md` — why the anchor clone is memory-heavy
-- `notes/fast-circuit-vs-anchor-pass.md` — which of the GRPO forwards get masked
