@@ -1,7 +1,7 @@
 {
   "run_name": "curvematch_dense_ref_50step",
   "run_id": "8rk2g9ti",
-  "state": "running",
+  "state": "crashed",
   "entity": "shamanework-pl",
   "project": "comm_eff_curve_match_m4",
   "config": {
