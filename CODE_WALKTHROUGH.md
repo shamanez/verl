@@ -23,8 +23,9 @@ into two coupled circuits on the **same process, same batch, same optimizer**:
    PRF activation mask at pipeline-boundary decoder blocks (`h_tilde = h * mask`),
    keyed on each token's stable `(sample_id, position_id)` so it is
    packing-invariant across the old-logprob and train forwards, producing a noisy
-   gradient `G_mask`. The optional `mask.rescale` knob applies the theory's
-   `1/(1-p)` (default off, matching the supervised reference).
+   gradient `G_mask`. `mask.rescale` (inverted-dropout `1/(1-p)`) is **ON and
+   settled** — it unbiases the masked activation (`E[h̃]=h`); without it grad_norm
+   explodes (~2700 vs ~0.4 dense).
 2. **Anchor (unmasked) circuit** — every `cadence` steps, an *unmasked*
    GRPO-actor-loss forward/backward runs from a `delay_K`-stale weight
    snapshot on a **no-hook clone** of the module, producing a clean
@@ -46,11 +47,21 @@ Ordering invariant: **masked fwd/bwd → FSDP all-reduce → spectral correction
 → AdamW**. The anchor block runs *before* the masked fwd/bwd so its raw
 gradient feeds the EMA before any correction touches the masked grads.
 
-Reference config (the comm-eff baseline): `mask.p=0.9`, `mask_recompute=true`,
-`anchor.cadence=5`, `anchor.delay_K=5`, `spectral.alpha=0.5`, `tau=0.01`,
-`beta_anc=0.9`; no KL, no entropy; `fsdp_config.use_orig_params=true`. The
-authoritative defaults are in `verl/workers/config/comm_eff.py` and the
-launcher `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`.
+**Status — the settled base keeps anchor + spectral OFF.** The proven base is the
+masked circuit + `mask.rescale=true` + a periodic dense **clean step**
+(`clean_cadence`, every K steps; the lever that makes masked GRPO learn — K≤20 →
+GSM8K dense parity; see `research/runs/SUMMARY.md`). The anchor+spectral correction
+above, **as implemented, does not work** — EXP-16 ran it with no clean steps → GSM8K
+0.080 (≈ random), inert. It fails by **orthogonality**: the filter linearly reweights
+`G_mask` in the anchor's SVD subspace, but the mask's bias is ~orthogonal to that
+subspace, and `G_anchor` is never *applied* (only feeds the EMA). Redesigning it into
+a cheap continuous corrector is the open frontier — `research/findings/NEXT_RESEARCH.md`.
+
+Settled-base config: `mask.p=0.9`, `mask.rescale=true`, `mask_recompute=true`,
+`clean_cadence` set (e.g. 20), `anchor.enabled=false`, `spectral.enabled=false`; no
+KL, no entropy; `fsdp_config.use_orig_params=true`. Authoritative defaults:
+`verl/workers/config/comm_eff.py` + the launcher
+`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`.
 
 ---
 
@@ -120,24 +131,25 @@ runtime (a violation raises, it does not silently corrupt a measurement):
 
 ---
 
-## 5. Not yet implemented (gap list)
+## 5. Not yet built (gap list)
+
+The open frontier:
+- **A working anchor+spectral correction.** The implemented form is inert (§1);
+  redesigning it into a cheap continuous surrogate for the clean step — attacking the
+  mask's curvature bias directly — is the next direction (`research/findings/NEXT_RESEARCH.md`).
 
 Deferred (later milestones):
-- **DP gradient compression** (PowerSGD + Streaming-DiLoCo) — out of scope until
-  the actor mask/anchor/spectral path is correct.
-- **Long compressed-vs-dense comparison runs** (the parity + savings curve).
+- **DP gradient compression** (PowerSGD + Streaming-DiLoCo) — out of scope until the
+  correction path works.
 - **Per-mini-batch anchor gradients** (the heavier variant) — current code is the
   same-loop periodic refresh.
-- **Megatron / Automodel engine integration** — only the FSDP backend overrides
-  the comm-eff hooks; other backends run as if disabled.
+- **Megatron / Automodel engine integration** — only the FSDP backend overrides the
+  comm-eff hooks; other backends run as if disabled.
 - **OOM microbatch-split for the anchor pass** — counter plumbed, path not coded.
 
 Out of scope (excluded by the method spec):
-- Top-k masking (random PRF only); separate anchor GPU/rank; non-Qwen2.5-1.5B
-  ports; masking any path other than actor-train; forking GRPO into a separate
-  algorithm. (The `1/(1-p)` rescale is an optional knob, default off — the
-  theory wants it but the supervised reference omits it; see
-  `CommEffMaskConfig.rescale`.)
+- Top-k masking (random PRF only); separate anchor GPU/rank; non-Qwen2.5-1.5B ports;
+  masking any path other than actor-train; forking GRPO into a separate algorithm.
 
 Known caveats:
 - **SP=1 / rmpad only for masking** — the per-element mask aligns its

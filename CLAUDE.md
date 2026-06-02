@@ -148,21 +148,11 @@ rm ~/.claude-kill-switch
 
 ### Manual baseline launch (bypass the harness)
 
-Provision a Vast.ai box from the locked template directly:
-
-```bash
-source ~/.config/verl-research/secrets.env
-bash research/.claude/skills/vast-provision/run.sh \
-  --query 'num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true' \
-  --max-price 24.0 --count 1 --disk-gb 200
-# then ssh into the resulting handle and run:
-#   bash examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh
-```
-
-The Vast.ai template (`verl-research-vllm020`, hash
-`3b0f8b726ac3036d6c007bfa13b6d75f`) handles docker bring-up, verl install,
-and HF/WandB auth via its onstart script — no separate bootstrap script
-is needed.
+Provision directly with `research/.claude/skills/vast-provision/run.sh` (locked
+template `verl-research-vllm020`, hash `3b0f8b726ac3036d6c007bfa13b6d75f` — its
+onstart script handles docker + verl install + HF/WandB auth), then ssh in and run
+`examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`. Full procedure:
+`research/researcher_steps.md`.
 
 ## 5. Commits
 
@@ -179,8 +169,5 @@ this fork.
 
 ## Acknowledgements
 
-This file adapts the orientation pattern of upstream verl's
-[`AGENTS.md`](AGENTS.md), which in turn adapted vLLM's agent
-instructions. The contribution-policy machinery from upstream is
-intentionally removed — this fork is research-only, not a contribution
-pipeline.
+Adapts the orientation pattern of upstream verl's [`AGENTS.md`](AGENTS.md);
+contribution-policy machinery removed — this fork is research-only.
