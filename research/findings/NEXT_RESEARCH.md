@@ -33,10 +33,13 @@ This is RL, not supervised learning: there is no recipe to port, so the correcti
 - **Candidate:** masked (p=0.9, rescale ON, `mask_recompute=true`) + the correction under test, anchor `cadence`=5, `delay_K`=5, **`clean_cadence` OFF** (the correction must stand on its own — no leaning on frequent clean steps). ≤50 steps, same logging.
 - **Match metric:** per-step distance between the curves (mean |reward_masked − reward_dense| over the 50 steps + the final gap + the within-window slope). "Match" = the candidate **tracks dense across the whole trajectory** within a stated tolerance, not just at the end — the strong evidence that the correction recovers the true gradient step-by-step, under realistic staleness.
 
+**Two hard constraints on the search:** (a) **staleness is mandatory** — `delay_K`=5, never 0; a realistic decentralized / PP system can never deliver a *fresh* full gradient (it always lands ~K steps stale), so a correction that only works with a fresh anchor is invalid; (b) **the periodic clean step was only an existence proof** that the signal is recoverable — `clean_cadence` stays OFF and is **not** reintroduced. The only full-fidelity passes allowed are the anchor's *stale reference* passes that feed the correction — never a fresh full gradient applied directly as the optimizer update.
+
 ## The recursive search loop
 
 A pure-research issue runs an agent that **recursively explores corrections**, every iteration backed by a real run:
 
+0. **Enumerate all candidate corrections theoretically first** — a complete list, each with its mechanism, rationale (why it should make the masked curve track dense), how it respects the constraints above, and predicted behavior — *before* running anything.
 1. Establish the dense reference curve (one run, cached).
 2. Propose a correction (a refinement of a prior attempt, or a new approach).
 3. Patch it on an `exp/*` branch; run masked+correction (≤50 steps, cadence 5, delay_K 5, clean_cadence OFF); log the curve.
