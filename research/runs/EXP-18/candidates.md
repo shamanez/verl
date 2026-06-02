@@ -1,0 +1,224 @@
+# EXP-18 / M4 — Theoretical candidate enumeration (sequence step 0)
+
+> **MANDATE deliverable (plan §"THE WORKING MODE", §Success criteria).** Written
+> BEFORE any candidate run. Enumerates the complete set of continuous,
+> STALE-anchor gradient corrections under test — each with (1) mechanism,
+> (2) rationale tied to `g_mask = g_true + b + ξ`, (3) how it respects the three
+> HARD CONSTRAINTS, (4) predicted ≤50-step curve-match behavior. At least one
+> candidate (C2) is **derived from the current spectral correction** (turning its
+> *reweighting* of `G_mask` into *additive injection* of the missing component).
+> This file is appended with a **results-driven theory** after every iteration
+> (observe → theorize → propose-new → test).
+
+---
+
+## 0. The theory we are reasoning from
+
+**The estimator decomposition.** The masked actor gradient is a biased, noisy
+estimator of the true (unmasked) GRPO gradient:
+
+```
+g_mask = g_true + b + ξ
+```
+
+- `g_true` — the true GRPO actor gradient at the current weights θ_t (what the
+  dense run follows).
+- `b` — a **systematic, curvature-aligned bias** (a delta-method term from masking
+  the boundary activations and the RMSNorm `1/RMS` backward compounding over the 7
+  pipeline boundaries `[3,7,11,15,18,21,24]`). `b` **accumulates** across a masking
+  window and, left uncorrected, eventually flips the ascent projection — the masked
+  run stalls at the ~0.13 reward floor (`runs/SUMMARY.md`, `findings/NEXT_RESEARCH.md`).
+- `ξ` — zero-mean masking noise. Rescale (`h·mask/(1-p)`, ON permanent) unbiases the
+  *activation* (`E[h̃]=h`) and bounds `Var(ξ)` (≈`p/(1-p)`≈9× at p=0.9). **Rescale does
+  NOT remove `b`** — the gradient bias survives because it is a nonlinear/curvature term.
+
+**The orthogonality finding (the load-bearing failure of the as-implemented method).**
+EXP-16 `anchor@2 + spectral@2` (no clean step) → GSM8K val **0.080 ≈ random**, pearson
+**~0.004**, inert. Root cause: at p=0.9, masking rotates `G_mask` **nearly orthogonal**
+to `g_true` (cos≈0). The `SpectralFilter` (`spectral_filter.py`) computes
+
+```
+G_proj = α·G_mask + (1-α)·U diag(d) (Uᵀ G_mask V) diag(d) Vᵀ ,   d_i = s_i/(s_i+τ)
+```
+
+where `(U,S,V)` is the SVD basis of the stale-anchor EMA `M_anchor`. **`G_proj` is a
+purely LINEAR function of `G_mask`.** `M_anchor` enters ONLY as projection *geometry*
+(its singular vectors + scalar Tikhonov weights `d_i∈[0,1)`); the **vector** `M_anchor`
+itself is never added. So when `G_mask ⊥ g_true`, the content `Uᵀ G_mask V` carries
+~no energy in the directions that matter, and **no linear reweighting of a
+near-orthogonal vector can synthesize the missing component.** This is exactly why the
+clean step works (it *applies* the true gradient) while spectral did not (it only *used*
+the true gradient as a basis).
+
+**The anchor signal we have (`anchor.py`, `transformer_impl._maybe_comm_eff_anchor_refresh`).**
+Every `cadence=5` steps the anchor runs ONE **unmasked** GRPO-actor-loss fwd/bwd on a
+**deep-cloned module** loaded with `delay_K=5`-**stale** weights `θ_{t-5}`, over the
+**current** batch's rollouts/advantages, taking **no optimizer step**. It yields a RAW
+per-target 2D gradient `G_anchor ≈ g_true(current batch; θ_{t-5})` — the **stale true
+gradient**. Today `G_anchor` flows ONLY into the EMA `M_anchor ← β·M_anchor +
+(1-β)·G_anchor` (`feed_anchor_grads_into_ema`) and is **never applied to the
+optimizer**. **Wiring `M_anchor` into the update as a force is the load-bearing change.**
+
+**The staleness model.** `M_anchor ≈ g_true(θ_{t-K})`. For small `K·lr`
+(`K=5`, `lr=1e-6` → weights barely move over 5 steps) `g_true(θ_{t-5}) ≈ g_true(θ_t)`,
+so `M_anchor` is a usable estimate of the **current** true-gradient *direction*. The
+correction must work from this stale estimate alone (Constraint 2) — it can NEVER assume
+a fresh anchor.
+
+**Scale caveat (important for every injection candidate).** Rescale inflates `‖G_mask‖`
+≈9× relative to a dense/true gradient, so `‖G_mask‖ ≫ ‖M_anchor‖`. A naïve `G_mask +
+M_anchor` is swamped — the true-gradient force barely rotates the update. **Every
+injection candidate must scale-match** the injected term to `‖G_mask‖` (Adam's `m̂/√v̂`
+is scale-invariant and verl grad-clips, so what matters is the *direction* we steer
+`G_mask` toward, not the absolute magnitude — settled decision, `runs/SUMMARY.md`).
+
+**Coverage caveat.** The as-implemented hook caps correction at `max_targets=4` matrices
+(an EXP-7 *discovery* smoke value). Four matrices out of ~196 targeted 2D decoder
+matrices cannot move the training curve. **Every candidate raises `max_targets=-1`
+(all targeted matrices)** so the correction actually covers the network. Injection modes
+carry **no SVD/basis cost**, so `-1` is cheap; only the per-matrix `M_anchor` EMA is
+stored (offload to `ema_device=cpu` if HBM-bound).
+
+---
+
+## 1. HARD CONSTRAINTS every candidate obeys (plan §HARD CONSTRAINTS)
+
+1. **No periodic full-gradient optimizer step.** `clean_cadence=0` always. The only
+   full-fidelity passes allowed are the anchor's **STALE** reference passes that FEED the
+   correction — never a fresh dense gradient applied as the update.
+2. **Staleness mandatory.** `delay_K=5`, never 0, never 20. A correction that needs a
+   fresh anchor is INVALID (it would not survive a decentralized/pipeline-parallel
+   deployment where the full gradient always lands ~K steps old).
+3. **Supply the missing component, do not reweight.** The correction must ADD the part
+   `G_mask` lacks — not linearly reweight `G_mask` in a subspace (that is precisely why
+   the as-implemented spectral filter was inert under orthogonality).
+
+---
+
+## 2. Candidate enumeration
+
+Fixed across all candidates: `MASK_P=0.9`, `rescale=ON`, `mask_recompute=ON`,
+`ANCHOR_CADENCE=5`, `ANCHOR_DELAY_K=5` (STALE), `CLEAN_CADENCE=0`. The correction is the
+ONE varying dimension, explored serially.
+
+### C0 — As-implemented spectral reweighting (the FLOOR, not a candidate)
+- **Mechanism.** `spectral_filter.correct_matrix` as committed: two-sided Tikhonov
+  reweighting of `G_mask` in `M_anchor`'s SVD basis (the formula in §0).
+- **Why it is the floor.** Inert by orthogonality (GSM8K 0.080, pearson ~0.004). Run
+  UNCHANGED as sequence step 1b (`curvematch_spectral_baseline_c5_d5`) and cached as the
+  reference every candidate must beat. **This is the explicit departure point for C2.**
+
+### C1 — Stale-anchor additive injection (direction-matched true-gradient force) — RUN FIRST
+- **Mechanism.** At the grad-correction hook, for each targeted 2D matrix, read the stale
+  true-gradient EMA `M_anchor` and **ADD** it as a scale-matched force:
+  ```
+  G_corr = G_mask + γ · (‖G_mask‖_F / (‖M_anchor‖_F + ε)) · M_anchor
+  ```
+  New knob `spectral.correction_mode="inject"` selects this path (default `"reweight"` =
+  C0, byte-identical); `spectral.inject_gamma=γ` (start 1.0). `max_targets=-1`.
+- **Rationale (`g_mask=g_true+b+ξ`).** `M_anchor ≈ g_true(stale)`. Adding a scale-matched
+  copy injects energy **along the true ascent direction** — exactly the directions
+  masking rotated away (where `G_mask≈0` by orthogonality, so the add is **constructive,
+  not a reweight**). This partially cancels `b` by re-supplying `+g_true`. `γ` tunes how
+  hard we steer toward the (stale) truth vs the (biased) masked gradient.
+- **Constraints.** (1) `M_anchor` is the stale anchor EMA — no clean step. (2) fed by
+  `delay_K=5` `G_anchor`. (3) **additive** supply of `g_true`'s direction — not a
+  reweight of `G_mask`. ✓
+- **Predicted curve.** Should lift reward **off the 0.13 floor toward dense**. `γ` too
+  small → undershoot (stays near floor); too large → over-weights the stale direction →
+  overshoot/oscillation. Diagnostic to log: live **cos(G_mask, M_anchor)** (confirms
+  orthogonality on the REAL anchor) and the injected-norm ratio.
+
+### C2 — Complement-projection injection (DERIVED FROM the spectral correction) — the spectral-derived candidate
+- **Mechanism.** Reuse the same anchor signal the `SpectralFilter` already holds, but
+  replace its *reweighting* with *additive injection of the orthogonal complement*: add
+  the part of `M_anchor` that `G_mask` does NOT already span —
+  ```
+  P_{G_mask}(M_anchor) = (⟨G_mask, M_anchor⟩ / ‖G_mask‖²) · G_mask        # projection onto span(G_mask)
+  G_corr = G_mask + η · scale · (M_anchor − P_{G_mask}(M_anchor))          # inject the COMPLEMENT
+  ```
+  (`scale = ‖G_mask‖/‖M_anchor‖` for the same scale-match reason as C1.) This is the
+  **minimal edit that turns the spectral filter from a reweighting of `G_mask` in a
+  subspace into an additive injection of the missing component** — the literal §(i)
+  mandate ("turning reweighting into additive injection / complement-projection").
+- **Rationale.** Orthogonality (cos≈0) ⇒ `P_{G_mask}(M_anchor) ≈ 0` ⇒ the injected term
+  **≈ the full `M_anchor`** = the entire missing true direction. So **under the measured
+  orthogonality, C2 *collapses to C1*** — which is why C1 is the clean first realization
+  and C2 is the principled framing (the complement form also stays correct when cos is
+  NOT ≈0, avoiding double-counting the aligned part). The complement of `g_true` w.r.t.
+  `g_mask` is precisely what `b` rotated away.
+- **Constraints.** ✓ (stale `M_anchor`; additive complement; `delay_K=5`).
+- **Predicted curve.** ≈ C1 at the orthogonal limit; strictly safer when alignment grows
+  mid-run (it never re-injects energy `G_mask` already has). Run if C1 shows signal but
+  drifts late (suggesting the aligned-part double-count matters as training proceeds).
+
+### C3 — Explicit `b`-estimator (stale masked-minus-unmasked bias removal)
+- **Mechanism.** Extend the anchor pass to compute, at the SAME stale weights `θ_{t-5}`,
+  **both** an unmasked grad `G_anchor` AND a masked grad `G_anchor^mask`. Their
+  difference is a direct estimate of the bias:
+  ```
+  b̂_stale = G_anchor^mask − G_anchor        # = (g_mask − g_true) at θ_{t-5}
+  G_corr   = G_mask − λ · b̂_stale            # subtract the estimated bias  (EMA-smoothed b̂)
+  ```
+  New knob `correction_mode="bias_est"`, `bias_lambda=λ`. Requires a second (masked)
+  stale pass in `_maybe_comm_eff_anchor_refresh` (still cadence=5).
+- **Rationale.** The most literal attack on `g_mask=g_true+b+ξ`: **measure `b` and
+  subtract it.** Valid because `b` is slowly varying (curvature-aligned, accumulates over
+  windows — `findings/NEXT_RESEARCH.md`), so `b̂_stale ≈ b_current`.
+- **Constraints.** (1) both stale passes are reference passes, no optimizer step. (2)
+  `delay_K=5`. (3) supplies `−b` (the missing correction). ✓
+- **Predicted curve.** Most principled de-biasing; should track dense best **if** `b` is
+  slowly varying. Risks: `b̂` is itself stale+noisy; doubles the anchor compute. Run if
+  direction-injection (C1/C2) lifts reward but does not *track* dense step-for-step.
+
+### C4 — Staleness-aware anchor aggregation (refinement axis on the winner)
+- **Mechanism.** Vary how `M_anchor` aggregates stale `G_anchor` to reduce lag: (a) lower
+  `beta_anc` (→0.5, →0.0 = raw last `G_anchor`); (b) linear extrapolation across two
+  refreshes `M̂ = G_anchor(t) + [G_anchor(t) − G_anchor(t−cadence)]`; (c) age-decay the
+  injection weight `γ_eff = γ·ρ^{age}` between refreshes.
+- **Rationale.** C1/C2/C3 assume `M_anchor ≈ g_true(current)`; `delay_K=5` + a heavy EMA
+  (`β=0.95`) makes it lag. Better aggregation sharpens the estimate → better step-for-step
+  tracking. (The "different aggregations/decays of the anchor signal" direction.)
+- **Constraints.** ✓ (all variants use only the stale anchor).
+- **Predicted curve.** A multiplier on whichever base candidate wins; tune `β`/extrapolation
+  AFTER a base candidate shows it lifts off the floor.
+
+### C5 — Boundary-activation injection (alternative locus; heavier change; fallback)
+- **Mechanism.** Inject the missing component at the **7 boundary activations** (where the
+  mask zeroed dims) instead of in parameter-gradient space: use the stale anchor's UNMASKED
+  boundary activations to estimate the per-(token,channel) activation the mask removed and
+  add it back at the boundary forward, so the downstream backward carries the missing signal.
+- **Rationale.** `b` originates at the masked boundaries (RMSNorm `1/RMS` compounding).
+  Correcting at the **source** (activations) is cheaper/more local than reconstructing `b`
+  in parameter space.
+- **Constraints.** ✓ but touches `activation_mask.py` + the boundary forward in
+  `transformer_impl.py` — the most invasive change.
+- **Predicted curve.** Potentially the most faithful (corrects at source); deferred unless
+  parameter-space injection (C1–C3) plateaus.
+
+---
+
+## 3. Run order + rationale
+
+1. **C1 (`exp/18-anchorinject-c5d5`)** — simplest realization of the load-bearing idea
+   (inject the stale true gradient as a scale-matched force). Establishes *whether
+   injection moves reward off the floor at all*. Logs live cos(G_mask, M_anchor) — the
+   first direct measurement of orthogonality on the live anchor.
+2. **C2** — if C1 lifts reward but drifts late → switch to the complement form (the
+   spectral-derived candidate) to stop double-counting the aligned part.
+3. **C3** — if direction-injection lifts but does not *track* dense step-for-step → measure
+   and subtract `b` explicitly.
+4. **C4** — refinement axis (anchor freshness) applied to whichever base candidate shows life.
+5. **C5** — fallback locus if parameter-space injection plateaus.
+
+STOP at the **first** candidate clearing the bar (mean `|Δreward|≤0.05` over steps 1..50
+AND final `|Δreward|≤0.05`, no collapse, slope-sign match, `pg_loss` tracks, `grad_norm`
+finite, constraints verified). Per `iterations:3`, at most 3 REVISE cycles on this lineage.
+
+---
+
+## 4. Results-driven theory log (appended after each iteration — the observe→theorize→propose loop)
+
+_(Empty until the dense reference + spectral floor are cached and C1 returns. Each entry:
+what improved/regressed vs BOTH dense (target) and the spectral floor; WHY (tie to
+`b`/orthogonality/staleness); and the next candidate proposed FROM that evidence.)_

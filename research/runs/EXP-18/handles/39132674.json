@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-06-02T13:54:24Z",
+  "dph_total": 15.790844298245611,
+  "gpu_name": "H200",
+  "instance_id": "39132674",
+  "label": "verl-research:13db3b25-cd30-47b2-8484-0f341d30bae0",
+  "num_gpus": 4,
+  "offer_id": "28747628",
+  "public_ipaddr": "208.64.254.75",
+  "schema_version": "1",
+  "session_id": "13db3b25-cd30-47b2-8484-0f341d30bae0",
+  "ssh_host": "208.64.254.75",
+  "ssh_login": "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 23828 root@208.64.254.75 -L 8080:localhost:8080",
+  "ssh_port": 23828,
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
+}
