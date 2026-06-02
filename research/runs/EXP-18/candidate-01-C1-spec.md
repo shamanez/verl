@@ -120,13 +120,16 @@ COMM_EFF_MASK_ENABLED=true COMM_EFF_MASK_P=0.9 COMM_EFF_MASK_RESCALE=true COMM_E
 COMM_EFF_CLEAN_CADENCE=0 \
 COMM_EFF_ANCHOR_ENABLED=true COMM_EFF_ANCHOR_CADENCE=5 COMM_EFF_ANCHOR_DELAY_K=5 \
 COMM_EFF_SPECTRAL_ENABLED=true COMM_EFF_SPECTRAL_MAX_TARGETS=-1 \
+PPO_MAX_TOKEN_LEN_PER_GPU=18432 LOG_PROB_MAX_TOKEN_LEN_PER_GPU=18432 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=18432 \
 TOTAL_TRAINING_STEPS=50 VAL_BEFORE_TRAIN=False TEST_FREQ=100000 USE_DYNAMIC_BSZ=True \
-NGPUS_PER_NODE=<provisioned count> \
+NGPUS_PER_NODE=4 \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.spectral.correction_mode=inject \
   actor_rollout_ref.actor.comm_eff.spectral.inject_gamma=1.0
 ```
 Constraint pins (INVALID run if violated): `ANCHOR_DELAY_K=5` (launcher default 20!), `CLEAN_CADENCE=0`, `ANCHOR_CADENCE=5`.
+
+**ANCHOR-OOM FIX (MANDATORY — inherited from the floor re-run).** The first floor run OOM'd in the anchor's unsharded full backward at `PPO_MAX_TOKEN_LEN_PER_GPU=36864`. The launcher's documented anchor-ON mitigation (halve to **18432**) is applied above and MUST stay for every anchor-ON candidate. Do NOT reduce `MAX_RESPONSE_LENGTH` (16384, fixed by mandate). `max_targets=-1` adds only ~5 GB/rank of M_anchor EMA (inject mode skips the SVD basis cache), which fits in the headroom the token-len halving frees. If C1 still OOMs at the anchor fire (~step 3), add `actor_rollout_ref.actor.fsdp_config.optimizer_offload=true` (and `param_offload=true`) via `"$@"`, or halve token-len again to 9216 — escalate memory before touching the method.
 
 ## CPU unit-test before launch (cheap, catches the math/wiring)
 On the box (or laptop) run the existing comm_eff tests + a quick inject sanity:
