@@ -23,14 +23,18 @@ EXP-16 `anchor@2+spectral@2`, no clean steps → GSM8K **0.080 (≈random)**, in
 
 On Big-Math even clean@20 stalls (~0.55) while dense learns (~0.61); the clean step's grad_norm there is ~2× smaller (smaller `‖g_true‖`). If hard tasks are in scope, the correction must recover signal the clean step itself does not.
 
+## Experiment protocol (new runs)
+
+**GSM8K, ≤25 steps** — the standard fast/cheap testbed for this cycle (the spectral-correction iteration and the two gating runs below). 25 steps is more than enough to see the early trajectory, the clean/correction re-anchoring, and the within-window reward slope. Use a **short clean cadence (≈5)** so several cycles fit in 25 steps (clean@20 would give only one). Hold the rest of the EXP-17 shape: rescale ON, `mask_recompute=true`, no-KL no-entropy, lr=1e-6, n=8, train_batch=128, mini_batch=64. **Big-Math is an optional later confirmation** once something works on the cheap GSM8K testbed — not part of the fast loop. (25-step runs are for development/comparison; a final parity claim needs one longer confirmation run — see Success bar.)
+
 ## Run these two cheap experiments FIRST (pure-config, before any redesign)
 
-**EXP-A — p-sweep (decisive).** Sweep `COMM_EFF_MASK_P ∈ {0.9,0.7,0.5,0.3,0.1}` on **both** GSM8K and Big-Math, all else at the EXP-17 shape, `clean_cadence=20` fixed.
-- *Question:* is the wall mask-rate/SNR (Big-Math climbs as p drops → find threshold `p*`) or does it genuinely need a correction (flat at all p)?
-- *Prediction:* GSM8K insensitive at high p; Big-Math climbs toward dense below some `p*`. Climbs → a cheap correction buys effective-low-p at high savings. Flat → the bias isn't a mask-rate artifact; the correction must attack `b`.
+**EXP-A — p-sweep.** Sweep `COMM_EFF_MASK_P ∈ {0.9,0.7,0.5,0.3,0.1}` on GSM8K, ≤25 steps, clean@5.
+- *Question:* how p-sensitive is GSM8K learning? Theory predicts it stays ~insensitive at high p (elicitation needs only a coarse gradient); p is also itself a savings knob (boundary volume ∝ p).
+- *Optional confirmation (later, 1 run):* repeat at the most informative p on Big-Math for the decisive `p*` question — does lowering p unlock the hard task, or is the bias not a mask-rate artifact (→ the correction must attack `b`)?
 
-**EXP-B — clean-only ablation (honesty check).** Fixed K=20 on GSM8K: Arm 1 = dense step every K, **no update between**; Arm 2 = masked+clean@K (= EXP-17).
-- *Question:* is masking contributing learning, or are the clean steps doing it all? Compare final val + within-window reward slope.
+**EXP-B — clean-only ablation (honesty check).** GSM8K, ≤25 steps, K=5: Arm 1 = dense step every K, **no update between**; Arm 2 = masked+clean@K.
+- *Question:* is masking contributing learning, or are the clean steps doing it all? Compare val + within-window reward slope.
 - *Decides framing:* Arm2 ≫ Arm1 → "masking supports learning" is honest; Arm1 ≈ Arm2 → downgrade to "masking doesn't destroy what clean steps learn."
 
 ## The redesign (only after EXP-A/B)
@@ -40,6 +44,6 @@ Attack `b`; use the anchor as a stale true-gradient **reference that contributes
 2. The anchor is already plumbed (`anchor.py`: K-stale isolated clone, raw unmasked grad) but its gradient is never applied — making it reach the optimizer as a correction is the load-bearing code change.
 3. Prefer correcting at the boundary activations (cheap, local) over a full parameter-gradient correction.
 
-**Success bar (ties to GOAL "done"):** reach **≥ masked-clean@K val with the clean step OFF (or sparser)**, at **net inter-stage comm strictly below the clean@K baseline** — savings reported *net of the correction's own overhead*. GSM8K parity (0.7415) minimum; Big-Math improvement if EXP-A shows the wall is correctable, else clear Constraint 2.
+**Success bar (ties to GOAL "done"):** on the 25-step GSM8K testbed, the correction (clean step OFF or sparser) must **hold the masked+clean@K trajectory** at **net inter-stage comm strictly below the clean@K baseline** (savings reported *net of the correction's overhead*). The final **parity claim (GSM8K val ≥ 0.7415)** is confirmed on **one longer run** once the 25-step testbed looks good; Big-Math improvement only if its optional p-run shows the wall is correctable, else clear Constraint 2.
 
 *Savings metric:* boundary-activation volume not communicated. masked+clean@K = `((K-1)/K)·p` (EXP-17 K=20,p=0.9 → ~85.5%). A continuous correction targets ~p every step but must subtract its own comm cost. (Distinct from "clean-step sparsity," the looser ~95% figure.)
