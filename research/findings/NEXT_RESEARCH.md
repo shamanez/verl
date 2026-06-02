@@ -2,7 +2,7 @@
 
 **Directive (head researcher):** find a *working* method combining a **spectral correction** with an **anchor circuit** as a **cheap, continuous surrogate for the periodic dense "clean" step.**
 
-**Why this is the direction:** the clean step is the existence proof that periodic true-gradient re-anchoring works (clean-resettable sawtooth, EXP-17). But it is expensive — full inter-stage comm every K steps, savings capped at `(K-1)/K·p`. The prize: a correction applied *every* masked step that recovers what the clean step recovers, at lower comm.
+**The moment of truth (why this direction).** Masking alone makes a biased, noisy gradient that does not learn at high mask rates. But **periodically passing a full dense gradient every K steps re-anchors training and reaches results comparable to dense** (GSM8K parity; clean-resettable sawtooth, EXP-17) — proof the signal is *recoverable*, not lost. If a *sparse* full gradient does it, a **cheaper continuous spectral correction** (driven by an anchor = a low-frequency true-gradient reference) should recover the same at a fraction of the comm. The clean step is expensive (full inter-stage comm every K steps, savings capped `(K-1)/K·p`); the prize is a correction applied *every* masked step that matches it at lower comm. The bar (Constraints 1–2 below): target the bias directly — not reweight `G_mask` — and clear the harder-task case where even the clean step stalls.
 
 Grounding: `runs/SUMMARY.md` (the proven result + why, knobs, settled base, dataset prep).
 

@@ -52,6 +52,25 @@ In brief:
   the periodic clean step, grounded in the delta-method curvature bias (not
   anchor-gradient-SVD). Gated by a **p-sweep** and a **clean-only ablation**.
 
+## The moment of truth
+
+Masking alone makes a **biased, noisy** gradient that does not learn at high mask
+rates. The decisive finding: **periodically passing a full dense gradient every K
+steps re-anchors training and recovers results comparable to dense** (GSM8K parity).
+A sparse periodic correction pulls the drifting masked trajectory back — so **the
+signal is recoverable, not lost.** The opening: if a *sparse* full gradient works, a
+**cheaper, continuous spectral correction** (driven by an anchor — a low-frequency
+true-gradient reference) should recover the same at a fraction of the communication.
+That is the direction worth pursuing.
+
+Honest bar: GSM8K parity is *elicitation* (the base model is already strong there) —
+on genuinely harder data (Big-Math) even the periodic full gradient stalls, so the
+correction's real job is to recover *learning*, not just match the clean step; and
+the first anchor+spectral attempt failed by **orthogonality** (it reweighted the
+masked gradient instead of supplying the missing true-gradient component), so the
+redesign must target the bias directly. The core logic still stands: periodic true
+gradients work → a continuous correction should too.
+
 ## Why code changes are in scope
 
 The method lives **in the verl source of this fork** (mask / anchor / spectral /
