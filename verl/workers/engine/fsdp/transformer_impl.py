@@ -840,6 +840,9 @@ class FSDPEngine(BaseEngine):
             feed_anchor_grads_into_ema,
             snapshot_named_params,
         )
+        # EXP-18: canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
+        # anchor clone matches the live module's per-layer-wrapped snapshot keys.
+        from verl.workers.comm_eff.spectral_filter import _canon
 
         cadence = int(getattr(anchor_cfg, "cadence", 20))
         delay_K = int(getattr(anchor_cfg, "delay_K", 20))
@@ -962,10 +965,26 @@ class FSDPEngine(BaseEngine):
 
             # Load the K-stale snapshot weights into the clone (NOT into the
             # live module — the live optimizer's params remain untouched).
+            # EXP-18: the `stale` snapshot is keyed by the LIVE module's
+            # (FSDP per-layer-wrapped) names — those carry the
+            # `._fsdp_wrapped_module.` infix — while the clone (when the deepcopy
+            # path fell back to a plain config-rebuild) has NON-infixed names. A
+            # raw `n in stale` lookup then never matches → the clone keeps RANDOM
+            # init weights → G_anchor is garbage. Match by canonical (infix-
+            # stripped) key so the clone receives the REAL delay_K-stale weights.
+            stale_canon = {_canon(k): v for k, v in stale.items()}
             with torch.no_grad():
+                loaded = 0
                 for n, p in anchor_module.named_parameters():
-                    if n in stale and stale[n].shape == p.shape:
-                        p.copy_(stale[n].to(p.device, p.dtype))
+                    s = stale_canon.get(_canon(n))
+                    if s is not None and s.shape == p.shape:
+                        p.copy_(s.to(p.device, p.dtype))
+                        loaded += 1
+            print(
+                f"[comm_eff][EXP-18][anchor-load] loaded {loaded}/{sum(1 for _ in anchor_module.named_parameters())} "
+                f"stale params into clone (canon-matched)",
+                flush=True,
+            )
 
             # Swap `self.module` to point at the clone for the duration of
             # _forward_backward_batch_inner — that method calls self.module(...)

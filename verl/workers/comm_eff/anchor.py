@@ -80,6 +80,24 @@ __all__ = [
 ]
 
 
+def _canon(name: str) -> str:
+    """Strip the FSDP per-layer-wrap infix from a parameter name (EXP-18).
+
+    Mirrors ``spectral_filter._canon`` (kept local so this CPU-testable module
+    has no cross-module import dependency). When ``build_anchor_module`` falls
+    back to a config-rebuild, the rebuilt clone is a PLAIN module whose
+    ``named_parameters()`` names lack the ``._fsdp_wrapped_module.`` infix the
+    live (per-layer FSDP-wrapped) ``inner_module`` may carry. Matching the
+    fallback param/buffer copy by canonical key ensures the clone is seeded with
+    the REAL live weights rather than keeping its random init — otherwise
+    ``G_anchor`` is computed from garbage.
+    """
+    name = name.replace("._fsdp_wrapped_module", "")
+    if name.startswith("_fsdp_wrapped_module."):
+        name = name[len("_fsdp_wrapped_module."):]
+    return name
+
+
 def anchor_should_fire(step: int, cadence: int, enabled: bool) -> bool:
     """True iff the anchor refresh fires on trainer ``step``.
 
@@ -328,16 +346,24 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
                 except Exception:
                     pass
             return t
+        # EXP-18: match by canonical (FSDP-infix-stripped) key. The rebuilt clone
+        # has NON-infixed names; the live inner_module's summoned names may carry
+        # the `._fsdp_wrapped_module.` infix (per-layer wrapping). A raw `n in
+        # src_params` lookup then misses for every layer and the clone keeps its
+        # RANDOM init weights → G_anchor is garbage. Canon-keying both sides
+        # gives the clone the real live weights even before the snapshot-load.
         with _torch.no_grad():
-            src_params = dict(inner_module.named_parameters())
+            src_params = {_canon(n): p for n, p in inner_module.named_parameters()}
             for n, p_dst in clone.named_parameters():
-                if n in src_params:
-                    s = _to_plain(src_params[n].detach())
+                s = src_params.get(_canon(n))
+                if s is not None:
+                    s = _to_plain(s.detach())
                     p_dst.data.copy_(s.to(p_dst.device, p_dst.dtype))
-            src_buffers = dict(inner_module.named_buffers())
+            src_buffers = {_canon(n): b for n, b in inner_module.named_buffers()}
             for n, b_dst in clone.named_buffers():
-                if n in src_buffers:
-                    s = _to_plain(src_buffers[n])
+                s = src_buffers.get(_canon(n))
+                if s is not None:
+                    s = _to_plain(s)
                     b_dst.copy_(s.to(b_dst.device, b_dst.dtype))
     # Belt-and-braces: explicitly clear any post-accumulate-grad hooks the
     # deepcopy might have transferred via a custom __deepcopy__ on a parent

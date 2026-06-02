@@ -73,6 +73,34 @@ __all__ = [
 ]
 
 
+def _canon(name: str) -> str:
+    """Canonicalize a parameter name by stripping the FSDP per-layer-wrap infix.
+
+    EXP-18/M4 anchor-circuit bug fix. The anchor EMA is FED from the anchor
+    clone's ``named_parameters()`` and READ back via the LIVE FSDP module's
+    summoned ``named_parameters()``. When ``build_anchor_module``'s deepcopy
+    fails and the config-rebuild fallback runs, the clone is a PLAIN
+    (non-FSDP) module whose names lack the per-layer FSDP wrap infix
+    ``._fsdp_wrapped_module.`` that the live per-layer-wrapped module's
+    summoned names carry. Without canonicalization the feed-side key
+    (``model.layers.0.self_attn.q_proj.weight``) and the read-side key
+    (``model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight``) never
+    match, so ``M_anchor`` reads as zero at injection/correction time and the
+    correction silently no-ops.
+
+    Canonicalizing at every ``self._anchor`` / ``self._basis`` key boundary
+    makes the two keys IDENTICAL. Safe in BOTH build paths: a successful
+    deepcopy yields infixed names that canon to the same as the live-canon
+    names; the fallback's non-infixed names are already canonical (no-op).
+    A leading ``_fsdp_wrapped_module.`` (root-wrap, no dot prefix) is also
+    stripped.
+    """
+    name = name.replace("._fsdp_wrapped_module", "")
+    if name.startswith("_fsdp_wrapped_module."):
+        name = name[len("_fsdp_wrapped_module."):]
+    return name
+
+
 def compute_basis(m_anchor: torch.Tensor, *, svd_mode: str = "full", rank: int = 8) -> tuple:
     """Compute the (U, S, V) basis of the anchor used by the two-sided projection.
 
@@ -328,6 +356,7 @@ class SpectralFilter:
         ``ema_device=cpu``, else the gradient's device). Seeding builds the
         deterministic basis on the grad's device, then moves it to storage.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor.get(name)
         if anc is None:
             store_dev = self._ema_storage_device(grad.device)
@@ -346,6 +375,7 @@ class SpectralFilter:
         Used at refresh/correction time to bring a CPU-offloaded EMA onto the
         compute device. The stored copy is left on its storage device.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor[name]
         return anc.to(device) if anc.device != torch.device(device) else anc
 
@@ -362,6 +392,7 @@ class SpectralFilter:
         is refreshed here (once per anchor refresh) so every subsequent fast
         mini-batch reuses it; under ``recompute`` no basis is cached.
         """
+        name = _canon(name)  # EXP-18: store EMA + basis under the canonical key
         self.ensure_anchor(name, g_anchor)
         compute_dev = g_anchor.device
         anc = self.anchor_on(name, compute_dev).to(torch.float32)
@@ -388,6 +419,7 @@ class SpectralFilter:
         seeded-cache path the EXP-7 reproduction cell relies on). The basis is
         cached on ``device`` (defaults to the EMA's current device).
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor[name]
         dev = device if device is not None else anc.device
         basis = compute_basis(anc.to(dev).to(torch.float32), svd_mode=self.svd_mode, rank=self.rank)
@@ -409,6 +441,7 @@ class SpectralFilter:
         SVD here, exactly as the pre-EXP-8 code did. A CPU-offloaded EMA is
         brought onto the gradient's device for the (recompute) SVD.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         self.ensure_anchor(name, g_mask)
         basis = None
         if self.basis_cache == "cache":
@@ -442,6 +475,7 @@ class SpectralFilter:
         projection ~0 and this is scale-matched direct injection of M_anchor.
         Returns G_corr with g_mask's shape/dtype/device.
         """
+        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
         self.ensure_anchor(name, g_mask)
         anc = self.anchor_on(name, g_mask.device).to(torch.float32)
         gm = g_mask.to(torch.float32)
