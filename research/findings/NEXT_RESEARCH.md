@@ -4,7 +4,7 @@
 
 **Why this is the direction:** the clean step is the existence proof that periodic true-gradient re-anchoring works (clean-resettable sawtooth, EXP-17). But it is expensive — full inter-stage comm every K steps, savings capped at `(K-1)/K·p`. The prize: a correction applied *every* masked step that recovers what the clean step recovers, at lower comm.
 
-Grounding: `findings/theory/REPORT.md` (the why), `runs/SUMMARY.md` (knobs, settled base, dataset prep).
+Grounding: `runs/SUMMARY.md` (the proven result + why, knobs, settled base, dataset prep).
 
 ## What we know
 
@@ -13,7 +13,7 @@ Grounding: `findings/theory/REPORT.md` (the why), `runs/SUMMARY.md` (knobs, sett
 | GSM8K | 0.715 | 0.735 (EXP-17) | 0.741 | parity = **elicitation** |
 | Big-Math | 0.480 | 0.55 flat (EXP-19) | 0.61 (EXP-20) | **stalls** = gradient-fidelity/SNR limit |
 
-The mask is not a policy — it's a biased, high-variance **estimator of the true GRPO gradient**: `g_mask = g_true + b + ξ`. Rescale unbiases the *activation*, not the gradient. `b` is a systematic curvature-aligned bias (delta-method term) that **accumulates** across a masking window; clean@K is error-feedback re-sync that injects `g_true` and resets `b` before it flips the ascent projection. (Derivation: REPORT §2.)
+The mask is not a policy — it's a biased, high-variance **estimator of the true GRPO gradient**: `g_mask = g_true + b + ξ`. Rescale unbiases the *activation*, not the gradient. `b` is a systematic curvature-aligned bias (delta-method term) that **accumulates** across a masking window; clean@K is error-feedback re-sync that injects `g_true` and resets `b` before it flips the ascent projection.
 
 ## HARD CONSTRAINT 1 — the prior anchor+spectral failed, by orthogonality
 

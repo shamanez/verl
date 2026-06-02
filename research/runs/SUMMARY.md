@@ -1,9 +1,8 @@
 # Research runs — summary
 
 Durable, self-contained operational record: the method, the proven result, the
-settled decisions, and the knob surface. No per-run artifacts are kept. The
-scientific "why" is `findings/theory/REPORT.md`; the next-cycle plan is
-`findings/NEXT_RESEARCH.md`.
+settled decisions, and the knob surface. No per-run artifacts are kept; the
+next-cycle plan is `findings/NEXT_RESEARCH.md`.
 
 ## Baseline = dense GRPO == method OFF
 
@@ -25,7 +24,7 @@ pearson≈0.004` → clean steps `kl≈0.0004 / pearson≈0.9996`, resets fully 
 step), clean-step grad_norm trends **down**, true-policy entropy stays sharp — no
 ratchet, no drift to random (EXP-17 PASS). The PPO ratio is masked-old-vs-masked-new
 (self-consistent, ≈1), so the gap never enters the loss and the unmasked deployed
-policy still improves. Full treatment: `findings/theory/REPORT.md`.
+policy still improves.
 
 | run | dataset | method | val (start→end) | reading |
 |---|---|---|---|---|

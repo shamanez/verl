@@ -17,8 +17,8 @@ A **communication-efficient, pipeline-parallel GRPO trainer** — per-(token,cha
 | For… | Read |
 |---|---|
 | What "done" means + where we are | [`.claude/GOAL.md`](.claude/GOAL.md) |
-| Full evidence + theory synthesis (the entry point) | [`findings/theory/REPORT.md`](findings/theory/REPORT.md) |
-| Durable run record + knob surface + settled decisions | [`runs/SUMMARY.md`](runs/SUMMARY.md) |
+| Durable run record + result + why + knob surface | [`runs/SUMMARY.md`](runs/SUMMARY.md) |
+| The next-cycle plan | [`findings/NEXT_RESEARCH.md`](findings/NEXT_RESEARCH.md) |
 | Engineering map of the method | [`../CODE_WALKTHROUGH.md`](../CODE_WALKTHROUGH.md) |
 
 ## Start here

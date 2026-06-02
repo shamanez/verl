@@ -32,9 +32,9 @@ With the method switched off, training is byte-identical to unmodified verl.
 
 ## Where we are
 
-The base is **settled**. Operational detail + knobs → `research/runs/SUMMARY.md`;
-scientific "why" → `research/findings/theory/REPORT.md`; next-cycle plan →
-`research/findings/NEXT_RESEARCH.md`. In brief:
+The base is **settled**. Operational detail, the proven result + why, and knobs →
+`research/runs/SUMMARY.md`; next-cycle plan → `research/findings/NEXT_RESEARCH.md`.
+In brief:
 
 - **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
 - **Settled comm-eff base** = mask (p=0.9, per-(token,channel), 7 boundaries) **+
@@ -69,8 +69,8 @@ are expected; diagnostic-only issues stay `code_change:false`.
 
 ## Pointers
 
-- **Canonical evidence + theory synthesis → `research/findings/theory/REPORT.md`**
-- Durable run record → `research/runs/SUMMARY.md`
+- Durable run record + result + why → `research/runs/SUMMARY.md`
+- Next-cycle plan → `research/findings/NEXT_RESEARCH.md`
 - Engineering map of the method → `CODE_WALKTHROUGH.md`
 - Authoritative operating config → `.claude/project.yaml`
 - Comm-eff launcher (dense control = run it with `COMM_EFF_ENABLED=false`) →
