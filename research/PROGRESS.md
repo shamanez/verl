@@ -4,3 +4,5 @@ Structured one-line events appended by the harness agents (triage, runner,
 monitor, analyst, log-writer) and the Stop hook. Newest at the bottom. Reset
 for a fresh cycle — project state lives in `LOG.md` / `runs/SUMMARY.md`, the
 curated status in `.claude/state/STATUS.md`.
+[2026-06-02T23:11:22+10:00] [research-planner #18] plan written
+[2026-06-02T23:11:45+10:00] [triage] dispatched 1 planners, 0 issues already planned
