@@ -219,6 +219,12 @@ finite, constraints verified). Per `iterations:3`, at most 3 REVISE cycles on th
 
 ## 4. Results-driven theory log (appended after each iteration — the observe→theorize→propose loop)
 
-_(Empty until the dense reference + spectral floor are cached and C1 returns. Each entry:
-what improved/regressed vs BOTH dense (target) and the spectral floor; WHY (tie to
-`b`/orthogonality/staleness); and the next candidate proposed FROM that evidence.)_
+### References cached (2026-06-03)
+- **Dense TARGET** (`metrics/curvematch_dense_ref_50step.jsonl`, 50/50): reward **0.135→0.868**, steep rise to ~0.75 by step 10 then plateau ~0.78–0.85; grad_norm 0.32–0.49, no NaN.
+- **Spectral FLOOR** (`metrics/curvematch_spectral_baseline_c5_d5.jsonl`, 50/50, rc=0): flat **mean 0.135** (0.111–0.164) — inert-by-orthogonality CONFIRMED on the live anchor at c5/d5. The "beat-this" baseline.
+- **Anchor-OOM engineering finding:** the anchor's UNSHARDED full backward OOMs at 36864 tok/gpu on 4×H200 (vLLM + FSDP + the ~3 GB clone). Fix = launcher-documented halve to `PPO_MAX_TOKEN_LEN_PER_GPU=18432` (no method change). Validated (floor ran 50 steps, anchor fired 40×, OOM=0). Every anchor-ON cell inherits it.
+
+### Iteration 1 — C1 (stale-anchor additive injection) — config refinement BEFORE the result
+**Observation (pre-result, from the live launch diagnostics):** at the first C1 launch (`seed_anchor_cache=true`, launcher default), `inject_matrix` fired ~3137× by step 2 while `anchor_backwards=0` — i.e. the injection was adding the **seeded random** `M_anchor` (a deterministic PSD basis), NOT the real stale anchor gradient (which only populates `M_anchor` once the live anchor fires ~step 3). The runner's "cos(G_mask,M_anchor)≈0" was therefore partly a **seed artifact** (random vs G_mask is trivially orthogonal), not the real G_mask-vs-true-gradient measurement.
+**Theory (tie to the method):** for an ADDITIVE-injection correction, seeding `M_anchor` injects a random-direction force at γ=1, and the `beta_anc=0.9` EMA makes the seed persist (≈0.9^k decay over k anchor fires) — contaminating the injected direction for much of the 50-step window. This is benign for the REWEIGHT floor (seed = geometry only) but corrupts INJECT (seed = an added force).
+**Refinement proposed + applied:** relaunch C1 with `seed_anchor_cache=false` ⇒ `M_anchor` starts at ZERO ⇒ injection is a no-op until the live anchor fires, then injects the REAL stale true-gradient direction (scale-matched). Killed the seeded launch at step 2 (minimal waste), relaunched clean via `c1_relaunch.sh`. This is the clean test of the C1 hypothesis. _(Result of the clean run appended next.)_

@@ -119,7 +119,7 @@ COMM_EFF_ENABLED=true \
 COMM_EFF_MASK_ENABLED=true COMM_EFF_MASK_P=0.9 COMM_EFF_MASK_RESCALE=true COMM_EFF_MASK_RECOMPUTE=true \
 COMM_EFF_CLEAN_CADENCE=0 \
 COMM_EFF_ANCHOR_ENABLED=true COMM_EFF_ANCHOR_CADENCE=5 COMM_EFF_ANCHOR_DELAY_K=5 \
-COMM_EFF_SPECTRAL_ENABLED=true COMM_EFF_SPECTRAL_MAX_TARGETS=-1 \
+COMM_EFF_SPECTRAL_ENABLED=true COMM_EFF_SPECTRAL_MAX_TARGETS=-1 COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE=false \
 PPO_MAX_TOKEN_LEN_PER_GPU=18432 LOG_PROB_MAX_TOKEN_LEN_PER_GPU=18432 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU=18432 \
 TOTAL_TRAINING_STEPS=50 VAL_BEFORE_TRAIN=False TEST_FREQ=100000 USE_DYNAMIC_BSZ=True \
 NGPUS_PER_NODE=4 \
@@ -128,6 +128,8 @@ bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.spectral.inject_gamma=1.0
 ```
 Constraint pins (INVALID run if violated): `ANCHOR_DELAY_K=5` (launcher default 20!), `CLEAN_CADENCE=0`, `ANCHOR_CADENCE=5`.
+
+**`SEED_ANCHOR_CACHE=false` (MANDATORY for inject).** The launcher defaults `seed_anchor_cache=true`, which seeds `M_anchor` with a random deterministic PSD basis on first sight. For the REWEIGHT floor that is just (random) geometry, but for INJECT it means **adding a random-direction force** (scaled to ‖G_mask‖) before the live anchor fires — and the seed lingers through the `beta_anc=0.9` EMA, contaminating the injected direction for much of the run. With `seed_anchor_cache=false`, `M_anchor` starts at ZERO ⇒ `inject_matrix` is a no-op (anc_norm≈0 guard) until the live anchor fires (~step 3), then injects the REAL stale true-gradient direction. The first C1 launch (seed=true) was killed at step 2 and relaunched clean (`c1_relaunch.sh`).
 
 **ANCHOR-OOM FIX (MANDATORY — inherited from the floor re-run).** The first floor run OOM'd in the anchor's unsharded full backward at `PPO_MAX_TOKEN_LEN_PER_GPU=36864`. The launcher's documented anchor-ON mitigation (halve to **18432**) is applied above and MUST stay for every anchor-ON candidate. Do NOT reduce `MAX_RESPONSE_LENGTH` (16384, fixed by mandate). `max_targets=-1` adds only ~5 GB/rank of M_anchor EMA (inject mode skips the SVD basis cache), which fits in the headroom the token-len halving frees. If C1 still OOMs at the anchor fire (~step 3), add `actor_rollout_ref.actor.fsdp_config.optimizer_offload=true` (and `param_offload=true`) via `"$@"`, or halve token-len again to 9216 — escalate memory before touching the method.
 
