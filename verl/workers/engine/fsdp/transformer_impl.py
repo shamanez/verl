@@ -796,6 +796,35 @@ class FSDPEngine(BaseEngine):
             return ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
         return tuple(substrs)
 
+    def _build_anchor_pg_loss(self, fast_path_loss_function, anchor_pg_loss):
+        """Bind the CLEAN policy-gradient loss (EXP-18 / M4 C4) for the anchor pass.
+
+        The anchor must NOT reuse the fast-path PPO ratio/clip loss (its
+        ``old_log_probs`` are from the MASKED path; the ratio against the
+        anchor's UNMASKED forward ≠ 1, so the clip corrupts ``G_anchor``).
+        Instead we run ``anchor_pg_loss`` (ratio ≡ 1) bound to the SAME actor
+        ``config`` the fast path carries, so ``agg_loss`` normalizes identically
+        and ``M_anchor`` is the clean true gradient at the same scale.
+
+        ``fast_path_loss_function`` is ``functools.partial(ppo_loss,
+        config=actor_config)``; we read ``config`` off ``.keywords`` and rebind.
+        This touches ONLY the anchor pass — the fast path keeps its real loss.
+        """
+        from functools import partial
+
+        config = None
+        kw = getattr(fast_path_loss_function, "keywords", None)
+        if kw is not None:
+            config = kw.get("config")
+        if config is None:
+            raise RuntimeError(
+                "comm_eff anchor C4: could not read 'config' off the fast-path "
+                "loss_function (expected functools.partial(ppo_loss, config=...)). "
+                "The clean-gradient anchor loss needs the actor config for "
+                "agg_loss normalization."
+            )
+        return partial(anchor_pg_loss, config=config)
+
     def _maybe_comm_eff_anchor_refresh(self, data, loss_function) -> None:
         """FSDP anchor-circuit refresh (EXP-8): unmasked K-stale GRPO-actor-loss
         fwd/bwd -> RAW G_anchor -> spectral anchor EMA, NO optimizer step.
@@ -803,9 +832,17 @@ class FSDPEngine(BaseEngine):
         Runs at the TOP of ``BaseEngine.train_batch`` (before the masked fast
         path). The six non-negotiable invariants this enforces:
 
-        1. **Same GRPO actor-loss, unmasked.** Reuses ``loss_function`` (the fast
-           path's ``ppo_loss``) over THIS rollout-expanded batch — NOT a
-           supervised next-token loss.
+        1. **Clean unmasked policy-gradient loss (EXP-18 / M4 C4).** The anchor
+           uses ``anchor_pg_loss`` (ratio ≡ 1, no clip, no ``old_log_probs``)
+           over THIS rollout-expanded batch — its gradient is the CLEAN true
+           policy gradient ``-(A·∇logπ_unmasked)`` at the K-stale weights. It is
+           bound to the SAME actor config the fast path carries (so ``agg_loss``
+           normalizes identically). It is NOT a supervised next-token loss, and
+           it is NOT the fast-path PPO loss: reusing the fast path's ``ppo_loss``
+           here would feed the MASKED-path ``old_log_probs`` against the anchor's
+           UNMASKED forward, making the importance ratio ≠ 1 and letting the PPO
+           clip corrupt ``G_anchor`` (the C1/C2/C3 failure). The fast-path loss
+           is left UNTOUCHED — this is anchor-pass-only.
         2. **No rollout / no reward recompute.** It only re-forwards ``data``
            (which already carries ``responses``/``old_log_probs``/``advantages``);
            rollout generation + reward scoring live upstream in the trainer and
@@ -833,6 +870,7 @@ class FSDPEngine(BaseEngine):
 
         from verl.workers.comm_eff.anchor import (
             AnchorStalenessQueue,
+            anchor_pg_loss,
             anchor_should_fire,
             assert_anchor_module_isolated,
             build_anchor_module,
@@ -840,6 +878,9 @@ class FSDPEngine(BaseEngine):
             feed_anchor_grads_into_ema,
             snapshot_named_params,
         )
+        # EXP-18: canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
+        # anchor clone matches the live module's per-layer-wrapped snapshot keys.
+        from verl.workers.comm_eff.spectral_filter import _canon
 
         cadence = int(getattr(anchor_cfg, "cadence", 20))
         delay_K = int(getattr(anchor_cfg, "delay_K", 20))
@@ -962,10 +1003,26 @@ class FSDPEngine(BaseEngine):
 
             # Load the K-stale snapshot weights into the clone (NOT into the
             # live module — the live optimizer's params remain untouched).
+            # EXP-18: the `stale` snapshot is keyed by the LIVE module's
+            # (FSDP per-layer-wrapped) names — those carry the
+            # `._fsdp_wrapped_module.` infix — while the clone (when the deepcopy
+            # path fell back to a plain config-rebuild) has NON-infixed names. A
+            # raw `n in stale` lookup then never matches → the clone keeps RANDOM
+            # init weights → G_anchor is garbage. Match by canonical (infix-
+            # stripped) key so the clone receives the REAL delay_K-stale weights.
+            stale_canon = {_canon(k): v for k, v in stale.items()}
             with torch.no_grad():
+                loaded = 0
                 for n, p in anchor_module.named_parameters():
-                    if n in stale and stale[n].shape == p.shape:
-                        p.copy_(stale[n].to(p.device, p.dtype))
+                    s = stale_canon.get(_canon(n))
+                    if s is not None and s.shape == p.shape:
+                        p.copy_(s.to(p.device, p.dtype))
+                        loaded += 1
+            print(
+                f"[comm_eff][EXP-18][anchor-load] loaded {loaded}/{sum(1 for _ in anchor_module.named_parameters())} "
+                f"stale params into clone (canon-matched)",
+                flush=True,
+            )
 
             # Swap `self.module` to point at the clone for the duration of
             # _forward_backward_batch_inner — that method calls self.module(...)
@@ -979,12 +1036,24 @@ class FSDPEngine(BaseEngine):
                 if p.grad is not None:
                     p.grad = None
 
-            # UNMASKED GRPO-actor-loss forward/backward on the CLONE. No FSDP
-            # hooks fire (the clone has none). mask_active=False ⇒ no mask
-            # hooks fire on the clone either (the masker is registered on
-            # self.module — now the clone — but mask_active gates the work).
-            # forward_only=False populates .grad on the clone's plain Parameters.
-            self._forward_backward_batch_inner(anchor_data, loss_function, forward_only=False)
+            # UNMASKED forward/backward on the CLONE. No FSDP hooks fire (the
+            # clone has none). mask_active=False ⇒ no mask hooks fire on the
+            # clone either (the masker is registered on self.module — now the
+            # clone — but mask_active gates the work). forward_only=False
+            # populates .grad on the clone's plain Parameters.
+            #
+            # EXP-18 / M4 C4 — CLEAN anchor gradient. The anchor uses a plain
+            # policy-gradient loss (ratio ≡ 1, no clip, no old_log_probs) instead
+            # of the fast-path PPO loss. The batch's old_log_probs came from the
+            # MASKED fast path; reusing them against this UNMASKED forward makes
+            # the GRPO importance ratio ≠ 1 → the PPO clip mangles G_anchor →
+            # M_anchor was never the clean true gradient. anchor_pg_loss fixes
+            # that (gradient = -(A·∇logπ_unmasked) at the stale weights). The
+            # fast-path loss_function (real ratio/clip) is UNTOUCHED — this swap
+            # is anchor-pass-only. We bind the SAME actor config the fast path
+            # uses (read off the partial) so agg_loss normalizes identically.
+            anchor_loss_function = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+            self._forward_backward_batch_inner(anchor_data, anchor_loss_function, forward_only=False)
 
             # GUARD 6: read G_anchor RAW per target (NO correct_matrix) off
             # the clone. full_grad_of is the identity — the clone is a plain
@@ -1064,7 +1133,11 @@ class FSDPEngine(BaseEngine):
                 f"anchor_grad_corrected={state.anchor_grad_corrected} "
                 f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
                 f"anchor_batch_fraction={state.anchor_batch_fraction} "
-                f"anchor_backward_isolation_mode=clone",
+                f"anchor_backward_isolation_mode=clone "
+                # EXP-18 / M4 C4: the anchor now uses the CLEAN policy-gradient
+                # loss (ratio ≡ 1, no clip, no old_log_probs). This tag is the
+                # on-box falsifier that the ratio-corruption is gone.
+                f"anchor_loss=clean_pg anchor_ratio=1.0",
                 flush=True,
             )
         else:
