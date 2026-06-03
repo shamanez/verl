@@ -55,7 +55,7 @@ invariants:
     gate:  hard
 ```
 
-The point is to **fail fast and cheap** on a broken implementation instead of paying for a full sweep that was never going to be interpretable. Expect the first launch of new code to surface backend-integration bugs the runner cannot self-resolve (it emits `STUCK:` and halts) — name the likely failure surfaces in `## Notes for runner` so the operator can triage quickly.
+The point is to **fail fast and cheap** on a broken implementation instead of paying for a full sweep that was never going to be interpretable. New code almost always surfaces backend-integration bugs on first launch (sharding / activation-checkpointing / dtype / OOM / autograd). **When that happens it is mandatory to iteratively diagnose and FIX it — edit on the `exp/*` branch → re-run the probe → repeat (the commit-hotfix loop) — until the invariants pass.** Do not stop at the first error: a `code_change` experiment is not done until it runs clean. Name the likely failure surfaces in `## Notes for runner` so debugging starts fast; emit `STUCK:` and halt only as a genuine last resort, when a fix needs a design decision or an upstream change.
 
 ## Experiment sequence (REQUIRED when tuning / testing / comparing)
 
@@ -233,7 +233,7 @@ The orchestrator refuses to dispatch the runner until every `depends_on` entry h
 ## Rescue triggers
 ```yaml
 escalate_if:
-  - "STUCK: EXP-<ID>"          # runner hit verl-internal/backend code it can't self-resolve (common for code_change plans)
+  - "STUCK: EXP-<ID>"          # LAST-RESORT halt — emitted only after iterative fix attempts are genuinely blocked (needs a design call / upstream change)
   - <pattern the runner or analyst might emit in PROGRESS.md>
   - <another pattern>
 ```
