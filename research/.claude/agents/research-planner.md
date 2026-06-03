@@ -25,7 +25,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
      - `experiment` / `ablation`: normal plan. `ablation` MUST include `depends_on:` naming the parent EXP that already PASSED.
      - `implementation`: write a normal plan but require `code_change: true` and a non-empty `target_modules:`. Skip the `## Experiment design` sweep_grid (no Vast.ai launch). After the human approves the plan, the orchestrator routes the issue to `log-writer` to draft the PR.
      - `brainstorm`: write a Discussion-shaped plan — replace `## Experiment design` and `## Compute budget` with a `## Proposal` and `## Open questions` section. No Vast.ai launch. The plan itself is the deliverable; the human iterates via issue comments and may later edit `kind: experiment` to promote.
-     - `literature`: do NOT write a normal plan. Append one line `RESCUE_REQUEST: math <issue title>` to PROGRESS.md and stop. The human operator decides whether to invoke `codex-verify --mode math-rescue` manually against the issue body.
+     - `literature`: do NOT write a normal plan. Append one line `RESCUE_REQUEST: math <issue title>` to PROGRESS.md and stop. The human operator decides how to handle that rescue request.
    - `hypothesis:` — required for `experiment` / `ablation` / `implementation`. One paragraph, falsifiable, with numeric thresholds. If missing, the first acceptance criterion becomes `clarification_needed: hypothesis missing or not falsifiable` and you stop early. **Operational thresholds count as numeric falsifiability.** For `milestone:M0` or `kind:smoke` issues, a hypothesis grounded in cost ceilings (`spend <= $5`), wall-clock (`<= 60 min`), correctness invariants (`no NaN/Inf in any loss field`, `train/reward_mean > 0 at step 5`), or environment hygiene (`docker exec verl env | grep VAST returns nothing`) is fully acceptable — do NOT demand an algorithmic performance threshold. Research-experiment issues (no `milestone:M0` / no `kind:smoke`) DO need an algorithm-level numeric threshold (e.g. `target_metric / baseline_metric <= 0.10`). For `brainstorm`, hypothesis is optional — replace with `## Proposal`.
    - `milestone: M<N>` — routing tag only, semantics defined externally by the user.
    - `baseline_run: EXP-<NN>` or `none`. **Default: `baseline`** (the dense control = comm-eff OFF, from `project.yaml.default_baseline.run`) if the issue body omits it. For `ablation`, this MUST be the parent EXP id.
@@ -34,7 +34,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    - `code_change: true|false` — auto-`true` for `kind: implementation`.
    - `target_modules:` — required when `code_change: true`. List of verl source paths.
    - `promote_launcher_as:` — the canonical `examples/grpo_trainer/vast_*.sh` filename a PASS should promote into (log-writer derives it from `resolved_params.txt`, opens a draft PR). Default `none` for exploratory/throwaway probes. Set a concrete `vast_<scenario>_<model>_<algo>_<dataset>.sh` name when the issue's intent is to establish or update a reference config. See TEMPLATE §Code change + `examples/grpo_trainer/VAST_README.md` §"Stability contract".
-   - `seed_replicates:`, `escalate_to_codex_if:`.
+   - `seed_replicates:`.
 
 3. Read any prior findings the issue references (e.g. `findings/M<N>/EXP-NN.md` paths) so the plan is grounded in known results. **Do NOT read any pinned background doc.** The planner is research-agnostic by contract — scope comes from the issue body.
 
@@ -82,20 +82,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
       machine-checkable, `## Compute budget` is sane, and (if
       `code_change: true`) `target_modules:` is confined to research-allowed
       paths.
-   2. *Optional* — get a second opinion from codex:
-
-      ```bash
-      bash .claude/skills/codex-verify/run.sh \
-        --mode verify \
-        --out  runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
-        --plan .claude/plans/<N>.md \
-        --cd   /Users/shamane/Documents/verl \
-        --timeout 600 --stall 90
-      cat runs/EXP-<N>/verify/*.md   # first line: VERIFY: PASS | CONCERNS | FAIL
-      ```
-
-      The harness does NOT read this output — it's purely advisory for you.
-   3. When ready: `gh issue edit <N> --remove-label status:planned --add-label status:approved`.
+   2. When ready: `gh issue edit <N> --remove-label status:planned --add-label status:approved`.
    ```
 
    The literal `<N>` should be the issue number (you know it from the dispatch).
