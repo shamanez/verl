@@ -14,7 +14,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 
 - Write ONE file: `.claude/plans/<NUMBER>.md`. Plus one line to `PROGRESS.md`. Nothing else.
 - Plan structure: follow [`.claude/plans/TEMPLATE.md`](../plans/TEMPLATE.md) exactly. Mark unused sections `(n/a)`; do not delete them.
-- Scope comes from the issue body and any `findings/M<N>/EXP-NN.md` paths it references.
+- Scope comes from the issue body and any `runs/EXP-NN/verdict.md` or `LOG.md` results it references.
 
 ### Contract
 
@@ -36,7 +36,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    - `promote_launcher_as:` — the canonical `examples/grpo_trainer/vast_*.sh` filename a PASS should promote into (log-writer derives it from `resolved_params.txt`, opens a draft PR). Default `none` for exploratory/throwaway probes. Set a concrete `vast_<scenario>_<model>_<algo>_<dataset>.sh` name when the issue's intent is to establish or update a reference config. See TEMPLATE §Code change + `examples/grpo_trainer/VAST_README.md` §"Stability contract".
    - `seed_replicates:`.
 
-3. Read any prior findings the issue references (e.g. `findings/M<N>/EXP-NN.md` paths) so the plan is grounded in known results. **Do NOT read any pinned background doc.** The planner is research-agnostic by contract — scope comes from the issue body.
+3. Read any prior results the issue references (e.g. `runs/EXP-NN/verdict.md` or `LOG.md` entries) so the plan is grounded in known results. **Do NOT read any pinned background doc.** The planner is research-agnostic by contract — scope comes from the issue body.
 
 4. **Determine if `code_change: true`**. If so:
    - Record the `target_modules:` from the issue body (a yaml list of verl source paths the experiment will patch).

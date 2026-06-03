@@ -21,14 +21,13 @@ Session A — triage /loop 60m
         │
         ▼
 [HUMAN GATE]
-   read the plan, optionally run codex-verify manually as a 2nd opinion,
-   then flip status:planned → status:approved
+   read the plan, then flip status:planned → status:approved
         │
         ▼
 Session B — orchestrator /loop 30m
    experiment-runner (provision Vast → train → done.flag)
      → analyst (writes verdict.md)
-       → log-writer (LOG.md + findings/ + draft PR on PASS)
+       → log-writer (LOG.md + runs/SUMMARY.md + draft PR on PASS)
    REVISE creates a child issue at status:planned → back through the human gate
 ```
 
@@ -49,8 +48,7 @@ Check:
 ```bash
 ls -l ~/.config/verl-research/secrets.env       # -rw------- (HF + WandB + VAST keys)
 gh repo set-default --view                       # shamanez/verl-compression-research
-which claude gh vastai codex uv                  # all on PATH
-codex doctor && codex login status               # green (optional codex review needs this)
+which claude gh vastai uv                        # all on PATH
 git rev-parse --abbrev-ref HEAD                  # vast-ai-workload
 ```
 
@@ -118,8 +116,7 @@ Triage polls open `research:claim` issues every 60 min and spawns a
 
 1. Writes `.claude/plans/<N>.md`.
 2. Labels the issue `status:planned`.
-3. Posts the plan as a comment ending with an **Operator review** footer
-   that includes the exact `codex-verify` invocation.
+3. Posts the plan as a comment ending with an **Operator review** footer.
 
 Triage closes itself between ticks; spin up Session B in parallel (see §3).
 
@@ -128,16 +125,6 @@ Triage closes itself between ticks; spin up Session B in parallel (see §3).
 ```bash
 # Read the plan
 cat .claude/plans/<N>.md
-
-# Optional second opinion from codex (the harness does NOT read this file —
-# it's purely advisory for you):
-mkdir -p runs/EXP-<N>/verify
-bash .claude/skills/codex-verify/run.sh \
-    --mode verify \
-    --out  runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
-    --plan .claude/plans/<N>.md \
-    --cd   /Users/shamane/Documents/verl
-cat runs/EXP-<N>/verify/*.md       # first line: VERIFY: PASS | CONCERNS | FAIL
 ```
 
 | Decision | Action |
@@ -170,30 +157,13 @@ Each tick, the orchestrator advances every approved plan:
 | `status:approved`, no `runs.jsonl` row | `experiment-runner` |
 | `runs.jsonl` row is `RUNNING`, no monitor active | `training-log-monitor` (background) |
 | `done.flag` exists OR tmux dead with metrics | `analyst` |
-| `verdict.md` says PASS | `log-writer` (appends LOG, copies to findings/, drafts PR on `code_change=true`) |
+| `verdict.md` says PASS | `log-writer` (appends LOG, updates runs/SUMMARY.md, drafts PR on `code_change=true`) |
 | `verdict.md` says REVISE | opens child issue at `status:planned`, **stops** — you review the child plan |
 | `verdict.md` says STOP | `log-writer`, label `status:stop` |
 
 `experiment-runner` defaults: **single Vast.ai node, $24/hr per-instance cap,
 96 GPU-hr total**, walking the 4×H200 → 8×H100 fallback chain unless
 the plan overrides it.
-
-### When to invoke codex manually (outside the autonomous loop)
-
-The orchestrator never dispatches codex. The operator runs
-`codex-verify` manually for:
-
-| Use | Mode |
-|---|---|
-| Plan review before approval | `--mode verify` |
-| Diagnose a STUCK run | `--mode code-rescue` |
-| Walk a derivation | `--mode math-rescue` |
-| Adversarial milestone review | `--mode adversarial` |
-
-Recipes in `.claude/skills/codex-verify/SKILL.md`. The harness does not
-look at the output files; you read them and decide.
-
----
 
 ## 4. Monitor
 
@@ -221,7 +191,7 @@ python scripts/check_budget.py --month
 
 | Trigger | Action |
 |---|---|
-| Issue planned | Read plan, optionally codex-verify, flip `status:planned` → `status:approved` |
+| Issue planned | Read plan, flip `status:planned` → `status:approved` |
 | REVISE child issue appears | Same as above (review child plan, approve when ready) |
 | `MANUAL_REVIEW_NEEDED:` in PROGRESS.md | Read the line, fix the root cause, re-approve |
 | Budget cap exceeded | Edit `budget.json` or pause |
@@ -236,8 +206,6 @@ python scripts/check_budget.py --month
 |---|---|
 | Triage fires, no plan appears | check label is `research:claim`; grep PROGRESS.md for planner failure |
 | Orchestrator picks up unapproved plan | label was set to `status:approved` by mistake → demote |
-| Codex hangs during your manual review | the wrapper has 600s hard + 90s stall timeouts; output starts with `TIMEOUT:` / `BROKER_DIED:` |
-| Codex CLI itself broken | `codex doctor && codex login status`; `!codex login` to re-auth |
 | Vast instance not torn down | `bash .claude/skills/vast-teardown/run.sh <instance_id>` |
 | Loop stopped | session ended → re-run `/bg /loop` in a new session |
 | `/bg` says "Nothing to background yet" | must prefix `/loop`: `/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.` |
@@ -256,18 +224,14 @@ research/
 ├── runs/
 │   ├── EXP-<N>/                    per-experiment dirs (runtime artifacts)
 │   └── SUMMARY.md                  durable record: baseline, method, knobs, tried-so-far
-├── findings/
-│   ├── M<N>/EXP-<N>.md             per-experiment PASS findings
-│   └── derivations/                math-rescue outputs (operator-invoked)
-├── notes/                          conceptual docs (memory, masking semantics, ...)
 ├── scripts/                        analyze.py, check_budget.py, diff_against_baseline.py
 └── .claude/
     ├── project.yaml                single source of truth (repo, secrets, vast template, defaults, branch policy)
     ├── playbooks/                  triage.md, orchestrator.md
     ├── agents/                     research-planner, experiment-runner, analyst, log-writer, training-log-monitor
-    ├── plans/                      TEMPLATE.md, baseline.md, <N>.md per issue
+    ├── plans/                      TEMPLATE.md, <N>.md per issue
     ├── hooks/                      kill-switch, protect-upstream, sync-metrics, teardown-finished-runs, commit-on-stop
-    ├── skills/                     vast-provision, vast-teardown, codex-verify (operator-invoked)
+    ├── skills/                     vast-provision, vast-teardown, de-bloat
     └── state/                      STATUS.md, runs.jsonl, .last-orchestrator-tick
 
 verl/examples/grpo_trainer/
@@ -293,11 +257,6 @@ cd /Users/shamane/Documents/verl/research && claude
 
 # Approve a plan
 gh issue edit <N> --add-label status:approved --remove-label status:planned
-
-# Manually review a plan with codex (optional; advisory only)
-bash .claude/skills/codex-verify/run.sh \
-    --mode verify --out runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
-    --plan .claude/plans/<N>.md --cd /Users/shamane/Documents/verl
 
 # Status
 cat .claude/state/STATUS.md

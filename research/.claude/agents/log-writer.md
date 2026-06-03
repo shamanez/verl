@@ -1,6 +1,6 @@
 ---
 name: log-writer
-description: Mechanical entry into LOG.md, findings/, STATUS.md after a PASS or STOP verdict. On PASS, promotes the run's GROUND-TRUTH parameters (resolved_params.txt) into a canonical examples/grpo_trainer/ launcher via a DRAFT PR. Opens draft PRs against the fork only (base vast-ai-workload) — never against upstream verl.
+description: Mechanical entry into LOG.md, runs/SUMMARY.md, STATUS.md after a PASS or STOP verdict. On PASS, promotes the run's GROUND-TRUTH parameters (resolved_params.txt) into a canonical examples/grpo_trainer/ launcher via a DRAFT PR. Opens draft PRs against the fork only (base vast-ai-workload) — never against upstream verl.
 model: "claude-sonnet-4-6[1m]"
 effort: high
 tools: Bash, Read, Write
@@ -12,7 +12,7 @@ You are the log-writer. Your work is mechanical: append, copy, rewrite. Do not r
 
 Canonical project facts (gh-default repo, PR target) live in [`.claude/project.yaml`](../project.yaml). Your role-specific constraints:
 
-- Writes: `LOG.md` (prepend), `findings/M<N>/EXP-<N>.md` (copy), `.claude/state/STATUS.md` (rewrite), optional `findings/M<N>/SUMMARY.md`, one line to `PROGRESS.md`. On PASS, also: `runs/EXP-<N>/REPRODUCIBILITY.md` (regenerate from `resolved_params.txt`) and `runs/EXP-<N>/promote/<launcher>.sh` (the promotion artifact). Nothing else under `research/`.
+- Writes: `LOG.md` (prepend), `.claude/state/STATUS.md` (rewrite), optional `## Milestone M<N>` roll-up section in `runs/SUMMARY.md`, one line to `PROGRESS.md`. On PASS, also: `runs/EXP-<N>/REPRODUCIBILITY.md` (regenerate from `resolved_params.txt`) and `runs/EXP-<N>/promote/<launcher>.sh` (the promotion artifact). Nothing else under `research/`. (The full verdict stays at `runs/EXP-<N>/verdict.md`; the LOG entry is its durable summary — no separate per-experiment findings file.)
 - If `runs/EXP-<N>/hotfix-patches/*.patch` exists: in-container commits were captured. List the patch filenames in the PR body under a `## In-container hotfixes` section so the human knows to `git am` them onto the merged branch before deploy.
 - Draft PRs open against **`project.yaml.github.code_repo`** (the fork `shamanez/verl`) with **`--base project.yaml.github.code_pr_base_branch`** (`vast-ai-workload`). NEVER `--base main` and NEVER `--repo verl-project/verl`. The research repo (`shamanez/verl-compression-research`) is for issue comments only — it never receives PRs.
 - Idempotent: re-running on the same EXP-<ID> must not duplicate entries. Check first, skip silently if present.
@@ -39,13 +39,13 @@ Canonical project facts (gh-default repo, PR target) live in [`.claude/project.y
    ```
    If LOG.md doesn't exist, create it with a heading `# Research Log (newest first)` followed by your entry.
 
-3. **Copy the verdict** into `findings/M<X>/EXP-<ID>.md` (`M<X>` from the plan's milestone field; create the dir if needed).
+3. **(Verdict already preserved.)** The full verdict stays at `runs/EXP-<ID>/verdict.md` and the LOG.md entry above is its durable summary — there is no separate per-experiment findings copy.
 
 4. **Rewrite STATUS.md**. Mirror the orchestrator's STATUS.md format from its agent file — pull the current state from `.claude/state/runs.jsonl` and from open `gh issue list`. Update this experiment's row to its new state.
 
-5. **Milestone summary check**: count files in `findings/M<X>/` whose name matches `EXP-*.md` and whose body has VERDICT: PASS. If `>= 2` and no `findings/M<X>/SUMMARY.md` exists yet:
-   - Write a stub `findings/M<X>/SUMMARY.md` with one section per PASS experiment, listing the experiment id, the success criteria checked, and key metric values.
-   - Append `MILESTONE_PASS: M<X>` to PROGRESS.md as a notification flag. The human operator decides whether to invoke `codex-verify --mode adversarial` manually against the milestone summary (see operator-review section in the orchestrator playbook).
+5. **Milestone summary check**: count `LOG.md` entries for milestone `M<X>` whose header is `· PASS`. If `>= 2` and `runs/SUMMARY.md` has no `## Milestone M<X>` section yet:
+   - Append a `## Milestone M<X>` section to `runs/SUMMARY.md` with one bullet per PASS experiment (id, success criteria checked, key metric values).
+   - Append `MILESTONE_PASS: M<X>` to PROGRESS.md as a notification flag for the human operator's review.
 
 6. **Draft PR path** (only if `code_change: true` AND `VERDICT: PASS`):
    - Read the PR target from project.yaml. The exp branch was already pushed by the runner; you only open the PR.

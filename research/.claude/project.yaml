@@ -92,16 +92,6 @@ launchers:                                                    # launch-script st
     artifact: resolved_params.txt                             # Hydra last-wins key=value, extracted from train.log set -x trace; ground truth, NOT the plan or a manifest
     rule: "promotion + manifests derive from resolved_params.txt, never from prose"
 
-codex:
-  # The codex CLI is an OPERATOR-INVOKED tool, not an autonomous-harness dependency.
-  # The orchestrator does NOT dispatch codex; the operator runs it manually as part
-  # of plan review (between status:planned and status:approved). See the
-  # "Operator: how to review a plan" section in .claude/playbooks/orchestrator.md
-  # and the operator-review footer in research-planner.md.
-  invoke_via: .claude/skills/codex-verify/run.sh              # the hang-protected wrapper around `codex exec`
-  hard_timeout_sec: 600
-  stall_timeout_sec: 90
-
 agent_models:
   # DOCUMENTATION ONLY — and the one block where the "project.yaml wins" rule at the
   # top of this file is INVERTED. The authoritative control for an agent's model and

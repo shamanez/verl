@@ -33,8 +33,7 @@ With the method switched off, training is byte-identical to unmodified verl.
 ## Where we are
 
 The base is **settled**. Operational detail, the proven result + why, and knobs →
-`research/runs/SUMMARY.md`; next-cycle plan → `research/findings/NEXT_RESEARCH.md`.
-In brief:
+`research/runs/SUMMARY.md`. In brief:
 
 - **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
 - **Settled comm-eff base** = mask (p=0.9, per-(token,channel), 7 boundaries) **+
@@ -55,7 +54,6 @@ In brief:
   **masked+correction training curve match the dense training curve within ≤50 steps**
   (GSM8K, anchor `cadence`=5, staleness `delay_K`=5, `clean_cadence` OFF), via an agent
   that **recursively** proposes a correction, runs it, compares curves, and refines.
-  See `research/findings/NEXT_RESEARCH.md`.
 
 ## The moment of truth
 
@@ -94,7 +92,6 @@ are expected; diagnostic-only issues stay `code_change:false`.
 ## Pointers
 
 - Durable run record + result + why → `research/runs/SUMMARY.md`
-- Next-cycle plan → `research/findings/NEXT_RESEARCH.md`
 - Engineering map of the method → `CODE_WALKTHROUGH.md`
 - Authoritative operating config → `.claude/project.yaml`
 - Comm-eff launcher (dense control = run it with `COMM_EFF_ENABLED=false`) →

@@ -29,7 +29,7 @@ If `kind:` is missing in the issue body, the planner defaults to `experiment`.
 <One paragraph. Falsifiable. Contains numeric thresholds. Example: "At setting X with knob Y, observed metric M_target / M_baseline <= 0.10 within `wall_clock_hr` hours, while validation loss stays within 0.05 of baseline at step 5000.">
 
 ## Background pointers
-- prior findings: findings/M<N>/EXP-NN.md, findings/M<N>/EXP-MM.md   # or "(none)"
+- prior results: runs/EXP-NN/verdict.md, LOG.md entries   # or "(none)"
 - referenced docs: <optional paths/URLs the issue body called out; planner does NOT read any fixed background doc by default>
 
 ## Correctness invariants (pre-run gate — REQUIRED when `code_change: true`, else `(n/a)`)

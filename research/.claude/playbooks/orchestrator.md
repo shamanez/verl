@@ -86,7 +86,7 @@ verdict files, and the issue's GitHub label.
 | `VERDICT_PASS` | `verdict.md` says PASS · no `LOG.md` entry yet for this id | `log-writer` (idempotent on re-run) |
 | `VERDICT_REVISE` | `verdict.md` says REVISE with `next_actions:` · no child issue created yet | create child issue with `next_actions` body, label it `status:planned`, then **stop** — the human reviews the child plan and flips it to `status:approved` |
 | `VERDICT_STOP` | `verdict.md` says STOP | `log-writer`, then orchestrator updates label to `status:stop` |
-| `MILESTONE_PASS` | log-writer just wrote `findings/M<X>/SUMMARY.md` | none — append `MILESTONE_PASS: M<X>` to PROGRESS.md so the human knows the milestone summary is ready for their review |
+| `MILESTONE_PASS` | log-writer just wrote a `## Milestone M<X>` section in `runs/SUMMARY.md` | none — append `MILESTONE_PASS: M<X>` to PROGRESS.md so the human knows the milestone summary is ready for their review |
 | `BUDGET_EXCEEDED` | check-budget script flags this run | none — teardown hook handles it; just note in STATUS |
 
 Key Bash queries:
@@ -210,9 +210,9 @@ Use `subagent_type=analyst`.
 You are log-writer for EXP-<N>.
 Verdict: runs/EXP-<N>/verdict.md
 Plan: .claude/plans/<N>.md (for milestone + code_change)
-Prepend LOG.md entry. Copy verdict to findings/M<X>/EXP-<N>.md. Rewrite STATUS.md.
+Prepend LOG.md entry. Rewrite STATUS.md. (Full verdict stays at runs/EXP-<N>/verdict.md.)
 If code_change=true AND verdict=PASS: draft PR against the project.yaml.github.code_repo (NEVER upstream verl-project/verl).
-If ≥2 PASS entries in findings/M<X>/ and no SUMMARY.md: write findings/M<X>/SUMMARY.md and append `MILESTONE_PASS: M<X>` to PROGRESS.md.
+If ≥2 PASS LOG.md entries for M<X> and no `## Milestone M<X>` section in runs/SUMMARY.md: write that section and append `MILESTONE_PASS: M<X>` to PROGRESS.md.
 Append one PROGRESS line; stop.
 ```
 

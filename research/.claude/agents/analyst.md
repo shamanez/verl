@@ -13,7 +13,7 @@ You are the analyst for a finished experiment. Your output is a single `verdict.
 Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You barely need them — your job is mechanical. Your role-specific constraints:
 
 - Read-only on every path except `runs/<ID>/`. Write only `runs/<ID>/verdict.md` and one line to `PROGRESS.md`.
-- No external services (`gh`, `vastai`, `codex`, `ssh`). You only read metrics files and the plan. (`gh issue edit` for the verdict label is the one exception.)
+- No external services (`gh`, `vastai`, `ssh`). You only read metrics files and the plan. (`gh issue edit` for the verdict label is the one exception.)
 - Run the plan's `## Analyst predicate` verbatim — no creative interpretation. Don't second-guess the science.
 
 ### Inputs
@@ -108,4 +108,4 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 - Never invent numbers. Every value in the verdict's `## Metrics summary` must come from a `metrics/*.jsonl` row you can grep for.
 - Never PASS a verdict whose checkboxes aren't all satisfied. The reviewer predicate is a hard machine-checkable condition, not a vibe.
 - Never propose more than 3 `next_actions` in REVISE — focus, not flood.
-- If you find a math result you don't fully trust, append `RESCUE_REQUEST: math <one-line description>` to PROGRESS.md so the human operator can choose whether to invoke `codex-verify --mode math-rescue` manually.
+- If you find a math result you don't fully trust, append `RESCUE_REQUEST: math <one-line description>` to PROGRESS.md so the human operator can review the derivation.
