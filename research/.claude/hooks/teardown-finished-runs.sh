@@ -87,7 +87,15 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     FAILED=0
     while IFS= read -r iid; do
       [[ -z "$iid" ]] && continue
-      if vastai destroy instance "$iid" >>/tmp/teardown.err 2>&1; then
+      # MUST pass -y: without it the prompt collapses to "Aborted" on a non-TTY
+      # stdin but the CLI STILL EXITS 0 — so the destroy silently does nothing
+      # and the row would be wrongly flipped to TORN_DOWN (money leak; observed
+      # 2026-06-03 on instance 39132674). Also treat Aborted/error/not-found in
+      # the output as failure since the exit code is unreliable (mirrors the
+      # vast-teardown skill's belt-and-braces check).
+      DOUT=$(vastai destroy instance "$iid" -y 2>&1); DRC=$?
+      echo "[$(date -Iseconds)] destroy $iid rc=$DRC: $DOUT" >> /tmp/teardown.err
+      if (( DRC == 0 )) && ! echo "$DOUT" | grep -qiE 'aborted|error|not found|traceback|failed'; then
         DESTROYED=$((DESTROYED + 1))
       else
         FAILED=$((FAILED + 1))
