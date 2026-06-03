@@ -19,9 +19,11 @@ The `research-planner` subagent fills this template by parsing the GitHub issue 
 | `ablation` | maybe | yes | runs the plan's predicate | same as experiment; requires `depends_on:` parent EXP that PASSED |
 | `implementation` | **true** (required) | NO | n/a | plan is the deliverable; draft PR after human approval |
 | `brainstorm` | no | NO | n/a | plan is the deliverable; iterate as comments; promote to `experiment` later by editing kind |
-| `literature` | no | NO | n/a | plan/issue is the deliverable; operator can invoke `codex-verify --mode math-rescue` manually if a derivation review is wanted |
+| `literature` | no | NO | n/a | plan/issue is the deliverable; the operator handles any derivation review manually |
 
 If `kind:` is missing in the issue body, the planner defaults to `experiment`.
+
+**Routing trap — new code that must RUN to be validated.** Use `kind: experiment` (or `ablation`) **with `code_change: true`**, NOT `kind: implementation`. The `implementation` kind never launches on Vast — it only drafts a PR — so it cannot prove the patch actually *runs* (no NaN/OOM, correct numerics, clean integration with the training backend). Reserve `implementation` for changes whose correctness is fully established by review + local checks. **If the hypothesis can only be confirmed by a training run, the kind is `experiment`/`ablation` even when the patch is large.** Those plans set `code_change: true` and MUST fill `## Correctness invariants` below.
 
 ## Hypothesis
 <One paragraph. Falsifiable. Contains numeric thresholds. Example: "At setting X with knob Y, observed metric M_target / M_baseline <= 0.10 within `wall_clock_hr` hours, while validation loss stays within 0.05 of baseline at step 5000.">
@@ -29,6 +31,31 @@ If `kind:` is missing in the issue body, the planner defaults to `experiment`.
 ## Background pointers
 - prior findings: findings/M<N>/EXP-NN.md, findings/M<N>/EXP-MM.md   # or "(none)"
 - referenced docs: <optional paths/URLs the issue body called out; planner does NOT read any fixed background doc by default>
+
+## Correctness invariants (pre-run gate — REQUIRED when `code_change: true`, else `(n/a)`)
+
+Before an expensive sweep is worth a single GPU-hour, a code change must prove it is *correct*, not merely that it trains. List the cheap, machine-checkable invariants the runner/analyst verify **first**, in a 1–2 step probe; a `hard`-gate failure aborts before the sweep (see `## Analyst predicate`). Keep every entry generic and falsifiable — no "looks right".
+
+```yaml
+invariants:
+  - name:  off-path parity
+    check: "with the feature DISABLED, outputs/bytes/loss are identical to the baseline path"
+    gate:  hard            # hard = abort the plan on failure; soft = record metric + continue
+  - name:  limiting-case identity
+    check: "at the setting where the method must reduce to a no-op / lossless / exact case, error ≈ 0"
+    gate:  hard
+  - name:  gradient / autograd check
+    check: "backward matches the intended analytic form (finite-diff or a known operator); no straight-through unless declared"
+    gate:  hard
+  - name:  determinism / multi-rank agreement
+    check: "same seed ⇒ identical derived state across ranks; no divergence under the parallelism actually used"
+    gate:  hard
+  - name:  backend integration
+    check: "composes with the training backend in use (sharding / activation checkpointing / mixed precision) with no NaN/Inf/OOM in the probe"
+    gate:  hard
+```
+
+The point is to **fail fast and cheap** on a broken implementation instead of paying for a full sweep that was never going to be interpretable. Expect the first launch of new code to surface backend-integration bugs the runner cannot self-resolve (it emits `STUCK:` and halts) — name the likely failure surfaces in `## Notes for runner` so the operator can triage quickly.
 
 ## Experiment sequence (REQUIRED when tuning / testing / comparing)
 
@@ -86,7 +113,11 @@ ablations:
   - disable_<component>
 seed_replicates:  3
 fanout_max:       6                # cap on parallel cells across the sweep
+controlled_variables:              # held FIXED across every arm so a confound can't masquerade as a result
+  - <e.g. compute/communication budget, step count, dataset, seed — whatever is NOT the variable under test>
 ```
+
+When arms differ by method, every *other* axis (budget, steps, data, seed) MUST be held fixed **and asserted** — add a machine-checkable box to `## Success criteria` (e.g. `budget(arm_A) == budget(arm_B)` within tolerance) so the comparison is fair by construction.
 
 ## Compute budget (HARD CAPS)
 ```yaml
@@ -156,7 +187,9 @@ maximize utilization while they're up.
 **What the plan does NOT specify.** The docker image, container `--shm-size` / `--cap-add`, onstart script (clone fork + pip-install verl `--no-deps`), recommended disk default, and CUDA driver filter all live in the locked Vast.ai Template referenced by `research/.claude/skills/vast-provision/templates.json`. The `vast-provision` skill auto-reads that file and pins the Template; plans MUST NOT name a `template_hash` or `image`. If a future plan needs a different runtime (new vllm major, different image), update `templates.json` and the Vast.ai Template record together — never bypass.
 
 ## Success criteria
+- [ ] (code_change) every `hard`-gate box in `## Correctness invariants` passes the pre-run probe — this gates the sweep
 - [ ] every sweep cell reaches `>= <step_target>` training steps without NaN or non-finite gradients
+- [ ] (comparison) controlled variables hold equal across arms (e.g. `budget(arm_A) == budget(arm_B)` within tolerance)
 - [ ] dense baseline reproduces published reference within `eval_<metric> <= <bound>`
 - [ ] best cell satisfies <method-specific metric threshold>
 - [ ] best cell `<quality_metric> - dense_<quality_metric> <= <delta>` at step `<step>`
@@ -176,6 +209,7 @@ python research/scripts/diff_against_baseline.py runs/EXP-<ID> --baseline <basel
 - **PASS** iff every box in `## Success criteria` is checked.
 - **REVISE** if at most `iterations` boxes are unchecked AND the analyst can name a concrete next-action knob change for each. Output `next_actions:` as a yaml list of `{knob, from, to, rationale}` objects.
 - **STOP** if the hypothesis is falsified (e.g. method underperforms baseline on the headline metric) OR budget exhausted OR `iterations` REVISE cycles already consumed on this lineage.
+- **Pre-run gate**: a `hard`-gate failure in `## Correctness invariants` is an automatic **STOP** for this run — the implementation is broken, so fix the code in a new `code_change` cycle rather than spending the sweep. A `soft`-gate failure is recorded and the sweep continues.
 
 ## Code change
 ```yaml
@@ -185,7 +219,7 @@ target_modules:                    # only meaningful when code_change=true
 promote_launcher_as: none          # on PASS, log-writer derives THIS canonical launcher from resolved_params.txt and opens a draft PR into examples/grpo_trainer/. `none` = no promotion (human promotes manually). Name e.g. vast_<scenario>_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
-If `code_change: true`, the human operator reviews the plan before flipping `status:planned → status:approved` (optionally invoking `codex-verify` manually on the plan). The runner is the only agent allowed to write under `verl/`, and only while on an `exp/*` branch inside its worktree.
+If `code_change: true`, the human operator reviews the plan before flipping `status:planned → status:approved`. The runner is the only agent allowed to write under `verl/`, and only while on an `exp/*` branch inside its worktree.
 
 `promote_launcher_as` is the stability valve (see `examples/grpo_trainer/VAST_README.md` §"Stability contract"): the experiment sandbox stays volatile, but a PASS auto-proposes the proven config — taken from `resolved_params.txt`, never from this plan's prose — into a named canonical launcher via a draft PR a human merges. Leave `none` for throwaway probes; set it once a scenario's config is meant to become the reference.
 
@@ -199,14 +233,14 @@ The orchestrator refuses to dispatch the runner until every `depends_on` entry h
 ## Rescue triggers
 ```yaml
 escalate_if:
+  - "STUCK: EXP-<ID>"          # runner hit verl-internal/backend code it can't self-resolve (common for code_change plans)
   - <pattern the runner or analyst might emit in PROGRESS.md>
   - <another pattern>
 ```
 
 The orchestrator surfaces these PROGRESS.md patterns in `STATUS.md` so the
-human operator sees them; the operator decides whether to invoke
-`codex-verify` (in `code-rescue` or `math-rescue` mode), edit the plan,
-abandon the experiment, or just keep going.
+human operator sees them; the operator decides whether to edit the plan,
+abandon the experiment, or keep going.
 
 ## Notes for runner
 <Anything the planner discovered that the runner should not have to rediscover: verl-internal API gotchas, dataset paths to rsync, environment variables to set on the Vast.ai node, etc. Free-form prose; keep it tight.>
