@@ -1,0 +1,88 @@
+# EXP-20 run config — materialised by experiment-runner from .claude/plans/20.md
+# PowerSGD-style PP activation compression vs the byte-matched PRF mask.
+#
+# fanout = 1: ONE Vast.ai box carries the whole sequence back-to-back (Vast
+# utilization discipline — re-provisioning between runs is forbidden). The
+# launch script runs steps 0->1->2(->3) in order; step 0 is a HARD GATE.
+#
+# Both arms call the SAME canonical launcher
+# (examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh) with
+# only the codec knobs differing (stability contract). The matched-budget
+# pairing is FIXED: prf_mask p=0.95 (q*H=102.4) == powersgd rank=102 (n*r).
+
+experiment: EXP-20
+branch: exp/20-powersgd-activation
+wandb_project: verl_compression_research
+wandb_entity: shamanework-pl
+model: Qwen/Qwen2.5-1.5B-Instruct
+dataset: GSM8K
+algorithm: vanilla GRPO (no-KL, no-entropy)
+
+common:
+  total_training_steps_full: 50      # the curve-match window (steps 1..2)
+  clean_cadence: 5                   # steps 5,10,...,50 dense (10 clean + 40 compressed)
+  anchor_enabled: false
+  spectral_enabled: false
+  seed: 0
+  ppo_max_token_len_per_gpu: 36864   # fits 4xH200 (anchor OFF => no ~3GB clone)
+
+sequence:
+  - id: 0
+    name: powersgd-correctness-probe
+    hard_gate: true
+    experiment_name: ce_powersgd_probe_2s_gsm8k
+    total_training_steps: 2
+    knobs:
+      compression_type: powersgd
+      powersgd.rank: 102
+      clean_cadence: 0
+    sub_checks:
+      - name: r_eq_H_lossless
+        experiment_name: ce_powersgd_probe_rankH_2s_gsm8k
+        powersgd.rank: 2048           # r=H => M_hat=M (reconstruction_rel_error<=1e-4)
+      - name: off_path_parity
+        experiment_name: ce_dense_probe_2s_gsm8k
+        comm_eff.enabled: false       # dense; step-1 loss must match to 1e-6 rel
+    note: >
+      CPU-side hard invariants (autograd no-STE, r=H lossless, determinism, fp32
+      orthonormality/finite q_cond, frozen-Q-within-step, sketch gating) are
+      PROVEN by tests/workers/comm_eff/test_powersgd_activation.py (15/15) +
+      test_comm_eff_config.py (18/18). The on-box probe proves the remaining
+      hard gate: FSDP + gradient-checkpointing + bf16-activation integration
+      runs clean (no NaN/Inf, no OOM, finite powersgd_q_cond, 4-8 GPUs live) AND
+      frozen-Q ratio~1 at step 0 on the live model.
+
+  - id: 1
+    name: mask-p95-clean5-baseline       # Run B — THE bar
+    depends_on: 0
+    experiment_name: ce_mask_p95_clean5_50s_gsm8k
+    total_training_steps: 50
+    knobs:
+      compression_type: prf_mask
+      mask.p: 0.95
+      mask.rescale: true
+      mask.mask_recompute: true
+      clean_cadence: 5
+
+  - id: 2
+    name: powersgd-r102-clean5            # Run A — the candidate
+    depends_on: 1
+    experiment_name: ce_powersgd_r102_clean5_50s_gsm8k
+    total_training_steps: 50
+    knobs:
+      compression_type: powersgd
+      powersgd.rank: 102
+      powersgd.update_cadence: 1
+      powersgd.warm_start: true
+      powersgd.compress_recompute: true
+      powersgd.sync_basis: false
+      clean_cadence: 5
+
+  - id: 3
+    name: dense-ceiling                   # OPTIONAL — gates nothing
+    depends_on: 2
+    optional: true
+    experiment_name: ce_dense_50s_gsm8k
+    total_training_steps: 50
+    knobs:
+      comm_eff.enabled: false
