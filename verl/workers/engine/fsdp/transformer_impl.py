@@ -730,20 +730,99 @@ class FSDPEngine(BaseEngine):
             position_ids=position_ids,
         )
 
+    def _comm_eff_powersgd_active(self, forward_only: bool) -> bool:
+        """True iff the PowerSGD projection hooks should be live for this forward.
+
+        EXP-20/M6 analogue of ``_comm_eff_mask_active``. The projector is confined
+        to the actor-train forward/backward (``path_tag == "train"``,
+        ``forward_only=False``) and, when ``powersgd.compress_recompute=true``, to
+        the old-policy log-prob recompute (``path_tag == "old_logprob"``,
+        ``forward_only=True``). Both paired forwards see the SAME frozen ``Q_t``
+        (the basis only advances after the gradient-bearing work), which is what
+        makes the GRPO importance ratio ``ρ ≈ 1`` at step 0 (INF-17). Returns
+        False (strict no-op) unless an enabled state with the powersgd codec and a
+        live ``mask_active`` flag is attached.
+        """
+        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, TRAIN_TAG
+
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return False
+        if getattr(state, "powersgd", None) is None:
+            return False
+        # `mask_active` is the shared "compressed-forward is live" flag the worker
+        # sets around update_actor / (recompute) compute_log_prob; it gates BOTH
+        # codecs (the name is historical). A clean step clears it ⇒ dense forward.
+        if not getattr(state, "mask_active", False):
+            return False
+        tag = getattr(state, "path_tag", None)
+        if tag == TRAIN_TAG:
+            return not forward_only
+        if tag == OLD_LOGPROB_TAG:
+            # Only when compress_recompute=true did the worker stamp mask_active
+            # on the recompute; the recompute is forward_only by construction.
+            return forward_only
+        return False
+
+    def _comm_eff_register_powersgd_hooks(self) -> bool:
+        """Register the PowerSGD projection hooks on the boundary blocks (EXP-20).
+
+        SP guard mirrors the mask: the boundary activation token axis is what
+        Ulysses SP>1 slices across ranks (out of scope) — refuse it loudly. The
+        per-forward context (global_step + the generation bump that dedupes the
+        basis sketch against grad-ckpt recompute) is set per micro-batch in
+        ``prepare_model_inputs``. Returns True iff hooks were registered.
+        """
+        if getattr(self, "ulysses_sequence_parallel_size", 1) and self.ulysses_sequence_parallel_size > 1:
+            raise NotImplementedError(
+                "comm_eff powersgd does not support "
+                f"ulysses_sequence_parallel_size>1 (got {self.ulysses_sequence_parallel_size}); "
+                "the launcher runs with SP=1."
+            )
+        state = self._comm_eff_state
+        compressor = state.powersgd
+        compressor.register(self.module)
+        return compressor.is_registered
+
+    def _comm_eff_maybe_set_powersgd_context(self, micro_batch: TensorDict, input_ids) -> None:
+        """Bump the PowerSGD forward generation + stamp global_step (EXP-20).
+
+        No-op unless the projection hooks are live. Unlike the mask, PowerSGD does
+        not key on token identity (its basis is shared across all tokens), so the
+        only per-micro-batch state is the generation counter (dedupes the sketch
+        against gradient-checkpoint recompute) and the trainer step.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None:
+            return
+        compressor = getattr(state, "powersgd", None)
+        if compressor is None or not compressor.is_registered:
+            return
+        compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # comm_eff activation-mask hook lifecycle: register hooks on entry to the
         # train forward/backward and remove them on exit, so a later log-prob /
         # infer / ref / validation forward on the same module is clean. When
         # disabled (default) or not on the actor-train path, nothing is registered
         # and no RNG is drawn, so the pass is byte-identical to dense GRPO.
+        #
+        # EXP-20: the PowerSGD codec uses the SAME register/unregister lifecycle.
+        # The two codecs are mutually exclusive (state.build constructs exactly
+        # one), so at most one branch fires.
         _mask_hooks_live = False
+        _powersgd_hooks_live = False
         if self._comm_eff_mask_active(forward_only=forward_only):
             _mask_hooks_live = self._comm_eff_register_mask_hooks()
+        elif self._comm_eff_powersgd_active(forward_only=forward_only):
+            _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
         try:
             return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
         finally:
             if _mask_hooks_live:
                 self._comm_eff_state.masker.unregister()
+            if _powersgd_hooks_live:
+                self._comm_eff_state.powersgd.unregister()
 
     def _forward_backward_batch_inner(
         self, data: TensorDict, loss_function: Callable, forward_only=False
@@ -1650,6 +1729,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # comm_eff: set the per-token mask context for this micro-batch before
             # the forward fires the boundary hooks (no-op unless masking is live).
             self._comm_eff_maybe_set_mask_context(micro_batch, input_ids)
+            # EXP-20: bump the PowerSGD forward generation + stamp the step before
+            # the boundary projection hooks fire (no-op unless powersgd is live).
+            self._comm_eff_maybe_set_powersgd_context(micro_batch, input_ids)
             # support per sample temperature
             # temperature (bsz,)
             # input_ids (bsz, j1)

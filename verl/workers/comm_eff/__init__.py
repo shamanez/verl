@@ -24,6 +24,16 @@ lazily by ``CommEffState.maybe_build`` and run **only** when
 ``comm_eff.enabled=true``; the disabled path never reaches them.
 """
 
-from .state import CommEffState, comm_eff_metrics, maybe_build_comm_eff_state
+from .state import (
+    CommEffState,
+    comm_eff_metrics,
+    maybe_build_comm_eff_state,
+    resolve_compression_type,
+)
 
-__all__ = ["CommEffState", "comm_eff_metrics", "maybe_build_comm_eff_state"]
+__all__ = [
+    "CommEffState",
+    "comm_eff_metrics",
+    "maybe_build_comm_eff_state",
+    "resolve_compression_type",
+]

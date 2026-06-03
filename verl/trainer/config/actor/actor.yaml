@@ -298,6 +298,15 @@ comm_eff:
   # Master switch. false => every comm_eff hook is a no-op
   enabled: false
 
+  # EXP-20/M6 codec selector: one of {dense, prf_mask, powersgd} (mutually
+  # exclusive per run). "dense" (default) = no activation compression (every
+  # pre-EXP-20 config + the disabled path keep their exact behavior; a mask run
+  # is still selected by mask.enabled for back-compat). "prf_mask" = the
+  # per-(token,dim) PRF Bernoulli mask. "powersgd" = the shared frozen-basis
+  # projector M_hat=(M@Q)@Qᵀ. Declared here so Hydra's struct-mode merge accepts
+  # actor_rollout_ref.actor.comm_eff.compression_type=powersgd.
+  compression_type: dense
+
   # EXP-14 periodic clean (unmasked) optimizer-step cadence, in trainer steps.
   # 0 (default) = off => strict no-op for the disabled path and every pre-EXP-14
   # config. >0 => every (global_step % clean_cadence == 0)-th step runs entirely
@@ -450,6 +459,62 @@ comm_eff:
     # 1 => scale-matched stale true gradient. Unused under "reweight"/"inject".
     # [0, 1].
     blend_eta: 0.5
+
+  # EXP-20/M6 PowerSGD-style pipeline-boundary activation-compression sub-config
+  # (inert unless parent enabled=true AND compression_type=powersgd). The codec
+  # replaces each boundary block's hidden state M with its rank-r projection onto
+  # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
+  # in-graph; NO straight-through). Registered regardless of compression_type so
+  # a prf_mask run that forwards comm_eff.powersgd.* still parses (the
+  # clean_cadence struct-mode gotcha).
+  powersgd:
+
+    # Target dataclass for this configuration
+    _target_: verl.workers.config.CommEffPowerSGDConfig
+
+    # Sub-switch; gated by the parent comm_eff.enabled AND compression_type=powersgd.
+    enabled: true
+
+    # Retained projection rank r. r=102 matches the PRF mask at p=0.95
+    # (q*H = 0.05*2048 = 102.4). r==H (=2048) is the lossless limiting case
+    # M_hat=M used by the correctness probe.
+    rank: 102
+
+    # Base seed for the deterministic per-layer basis bootstrap
+    # (seed_L = (seed*1_000_003 + layer_idx*7919) & 0x7FFFFFFF). Identical on
+    # every rank => zero-communication codebook init.
+    seed: 0
+
+    # Logical pipeline-shard count (same boundary selection as the mask):
+    # last block of every shard except the final. L=16/pp_size=8 -> [1,3,..,13].
+    pp_size: 8
+
+    # Block-power-iteration basis-update cadence in optimizer steps. 1 = refresh
+    # Q every (non-clean) step; >1 = refresh only on (global_step % cadence)==0.
+    update_cadence: 1
+
+    # true (default) carries Q across steps (warm block power iteration); false
+    # re-bootstraps from the per-layer seed every update (cold, diagnostic).
+    warm_start: true
+
+    # true (default) also projects the old-logprob recompute so BOTH
+    # gradient-feeding forwards see the same frozen Q_t (=> importance ratio ~1).
+    compress_recompute: true
+
+    # false (default) keeps each rank's basis local + deterministic (no
+    # collective; identical by construction from the shared seed). true would
+    # all-reduce the sketch V across the DP mesh before orth.
+    sync_basis: false
+
+    # Dtype for the orthonormalization (QR) and stored-basis math: "fp32"
+    # (default, REQUIRED — bf16-QR loses orthogonality, a frequent NaN/q_cond
+    # source) | "bf16" (diagnostic). The projection runs in the activation dtype
+    # regardless.
+    qr_dtype: fp32
+
+    # Floor under the QR / singular-value floor for the q_cond diagnostic, so a
+    # rank-deficient sketch never yields a non-finite condition number. > 0.
+    reortho_eps: 1e-6
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

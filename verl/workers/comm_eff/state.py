@@ -52,6 +52,7 @@ __all__ = [
     "CommEffState",
     "maybe_build_comm_eff_state",
     "comm_eff_metrics",
+    "resolve_compression_type",
     "PATH_TAGS",
     "TRAIN_TAG",
     "OLD_LOGPROB_TAG",
@@ -133,6 +134,32 @@ def _is_enabled(config: Any) -> bool:
     return bool(getattr(config, "enabled", False))
 
 
+def resolve_compression_type(config: Any) -> str:
+    """Resolve the effective boundary codec from a comm_eff config (EXP-20/M6).
+
+    Returns one of ``{"dense", "prf_mask", "powersgd"}``. Pure read — no side
+    effects, no allocation. The resolution is back-compatible:
+
+    * an explicit ``compression_type`` of ``prf_mask`` or ``powersgd`` wins;
+    * ``dense`` (the field default) falls back to the LEGACY selector — if the
+      mask sub-config is enabled with ``p > 0`` the codec is ``prf_mask`` (so
+      every pre-EXP-20 mask config keeps working without setting the new field),
+      otherwise ``dense``.
+
+    This is what lets the step-1 mask arm run unchanged while the step-2
+    PowerSGD arm is selected purely by ``compression_type=powersgd``.
+    """
+    ctype = getattr(config, "compression_type", "dense") if config is not None else "dense"
+    if ctype in ("prf_mask", "powersgd"):
+        return ctype
+    # ctype == "dense": honor the legacy mask selector for back-compat.
+    mask_cfg = getattr(config, "mask", None)
+    mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
+    if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
+        return "prf_mask"
+    return "dense"
+
+
 class CommEffState:
     """Per-worker communication-efficient compression state.
 
@@ -152,6 +179,10 @@ class CommEffState:
         self.config = config
         self.enabled = True
         self._built = False
+        # EXP-20/M6 active boundary codec, resolved in build(). Until build() the
+        # conservative default is "dense" (no codec). Read by metrics() and the
+        # engine to decide which compressor lifecycle to drive.
+        self.compression_type = "dense"
 
         # Operation counters surfaced into training metrics under comm_eff/*.
         self.mask_applications = 0
@@ -215,6 +246,20 @@ class CommEffState:
         # when the mask sub-config is disabled.
         self.masker = None
 
+        # EXP-20/M6 PowerSGD activation compressor (boundary codec). Constructed
+        # in build() ONLY when compression_type == "powersgd"; None otherwise
+        # (the disabled path, the dense codec, and the prf_mask codec never
+        # touch it). Mutually exclusive with `masker`: a run is either the mask
+        # codec or the powersgd codec, never both.
+        self.powersgd = None
+        # PowerSGD op counters (analyst greps these by name). Cumulative.
+        #   powersgd_applications  — projection hooks fired on the train path.
+        #   powersgd_basis_updates — orth(V) basis refreshes taken (one per
+        #                            non-clean cadence step). Lets the analyst
+        #                            confirm the basis advanced on schedule.
+        self.powersgd_applications = 0
+        self.powersgd_basis_updates = 0
+
         # Whether masking is currently active. Set True only on entry to the
         # actor-train forward/backward (around update_actor) and cleared on
         # exit, so log-prob / ref / infer / val / checkpoint forwards stay clean.
@@ -268,9 +313,11 @@ class CommEffState:
         """
         if self._built:
             return
+        # EXP-20/M6: resolve the active boundary codec ONCE. Exactly one of the
+        # mask / powersgd compressors is constructed; `dense` constructs neither.
+        self.compression_type = resolve_compression_type(self.config)
         mask_cfg = getattr(self.config, "mask", None)
-        mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
-        if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
+        if self.compression_type == "prf_mask":
             # Imported lazily so the disabled path never pays the import cost.
             from verl.workers.comm_eff.activation_mask import ActivationMasker
 
@@ -281,6 +328,41 @@ class CommEffState:
                 rescale=bool(getattr(mask_cfg, "rescale", False)),
                 rescale_mode=str(getattr(mask_cfg, "rescale_mode", "auto")),
                 state=self,
+            )
+        elif self.compression_type == "powersgd":
+            # Imported lazily so the disabled / mask paths never pay the cost.
+            from verl.workers.comm_eff.powersgd_activation import PowerSGDActivationCompressor
+
+            ps_cfg = getattr(self.config, "powersgd", None)
+            self.powersgd = PowerSGDActivationCompressor(
+                rank=int(getattr(ps_cfg, "rank", 102)),
+                base_seed=int(getattr(ps_cfg, "seed", 0)),
+                pp_size=int(getattr(ps_cfg, "pp_size", 8)),
+                update_cadence=int(getattr(ps_cfg, "update_cadence", 1)),
+                warm_start=bool(getattr(ps_cfg, "warm_start", True)),
+                compress_recompute=bool(getattr(ps_cfg, "compress_recompute", True)),
+                sync_basis=bool(getattr(ps_cfg, "sync_basis", False)),
+                qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
+                reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
+                state=self,
+            )
+            logger.info(
+                "comm_eff: powersgd compressor built (rank=%s update_cadence=%s warm_start=%s "
+                "compress_recompute=%s sync_basis=%s qr_dtype=%s)",
+                self.powersgd.rank,
+                self.powersgd.update_cadence,
+                self.powersgd.warm_start,
+                self.powersgd.compress_recompute,
+                self.powersgd.sync_basis,
+                getattr(ps_cfg, "qr_dtype", "fp32"),
+            )
+            print(
+                f"[comm_eff][EXP-20] powersgd codec: rank={self.powersgd.rank} "
+                f"update_cadence={self.powersgd.update_cadence} warm_start={self.powersgd.warm_start} "
+                f"compress_recompute={self.powersgd.compress_recompute} "
+                f"sync_basis={self.powersgd.sync_basis} "
+                f"qr_dtype={getattr(ps_cfg, 'qr_dtype', 'fp32')}",
+                flush=True,
             )
 
         spec_cfg = getattr(self.config, "spectral", None)
@@ -410,6 +492,16 @@ class CommEffState:
         tag = self.path_tag if self.path_tag in self.mask_applications_by_path else TRAIN_TAG
         self.mask_applications_by_path[tag] += 1
 
+    def note_powersgd_application(self) -> None:
+        """Record one PowerSGD projection-hook fire (EXP-20). Called from the
+        compressor hook. Pure counter bump — no allocation."""
+        self.powersgd_applications += 1
+
+    def note_powersgd_basis_update(self) -> None:
+        """Record one PowerSGD block-power-iteration basis refresh (EXP-20).
+        Called from ``maybe_update_basis`` after a successful ``orth(V)``."""
+        self.powersgd_basis_updates += 1
+
     def path_metrics(self) -> dict:
         """Per-path mask-application counters, surfaced under a stable KEY prefix.
 
@@ -436,6 +528,15 @@ class CommEffState:
         out = {"comm_eff/mask_ratio": mean_ratio}
         for idx, r in sorted(ratios.items()):
             out[f"comm_eff/mask_ratio/layer_{idx}"] = r
+        # EXP-20 matched-budget metric: PRF kept coords per token = (1-p)*H. The
+        # analyst asserts this equals PowerSGD's n*r (=rank) within 1% so the two
+        # arms carry the IDENTICAL logical PP byte budget (a confound guard). Use
+        # the configured p (exact, not the measured ratio which jitters per draw)
+        # and the recorded H.
+        H = getattr(self.masker, "hidden_size", None)
+        p = float(getattr(self.masker, "p", 0.0))
+        if H is not None:
+            out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - p) * float(H))
         return out
 
     def spectral_metrics(self) -> dict:
@@ -469,6 +570,54 @@ class CommEffState:
             out["comm_eff/spectral/rel_change_mean"] = sum(vals) / len(vals)
             for name, r in self.spectral_rel_change.items():
                 out[f"comm_eff/spectral/rel_change/{name}"] = r
+        return out
+
+    def powersgd_metrics(self) -> dict:
+        """Return PowerSGD codec health/diagnostic metrics (EXP-20/M6).
+
+        All NUMERIC (the reduce_metrics-must-stay-numeric contract). Empty when
+        the powersgd codec is not active. Surfaces, per the plan's success
+        criteria:
+          comm_eff/powersgd_q_cond                     — mean Q condition number
+                                                         (≈1 orthonormal; non-finite
+                                                         ⇒ basis collapse falsifier).
+          comm_eff/powersgd_q_cond/layer_<i>           — per-boundary breakdown.
+          comm_eff/powersgd_reconstruction_rel_error   — mean ||M-M_hat||/||M||
+                                                         (must stay < 1.0).
+          comm_eff/powersgd_reconstruction_rel_error/layer_<i>
+          comm_eff/logical_pp_bytes_powersgd_y_only    — n·r coords/token-layer
+                                                         (the matched-budget metric;
+                                                         the analyst asserts equality
+                                                         against the PRF q·H bytes).
+          comm_eff/powersgd_basis_updates              — cumulative orth(V) refreshes.
+        """
+        if self.powersgd is None:
+            return {}
+        out: dict = {}
+        qc = getattr(self.powersgd, "last_q_cond", {})
+        if qc:
+            finite = [v for v in qc.values() if v == v and v not in (float("inf"), float("-inf"))]
+            # Report the mean of finite conds; if ANY is non-finite, surface inf
+            # for the mean so the analyst's finiteness check trips.
+            if len(finite) == len(qc):
+                out["comm_eff/powersgd_q_cond"] = sum(finite) / len(finite)
+            else:
+                out["comm_eff/powersgd_q_cond"] = float("inf")
+            for idx, v in sorted(qc.items()):
+                out[f"comm_eff/powersgd_q_cond/layer_{idx}"] = v
+        re = getattr(self.powersgd, "last_reconstruction_rel_error", {})
+        if re:
+            out["comm_eff/powersgd_reconstruction_rel_error"] = sum(re.values()) / len(re)
+            for idx, v in sorted(re.items()):
+                out[f"comm_eff/powersgd_reconstruction_rel_error/layer_{idx}"] = v
+        # Logical PP byte budget actually carried: n·r coordinate-values per
+        # token-layer (Y = M @ Q is the only thing "sent"). The analyst asserts
+        # this equals the PRF q·H within 1% (matched budget).
+        out["comm_eff/logical_pp_bytes_powersgd_y_only"] = float(
+            getattr(self.powersgd, "last_y_coords_per_token", self.powersgd.rank)
+        )
+        out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
+        out["comm_eff/powersgd_applications"] = self.powersgd_applications
         return out
 
     def metrics(self) -> dict:
@@ -532,4 +681,5 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     out.update(state.path_metrics())
     out.update(state.mask_ratio_metrics())
     out.update(state.spectral_metrics())
+    out.update(state.powersgd_metrics())
     return out

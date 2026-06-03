@@ -685,6 +685,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
+                # EXP-20/M6: PowerSGD compress_recompute. When the powersgd codec
+                # is active and compress_recompute=true, the old-logprob recompute
+                # is ALSO projected through the SAME frozen Q_t as the train
+                # forward, so both gradient-feeding forwards agree ⇒ ρ≈1 (INF-17).
+                # The recompute runs forward_only (no_grad) so it folds NOTHING
+                # into the basis sketch V (the compressor's _should_accumulate
+                # gate requires grad-enabled). Suppressed on a clean step (both
+                # forwards dense). compress_recompute=false leaves the recompute
+                # dense (the IS-ratio denominator is the dense old-logprob).
+                ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
+                ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
+                if (
+                    not clean_step
+                    and getattr(comm_eff_state, "powersgd", None) is not None
+                    and ps_recompute
+                ):
+                    prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
+                    comm_eff_state.mask_active = True
+                    stamped_mask_active = True
             # Stamp the stable per-row id so the masked old-logprob recompute keys
             # each token's per-element mask on the SAME (sample_id, position_id) as
             # the actor-train forward (no-op when disabled / no masker).
@@ -875,6 +894,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
                 comm_eff_state.set_path_tag(None)
+                # EXP-20/M6: PowerSGD block-power-iteration basis update. Runs
+                # ONCE per trainer step, AFTER all PPO mini-batch forwards/backwards
+                # of this update_actor have run (so the sketch V has folded in
+                # every gradient-bearing actor-train forward) and AFTER the
+                # gradient-bearing work (so Q was frozen for both paired GRPO
+                # forwards this step — INF-17). Sets Q_t -> Q_{t+1} for the NEXT
+                # step. Skipped on a clean step and on non-cadence steps inside
+                # maybe_update_basis. Strict no-op for the mask/dense/disabled
+                # codecs (powersgd is None there).
+                powersgd = getattr(comm_eff_state, "powersgd", None)
+                if powersgd is not None:
+                    powersgd.maybe_update_basis(is_clean_step=clean_step)
 
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /
@@ -899,6 +930,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # EXP-14: explicit zero on the disabled path (Test 1 gate cells
                     # run comm_eff.enabled=false) so the no-op stays greppable.
                     "comm_eff/clean_steps": 0,
+                    # EXP-20: explicit zeros on the disabled path so the PowerSGD
+                    # codec counters stay greppable even on the mask/dense arms.
+                    "comm_eff/powersgd_applications": 0,
+                    "comm_eff/powersgd_basis_updates": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)
