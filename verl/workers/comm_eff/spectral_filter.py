@@ -73,6 +73,34 @@ __all__ = [
 ]
 
 
+def _canon(name: str) -> str:
+    """Canonicalize a parameter name by stripping the FSDP per-layer-wrap infix.
+
+    EXP-18/M4 anchor-circuit bug fix. The anchor EMA is FED from the anchor
+    clone's ``named_parameters()`` and READ back via the LIVE FSDP module's
+    summoned ``named_parameters()``. When ``build_anchor_module``'s deepcopy
+    fails and the config-rebuild fallback runs, the clone is a PLAIN
+    (non-FSDP) module whose names lack the per-layer FSDP wrap infix
+    ``._fsdp_wrapped_module.`` that the live per-layer-wrapped module's
+    summoned names carry. Without canonicalization the feed-side key
+    (``model.layers.0.self_attn.q_proj.weight``) and the read-side key
+    (``model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight``) never
+    match, so ``M_anchor`` reads as zero at injection/correction time and the
+    correction silently no-ops.
+
+    Canonicalizing at every ``self._anchor`` / ``self._basis`` key boundary
+    makes the two keys IDENTICAL. Safe in BOTH build paths: a successful
+    deepcopy yields infixed names that canon to the same as the live-canon
+    names; the fallback's non-infixed names are already canonical (no-op).
+    A leading ``_fsdp_wrapped_module.`` (root-wrap, no dot prefix) is also
+    stripped.
+    """
+    name = name.replace("._fsdp_wrapped_module", "")
+    if name.startswith("_fsdp_wrapped_module."):
+        name = name[len("_fsdp_wrapped_module."):]
+    return name
+
+
 def compute_basis(m_anchor: torch.Tensor, *, svd_mode: str = "full", rank: int = 8) -> tuple:
     """Compute the (U, S, V) basis of the anchor used by the two-sided projection.
 
@@ -241,6 +269,9 @@ class SpectralFilter:
         svd_mode: str = "full",
         basis_cache: str = "cache",
         rank: int = 8,
+        correction_mode: str = "reweight",
+        inject_gamma: float = 1.0,
+        blend_eta: float = 0.5,
     ):
         self.alpha = float(alpha)
         self.tau = float(tau)
@@ -257,6 +288,15 @@ class SpectralFilter:
         self.svd_mode = str(svd_mode)
         self.basis_cache = str(basis_cache)
         self.rank = int(rank)
+        # EXP-18/M4 correction mode. "reweight" = the as-implemented two-sided
+        # Tikhonov reweighting (correct_matrix); "inject" = additive injection of
+        # the scale-matched stale-anchor complement (inject_matrix); "blend" =
+        # convex blend toward the scale-matched stale anchor (blend_matrix, C2).
+        # Validated in CommEffConfig.__post_init__; assert defensively here too.
+        assert correction_mode in ("reweight", "inject", "blend"), correction_mode
+        self.correction_mode = str(correction_mode)
+        self.inject_gamma = float(inject_gamma)
+        self.blend_eta = float(blend_eta)
         # name -> M_anchor (float32). Lives on the gradient's device when
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / correct_matrix).
@@ -319,6 +359,7 @@ class SpectralFilter:
         ``ema_device=cpu``, else the gradient's device). Seeding builds the
         deterministic basis on the grad's device, then moves it to storage.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor.get(name)
         if anc is None:
             store_dev = self._ema_storage_device(grad.device)
@@ -337,6 +378,7 @@ class SpectralFilter:
         Used at refresh/correction time to bring a CPU-offloaded EMA onto the
         compute device. The stored copy is left on its storage device.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor[name]
         return anc.to(device) if anc.device != torch.device(device) else anc
 
@@ -353,6 +395,7 @@ class SpectralFilter:
         is refreshed here (once per anchor refresh) so every subsequent fast
         mini-batch reuses it; under ``recompute`` no basis is cached.
         """
+        name = _canon(name)  # EXP-18: store EMA + basis under the canonical key
         self.ensure_anchor(name, g_anchor)
         compute_dev = g_anchor.device
         anc = self.anchor_on(name, compute_dev).to(torch.float32)
@@ -365,7 +408,11 @@ class SpectralFilter:
             stored = stored.pin_memory()
         self._anchor[name] = stored
         # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
-        if self.basis_cache == "cache":
+        # EXP-18/M4 inject AND blend modes need NO SVD basis (they combine the
+        # scale-matched anchor with G_mask directly), so skip the cache —
+        # computing the full SVD of every targeted matrix per refresh would
+        # stall the run.
+        if self.basis_cache == "cache" and self.correction_mode not in ("inject", "blend"):
             self._basis[name] = compute_basis(new, svd_mode=self.svd_mode, rank=self.rank)
         return new
 
@@ -376,6 +423,7 @@ class SpectralFilter:
         seeded-cache path the EXP-7 reproduction cell relies on). The basis is
         cached on ``device`` (defaults to the EMA's current device).
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         anc = self._anchor[name]
         dev = device if device is not None else anc.device
         basis = compute_basis(anc.to(dev).to(torch.float32), svd_mode=self.svd_mode, rank=self.rank)
@@ -397,6 +445,7 @@ class SpectralFilter:
         SVD here, exactly as the pre-EXP-8 code did. A CPU-offloaded EMA is
         brought onto the gradient's device for the (recompute) SVD.
         """
+        name = _canon(name)  # EXP-18: match feed-side & read-side keys
         self.ensure_anchor(name, g_mask)
         basis = None
         if self.basis_cache == "cache":
@@ -419,6 +468,67 @@ class SpectralFilter:
             rank=self.rank,
             basis=basis,
         )
+
+    def inject_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-18/M4 additive injection: G_corr = G_mask + gamma*scale*(M_anchor - P_Gmask(M_anchor)).
+
+        Supplies the component of the stale true-gradient EMA M_anchor that G_mask
+        does NOT already span (the part masking rotated away), scale-matched to
+        ||G_mask|| (rescale inflates ||G_mask|| ~9x; Adam+grad-clip make the
+        *direction* the load-bearing quantity). Under orthogonality (cos≈0) the
+        projection ~0 and this is scale-matched direct injection of M_anchor.
+        Returns G_corr with g_mask's shape/dtype/device.
+        """
+        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        gm_norm = torch.linalg.norm(gm)
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps or gm_norm <= eps:
+            return g_mask  # anchor not warmed / zero grad → no-op
+        coeff = (gm * anc).sum() / (gm_norm * gm_norm + eps)   # <G_mask,M_anchor>/||G_mask||^2
+        complement = anc - coeff * gm
+        scale = gm_norm / (anc_norm + eps)
+        g_corr = gm + self.inject_gamma * scale * complement
+        # Diagnostic: cosine(G_mask, M_anchor) — measures orthogonality on the LIVE anchor.
+        cos = (coeff * gm_norm / (anc_norm + eps)).item()
+        print(f"[comm_eff][EXP-18][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
+              f"gamma={self.inject_gamma} scale={scale.item():.4f} "
+              f"||inj||/||G_mask||={(torch.linalg.norm(self.inject_gamma*scale*complement)/(gm_norm+eps)).item():.4f}",
+              flush=True)
+        return g_corr.to(g_mask.dtype)
+
+    def blend_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-18/M4 C2 convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
+
+        REPLACES (downweights) the biased G_mask with the scale-matched stale
+        true-gradient EMA M_anchor, scale=||G_mask||/||M_anchor||. Unlike inject
+        (which ADDS an orthogonal force and inflates magnitude to sqrt(2)*||G_mask||
+        at eta=1, C1's collapse cause), the convex blend keeps a stable magnitude:
+        for orthogonal terms ||G_corr|| = ||G_mask||*sqrt((1-eta)^2 + eta^2) <= ||G_mask||.
+        eta->0 returns G_mask exactly; eta->1 returns the scale-matched M_anchor.
+        Returns G_corr with g_mask's shape/dtype/device.
+        """
+        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        gm_norm = torch.linalg.norm(gm)
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps or gm_norm <= eps:
+            return g_mask  # anchor not warmed / zero grad → no-op (returns G_mask)
+        eta = self.blend_eta
+        scale = gm_norm / (anc_norm + eps)
+        g_corr = (1.0 - eta) * gm + eta * scale * anc
+        # Diagnostic: cosine(G_mask, M_anchor) on the LIVE anchor + magnitude ratio.
+        cos = ((gm * anc).sum() / (gm_norm * anc_norm + eps)).item()
+        print(f"[comm_eff][EXP-18][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
+              f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
+              flush=True)
+        return g_corr.to(g_mask.dtype)
 
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
@@ -496,7 +606,13 @@ def apply_spectral_correction_to_params(
             print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
-        g_proj = spectral.correct_matrix(name, full)
+        _mode = getattr(spectral, "correction_mode", "reweight")
+        if _mode == "inject":
+            g_proj = spectral.inject_matrix(name, full)
+        elif _mode == "blend":
+            g_proj = spectral.blend_matrix(name, full)
+        else:
+            g_proj = spectral.correct_matrix(name, full)
         rel = spectral.relative_change(full, g_proj)
         state.spectral_rel_change[name] = rel
         print(
