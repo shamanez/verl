@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PowerSGD, explained</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..600&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400..500&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#f4efe3; --paper-2:#ece4d3; --paper-3:#e3d9c2;
+    --ink:#221f18; --ink-soft:#57523f; --ink-faint:#8d8770;
+    --rule:#d6ccb3;
+    --accent:#b3472a; --accent-soft:#ecccbe;
+    --gold:#9a7414; --gold-soft:#e7d8a8;
+    --teal:#2c6c5f; --teal-soft:#cde0d8;
+    --display:'Fraunces','Playfair Display',Georgia,serif;
+    --body:'Newsreader','Iowan Old Style',Georgia,serif;
+    --mono:'JetBrains Mono','SFMono-Regular',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--body); font-size:19px; line-height:1.66;
+    background-image:radial-gradient(var(--paper-3) 0.6px, transparent 0.6px);
+    background-size:22px 22px;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:0 26px 120px}
+  ::selection{background:var(--accent-soft)}
+
+  /* ---- header ---- */
+  header{padding:74px 0 18px; border-bottom:1px solid var(--rule); margin-bottom:8px}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin:0 0 22px}
+  h1{font-family:var(--display); font-weight:900; font-size:clamp(56px,12vw,104px); line-height:.92; letter-spacing:-.02em; margin:0 0 18px; font-optical-sizing:auto}
+  h1 em{font-style:italic; font-weight:400; color:var(--ink-soft)}
+  .lede{font-size:23px; line-height:1.45; color:var(--ink); max-width:48ch; margin:0 0 26px}
+  .byline{font-family:var(--mono); font-size:12.5px; color:var(--ink-faint); letter-spacing:.04em}
+  .spectrum{display:flex; align-items:flex-end; gap:5px; height:54px; margin:30px 0 6px}
+  .spectrum i{display:block; width:10px; background:var(--accent); border-radius:2px 2px 0 0; opacity:.92}
+  .spectrum i:nth-child(n+3){background:var(--ink); opacity:.16}
+  .spectrum-cap{font-family:var(--mono); font-size:11.5px; color:var(--ink-faint); letter-spacing:.02em}
+
+  /* ---- sections ---- */
+  section{padding:48px 0; border-bottom:1px solid var(--rule)}
+  .num{font-family:var(--mono); font-size:13px; color:var(--accent); letter-spacing:.14em; display:block; margin-bottom:10px}
+  h2{font-family:var(--display); font-weight:600; font-size:clamp(28px,5vw,38px); line-height:1.08; letter-spacing:-.01em; margin:0 0 22px}
+  h3{font-family:var(--display); font-weight:600; font-size:21px; margin:34px 0 10px}
+  p{margin:0 0 18px}
+  a{color:var(--accent)}
+  strong{font-weight:600}
+  em{font-style:italic}
+  .lead{font-size:21px; color:var(--ink-soft)}
+  sup,sub{font-size:.72em; line-height:0}
+  .var{font-family:var(--mono); font-size:.86em; color:var(--ink)}
+
+  /* ---- key idea callout ---- */
+  .key{border-left:3px solid var(--accent); background:linear-gradient(90deg,var(--paper-2),transparent); padding:18px 22px; margin:28px 0; border-radius:0 8px 8px 0}
+  .key .lab{font-family:var(--mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); display:block; margin-bottom:8px}
+  .key p{margin:0; font-size:18.5px}
+  .key p + p{margin-top:12px}
+
+  /* ---- mono / matrix blocks ---- */
+  pre.mono{font-family:var(--mono); font-size:14px; line-height:1.7; background:var(--paper-2); border:1px solid var(--rule); border-radius:10px; padding:18px 20px; overflow-x:auto; margin:24px 0; color:var(--ink)}
+  pre.mono .c{color:var(--accent)}
+  pre.mono .g{color:var(--gold)}
+  pre.mono .d{color:var(--ink-faint)}
+  code{font-family:var(--mono); font-size:.85em; background:var(--paper-2); padding:1px 6px; border-radius:5px; border:1px solid var(--rule)}
+
+  figure{margin:30px 0}
+  figure svg{display:block; width:100%; height:auto}
+  figcaption{font-family:var(--mono); font-size:12.5px; line-height:1.6; color:var(--ink-faint); margin-top:12px; text-align:center; letter-spacing:.01em}
+  .swatch{display:inline-block; width:9px; height:9px; border-radius:2px; vertical-align:middle; margin:0 3px 2px 8px}
+
+  /* ---- two-column stat ---- */
+  .ratio{display:flex; flex-wrap:wrap; gap:14px; margin:26px 0}
+  .ratio .cell{flex:1 1 150px; background:var(--paper-2); border:1px solid var(--rule); border-radius:10px; padding:16px 18px}
+  .ratio .big{font-family:var(--display); font-size:34px; font-weight:600; line-height:1; color:var(--accent)}
+  .ratio .sm{font-family:var(--mono); font-size:12px; color:var(--ink-soft); margin-top:8px; line-height:1.5}
+
+  /* ---- interactive stepper ---- */
+  .sim{background:var(--paper-2); border:1px solid var(--rule); border-radius:14px; padding:24px; margin:30px 0}
+  .sim-top{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:18px; flex-wrap:wrap}
+  .sim-title{font-family:var(--mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-soft)}
+  .sim-step{font-family:var(--display); font-size:20px; font-weight:600}
+  .mats{display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start}
+  .matbox{flex:1 1 130px; min-width:120px}
+  .matbox .ml{font-family:var(--mono); font-size:11.5px; color:var(--ink-soft); letter-spacing:.03em; margin-bottom:7px; height:1.4em}
+  .grid2{display:grid; grid-template-columns:repeat(2,1fr); gap:5px; background:var(--ink); border-radius:8px; padding:5px; max-width:128px}
+  .grid2 span{font-family:var(--mono); font-size:16px; text-align:center; padding:11px 4px; background:var(--paper); border-radius:5px; transition:background .25s, color .25s}
+  .grid2 span.hot{background:var(--accent); color:var(--paper)}
+  .grid2 span.warm{background:var(--gold); color:var(--paper)}
+  .bar-wrap{margin:22px 0 6px}
+  .bar-lab{font-family:var(--mono); font-size:12px; color:var(--ink-soft); margin-bottom:8px}
+  .bar-track{position:relative; height:26px; background:var(--paper-3); border-radius:6px; overflow:hidden}
+  .bar-fill{position:absolute; left:0; top:0; bottom:0; width:0; background:var(--gold); border-radius:6px; transition:width .35s ease, background .25s}
+  .bar-fill.over{background:var(--accent)}
+  .bar-thr{position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink); left:80%}
+  .bar-thr::after{content:'dominant = 4'; position:absolute; top:-18px; left:-30px; font-family:var(--mono); font-size:10.5px; color:var(--ink-soft); white-space:nowrap}
+  .readout{font-family:var(--mono); font-size:13px; line-height:1.7; color:var(--ink-soft); margin:18px 0 6px; min-height:3.4em}
+  .readout b{color:var(--accent); font-weight:500}
+  .btns{display:flex; gap:10px; margin-top:18px}
+  button{font-family:var(--mono); font-size:13px; letter-spacing:.04em; padding:11px 20px; border-radius:8px; cursor:pointer; border:1px solid var(--ink); background:var(--ink); color:var(--paper); transition:transform .1s, opacity .15s}
+  button.ghost{background:transparent; color:var(--ink)}
+  button:hover{opacity:.85}
+  button:active{transform:translateY(1px)}
+
+  /* ---- pseudocode ---- */
+  .algo{counter-reset:none}
+  ul.steps{list-style:none; padding:0; margin:24px 0; font-family:var(--mono); font-size:13.5px; line-height:1.55}
+  ul.steps li{padding:7px 0 7px 0; border-bottom:1px dashed var(--rule); display:flex; gap:14px}
+  ul.steps li:last-child{border-bottom:none}
+  ul.steps .ln{color:var(--ink-faint); flex:0 0 auto; width:1.5em; text-align:right}
+  ul.steps .note{color:var(--ink-faint)}
+  ul.steps .hl{color:var(--accent)}
+
+  footer{padding:46px 0 0; font-family:var(--mono); font-size:12.5px; color:var(--ink-faint); line-height:1.7}
+
+  @media (max-width:560px){
+    body{font-size:18px}
+    .wrap{padding:0 18px 80px}
+    h1{font-size:clamp(46px,16vw,72px)}
+    .grid2{max-width:none}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none !important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="kicker">Distributed optimization · low-rank gradient compression</p>
+    <h1>Power<em>SGD</em></h1>
+    <p class="lede">Send a cheap low-rank <em>sketch</em> of the gradient instead of the whole thing — and remember the part you dropped, so nothing is lost.</p>
+    <div class="spectrum" aria-hidden="true">
+      <i style="height:54px"></i><i style="height:36px"></i><i style="height:14px"></i><i style="height:9px"></i><i style="height:6px"></i><i style="height:5px"></i><i style="height:4px"></i><i style="height:3px"></i>
+    </div>
+    <p class="spectrum-cap">gradient singular values are “top-heavy” — a few directions carry almost everything</p>
+    <p class="byline" style="margin-top:24px">After Vogels, Karimireddy &amp; Jaggi — <span style="color:var(--ink-soft)">Practical Low-Rank Gradient Compression for Distributed Optimization</span> (NeurIPS 2019)</p>
+  </header>
+
+  <section>
+    <span class="num">01 — THE BOTTLENECK</span>
+    <h2>Why distributed training is communication-limited</h2>
+    <p class="lead">In data-parallel SGD, <span class="var">W</span> worker GPUs each compute a gradient on their own slice of data, then must <em>average</em> those gradients every single step before updating the model.</p>
+    <p>That average means shipping a vector the size of the entire model across the network, every step, forever. As models grow and worker counts climb, the network — not the GPUs — sets the pace. The compute sits idle, waiting on the wire. PowerSGD attacks exactly this: shrink what gets sent, without hurting the final accuracy, and without the compression itself costing more than the bytes it saves.</p>
+  </section>
+
+  <section>
+    <span class="num">02 — THE IDEA</span>
+    <h2>A gradient is a matrix. Most of it is redundant.</h2>
+    <p>Take one layer's gradient and treat it as a matrix <span class="var">M</span> of shape <span class="var">n×m</span>. The bet — well supported for deep nets — is that this matrix is <em>approximately low rank</em>: a handful of directions hold almost all of its energy. So approximate it as a product of two skinny matrices:</p>
+
+    <figure>
+      <svg viewBox="0 0 680 200" role="img" aria-label="M of shape n by m is approximately P-hat of shape n by r times Q-transpose of shape r by m">
+        <rect x="130" y="36" width="118" height="118" rx="6" fill="var(--paper-3)" stroke="var(--ink)" stroke-width="1"/>
+        <text x="189" y="100" text-anchor="middle" font-family="var(--display)" font-size="30" font-weight="600" fill="var(--ink)">M</text>
+        <text x="189" y="172" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink-faint)">n × m</text>
+
+        <text x="282" y="103" text-anchor="middle" font-family="var(--display)" font-size="30" fill="var(--ink-soft)">≈</text>
+
+        <rect x="318" y="36" width="42" height="118" rx="6" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1"/>
+        <text x="339" y="100" text-anchor="middle" font-family="var(--display)" font-size="24" font-weight="600" fill="var(--accent)">P̂</text>
+        <text x="339" y="172" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink-faint)">n × r</text>
+
+        <text x="388" y="103" text-anchor="middle" font-family="var(--display)" font-size="26" fill="var(--ink-soft)">·</text>
+
+        <rect x="412" y="68" width="118" height="42" rx="6" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="1"/>
+        <text x="471" y="96" text-anchor="middle" font-family="var(--display)" font-size="22" font-weight="600" fill="var(--teal)">Qᵀ</text>
+        <text x="471" y="130" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink-faint)">r × m</text>
+
+        <text x="560" y="86" font-family="var(--mono)" font-size="12.5" fill="var(--ink-soft)">r ≪ n, m</text>
+        <text x="560" y="106" font-family="var(--mono)" font-size="12.5" fill="var(--ink-soft)">(1–4 columns)</text>
+      </svg>
+      <figcaption>You transmit the two thin blocks — <span style="color:var(--accent)">P̂</span> and <span style="color:var(--teal)">Q</span> — never the big one.</figcaption>
+    </figure>
+
+    <p>Instead of <span class="var">n·m</span> numbers you send only <span class="var">r·(n+m)</span>. Because a matrix's area grows far faster than its perimeter, the saving is enormous on real layers:</p>
+
+    <div class="ratio">
+      <div class="cell"><div class="big">230×</div><div class="sm">ResNet18 conv layer<br>512×4608, rank 2</div></div>
+      <div class="cell"><div class="big">8 MB</div><div class="sm">per epoch, vs 1023 MB<br>for the full gradient</div></div>
+      <div class="cell"><div class="big">94.4%</div><div class="sm">test accuracy — matching<br>uncompressed SGD</div></div>
+    </div>
+
+    <h3>What counts as a matrix</h3>
+    <p>Fully-connected layers are matrices already. A convolution's gradient is a 4-D tensor like <span class="var">512×512×3×3</span>; flatten the last three dims and it becomes <span class="var">512×4608</span>. Bias vectors are tiny, so they're sent uncompressed.</p>
+  </section>
+
+  <section>
+    <span class="num">03 — THE COMPRESSION STEP</span>
+    <h2>The heart of it — and the “two Q” that confuses everyone</h2>
+    <p>PowerSGD finds the sketch with a <em>single step</em> of subspace iteration. It involves a matrix called <span class="var">Q</span> that appears to show up twice. It doesn't — it's the same object playing two roles, at two moments:</p>
+
+    <div class="key">
+      <span class="lab">The one thing to understand</span>
+      <p><strong>Q<sub>in</sub></strong> is a <em>guess</em> — a probe. You don't trust it. You only use it to ask the gradient “which directions do you mostly point in?” by computing <span class="var">P = M·Q<sub>in</sub></span>, then cleaning the result up (orthonormalizing) into <span class="var">P̂</span>. That <span class="var">P̂</span> is the answer: the gradient's main directions.</p>
+      <p><strong>Q<sub>out</sub></strong> is the <em>answer you keep</em>. Now that you know the good directions <span class="var">P̂</span>, you compute the matching coefficients <span class="var">Q<sub>out</sub> = Mᵀ·P̂</span>. This is what actually reconstructs the gradient, and this is what you transmit. And next step, <strong>Q<sub>out</sub> becomes the new Q<sub>in</sub></strong> — the answer cycles around to become the guess. That's why it's the same letter.</p>
+    </div>
+
+    <figure>
+      <svg viewBox="0 0 680 462" role="img" aria-label="One PowerSGD step: a guess Q-in probes the gradient to find directions P-hat, the coefficients Q-out are computed and transmitted, then Q-out becomes the next step's guess and the leftover e is added to the next gradient">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+        </defs>
+
+        <!-- B1 delta -->
+        <rect x="170" y="26" width="280" height="54" rx="9" fill="var(--paper-3)" stroke="var(--ink)" stroke-width="0.8"/>
+        <text x="310" y="46" text-anchor="middle" font-family="var(--mono)" font-size="15" fill="var(--ink)">Δ = G + e</text>
+        <text x="310" y="66" text-anchor="middle" font-family="var(--body)" font-size="14" fill="var(--ink-soft)">this step’s gradient + leftover</text>
+        <line x1="310" y1="80" x2="310" y2="106" stroke="var(--ink)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+        <!-- B2 P -->
+        <rect x="170" y="108" width="280" height="54" rx="9" fill="var(--paper-3)" stroke="var(--ink)" stroke-width="0.8"/>
+        <text x="310" y="128" text-anchor="middle" font-family="var(--mono)" font-size="15" fill="var(--ink)">P = Δ · Q_in</text>
+        <text x="310" y="148" text-anchor="middle" font-family="var(--body)" font-size="14" fill="var(--ink-soft)">probe Δ with the old guess</text>
+        <line x1="310" y1="162" x2="310" y2="188" stroke="var(--ink)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+        <!-- B3 P-hat -->
+        <rect x="170" y="190" width="280" height="54" rx="9" fill="var(--paper-3)" stroke="var(--ink)" stroke-width="0.8"/>
+        <text x="310" y="210" text-anchor="middle" font-family="var(--mono)" font-size="15" fill="var(--ink)">P̂ = orthonormalize(P)</text>
+        <text x="310" y="230" text-anchor="middle" font-family="var(--body)" font-size="14" fill="var(--ink-soft)">Δ’s main directions</text>
+        <line x1="310" y1="244" x2="310" y2="270" stroke="var(--ink)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+        <!-- B4 Q-out (accent) -->
+        <rect x="170" y="272" width="280" height="54" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1"/>
+        <text x="310" y="292" text-anchor="middle" font-family="var(--mono)" font-size="15" fill="var(--accent)">Q_out = Δᵀ · P̂</text>
+        <text x="310" y="312" text-anchor="middle" font-family="var(--body)" font-size="14" fill="var(--accent)">coefficients → send P̂, Q_out</text>
+        <line x1="310" y1="326" x2="310" y2="352" stroke="var(--ink)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+        <!-- B5 e (gold) -->
+        <rect x="170" y="354" width="280" height="54" rx="9" fill="var(--gold-soft)" stroke="var(--gold)" stroke-width="1"/>
+        <text x="310" y="374" text-anchor="middle" font-family="var(--mono)" font-size="15" fill="var(--gold)">e = Δ − P̂ · Q_outᵀ</text>
+        <text x="310" y="394" text-anchor="middle" font-family="var(--body)" font-size="14" fill="var(--gold)">the part that didn’t fit</text>
+
+        <!-- warm-start loop (accent) -->
+        <polyline points="450,299 522,299 522,135 450,135" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="486" y="100" text-anchor="middle" font-family="var(--mono)" font-size="12" fill="var(--accent)">warm start</text>
+
+        <!-- error loop (gold) -->
+        <polyline points="450,381 588,381 588,53 450,53" fill="none" stroke="var(--gold)" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="516" y="42" text-anchor="middle" font-family="var(--mono)" font-size="12" fill="var(--gold)">error feedback</text>
+      </svg>
+      <figcaption>
+        One step, with both feedback loops.
+        <span class="swatch" style="background:var(--accent)"></span>warm start — Q<sub>out</sub> becomes next step’s Q<sub>in</sub>.
+        <span class="swatch" style="background:var(--gold)"></span>error feedback — e is added to the next gradient.
+      </figcaption>
+    </figure>
+
+    <p>Why orthonormalize? Once <span class="var">P̂</span> has perpendicular, unit-length columns, <span class="var">Q<sub>out</sub> = Mᵀ·P̂</span> is exactly the <em>least-squares best</em> set of coefficients, because <span class="var">P̂·Q<sub>out</sub>ᵀ</span> is precisely the projection of <span class="var">M</span> onto the directions <span class="var">P̂</span> spans. A useful side effect: only the <em>direction</em> of <span class="var">Q<sub>in</sub></span> matters, never its size — orthonormalizing throws the size away. That's exactly why reusing last step's answer as this step's probe is harmless.</p>
+  </section>
+
+  <section>
+    <span class="num">04 — WARM START</span>
+    <h2>Why one step is enough</h2>
+    <p>A single step of subspace iteration from a <em>random</em> guess gives a rough sketch — normally you'd need many iterations to converge to the true best rank-<span class="var">r</span> approximation (an SVD). PowerSGD does exactly one, which is what keeps it cheap. The trick that rescues quality is to seed each step with <em>last step's</em> <span class="var">Q<sub>out</sub></span> instead of re-randomizing.</p>
+    <p>This works because the model takes tiny steps, so consecutive gradients point in nearly the same directions — the dominant subspace drifts slowly. One iteration from a warm start lands about where many iterations from a cold start would. (As a bonus, reusing the old basis averages over consecutive stochastic gradients, like Oja's rule, quietly reducing variance.)</p>
+    <div class="key">
+      <span class="lab">Important</span>
+      <p><span class="var">Q</span> is <em>updated every step</em> but it is <strong>not trainable</strong>. No gradient flows into it; it never appears in the loss. It's bookkeeping the compressor recomputes by its own rule — the same category as a momentum buffer or Adam's running averages. It <em>adapts</em> (it tracks the gradient subspace), but through power iteration, not backprop.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="num">05 — ERROR FEEDBACK</span>
+    <h2>The non-negotiable part</h2>
+    <p>A low-rank projection is <em>biased</em>: the discarded tail is structured, not random noise. Drop it and it's gone forever, and the model converges as if those directions had no gradient. Error feedback fixes this by keeping a buffer <span class="var">e</span> the full size of the gradient. You never compress the raw gradient — you compress <span class="var">g + e</span>, then set <span class="var">e</span> to whatever didn't make it through:</p>
+
+    <pre class="mono">Δ    = g + e                       <span class="d"># fold in last step's leftover</span>
+sent = decompress(compress(Δ))     <span class="d"># what actually goes on the wire</span>
+e    = Δ − sent                    <span class="c"># remember the residual for next time</span></pre>
+
+    <p>Nothing is ever permanently dropped. Whatever the rank-<span class="var">r</span> sketch can't capture this step accumulates in <span class="var">e</span> and gets folded into a later step, where it can finally grow large enough to enter the top-<span class="var">r</span> subspace and be sent. Step through it and watch the backlog build, then discharge:</p>
+
+    <div class="sim" id="sim">
+      <div class="sim-top">
+        <span class="sim-title">Error-feedback simulator · gradient held at G = diag(4, 1), rank 1</span>
+        <span class="sim-step">step <span id="stepN">0</span></span>
+      </div>
+      <div class="mats">
+        <div class="matbox">
+          <div class="ml">Δ = G + e</div>
+          <div class="grid2" id="mD"><span>4</span><span>0</span><span>0</span><span>1</span></div>
+        </div>
+        <div class="matbox">
+          <div class="ml">transmitted (rank 1)</div>
+          <div class="grid2" id="mS"><span>–</span><span>–</span><span>–</span><span>–</span></div>
+        </div>
+        <div class="matbox">
+          <div class="ml">error buffer e</div>
+          <div class="grid2" id="mE"><span>0</span><span>0</span><span>0</span><span>0</span></div>
+        </div>
+      </div>
+
+      <div class="bar-wrap">
+        <div class="bar-lab">strength of the deferred direction &nbsp;=&nbsp; Δ’s bottom-right (<span id="d22">1</span>)</div>
+        <div class="bar-track"><div class="bar-fill" id="bar"></div><div class="bar-thr"></div></div>
+      </div>
+
+      <div class="readout" id="readout">Press <b>Step</b> to run the first iteration. The bottom-right direction (gradient 1) is too small to make the rank-1 cut, so it gets deferred into <code>e</code>.</div>
+
+      <div class="btns">
+        <button id="stepBtn">Step ▸</button>
+        <button class="ghost" id="resetBtn">Reset</button>
+      </div>
+    </div>
+
+    <p>The invariant behind it: the total you actually transmit equals the total true gradient, lagging by exactly whatever is sitting in <span class="var">e</span> right now <span class="var">(Σ sent = t·G − e)</span>. That is what “a biased compressor, made unbiased over time” means concretely. Skip error feedback and rank-4 PowerSGD plateaus around 88% where it should reach 94.4% — the gap is the lost tail. The cost is memory: <span class="var">e</span> is full gradient size, one per worker.</p>
+  </section>
+
+  <section>
+    <span class="num">06 — LINEARITY &amp; ALL-REDUCE</span>
+    <h2>The property that makes it scale</h2>
+    <p>Both multiplications — <span class="var">P = M·Q</span> and <span class="var">Q = Mᵀ·P̂</span> — are <em>linear</em>. So compressing the average of the workers' gradients equals the average of their compressions: compression <em>commutes</em> with averaging.</p>
+    <p>That single fact lets PowerSGD ride the <strong>all-reduce</strong> collective — the operation that sums while it communicates, in a tree, scaling as <span class="var">O(log W)</span>, leaving every worker with the already-averaged result and a decode cost that doesn't grow with worker count. Sign-based methods and top-<span class="var">K</span> are <em>not</em> linear (the sign of a sum isn't the sum of signs), so they're stuck with all-gather: every worker collects all <span class="var">W</span> messages and decodes them one by one, at <span class="var">O(W)</span>. This is the real reason PowerSGD scales where other compressors stall.</p>
+  </section>
+
+  <section>
+    <span class="num">07 — THE WHOLE THING</span>
+    <h2>One step of real PowerSGD</h2>
+    <p>Putting the three ingredients together — the linear sketch, warm start, and error feedback — here is what each worker does every step. Two pieces of state ride across steps; neither is trainable.</p>
+
+    <div class="algo">
+      <ul class="steps">
+        <li><span class="ln">1</span><span><span class="hl">g</span> = local stochastic gradient<span class="note">&nbsp;&nbsp;# shape n×m</span></span></li>
+        <li><span class="ln">2</span><span>Δ = g + e<span class="note">&nbsp;&nbsp;# (1) error feedback in</span></span></li>
+        <li><span class="ln">3</span><span>(P̂, Q) = COMPRESS(Δ, Q)<span class="note">&nbsp;&nbsp;# one subspace step, warm-started; Q updated here</span></span></li>
+        <li><span class="ln">4</span><span>e = Δ − DECOMPRESS(P̂, Q)<span class="note">&nbsp;&nbsp;# (2) error buffer = residual not captured</span></span></li>
+        <li><span class="ln">5</span><span>Δ′ = DECOMPRESS( ALL-REDUCE )<span class="note">&nbsp;&nbsp;# sketches averaged in-flight — the linearity trick</span></span></li>
+        <li><span class="ln">6</span><span>m = γ·m + Δ′<span class="note">&nbsp;&nbsp;# momentum</span></span></li>
+        <li><span class="ln">7</span><span><span class="hl">x</span> = x − η·(Δ′ + m)<span class="note">&nbsp;&nbsp;# the only thing actually trained</span></span></li>
+      </ul>
+    </div>
+    <p>The two carried buffers are <span class="var">Q</span> (shape <span class="var">m×r</span>, the warm-start basis) and <span class="var">e</span> (shape <span class="var">n×m</span>, the error memory). Both are recomputed every step by the rules above; neither receives a gradient. Only the model weights <span class="var">x</span> are trained.</p>
+  </section>
+
+  <section style="border-bottom:none">
+    <span class="num">08 — IN ONE BREATH</span>
+    <h2>Three ingredients, three payoffs</h2>
+    <div class="key" style="margin-top:8px">
+      <p><strong>Linear low-rank sketch</strong> → rides all-reduce, so it <em>scales</em> with workers and fast networks.</p>
+      <p><strong>Warm start</strong> → one cheap power-iteration step matches the expensive best rank-<span class="var">r</span> approximation, so quality is essentially <em>free</em>.</p>
+      <p><strong>Error feedback</strong> → the discarded tail is remembered and paid back, so the biased compressor is <em>unbiased over time</em> and reaches full SGD accuracy.</p>
+    </div>
+    <p class="lead" style="margin-top:26px">Together: the same number of iterations, the same final accuracy, a fraction of the bytes — and the advantage <em>grows</em> for larger models, which is exactly where communication dominates.</p>
+  </section>
+
+  <footer>
+    A teaching note on PowerSGD (Vogels, Karimireddy &amp; Jaggi, NeurIPS 2019). Gradient compression for data-parallel training — distinct from applying the same sketch to pipeline-parallel activations.
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  var G = [[4,0],[0,1]];
+  var e, step;
+  var mD = document.getElementById('mD').children;
+  var mS = document.getElementById('mS').children;
+  var mE = document.getElementById('mE').children;
+  var stepN = document.getElementById('stepN');
+  var d22el = document.getElementById('d22');
+  var bar = document.getElementById('bar');
+  var readout = document.getElementById('readout');
+
+  function fmt(x){ return (Math.round(x*100)/100).toString(); }
+
+  function paint(grid, M, hotIdx, cls){
+    var flat = [M[0][0], M[0][1], M[1][0], M[1][1]];
+    for(var i=0;i<4;i++){
+      grid[i].textContent = (M===null) ? '–' : fmt(flat[i]);
+      grid[i].className = (hotIdx===i) ? cls : '';
+    }
+  }
+
+  function reset(){
+    e = [[0,0],[0,0]];
+    step = 0;
+    stepN.textContent = '0';
+    paint(mD, G, -1, '');
+    paint(mE, e, -1, '');
+    for(var i=0;i<4;i++){ mS[i].textContent='–'; mS[i].className=''; }
+    d22el.textContent = '1';
+    bar.style.width = (1/5*100)+'%';
+    bar.className = 'bar-fill';
+    readout.innerHTML = 'Press <b>Step</b> to run the first iteration. The bottom-right direction (gradient 1) is too small to make the rank-1 cut, so it gets deferred into <code>e</code>.';
+  }
+
+  function doStep(){
+    step++;
+    var d = [[G[0][0]+e[0][0], G[0][1]+e[0][1]],
+             [G[1][0]+e[1][0], G[1][1]+e[1][1]]];
+    var a = Math.abs(d[0][0]), b = Math.abs(d[1][1]);
+    var sent, hotIdx, cls, flip=false;
+    if(a >= b){
+      sent = [[d[0][0],0],[0,0]];
+      hotIdx = 0; cls='hot';
+    } else {
+      sent = [[0,0],[0,d[1][1]]];
+      hotIdx = 3; cls='warm'; flip=true;
+    }
+    var ne = [[d[0][0]-sent[0][0], d[0][1]-sent[0][1]],
+              [d[1][0]-sent[1][0], d[1][1]-sent[1][1]]];
+
+    stepN.textContent = step;
+    paint(mD, d, (a>=b?0:3), 'hot');
+    paint(mS, sent, hotIdx, cls);
+    paint(mE, ne, (Math.abs(ne[1][1])>0?3:(Math.abs(ne[0][0])>0?0:-1)), 'warm');
+
+    var d22 = d[1][1];
+    d22el.textContent = fmt(d22);
+    var frac = Math.min(d22/5, 1);
+    bar.style.width = (frac*100)+'%';
+    bar.className = 'bar-fill' + (d22>4 ? ' over':'');
+
+    if(flip){
+      readout.innerHTML = '<b>The flip.</b> The deferred direction (now '+fmt(d22)+') finally beats the dominant 4, so the rank-1 sketch sends <em>it</em> instead — the whole backlog discharges in one burst, and <code>e</code> resets there.';
+    } else if(step===1){
+      readout.innerHTML = 'Sent the dominant direction (4). The bottom-right gradient (1) didn’t fit, so <code>e</code> now holds <b>1</b> there — deferred, not lost.';
+    } else {
+      readout.innerHTML = 'Dominant direction sent again. The deferred bottom-right keeps piling up in <code>e</code> — now <b>'+fmt(ne[1][1] || d22)+'</b>. It climbs by 1 each step until it overtakes the 4.';
+    }
+  }
+
+  document.getElementById('stepBtn').addEventListener('click', doStep);
+  document.getElementById('resetBtn').addEventListener('click', reset);
+  reset();
+})();
+</script>
+</body>
+</html>
