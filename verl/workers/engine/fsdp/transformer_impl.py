@@ -791,6 +791,16 @@ class FSDPEngine(BaseEngine):
         not key on token identity (its basis is shared across all tokens), so the
         only per-micro-batch state is the generation counter (dedupes the sketch
         against gradient-checkpoint recompute) and the trainer step.
+
+        rmpad guard (EXP-20 hardening, mirrors the mask): the boundary activation
+        ``M`` the projector compresses is the rmpad (nested / no-padding) token
+        axis. If a caller ever ran without ``use_remove_padding=True`` the
+        activation would be a PADDED ``(B, T, H)`` block and the projector +
+        basis sketch ``V`` would silently fold PAD tokens into ``M`` and into the
+        codebook — corrupting both the reconstruction metric and the learned
+        basis. Refuse it loudly here rather than produce a quietly-wrong codec.
+        The launcher runs rmpad + SP=1, so this never fires in the sanctioned
+        config; it only catches a future mis-launch.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None:
@@ -798,6 +808,13 @@ class FSDPEngine(BaseEngine):
         compressor = getattr(state, "powersgd", None)
         if compressor is None or not compressor.is_registered:
             return
+        if not getattr(input_ids, "is_nested", False):
+            raise NotImplementedError(
+                "comm_eff powersgd requires rmpad (nested / no-padding) inputs "
+                "(use_remove_padding=True); padded forwards would fold PAD tokens "
+                "into the projected activation M and the basis sketch V. The "
+                "launcher runs rmpad + SP=1."
+            )
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:

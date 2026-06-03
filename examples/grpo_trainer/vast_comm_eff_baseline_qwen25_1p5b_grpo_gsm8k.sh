@@ -325,6 +325,22 @@ EOF
 #     teardown). It just gives the monitor a single high-signal grep target so it
 #     does not have to re-derive the regex from the rescue-trigger list. Strict
 #     opt-in side effect: writes only into this run's own dir.
+#
+#     EXP-20 fix (CRITICAL — a clean run used to hang here forever): the old
+#     watcher ran `tail -F | grep -m1` in a backgrounded subshell and the EXIT
+#     trap killed only the SUBSHELL pid, orphaning the child `tail -F`. On a
+#     CLEAN run grep -m1 never matches, `tail -F` follows the (now-idle) log
+#     forever, the subshell never exits, and THIS SCRIPT blocks in its implicit
+#     `wait` at end-of-script — so the back-to-back sequence could never finish
+#     autonomously (GPUs idle at $/hr). Two independent guards now prevent that:
+#       (1) `tail --pid="$TRAIN_PID" -F` — the follower DIES when the training
+#           process exits (clean or crash), closing the pipe so grep hits EOF and
+#           the subshell returns; nothing is left to wait on.
+#       (2) the watcher runs in its OWN process group (setsid) and the EXIT trap
+#           kills the WHOLE group (`kill -- -$PGID`), reaping tail+grep+subshell
+#           even if (1) somehow doesn't fire.
+#     Net: the watcher never leaves a dangling follower and never blocks this
+#     script on clean completion — for EVERY cell in the sequence.
 # ---------------------------------------------------------------------------
 RUN_DIR="$(dirname "$LOG")"
 EARLY_STOP_SENTINEL="$RUN_DIR/EARLY_STOP_SIGNAL"
@@ -333,27 +349,16 @@ rm -f "$EARLY_STOP_SENTINEL"
 # spectral safety). \bnan/inf word-boundary guards avoid matching "infer"/
 # "information". The watcher is a no-op until $LOG starts filling.
 EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_params.*(error|Error|assert)|could not convert string to float|aten::copy_.*(mismatch|size)|torch\.distributed\.fsdp.*(error|Error)|(loss|grad_norm|pg_loss|policy_loss|reward)[^A-Za-z].{0,80}\b([Nn]a[Nn]|[Ii]nf)\b|\b([Nn]a[Nn]|[Ii]nf)\b.{0,40}(loss|grad_norm))'
-(
-  # Wait for the log to exist (training start), then stream-match once.
-  for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
-  # --line-buffered so the match is emitted the instant the line is written.
-  if MATCH=$(stdbuf -oL tail -n +1 -F "$LOG" 2>/dev/null | grep -m1 -nE "$EARLY_STOP_RE"); then
-    {
-      echo "EARLY_STOP_SIGNAL: matched corrupting-failure pattern in $EXPERIMENT_NAME"
-      echo "EARLY_STOP_SIGNAL: $MATCH"
-      echo "EARLY_STOP_SIGNAL: training-log-monitor should classify + recommend kill-switch for this cell."
-    } | tee -a "$LOG"
-    printf '%s\t%s\n' "$EXPERIMENT_NAME" "$MATCH" > "$EARLY_STOP_SENTINEL"
-  fi
-) &
-EARLY_STOP_WATCHER_PID=$!
-# Make sure the watcher never outlives this script (it would tail a stale log).
-trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill "$EARLY_STOP_WATCHER_PID" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # 7. Launch — reuse upstream's per-recipe script for the verbatim main_ppo
 #    invocation, overriding the OOM-relevant + comm-eff Hydra knobs. Every
 #    enabled flag comes from env so the full ablation grid is a one-liner.
+#
+#    EXP-20: launch the training in the BACKGROUND, capture its PID, start the
+#    early-stop watcher bound to that PID, then `wait` on training explicitly.
+#    The watcher self-terminates when training exits (guard 1), and the EXIT
+#    trap reaps the watcher's whole process group (guard 2).
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
@@ -412,7 +417,47 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   "$@" \
-  2>&1 | tee "$LOG"
+  > "$LOG" 2>&1 &
+TRAIN_PID=$!
+
+# EXP-20 early-stop watcher — bound to TRAIN_PID + its own process group.
+# Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or
+# crash), so grep hits EOF and the watcher subshell returns. Guard 2: setsid
+# puts the watcher in its own pgroup; the EXIT trap kills the whole group so
+# nothing dangles. The watcher only SIGNALS (sentinel + log line); the
+# monitor/runner owns teardown.
+setsid bash -c '
+  LOG="$1"; RE="$2"; EXP="$3"; SENT="$4"; TPID="$5"
+  for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
+  if MATCH=$(stdbuf -oL tail --pid="$TPID" -n +1 -F "$LOG" 2>/dev/null | grep -m1 -nE "$RE"); then
+    {
+      echo "EARLY_STOP_SIGNAL: matched corrupting-failure pattern in $EXP"
+      echo "EARLY_STOP_SIGNAL: $MATCH"
+      echo "EARLY_STOP_SIGNAL: training-log-monitor should classify + recommend kill-switch for this cell."
+    } | tee -a "$LOG"
+    printf "%s\t%s\n" "$EXP" "$MATCH" > "$SENT"
+  fi
+' _ "$LOG" "$EARLY_STOP_RE" "$EXPERIMENT_NAME" "$EARLY_STOP_SENTINEL" "$TRAIN_PID" &
+EARLY_STOP_WATCHER_PID=$!
+# Reap the watcher's WHOLE process group on exit (guard 2). setsid makes the
+# watcher a group leader, so its PGID == its PID; kill -- -PGID reaps tail+grep
+# too. `|| true` so a self-terminated watcher (guard 1 already fired) is fine.
+trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null; true' EXIT
+
+# Block on TRAINING ONLY (not the watcher) — when main_ppo finishes, we proceed
+# to done.flag immediately; the EXIT trap then reaps the watcher. `wait $PID`
+# returns the child's exit status; capture it WITHOUT tripping `set -e` (the
+# `|| TRAIN_RC=$?` keeps a non-zero training exit from aborting before we can
+# clean up the watcher + write done.flag + propagate the status).
+TRAIN_RC=0
+wait "$TRAIN_PID" || TRAIN_RC=$?
+
+# Proactively stop the watcher now that training is done (belt-and-braces with
+# the EXIT trap + guard 1), so back-to-back cells never accumulate watchers.
+kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
 
 touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
-echo "=== done at $(date -u +%FT%TZ) ==="
+echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
+# Propagate the training exit status so the EXP-20 launch.sh `run_step` sees a
+# real failure (set -e / `|| true` semantics in the driver still apply).
+exit "$TRAIN_RC"
