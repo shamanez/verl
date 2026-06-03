@@ -137,3 +137,6 @@ research/runs/**/*.log
 research/runs/**/exp.bundle
 # experiment-runner subagent worktrees (transient; auto-cleaned via `git worktree remove`)
 .claude/worktrees/
+
+# large re-downloadable paper PDFs — keep the distilled notes, not the binary
+research/refs/*.pdf
