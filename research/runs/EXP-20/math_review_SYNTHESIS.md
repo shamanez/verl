@@ -40,4 +40,14 @@
 Mathematically and structurally the codec is a correct, faithful implementation of issue #20 — including the operator-mandated cross-DP consensus basis, now verified bit-identical on-disk. **Nothing blocks the 50-step sweep.** The one genuinely-open question is empirical (does r=102 capture enough of the activation subspace?), which is exactly what the sweep measures; the panel's convergent prediction is that the deep-layer weak spectral gap may force a REVISE to r=205.
 
 ## Source reports
-- `math_validity_review.md` (core math) · `review_autograd.md` (autograd) · `review_distributed_correctness.md` (distributed; also `review_distributed.md` = math-checker interim) · `review_rl.md` (RL/GRPO) · `review_numerics.md` (numerics)
+- `math_validity_review.md` (core math) · `review_autograd.md` (autograd) · `review_distributed.md` (distributed, consolidated; math-checker interim folded in as Appendix A) · `review_rl.md` (RL/GRPO) · `review_numerics.md` (numerics)
+
+## POST-REVIEW FINDING (surfaced from the live run, NOT caught by the panel) + operator decision — 2026-06-04
+**Byte budgets are MISMATCHED.** Qwen2.5-1.5B-Instruct has `hidden_size=1536`, not the **2048** the issue (and every reviewer) assumed. So the issue's `r=102 ≡ p=0.95` (`0.05·2048=102.4`) is wrong: at H=1536, mask p=0.95 keeps `0.05·1536=76.8` coords/token while PowerSGD r=102 sends 102 → **PowerSGD has a ~33% larger budget**. Confirmed live: `logical_pp_bytes_prf=76.8`, rank-H probe `logical_pp_bytes_powersgd_y_only=1536`. The byte-matched rank for p=0.95 would be ≈77.
+
+**Operator decision: keep r=102, NOTE the mismatch** (do not change the rank; do not re-run the p=0.95 mask arm).
+
+**Analyst directive (this WAIVES the plan's "logical_pp_bytes match within 1%" success box — do NOT STOP/REVISE on it):**
+- Footnote the actual budgets (PowerSGD 102 vs mask 76.8 coords/token, +33%).
+- Interpret asymmetrically: a PowerSGD **win/track** over the mask is **weak/caveated** evidence (it had a budget advantage); a PowerSGD **loss** even at +33% budget is a **decisive negative**.
+- Judge the hypothesis on the reward trajectory + dense-vs-compressed update cosine + reconstruction error with the budget caveat explicit, NOT on the (knowingly-failing) matched-budget box.

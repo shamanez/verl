@@ -30,5 +30,11 @@
 ## Monitoring
 - `monitor-exp20-sync` (bounded-SSH, GPU-util-aware) watching tmux `exp-20-sync`. Previous monitor died on a harness watchdog (tooling, not training).
 
+## ⚠ Byte-budget mismatch + operator decision (2026-06-04)
+- **Qwen2.5-1.5B is H=1536, not 2048** (issue's assumption). So r=102 ≠ p=0.95: mask p=0.95 keeps 76.8 coords, PowerSGD r=102 sends 102 → PowerSGD **+33% budget**. Confirmed live (logical_pp_bytes_prf=76.8; rank-H probe bytes=1536). The 5-lens panel missed this (all inherited H=2048); surfaced from the runtime metric.
+- **Operator decision: KEEP r=102, NOTE the mismatch** (no rank change, no mask re-run). Saved to memory (`qwen25-1p5b-hidden-size-1536`).
+- **ANALYST DISPATCH MUST CARRY:** the "logical_pp_bytes match within 1%" success box is WAIVED (don't STOP/REVISE on it); footnote the +33% gap; interpret asymmetrically — PowerSGD win = caveated, PowerSGD loss even at +33% budget = decisive. (Full directive in runs/EXP-20/math_review_SYNTHESIS.md.)
+- Rank-H probe `rec_rel_error=0.0029` ADJUDICATED = soft note (bf16 projection rounding; near-lossless confirmed; probe passes).
+
 ## Budget
 $/hr now: $15.21 · note: 5 Opus reviewers + monitor are token-heavy (operator opted in: "heavy issue, ADD ALL") · max_gpu_hr 96 OK
