@@ -17,7 +17,7 @@
 - Collective-safety: iterate fixed `sorted(boundary_indices)`, zero-fill missing → no deadlock.
 - On-box proof of invariant #4: `verify_basis_agreement_across_ranks` all-gathers an fp64 Q checksum, RAISES on >1e-6 divergence → measured **0.0**. q_cond=1.0000003, recon=0.967<1, bytes=102, mask counters 0 (powersgd-only). +6 tests; 39 powersgd+config + 100 comm_eff tests pass.
 
-## Math-validity agent team `powersgd-mathcheck` (5 lenses, Opus, parallel, reviewing f748dbc1)
+## Math-validity agent team `powersgd-mathcheck` — COMPLETE ✅ (VERDICT: faithful + mathematically correct, NO INVALID; full report → runs/EXP-20/math_review_SYNTHESIS.md; HIGH-1 consensus verified on-disk max_rel_dev=0.0; open: HIGH-2 latent verifier-gate [non-blocking], q_cond/byte-metric MED [analyst], r=102 recon EMPIRICAL [→maybe REVISE r=205])
 | Lens | Member | Focus | Status |
 |---|---|---|---|
 | Theory/core math | mathematical-checker | projector, power-iter→Eckart-Young, seed, byte budget, lossless, consensus | running |
