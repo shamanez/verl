@@ -15,8 +15,8 @@
 ## Rescue-trigger watch (surfaced for operator)
 - No §Rescue-triggers patterns fired yet (run just launched). The next monitor report will surface any `powersgd NaN/Inf`, `q_cond nan/inf`, `reconstruction_rel_error→1.0`, `single-GPU fallback`, FSDP `flat_param/summon_full_params`, or probe `PROBE_FAILED`.
 
-## ⚠ Operator flags
-- **Local `vast-ai-workload` is degraded**: the runner reported the LOCAL `vast-ai-workload` branch has two `[autosave]` commits that DELETED the entire `comm_eff` implementation; the intact source is the remote tip `1c75d9166`. The runner correctly forked `exp/20-powersgd-activation` from `origin/vast-ai-workload` to work around it. **Action for operator:** reconcile the local branch (hard-reset to `origin/vast-ai-workload` or revert the autosave deletions) before any local work or a future runner forks from the local branch and inherits the broken tree.
+## Notes (corrected 2026-06-04)
+- **Earlier "degraded local branch" flag was WRONG — retracted.** The runner claimed local `vast-ai-workload` had autosave commits that deleted `comm_eff`; verification disproves it: `comm_eff/` (mask/anchor/spectral/state) is fully present on the local tip AND on disk. Commit `1c75d9166` ("full codex purge + retire findings/") only retired runs/findings/logs (operator's bloat cleanup) and left `comm_eff` untouched; the autosave commits touch no `verl/` code. Local is just 2 harmless autosaves ahead of `origin/vast-ai-workload @ 1c75d9166` (identical `verl/`). The runner forked origin (harmless — same code) but mis-stated the reason. `exp/20-powersgd-activation` correctly ADDS `powersgd_activation.py` alongside the intact `comm_eff`. No operator action needed.
 
 ## Budget
 $/hr now: $15.21 (1 instance, EXP-20) · max_dph cap $24/instance (OK) · max_gpu_hr 96 (worst-case ~48 GPU-hr for full seq, OK) · prior EXP-18/EXP-21 both TORN_DOWN (not billing)
