@@ -268,15 +268,16 @@ COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE="${COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE:-true
 # --- EXP-20/M6 PowerSGD activation compression (active iff
 #     COMM_EFF_COMPRESSION_TYPE=powersgd). Defaults = the issue VII.1 candidate:
 #     rank=102 (byte-matched to the PRF mask at p=0.95), warm block power
-#     iteration every step, compress the old-logprob recompute (=> ρ≈1), local
-#     deterministic basis, fp32 QR (REQUIRED — bf16-QR loses orthogonality). ---
+#     iteration every step, compress the old-logprob recompute (=> ρ≈1),
+#     sync_basis=true (single shared consensus Q across DP ranks — REQUIRED
+#     under DP), fp32 QR (REQUIRED — bf16-QR loses orthogonality). ---
 COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-102}"               # r; 102 ≡ p=0.95 (q·H=102.4)
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
 COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks (same as mask)
 COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # orth(V) every N steps
 COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"  # carry Q across steps
 COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"  # project old-logprob too
-COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-false}" # all-reduce V across DP (off: local+deterministic)
+COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-reduce V across DP => single shared consensus Q (REQUIRED under DP)
 COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 REQUIRED (INF-14); bf16 diagnostic
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 

@@ -206,6 +206,11 @@ class PowerSGDActivationCompressor:
         self._handles: list[Any] = []
         self.boundary_indices: list[int] = []
         self._hidden_size: Optional[int] = None
+        # DP process group the basis consensus all-reduces over. None ⇒ world
+        # group (correct when world==DP: SP=1, no TP/PP in the training mesh —
+        # the EXP-20 actor). Bound by the engine via set_dp_group when a narrower
+        # DP subgroup is needed.
+        self._dp_process_group = None
 
         # Per-boundary frozen basis Q_t (H, r), fp32, on the activation device.
         # Lazily bootstrapped on first register() once H is known. Persists
@@ -423,6 +428,32 @@ class PowerSGDActivationCompressor:
         Because this runs AFTER backward, ``Q`` was frozen for both paired GRPO
         forwards of this step; the update advances ``Q_t → Q_{t+1}`` for the NEXT
         step (Part V.3 / INF-17).
+
+        **Cross-rank consensus codebook (operator clarification, EXP-20).** The
+        basis ``Q`` is a SINGLE shared codebook that must differ ONLY per
+        layer-boundary and be IDENTICAL on every DP rank. Each rank, however,
+        builds its local sketch ``V = Σ Mᵀ(MQ)`` from its OWN data shard (the
+        dispatch scatters a different shard per rank), so per-rank ``orth(V)``
+        would DIVERGE after the first update. With ``sync_basis=true`` (the
+        default) we all-reduce the raw sketches across the DP group BEFORE
+        ``orth`` so every rank orthonormalizes the SAME pooled
+        ``V_global = Σ_ranks Σ_microbatch Mᵀ(MQ)`` (the global activation
+        second-moment projected through ``Q``) → bit-identical consensus ``Q`` on
+        every rank, differing only per boundary. DP training is untouched; this
+        is just an ``H×r`` all-reduce per boundary at each non-clean update.
+
+        Orthonormalization is scale-invariant, so summing the raw per-rank ``V``s
+        (rather than averaging) is exactly the pooled direction — no per-rank
+        count re-weighting is needed for the basis.
+
+        **Collective safety (deadlock guard).** The all-reduce iterates the FIXED
+        ``sorted(self.boundary_indices)`` on EVERY rank, contributing a correctly
+        shaped ZERO sketch for any boundary a rank happens to be missing locally,
+        so all ranks issue the identical sequence of collectives. A rank-relative
+        iteration over ``self._sketch`` (different/missing keys, different order)
+        would mismatch the collective and HANG (all GPUs pinned-but-idle — the
+        exact stall signature). All ranks call ``update_actor`` in lockstep, so a
+        symmetric per-boundary collective set is sufficient.
         """
         if is_clean_step:
             # No V accumulated on a clean step (the train forward ran dense, no
@@ -434,41 +465,178 @@ class PowerSGDActivationCompressor:
         # gs <= 0 is the pre-train boundary; never update there.
         if gs <= 0 or (gs % cadence) != 0:
             return False
-        if not self._sketch:
+
+        do_sync = bool(self.sync_basis) and torch.distributed.is_initialized()
+        group = self._dp_group() if do_sync else None
+
+        # GATE THE WHOLE UPDATE SYMMETRICALLY. Without sync, a rank with an empty
+        # local sketch simply skips (no collective, safe). WITH sync, every rank
+        # MUST walk the identical collective sequence, so we do NOT early-return
+        # on an empty local sketch — a rank missing a boundary contributes a zero
+        # V for it. (All ranks reach maybe_update_basis in lockstep on the same
+        # cadence step, so the boundary_indices set is identical across ranks.)
+        if not do_sync and not self._sketch:
             return False
 
         if not self.warm_start:
             # Cold start: re-bootstrap every update from the per-layer seed,
-            # then take one orth(V) step from there (diagnostic path).
-            for layer_idx in list(self._sketch.keys()):
+            # then take one orth(V) step from there (diagnostic path). Re-seed
+            # the FIXED boundary set so it is symmetric across ranks too.
+            for layer_idx in self._boundary_for_update():
                 if self._hidden_size is not None:
                     self._basis[layer_idx] = init_basis(
                         hidden_size=int(self._hidden_size),
                         rank=self.rank,
                         base_seed=self.base_seed,
                         layer_idx=layer_idx,
-                    ).to(device=self._sketch[layer_idx].device, dtype=torch.float32)
+                    ).to(device=self._sketch_device(), dtype=torch.float32)
 
         updated = False
-        for layer_idx, V in self._sketch.items():
-            cnt = max(1, int(self._sketch_count.get(layer_idx, 1)))
-            Vmean = V / float(cnt)
-            # Optional cross-rank consensus (off by default — the deterministic
-            # seed already gives a bit-identical basis and per-rank sketches stay
-            # in lockstep under identical data ordering).
-            if self.sync_basis and torch.distributed.is_initialized():
-                torch.distributed.all_reduce(Vmean, op=torch.distributed.ReduceOp.SUM)
-                Vmean = Vmean / float(torch.distributed.get_world_size())
-            q_new = orthonormalize(Vmean.to(self.qr_dtype), eps=self.reortho_eps)
-            self._basis[layer_idx] = q_new.to(
-                device=V.device, dtype=torch.float32
-            )
+        for layer_idx in self._boundary_for_update():
+            V = self._sketch.get(layer_idx, None)
+            if V is None:
+                if do_sync and self._hidden_size is not None:
+                    # Symmetric collective: contribute a zero sketch of the right
+                    # shape so this rank issues the same all_reduce as the others.
+                    r = self._effective_rank()
+                    V = torch.zeros(int(self._hidden_size), r, dtype=torch.float32, device=self._sketch_device())
+                else:
+                    # No sync + no local sketch for this boundary ⇒ keep Q_t.
+                    continue
+            Vsum = V.to(torch.float32)
+            if do_sync:
+                # Pool the RAW sketches across the DP group: V_global = Σ_ranks V.
+                # orth is scale-invariant so the SUM gives the pooled direction;
+                # every rank now orthonormalizes the identical V_global.
+                torch.distributed.all_reduce(Vsum, op=torch.distributed.ReduceOp.SUM, group=group)
+            q_new = orthonormalize(Vsum.to(self.qr_dtype), eps=self.reortho_eps)
+            self._basis[layer_idx] = q_new.to(device=self._sketch_device(), dtype=torch.float32)
             updated = True
 
         self._reset_sketch()
         if updated and self._state is not None and hasattr(self._state, "note_powersgd_basis_update"):
             self._state.note_powersgd_basis_update()
         return updated
+
+    def _boundary_for_update(self) -> list[int]:
+        """The FIXED, sorted boundary set every rank iterates in maybe_update_basis.
+
+        Prefer the registered ``boundary_indices`` (identical on every rank by
+        construction — they come from ``decoder_boundary_indices(L, pp_size)`` on
+        the same model). Fall back to the sorted union of locally-bootstrapped
+        bases / sketches if the compressor was never registered (unit tests).
+        """
+        if self.boundary_indices:
+            return sorted(self.boundary_indices)
+        return sorted(set(self._basis.keys()) | set(self._sketch.keys()))
+
+    def _sketch_device(self):
+        """Device the sketch / basis live on (first available basis or sketch,
+        else CPU). Used to place the zero-sketch contribution + the new basis."""
+        for d in (self._sketch, self._basis):
+            for t in d.values():
+                return t.device
+        return torch.device("cpu")
+
+    def _dp_group(self):
+        """The process group the basis is synchronized over.
+
+        For THIS actor — FSDP, Ulysses SP=1, and NO tensor/pipeline-parallel dim
+        in the *training* mesh (the launcher's TP=2 is ROLLOUT-only, a separate
+        vLLM mesh) — the world process group IS the DP group: world_size ==
+        data_parallel_size == 4. So the default (world) group is correct here and
+        the basis is pooled over exactly the ranks whose data shards we want to
+        consensus over. The engine may inject a narrower group via
+        ``set_dp_group`` if a future config adds a TP/PP dim to the training mesh
+        (in which case the all-reduce MUST reduce over the DP subgroup only, not
+        the world). When unset we use the default group.
+        """
+        return getattr(self, "_dp_process_group", None)
+
+    def set_dp_group(self, group) -> None:
+        """Bind the DP process group the basis consensus all-reduces over.
+
+        Called by the engine with its data-parallel group. ``None`` (default)
+        ⇒ the world group, which is correct when world == DP (SP=1, no TP/PP in
+        the training mesh — the EXP-20 actor). Pure setter; no collective."""
+        self._dp_process_group = group
+
+    def basis_checksums(self) -> dict:
+        """Per-boundary fp64 checksum of the current basis Q (hard-invariant #4).
+
+        Returns ``{layer_idx: float}`` — a deterministic scalar summary of each
+        ``Q`` (sum of Q ⊙ a fixed index ramp, in fp64, so sign/permutation/value
+        differences all show up). The engine all-gathers these across ranks and
+        asserts equality to VERIFY that ``sync_basis`` produced an identical
+        consensus ``Q`` on every rank (the plan invariant "identical Q after one
+        update on every rank", previously unverifiable). Pure read."""
+        out: dict = {}
+        for layer_idx in self._boundary_for_update():
+            q = self._basis.get(layer_idx, None)
+            if q is None:
+                continue
+            qd = q.detach().to(torch.float64)
+            H, r = qd.shape
+            # A fixed deterministic weighting so a permutation/sign flip of Q's
+            # columns or any value change moves the checksum.
+            ramp = torch.arange(1, H * r + 1, dtype=torch.float64, device=qd.device).reshape(H, r)
+            out[layer_idx] = float((qd * ramp).sum().item())
+        return out
+
+    def verify_basis_agreement_across_ranks(self, *, atol: float = 1e-6) -> Optional[float]:
+        """Assert ``Q`` is identical on every DP rank — hard-invariant #4 (EXP-20).
+
+        All-gathers a per-boundary checksum VECTOR (built over the FIXED
+        ``boundary_indices``, so every rank contributes the same-length, same-order
+        vector → the collective is symmetric and cannot deadlock) and asserts the
+        max element-wise deviation across ranks is ``<= atol`` (scaled by the
+        checksum magnitude). Returns the max relative cross-rank deviation
+        (``0.0`` = bit-identical) so the engine can log it, or ``None`` when
+        distributed is unavailable / single-rank (the check is trivially true).
+
+        This DIRECTLY validates "identical Q after one update on every rank",
+        which was unverifiable before ``sync_basis``. A non-zero result with
+        ``sync_basis=true`` would mean the consensus all-reduce failed to make the
+        basis agree (e.g. wrong process group, asymmetric sketch). RAISES on a
+        mismatch so a broken consensus fails the probe loudly rather than
+        silently training 4 divergent codebooks.
+
+        MUST be called on EVERY rank in lockstep (it issues an all_gather). The
+        caller gates it on a condition identical across ranks (e.g. the first
+        successful basis update, which all ranks reach on the same cadence step).
+        """
+        if not torch.distributed.is_initialized():
+            return None
+        group = self._dp_group()
+        world = torch.distributed.get_world_size(group=group)
+        if world <= 1:
+            return 0.0
+        idxs = self._boundary_for_update()
+        if not idxs:
+            return None
+        sums = self.basis_checksums()
+        # Fixed-order vector over the FIXED boundary set (0.0 for any boundary
+        # missing locally — should not happen post-update, but keeps it symmetric).
+        dev = self._sketch_device()
+        vec = torch.tensor([float(sums.get(i, 0.0)) for i in idxs], dtype=torch.float64, device=dev)
+        gathered = [torch.zeros_like(vec) for _ in range(world)]
+        torch.distributed.all_gather(gathered, vec, group=group)
+        ref = gathered[0]
+        max_abs_dev = 0.0
+        for g in gathered[1:]:
+            max_abs_dev = max(max_abs_dev, float((g - ref).abs().max().item()))
+        scale = float(ref.abs().max().item()) or 1.0
+        max_rel_dev = max_abs_dev / scale
+        if max_rel_dev > atol:
+            raise RuntimeError(
+                "comm_eff.powersgd: basis Q DIVERGED across DP ranks "
+                f"(max_rel_dev={max_rel_dev:.3e} > atol={atol:.1e}) despite "
+                f"sync_basis={self.sync_basis}. The shared codebook must be "
+                "identical on every rank (hard-invariant #4); a non-zero deviation "
+                "means the consensus all-reduce used the wrong process group or an "
+                "asymmetric sketch. Refusing to train divergent per-rank codebooks."
+            )
+        return max_rel_dev
 
     def _reset_sketch(self) -> None:
         self._sketch = {}

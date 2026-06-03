@@ -163,7 +163,9 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         self.assertEqual(cfg.powersgd.update_cadence, 1)
         self.assertTrue(cfg.powersgd.warm_start)
         self.assertTrue(cfg.powersgd.compress_recompute)
-        self.assertFalse(cfg.powersgd.sync_basis)
+        # EXP-20 operator clarification: the shared codebook MUST be synced
+        # across DP ranks (default true), else per-rank Q diverges on its shard.
+        self.assertTrue(cfg.powersgd.sync_basis)
         self.assertEqual(cfg.powersgd.qr_dtype, "fp32")
 
     def test_compression_type_enum_validated(self):

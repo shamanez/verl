@@ -319,14 +319,19 @@ class CommEffPowerSGDConfig(BaseConfig):
             ``mask_recompute``). ``False`` projects only the actor-train forward
             (old-logprob runs dense), which dense-anchors the importance ratio's
             denominator.
-        sync_basis (bool): ``False`` (default) keeps each rank's basis purely
-            local + deterministic (identical by construction from the shared seed;
-            no collective). ``True`` would all-reduce the sketch ``V`` across the
-            data-parallel mesh before ``orth`` (a cross-rank consensus basis).
-            Default ``False`` because the deterministic seed already guarantees a
-            bit-identical starting basis on every rank and the per-rank sketches
-            stay in lockstep under identical data ordering; ``True`` is reserved
-            for a follow-up that varies data across ranks.
+        sync_basis (bool): ``True`` (default — REQUIRED for a correct shared
+            codebook under DP). Each DP rank builds its sketch ``V`` from its OWN
+            data shard (the dispatch scatters a different shard per rank), so a
+            per-rank ``orth(V)`` would DIVERGE the per-boundary ``Q`` across ranks
+            after the first update. ``True`` all-reduces the raw sketches over the
+            DP group before ``orth`` so every rank orthonormalizes the SAME pooled
+            ``V_global = Σ_ranks V`` → a bit-identical consensus ``Q`` on every
+            rank, differing only per boundary (the operator's "single shared
+            codebook, identical across ranks" intent; hard-invariant #4). The
+            collective is made deadlock-safe by iterating the fixed
+            ``boundary_indices`` on every rank. ``False`` (diagnostic only) keeps
+            each rank's basis local — only correct if every rank sees identical
+            data, which DP does not.
         qr_dtype (str): Dtype for the orthonormalization (``orth``/QR) and the
             stored basis math — ``"fp32"`` (default, REQUIRED for correctness:
             bf16-QR loses orthogonality, drifts ``QᵀQ`` from ``I``, and is a
@@ -347,7 +352,7 @@ class CommEffPowerSGDConfig(BaseConfig):
     update_cadence: int = 1
     warm_start: bool = True
     compress_recompute: bool = True
-    sync_basis: bool = False
+    sync_basis: bool = True
     qr_dtype: str = "fp32"
     reortho_eps: float = 1e-6
 

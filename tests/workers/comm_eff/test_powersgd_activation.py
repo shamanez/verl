@@ -262,5 +262,92 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
         self.assertEqual(comp.last_y_coords_per_token, 16)
 
 
+class TestPowerSGDSyncBasis(unittest.TestCase):
+    """EXP-20 cross-rank consensus codebook (sync_basis) + collective safety.
+
+    The all-reduce / all-gather collectives need a process group, so the actual
+    cross-rank agreement is exercised on the box. Here we test the SINGLE-PROCESS
+    invariants that gate it: the symmetric boundary iteration (deadlock guard),
+    the checksum determinism/sensitivity, set_dp_group, and the single-rank
+    verification short-circuit."""
+
+    def _build(self, **kw):
+        torch.manual_seed(0)
+        model = _TinyModel(64)
+        comp = PowerSGDActivationCompressor(
+            rank=16, base_seed=0, pp_size=4, update_cadence=1, warm_start=True,
+            compress_recompute=True, sync_basis=kw.pop("sync_basis", True),
+            qr_dtype="fp32", reortho_eps=1e-6, state=_FakeState(),
+        )
+        comp.register(model)
+        return model, comp
+
+    def test_boundary_for_update_is_fixed_sorted(self):
+        # The deadlock guard: every rank iterates the FIXED sorted boundary set,
+        # NOT its rank-local sketch keys.
+        _, comp = self._build()
+        self.assertEqual(comp._boundary_for_update(), [0, 1, 2])
+        # Even if the local sketch is missing a boundary, the update set is fixed.
+        comp.set_context(global_step=1)
+        # simulate a sketch that only has boundary 0
+        comp._sketch = {0: torch.randn(64, 16)}
+        comp._sketch_count = {0: 1}
+        self.assertEqual(comp._boundary_for_update(), [0, 1, 2])
+
+    def test_basis_checksums_deterministic_and_sensitive(self):
+        model, comp = self._build()
+        comp.set_context(global_step=1)
+        # bootstrap the per-boundary bases by firing the registered model.
+        model(torch.randn(8, 64, requires_grad=True)).pow(2).sum().backward()
+        s1 = comp.basis_checksums()
+        s2 = comp.basis_checksums()
+        self.assertEqual(s1, s2)  # deterministic
+        self.assertEqual(set(s1), {0, 1, 2})  # one checksum per boundary
+        # mutate one Q column -> checksum for that boundary must change
+        k = sorted(s1)[0]
+        comp._basis[k] = comp._basis[k].clone()
+        comp._basis[k][:, 0] *= -1.0  # sign flip
+        s3 = comp.basis_checksums()
+        self.assertNotEqual(s1[k], s3[k])
+
+    def test_set_dp_group_none_is_world(self):
+        _, comp = self._build()
+        self.assertIsNone(comp._dp_group())  # default => world
+        sentinel = object()
+        comp.set_dp_group(sentinel)
+        self.assertIs(comp._dp_group(), sentinel)
+
+    def test_verify_agreement_single_rank_short_circuits(self):
+        # No distributed init => returns None (trivially agree). This is the
+        # unit-test path; the real >1-rank assertion runs on the box.
+        model, comp = self._build()
+        comp.set_context(global_step=1)
+        model(torch.randn(8, 64, requires_grad=True)).pow(2).sum().backward()
+        self.assertIsNone(comp.verify_basis_agreement_across_ranks())
+
+    def test_sync_basis_single_process_equivalent_to_local(self):
+        # With sync_basis=True but no distributed init, do_sync is False, so the
+        # update must behave EXACTLY like the local path (no hang, basis advances,
+        # orthonormal). This is what runs in CI / on a single rank.
+        model, comp = self._build(sync_basis=True)
+        comp.set_context(global_step=1)
+        model(torch.randn(20, 64, requires_grad=True)).pow(2).sum().backward()
+        Qb = {k: comp._basis[k].clone() for k in comp._basis}
+        self.assertTrue(comp.maybe_update_basis(is_clean_step=False))
+        for k in comp._basis:
+            Q = comp._basis[k]
+            err = (Q.t() @ Q - torch.eye(Q.shape[1])).abs().max().item()
+            self.assertLess(err, 1e-4)
+            self.assertFalse(torch.equal(Q, Qb[k]))
+
+
+class TestPowerSGDConfigSyncDefault(unittest.TestCase):
+    def test_sync_basis_defaults_true(self):
+        # Operator clarification: the shared codebook MUST be synced under DP.
+        from verl.workers.config import CommEffPowerSGDConfig
+
+        self.assertTrue(CommEffPowerSGDConfig().sync_basis)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -748,6 +748,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     state.build(getattr(engine, "module", None))
                     object.__setattr__(engine, "_comm_eff_state", state)
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
+                    # EXP-20: bind the actor's DATA-PARALLEL group to the PowerSGD
+                    # compressor so the basis-consensus all-reduce pools the
+                    # sketch over exactly the DP ranks (not blindly the world).
+                    # For this actor world==DP (SP=1, no TP/PP in the training
+                    # mesh), so this equals the default group — but binding it
+                    # explicitly is the correctness safeguard if a future config
+                    # adds a TP/PP dim. get_data_parallel_group() is the engine's
+                    # DP process group (the same group the loss-norm all_reduce
+                    # uses in _forward_backward_batch_inner).
+                    powersgd = getattr(state, "powersgd", None)
+                    if powersgd is not None and hasattr(engine, "get_data_parallel_group"):
+                        try:
+                            dp_group = engine.get_data_parallel_group()
+                            powersgd.set_dp_group(dp_group)
+                            try:
+                                import torch.distributed as _dist
+
+                                ws = _dist.get_world_size()
+                                dp_ws = _dist.get_world_size(group=dp_group) if dp_group is not None else ws
+                                logger.info(
+                                    "comm_eff.powersgd: basis sync bound to DP group "
+                                    "(dp_world_size=%s, global_world_size=%s, sync_basis=%s)",
+                                    dp_ws,
+                                    ws,
+                                    getattr(powersgd, "sync_basis", None),
+                                )
+                                print(
+                                    f"[comm_eff][EXP-20] basis-sync DP group: dp_world_size={dp_ws} "
+                                    f"global_world_size={ws} sync_basis={getattr(powersgd, 'sync_basis', None)}",
+                                    flush=True,
+                                )
+                            except Exception:  # pragma: no cover - logging only
+                                pass
+                        except Exception as e:  # pragma: no cover - defensive
+                            logger.warning("comm_eff.powersgd: could not bind DP group (%s); using world group", e)
         return getattr(self, "_comm_eff_state", None)
 
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
@@ -905,7 +940,36 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
                 if powersgd is not None:
-                    powersgd.maybe_update_basis(is_clean_step=clean_step)
+                    did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
+                    # EXP-20 hard-invariant #4: after the FIRST basis update,
+                    # verify Q is bit-identical on every DP rank (the sync_basis
+                    # consensus actually agreed). All ranks reach their first
+                    # update on the SAME cadence step (lockstep update_actor), so
+                    # this gate is symmetric and the all_gather inside cannot
+                    # deadlock. Done once (the flag flips on all ranks together);
+                    # the result is stashed for the metrics block below. RAISES on
+                    # a real divergence so a broken consensus fails loudly.
+                    if did_update and not getattr(comm_eff_state, "_powersgd_q_agreement_checked", False):
+                        try:
+                            dev = powersgd.verify_basis_agreement_across_ranks()
+                            object.__setattr__(comm_eff_state, "_powersgd_q_agreement_checked", True)
+                            object.__setattr__(comm_eff_state, "_powersgd_q_agreement_dev", dev)
+                            if dev is not None:
+                                logger.info(
+                                    "comm_eff.powersgd: cross-rank Q agreement verified "
+                                    "(max_rel_dev=%.3e, sync_basis=%s) — hard-invariant #4 OK",
+                                    dev,
+                                    getattr(powersgd, "sync_basis", None),
+                                )
+                                print(
+                                    f"[comm_eff][EXP-20] cross-rank Q agreement: max_rel_dev={dev:.3e} "
+                                    f"sync_basis={getattr(powersgd, 'sync_basis', None)} (hard-invariant #4)",
+                                    flush=True,
+                                )
+                        except RuntimeError:
+                            # A genuine divergence — re-raise so the probe fails
+                            # (do NOT swallow; training 4 divergent codebooks is wrong).
+                            raise
 
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /

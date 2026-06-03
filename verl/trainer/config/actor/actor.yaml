@@ -501,10 +501,14 @@ comm_eff:
     # gradient-feeding forwards see the same frozen Q_t (=> importance ratio ~1).
     compress_recompute: true
 
-    # false (default) keeps each rank's basis local + deterministic (no
-    # collective; identical by construction from the shared seed). true would
-    # all-reduce the sketch V across the DP mesh before orth.
-    sync_basis: false
+    # true (default — REQUIRED for a correct shared codebook under DP). Each DP
+    # rank builds its sketch V from its OWN data shard, so a per-rank orth(V)
+    # would DIVERGE the per-boundary Q across ranks. true all-reduces the raw
+    # sketches over the DP group before orth so every rank gets the SAME pooled
+    # consensus Q (differs only per boundary; hard-invariant #4). Deadlock-safe:
+    # iterates the fixed boundary_indices on every rank. false = diagnostic only
+    # (correct only if every rank sees identical data, which DP does not).
+    sync_basis: true
 
     # Dtype for the orthonormalization (QR) and stored-basis math: "fp32"
     # (default, REQUIRED — bf16-QR loses orthogonality, a frequent NaN/q_cond

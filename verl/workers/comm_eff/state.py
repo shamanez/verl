@@ -618,6 +618,14 @@ class CommEffState:
         )
         out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
         out["comm_eff/powersgd_applications"] = self.powersgd_applications
+        # EXP-20 hard-invariant #4: max relative cross-rank deviation of the
+        # consensus basis Q after the first update (0.0 = bit-identical on every
+        # DP rank). Set once by update_actor's verify_basis_agreement_across_ranks;
+        # surfaced so the analyst can confirm the shared codebook agreed. Omitted
+        # until the check runs (single-rank / pre-first-update).
+        qdev = getattr(self, "_powersgd_q_agreement_dev", None)
+        if qdev is not None:
+            out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
         return out
 
     def metrics(self) -> dict:
