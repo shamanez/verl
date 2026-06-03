@@ -77,16 +77,16 @@ verdict files, and the issue's GitHub label.
 
 | State | Detection | Next dispatch |
 |---|---|---|
-| `PLAN_READY` | plan file exists · label is `status:planned` | none — wait for human to flip to `status:approved` (the human may run codex-verify manually as part of the review) |
+| `PLAN_READY` | plan file exists · label is `status:planned` | none — wait for human to flip to `status:approved` (the human reviews the plan manually) |
 | `READY_TO_RUN` | label `status:approved` · no runs.jsonl entry for `EXP-<ID>` (no row in any state — RUNNING, PROVISIONED, or TORN_DOWN) | `experiment-runner` |
 | `PROVISIONED` | runs.jsonl row has `status:"PROVISIONED"` (runner captured handles, has not yet promoted to RUNNING) | none — sync-metrics hook is a no-op until status flips; the Stop hook will tear down if the row stays PROVISIONED for >15 min |
 | `RUNNING` (no monitor) | runs.jsonl row has `status:"RUNNING"` · no `runs/<ID>/monitor-detail.log` OR its last line is older than 5 min · no `verdict.md` | `training-log-monitor` (background) |
 | `RUNNING` (monitor active) | runs.jsonl row has `status:"RUNNING"` · `runs/<ID>/monitor-detail.log` has a poll line in the last 5 min · no `verdict.md` | none — the monitor returns a terminal report; act on it when the background task completes (or next tick) |
 | `RESULTS_READY` | runs.jsonl row exists · `runs/<ID>/done.flag` exists OR tmux session dead AND `metrics/*.jsonl` present · no `verdict.md` | `analyst` |
 | `VERDICT_PASS` | `verdict.md` says PASS · no `LOG.md` entry yet for this id | `log-writer` (idempotent on re-run) |
-| `VERDICT_REVISE` | `verdict.md` says REVISE with `next_actions:` · no child issue created yet | create child issue with `next_actions` body, label it `status:planned`, then **stop** — the human reviews the child plan and flips it to `status:approved` (running codex-verify manually if they want) |
+| `VERDICT_REVISE` | `verdict.md` says REVISE with `next_actions:` · no child issue created yet | create child issue with `next_actions` body, label it `status:planned`, then **stop** — the human reviews the child plan and flips it to `status:approved` |
 | `VERDICT_STOP` | `verdict.md` says STOP | `log-writer`, then orchestrator updates label to `status:stop` |
-| `MILESTONE_PASS` | log-writer just wrote `findings/M<X>/SUMMARY.md` | none — append `MILESTONE_PASS: M<X>` to PROGRESS.md so the human knows it's time to invoke codex-verify in `adversarial` mode manually if desired |
+| `MILESTONE_PASS` | log-writer just wrote `findings/M<X>/SUMMARY.md` | none — append `MILESTONE_PASS: M<X>` to PROGRESS.md so the human knows the milestone summary is ready for their review |
 | `BUDGET_EXCEEDED` | check-budget script flags this run | none — teardown hook handles it; just note in STATUS |
 
 Key Bash queries:
@@ -222,11 +222,10 @@ Use `subagent_type=log-writer`.
 
 ## Operator: how to review a plan
 
-The harness used to autonomously dispatch a codex review of every plan
-before launching expensive compute. That gate proved more flaky than
-helpful (broker hangs, false-positive FAILs, override-anyway cycles). It
-is now an **operator-driven manual step**, done before flipping
-`status:planned → status:approved`.
+Plan review is an **operator-driven manual step**, done before flipping
+`status:planned → status:approved`. The orchestrator never reviews plans
+automatically — it only ever acts on the `status:approved` label the human
+sets.
 
 ### Quick visual review (always do this)
 
@@ -243,29 +242,6 @@ Read `.claude/plans/<N>.md` end-to-end. Check:
 6. If `code_change: true`, the `target_modules:` list is concrete and
    confined to research-allowed paths (no `verl/AGENTS.md`, no
    `pyproject.toml`).
-
-### Optional: codex review of the plan
-
-For larger plans or when you want a second opinion, invoke the
-`codex-verify` skill manually:
-
-```bash
-# At the research/ root, with codex CLI available:
-bash .claude/skills/codex-verify/run.sh \
-  --mode verify \
-  --out  runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
-  --plan .claude/plans/<N>.md \
-  --cd   /Users/shamane/Documents/verl \
-  --timeout 600 --stall 90
-
-# Look at the output:
-cat runs/EXP-<N>/verify/*.md
-```
-
-The output's first line is `VERIFY: PASS | VERIFY: CONCERNS | VERIFY: FAIL`.
-You read it, decide whether to fix the plan / proceed / abandon. **The
-harness does not look at this file.** Codex is now purely an advisory tool
-for you.
 
 ### Approving the plan
 
