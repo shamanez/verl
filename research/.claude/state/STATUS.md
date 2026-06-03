@@ -17,9 +17,9 @@
 - **Fixed (commit 9287994a, pushed origin/exp/20-powersgd-activation):** (1) `tail --pid=$TRAIN_PID -F` so the follower dies when training exits; launcher `wait`s on training only + propagates `exit $TRAIN_RC` (a real arm failure now aborts rather than comparing on a broken baseline). (2) watcher under `setsid`; EXIT trap `kill -- -$PGID`. Verified control flow on the box.
 - **Restarted:** box reset --hard to 9287994a (editable install → live), bundle refreshed, stale logs/flags cleared, tmux `exp-20-rerun`. Full ≤2-step probe (incl. rank-H lossless + off-path-parity sub-probes that never ran) now runs before the sweep.
 
-## M-capture correctness (operator's "wrong M" FSDP check) — VERIFIED CORRECT
-- PowerSGD reuses the mask's `find_decoder_layers`+`decoder_boundary_indices`, hooks the same boundary blocks, captures the same `output[0]`, and is order-invariant (shared basis) → immune to the per-token-keying/alignment bug class the mask fixed. `use_remove_padding=True`, SP=1, powersgd-only codec (no double-compress) confirmed.
-- Hardening landed: PowerSGD now also asserts rmpad (`is_nested`), so it can never silently compress padded M.
+## M-capture correctness (operator's FSDP check) — VERIFIED CORRECT / MOOT
+- **Operator clarification:** the prior FSDP fix referred to was the **anchor-clone-on-random-weights** bug (nested-FSDP state-dict key mismatch — `._fsdp_wrapped_module` infix dropped — so the stale-anchor clone ran on uninitialized weights; confounded EXP-16). **Moot for EXP-20:** anchor + spectral are OFF (`anchor.enabled=false`, `spectral.enabled=false`), so NO model clone is created — that bug surface is absent. PowerSGD hooks the live model's real-weight boundary outputs; its random basis `Q=orth(randn)` is a deterministic codebook bootstrap (INF-13), NOT uninitialized weights.
+- Independently verified the activation-side path too: PowerSGD reuses the mask's `find_decoder_layers`+`decoder_boundary_indices`, hooks the same boundary blocks, captures the same `output[0]`, and is order-invariant (shared basis) → immune to the per-token-keying/alignment bug class. `use_remove_padding=True`, SP=1, powersgd-only codec (no double-compress) confirmed. Hardening landed: PowerSGD now also asserts rmpad (`is_nested`).
 
 ## GPU-utilization watch (operator standing instruction — now applied)
 - Saved to memory; baked into the runner's restart check (GPUs confirmed 52%/59GB) and the monitor dispatch (sustained idle GPUs while tmux ALIVE = stall, act immediately, don't wait for timeout).
