@@ -4,3 +4,5 @@
 [2026-06-04] Dense control ce_dense_50s_gsm8k (wandb 5e2jpho9, box 39409362) done: dense@10=0.7324, dense@50=0.7536 — 10 full grads ≈ the compressed ceiling, and dense sits ~1–1.5 pp above all compressed arms (a small compression tax). Box torn down.
 [2026-06-04] Posted issue #21 (RL-grads-under-PP-compression analysis; "10 clean steps?" answered — compressed steps carry 57–95% of the reward gain; dense results appended) and issue #22 (clean-step realism/staleness confound + test plan: amortized ~4×, test delay_K staleness + cadence→∞ + error feedback + harder task). 4-agent team psgd-rl-research used then deleted.
 [2026-06-04] Ledger reconciled: EXP-20-dense + EXP-20-dense-DEAD-39407768 → TORN_DOWN (both boxes confirmed destroyed; ends the teardown-hook retry spam). Tracking files (STATUS/PROGRESS/SUMMARY) de-bloated.
+[2026-06-04T20:59:47+10:00] [research-planner #23] plan written
+[2026-06-04T21:00:20+10:00] [triage] dispatched 1 planners, 0 issues already planned
