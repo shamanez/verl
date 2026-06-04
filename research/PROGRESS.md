@@ -6,3 +6,4 @@
 [2026-06-04] Ledger reconciled: EXP-20-dense + EXP-20-dense-DEAD-39407768 → TORN_DOWN (both boxes confirmed destroyed; ends the teardown-hook retry spam). Tracking files (STATUS/PROGRESS/SUMMARY) de-bloated.
 [2026-06-04T20:59:47+10:00] [research-planner #23] plan written
 [2026-06-04T21:00:20+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-06-04T21:13:18+10:00] [operator] plan #23 revised per operator request: +correction-mechanism table (reweight/inject/blend) + theory; +explicit Vast run accounting (1 box, 4 cells, 0 re-runs); +NO-IDLE-INSTANCES hard rule; +EXECUTION-AUTONOMY clause (hands-off post-approval; approval gate preserved). FILE updated; GH issue comment NOT yet synced (awaiting confirm).
