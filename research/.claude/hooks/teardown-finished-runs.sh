@@ -81,29 +81,42 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   fi
 
   if [[ -n "$REASON" ]]; then
-    # Tear down all instances in this row. Track success/failure so we don't
-    # silently mark a row TORN_DOWN while the instance keeps running and billing.
+    # Tear down all instances in this row. VERIFY-AUTHORITATIVE classification:
+    # an instance that is GONE counts as DESTROYED even if `destroy` itself
+    # errored (e.g. it was already destroyed manually). This fixes the retry-
+    # spam regression where an already-gone instance was classified FAILED on
+    # every Stop forever (2026-06-04, EXP-20-dense-DEAD-39407768 hit 8 attempts
+    # because the old grep counted "not found" as a failure).
+    # Conservative on ambiguity: an auth/network error from `show instance` does
+    # NOT count as gone (that would falsely flip a live, billing box to
+    # TORN_DOWN) — only a positive not-found does.
     DESTROYED=0
     FAILED=0
     while IFS= read -r iid; do
       [[ -z "$iid" ]] && continue
-      # MUST pass -y: without it the prompt collapses to "Aborted" on a non-TTY
-      # stdin but the CLI STILL EXITS 0 — so the destroy silently does nothing
-      # and the row would be wrongly flipped to TORN_DOWN (money leak; observed
-      # 2026-06-03 on instance 39132674). Also treat Aborted/error/not-found in
-      # the output as failure since the exit code is unreliable (mirrors the
-      # vast-teardown skill's belt-and-braces check).
+      # MUST pass -y (without it a non-TTY prompt collapses to "Aborted" yet the
+      # CLI still exits 0 — a silent no-op; observed 2026-06-03 on 39132674).
       DOUT=$(vastai destroy instance "$iid" -y 2>&1); DRC=$?
       echo "[$(date -Iseconds)] destroy $iid rc=$DRC: $DOUT" >> /tmp/teardown.err
-      if (( DRC == 0 )) && ! echo "$DOUT" | grep -qiE 'aborted|error|not found|traceback|failed'; then
-        DESTROYED=$((DESTROYED + 1))
+      if (( DRC == 0 )) && ! echo "$DOUT" | grep -qiE 'aborted|traceback|status_code|permission denied|^error'; then
+        DESTROYED=$((DESTROYED + 1))                       # clean destroy
+      elif echo "$DOUT" | grep -qiE 'not found|no such|does not exist|no longer exists|already (destroyed|gone)'; then
+        DESTROYED=$((DESTROYED + 1))                       # already gone — goal achieved, NOT a failure
       else
-        FAILED=$((FAILED + 1))
+        # Ambiguous — verify authoritatively. Only a POSITIVE not-found counts as
+        # gone; still-listed OR an auth/network error is a conservative FAILED so
+        # we never abandon a live, billing box.
+        CHECK=$(vastai show instance "$iid" --raw 2>&1 || true)
+        if echo "$CHECK" | grep -qiE 'not found|no such|does not exist|404'; then
+          DESTROYED=$((DESTROYED + 1))
+        else
+          FAILED=$((FAILED + 1))
+        fi
       fi
     done < <(echo "$row" | jq -r '.handles[]? | .instance_id // empty')
 
-    if (( FAILED == 0 && DESTROYED > 0 )); then
-      # Clean teardown — flip to TORN_DOWN.
+    if (( FAILED == 0 )); then
+      # Clean teardown, or no handles left to destroy — flip to TORN_DOWN.
       echo "$row" \
         | jq -c --arg t "$(date -Iseconds)" --arg r "$REASON" \
           '. + {status: "TORN_DOWN", torn_down_at: $t, teardown_reason: $r}' \
@@ -111,31 +124,26 @@ while IFS= read -r row || [[ -n "$row" ]]; do
       echo "[$(date -Iseconds)] teardown EXP-$ID reason=$REASON destroyed=$DESTROYED" \
         >> "$PROJECT_DIR/PROGRESS.md"
       TORN_ANY=1
-    elif (( DESTROYED == 0 && FAILED == 0 )); then
-      # No handles at all — odd but treat as torn-down (nothing to destroy).
-      echo "$row" \
-        | jq -c --arg t "$(date -Iseconds)" --arg r "${REASON}-no-handles" \
-          '. + {status: "TORN_DOWN", torn_down_at: $t, teardown_reason: $r}' \
-        >> "$TEMP"
-      echo "[$(date -Iseconds)] teardown EXP-$ID reason=$REASON no-handles" \
-        >> "$PROJECT_DIR/PROGRESS.md"
-      TORN_ANY=1
     else
-      # Partial or full teardown failure — leave row RUNNING with an annotation
-      # so the next Stop hook retries, and emit a loud PROGRESS marker so the
-      # operator knows to intervene before money bleeds further.
+      # Genuine failure: instance(s) still listed. Keep the row for the next Stop
+      # to retry (so a transient Vast outage eventually clears), but THROTTLE the
+      # PROGRESS warning to once/hour so a stuck box can't spam the audit log on
+      # every Stop (the 2026-06-04 regression that bloated PROGRESS.md).
+      LAST_FAIL=$(echo "$row" | jq -r '.teardown_last_epoch // 0')
       echo "$row" \
-        | jq -c --arg t "$(date -Iseconds)" --arg r "$REASON" \
+        | jq -c --arg t "$(date -Iseconds)" --argjson te "$NOW" --arg r "$REASON" \
           --argjson d "$DESTROYED" --argjson f "$FAILED" \
           '. + {teardown_attempts: ((.teardown_attempts // 0) + 1),
                 teardown_last_at: $t,
+                teardown_last_epoch: $te,
                 teardown_last_reason: $r,
                 teardown_partial_destroyed: $d,
                 teardown_partial_failed: $f}' \
         >> "$TEMP"
-      echo "[$(date -Iseconds)] TEARDOWN_FAILED EXP-$ID reason=$REASON destroyed=$DESTROYED failed=$FAILED — instance(s) may still be running, check vastai show instances" \
-        >> "$PROJECT_DIR/PROGRESS.md"
-      # Do NOT set TORN_ANY — partial failure shouldn't suppress the warning banner.
+      if (( NOW - LAST_FAIL > 3600 )); then
+        echo "[$(date -Iseconds)] TEARDOWN_FAILED EXP-$ID reason=$REASON destroyed=$DESTROYED failed=$FAILED — instance(s) still listed, check 'vastai show instances' (throttled 1/hr)" \
+          >> "$PROJECT_DIR/PROGRESS.md"
+      fi
     fi
   else
     echo "$row" >> "$TEMP"

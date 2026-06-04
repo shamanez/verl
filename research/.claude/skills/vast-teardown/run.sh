@@ -91,7 +91,11 @@ if [[ -f "$LEDGER" && ${#DESTROYED[@]} -gt 0 ]]; then
   while IFS= read -r row; do
     [[ -z "$row" ]] && continue
     NEW=$(jq -c --argjson ids "$IDS_JSON" --arg t "$TS" --arg r "$REASON" '
-      if .status == "RUNNING"
+      # Patch RUNNING *and* PROVISIONED rows (an abandoned PROVISIONED box —
+      # e.g. one that failed SSH-key injection before launch — must also flip
+      # to TORN_DOWN once its instance is destroyed, else the Stop hook keeps
+      # reaping it; 2026-06-04 EXP-20-dense-DEAD-39407768).
+      if (.status == "RUNNING" or .status == "PROVISIONED")
          and (any(.handles[]?.instance_id // empty; . as $i | $ids | index($i)))
       then . + {status: "TORN_DOWN", torn_down_at: $t, teardown_reason: $r}
       else .
