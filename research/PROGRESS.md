@@ -7,3 +7,4 @@
 [2026-06-04T20:59:47+10:00] [research-planner #23] plan written
 [2026-06-04T21:00:20+10:00] [triage] dispatched 1 planners, 0 issues already planned
 [2026-06-04T21:13:18+10:00] [operator] plan #23 revised per operator request: +correction-mechanism table (reweight/inject/blend) + theory; +explicit Vast run accounting (1 box, 4 cells, 0 re-runs); +NO-IDLE-INSTANCES hard rule; +EXECUTION-AUTONOMY clause (hands-off post-approval; approval gate preserved). FILE updated; GH issue comment NOT yet synced (awaiting confirm).
+[2026-06-04T21:27:46+10:00] [operator] plan #23: scope=MEASURE-FIRST (no A4 new method now). +Prime Directive (DO NOT BREAK CURRENT PATHS, additive+flag-gated+parity-gated); +Measurement gate (geometry suite cos/complement/norms/staleness-rotation + clean-calibration; non-stationary GRPO grad rationale; new combiners admissible but deferred to follow-up issue); +analyst measure-then-decide deliverable. FILE only; GH comment NOT synced.
