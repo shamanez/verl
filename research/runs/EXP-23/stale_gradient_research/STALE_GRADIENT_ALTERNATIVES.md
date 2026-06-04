@@ -350,29 +350,56 @@ predicted failure modes.
 
 Every method below is subject to the **Prime Directive**: it MUST be *additive*,
 *flag-gated*, and *OFF by default*. With its flag off, training is byte-identical to
-the current PowerSGD path (and ultimately to upstream verl). None of these change
-A1/A2/A3 — they are the *next* levers to try if A2 and A3 both fail (or to refine if
-A3 partially works).
+the current PowerSGD path (and ultimately to upstream verl). A2 and A3 **both
+failed** (FALSIFIED, §0/§8), so these are the *binding* next levers. The live data
+narrows the ranking sharply: **the failure is geometric incoherence (G ⊥ M by
+construction), not combiner tuning** — so the two Rank-1 methods (error-feedback,
+basis-aligned anchor) that *remove the orthogonality at its source* dominate, while
+the combiner-tuning levers (Rank 2/3/4/6) can only help *once a shared subspace
+exists*. Each is flagged with whether it attacks the incoherence or presumes it
+already fixed.
 
-### Rank 1 — Error-feedback on the PowerSGD residual (the #21 top lever)
+### Rank 1a — Error-feedback on the PowerSGD residual (the #21 top lever; ATTACKS the incoherence)
 
 **Mechanism.** Maintain a local FP32 buffer `e` per boundary matrix. Each step:
 compute the full boundary grad `G_full`, compress to `G_compressed` (PowerSGD r=77),
-apply `G_step = G_compressed + decay·e`, then update `e ← e + (G_full − G_compressed)`
-(the dropped low-rank residual). Every K steps, *flush* `e` into / re-ground it
-against the stale full-rank anchor M (read M as the periodic full-rank ground truth
-for the accumulated residual). New flags: `comm_eff.error_feedback.enabled` (default
-false), `.decay`, `.flush_cadence`.
+apply `G_step = G_compressed + decay·e`, then update
+`e ← e + (G_full − decompress(compress(G_full)))` (the *dropped* low-rank residual —
+the standard PowerSGD convergence fix). Optionally re-ground `e` against the stale
+full-rank anchor M every K steps. New flags: `comm_eff.error_feedback.enabled`
+(default false), `.decay`, `.flush_cadence`.
 
-**Why the evidence supports it.** (a) Issue #21 already names "NO error-feedback =
-top lever" for this PowerSGD setup; EF-SGD / the stock PowerSGD both ship EF and it
-is provably convergent. (b) 2602.03839 makes EF the *named* fix for exactly this
-"gate out what you can't send, but accumulate the residual and inject it next round
-so nothing is permanently lost" problem (PULSELoCo Alg. 2). (c) The geometry says M
-⊥ G ⇒ the residual G misses is large and real (Mukherjee full-rank). EF reframes the
-stale M from "orthogonal impulse to add" to "periodic flush of an accumulated,
-*tracked* residual" — which is both convergent and spectrum-gentle (the per-step
-correction is the bounded `decay·e`, not a √2 inflation).
+**Why the evidence supports it (and why it beats inject/blend on the LIVE result).**
+The live data shows G ⊥ M (cos ≈ 0.001, steady-state) because PowerSGD r=77 *discards*
+the subspace M lives in. EF carries forward **exactly the energy the sketch dropped**,
+in the *same* basis — so the fed-back term is aligned with what G is missing by
+construction, the one thing inject/blend could not be. (a) Issue #21 names
+"NO error-feedback = top lever" for this PowerSGD setup; EF-SGD / stock PowerSGD ship
+EF and it is provably convergent. (b) 2602.03839 makes EF the *named* fix for "gate
+out what you can't send, accumulate the residual, inject it next round so nothing is
+permanently lost" (PULSELoCo Alg. 2). (c) Mukherjee full-rank ⇒ the dropped residual
+is real signal, not noise. Spectrum-gentle (per-step correction is the bounded
+`decay·e`, not a √2 inflation).
+
+### Rank 1b — Basis-aligned anchor (project M into the live PowerSGD Q-basis; ATTACKS the incoherence)
+
+**Mechanism.** Before combining, project the stale full-rank anchor M onto the live
+PowerSGD rank-r Q-basis (the left/right factors the codec keeps this step):
+`M_aligned = Q (Qᵀ M)` (and the right-factor analog), so M and G share a subspace by
+construction; then inject/blend `M_aligned`. New flags:
+`comm_eff.anchor.basis_align {none|q_project}` (default `none` ⇒ exactly current
+behavior).
+
+**Why the evidence supports it.** The live result proves the problem is that M lives
+in PowerSGD's *complement*; the direct structural fix is to stop defining the anchor
+in an orthogonal subspace. **An anchor defined in the orthogonal complement can never
+help no matter how fresh** (grad-empirics §8). Projecting M into Q forces a non-zero
+cos and lets a small blend actually move G along a shared, informative direction.
+Caveat: this *also* throws away M's full-rank content (the part outside Q), so it is
+complementary to — not a substitute for — Rank 1a (EF, which is what keeps the dropped
+content alive). The strongest single design is **1a + 1b together**: EF preserves the
+dropped energy across steps; basis-alignment makes the periodic full-rank anchor
+land in a subspace the live step can use.
 
 ### Rank 2 — Small-λ, staleness-aware convex blend with η ∝ 1/K
 
@@ -387,8 +414,15 @@ magnitude injection. New flags: `spectral.blend_eta_mode {fixed|inv_k|inv_gap}`,
 Gap-Aware SGD's ‖Δθ‖ weighting *all independently* prescribe a staleness-shrinking
 interpolation weight. 2511.08567's spectrum-preservation argues small λ; 2601.04537
 says M is a good *drift estimate* (blend toward M̂), so a small pull onto the
-persistent drift is exactly the intended use. This is the **minimal change to A3**
-and the most likely "A3-almost-worked, just over-weighted" fix.
+persistent drift is exactly the intended use.
+
+**PRESUMES a shared subspace — DEMOTED by the live result.** With G ⊥ M (the live
+finding), a smaller η just shrinks an already-negligible orthogonal contribution: at
+η=0.2 instead of 0.5, A3 would scale the step to √(0.8²+0.2²)=0.82× and still add no
+aligned signal. So η∝1/K alone **cannot** fix EXP-23's failure — it is only useful
+*downstream of* Rank 1b (once the anchor is basis-aligned and cos>0, a smaller, gap-
+aware η is the right weight on a now-informative blend). Keep it as the cheap
+refinement layered on Rank 1, not as a standalone fix.
 
 ### Rank 3 — Correction masked to the active subnetwork
 
@@ -441,19 +475,23 @@ estimated signal-to-noise warrants, with a hard cap on ‖G_corr‖/‖G‖ (e.g
 forbid the √2 inflation. New flags: `spectral.inject_gamma_mode {fixed|adaptive}`,
 `.inject_norm_cap`.
 
-**Why the evidence supports it.** The plan flagged the MMSE-style combiner; the smoke
-shows the uncapped γ=1 inject is the √2-inflation/C1-collapse risk. M2PO's
-second-moment trust and VCPO's variance modulation say cap/modulate the
-high-variance contribution. This *salvages inject* if A2 fails purely on magnitude
-(rather than direction). Lower-ranked because if direction is the problem (orthogonal
-M not a real descent direction), no magnitude cap helps — Rank 1/2/3 address
-direction.
+**Why the evidence supports it — and why the LIVE result largely retires it.** The
+plan flagged the MMSE-style combiner; M2PO/VCPO say cap/modulate the high-variance
+contribution. But the live data settled the smoke's open question: A2's failure was
+**direction, not magnitude.** In practice `scale = ‖G‖/‖M‖ = 0.0002–0.25` (‖M‖≫‖G‖)
+made the realized inject a *tiny, scale-suppressed orthogonal noise* vector — not the
+√2 inflation the smoke's larger scales had suggested — and it still moved val only
++0.005 (noise). A magnitude cap addresses an inflation that did not occur and cannot
+supply the missing alignment. **Retire as a fix on its own**; an adaptive γ is only
+meaningful *after* Rank 1b makes the injected direction non-orthogonal.
 
 ### Scope lever (distinct from the combiner) — raise `spectral.max_targets` beyond 4
 
-The smoke corrects only **4/196** targets (layer-0 q/k/v/o). If A2/A3 fail, one
-hypothesis is *insufficient coverage*, not a bad operator — the correction may be
-real but applied to a vanishingly small slice of the model. Raising `max_targets`
+Both smoke and the live arms correct only **4/196** targets (layer-0 q/k/v/o). A
+residual hypothesis for the FALSIFIED result is *insufficient coverage*, not a bad
+operator — though the live geometry argues against it (the failure is orthogonality
+on the targets we *did* measure, which broader coverage would not fix). Still, since
+cos(G,M) on MLP/deep layers is unmeasured, raising `max_targets`
 (and/or extending to MLP `gate/up/down` and deeper layers) is a **coverage** lever
 orthogonal to *which* combiner to use, and it interacts with cost (anchor backward
 OOM — recall the 18432 tok/gpu + `ema_device=cpu` guard,
