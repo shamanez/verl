@@ -457,6 +457,25 @@ wait "$TRAIN_PID" || TRAIN_RC=$?
 # the EXIT trap + guard 1), so back-to-back cells never accumulate watchers.
 kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# WandB final-flush (fix for the truncated-dashboard bug). verl/Ray SIGKILLs
+# its workers at teardown before WandB's async uploader flushes the LAST batch,
+# so the online run is cut ~2 steps short — the final (step-N) validation point
+# never lands and the run is marked "crashed" (observed across EXP-20 + the
+# dense control: lastHistoryStep=48 of 50, summary stuck at the step-40/25 val).
+# The COMPLETE history is always in the local .wandb file, so re-sync it here —
+# AFTER training, BEFORE done.flag (which gates the orchestrator's teardown) —
+# to upload the missing tail and finish the run cleanly. Best-effort + bounded:
+# never blocks done.flag (the local train.log stays the authoritative record).
+if command -v wandb >/dev/null 2>&1; then
+  WANDB_RUN_DIR=$(ls -dt /workspace/verl/wandb/run-* /workspace/verl/wandb/offline-run-* 2>/dev/null | head -1 || true)
+  if [[ -n "${WANDB_RUN_DIR:-}" ]]; then
+    echo "=== wandb sync $WANDB_RUN_DIR (flush final history before teardown) ==="
+    timeout 240 wandb sync "$WANDB_RUN_DIR" 2>&1 | tail -8 \
+      || echo "WARN: wandb sync failed/timed out — final point may be missing online; local train.log is authoritative" >&2
+  fi
+fi
+
 touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
 echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
 # Propagate the training exit status so the EXP-20 launch.sh `run_step` sees a
