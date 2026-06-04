@@ -54,7 +54,7 @@ For depth, read **`research/runs/EXP-20/POWERSGD_IMPLEMENTATION.md`** (end-to-en
 | **mask p=0.95** (baseline-of-record) | `ce_mask_p95_clean5_50s_gsm8k` | `3yxzzwn3` | `prf_mask` | p=0.95 | **76.8** | **0.7384** |
 | **PowerSGD r=102** | `ce_powersgd_r102_clean5_50s_gsm8k` | `kqozxfr0` | `powersgd` | r=102 (+33% budget) | **102.0** | **0.7437** (+0.0053) |
 | **PowerSGD r=77** (byte-matched) | `ce_powersgd_r77_clean5_50s_gsm8k` | `oquyeic3` | `powersgd` | r=77 | **77.0** | **0.7415** (+0.0031) |
-| **dense control** | `ce_dense_50s_gsm8k` | TBD | (off) | — | H=1536 | **PENDING (§9)** |
+| **dense control** | `ce_dense_50s_gsm8k` | `5e2jpho9` | (off) | — | H=1536 | **0.7536** (+1.0–1.5 pp over the compressed arms — see §9 + dense-results comment) |
 
 **Budget note (H=1536, not the issue-assumed 2048):** the mask at p=0.95 keeps `0.05·1536 = 76.8` coords/tok, so **r=77 is the byte-matched arm** (the equal-communication comparison, +0.26%); r=102 is +33% budget. `logical_pp_bytes/tok` is the per-token coordinate count crossing each boundary (mask: surviving fraction of H; PowerSGD: the rank r). At equal budget, PowerSGD (principal-subspace projection) **edges** the PRF mask (random sparsification) — verdict = **PASS** (`research/runs/EXP-20/verdict.md`), decisive on the byte-matched r=77 arm. Honest calibration: deltas are small (+0.003–0.005), single seed, 50 steps — a directional curve-match, not a variance study. The accuracy spread across all three codecs is **0.53 pp**, within RL noise: **the three codecs are accuracy-equivalent at this budget.**
 
@@ -140,7 +140,7 @@ The mask's `20×` rescale of a sparse survivor set inflates the grad-norm ~27× 
 | mask p=0.95 | `3yxzzwn3` | https://wandb.ai/shamanework-pl/verl_compression_research/runs/3yxzzwn3 |
 | PowerSGD r=102 | `kqozxfr0` | https://wandb.ai/shamanework-pl/verl_compression_research/runs/kqozxfr0 |
 | PowerSGD r=77 | `oquyeic3` | https://wandb.ai/shamanework-pl/verl_compression_research/runs/oquyeic3 |
-| **dense control** `ce_dense_50s_gsm8k` | TBD | _(link appended once it lands — §9)_ |
+| **dense control** `ce_dense_50s_gsm8k` | `5e2jpho9` | https://wandb.ai/shamanework-pl/verl_compression_research/runs/5e2jpho9 |
 
 **Key metric keys to pull** (and what each tells you):
 
@@ -185,9 +185,9 @@ A downstream research agent reading the code + the WandB metrics should pick the
 
 ---
 
-# 9. Dense baseline — PENDING (being measured)
+# 9. Dense baseline — ✅ RESULTS (dense@50 = 0.7536)
 
-A same-config **DENSE** GSM8K 50-step run — `ce_dense_50s_gsm8k`, comm-eff **OFF**, identical lr / batch / 2-epoch surface, `test_freq=10` (val at 0/10/20/30/40/50, so the post-step-10 region this issue hinges on is resolved) — is **RUNNING**. **Its results (dense@10 / dense@50 / the post-10 slope) will be appended to this issue as a comment.**
+A same-config **DENSE** GSM8K 50-step run — `ce_dense_50s_gsm8k`, comm-eff **OFF**, identical lr / batch / 2-epoch surface, `test_freq=10` (val at 0/10/20/30/40/50) — has **COMPLETED** (WandB [`5e2jpho9`](https://wandb.ai/shamanework-pl/verl_compression_research/runs/5e2jpho9)). **Results: dense@10 = 0.7324, dense@50 = 0.7536** (full trajectory + the three comparisons filled in the [dense-results comment](https://github.com/shamanez/verl-compression-research/issues/21#issuecomment-4619991952)). **Headline:** dense@10 ≈ the compressed ceiling (≈10 full grads suffice), and dense@50 sits **~1–1.5 pp above** all three compressed arms — a small but consistent compression tax that *sharpens* [#22](https://github.com/shamanez/verl-compression-research/issues/22). The `<TBD>` placeholders below are resolved in that comment.
 
 This is necessary because **no usable ≥50-step dense GSM8K trajectory currently exists**: the only genuine dense run in the project is `grpo_dense_bigmath_baseline` (`lwl9yk4y`), which is **Big-Math / MATH-lighteval, not GSM8K** (it shows the same post-step-10 improvement shape the operator noticed, but on MATH-eval: val 0.536→0.558→0.584 over steps 0/10/20 — wrong dataset, wrong eval set, 1 epoch / 120 steps, base capability ~0.54); the only DENSE+GSM8K runs are two empty 2-step probes; and the surviving dense-GSM8K parity figure ≈0.741 is **prose-only from a different-config EXP-17 era** (mask p=0.9, clean_cadence=20). The project-fixed **baseline-of-record for the EXP-20 comparison is therefore the mask arm (0.7384)**, not dense.
 

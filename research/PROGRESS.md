@@ -44,3 +44,6 @@ EXP-20 mask arm ce_mask_p95_clean5_50s_gsm8k — step 15/50 at 31:02 elapsed, re
 [2026-06-04T15:43:24+10:00] [experiment-runner #EXP-20-dense] launched ce_dense_50s_gsm8k (DENSE control, comm_eff OFF) on 1×(4×H200) inst=39409362 dph=15.21 wandb=5e2jpho9; all 4 sanity gates PASS (4 GPUs, comm_eff master=false, global_step>=2 critic/score/mean=0.168 finite, all-GPU util>0). First box 39407768 abandoned (Vast SSH key-injection failure on machine_id 59484; team-lead destroying).
 [2026-06-04T15:44:50+10:00] TEARDOWN_FAILED EXP-EXP-20-dense-DEAD-39407768 reason=provisioned-but-never-launched destroyed=0 failed=1 — instance(s) may still be running, check vastai show instances
 [2026-06-04T16:57:25+10:00] TEARDOWN_FAILED EXP-EXP-20-dense-DEAD-39407768 reason=provisioned-but-never-launched destroyed=0 failed=1 — instance(s) may still be running, check vastai show instances
+[2026-06-04T17:19:48+10:00] TEARDOWN_FAILED EXP-EXP-20-dense-DEAD-39407768 reason=provisioned-but-never-launched destroyed=0 failed=1 — instance(s) may still be running, check vastai show instances
+
+2026-06-04 17:29 EXP-20-dense [DONE] ce_dense_50s_gsm8k: 50 steps complete, val@10=73.24%, val@50=75.36%, wall=1:55h, zero errors
