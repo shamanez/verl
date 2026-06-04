@@ -47,3 +47,4 @@ EXP-20 mask arm ce_mask_p95_clean5_50s_gsm8k — step 15/50 at 31:02 elapsed, re
 [2026-06-04T17:19:48+10:00] TEARDOWN_FAILED EXP-EXP-20-dense-DEAD-39407768 reason=provisioned-but-never-launched destroyed=0 failed=1 — instance(s) may still be running, check vastai show instances
 
 2026-06-04 17:29 EXP-20-dense [DONE] ce_dense_50s_gsm8k: 50 steps complete, val@10=73.24%, val@50=75.36%, wall=1:55h, zero errors
+[2026-06-04T17:36:33+10:00] TEARDOWN_FAILED EXP-EXP-20-dense-DEAD-39407768 reason=provisioned-but-never-launched destroyed=0 failed=1 — instance(s) may still be running, check vastai show instances
