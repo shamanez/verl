@@ -1,24 +1,31 @@
-# Research Status — 2026-06-04
+# Research Status — 2026-06-04T12:35+10:00 (orchestrator · EXP-23)
 
 ## Active
-Nothing running. **0 live Vast instances** ($0 idle, verified).
+EXP-23 RUNNING — 1×4H200 (instance 39447338, $15.21/hr). Arms A1→A2→A3 back-to-back in tmux `exp-23-84_8_106_109`. monitor-23 active (background). Smoke gate PASSED (all 6 hard gates; no verl hotfix needed).
 
-## Latest — EXP-20 (M6) · DONE · PASS
-PowerSGD-style PP activation compression vs PRF mask. Qwen2.5-1.5B-Instruct + GSM8K, vanilla GRPO (no-KL/no-entropy), `clean_cadence=5`, 50 steps, 4×H200. Codec is the only axis (`runs/FIXED_CONTROL_SURFACE.md`).
+## Issue pipeline
 
-| arm | codec | val GSM8K acc@50 |
-|---|---|---|
-| dense (control) | comm-eff OFF | **0.7536** |
-| PowerSGD r=102 (+33% budget) | powersgd | 0.7437 |
-| PowerSGD r=77 (byte-matched) | powersgd | 0.7415 |
-| mask p=0.95 | prf_mask | 0.7384 |
+| EXP | Title | State | Vast runs | Verdict | Notes |
+|---|---|---|---|---|---|
+| 23 | Stale full-grad re-anchor for PowerSGD (delay_K=5 + inject/blend) | RUNNING | 1×4H200 (i_39447338) | — | smoke PASS. A1 launching ~12:31. launch.sh ARM-parse bug fixed + relaunched. |
+| 20 | PowerSGD activation codec (parent) | DONE | — | PASS | A0=0.7415 (r=77), dense ceiling 0.7536 — EXP-23 refs (not re-run) |
 
-PowerSGD ≥ mask at **equal** communication budget (un-caveated, r=77). Dense ~1–1.5 pp above all compressed → a small compression tax. Codec PR shamanez/verl#13 **merged** → vast-ai-workload.
+## EXP-23 arm plan (one warm box, back-to-back — 4 GPUs can't split across 3 multi-GPU arms)
+- **A1** no-refresh floor: anchor OFF, spectral OFF, clean_cadence=0, 36864 tok/gpu — `exp-23-A1-no-refresh`
+- **A2** stale inject: anchor delay_K=5 cadence=5, spectral inject γ=1.0 cadence=5, 18432 + ema_device=cpu — `exp-23-A2-stale-inject`
+- **A3** stale blend: as A2 but spectral blend η=0.5 — `exp-23-A3-stale-blend`
+- HEADLINE (PASS): `max(val@50(A2),val@50(A3)) ≥ 0.7315 AND ≥ val@50(A1)+0.05`. Falsified if `≤ val@50(A1)+0.02`.
+- code change f42b7f36 on `exp/23-stale-reanchor`: wired spectral.correction_mode/inject_gamma/blend_eta env vars (was silent reweight default).
 
-## Open issues (research repo)
-- **#21** — how RL/GRPO grads behave under PP compression (EXP-20 analysis; "is it just the 10 clean steps?" → **No**, compressed steps carry 57–95% of the gain; + dense results appended). `kind:experiment`, M6.
-- **#22** — clean-step realism confound: does it survive WITHOUT a fresh full-grad refresh? (amortized comm is ~4× not 20×; test staleness/`delay_K` + cadence→∞ + error-feedback + a harder task). `kind:experiment`, M6. **UNCLAIMED** — flip to `research:claim` to queue.
-- **#19** — M5 epic, unclaimed.
+## Parallel background research team — `exp23-stale-grad` (operator directive 2026-06-04)
+Runs alongside training; the MANDATORY next-lever readout if A2 AND A3 both fail (plan §Falsification contingency).
+- async-rl-scout — async/off-policy RL staleness-tolerance literature
+- cited-reader — operator-cited papers (2602.03839, 2511.08567, 2601.04537, nrehiew OPD blog)
+- grad-empirics — measured per-layer G↔M_anchor geometry + layer coverage from EXP-23 logs
+- synthesizer (blocked by the 3) → `runs/EXP-23/stale_gradient_research/STALE_GRADIENT_ALTERNATIVES.md`
 
-## M6 progress
-EXP-20 PASS (1 of ≥2 for the milestone summary). Likely next: the #22 staleness/clean-cadence sweep.
+## Last tick
+2026-06-04T12:35+10:00 · running=[23] · analyzing=[] · logging=[] · blocked=[]
+
+## Budget
+$/hr now: $15.21 (1×4H200) · EXP-23 caps: max_gpu_hr=48, max_dph=24 · est arms ≈ 24–30 GPU-hr (within cap)
