@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PowerSGD Activation Compression: Implementation Logic</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #5b6773;
+      --line: #d8dee4;
+      --soft: #f6f8fa;
+      --accent: #2457a6;
+      --accent-soft: #e8f0fe;
+      --ok-soft: #ecf7ef;
+      --warn-soft: #fff5df;
+      --code: #111827;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      line-height: 1.55;
+      color: var(--ink);
+      background: #ffffff;
+    }
+
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 40px 24px 56px;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 32px 0 10px;
+      font-size: 21px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 20px 0 8px;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    ul {
+      margin: 8px 0 16px 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: var(--code);
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 0.94em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 12px 0 18px;
+      padding: 14px 16px;
+      background: var(--soft);
+      color: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .subtitle {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .tag {
+      display: inline-block;
+      margin-bottom: 12px;
+      padding: 4px 8px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid #c9daf8;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .note {
+      margin: 16px 0;
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .invariant {
+      background: var(--ok-soft);
+      border-left-color: #2e7d32;
+    }
+
+    .caution {
+      background: var(--warn-soft);
+      border-left-color: #b7791f;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 14px 0 18px;
+    }
+
+    .box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      background: #ffffff;
+    }
+
+    .box strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--soft);
+    }
+
+    .formula {
+      margin: 14px 0 18px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      font-size: 17px;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .formula code {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      font-size: inherit;
+    }
+
+    @media (max-width: 720px) {
+      main {
+        padding: 28px 16px 40px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        font-size: 13px;
+      }
+    }
+
+    @media print {
+      main {
+        max-width: none;
+        padding: 22mm 18mm;
+      }
+
+      pre {
+        white-space: pre-wrap;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="tag">Logic-only review note</span>
+      <h1>PowerSGD-Style Activation Compression</h1>
+      <p class="subtitle">
+        A lightweight implementation summary of a low-rank activation codec for pipeline-boundary
+        tensors. This version keeps only the algorithmic logic and omits project-specific files,
+        wiring, and experiment details.
+      </p>
+    </header>
+
+    <section>
+      <h2>1. Core Idea</h2>
+      <p>
+        At a boundary between two model segments, replace the activation matrix
+        <code>M</code> with its projection onto a shared low-rank orthonormal basis
+        <code>Q</code>.
+      </p>
+      <div class="formula">
+        <code>M</code> shape: <code>(N tokens, H hidden)</code><br>
+        <code>Q</code> shape: <code>(H hidden, r rank)</code><br>
+        <code>Y = M @ Q</code><br>
+        <code>M_hat = Y @ Q.T = M @ Q @ Q.T</code>
+      </div>
+      <p>
+        Only <code>Y</code>, with shape <code>(N, r)</code>, needs to cross the boundary.
+        The basis <code>Q</code> is a shared codebook, so it does not need to be sent with
+        every activation.
+      </p>
+      <div class="note invariant">
+        <strong>Main invariant:</strong> if <code>Q.T @ Q = I</code>, then
+        <code>Q @ Q.T</code> is an idempotent projection matrix. The forward pass and
+        backward pass both keep only the same rank-<code>r</code> subspace.
+      </div>
+    </section>
+
+    <section>
+      <h2>2. Autograd Behavior</h2>
+      <p>
+        The basis <code>Q</code> is treated as a frozen buffer, not a trainable parameter.
+        The activation <code>M</code> remains inside the computation graph.
+      </p>
+      <pre><code>q = stop_gradient(Q)
+Y = M @ q
+M_hat = Y @ q.T</code></pre>
+      <p>
+        No straight-through estimator is needed. The normal autograd gradient is exactly
+        the projected upstream gradient:
+      </p>
+      <div class="formula">
+        <code>dL/dM = (dL/dM_hat) @ Q @ Q.T</code>
+      </div>
+      <p>
+        This means the method optimizes through the compressed activation that the next
+        segment actually receives, rather than pretending the dense activation was used.
+      </p>
+    </section>
+
+    <section>
+      <h2>3. Basis Initialization</h2>
+      <p>
+        Each boundary gets a deterministic starting basis. The basis is drawn from a
+        seeded Gaussian matrix and orthonormalized in fp32.
+      </p>
+      <pre><code>seed_boundary = hash(base_seed, boundary_index)
+A = randn(H, r, seed=seed_boundary, dtype=fp32)
+Q = orthonormalize(A)  # fp32 QR with deterministic sign handling</code></pre>
+      <ul>
+        <li>Drawing from a deterministic seed lets both sides reproduce the same initial <code>Q</code>.</li>
+        <li>Orthonormalization is done in fp32 to avoid losing orthogonality.</li>
+        <li>If QR produces a degenerate or non-finite column, replace it with a deterministic random complement and re-orthonormalize.</li>
+        <li>The basis persists across steps; it is warm-started rather than recreated every forward pass.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>4. Basis Update</h2>
+      <p>
+        The basis is not updated by gradient descent. It is refreshed with block power
+        iteration on the activation Gram matrix.
+      </p>
+      <h3>During the training forward</h3>
+      <p>
+        Accumulate a sketch off-graph:
+      </p>
+      <pre><code>V += M.T @ (M @ Q)   # equals (M.T @ M) @ Q</code></pre>
+      <p>
+        Accumulating over micro-batches gives:
+      </p>
+      <div class="formula">
+        <code>V = sum_mb M_mb.T @ M_mb @ Q = C_step @ Q</code>
+      </div>
+      <h3>After backward</h3>
+      <p>
+        Orthonormalize the accumulated sketch:
+      </p>
+      <pre><code>Q_next = orthonormalize(V)
+clear V</code></pre>
+      <p>
+        This is one block power iteration step:
+      </p>
+      <div class="formula">
+        <code>Q_{t+1} = orth(C_step @ Q_t)</code>
+      </div>
+      <p>
+        Repeating this drives <code>Q</code> toward the top rank-<code>r</code>
+        right-singular subspace of the boundary activations, which is the best
+        rank-<code>r</code> reconstruction subspace in Frobenius norm.
+      </p>
+      <div class="note caution">
+        <strong>Important timing rule:</strong> the basis must be read-only during the
+        forward/backward work for a step. Update it only after gradients for that step
+        have been computed.
+      </div>
+    </section>
+
+    <section>
+      <h2>5. Data-Parallel Consensus</h2>
+      <p>
+        If multiple data-parallel ranks see different samples, each rank accumulates a
+        different local sketch:
+      </p>
+      <div class="formula">
+        <code>V_i = C_i @ Q</code>
+      </div>
+      <p>
+        To keep one shared basis, reduce the raw sketches before QR:
+      </p>
+      <pre><code>V_global = all_reduce_sum(V_i)
+Q_next = orthonormalize(V_global)</code></pre>
+      <p>
+        Reducing <code>V</code> is mathematically meaningful because:
+      </p>
+      <div class="formula">
+        <code>sum_i V_i = (sum_i C_i) @ Q</code>
+      </div>
+      <ul>
+        <li>Use a sum, not an average; QR is scale-invariant.</li>
+        <li>Reduce the raw sketch, not already-orthonormalized per-rank bases.</li>
+        <li>Run collectives in the same boundary order on every rank.</li>
+        <li>If a rank has no data for a boundary, contribute zeros so collective ordering remains identical.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>6. Policy-Gradient Timing</h2>
+      <p>
+        For algorithms that compare an old-policy forward with a train-policy forward,
+        both forwards must use the same frozen basis <code>Q_t</code> for the entire
+        global step.
+      </p>
+      <div class="grid">
+        <div class="box">
+          <strong>Old-policy recompute</strong>
+          Use <code>Q_t</code>. Do not accumulate the sketch if this forward is under
+          no-gradient mode.
+        </div>
+        <div class="box">
+          <strong>Training forward/backward</strong>
+          Use the same <code>Q_t</code>. Accumulate <code>V</code> only from the
+          gradient-bearing training forward.
+        </div>
+      </div>
+      <p>
+        Updating the basis between these two forwards would change the projection
+        operator and create a spurious importance-ratio shift unrelated to policy
+        parameter changes.
+      </p>
+    </section>
+
+    <section>
+      <h2>7. Dense Refresh Cadence</h2>
+      <p>
+        Every <code>k</code> steps, optionally disable compression for the full step.
+      </p>
+      <pre><code>is_clean_step = clean_cadence &gt; 0 and step % clean_cadence == 0</code></pre>
+      <p>On a clean step:</p>
+      <ul>
+        <li>Run both relevant forwards with dense activations.</li>
+        <li>Do not accumulate <code>V</code>.</li>
+        <li>Do not update <code>Q</code>.</li>
+        <li>Let the optimizer see an exact dense gradient periodically.</li>
+      </ul>
+      <p>
+        This acts as a debiasing refresh for optimizer moments and prevents the low-rank
+        projection from being the only gradient path for long stretches.
+      </p>
+    </section>
+
+    <section>
+      <h2>8. Numerics</h2>
+      <ul>
+        <li>Store and orthonormalize <code>Q</code> in fp32.</li>
+        <li>Cast <code>Q</code> to the activation dtype for the projection matmuls if needed.</li>
+        <li>Track <code>Q.T @ Q</code> health; the condition number should stay near 1.</li>
+        <li>Track reconstruction error <code>||M - M_hat|| / ||M||</code>; this measures whether the learned subspace is useful.</li>
+        <li>If a normalization layer immediately follows the boundary, projection-induced norm shrink is usually absorbed by that normalization. Otherwise, rescaling may need separate validation.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>9. One-Step Lifecycle</h2>
+      <pre><code># Step t
+Q = Q_t
+
+old_policy_forward:
+    optionally use M_hat = (M @ Q) @ Q.T
+    do not update Q
+    do not accumulate V if no_grad
+
+training_forward_backward:
+    use the same Q_t
+    forward sends Y = M @ Q and reconstructs M_hat = Y @ Q.T
+    off-graph accumulate V += M.T @ (M @ Q)
+    backward sees projected gradient dL/dM = upstream @ Q @ Q.T
+
+optimizer_step:
+    update model parameters
+
+post_backward:
+    if not clean_step and update_due:
+        V = all_reduce_sum(V) if using data parallel consensus
+        Q_{t+1} = orthonormalize(V)
+        clear V
+    else:
+        Q_{t+1} = Q_t</code></pre>
+    </section>
+
+    <section>
+      <h2>10. Minimal Knobs</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Knob</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>rank r</code></td>
+            <td>Number of coordinates sent per token at each boundary.</td>
+          </tr>
+          <tr>
+            <td><code>update_cadence</code></td>
+            <td>How often to run <code>Q = orth(V)</code> on non-clean steps.</td>
+          </tr>
+          <tr>
+            <td><code>clean_cadence</code></td>
+            <td>How often to run a fully dense debiasing step.</td>
+          </tr>
+          <tr>
+            <td><code>sync_basis</code></td>
+            <td>Whether to all-reduce raw sketches before QR so all ranks share one basis.</td>
+          </tr>
+          <tr>
+            <td><code>seed</code></td>
+            <td>Base seed for deterministic per-boundary initialization.</td>
+          </tr>
+          <tr>
+            <td><code>qr_dtype</code></td>
+            <td>Precision for orthonormalization; fp32 is the practical default.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Bottom Line</h2>
+      <p>
+        The method sends <code>r</code> coordinates per token instead of <code>H</code>,
+        keeps the projection differentiable without a straight-through estimator, learns
+        the shared basis with block power iteration rather than SGD, freezes that basis
+        across paired policy forwards, and optionally inserts dense refresh steps to
+        control optimization bias.
+      </p>
+    </section>
+  </main>
+</body>
+</html>
