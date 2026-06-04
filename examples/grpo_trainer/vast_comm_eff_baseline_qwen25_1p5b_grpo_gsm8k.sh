@@ -222,6 +222,14 @@ REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}
 #    unknown keys regardless of enabled flags; that bit us on clean_cadence).
 # ---------------------------------------------------------------------------
 COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
+# --- EXP-20/M6 codec selector: dense | prf_mask | powersgd ---
+# "dense" (default) keeps the LEGACY behavior: the codec is selected by
+# COMM_EFF_MASK_ENABLED below (mask on => prf_mask), so every prior comm-eff run
+# is byte-unchanged. Set COMM_EFF_COMPRESSION_TYPE=powersgd to select the EXP-20
+# PowerSGD activation projector instead. The mask arm and the powersgd arm thus
+# call THIS SAME launcher with only the codec knobs differing (stability
+# contract — never re-type the baseline).
+COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-dense}"
 # --- activation mask ---
 COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
 COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
@@ -257,6 +265,21 @@ COMM_EFF_SPECTRAL_SVD_MODE="${COMM_EFF_SPECTRAL_SVD_MODE:-full}"
 COMM_EFF_SPECTRAL_BASIS_CACHE="${COMM_EFF_SPECTRAL_BASIS_CACHE:-cache}"
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:-4}"
 COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE="${COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE:-true}"
+# --- EXP-20/M6 PowerSGD activation compression (active iff
+#     COMM_EFF_COMPRESSION_TYPE=powersgd). Defaults = the issue VII.1 candidate:
+#     rank=102 (byte-matched to the PRF mask at p=0.95), warm block power
+#     iteration every step, compress the old-logprob recompute (=> ρ≈1),
+#     sync_basis=true (single shared consensus Q across DP ranks — REQUIRED
+#     under DP), fp32 QR (REQUIRED — bf16-QR loses orthogonality). ---
+COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-102}"               # r; 102 ≡ p=0.95 (q·H=102.4)
+COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
+COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks (same as mask)
+COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # orth(V) every N steps
+COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"  # carry Q across steps
+COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"  # project old-logprob too
+COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-reduce V across DP => single shared consensus Q (REQUIRED under DP)
+COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 REQUIRED (INF-14); bf16 diagnostic
+COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
 if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
   echo "WARN: anchor enabled -> ~3 GB clone/rank is back; prefer 8×GPU or halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432." >&2
@@ -280,7 +303,9 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense => legacy mask-by-flag)
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
+  powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS
@@ -301,6 +326,22 @@ EOF
 #     teardown). It just gives the monitor a single high-signal grep target so it
 #     does not have to re-derive the regex from the rescue-trigger list. Strict
 #     opt-in side effect: writes only into this run's own dir.
+#
+#     EXP-20 fix (CRITICAL — a clean run used to hang here forever): the old
+#     watcher ran `tail -F | grep -m1` in a backgrounded subshell and the EXIT
+#     trap killed only the SUBSHELL pid, orphaning the child `tail -F`. On a
+#     CLEAN run grep -m1 never matches, `tail -F` follows the (now-idle) log
+#     forever, the subshell never exits, and THIS SCRIPT blocks in its implicit
+#     `wait` at end-of-script — so the back-to-back sequence could never finish
+#     autonomously (GPUs idle at $/hr). Two independent guards now prevent that:
+#       (1) `tail --pid="$TRAIN_PID" -F` — the follower DIES when the training
+#           process exits (clean or crash), closing the pipe so grep hits EOF and
+#           the subshell returns; nothing is left to wait on.
+#       (2) the watcher runs in its OWN process group (setsid) and the EXIT trap
+#           kills the WHOLE group (`kill -- -$PGID`), reaping tail+grep+subshell
+#           even if (1) somehow doesn't fire.
+#     Net: the watcher never leaves a dangling follower and never blocks this
+#     script on clean completion — for EVERY cell in the sequence.
 # ---------------------------------------------------------------------------
 RUN_DIR="$(dirname "$LOG")"
 EARLY_STOP_SENTINEL="$RUN_DIR/EARLY_STOP_SIGNAL"
@@ -309,27 +350,16 @@ rm -f "$EARLY_STOP_SENTINEL"
 # spectral safety). \bnan/inf word-boundary guards avoid matching "infer"/
 # "information". The watcher is a no-op until $LOG starts filling.
 EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_params.*(error|Error|assert)|could not convert string to float|aten::copy_.*(mismatch|size)|torch\.distributed\.fsdp.*(error|Error)|(loss|grad_norm|pg_loss|policy_loss|reward)[^A-Za-z].{0,80}\b([Nn]a[Nn]|[Ii]nf)\b|\b([Nn]a[Nn]|[Ii]nf)\b.{0,40}(loss|grad_norm))'
-(
-  # Wait for the log to exist (training start), then stream-match once.
-  for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
-  # --line-buffered so the match is emitted the instant the line is written.
-  if MATCH=$(stdbuf -oL tail -n +1 -F "$LOG" 2>/dev/null | grep -m1 -nE "$EARLY_STOP_RE"); then
-    {
-      echo "EARLY_STOP_SIGNAL: matched corrupting-failure pattern in $EXPERIMENT_NAME"
-      echo "EARLY_STOP_SIGNAL: $MATCH"
-      echo "EARLY_STOP_SIGNAL: training-log-monitor should classify + recommend kill-switch for this cell."
-    } | tee -a "$LOG"
-    printf '%s\t%s\n' "$EXPERIMENT_NAME" "$MATCH" > "$EARLY_STOP_SENTINEL"
-  fi
-) &
-EARLY_STOP_WATCHER_PID=$!
-# Make sure the watcher never outlives this script (it would tail a stale log).
-trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill "$EARLY_STOP_WATCHER_PID" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # 7. Launch — reuse upstream's per-recipe script for the verbatim main_ppo
 #    invocation, overriding the OOM-relevant + comm-eff Hydra knobs. Every
 #    enabled flag comes from env so the full ablation grid is a one-liner.
+#
+#    EXP-20: launch the training in the BACKGROUND, capture its PID, start the
+#    early-stop watcher bound to that PID, then `wait` on training explicitly.
+#    The watcher self-terminates when training exits (guard 1), and the EXIT
+#    trap reaps the watcher's whole process group (guard 2).
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
@@ -357,6 +387,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
   trainer.val_before_train="$VAL_BEFORE_TRAIN" \
   actor_rollout_ref.actor.comm_eff.enabled="$COMM_EFF_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.compression_type="$COMM_EFF_COMPRESSION_TYPE" \
   actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \
   actor_rollout_ref.actor.comm_eff.mask.enabled="$COMM_EFF_MASK_ENABLED" \
   actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
@@ -377,8 +408,57 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.basis_cache="$COMM_EFF_SPECTRAL_BASIS_CACHE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
   actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.rank="$COMM_EFF_POWERSGD_RANK" \
+  actor_rollout_ref.actor.comm_eff.powersgd.seed="$COMM_EFF_POWERSGD_SEED" \
+  actor_rollout_ref.actor.comm_eff.powersgd.pp_size="$COMM_EFF_POWERSGD_PP_SIZE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.update_cadence="$COMM_EFF_POWERSGD_UPDATE_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.warm_start="$COMM_EFF_POWERSGD_WARM_START" \
+  actor_rollout_ref.actor.comm_eff.powersgd.compress_recompute="$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.sync_basis="$COMM_EFF_POWERSGD_SYNC_BASIS" \
+  actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   "$@" \
-  2>&1 | tee "$LOG"
+  > "$LOG" 2>&1 &
+TRAIN_PID=$!
+
+# EXP-20 early-stop watcher — bound to TRAIN_PID + its own process group.
+# Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or
+# crash), so grep hits EOF and the watcher subshell returns. Guard 2: setsid
+# puts the watcher in its own pgroup; the EXIT trap kills the whole group so
+# nothing dangles. The watcher only SIGNALS (sentinel + log line); the
+# monitor/runner owns teardown.
+setsid bash -c '
+  LOG="$1"; RE="$2"; EXP="$3"; SENT="$4"; TPID="$5"
+  for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
+  if MATCH=$(stdbuf -oL tail --pid="$TPID" -n +1 -F "$LOG" 2>/dev/null | grep -m1 -nE "$RE"); then
+    {
+      echo "EARLY_STOP_SIGNAL: matched corrupting-failure pattern in $EXP"
+      echo "EARLY_STOP_SIGNAL: $MATCH"
+      echo "EARLY_STOP_SIGNAL: training-log-monitor should classify + recommend kill-switch for this cell."
+    } | tee -a "$LOG"
+    printf "%s\t%s\n" "$EXP" "$MATCH" > "$SENT"
+  fi
+' _ "$LOG" "$EARLY_STOP_RE" "$EXPERIMENT_NAME" "$EARLY_STOP_SENTINEL" "$TRAIN_PID" &
+EARLY_STOP_WATCHER_PID=$!
+# Reap the watcher's WHOLE process group on exit (guard 2). setsid makes the
+# watcher a group leader, so its PGID == its PID; kill -- -PGID reaps tail+grep
+# too. `|| true` so a self-terminated watcher (guard 1 already fired) is fine.
+trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null; true' EXIT
+
+# Block on TRAINING ONLY (not the watcher) — when main_ppo finishes, we proceed
+# to done.flag immediately; the EXIT trap then reaps the watcher. `wait $PID`
+# returns the child's exit status; capture it WITHOUT tripping `set -e` (the
+# `|| TRAIN_RC=$?` keeps a non-zero training exit from aborting before we can
+# clean up the watcher + write done.flag + propagate the status).
+TRAIN_RC=0
+wait "$TRAIN_PID" || TRAIN_RC=$?
+
+# Proactively stop the watcher now that training is done (belt-and-braces with
+# the EXIT trap + guard 1), so back-to-back cells never accumulate watchers.
+kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
 
 touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
-echo "=== done at $(date -u +%FT%TZ) ==="
+echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
+# Propagate the training exit status so the EXP-20 launch.sh `run_step` sees a
+# real failure (set -e / `|| true` semantics in the driver still apply).
+exit "$TRAIN_RC"
