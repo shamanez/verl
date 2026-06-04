@@ -120,8 +120,10 @@ Crucially, **orthogonality alone does not tell us whether the correction helps**
 only that it is *not inert*. (Contrast the as-implemented spectral *reweight*, which
 is inert by orthogonality — `rel_change ≈ 0.5`, G_filt ≈ 0; see
 [[exp21-reweight-fixed-anchor]].) Whether the orthogonal stale direction is *aligned
-with the true full-rank gradient 5 steps later* is exactly what the A2/A3 reward
-curves vs. the A1 floor must answer, and it cannot be settled from geometry scalars.
+with the true full-rank gradient 5 steps later* was the open question the A2/A3
+reward curves had to settle — and they did: **it is not.** Both arms came in at the
+A1 floor ±0.005 (§8); the stale anchor carried no usable descent signal into the
+compressed step, because it lives in PowerSGD's discarded subspace.
 
 ---
 
@@ -165,15 +167,19 @@ Live findings (these supersede the smoke as the definitive geometry):
   50 steps — the phase-1 orthogonal-regime prediction (§2.2) **confirmed to 3
   decimals.** Blend deterministically shrinks the step to 0.71× because it replaces
   half of G with a scale-matched anchor orthogonal to it.
-- **New mechanistic refinement — `scale = ‖G‖/‖M‖` is SMALL (0.0002 → 0.25), i.e.
-  ‖M‖ ≫ ‖G‖.** The inject formula re-adds an *‖G‖-sized* orthogonal complement
-  (‖inj‖/‖G‖ = 1.0000), but because the raw stale anchor is much larger than the
-  live compressed grad, that complement is a *heavily down-scaled* (0.0002–0.25×)
-  copy of M — in practice a tiny, scale-suppressed orthogonal-noise direction, not
-  even the full √2 inflation the smoke's larger scales suggested. So **inject's
-  realized net effect on PowerSGD is negligible orthogonal noise** that Adam +
-  grad-clip wash out (val +0.005 = noise); blend's is a flat 0.71× step shrink that
-  trades informative live signal for orthogonal stale signal (val −0.005).
+- **Mechanistic refinement — `scale = ‖G‖/‖M‖` is SMALL (0.0002 → 0.253), i.e.
+  ‖M‖ ≫ ‖G‖** (the full-rank stale anchor is *larger*-norm than the rank-77
+  compressed grad). Inject scale-matches M *down* to ‖G‖-magnitude: the injected term
+  = `(‖G‖/‖M‖)·(M − proj_G(M)) ≈ (‖G‖/‖M‖)·M`, with magnitude ≈ ‖G‖ — so
+  `‖inj‖/‖G‖ = 1.0000` means the injected orthogonal vector is **‖G‖-sized, not tiny
+  noise.** With cos ≈ 0 ⇒ `‖G_corr‖ ≈ √2·‖G‖` in the formula. **Why A2 is still
+  inert:** the correction is applied AFTER FSDP reduction but BEFORE GRPO grad
+  clipping (§2.4), so the √2-inflated `G_corr` (grad_norm ≈ 1.3–2.57) exceeds the
+  clip threshold; clipping then scales the *whole* vector down — shrinking the useful
+  G component by ~1/√2 while spending half the clipped budget on an orthogonal stale
+  direction that adds no aligned signal. **Net: A2 ≈ floor (no aligned signal added,
+  useful step mildly diluted) — the same outcome as A3's explicit 0.71× shrink,
+  reached by a different route** (A2 val +0.005, A3 val −0.005; both noise).
 - **Circuit fired as scheduled, codec held byte-constant:** A2/A3 each logged
   `spectral_corrections=80`, `anchor_backwards=20`; A1 = 0/0; and
   `powersgd_applications=179200` is **identical across all three arms** — the
@@ -199,10 +205,17 @@ Key facts:
   missing from G's span. Inject re-adds essentially the *entire* (scale-matched)
   stale anchor as a force orthogonal to G. Corroborated by
   `rel_change = ‖G_proj − G_mask‖/‖G_mask‖ = 1.000000` on every target.
-- **Magnitude consequence (inject):** `G_corr = G + (≈equal-norm orthogonal vector)`
-  ⇒ **‖G_corr‖ ≈ √2·‖G‖ ≈ 1.41×** — undirected ~41% inflation. C1-collapse risk.
-- **`scale` swings widely (0.11 → 12.4)** because ‖M‖ and the rescaled ‖G‖ differ
-  per target/step; the scale-match is doing real normalization work.
+- **Magnitude consequence (inject):** `G_corr = G + (‖G‖-sized orthogonal vector)`
+  ⇒ ‖G_corr‖ ≈ √2·‖G‖ ≈ 1.41× — this holds in *both* smoke and live runs, because
+  inject always scale-matches the complement to ‖G‖ (‖inj‖/‖G‖ = 1.0) regardless of
+  the raw ‖M‖/‖G‖ ratio. **The live arms confirmed the √2 inflation is real but
+  benign:** it lands above the GRPO grad-clip threshold (grad_norm ≈ 1.3–2.57) and
+  clipping dilutes the useful G component by ~1/√2 while half the budget goes to an
+  orthogonal stale direction (§2.0). The failure is **direction (cos≈0), not
+  magnitude** — a magnitude cap would not supply the missing alignment.
+- **`scale` swings widely in the smoke (0.11 → 12.4)** but is uniformly *small* in the
+  live run (0.0002–0.253, ‖M‖≫‖G‖); either way the injected complement is normalized
+  to ‖G‖, so the realized inject magnitude is ‖G‖-sized in both.
 
 ### 2.2 Blend geometry — phase-1 prediction, now CONFIRMED by §2.0
 
@@ -417,7 +430,7 @@ says M is a good *drift estimate* (blend toward M̂), so a small pull onto the
 persistent drift is exactly the intended use.
 
 **PRESUMES a shared subspace — DEMOTED by the live result.** With G ⊥ M (the live
-finding), a smaller η just shrinks an already-negligible orthogonal contribution: at
+finding), a smaller η just shrinks an orthogonal, *unaligned* contribution: at
 η=0.2 instead of 0.5, A3 would scale the step to √(0.8²+0.2²)=0.82× and still add no
 aligned signal. So η∝1/K alone **cannot** fix EXP-23's failure — it is only useful
 *downstream of* Rank 1b (once the anchor is basis-aligned and cos>0, a smaller, gap-
@@ -477,13 +490,14 @@ forbid the √2 inflation. New flags: `spectral.inject_gamma_mode {fixed|adaptiv
 
 **Why the evidence supports it — and why the LIVE result largely retires it.** The
 plan flagged the MMSE-style combiner; M2PO/VCPO say cap/modulate the high-variance
-contribution. But the live data settled the smoke's open question: A2's failure was
-**direction, not magnitude.** In practice `scale = ‖G‖/‖M‖ = 0.0002–0.25` (‖M‖≫‖G‖)
-made the realized inject a *tiny, scale-suppressed orthogonal noise* vector — not the
-√2 inflation the smoke's larger scales had suggested — and it still moved val only
-+0.005 (noise). A magnitude cap addresses an inflation that did not occur and cannot
-supply the missing alignment. **Retire as a fix on its own**; an adaptive γ is only
-meaningful *after* Rank 1b makes the injected direction non-orthogonal.
+contribution. The live data settled the smoke's open question: A2's failure was
+**direction, not magnitude.** The √2 inflation *did* occur (inject scale-matches the
+complement to ‖G‖, so `‖G_corr‖ ≈ √2·‖G‖`, grad_norm ≈ 1.3–2.57), but GRPO grad
+clipping already absorbed it — clipping scaled the inflated vector down, leaving A2 at
+the floor with no aligned signal. A static magnitude cap would only do what grad-clip
+already did and **cannot supply the missing alignment.** **Retire as a fix on its
+own**; an adaptive γ is meaningful only *after* Rank 1b makes the injected direction
+non-orthogonal (so capping trades a real aligned contribution against a budget).
 
 ### Scope lever (distinct from the combiner) — raise `spectral.max_targets` beyond 4
 
@@ -503,112 +517,161 @@ broader correction. Treat coverage as a separate axis in any follow-up sweep.
 
 ## 5. How I came to these conclusions (reasoning chain)
 
-- **Geometry → "inject inflates, blend shrinks."** The smoke's measured ‖inj‖/‖G‖ =
-  1.0 and cos ≈ 0 are not estimates — they are the logged values. The Frobenius
-  identity `‖G_corr‖ = √2·‖G‖` (inject, orthogonal) and `√0.5·‖G‖` (blend, η=0.5,
-  orthogonal) follow directly. So *before any reward*, geometry predicts A2
-  destabilizes by magnitude and A3 is gentler. → motivates Rank 2 (smaller η) and
-  Rank 6 (cap inject).
-- **Async-RL bounds → "age is not the problem; η ∝ 1/K."** AReaL η≤8 lossless +
-  M2PO ≥256 + the log dropoff put K=5 deep inside the safe band. Three independent
-  staleness-correction families (A-3PO 1/d, SA-SGD 1/τ, Gap-Aware ‖Δθ‖) all
-  prescribe a *shrinking* interpolation weight. → Rank 2 is the literal translation;
-  Rank 4 (DC-ASGD) is the curvature-aware version; Rank 3 (active mask) is the
-  M2PO/VCPO "mask the outliers / control variance" idea in coord space.
-- **Linear dynamics → "M is information-rich; use it as a drift estimate, re-ground
-  periodically."** 2601.04537's cos > 0.9 across K-windows says a 5-step-stale M is
-  *aligned with the current drift* — which contradicts the smoke's cos ≈ 0 *only if*
-  one conflates "G (low-rank sketch) vs M" with "true full grad vs M." The
-  resolution: G is a *compressed* sketch, so G ⊥ M is expected (PowerSGD threw away
-  the directions M lives in — Mukherjee full-rank), while *full* grad ‖ M would still
-  be high. → This is the crux: it predicts **blend/EF (which fold M's real direction
-  back in) beat inject (which adds it orthogonally and inflates).** → Rank 1, 2, 5.
-- **RL ≠ SFT, full-rank, spectrum-preserving → "small-λ blend over big inject; keep
-  full-rank M; EF the residual."** 2511.08567 + Mukherjee jointly say: don't distort
-  the spectrum (no big inject), keep the full-rank signal (low-rank under-covers RL),
-  and the part G misses is real → must be tracked, not discarded. → Rank 1 (EF) is
-  the direct consequence; it is also the standing #21 top lever, so it ranks first.
+The chain below ran first on the smoke + literature (phase 1) and is now closed by
+the live 50-step data (phase 2). The live result did not overturn the prediction — it
+**sharpened it**: the failure is not magnitude-vs-shrink tuning, it is structural
+geometric incoherence.
+
+- **Geometry (smoke → live) → "G ⊥ M is steady-state and structural."** The logged
+  ‖inj‖/‖G‖ = 1.0 and cos ≈ 0.001 are measured values, not estimates; the Frobenius
+  identities `‖G_corr‖ = √2·‖G‖` (inject, orthogonal) and `√0.5·‖G‖` (blend, η=0.5)
+  follow directly — and the live A3 arm logged 0.7071 to 3 decimals, confirming the
+  geometry held. The live refinement: `scale = ‖G‖/‖M‖ = 0.0002–0.253` ⇒ **‖M‖≫‖G‖**,
+  but inject scale-matches the complement *down* to ‖G‖, so the injected orthogonal
+  vector is **‖G‖-sized** (not tiny noise) and `‖G_corr‖ ≈ √2·‖G‖` is real — it just
+  lands above the grad-clip threshold (grad_norm 1.3–2.57), so clipping shrinks the
+  useful G by ~1/√2 and spends half the budget on an orthogonal stale direction. **A2
+  reaches the same "≈ floor, useful step diluted, no aligned signal" outcome as A3's
+  0.71× shrink, by a different route.** cos does NOT rise past warmup ⇒ orthogonality
+  is the steady state. → This *demotes* Rank 2 (a smaller η shrinks an
+  already-orthogonal contribution) and *retires* Rank 6 (the failure is direction, not
+  a magnitude that a cap could fix) as standalone fixes.
+- **The crux — reconciling Linear-Dynamics (cos>0.9) with the measured cos≈0.** These
+  only conflict if one conflates "G (the compressed sketch) vs M" with "true full
+  grad vs M." The resolution the live data confirms: G is a *PowerSGD low-rank
+  sketch*, so it discards exactly the subspace M lives in ⇒ G ⊥ M *by construction*,
+  while *full* grad ‖ M would still be high (the trajectory really is linear). → This
+  is the load-bearing inference: **the fix must restore a shared subspace** — either
+  carry the dropped energy forward in-basis (Rank 1a, EF) or project M into the live
+  Q-basis (Rank 1b). It also says delay_K is irrelevant: a fresher M lands in the
+  same complement (confirmed — cos flat across all 50 steps).
+- **Async-RL bounds → "age is not the problem."** AReaL η≤8 lossless + M2PO ≥256 +
+  the log dropoff put K=5 deep inside the safe band; the steady-state orthogonality
+  confirms staleness is not the failure axis. The three staleness-weight families
+  (A-3PO 1/d, SA-SGD 1/τ, Gap-Aware ‖Δθ‖) still prescribe η∝1/K — but, per the live
+  result, only *after* a shared subspace exists (Rank 2 layered on Rank 1b).
+- **RL ≠ SFT, full-rank, spectrum-preserving → "EF the residual; keep M full-rank."**
+  2511.08567 + Mukherjee: don't distort the spectrum, keep the full-rank signal
+  (low-rank under-covers RL), and the part G misses is real → must be tracked, not
+  discarded. The live G⊥M is the empirical face of "low-rank under-covers RL." →
+  Rank 1a (EF) is the direct consequence and the standing #21 top lever, so it ranks
+  first; Rank 1b (basis-align) is the co-equal structural fix the live data motivated.
+- **Two dead-ends, two different root causes.** EXP-21's mask+reweight was inert by a
+  *projection-operator* collapse at cos≈0.5 (G_filt≈0, [[exp21-reweight-fixed-anchor]]);
+  EXP-23's PowerSGD+inject/blend is inert by *true geometric incoherence* at cos≈0.001
+  (~10× more orthogonal). Distinguishing these matters: the EXP-23 fix is not a better
+  operator on the same gradients (that was EXP-21's failed move) but a change to *which
+  subspace the anchor occupies*. → Rank 1a/1b, not Rank 2–6.
 - **Coverage scalars → "we only saw 4/196; raw matrices absent."** The grep + the
   `break`-at-max_targets logic prove the geometry is layer-0-attention only and
-  scalars-only. → This caps confidence in "orthogonality is model-wide" and yields
-  the *coverage* lever + the OFF-by-default debug-dump proposal, kept distinct from
-  the combiner choice.
+  scalars-only. → caps confidence in "orthogonality is model-wide" and yields the
+  *coverage* lever + the OFF-by-default debug-dump proposal, kept distinct from the
+  combiner choice.
 
 ---
 
 ## 6. Recommended follow-up issue
 
-**Title:** `EXP-24: Error-feedback PowerSGD residual + staleness-aware blend (η∝1/K)
-— the named #21 top lever, gated and OFF by default`
+**Title:** `EXP-24: Error-feedback on the PowerSGD residual (+ basis-aligned anchor)
+— remove the G⊥M incoherence EXP-23 exposed; gated, OFF by default`
 
-**Plan seed (one paragraph).** Add an OFF-by-default error-feedback path to the
-PowerSGD boundary codec: a per-matrix FP32 residual buffer `e` accumulating
-`G_full − G_compressed`, applied as `G_step = G_compressed + decay·e` and flushed /
-re-grounded against the stale full-rank anchor M every K steps
-(`comm_eff.error_feedback.{enabled,decay,flush_cadence}`, default off ⇒
-byte-identical to current). In the same cycle, replace A3's fixed blend η with a
-staleness-aware schedule `η = c/K` (and an `inv_gap` variant weighting by measured
-‖θ_t − θ_{t−K}‖), so the convex-blend operator that the literature endorses is run at
-the prescribed ≈0.2 rather than 0.5. Arms on the FIXED control surface
-([[fixed-control-surface-gsm8k]]): **B1** = A1 floor (PowerSGD r=77, no refresh, no
-EF) for byte-parity, **B2** = EF-only, **B3** = EF + blend(η=1/K). Gate on EF-only ≥
-A1 floor (proves EF alone recovers residual reward) and EF+blend ≥ EF-only (proves
-the stale-anchor drift adds on top). Carry the OFF-by-default `spectral.debug_dump`
+**Plan seed (one paragraph).** EXP-23 falsified the stale full-rank anchor on
+PowerSGD because the compressed live grad G is ~orthogonal to the stale anchor M
+(cos≈0.001, steady-state) — PowerSGD r=77 discards exactly the subspace M occupies,
+so neither inject (a ‖G‖-sized orthogonal add that grad-clip then dilutes ~1/√2) nor
+blend (flat 0.71× step shrink) can carry M's descent information into the live step. EXP-24 attacks that
+incoherence at its source. Add an OFF-by-default error-feedback path to the PowerSGD
+boundary codec: a per-matrix FP32 residual buffer `e` accumulating the *dropped*
+energy `G_full − decompress(compress(G_full))`, applied as
+`G_step = G_compressed + decay·e` (`comm_eff.error_feedback.{enabled,decay}`, default
+off ⇒ byte-identical to current — the standard provably-convergent PowerSGD EF). Add
+an OFF-by-default basis-aligned anchor (`comm_eff.anchor.basis_align=q_project`) that
+projects the stale full-rank M into the live PowerSGD Q-basis so the anchor and live
+step share a subspace by construction; only with basis-alignment does a
+staleness-aware blend `η=c/K` become meaningful (layer it on, not standalone). Arms
+on the FIXED control surface ([[fixed-control-surface-gsm8k]]): **B1** = A1 floor
+(PowerSGD r=77, no refresh, no EF) for byte-parity, **B2** = EF-only, **B3** = EF +
+basis-aligned anchor blend(η=1/K). Gate on EF-only ≥ A1 floor (proves EF alone
+recovers the dropped-residual reward — the #21 top lever) and B3 ≥ B2 (proves the
+basis-aligned stale drift adds on top). Carry the OFF-by-default `spectral.debug_dump`
 (§2.4) to capture per-target SVD spectra on step 0, and a coverage knob
-(`max_targets`, MLP/deep-layer) as a *separate* secondary axis — measure cos(G,M) on
-MLP/deep layers before paying to correct them. Keep all anchor-OOM guards
-(18432 tok/gpu, `ema_device=cpu`).
+(`max_targets`, MLP/deep-layer) as a *separate* secondary axis — first measure
+cos(G,M) on MLP/deep layers to confirm the orthogonality is model-wide. Keep all
+anchor-OOM guards (18432 tok/gpu, `ema_device=cpu`).
 
 ---
 
 ## 7. Summary table — the alternatives at a glance
 
-| Rank | Method | New flag(s) (default OFF) | Primary evidence | Addresses |
+Ranks reflect the FALSIFIED live result: **1a/1b ATTACK the G⊥M incoherence** (the
+proven root cause); 2–6 **presume a shared subspace** and only help layered on 1a/1b.
+
+| Rank | Method | New flag(s) (default OFF) | Primary evidence | Status vs live result |
 |---|---|---|---|---|
-| 1 | Error-feedback on PowerSGD residual | `error_feedback.{enabled,decay,flush_cadence}` | #21 top lever; 2602.03839 (PULSELoCo EF); Mukherjee full-rank | residual loss + spectrum-gentle |
-| 2 | Staleness-aware blend η∝1/K | `blend_eta_mode {fixed\|inv_k\|inv_gap}` | A-3PO 1/d; SA-SGD 1/τ; Gap-Aware ‖Δθ‖; 2511.08567 small-λ | over-weighted A3 |
-| 3 | Active-subnetwork-masked correction | `active_mask {none\|topk\|union}` | Mukherjee ~60% subnet; OPD/Yuan important-not-redundant; M2PO outlier mask | stale/live drift mismatch |
-| 4 | DC-ASGD curvature re-anchor of M | `anchor.dc_lambda` (0 ⇒ current) | DC-ASGD 1609.08326 | re-point stale M to θ_t |
-| 5 | Relax anchor cadence (re-ground 10–50) | sweep `anchor.cadence`,`delay_K` | 2601.04537 6.1× re-grounding | cost (fewer full-rank anchors) |
-| 6 | Magnitude-capped adaptive inject | `inject_gamma_mode {fixed\|adaptive}`,`inject_norm_cap` | plan MMSE combiner; M2PO/VCPO variance ctrl | salvage A2 if magnitude-only |
-| — | Coverage: raise `max_targets` / add MLP+deep | `spectral.max_targets`, `target_substr`; `debug_dump` | smoke 4/196 coverage gap | scope, not combiner |
+| **1a** | Error-feedback on PowerSGD residual | `error_feedback.{enabled,decay}` | #21 top lever; 2602.03839 (PULSELoCo EF); Mukherjee full-rank; live G⊥M | **top fix** — carries dropped energy forward in-basis |
+| **1b** | Basis-aligned anchor (project M into Q) | `anchor.basis_align {none\|q_project}` | live cos≈0.001 = M in PowerSGD complement; grad-empirics §8 | **co-top fix** — forces shared subspace by construction |
+| 2 | Staleness-aware blend η∝1/K | `blend_eta_mode {fixed\|inv_k\|inv_gap}` | A-3PO 1/d; SA-SGD 1/τ; Gap-Aware ‖Δθ‖; 2511.08567 small-λ | demoted — needs 1b first (else shrinks orthogonal noise) |
+| 3 | Active-subnetwork-masked correction | `active_mask {none\|topk\|union}` | Mukherjee ~60% subnet; OPD/Yuan; M2PO outlier mask | layered on 1a/1b |
+| 4 | DC-ASGD curvature re-anchor of M | `anchor.dc_lambda` (0 ⇒ current) | DC-ASGD 1609.08326 | re-points M but not into Q — pairs with 1b |
+| 5 | Relax anchor cadence (re-ground 10–50) | sweep `anchor.cadence`,`delay_K` | 2601.04537 6.1× re-grounding | cost lever; delay_K confirmed NOT the failure axis |
+| 6 | Magnitude-capped adaptive inject | `inject_gamma_mode {fixed\|adaptive}`,`inject_norm_cap` | plan MMSE combiner; M2PO/VCPO | retired — failure was direction not magnitude; grad-clip already absorbed the √2 inflation |
+| — | Coverage: raise `max_targets` / add MLP+deep | `spectral.max_targets`, `target_substr`; `debug_dump` | live 4/196 coverage gap | scope, not combiner; confirm orthogonality is model-wide |
 
 ---
 
-## 8. A2/A3 EMPIRICAL OUTCOME — PENDING (finalize after arms complete, ~2–4 h)
+## 8. A2/A3 EMPIRICAL OUTCOME — FINAL (hypothesis FALSIFIED, verdict STOP)
 
-The A2/A3 50-step reward curves and live per-layer geometry are **not yet
-available** (A1 at step 3/50 as of 12:41Z; A2/A3 not started; full run ≈5–7 h). This
-report's recommendation **conditions on that outcome** as follows:
+All three arms ran to step 50; the box is torn down; logs are on disk. **The
+"A2 AND A3 both fail" branch fired** — so the conditioning resolves to the binding
+next-lever path below.
 
-- **A2 AND A3 both fail** (neither beats the A1 floor): the pre-registered prediction
-  is confirmed and this section becomes the **binding next-lever readout**. Proceed
-  with **Rank 1 (error-feedback)** as the top lever — it is independently the #21 top
-  lever and the named fix in 2602.03839 — combined with **Rank 2 (η∝1/K)**. File the
-  EXP-24 issue (§6). The failure is attributed to the *combine* (orthogonal
-  inject/over-weighted blend), not to K=5 age, per the literature.
+| arm | refresh | val@50 | Δ vs A1 floor | reading |
+|---|---|---|---|---|
+| A1 no-refresh (floor) | none | 0.6914 | — | PowerSGD r=77 baseline |
+| A2 stale inject (γ=1.0) | stale_inject | 0.6967 | +0.0053 | INERT (within GSM8K noise) |
+| A3 stale blend (η=0.5) | stale_blend | 0.6861 | −0.0053 | INERT (slightly below floor) |
 
-- **A3 (blend) PASSES, A2 (inject) fails:** the blend operator is validated and the
-  prediction holds (blend > inject, as both geometry and literature said). Prefer the
-  **Rank 2 refinement (η∝1/K ≈ 0.2)** to see if a *smaller* blend does as well or
-  better at lower cost / less live-signal displacement; A2's inject is shelved
-  (confirmed √2-inflation failure) unless Rank 6's capped-adaptive inject is wanted as
-  a curiosity. Error-feedback (Rank 1) still recommended as an additive on top.
+`max(A2, A3) = 0.6967 ≤ falsify line 0.7114` (PASS bar 0.7414; A0 fresh-clean
+ref 0.7415, dense 0.7536) ⇒ **FALSIFIED.** The PowerSGD codec was held
+byte-constant across arms (`powersgd_applications=179200` identical), and the
+correction circuit fired as scheduled (A2/A3 `spectral_corrections=80`,
+`anchor_backwards=20`; A1 0/0), so this is a clean negative, not a plumbing failure.
 
-- **A2 (inject) PASSES:** inject *surprised us* — the orthogonal stale direction was a
-  real descent direction despite the magnitude inflation, and RLVR tolerated the √2
-  step. Revisit the spectrum-distortion worry (2511.08567) empirically: dump the SVD
-  spectra (§2.4 debug-dump) to see whether the inject preserved or rotated the
-  principal subspace, and check whether the win survives at scale / later in training
-  (2601.04537 late-stage non-linearity). Re-rank: a *capped* adaptive inject (Rank 6)
-  would then likely dominate plain γ=1.
+**Why it failed (settled, not hypothesized).** cos(G, M_anchor) ≈ 0.001 on every
+target and every one of the 50 steps in *both* arms — steady-state near-orthogonality
+that did not rise past the delay_K=5 warmup. The stale full-rank anchor lives in the
+subspace PowerSGD r=77 *discards*, so neither operator carries M's descent
+information into the live step. The two operators reach the same null by different
+routes:
+- **A3 blend (η=0.5):** `‖G_corr‖/‖G‖ = 0.7071` exactly (= √0.5) — a deterministic
+  0.71× step shrink that trades half the informative live grad for half an orthogonal,
+  uninformative stale one.
+- **A2 inject (γ=1.0):** `scale = ‖G‖/‖M‖ = 0.0002–0.253` ⇒ **‖M‖ ≫ ‖G‖**, but inject
+  scale-matches the complement *down* to ‖G‖ (`‖inj‖/‖G‖ = 1.0`), so it adds a
+  **‖G‖-sized orthogonal vector** (not tiny noise) ⇒ `‖G_corr‖ ≈ √2·‖G‖`. Because the
+  correction lands BEFORE GRPO grad clipping, the √2-inflated grad (grad_norm
+  ≈ 1.3–2.57) exceeds the clip threshold; clipping scales the whole vector down,
+  shrinking the useful G component by ~1/√2 while half the clipped budget is spent on
+  an orthogonal stale direction. Net ≈ A3's outcome: no aligned signal added, useful
+  step mildly diluted.
 
-- **Live-geometry checks to append at finalize** (from the A2/A3 logs): (i) does cos(G,
-  M) stay ≈0 past PowerSGD warmup (step 1 `reconstruction_rel_error` 0.976→0.024)? a
-  rising cos would mean the sketch starts covering M and changes the inject/blend
-  math; (ii) A3's actual `‖G_corr‖/‖G‖` vs. the predicted 0.7071; (iii) whether the
-  inject/blend steps (5,10,…,50) coincide with reward jumps or drops vs. the A1 floor;
-  (iv) effective rank / ESS of the combined update at the correction steps (VCPO).
+The phase-1 prediction from geometry + literature is confirmed; the mechanism is
+**structural geometric incoherence (G ⊥ M by construction), not combiner tuning and
+not K=5 staleness.** (See §0, §2.0, §5.)
+
+**Binding next lever.** Pursue **Rank 1a (error-feedback on the PowerSGD residual)**
+and **Rank 1b (basis-aligned anchor)** — the only two levers that remove the
+incoherence at its source — ideally together (EF keeps the dropped energy alive
+across steps; basis-alignment lands the periodic full-rank anchor in a usable
+subspace). Layer **Rank 2 (η∝1/K)** on top *only after* 1b restores a shared
+subspace. **Do NOT** re-run inject/blend at other γ/η (Rank 6 retired; Rank 2
+standalone demoted) and **do NOT** chase delay_K — the live data shows a fresher
+anchor lands in the same orthogonal complement. File the EXP-24 issue (§6).
+
+**Self-consistency with the STOP verdict:** this report is referenced by
+`runs/EXP-23/verdict.md` as the binding next lever; the STOP applies to the
+*stale-anchor-on-PowerSGD* mechanism as implemented, and the forward path (EXP-24
+EF + basis-align) is the continuation, not a reopening of EXP-23.
 
 ---
 
