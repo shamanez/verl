@@ -226,9 +226,10 @@
       <span class="tag">Logic-only review note</span>
       <h1>PowerSGD-Style Activation Compression</h1>
       <p class="subtitle">
-        A lightweight implementation summary of a low-rank activation codec for pipeline-boundary
-        tensors. This version keeps only the algorithmic logic and omits project-specific files,
-        wiring, and experiment details.
+        A lightweight implementation summary of a low-rank activation codec for tensors
+        passed between model segments. PowerSGD means Power Stochastic Gradient Descent
+        style low-rank projection logic. This version keeps only the algorithmic logic
+        and omits project-specific files, wiring, and experiment details.
       </p>
     </header>
 
@@ -250,6 +251,81 @@
         The basis <code>Q</code> is a shared codebook, so it does not need to be sent with
         every activation.
       </p>
+      <h3>Symbol key</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>M</code></td>
+            <td>The dense activation matrix produced by the previous model segment.</td>
+          </tr>
+          <tr>
+            <td><code>N</code></td>
+            <td>The number of tokens in the current activation batch.</td>
+          </tr>
+          <tr>
+            <td><code>H</code></td>
+            <td>The hidden dimension, meaning the number of activation features per token.</td>
+          </tr>
+          <tr>
+            <td><code>r</code></td>
+            <td>The compression rank, meaning the number of coordinates kept per token.</td>
+          </tr>
+          <tr>
+            <td><code>Q</code></td>
+            <td>The shared orthonormal basis. Orthonormal means <code>Q.T @ Q = I</code>.</td>
+          </tr>
+          <tr>
+            <td><code>I</code></td>
+            <td>The identity matrix, which leaves a vector unchanged when multiplied by it.</td>
+          </tr>
+          <tr>
+            <td><code>Y</code></td>
+            <td>The compressed coordinate matrix that is sent across the boundary.</td>
+          </tr>
+          <tr>
+            <td><code>M_hat</code></td>
+            <td>The reconstructed low-rank approximation of the dense activation matrix.</td>
+          </tr>
+          <tr>
+            <td><code>.T</code></td>
+            <td>Matrix transpose, meaning rows and columns are swapped.</td>
+          </tr>
+          <tr>
+            <td><code>A</code></td>
+            <td>The raw random matrix used before orthonormalizing the initial basis.</td>
+          </tr>
+          <tr>
+            <td><code>V</code></td>
+            <td>The sketch accumulator used to update the basis after the backward pass.</td>
+          </tr>
+          <tr>
+            <td><code>C_step</code></td>
+            <td>The activation Gram matrix for one training step. It summarizes feature correlations in the activations.</td>
+          </tr>
+          <tr>
+            <td><code>t</code></td>
+            <td>The current training step index, so <code>Q_t</code> means the basis used during step <code>t</code>.</td>
+          </tr>
+          <tr>
+            <td><code>k</code></td>
+            <td>The dense refresh interval, meaning compression is disabled every <code>k</code> steps.</td>
+          </tr>
+          <tr>
+            <td><code>i</code></td>
+            <td>A data-parallel rank index, meaning one worker among the parallel training workers.</td>
+          </tr>
+          <tr>
+            <td><code>||X||</code></td>
+            <td>The size of matrix <code>X</code> using the Frobenius norm, meaning the square root of the sum of squared entries.</td>
+          </tr>
+        </tbody>
+      </table>
       <div class="note invariant">
         <strong>Main invariant:</strong> if <code>Q.T @ Q = I</code>, then
         <code>Q @ Q.T</code> is an idempotent projection matrix. The forward pass and
@@ -263,9 +339,9 @@
         The basis <code>Q</code> is treated as a frozen buffer, not a trainable parameter.
         The activation <code>M</code> remains inside the computation graph.
       </p>
-      <pre><code>q = stop_gradient(Q)
-Y = M @ q
-M_hat = Y @ q.T</code></pre>
+      <pre><code>frozen_basis = stop_gradient(Q)
+Y = M @ frozen_basis
+M_hat = Y @ frozen_basis.T</code></pre>
       <p>
         No straight-through estimator is needed. The normal autograd gradient is exactly
         the projected upstream gradient:
@@ -273,6 +349,12 @@ M_hat = Y @ q.T</code></pre>
       <div class="formula">
         <code>dL/dM = (dL/dM_hat) @ Q @ Q.T</code>
       </div>
+      <p>
+        In this expression, <code>L</code> means the training loss,
+        <code>dL/dM</code> means the gradient of the loss with respect to the dense
+        activation matrix, and <code>dL/dM_hat</code> means the upstream gradient with
+        respect to the reconstructed activation.
+      </p>
       <p>
         This means the method optimizes through the compressed activation that the next
         segment actually receives, rather than pretending the dense activation was used.
@@ -283,15 +365,16 @@ M_hat = Y @ q.T</code></pre>
       <h2>3. Basis Initialization</h2>
       <p>
         Each boundary gets a deterministic starting basis. The basis is drawn from a
-        seeded Gaussian matrix and orthonormalized in fp32.
+        seeded Gaussian matrix and orthonormalized in 32-bit floating-point precision.
       </p>
       <pre><code>seed_boundary = hash(base_seed, boundary_index)
-A = randn(H, r, seed=seed_boundary, dtype=fp32)
-Q = orthonormalize(A)  # fp32 QR with deterministic sign handling</code></pre>
+A = random_normal_matrix(H, r, seed=seed_boundary, data_type=float32)
+Q = orthonormalize(A)  # 32-bit floating-point QR decomposition with deterministic sign handling</code></pre>
       <ul>
         <li>Drawing from a deterministic seed lets both sides reproduce the same initial <code>Q</code>.</li>
-        <li>Orthonormalization is done in fp32 to avoid losing orthogonality.</li>
-        <li>If QR produces a degenerate or non-finite column, replace it with a deterministic random complement and re-orthonormalize.</li>
+        <li>Orthonormalization is done in 32-bit floating-point precision to avoid losing orthogonality.</li>
+        <li>QR decomposition is the matrix factorization used here to turn a raw random matrix into an orthonormal basis.</li>
+        <li>If QR decomposition produces a degenerate or non-finite column, replace it with a deterministic random complement and re-orthonormalize.</li>
         <li>The basis persists across steps; it is warm-started rather than recreated every forward pass.</li>
       </ul>
     </section>
@@ -311,8 +394,13 @@ Q = orthonormalize(A)  # fp32 QR with deterministic sign handling</code></pre>
         Accumulating over micro-batches gives:
       </p>
       <div class="formula">
-        <code>V = sum_mb M_mb.T @ M_mb @ Q = C_step @ Q</code>
+        <code>V = sum_over_micro_batches M_micro_batch.T @ M_micro_batch @ Q = C_step @ Q</code>
       </div>
+      <p>
+        Here <code>M_micro_batch</code> is the activation matrix for one micro-batch.
+        A Gram matrix summarizes feature correlations by multiplying activations by
+        their transpose.
+      </p>
       <h3>After backward</h3>
       <p>
         Orthonormalize the accumulated sketch:
@@ -323,7 +411,7 @@ clear V</code></pre>
         This is one block power iteration step:
       </p>
       <div class="formula">
-        <code>Q_{t+1} = orth(C_step @ Q_t)</code>
+        <code>Q_{t+1} = orthonormalize(C_step @ Q_t)</code>
       </div>
       <p>
         Repeating this drives <code>Q</code> toward the top rank-<code>r</code>
@@ -347,10 +435,19 @@ clear V</code></pre>
         <code>V_i = C_i @ Q</code>
       </div>
       <p>
-        To keep one shared basis, reduce the raw sketches before QR:
+        The subscript <code>i</code> means one data-parallel rank. <code>C_i</code> is
+        that rank's local activation Gram matrix, and <code>V_i</code> is that rank's
+        local sketch accumulator.
+      </p>
+      <p>
+        To keep one shared basis, reduce the raw sketches before QR decomposition:
       </p>
       <pre><code>V_global = all_reduce_sum(V_i)
 Q_next = orthonormalize(V_global)</code></pre>
+      <p>
+        An all-reduce sum means every data-parallel rank contributes its local sketch,
+        all sketches are summed together, and every rank receives the same summed result.
+      </p>
       <p>
         Reducing <code>V</code> is mathematically meaningful because:
       </p>
@@ -358,7 +455,7 @@ Q_next = orthonormalize(V_global)</code></pre>
         <code>sum_i V_i = (sum_i C_i) @ Q</code>
       </div>
       <ul>
-        <li>Use a sum, not an average; QR is scale-invariant.</li>
+        <li>Use a sum, not an average; QR decomposition is scale-invariant, so multiplying the whole sketch by a constant does not change the resulting basis.</li>
         <li>Reduce the raw sketch, not already-orthonormalized per-rank bases.</li>
         <li>Run collectives in the same boundary order on every rank.</li>
         <li>If a rank has no data for a boundary, contribute zeros so collective ordering remains identical.</li>
@@ -372,11 +469,18 @@ Q_next = orthonormalize(V_global)</code></pre>
         both forwards must use the same frozen basis <code>Q_t</code> for the entire
         global step.
       </p>
+      <div class="note invariant">
+        <strong>Self-consistency rule:</strong> on compressed steps, the old-policy
+        recompute should also use the compression operator <code>Q_t @ Q_t.T</code>.
+        This makes the old-policy denominator and the train-policy numerator evaluate
+        under the same projection. On dense refresh steps, both forwards are dense.
+      </div>
       <div class="grid">
         <div class="box">
           <strong>Old-policy recompute</strong>
-          Use <code>Q_t</code>. Do not accumulate the sketch if this forward is under
-          no-gradient mode.
+          On compressed steps, use <code>Q_t</code> and compute
+          <code>M_hat = (M @ Q_t) @ Q_t.T</code>. Do not accumulate the sketch because
+          this forward is under no-gradient mode.
         </div>
         <div class="box">
           <strong>Training forward/backward</strong>
@@ -387,7 +491,9 @@ Q_next = orthonormalize(V_global)</code></pre>
       <p>
         Updating the basis between these two forwards would change the projection
         operator and create a spurious importance-ratio shift unrelated to policy
-        parameter changes.
+        parameter changes. Running the old-policy recompute dense while the training
+        forward is compressed is a deliberate ablation setting, not the default
+        self-consistent path.
       </p>
     </section>
 
@@ -395,8 +501,10 @@ Q_next = orthonormalize(V_global)</code></pre>
       <h2>7. Dense Refresh Cadence</h2>
       <p>
         Every <code>k</code> steps, optionally disable compression for the full step.
+        Here <code>k</code> is the clean-cadence value chosen for the run.
       </p>
-      <pre><code>is_clean_step = clean_cadence &gt; 0 and step % clean_cadence == 0</code></pre>
+      <pre><code>is_clean_step = dense_refresh_cadence &gt; 0
+                and step_index is divisible by dense_refresh_cadence</code></pre>
       <p>On a clean step:</p>
       <ul>
         <li>Run both relevant forwards with dense activations.</li>
@@ -413,8 +521,8 @@ Q_next = orthonormalize(V_global)</code></pre>
     <section>
       <h2>8. Numerics</h2>
       <ul>
-        <li>Store and orthonormalize <code>Q</code> in fp32.</li>
-        <li>Cast <code>Q</code> to the activation dtype for the projection matmuls if needed.</li>
+        <li>Store and orthonormalize <code>Q</code> in 32-bit floating-point precision.</li>
+        <li>Cast <code>Q</code> to the activation data type for the projection matrix multiplications if needed.</li>
         <li>Track <code>Q.T @ Q</code> health; the condition number should stay near 1.</li>
         <li>Track reconstruction error <code>||M - M_hat|| / ||M||</code>; this measures whether the learned subspace is useful.</li>
         <li>If a normalization layer immediately follows the boundary, projection-induced norm shrink is usually absorbed by that normalization. Otherwise, rescaling may need separate validation.</li>
@@ -422,26 +530,133 @@ Q_next = orthonormalize(V_global)</code></pre>
     </section>
 
     <section>
-      <h2>9. One-Step Lifecycle</h2>
-      <pre><code># Step t
+      <h2>9. Metrics to Report</h2>
+      <p>
+        These are the main measurements to show when reviewing whether the compression
+        logic is behaving correctly. Each metric should be reported per training step,
+        and boundary-specific versions are useful when one boundary behaves differently
+        from the others.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric name</th>
+            <th>What it measures</th>
+            <th>How to read it</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Basis condition number</td>
+            <td>
+              The largest singular value of <code>Q</code> divided by the smallest
+              singular value of <code>Q</code>. A singular value measures how much a
+              matrix stretches a direction.
+            </td>
+            <td>
+              It should be close to <code>1</code>. Close to <code>1</code> means the
+              basis columns are well orthonormalized. A very large or non-finite value
+              means the basis may have collapsed numerically.
+            </td>
+          </tr>
+          <tr>
+            <td>Reconstruction relative error</td>
+            <td>
+              The size of the reconstruction error divided by the size of the original
+              activation: <code>||M - M_hat|| / ||M||</code>.
+            </td>
+            <td>
+              Lower is better. This is the main quality metric because it tells how much
+              activation information is lost by the rank-<code>r</code> projection.
+            </td>
+          </tr>
+          <tr>
+            <td>Cross-rank basis disagreement</td>
+            <td>
+              The relative difference between the basis <code>Q</code> stored on
+              different data-parallel ranks.
+            </td>
+            <td>
+              It should be close to <code>0</code>. A value near <code>0</code> means all
+              ranks are using the same shared codebook. A larger value means the
+              all-reduce or update ordering is not keeping the bases synchronized.
+            </td>
+          </tr>
+          <tr>
+            <td>Logical boundary payload</td>
+            <td>
+              The number of compressed coordinates sent per token at each boundary. For
+              this method, the payload is the compression rank <code>r</code>.
+            </td>
+            <td>
+              Smaller values reduce communication but usually increase reconstruction
+              error. This metric states the communication budget being tested.
+            </td>
+          </tr>
+          <tr>
+            <td>Basis update count</td>
+            <td>
+              The number of times the algorithm has updated <code>Q</code> using
+              <code>Q_next = orthonormalize(V)</code>.
+            </td>
+            <td>
+              It should increase on non-clean steps when an update is due. If it does
+              not increase, the basis is not learning from activations.
+            </td>
+          </tr>
+          <tr>
+            <td>Dense refresh count</td>
+            <td>
+              The number of clean steps where compression was disabled and the dense
+              activation path was used.
+            </td>
+            <td>
+              It should match the chosen clean cadence. This confirms the optimizer is
+              periodically receiving an exact dense gradient.
+            </td>
+          </tr>
+          <tr>
+            <td>Sketch norm</td>
+            <td>
+              The size of the sketch accumulator <code>V</code> before it is
+              orthonormalized.
+            </td>
+            <td>
+              It should be finite and nonzero on update steps. A zero or non-finite
+              value means the update input is missing or numerically invalid.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>10. One-Step Lifecycle</h2>
+      <pre><code># Training step t, where t is the current step index
 Q = Q_t
 
-old_policy_forward:
-    optionally use M_hat = (M @ Q) @ Q.T
+old policy forward:
+    if this is a compressed step, use M_hat = (M @ Q) @ Q.T
+    if this is a dense refresh step, use the dense activation M
     do not update Q
-    do not accumulate V if no_grad
+    do not accumulate V if the forward is in no-gradient mode
 
-training_forward_backward:
-    use the same Q_t
-    forward sends Y = M @ Q and reconstructs M_hat = Y @ Q.T
-    off-graph accumulate V += M.T @ (M @ Q)
-    backward sees projected gradient dL/dM = upstream @ Q @ Q.T
+training forward and backward:
+    use the same Q_t on compressed steps
+    use the dense activation M on dense refresh steps
+    if this is a compressed step:
+        forward sends Y = M @ Q and reconstructs M_hat = Y @ Q.T
+        accumulate V += M.T @ (M @ Q) without recording gradients
+        backward sees projected gradient dL/dM = upstream @ Q @ Q.T
+    if this is a dense refresh step:
+        use the normal dense forward and dense gradient
+        do not accumulate V
 
-optimizer_step:
+optimizer step:
     update model parameters
 
-post_backward:
-    if not clean_step and update_due:
+after backward:
+    if this is not a clean step and the basis update is due:
         V = all_reduce_sum(V) if using data parallel consensus
         Q_{t+1} = orthonormalize(V)
         clear V
@@ -450,7 +665,7 @@ post_backward:
     </section>
 
     <section>
-      <h2>10. Minimal Knobs</h2>
+      <h2>11. Minimal Knobs</h2>
       <table>
         <thead>
           <tr>
@@ -460,28 +675,36 @@ post_backward:
         </thead>
         <tbody>
           <tr>
-            <td><code>rank r</code></td>
+            <td>Compression rank</td>
             <td>Number of coordinates sent per token at each boundary.</td>
           </tr>
           <tr>
-            <td><code>update_cadence</code></td>
-            <td>How often to run <code>Q = orth(V)</code> on non-clean steps.</td>
+            <td>Basis update cadence</td>
+            <td>How often to run <code>Q = orthonormalize(V)</code> on non-clean steps.</td>
           </tr>
           <tr>
-            <td><code>clean_cadence</code></td>
+            <td>Dense refresh cadence</td>
             <td>How often to run a fully dense debiasing step.</td>
           </tr>
           <tr>
-            <td><code>sync_basis</code></td>
-            <td>Whether to all-reduce raw sketches before QR so all ranks share one basis.</td>
+            <td>Old-policy recompute compression</td>
+            <td>
+              Whether the old-policy recompute uses the same projection as the
+              training forward on compressed steps. Keep this enabled for the
+              self-consistent policy-gradient ratio.
+            </td>
           </tr>
           <tr>
-            <td><code>seed</code></td>
+            <td>Basis synchronization</td>
+            <td>Whether to all-reduce raw sketches before QR decomposition so all ranks share one basis.</td>
+          </tr>
+          <tr>
+            <td>Initialization seed</td>
             <td>Base seed for deterministic per-boundary initialization.</td>
           </tr>
           <tr>
-            <td><code>qr_dtype</code></td>
-            <td>Precision for orthonormalization; fp32 is the practical default.</td>
+            <td>Orthonormalization precision</td>
+            <td>Precision for orthonormalization; 32-bit floating-point precision is the practical default.</td>
           </tr>
         </tbody>
       </table>
@@ -492,9 +715,9 @@ post_backward:
       <p>
         The method sends <code>r</code> coordinates per token instead of <code>H</code>,
         keeps the projection differentiable without a straight-through estimator, learns
-        the shared basis with block power iteration rather than SGD, freezes that basis
-        across paired policy forwards, and optionally inserts dense refresh steps to
-        control optimization bias.
+        the shared basis with block power iteration rather than gradient descent, freezes
+        that basis across paired policy forwards, and optionally inserts dense refresh
+        steps to control optimization bias.
       </p>
     </section>
   </main>
