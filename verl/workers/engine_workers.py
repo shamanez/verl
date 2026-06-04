@@ -685,6 +685,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
+                # EXP-20/M6: PowerSGD compress_recompute. When the powersgd codec
+                # is active and compress_recompute=true, the old-logprob recompute
+                # is ALSO projected through the SAME frozen Q_t as the train
+                # forward, so both gradient-feeding forwards agree ⇒ ρ≈1 (INF-17).
+                # The recompute runs forward_only (no_grad) so it folds NOTHING
+                # into the basis sketch V (the compressor's _should_accumulate
+                # gate requires grad-enabled). Suppressed on a clean step (both
+                # forwards dense). compress_recompute=false leaves the recompute
+                # dense (the IS-ratio denominator is the dense old-logprob).
+                ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
+                ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
+                if (
+                    not clean_step
+                    and getattr(comm_eff_state, "powersgd", None) is not None
+                    and ps_recompute
+                ):
+                    prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
+                    comm_eff_state.mask_active = True
+                    stamped_mask_active = True
             # Stamp the stable per-row id so the masked old-logprob recompute keys
             # each token's per-element mask on the SAME (sample_id, position_id) as
             # the actor-train forward (no-op when disabled / no masker).
@@ -729,6 +748,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     state.build(getattr(engine, "module", None))
                     object.__setattr__(engine, "_comm_eff_state", state)
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
+                    # EXP-20: bind the actor's DATA-PARALLEL group to the PowerSGD
+                    # compressor so the basis-consensus all-reduce pools the
+                    # sketch over exactly the DP ranks (not blindly the world).
+                    # For this actor world==DP (SP=1, no TP/PP in the training
+                    # mesh), so this equals the default group — but binding it
+                    # explicitly is the correctness safeguard if a future config
+                    # adds a TP/PP dim. get_data_parallel_group() is the engine's
+                    # DP process group (the same group the loss-norm all_reduce
+                    # uses in _forward_backward_batch_inner).
+                    powersgd = getattr(state, "powersgd", None)
+                    if powersgd is not None and hasattr(engine, "get_data_parallel_group"):
+                        try:
+                            dp_group = engine.get_data_parallel_group()
+                            powersgd.set_dp_group(dp_group)
+                            try:
+                                import torch.distributed as _dist
+
+                                ws = _dist.get_world_size()
+                                dp_ws = _dist.get_world_size(group=dp_group) if dp_group is not None else ws
+                                logger.info(
+                                    "comm_eff.powersgd: basis sync bound to DP group "
+                                    "(dp_world_size=%s, global_world_size=%s, sync_basis=%s)",
+                                    dp_ws,
+                                    ws,
+                                    getattr(powersgd, "sync_basis", None),
+                                )
+                                print(
+                                    f"[comm_eff][EXP-20] basis-sync DP group: dp_world_size={dp_ws} "
+                                    f"global_world_size={ws} sync_basis={getattr(powersgd, 'sync_basis', None)}",
+                                    flush=True,
+                                )
+                            except Exception:  # pragma: no cover - logging only
+                                pass
+                        except Exception as e:  # pragma: no cover - defensive
+                            logger.warning("comm_eff.powersgd: could not bind DP group (%s); using world group", e)
         return getattr(self, "_comm_eff_state", None)
 
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
@@ -875,6 +929,47 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
                 comm_eff_state.set_path_tag(None)
+                # EXP-20/M6: PowerSGD block-power-iteration basis update. Runs
+                # ONCE per trainer step, AFTER all PPO mini-batch forwards/backwards
+                # of this update_actor have run (so the sketch V has folded in
+                # every gradient-bearing actor-train forward) and AFTER the
+                # gradient-bearing work (so Q was frozen for both paired GRPO
+                # forwards this step — INF-17). Sets Q_t -> Q_{t+1} for the NEXT
+                # step. Skipped on a clean step and on non-cadence steps inside
+                # maybe_update_basis. Strict no-op for the mask/dense/disabled
+                # codecs (powersgd is None there).
+                powersgd = getattr(comm_eff_state, "powersgd", None)
+                if powersgd is not None:
+                    did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
+                    # EXP-20 hard-invariant #4: after the FIRST basis update,
+                    # verify Q is bit-identical on every DP rank (the sync_basis
+                    # consensus actually agreed). All ranks reach their first
+                    # update on the SAME cadence step (lockstep update_actor), so
+                    # this gate is symmetric and the all_gather inside cannot
+                    # deadlock. Done once (the flag flips on all ranks together);
+                    # the result is stashed for the metrics block below. RAISES on
+                    # a real divergence so a broken consensus fails loudly.
+                    if did_update and not getattr(comm_eff_state, "_powersgd_q_agreement_checked", False):
+                        try:
+                            dev = powersgd.verify_basis_agreement_across_ranks()
+                            object.__setattr__(comm_eff_state, "_powersgd_q_agreement_checked", True)
+                            object.__setattr__(comm_eff_state, "_powersgd_q_agreement_dev", dev)
+                            if dev is not None:
+                                logger.info(
+                                    "comm_eff.powersgd: cross-rank Q agreement verified "
+                                    "(max_rel_dev=%.3e, sync_basis=%s) — hard-invariant #4 OK",
+                                    dev,
+                                    getattr(powersgd, "sync_basis", None),
+                                )
+                                print(
+                                    f"[comm_eff][EXP-20] cross-rank Q agreement: max_rel_dev={dev:.3e} "
+                                    f"sync_basis={getattr(powersgd, 'sync_basis', None)} (hard-invariant #4)",
+                                    flush=True,
+                                )
+                        except RuntimeError:
+                            # A genuine divergence — re-raise so the probe fails
+                            # (do NOT swallow; training 4 divergent codebooks is wrong).
+                            raise
 
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /
@@ -899,6 +994,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # EXP-14: explicit zero on the disabled path (Test 1 gate cells
                     # run comm_eff.enabled=false) so the no-op stays greppable.
                     "comm_eff/clean_steps": 0,
+                    # EXP-20: explicit zeros on the disabled path so the PowerSGD
+                    # codec counters stay greppable even on the mask/dense arms.
+                    "comm_eff/powersgd_applications": 0,
+                    "comm_eff/powersgd_basis_updates": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)

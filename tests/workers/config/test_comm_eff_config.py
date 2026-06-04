@@ -147,6 +147,110 @@ class TestCommEffConfigSchema(unittest.TestCase):
             CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
 
 
+class TestCommEffPowerSGDConfig(unittest.TestCase):
+    """EXP-20/M6: the compression_type enum + powersgd block must be registered
+    (so a launcher arg parses regardless of compression_type — the clean_cadence
+    struct-mode gotcha) and validated."""
+
+    def test_default_compression_type_dense_powersgd_block_present(self):
+        from verl.workers.config import CommEffPowerSGDConfig
+
+        cfg = CommEffConfig()
+        self.assertEqual(cfg.compression_type, "dense")
+        self.assertIsInstance(cfg.powersgd, CommEffPowerSGDConfig)
+        # Issue VII.1 defaults.
+        self.assertEqual(cfg.powersgd.rank, 102)
+        self.assertEqual(cfg.powersgd.update_cadence, 1)
+        self.assertTrue(cfg.powersgd.warm_start)
+        self.assertTrue(cfg.powersgd.compress_recompute)
+        # EXP-20 operator clarification: the shared codebook MUST be synced
+        # across DP ranks (default true), else per-rank Q diverges on its shard.
+        self.assertTrue(cfg.powersgd.sync_basis)
+        self.assertEqual(cfg.powersgd.qr_dtype, "fp32")
+
+    def test_compression_type_enum_validated(self):
+        with self.assertRaises(ValueError):
+            CommEffConfig(compression_type="powerSGD")  # typo
+        for ok in ("dense", "prf_mask", "powersgd"):
+            self.assertEqual(CommEffConfig(compression_type=ok).compression_type, ok)
+
+    def test_powersgd_block_validated(self):
+        from verl.workers.config import CommEffPowerSGDConfig
+
+        with self.assertRaises(ValueError):
+            CommEffConfig(powersgd=CommEffPowerSGDConfig(rank=0))
+        with self.assertRaises(ValueError):
+            CommEffConfig(powersgd=CommEffPowerSGDConfig(update_cadence=0))
+        with self.assertRaises(ValueError):
+            CommEffConfig(powersgd=CommEffPowerSGDConfig(qr_dtype="float16"))
+
+    def test_resolve_compression_type_back_compat(self):
+        """resolve_compression_type honors an explicit codec, else falls back to
+        the legacy mask selector (so every pre-EXP-20 mask config still runs)."""
+        from verl.workers.config import CommEffMaskConfig
+        from verl.workers.comm_eff.state import resolve_compression_type
+
+        # explicit powersgd wins
+        self.assertEqual(
+            resolve_compression_type(CommEffConfig(enabled=True, compression_type="powersgd")),
+            "powersgd",
+        )
+        # dense default + mask enabled p>0 => legacy prf_mask
+        self.assertEqual(
+            resolve_compression_type(CommEffConfig(enabled=True, mask=CommEffMaskConfig(enabled=True, p=0.95))),
+            "prf_mask",
+        )
+        # dense default + mask off => dense
+        self.assertEqual(
+            resolve_compression_type(CommEffConfig(enabled=True, mask=CommEffMaskConfig(enabled=False))),
+            "dense",
+        )
+
+    def test_yaml_powersgd_args_compose_the_gotcha(self):
+        """The whole launcher arg path (compression_type=powersgd +
+        comm_eff.powersgd.rank=102 + a prf_mask run forwarding powersgd.rank)
+        composes through the actor YAML — the registered-keys requirement that
+        bit clean_cadence. Mask-arm and powersgd-arm share ONE launcher, so the
+        mask arm DOES forward powersgd.* args; that must parse."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.enabled=true",
+                    "comm_eff.compression_type=powersgd",
+                    "comm_eff.powersgd.rank=102",
+                    "comm_eff.powersgd.warm_start=true",
+                    "comm_eff.powersgd.compress_recompute=true",
+                    "comm_eff.powersgd.qr_dtype=fp32",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertEqual(config.comm_eff.compression_type, "powersgd")
+        self.assertEqual(config.comm_eff.powersgd.rank, 102)
+
+        # The mask arm forwards the SAME powersgd.* args (shared launcher) while
+        # selecting prf_mask — must also parse (the gotcha).
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg2 = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.enabled=true",
+                    "comm_eff.compression_type=prf_mask",
+                    "comm_eff.mask.p=0.95",
+                    "comm_eff.powersgd.rank=102",  # forwarded by the shared launcher
+                ],
+            )
+        config2 = omega_conf_to_dataclass(cfg2)
+        self.assertEqual(config2.comm_eff.compression_type, "prf_mask")
+        self.assertEqual(config2.comm_eff.powersgd.rank, 102)
+
+
 class TestCommEffStateInert(unittest.TestCase):
     """The disabled state must be a strict no-op (the parity-check invariant)."""
 

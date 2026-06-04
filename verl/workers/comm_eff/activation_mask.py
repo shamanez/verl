@@ -265,6 +265,10 @@ class ActivationMasker:
         self._position_ids: Optional[torch.Tensor] = None
         # Last-measured masked fraction per boundary (comm_eff/mask_ratio).
         self.last_mask_ratio: dict[int, float] = {}
+        # Hidden size H, recorded on first fire. Used to surface the PRF logical
+        # PP byte budget (kept coords/token = (1-p)*H) so the EXP-20 analyst can
+        # assert budget equality against PowerSGD's n*r. None until a mask fires.
+        self.hidden_size: Optional[int] = None
 
     def set_context(
         self,
@@ -302,6 +306,8 @@ class ActivationMasker:
                 )
 
             hidden_size = h.shape[-1]
+            if masker.hidden_size is None:
+                masker.hidden_size = int(hidden_size)
             n_tokens = h.numel() // hidden_size
             sample_ids = masker._sample_ids
             position_ids = masker._position_ids

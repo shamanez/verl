@@ -36,8 +36,17 @@ __all__ = [
     "CommEffMaskConfig",
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
+    "CommEffPowerSGDConfig",
     "CommEffConfig",
 ]
+
+# The compression codecs ``comm_eff.compression_type`` may select. Exactly one
+# codec is active per run (mutually exclusive). ``dense`` is the byte-identical
+# off-path (equivalent to ``comm_eff.enabled=false`` for the activation path);
+# ``prf_mask`` is the EXP-5..EXP-18 per-(token,dim) PRF Bernoulli mask;
+# ``powersgd`` (EXP-20/M6) is the shared frozen-basis PowerSGD-style projector
+# ``M_hat = (M @ Q) @ Qᵀ`` at the same logical PP byte budget.
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd")
 
 
 @dataclass
@@ -244,6 +253,111 @@ class CommEffSpectralConfig(BaseConfig):
 
 
 @dataclass
+class CommEffPowerSGDConfig(BaseConfig):
+    """PowerSGD-style pipeline-boundary activation-compression sub-config (EXP-20/M6).
+
+    The codec replaces each boundary block's hidden-state output ``M`` (shape
+    ``(N, H)`` — ``N`` packed tokens × ``H`` hidden dims) with its rank-``r``
+    projection onto a **shared, frozen, per-layer orthonormal basis** ``Q``
+    (shape ``(H, r)``)::
+
+        M_hat = (M @ Q) @ Q.T            # forward; Q detached, M in-graph (NO STE)
+
+    so the pipeline boundary transmits only the ``N·r`` projected coordinates
+    ``Y = M @ Q`` (plus the shared, communication-free ``Q``) instead of ``N·H``
+    — the **identical logical PP byte budget as the PRF mask at ``p = 1 − r/H``**
+    (``r=102 ≡ p=0.95`` at ``H=2048``). Because ``Q`` is detached and ``M`` stays
+    in-graph, the backward is the exact self-adjoint projector
+    ``dL/dM = (dL/dM_hat) · Q Qᵀ`` with no straight-through estimator (INF-9,
+    Part III.7).
+
+    The basis is bootstrapped with **zero communication** from a deterministic
+    per-layer seed ``seed_L = (base_seed·1_000_003 + layer_idx·7919) & 0x7FFFFFFF``
+    (INF-13) — ``Q_L = orth(randn(H, r))`` in fp32, identical on every rank — and
+    refined by block power iteration: on compressed *train* forwards we
+    accumulate, OFF the autograd graph, ``V += Mᵀ (M Q)`` (one sketch per
+    boundary forward), then once at end-of-actor-update (when not a clean step
+    and ``global_step % update_cadence == 0``) set ``Q ← orth(V)`` in fp32 and
+    clear ``V`` (Part III.7). ``Q`` is **frozen for the entire global step** — the
+    old-logprob recompute and the actor-train forward both see ``Q_t``; the
+    update to ``Q_{t+1}`` happens only after the gradient-bearing actor work, so
+    the GRPO importance ratio ``ρ ≈ 1`` at step 0 with no weight change (INF-17,
+    Part V.3).
+
+    Inert unless ``comm_eff.enabled=true`` AND ``comm_eff.compression_type ==
+    "powersgd"``. Every key is registered regardless of ``compression_type`` so a
+    ``prf_mask`` run that passes ``comm_eff.powersgd.rank=...`` still parses (the
+    structured-config "unknown key rejected regardless of enabled flag" gotcha
+    that bit ``clean_cadence``).
+
+    Args:
+        enabled (bool): Sub-switch; gated by the parent ``comm_eff.enabled`` AND
+            by ``compression_type == "powersgd"``. ``True`` (default) so simply
+            selecting ``compression_type=powersgd`` activates it; the parent
+            gates remain the real master switches.
+        rank (int): Retained projection rank ``r``. ``r=102`` matches the PRF
+            mask at ``p=0.95`` (``q·H = 0.05·2048 = 102.4``). Must be ``>= 1``.
+            ``r == H`` (=2048) is the lossless limiting case ``M_hat = M`` used
+            by the correctness probe (INF-18).
+        seed (int): Base seed for the deterministic per-layer basis bootstrap
+            (folded with ``layer_idx`` via the INF-13 mixing constants). Identical
+            on every rank ⇒ zero-communication codebook init.
+        pp_size (int): Logical pipeline-shard count; the same boundary-block
+            selection as the PRF mask (last block of every shard except the
+            final). ``L=16, pp_size=8 -> [1,3,5,7,9,11,13]``. Must be ``>= 1``.
+        update_cadence (int): Block-power-iteration basis-update cadence in
+            optimizer steps. ``1`` (default) refreshes ``Q`` every (non-clean)
+            step. ``> 1`` refreshes only when ``global_step % update_cadence ==
+            0`` (a quieter, more stable basis). Must be ``>= 1``.
+        warm_start (bool): ``True`` (default) carries ``Q`` across steps (warm
+            block power iteration — the standard PowerSGD warm start). ``False``
+            re-bootstraps ``Q`` from the per-layer seed every update (cold,
+            diagnostic only).
+        compress_recompute (bool): When ``True`` (default) the projector also
+            fires on the old-logprob recompute, so BOTH gradient-feeding forwards
+            see the same frozen ``Q_t`` ⇒ ``ρ ≈ 1`` (the analogue of the mask's
+            ``mask_recompute``). ``False`` projects only the actor-train forward
+            (old-logprob runs dense), which dense-anchors the importance ratio's
+            denominator.
+        sync_basis (bool): ``True`` (default — REQUIRED for a correct shared
+            codebook under DP). Each DP rank builds its sketch ``V`` from its OWN
+            data shard (the dispatch scatters a different shard per rank), so a
+            per-rank ``orth(V)`` would DIVERGE the per-boundary ``Q`` across ranks
+            after the first update. ``True`` all-reduces the raw sketches over the
+            DP group before ``orth`` so every rank orthonormalizes the SAME pooled
+            ``V_global = Σ_ranks V`` → a bit-identical consensus ``Q`` on every
+            rank, differing only per boundary (the operator's "single shared
+            codebook, identical across ranks" intent; hard-invariant #4). The
+            collective is made deadlock-safe by iterating the fixed
+            ``boundary_indices`` on every rank. ``False`` (diagnostic only) keeps
+            each rank's basis local — only correct if every rank sees identical
+            data, which DP does not.
+        qr_dtype (str): Dtype for the orthonormalization (``orth``/QR) and the
+            stored basis math — ``"fp32"`` (default, REQUIRED for correctness:
+            bf16-QR loses orthogonality, drifts ``QᵀQ`` from ``I``, and is a
+            frequent NaN / ``q_cond`` source — INF-14) or ``"bf16"`` (diagnostic
+            only, expected to degrade). The projection itself runs in the
+            activation dtype regardless; only the QR/orth + ``V`` accumulation are
+            in ``qr_dtype``.
+        reortho_eps (float): Floor added under the QR when forming the basis, and
+            the singular-value floor used in the ``q_cond`` diagnostic, to keep a
+            rank-deficient sketch from producing a non-finite condition number.
+            Must be ``> 0``.
+    """
+
+    enabled: bool = True
+    rank: int = 102
+    seed: int = 0
+    pp_size: int = 8
+    update_cadence: int = 1
+    warm_start: bool = True
+    compress_recompute: bool = True
+    sync_basis: bool = True
+    qr_dtype: str = "fp32"
+    reortho_eps: float = 1e-6
+
+
+@dataclass
 class CommEffConfig(BaseConfig):
     """Top-level config for the communication-efficient compression method.
 
@@ -265,9 +379,19 @@ class CommEffConfig(BaseConfig):
         enabled (bool): Master switch. ``false`` (default) makes every comm_eff
             hook a no-op. Must be set ``true`` explicitly to activate any
             circuit.
+        compression_type (str): EXP-20/M6 codec selector, one of
+            ``{dense, prf_mask, powersgd}`` (mutually exclusive per run).
+            ``dense`` (default) = no activation compression. ``prf_mask`` = the
+            existing PRF mask. ``powersgd`` = the shared frozen-basis projector.
+            For back-compat the legacy ``mask.enabled`` path still selects the
+            mask when ``compression_type`` is left at its ``dense`` default, so
+            every pre-EXP-20 config behaves unchanged; an explicit
+            ``compression_type=powersgd`` selects the PowerSGD codec.
         mask (CommEffMaskConfig): Pipeline activation-masking sub-config.
         anchor (CommEffAnchorConfig): Asynchronous anchor-circuit sub-config.
         spectral (CommEffSpectralConfig): Spectral-correction sub-config.
+        powersgd (CommEffPowerSGDConfig): EXP-20 PowerSGD activation-compression
+            sub-config.
         clean_cadence (int): EXP-14 periodic clean (unmasked) optimizer-step
             cadence, in trainer steps. ``0`` (default) = off, so the disabled
             path AND every pre-EXP-14 method config stay a strict no-op. When
@@ -288,9 +412,23 @@ class CommEffConfig(BaseConfig):
     """
 
     enabled: bool = False
+    # EXP-20/M6 codec selector. Exactly one boundary codec is active per run:
+    #   "dense"    -> no activation compression (the boundary forward is
+    #                 byte-identical to dense; equivalent to the activation path
+    #                 of enabled=false). The DEFAULT, so every pre-EXP-20 config
+    #                 and the disabled path keep their exact behavior — a
+    #                 mask-circuit run is selected by mask.enabled, NOT by this
+    #                 field, for back-compat (see __post_init__).
+    #   "prf_mask" -> the EXP-5..EXP-18 per-(token,dim) PRF Bernoulli mask.
+    #   "powersgd" -> the EXP-20 shared frozen-basis projector M_hat=(M@Q)@Qᵀ.
+    # Registered (with the powersgd block) regardless of value so a prf_mask run
+    # that passes comm_eff.powersgd.rank=... still parses (the clean_cadence
+    # struct-mode gotcha).
+    compression_type: str = "dense"
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
+    powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
     clean_cadence: int = 0
 
     def __post_init__(self):
@@ -368,3 +506,43 @@ class CommEffConfig(BaseConfig):
         # config error, not a silent disable.
         if self.clean_cadence < 0:
             raise ValueError(f"comm_eff.clean_cadence must be >= 0; got {self.clean_cadence}")
+        # EXP-20/M6 codec selector. Validated to the closed enum so a typo
+        # (compression_type=powerSGD / powergsd) is a loud error, not a silent
+        # fall-through to dense.
+        if self.compression_type not in COMPRESSION_TYPES:
+            raise ValueError(
+                f"comm_eff.compression_type must be one of {COMPRESSION_TYPES}; "
+                f"got {self.compression_type!r}"
+            )
+        # EXP-20/M6 PowerSGD block. Validated unconditionally (the keys are
+        # registered regardless of compression_type) so a prf_mask run that
+        # forwards comm_eff.powersgd.* args still fails fast on a bad value.
+        if self.powersgd.rank < 1:
+            raise ValueError(f"comm_eff.powersgd.rank must be >= 1; got {self.powersgd.rank}")
+        if self.powersgd.pp_size < 1:
+            raise ValueError(f"comm_eff.powersgd.pp_size must be >= 1; got {self.powersgd.pp_size}")
+        if self.powersgd.update_cadence < 1:
+            raise ValueError(
+                f"comm_eff.powersgd.update_cadence must be >= 1; got {self.powersgd.update_cadence}"
+            )
+        if not isinstance(self.powersgd.warm_start, bool):
+            raise ValueError(
+                f"comm_eff.powersgd.warm_start must be a bool; got "
+                f"{type(self.powersgd.warm_start).__name__} ({self.powersgd.warm_start!r})"
+            )
+        if not isinstance(self.powersgd.compress_recompute, bool):
+            raise ValueError(
+                f"comm_eff.powersgd.compress_recompute must be a bool; got "
+                f"{type(self.powersgd.compress_recompute).__name__} ({self.powersgd.compress_recompute!r})"
+            )
+        if not isinstance(self.powersgd.sync_basis, bool):
+            raise ValueError(
+                f"comm_eff.powersgd.sync_basis must be a bool; got "
+                f"{type(self.powersgd.sync_basis).__name__} ({self.powersgd.sync_basis!r})"
+            )
+        if self.powersgd.qr_dtype not in ("fp32", "bf16"):
+            raise ValueError(
+                f"comm_eff.powersgd.qr_dtype must be one of (fp32, bf16); got {self.powersgd.qr_dtype!r}"
+            )
+        if self.powersgd.reortho_eps <= 0.0:
+            raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
