@@ -81,6 +81,12 @@ default_baseline:                                             # the reference a 
   launcher: examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh   # dense control launcher (== comm-eff launcher with COMM_EFF_ENABLED=false)
   dense_control: baseline                                     # the verl-unmodified dense reference; name it explicitly with `baseline_run: baseline`
 
+fixed_control_surface:                                        # LOCKED training hyperparameters — operator directive 2026-06-04 (extends CLAUDE.md §1 model/loss/hardware controls)
+  doc: research/runs/FIXED_CONTROL_SURFACE.md                 # authoritative human-readable sheet (batch/lr/cadence/steps/contexts pinned)
+  rule: "every GSM8K comm-eff experiment holds the surface constant; the ONLY axis that may vary is the codec (dense | prf_mask p | powersgd rank). Values live in the launcher ${VAR:-default} defaults + the doc, NOT duplicated here (avoid divergence)."
+  variable_axis: codec                                        # comm_eff.compression_type + its single knob (mask.p / powersgd.rank)
+  measurement_knobs: [test_freq]                              # NOT control variables (validation is read-only) — canonical test_freq=10 going forward
+
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
   dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, branch vast-ai-workload)
   naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
