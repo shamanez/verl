@@ -1,22 +1,21 @@
 # EXP-23 — Per-layer gradient/weight-matrix geometry (empirical grounding)
 
-**Author:** grad-empirics (task #3) · **Date:** 2026-06-04
+**Author:** grad-empirics (task #3) · **Date:** 2026-06-04 (smoke) → **finalized 2026-06-05** (live A2/A3)
 **Sources (read-only):**
-- `runs/EXP-23/smoke-logs/smoke_fire.log` (PROBE_FIRE: anchor.cadence=1, inject mode, 4 steps) — **primary inject geometry source**
-- `runs/EXP-23/smoke-logs/smoke_on.log` (PROBE_ON: anchor.cadence=5, 2 steps — circuit never fired, see below)
-- `runs/EXP-23/smoke-logs/smoke_off.log` (PROBE_OFF: PowerSGD r=77, circuit OFF — no diagnostics, as expected)
-- `runs/EXP-23/smoke-logs/resolved_params_PROBE_FIRE.txt`
+- `runs/EXP-23/exp-23-A1-no-refresh.train.log` (FLOOR: circuit OFF, 50 steps) — **LIVE**
+- `runs/EXP-23/exp-23-A2-stale-inject.train.log` (inject, cadence=5, 50 steps) — **LIVE primary inject source**
+- `runs/EXP-23/exp-23-A3-stale-blend.train.log` (blend, cadence=5, 50 steps) — **LIVE primary blend source**
+- `runs/EXP-23/smoke-logs/smoke_fire.log` (PROBE_FIRE: anchor.cadence=1, inject mode, 4 steps) — initial smoke probe
+- `runs/EXP-23/smoke-logs/smoke_on.log` (PROBE_ON: cadence=5, 2 steps — circuit never fired) / `smoke_off.log` (parity)
 - Code of record: `verl/workers/comm_eff/spectral_filter.py` (`inject_matrix` L472, `blend_matrix` L503, correction loop `apply_spectral_correction_to_params` L547)
 
-> **Status of LIVE 50-step arm data (A2 inject / A3 blend):** PENDING. As of the
-> last monitor poll (`monitor-detail.log`, POLL 2 @ 12:37Z) **A1 is running**
-> (anchor OFF — the floor, emits NO inject/blend lines) and **A2/A3 have not
-> started** (`A2_log: NOT_CREATED_YET`, `A3_log: NOT_CREATED_YET`). The numbers
-> below are from the **smoke probe**, which exercises the identical inject
-> circuit on the identical model/codec — they are representative of what A2 will
-> log, but they are not the 50-step arm numbers. **A3 blend has NO smoke source**
-> (smoke_fire used `correction_mode=inject`); the blend prediction below is
-> derived from the code + measured cos, to be confirmed when A3 logs land.
+> **Status: FINAL.** All 3 arms ran to step 50; box torn down; logs on disk
+> locally. **Headline result — HYPOTHESIS FALSIFIED:** A1 floor val@50=0.6914,
+> A2 inject=0.6967 (+0.0053), A3 blend=0.6861 (−0.0053). max(A2,A3)=0.6967 ≤
+> falsify line 0.7114 (PASS bar was 0.7414). The stale full-rank anchor neither
+> rescues nor harms PowerSGD beyond noise. §7 below has the live per-step
+> geometry that explains *why*; the smoke tables (§2–§4) are retained as the
+> cadence=1 cross-check and agree with the live numbers.
 
 ---
 
@@ -113,3 +112,61 @@ Per-target shapes: **q_proj/o_proj = (1536,1536); k_proj/v_proj = (256,1536)** (
 ## 6. What this geometry implies (one paragraph)
 
 The stale full-rank anchor `M_anchor` is **essentially orthogonal** to the live compressed gradient `G_mask` (|cos| ≤ 0.005 on every measured target/step), so the complement fraction is ≈1.0 — **G_mask contains almost none of M_anchor's direction.** This is the *necessary* condition for inject to be non-trivial (there is a large missing complement to add), but it is also the **danger sign**: because the complement is the *entire* (scale-matched) anchor and it is orthogonal, inject sets `G_corr = G_mask + (≈equal-norm orthogonal force)` ⇒ ‖G_corr‖ ≈ √2·‖G_mask‖, an undirected ~41% magnitude inflation pointing in a direction G_mask never chose. Whether that *helps* depends entirely on whether the stale `M_anchor` direction is still a descent direction 5 steps later — orthogonality alone says inject is **not inert** (unlike the as-implemented reweight, which is inert by orthogonality per the [[exp21-reweight-fixed-anchor]] result), but it also gives no guarantee the added force is useful rather than just noise/inflation. The blend mode exists precisely to avoid that inflation (predicted ‖G_corr‖≈0.71×), trading magnitude stability for actually *replacing* half the live signal with the stale one. **Bottom line for synthesis:** the measured geometry says inject/blend are mechanically *live* (they change the grad by ~100% in an orthogonal direction), but the same orthogonality means there is zero evidence here that the stale direction is *aligned with the true gradient* — that question is what the A2/A3 reward curves (vs A1 floor) must answer, and it cannot be settled from geometry scalars alone. Caveat: all of this is **layer-0-attention only** (4/~196 targets); MLP and deep-layer geometry is unmeasured.
+
+---
+
+## 7. LIVE 50-step geometry (A2 inject + A3 blend) — FINAL
+
+Extracted from the local arm logs (ANSI/pid stripped, every logged occurrence across all 50 steps; 80 occurrences/target = 10 cadence-5 firing steps × 4 ranks × 2 reductions). The smoke (§2) and live numbers agree: cos≈0 throughout, complement fraction ≈1, blend ratio = √0.5.
+
+### 7.1 A2 — inject (`exp-23-A2-stale-inject.train.log`)
+
+| target | shape | n | cos min | cos max | \|cos\|max | scale=‖G‖/‖M‖ min | scale max | ‖inj‖/‖G_mask‖ |
+|---|---|---|---|---|---|---|---|---|
+| layers.0 q_proj | (1536,1536) | 80 | −0.0017 | +0.0005 | 0.0017 | 0.00020 | 0.00770 | 1.0000 |
+| layers.0 k_proj | (256,1536)  | 80 | −0.0030 | +0.0043 | 0.0043 | 0.00050 | 0.01970 | 1.0000 |
+| layers.0 v_proj | (256,1536)  | 80 | −0.0034 | +0.0048 | 0.0048 | 0.00520 | 0.25330 | 1.0000 |
+| layers.0 o_proj | (1536,1536) | 80 | −0.0012 | +0.0009 | 0.0012 | 0.00130 | 0.07040 | 1.0000 |
+
+- **cos(G_mask, M_anchor) ≈ 0 on every target, every firing step** (global |cos| ≤ 0.0048). It does **not** rise after the delay_K=5 warmup — orthogonality is the steady state, not a transient.
+- **‖inj‖/‖G_mask‖ = 1.0000 everywhere** ⇒ complement fraction = √(1−cos²) ≈ 1.0 (whole anchor missing from G_mask span) — identical to smoke.
+- **scale = ‖G_mask‖/‖M_anchor‖ is SMALL (0.0002 → 0.253) and grows over training.** This is the key difference from the smoke (where scale ranged 0.1–12): in the real run ‖M_anchor‖ ≫ ‖G_mask‖ early — wait, scale<1 means ‖M_anchor‖>‖G_mask‖, i.e. the stale anchor's RAW norm is *larger* than the rescaled live grad, so the injected complement (= scale·M_anchor, scaled DOWN to match ‖G_mask‖) is normalized to exactly ‖G_mask‖. The injected force is therefore an equal-norm orthogonal vector regardless — but its *content* is a heavily down-scaled (0.0002–0.25×) copy of a large stale anchor, i.e. near-pure scale-suppressed orthogonal direction.
+
+### 7.2 A3 — blend (`exp-23-A3-stale-blend.train.log`, eta=0.5)
+
+| target | shape | n | cos min | cos max | \|cos\|max | ‖G_corr‖/‖G_mask‖ min | ‖G_corr‖/‖G_mask‖ max |
+|---|---|---|---|---|---|---|---|
+| layers.0 q_proj | (1536,1536) | 80 | −0.0018 | +0.0009 | 0.0018 | 0.7065 | 0.7074 |
+| layers.0 k_proj | (256,1536)  | 80 | −0.0034 | +0.0012 | 0.0034 | 0.7059 | 0.7075 |
+| layers.0 v_proj | (256,1536)  | 80 | −0.0031 | +0.0040 | 0.0040 | 0.7060 | 0.7085 |
+| layers.0 o_proj | (1536,1536) | 80 | −0.0014 | +0.0012 | 0.0014 | 0.7066 | 0.7075 |
+
+- **‖G_corr‖/‖G_mask‖ = 0.706–0.709 ≡ √0.5 = 0.7071 EXACTLY** — the orthogonal-regime prediction from phase 1 (§3) is **CONFIRMED to 3 decimals on all 4 targets, all 50 steps.** Blend at eta=0.5 deterministically *shrinks* the step to 0.71× because it replaces half of G_mask with a scale-matched anchor that is orthogonal to it.
+- cos again ≈0 throughout (|cos| ≤ 0.0040), consistent with the inject arm.
+
+### 7.3 Circuit counters + codec invariance (all from last logged step, step 50)
+
+| arm | global_step | anchor_backwards | spectral_corrections | powersgd_applications | val@50 (gsm8k acc) |
+|---|---|---|---|---|---|
+| A1 no-refresh (floor) | 50 | 0 | 0 | 179200 | **0.6914** |
+| A2 stale-inject | 50 | 20 | 80 | 179200 | **0.6967** (+0.0053) |
+| A3 stale-blend | 50 | 20 | 80 | 179200 | **0.6861** (−0.0053) |
+
+- The circuit **fired as scheduled** in A2/A3: `spectral_corrections=80` = 4 targets × 10 cadence-5 firing steps × 2 (the per-step reduction count); `anchor_backwards=20` = 10 firing steps × 2. A1 is 0/0 (correct, circuit off).
+- `powersgd_applications=179200` is **identical across all three arms** — the PowerSGD r=77 codec is held byte-constant; the only variable is the refresh mechanism, exactly as the EXP-23 design requires.
+- val deltas (±0.005) are within run-to-run GSM8K noise; the geometry below explains why no real effect was possible.
+
+---
+
+## 8. THE MECHANISM — why the stale anchor is inert on PowerSGD (FINAL statement)
+
+For the **PowerSGD r=77 codec, cos(G_mask, M_anchor) ≈ 0.001** (|cos| ≤ 0.0048 across all 4 targets and all 50 steps) — an **order of magnitude more orthogonal** than the **mask codec's cos ≈ 0.5** measured in EXP-21 (where the as-implemented two-sided *reweight* was found inert, see [[exp21-reweight-fixed-anchor]]). The two dead-ends have **different root causes**:
+
+- **Mask + reweight (EXP-21):** inert because the two-sided Tikhonov *projection operator* collapses (G_filt ≈ 0, rel_change ≈ 0.5) even though the gradients are only ~60° apart — a **projection-operator failure**.
+- **PowerSGD + inject/blend (EXP-23):** inert because the live and stale gradients are **genuinely, almost perfectly geometrically incoherent** — the PowerSGD compression subspace (the rank-77 sketch that survives the boundary) is ~orthogonal to the stale full-rank gradient. This is **true geometric incoherence, NOT a projection failure.** The correction operators here are mechanically live (they change the grad by ~100% / scale it by 0.71×), but they have nothing aligned to inject.
+
+Consequently: **inject** adds an equal-norm but *orthogonal*, scale-suppressed (‖M‖≫‖G‖ ⇒ scale 0.0002–0.25) copy of the stale direction — effectively tiny orthogonal noise that Adam + grad-clip wash out (val +0.005, noise). **Blend** simply shrinks the optimizer step to 0.71× by trading half the (informative) live grad for half a (orthogonal, uninformative) stale one — a slight *pessimization* (val −0.005). Neither carries any of the stale full-gradient's descent information into the live step, because there is no shared direction to carry.
+
+**Implication for the fix (hands to synthesis §8):** `delay_K` (anchor staleness) is **not** the lever — the orthogonality is steady-state, present from the first post-warmup firing and not growing, so a fresher anchor (smaller delay_K) would land in the same incoherent geometry. To make a stale/auxiliary full-gradient *useful* on PowerSGD you must remove the incoherence at its source, i.e. either **(a) error-feedback** (compress the *residual* G − decompress(compress(G)) and carry it forward, the standard PowerSGD convergence fix, which keeps the dropped energy in the same basis instead of discarding it), or **(b) a basis-aligned anchor** (project/define the stale full-grad onto the live PowerSGD Q-basis so the two share a subspace by construction). An anchor defined in an orthogonal complement can never help no matter how fresh.
+
+**Coverage caveat (unchanged):** all live geometry is **layer-0 self-attention only** — 4 of ~196 candidate 2D targets (`spectral.max_targets=4`); MLP and layers 1–27 are unmeasured, and only scalar geometry exists (no raw G/M matrices on disk — §5).

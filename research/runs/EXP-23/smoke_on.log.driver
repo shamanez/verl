@@ -1,0 +1,40 @@
+=== detected 4 GPUs (GPU 0: NVIDIA H200 (UUID: GPU-46a72f37-c078-815c-b170-44b2244f67f7)) ===
+=== cgroup pids.max=unknown (need >= 4096 for full vLLM + Ray stack on multi-GPU) ===
+=== preprocess GSM8K -> /root/data/gsm8k ===
+Generating train split:   0%|          | 0/7473 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 7473/7473 [00:00<00:00, 252089.35 examples/s]
+Generating test split:   0%|          | 0/1319 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1319/1319 [00:00<00:00, 214321.74 examples/s]
+Map:   0%|          | 0/7473 [00:00<?, ? examples/s]Map:  62%|██████▏   | 4638/7473 [00:00<00:00, 46090.05 examples/s]Map: 100%|██████████| 7473/7473 [00:00<00:00, 46277.99 examples/s]
+Map:   0%|          | 0/1319 [00:00<?, ? examples/s]Map: 100%|██████████| 1319/1319 [00:00<00:00, 42925.54 examples/s]
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 125.61ba/s]
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 728.30ba/s]
+=== train: 7473 rows ===
+=== test:  1319 rows ===
+WARN: anchor enabled -> ~3 GB clone/rank is back; prefer 8×GPU or halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432.
+=== launching communication-efficient GRPO ===
+  model:               Qwen/Qwen2.5-1.5B-Instruct
+  GPUs:                4
+  rollout TP × N:      2 × 8
+  vLLM mem util:       0.4
+  train batch:         128 prompts (× 8 = 1024 seqs/step)
+  ppo mini batch:      64
+  batching:            dynamic_bsz=False  (when False: micro_batch_per_gpu=1, max_tokens/GPU=18432 ignored)
+  prompt / response:   1024 / 16384
+  epochs:              2  (save 50, validate 0, total steps 2)
+  val_before_train:    False
+  objective:           pg_loss only (use_kl_loss=False, use_kl_in_reward=False, entropy_coeff=0)
+  mismatch diag:       calculate_log_probs=True (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
+  comm_eff master:     true
+  compression_type:    powersgd  (dense|prf_mask|powersgd; dense => legacy mask-by-flag)
+  mask:                enabled=true p=0.9 rescale=true recompute=true seed=0 pp_size=8
+  powersgd:            rank=77 update_cadence=1 warm_start=true compress_recompute=true sync_basis=true qr_dtype=fp32  (active iff compression_type=powersgd)
+  clean_cadence:       0  (0=off; naive periodic full-grad step — NOT sustainable)
+  anchor:              enabled=true cadence=5 delay_K=5
+  spectral:            enabled=true alpha=0.5 tau=0.01 beta_anc=0.9 cadence=5 max_targets=4 ema_device=cpu
+  spectral correction: mode=inject inject_gamma=1.0 blend_eta=0.5
+  wandb:               verl_compression_research / exp-23-smoke-on
+  log:                 /workspace/runs/EXP-23/smoke_on.log
+=== launching ===
+=== wandb sync /workspace/verl/wandb/run-20260604_120037-npviazyb (flush final history before teardown) ===
+Find logs at: /workspace/verl/wandb/debug-cli.root.log
+Syncing: https://wandb.ai/shamanework-pl/verl_compression_research/runs/npviazyb ... done.
+touch: cannot touch '/workspace/verl/runs/exp-23-smoke-on/done.flag': No such file or directory

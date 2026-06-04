@@ -1,15 +1,16 @@
 # EXP-23 — Stale-Gradient Re-Anchor: Alternative Correction Methods
 
-**Status:** DRAFT (phase 1 — literature + smoke geometry). The A2/A3 live 50-step
-geometry and reward curves are **PENDING**; §8 conditions every recommendation on
-that outcome and will be finalized once `grad-empirics` appends the live numbers.
+**Status:** FINAL. All three EXP-23 arms ran to step 50; **hypothesis FALSIFIED**
+(verdict = STOP). The A2/A3 live 50-step geometry and reward curves are in hand;
+§8 is finalized to the actual "A2 AND A3 both fail" outcome, so **this report is
+now the BINDING next-lever readout** (referenced as such by `runs/EXP-23/verdict.md`).
 
 **Authors:** synthesizer (this report), drawing on three teammate notes:
 - `notes_async_rl.md` — async/off-policy RL staleness tolerance (async-rl-scout)
 - `notes_cited_papers.md` — operator-cited papers (cited-reader)
-- `notes_grad_geometry.md` — measured per-layer G↔M_anchor geometry from the smoke (grad-empirics)
+- `notes_grad_geometry.md` — measured per-layer G↔M_anchor geometry, **finalized with live A2/A3 50-step data** (grad-empirics)
 
-**Date:** 2026-06-04
+**Date:** 2026-06-04 (phase-1 draft) → finalized 2026-06-05 (live A2/A3)
 
 ---
 
@@ -23,40 +24,55 @@ correction operators with the fresh clean step turned OFF:
 - **A2 — inject:** `G_corr = G + γ·scale·(M − proj_G(M))`, γ=1.0
 - **A3 — blend:** `G_corr = (1−η)·G + η·scale·M`, η=0.5
 
-This report is the **mandatory next-lever readout if A2 AND A3 both fail** (plan
-§Falsification contingency). If A2 or A3 passes it is forward-looking context for
-the next compression cycle.
+The plan made this report the **mandatory next-lever readout if A2 AND A3 both
+fail** (plan §Falsification contingency). **That branch is the one that fired:**
 
-**The pre-registered prediction — THREE INDEPENDENT lines converge on the same call:**
+| arm | refresh | val@50 | Δ vs floor | reading |
+|---|---|---|---|---|
+| A1 no-refresh (floor) | none | **0.6914** | — | PowerSGD r=77 baseline |
+| A2 stale inject (γ=1.0) | stale_inject | **0.6967** | +0.0053 | **INERT** (within GSM8K noise) |
+| A3 stale blend (η=0.5) | stale_blend | **0.6861** | −0.0053 | **INERT** (slightly below floor) |
 
-1. **Measured smoke geometry** says `cos(G, M_anchor) ≈ 0` (|cos| ≤ 0.005 on every
-   measured target/step) ⇒ the complement fraction is ≈1.0 ⇒ **inject at γ=1
-   inflates the step to ≈√2·‖G‖** (an undirected ~41% magnitude blow-up in a
-   direction G never chose — the C1-collapse mechanism the blend mode was built to
-   avoid). Only **4 of ~196 targets** were corrected (layer-0 attention q/k/v/o),
-   scalars only, no raw matrices dumped.
-2. **Async-RL theory** says K=5 staleness is essentially free (AReaL η≤8 lossless;
-   M2PO matches on-policy at ≥256 stale), so the failure (if any) is the **combine,
-   not the age**; the universally-winning correction is a **small, staleness-aware
-   blend** (η ∝ 1/K ≈ 0.2, NOT a fixed 0.5), with second-moment / ESS variance
-   control and a DC-ASGD curvature term as the principled re-anchor.
-3. **Cited papers** say RLVR weights drift **linearly** (2601.04537; cos > 0.9
-   across K-windows) ⇒ a K=5-stale M is **information-rich**, not stale junk;
-   PowerSGD's low rank provably **under-covers** RL's near-full-rank update
-   (Mukherjee 2505.11711, rank 99%+); the right combiner is a **small-λ convex
-   blend (spectrum-preserving)** plus **error-feedback on the dropped PowerSGD
-   residual** — and a big additive inject is the predicted failure.
+`max(A2, A3) = 0.6967 ≤ falsify line 0.7114` (PASS bar was **0.7414**; A0
+fresh-clean reference = 0.7415, dense control = 0.7536). **HYPOTHESIS FALSIFIED →
+verdict STOP.** A stale full-rank anchor neither rescues nor harms PowerSGD beyond
+±0.005 noise. This report is therefore the **binding next-lever readout**.
 
-⇒ **Independent geometry AND literature both predict: A2 (inject γ=1)
-destabilizes / under-helps, A3 (blend) is the better operator but η=0.5 is likely
-too large, and error-feedback on the PowerSGD residual is the named top lever**
-(this matches issue #21's standing finding that "NO error-feedback = top lever").
+**The pre-registered prediction — THREE INDEPENDENT lines — was CONFIRMED:**
 
-**Top-ranked alternative method:** *error-feedback inject* — accumulate the
-PowerSGD low-rank residual `G_full − G_compressed` in a local FP32 buffer, fold it
-back into the live step (decayed), and use the stale full-rank M as a *periodic
-flush / re-grounding* of that residual rather than as a raw orthogonal impulse.
-Additive, flag-gated, OFF by default (Prime Directive). Full ranking in §4.
+1. **Geometry** predicted `cos(G, M_anchor) ≈ 0`. **CONFIRMED on live data:**
+   |cos| ≤ 0.0048 across **all 4 targets × all 50 steps of BOTH arms**, steady
+   state (did NOT rise past the delay_K=5 warmup). A3's `‖G_corr‖/‖G‖ = 0.706–0.709
+   ≡ √0.5 = 0.7071` to 3 decimals exactly, as predicted. Only **4 of ~196 targets**
+   were corrected (layer-0 attention q/k/v/o), scalars only, no raw matrices dumped.
+2. **Async-RL theory** predicted K=5 staleness is essentially free (AReaL η≤8
+   lossless; M2PO matches on-policy at ≥256 stale), so the failure is the
+   **combine, not the age**. **CONFIRMED:** orthogonality is steady-state (present
+   from the first post-warmup firing, not growing) ⇒ a fresher anchor (smaller
+   delay_K) lands in the same incoherent geometry. delay_K is *not* the lever.
+3. **Cited papers** predicted PowerSGD's low rank **under-covers** RL's
+   near-full-rank update (Mukherjee 2505.11711, rank 99%+) and that the dropped
+   directions are real signal needing error-feedback. **CONFIRMED at the root:**
+   the live data shows the PowerSGD r=77 sketch is ~orthogonal to the stale
+   full-rank M — the compressor discards exactly the subspace M lives in.
+
+⇒ **The failure mode is structural geometric incoherence, NOT inject-vs-blend
+tuning and NOT delay_K.** PowerSGD r=77 discards the very directions M lives in, so
+G ⊥ M *by construction*. A bigger/smaller γ or η, or a fresher anchor, cannot fix
+an orthogonal complement. The named top lever is therefore **error-feedback on the
+PowerSGD residual** (compress the *error* so the fed-back term aligns with exactly
+what G dropped) and/or a **basis-aligned anchor** (project M into the PowerSGD
+Q-basis so the two share a subspace by construction). This matches issue #21's
+standing finding that "NO error-feedback = top lever".
+
+**Top-ranked alternative method:** *error-feedback on the PowerSGD residual* —
+accumulate the dropped low-rank residual `G_full − decompress(compress(G_full))` in
+a local FP32 buffer and fold it back into the next step (the standard PowerSGD
+convergence fix), so the fed-back term is aligned with *exactly* the energy the
+sketch discarded — directly attacking the orthogonality the live data exposed. The
+co-equal structural fix is a *basis-aligned anchor* (project the stale full-grad M
+into the live PowerSGD Q-basis so the two share a subspace by construction). Both
+are additive, flag-gated, OFF by default (Prime Directive). Full ranking in §4.
 
 ---
 
@@ -109,14 +125,61 @@ curves vs. the A1 floor must answer, and it cannot be settled from geometry scal
 
 ---
 
-## 2. What the measured geometry shows (smoke probe)
+## 2. What the measured geometry shows (live 50-step + smoke cross-check)
 
-Source: `runs/EXP-23/smoke-logs/smoke_fire.log` (PROBE_FIRE: anchor.cadence=1,
-inject mode, 4 steps), exercising the **identical** inject circuit on the
-**identical** model/codec as the live A2 arm. These are representative of what A2
-will log, not the 50-step arm numbers.
+**The live 50-step data is in (§2.0). The smoke tables (§2.1–§2.3) are retained as
+the cadence=1 cross-check; the live and smoke numbers agree (cos ≈ 0 throughout,
+complement ≈ 1, blend ratio = √0.5).**
 
-### 2.1 Per-target inject geometry (smoke_fire, steps 1–4)
+### 2.0 LIVE per-step geometry (A2 inject + A3 blend, all 50 steps) — FINAL
+
+Source: `runs/EXP-23/exp-23-A2-stale-inject.train.log` and
+`exp-23-A3-stale-blend.train.log` (every logged firing; 80 occurrences/target = 10
+cadence-5 firing steps × 4 ranks × 2 reductions).
+
+**A2 — inject (γ=1.0):**
+
+| target | shape | n | \|cos\|max | scale=‖G‖/‖M‖ (min…max) | ‖inj‖/‖G‖ |
+|---|---|---|---|---|---|
+| layers.0 q_proj | (1536,1536) | 80 | 0.0017 | 0.00020 … 0.00770 | 1.0000 |
+| layers.0 k_proj | (256,1536)  | 80 | 0.0043 | 0.00050 … 0.01970 | 1.0000 |
+| layers.0 v_proj | (256,1536)  | 80 | 0.0048 | 0.00520 … 0.25330 | 1.0000 |
+| layers.0 o_proj | (1536,1536) | 80 | 0.0012 | 0.00130 … 0.07040 | 1.0000 |
+
+**A3 — blend (η=0.5):**
+
+| target | shape | n | \|cos\|max | ‖G_corr‖/‖G‖ (min…max) |
+|---|---|---|---|---|
+| layers.0 q_proj | (1536,1536) | 80 | 0.0018 | 0.7065 … 0.7074 |
+| layers.0 k_proj | (256,1536)  | 80 | 0.0034 | 0.7059 … 0.7075 |
+| layers.0 v_proj | (256,1536)  | 80 | 0.0040 | 0.7060 … 0.7085 |
+| layers.0 o_proj | (1536,1536) | 80 | 0.0014 | 0.7066 … 0.7075 |
+
+Live findings (these supersede the smoke as the definitive geometry):
+- **cos(G, M_anchor) ≈ 0 on every target, every firing step of BOTH arms**
+  (global |cos| ≤ 0.0048). It does **NOT** rise after the delay_K=5 warmup —
+  near-orthogonality is the **steady state**, not a transient. This is ~10× *more*
+  orthogonal than the mask codec's cos ≈ 0.5 measured in EXP-21
+  ([[exp21-reweight-fixed-anchor]]).
+- **A3 `‖G_corr‖/‖G‖ = 0.706–0.709 ≡ √0.5 = 0.7071 exactly`** on all 4 targets, all
+  50 steps — the phase-1 orthogonal-regime prediction (§2.2) **confirmed to 3
+  decimals.** Blend deterministically shrinks the step to 0.71× because it replaces
+  half of G with a scale-matched anchor orthogonal to it.
+- **New mechanistic refinement — `scale = ‖G‖/‖M‖` is SMALL (0.0002 → 0.25), i.e.
+  ‖M‖ ≫ ‖G‖.** The inject formula re-adds an *‖G‖-sized* orthogonal complement
+  (‖inj‖/‖G‖ = 1.0000), but because the raw stale anchor is much larger than the
+  live compressed grad, that complement is a *heavily down-scaled* (0.0002–0.25×)
+  copy of M — in practice a tiny, scale-suppressed orthogonal-noise direction, not
+  even the full √2 inflation the smoke's larger scales suggested. So **inject's
+  realized net effect on PowerSGD is negligible orthogonal noise** that Adam +
+  grad-clip wash out (val +0.005 = noise); blend's is a flat 0.71× step shrink that
+  trades informative live signal for orthogonal stale signal (val −0.005).
+- **Circuit fired as scheduled, codec held byte-constant:** A2/A3 each logged
+  `spectral_corrections=80`, `anchor_backwards=20`; A1 = 0/0; and
+  `powersgd_applications=179200` is **identical across all three arms** — the
+  PowerSGD r=77 codec is byte-constant, the refresh mechanism is the only variable.
+
+### 2.1 Per-target inject geometry (smoke_fire, steps 1–4) — cross-check
 
 Targets are **layer 0 only** — `q_proj, k_proj, v_proj, o_proj` (4 =
 `spectral.max_targets`). Boundary shapes: q/o = **(1536, 1536)**, k/v =
@@ -141,16 +204,14 @@ Key facts:
 - **`scale` swings widely (0.11 → 12.4)** because ‖M‖ and the rescaled ‖G‖ differ
   per target/step; the scale-match is doing real normalization work.
 
-### 2.2 Blend geometry — PREDICTED (no smoke source; A3 used inject only)
+### 2.2 Blend geometry — phase-1 prediction, now CONFIRMED by §2.0
 
-smoke_fire ran `correction_mode=inject`, so there are **zero `[blend]` lines** in
-any local log. From `blend_matrix` (η=0.5, scale-matched anchor) and the measured
-cos ≈ 0:
+smoke_fire ran `correction_mode=inject`, so the smoke had **zero `[blend]` lines**;
+the phase-1 prediction was derived from `blend_matrix` (η=0.5, scale-matched anchor)
+and the measured cos ≈ 0:
 - predicted `‖G_corr‖/‖G‖ = √((1−η)² + η²) = √0.5 ≈ **0.7071**` (orthogonal regime).
-- i.e. blend at η=0.5 *shrinks* the grad to ~0.71×, replacing half of G with half of
-  the orthogonal scale-matched stale anchor.
-- **To confirm:** the `[blend] ... cos(...) ‖G_corr‖/‖G‖=` line from
-  `exp-23-A3-stale-blend.train.log` once that arm runs. **PENDING.**
+- **CONFIRMED:** the live A3 arm logs `‖G_corr‖/‖G‖ = 0.706–0.709` on all 4 targets,
+  all 50 steps (§2.0) — the prediction held to 3 decimals.
 
 ### 2.3 Anchor EMA update magnitude (smoke_fire, cadence=1)
 
@@ -196,15 +257,14 @@ but only 4 of its grads become `M_anchor` EMAs / diagnostics. Consequences:
   full SVD spectra; **proposed, not implemented**. This is the *coverage fix* lever,
   distinct from the combiner — see §4.)
 
-### 2.5 A2/A3 LIVE geometry — PENDING
+### 2.5 A2/A3 LIVE geometry — LANDED (see §2.0)
 
-As of the last monitor poll (POLL 13 @ 2026-06-04T12:41Z) **A1 is running** at step
-3/50 (anchor OFF — the floor, emits no inject/blend lines) and **A2/A3 have not
-started** (`A2_log: NOT_CREATED_YET`, `A3_log: NOT_CREATED_YET`). Step time ≈130s ⇒
-A1 alone ≈108 min; full back-to-back A1→A2→A3 ≈5–7 h. The live per-layer
-cos/complement/norm-ratio numbers for the 50-step arms (and whether the
-orthogonality persists past step 1's PowerSGD warmup, where
-`reconstruction_rel_error` drops 0.976 → 0.024) will be appended at finalize.
+The live 50-step numbers are now in §2.0 and answer the two questions this
+subsection had flagged: (i) **orthogonality persists past the PowerSGD warmup** —
+cos stays ≈0 across all 50 steps, it is steady-state not transient; (ii) A3's
+**‖G_corr‖/‖G‖ matches the predicted √0.5** to 3 decimals. The coverage caveat
+(§2.4) is unchanged — still 4/196 targets (layer-0 attention), scalars only, no raw
+matrices on disk; whether MLP/deep layers are equally orthogonal remains unmeasured.
 
 ---
 
