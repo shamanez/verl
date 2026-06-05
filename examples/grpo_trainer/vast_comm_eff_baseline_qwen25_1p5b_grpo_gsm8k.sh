@@ -249,35 +249,40 @@ COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
 # 20, validated >=0); EXP-16 plumbs it through env. Default keeps the schema
 # default so non-EXP-16 runs are unchanged.
 COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
-# --- spectral correction (OFF by default) ---
+# EXP-25 (R2): anchor-owns-Q. When true the ANCHOR owns the PowerSGD basis Q
+# (fast maybe_update_basis + fast sketch gated OFF; anchor computes Q ← orth(V)
+# from its slow-net stale-forward activations and broadcasts Q + M every refresh).
+# false (default) = EXP-20 fast-owns-Q (byte-identical). Active iff
+# COMM_EFF_COMPRESSION_TYPE=powersgd AND COMM_EFF_ANCHOR_ENABLED=true.
+COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"
+# --- anchor-guided gradient correction (OFF by default) ---
+# EXP-25: the live correction is the signed_ema merger; the dead SVD/Tikhonov/
+# seeded "reweight" path was removed, so alpha/tau/svd_mode/basis_cache/
+# seed_anchor_cache/rank are gone from the schema. The combiners consult only
+# the anchor-gradient EMA M_anchor.
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-false}"
-COMM_EFF_SPECTRAL_ALPHA="${COMM_EFF_SPECTRAL_ALPHA:-0.5}"
-COMM_EFF_SPECTRAL_TAU="${COMM_EFF_SPECTRAL_TAU:-0.01}"
 COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.9}"
-# EXP-16: spectral-correction cadence in optimizer steps. NEW config field
-# (comm_eff.spectral.cadence). Default 1 = fire every step = the pre-EXP-16
-# behavior (strict no-op for every prior config + the disabled path). Set to 2
-# (aligned with COMM_EFF_ANCHOR_CADENCE=2) so the correction fires only on the
-# steps the anchor EMA was just refreshed (a fresh basis, never a stale one).
+# Correction cadence in optimizer steps. Default 1 = fire every step (strict
+# no-op for the disabled path). Set == COMM_EFF_ANCHOR_CADENCE so the correction
+# fires only on the steps the anchor EMA was just refreshed.
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-gpu}"
-COMM_EFF_SPECTRAL_SVD_MODE="${COMM_EFF_SPECTRAL_SVD_MODE:-full}"
-COMM_EFF_SPECTRAL_BASIS_CACHE="${COMM_EFF_SPECTRAL_BASIS_CACHE:-cache}"
-COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:-4}"
-COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE="${COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE:-true}"
-# EXP-18/M4 + EXP-23: spectral correction MODE and its two additive-mode knobs.
-# These three config fields already exist + are validated in
-# verl/workers/config/comm_eff.py (correction_mode L493-496, inject_gamma
-# L498-499, blend_eta L502-503) and are read into the SpectralFilter in
-# verl/workers/comm_eff/state.py (L385-387) — but the launcher did NOT pass them
-# to Hydra, so an un-overridden run silently fell to the dataclass default
-# correction_mode=reweight, which project evidence (EXP-21) proved INERT on this
-# circuit (cos~0.5, G_filt≈0). Defaults here MIRROR the dataclass defaults
-# EXACTLY (reweight / 1.0 / 0.5) so an un-overridden run is byte-unchanged; the
-# EXP-23 arms set COMM_EFF_SPECTRAL_CORRECTION_MODE=inject (A2) / blend (A3).
-COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-reweight}"  # reweight (default, dataclass) | inject | blend
+# Cap on target matrices corrected per step. -1 = no cap = full coverage of all
+# 196 projection matrices the merger corrects (EXP-25 default; a residual cap
+# silently drops merger targets). >= 0 only as a diagnostic throttle.
+COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
+# EXP-25 (R3): spectral correction MODE (anchor combiner) + its knobs. These
+# config fields exist + are validated in verl/workers/config/comm_eff.py and are
+# read into the SpectralFilter in verl/workers/comm_eff/state.py. The dead
+# "reweight" mode was removed; the dataclass default is now signed_ema (the SL
+# merger). "inject" (A2) / "blend" (A3) remain as alternate combiners.
+COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"  # signed_ema (default, dataclass) | inject | blend
 COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # inject force (correction_mode=inject); dataclass default 1.0
 COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # convex-blend weight (correction_mode=blend); dataclass default 0.5
+# EXP-25 (R3): signed_ema merger weight alpha in G=alpha*G_noisy+(1-alpha)*|G_noisy|*sign(M).
+# alpha=0 = pure sign-merger (SFT default); alpha=1 = G_noisy unchanged. THE swept axis.
+# Active iff correction_mode=signed_ema. dataclass default 0.0.
+COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.0}"
 # --- EXP-20/M6 PowerSGD activation compression (active iff
 #     COMM_EFF_COMPRESSION_TYPE=powersgd). Defaults = the issue VII.1 candidate:
 #     rank=102 (byte-matched to the PRF mask at p=0.95), warm block power
@@ -320,9 +325,9 @@ cat <<EOF
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
-  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K
-  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED alpha=$COMM_EFF_SPECTRAL_ALPHA tau=$COMM_EFF_SPECTRAL_TAU beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA
+  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q
+  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
+  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -412,19 +417,16 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
+  actor_rollout_ref.actor.comm_eff.anchor.owns_q="$COMM_EFF_ANCHOR_OWNS_Q" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
-  actor_rollout_ref.actor.comm_eff.spectral.alpha="$COMM_EFF_SPECTRAL_ALPHA" \
-  actor_rollout_ref.actor.comm_eff.spectral.tau="$COMM_EFF_SPECTRAL_TAU" \
   actor_rollout_ref.actor.comm_eff.spectral.beta_anc="$COMM_EFF_SPECTRAL_BETA_ANC" \
-  actor_rollout_ref.actor.comm_eff.spectral.seed_anchor_cache="$COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE" \
   actor_rollout_ref.actor.comm_eff.spectral.ema_device="$COMM_EFF_SPECTRAL_EMA_DEVICE" \
-  actor_rollout_ref.actor.comm_eff.spectral.svd_mode="$COMM_EFF_SPECTRAL_SVD_MODE" \
-  actor_rollout_ref.actor.comm_eff.spectral.basis_cache="$COMM_EFF_SPECTRAL_BASIS_CACHE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
   actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
   actor_rollout_ref.actor.comm_eff.spectral.correction_mode="$COMM_EFF_SPECTRAL_CORRECTION_MODE" \
   actor_rollout_ref.actor.comm_eff.spectral.inject_gamma="$COMM_EFF_SPECTRAL_INJECT_GAMMA" \
   actor_rollout_ref.actor.comm_eff.spectral.blend_eta="$COMM_EFF_SPECTRAL_BLEND_ETA" \
+  actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha="$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA" \
   actor_rollout_ref.actor.comm_eff.powersgd.rank="$COMM_EFF_POWERSGD_RANK" \
   actor_rollout_ref.actor.comm_eff.powersgd.seed="$COMM_EFF_POWERSGD_SEED" \
   actor_rollout_ref.actor.comm_eff.powersgd.pp_size="$COMM_EFF_POWERSGD_PP_SIZE" \

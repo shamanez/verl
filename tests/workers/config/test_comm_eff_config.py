@@ -132,16 +132,16 @@ class TestCommEffConfigSchema(unittest.TestCase):
         """An unknown key under comm_eff.spectral must raise."""
         with self.assertRaises(Exception):
             omega_conf_to_dataclass(
-                {"enabled": False, "spectral": {"rank": 8, "typo": 2}},
+                {"enabled": False, "spectral": {"beta_anc": 0.9, "typo": 2}},
                 dataclass_type=CommEffConfig,
             )
 
     def test_post_init_validates_ranges(self):
-        """__post_init__ rejects out-of-range mask.p / spectral.rank."""
+        """__post_init__ rejects out-of-range mask.p / spectral.signed_ema_alpha."""
         with self.assertRaises(ValueError):
             CommEffConfig(mask=CommEffMaskConfig(p=1.5))
         with self.assertRaises(ValueError):
-            CommEffConfig(spectral=CommEffSpectralConfig(rank=0))
+            CommEffConfig(spectral=CommEffSpectralConfig(signed_ema_alpha=1.5))
         with self.assertRaises(ValueError):
             CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
 

@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the comm_eff spectral correction filter.
+"""Unit tests for the comm_eff anchor-guided gradient corrector.
 
 These cover formula-correctness invariants without a GPU or distributed runtime.
 The filter operates on logical 2D matrices; FSDP unsharding is the engine's job.
+The live correction is the signed-EMA merger (``correction_mode="signed_ema"``);
+``inject`` and ``blend`` are alternate anchor combiners. All consult only the
+anchor-gradient EMA ``M_anchor`` (no SVD / no basis cache — the dead
+reweight/SVD/Tikhonov/seeded path was removed in EXP-25).
 
-* alpha=1.0  => G_proj == G_mask           (max abs diff <= 1e-6), any anchor
-* alpha=0    => G_proj == pure two-sided Tikhonov projection (<= 1e-6)
-* shape preservation for representative square AND rectangular 2D matrices
-* determinism for a fixed seed (seeded anchor cache reproduces the result)
-* rel_change is faithful: 0 at alpha=1, strictly >0 at alpha=0.3
+* anchor EMA cold-starts at zeros and moves under update_anchor
+* signed_ema: alpha=1 => G_noisy unchanged; alpha=0 => |G_noisy|*sign(M);
+  cold-M => G_noisy unchanged (NOT zeroed) + merger_coldM_fallbacks bumped
+* inject / blend fire across the FSDP name infix
+* ema_device=cpu round-trip equals on-device
+* _canon collapses the FSDP wrap infix to one EMA key
 """
 
 import importlib.util
@@ -50,226 +55,33 @@ sys.modules["verl.workers.comm_eff.spectral_filter"] = _sf
 _spec.loader.exec_module(_sf)
 
 SpectralFilter = _sf.SpectralFilter
-compute_basis = _sf.compute_basis
-spectral_correct = _sf.spectral_correct
-tikhonov_weights = _sf.tikhonov_weights
-two_sided_projection = _sf.two_sided_projection
 _canon = _sf._canon
 
 TOL = 1e-6
 
 
-def _rand_matrix(m, n, seed=0):
-    g = torch.Generator().manual_seed(seed)
-    return torch.randn(m, n, generator=g, dtype=torch.float64)
-
-
-def _rand_anchor(m, n, seed=1):
-    """A generic (not necessarily PSD) anchor matrix for the standalone math."""
-    g = torch.Generator().manual_seed(seed)
-    return torch.randn(m, n, generator=g, dtype=torch.float64)
-
-
 # --------------------------------------------------------------------------- #
-# alpha = 1.0  =>  exact no-op
+# anchor EMA: cold-starts at zeros and moves under update_anchor
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("shape", [(8, 8), (12, 5), (5, 12), (1, 7), (7, 1)])
-def test_alpha_one_is_exact_noop(shape):
-    m, n = shape
-    g_mask = _rand_matrix(m, n, seed=3)
-    anchor = _rand_anchor(m, n, seed=4)
-    g_proj = spectral_correct(g_mask, anchor, alpha=1.0, tau=1e-3)
-    assert g_proj.shape == g_mask.shape
-    assert torch.max(torch.abs(g_proj - g_mask)).item() <= TOL
-
-
-def test_alpha_one_noop_independent_of_anchor():
-    # Two very different anchors must both yield G_proj == G_mask at alpha=1.
-    g_mask = _rand_matrix(10, 6, seed=5)
-    for s in (0, 1, 99):
-        anchor = _rand_anchor(10, 6, seed=s) * (s + 1) * 10.0
-        g_proj = spectral_correct(g_mask, anchor, alpha=1.0, tau=1e-3)
-        assert torch.max(torch.abs(g_proj - g_mask)).item() <= TOL
-
-
-# --------------------------------------------------------------------------- #
-# alpha = 0  =>  pure two-sided Tikhonov projection
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("shape", [(8, 8), (12, 5), (5, 12)])
-def test_alpha_zero_is_pure_two_sided_projection(shape):
-    m, n = shape
-    g_mask = _rand_matrix(m, n, seed=7)
-    anchor = _rand_anchor(m, n, seed=8)
-    tau = 1e-3
-
-    g_proj = spectral_correct(g_mask, anchor, alpha=0.0, tau=tau)
-
-    # Reference: recompute the projection independently from the SVD.
-    u, s, vh = torch.linalg.svd(anchor, full_matrices=False)
-    v = vh.transpose(-1, -2)
-    d = tikhonov_weights(s, tau)
-    ref = two_sided_projection(g_mask, u, d, v)
-
-    assert g_proj.shape == g_mask.shape
-    assert torch.max(torch.abs(g_proj - ref)).item() <= TOL
-
-
-def test_tikhonov_weights_formula():
-    s = torch.tensor([10.0, 1.0, 0.0])
-    tau = 1e-3
-    d = tikhonov_weights(s, tau)
-    expected = s / (s + tau)
-    assert torch.allclose(d, expected, atol=0, rtol=0)
-    # zero singular value => weight exactly 0 (well-defined, no div-by-zero)
-    assert d[-1].item() == 0.0
-
-
-def test_blend_is_convex_combination():
-    # G_proj = alpha*G_mask + (1-alpha)*G_filt must lie exactly on that line.
-    m, n = 9, 9
-    g_mask = _rand_matrix(m, n, seed=11)
-    anchor = _rand_anchor(m, n, seed=12)
-    tau = 1e-3
-    alpha = 0.3
-
-    g0 = spectral_correct(g_mask, anchor, alpha=0.0, tau=tau)
-    ga = spectral_correct(g_mask, anchor, alpha=alpha, tau=tau)
-    blended = alpha * g_mask + (1.0 - alpha) * g0
-    assert torch.max(torch.abs(ga - blended)).item() <= TOL
-
-
-# --------------------------------------------------------------------------- #
-# shape preservation
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("shape", [(16, 16), (32, 8), (8, 32), (1, 5), (5, 1), (1, 1)])
-def test_shape_preserved(shape):
-    m, n = shape
-    g_mask = _rand_matrix(m, n, seed=13)
-    anchor = _rand_anchor(m, n, seed=14)
-    for alpha in (0.0, 0.3, 1.0):
-        g_proj = spectral_correct(g_mask, anchor, alpha=alpha, tau=1e-3)
-        assert g_proj.shape == g_mask.shape
-
-
-def test_non_2d_input_rejected():
-    g3d = torch.randn(2, 3, 4)
-    anchor = torch.randn(2, 3, 4)
-    with pytest.raises(AssertionError):
-        spectral_correct(g3d, anchor, alpha=0.3, tau=1e-3)
-
-
-def test_anchor_shape_mismatch_rejected():
-    g = torch.randn(8, 6)
-    bad_anchor = torch.randn(6, 8)
-    with pytest.raises(AssertionError):
-        spectral_correct(g, bad_anchor, alpha=0.3, tau=1e-3)
-
-
-# --------------------------------------------------------------------------- #
-# SpectralFilter: seeded anchor cache + determinism
-# --------------------------------------------------------------------------- #
-def test_seeded_anchor_is_deterministic():
-    g_mask = _rand_matrix(12, 7, seed=20).to(torch.float32)
-    f1 = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.95, seed_anchor_cache=True, anchor_seed=42)
-    f2 = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.95, seed_anchor_cache=True, anchor_seed=42)
-    out1 = f1.correct_matrix("model.layers.0.self_attn.q_proj.weight", g_mask.clone())
-    out2 = f2.correct_matrix("model.layers.0.self_attn.q_proj.weight", g_mask.clone())
-    assert out1.shape == g_mask.shape
-    assert torch.max(torch.abs(out1 - out2)).item() <= TOL
-
-
-def test_seeded_anchor_shape_matches_target():
-    f = SpectralFilter(seed_anchor_cache=True, anchor_seed=0)
-    for shape in [(16, 16), (32, 8), (8, 32)]:
-        g = torch.randn(*shape, dtype=torch.float32)
-        anc = f.ensure_anchor(f"p{shape}", g)
-        assert anc.shape == g.shape
-        out = f.correct_matrix(f"p{shape}", g)
-        assert out.shape == g.shape
-
-
-def test_alpha_one_noop_through_filter():
-    f = SpectralFilter(alpha=1.0, tau=1e-3, seed_anchor_cache=True, anchor_seed=1)
-    g = torch.randn(10, 6, dtype=torch.float32)
-    out = f.correct_matrix("w", g.clone())
-    assert torch.max(torch.abs(out - g)).item() <= TOL
-    assert f.relative_change(g, out) == 0.0
-
-
-def test_rel_change_active_at_alpha_0p3():
-    # Correction must actually fire (rel_change > 0).
-    f = SpectralFilter(alpha=0.3, tau=1e-3, seed_anchor_cache=True, anchor_seed=2)
-    g = torch.randn(12, 12, dtype=torch.float32)
-    out = f.correct_matrix("w", g.clone())
-    rel = f.relative_change(g, out)
-    assert rel > 0.0  # correction is not a silent no-op
-    assert out.shape == g.shape
+def test_anchor_cold_starts_at_zeros():
+    """ensure_anchor cold-starts M_anchor at zeros (no seeded basis)."""
+    f = SpectralFilter(beta_anc=0.5)
+    g = torch.randn(8, 6, dtype=torch.float32)
+    anc = f.ensure_anchor("w", g)
+    assert anc.shape == g.shape
+    assert torch.count_nonzero(anc).item() == 0, "cold start must be all-zeros"
 
 
 def test_ema_update_moves_anchor():
-    f = SpectralFilter(beta_anc=0.5, seed_anchor_cache=False)
+    f = SpectralFilter(beta_anc=0.5)
     g_anchor = torch.ones(4, 4, dtype=torch.float32)
-    a0 = f.ensure_anchor("w", g_anchor).clone()  # zeros (unseeded)
+    a0 = f.ensure_anchor("w", g_anchor).clone()  # zeros (cold start)
     a1 = f.update_anchor("w", g_anchor)
     # beta=0.5: M <- 0.5*0 + 0.5*1 = 0.5
     assert torch.allclose(a1, torch.full((4, 4), 0.5), atol=TOL)
     assert not torch.allclose(a0, a1)
 
 
-# =========================================================================== #
-# svd_mode=lowrank reconstruction error is bounded and decreasing in rank.
-# =========================================================================== #
-def _recon_error_at_rank(m_anchor, rank):
-    """||M - U_r diag(S_r) V_r^T||_F for the rank-r lowrank basis of M."""
-    u, s, v = compute_basis(m_anchor, svd_mode="lowrank", rank=rank)
-    recon = u @ torch.diag(s) @ v.transpose(-1, -2)
-    return torch.linalg.norm(m_anchor - recon).item()
-
-
-@pytest.mark.parametrize("shape", [(16, 16), (24, 12), (12, 24)])
-def test_lowrank_recon_error_bounded_and_decreasing_in_rank(shape):
-    m, n = shape
-    k = min(m, n)
-    # A matrix with a genuine decaying spectrum so higher rank captures more.
-    g = torch.Generator().manual_seed(101)
-    a = torch.randn(m, k, generator=g, dtype=torch.float64)
-    b = torch.randn(n, k, generator=g, dtype=torch.float64)
-    spectrum = torch.logspace(0, -2, steps=k, dtype=torch.float64)  # 1 .. 0.01
-    qa, _ = torch.linalg.qr(a)
-    qb, _ = torch.linalg.qr(b)
-    M = (qa * spectrum.unsqueeze(0)) @ qb.transpose(0, 1)
-
-    errs = [_recon_error_at_rank(M, r) for r in range(1, k + 1)]
-    # torch.svd_lowrank is RANDOMIZED, so adjacent ranks are not strictly
-    # monotone; assert the trend over WELL-SEPARATED ranks (randomization noise
-    # is small relative to a halving of the truncation level). The exact-SVD
-    # fallback at q==k makes the full-rank point exact.
-    lo_rank_err = errs[0]
-    mid_rank_err = errs[(k // 2) - 1] if k >= 2 else errs[0]
-    full_rank_err = errs[-1]
-    # Bounded: every reconstruction error is finite and the ideal (Eckart-Young)
-    # rank-r error is the tail energy, which is <= ||M||; allow randomization
-    # slack but it must never exceed ||M|| by more than a small factor.
-    norm_M = torch.linalg.norm(M).item()
-    assert all(0.0 <= e <= norm_M + 1e-6 for e in errs), f"recon error unbounded: {errs} (||M||={norm_M})"
-    # Decreasing trend: mid rank beats low rank; full rank reconstructs ~exactly.
-    assert mid_rank_err < lo_rank_err, f"mid-rank not better than low-rank: {errs}"
-    assert full_rank_err <= 1e-6, f"full-rank reconstruction not exact: {full_rank_err}"
-    assert lo_rank_err > full_rank_err, f"low rank should leave residual: {errs}"
-
-
-def test_lowrank_correct_matrix_runs_and_preserves_shape():
-    f = SpectralFilter(alpha=0.3, tau=1e-3, seed_anchor_cache=True, anchor_seed=3, svd_mode="lowrank", rank=4)
-    for shape in [(16, 16), (32, 8), (8, 32)]:
-        g = torch.randn(*shape, dtype=torch.float32)
-        out = f.correct_matrix(f"w{shape}", g.clone())
-        assert out.shape == g.shape
-        assert torch.isfinite(out).all()
-
-
-# =========================================================================== #
-# ema_device=cpu round-trip yields the same M_anchor as on-device.
-# =========================================================================== #
 def test_ema_device_cpu_roundtrip_equals_on_device():
     # On CPU-only CI both "gpu" and "cpu" storage resolve to CPU tensors, so the
     # EMA arithmetic must be identical; the test guards the offload-move logic
@@ -277,8 +89,8 @@ def test_ema_device_cpu_roundtrip_equals_on_device():
     g1 = torch.randn(8, 6, generator=torch.Generator().manual_seed(7), dtype=torch.float32)
     g2 = torch.randn(8, 6, generator=torch.Generator().manual_seed(8), dtype=torch.float32)
 
-    f_gpu = SpectralFilter(beta_anc=0.9, seed_anchor_cache=False, ema_device="gpu")
-    f_cpu = SpectralFilter(beta_anc=0.9, seed_anchor_cache=False, ema_device="cpu")
+    f_gpu = SpectralFilter(beta_anc=0.9, ema_device="gpu")
+    f_cpu = SpectralFilter(beta_anc=0.9, ema_device="cpu")
 
     for f in (f_gpu, f_cpu):
         f.update_anchor("w", g1)
@@ -291,54 +103,67 @@ def test_ema_device_cpu_roundtrip_equals_on_device():
     assert f_cpu._anchor["w"].device.type == "cpu"
 
 
-def test_ema_device_cpu_correct_matrix_matches_gpu():
-    g_anchor = torch.randn(10, 10, generator=torch.Generator().manual_seed(11), dtype=torch.float32)
-    g_mask = torch.randn(10, 10, generator=torch.Generator().manual_seed(12), dtype=torch.float32)
-
-    f_gpu = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, ema_device="gpu")
-    f_cpu = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, ema_device="cpu")
-    for f in (f_gpu, f_cpu):
-        f.update_anchor("w", g_anchor)
-
-    out_gpu = f_gpu.correct_matrix("w", g_mask.clone())
-    out_cpu = f_cpu.correct_matrix("w", g_mask.clone())
-    assert torch.allclose(out_gpu, out_cpu, atol=1e-5)
-
-
 # =========================================================================== #
-# basis_cache=recompute is numerically equal to basis_cache=cache.
+# signed_ema merger (EXP-25/R3): G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M)
 # =========================================================================== #
-def test_basis_cache_recompute_equals_cache():
-    g_anchor = torch.randn(12, 9, generator=torch.Generator().manual_seed(21), dtype=torch.float32)
-    g_mask = torch.randn(12, 9, generator=torch.Generator().manual_seed(22), dtype=torch.float32)
-
-    f_cache = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="cache")
-    f_recompute = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="recompute")
-    for f in (f_cache, f_recompute):
-        f.update_anchor("w", g_anchor)  # cache mode populates _basis here
-
-    # cache mode reuses the basis stored at the last update_anchor; recompute
-    # recomputes SVD inside correct_matrix. Both act on the SAME M_anchor.
-    out_cache = f_cache.correct_matrix("w", g_mask.clone())
-    out_recompute = f_recompute.correct_matrix("w", g_mask.clone())
-    assert torch.allclose(out_cache, out_recompute, atol=1e-5), "cache vs recompute diverged"
-    # cache mode actually stored a basis; recompute mode did not.
-    assert "w" in f_cache._basis
-    assert "w" not in f_recompute._basis
+def test_signed_ema_alpha_one_returns_g_noisy_exactly():
+    """alpha=1 => G_corr == G_noisy verbatim, regardless of the (warm) anchor."""
+    f = SpectralFilter(beta_anc=0.0, correction_mode="signed_ema", signed_ema_alpha=1.0)
+    gen = torch.Generator().manual_seed(31)
+    # beta=0 => M_anchor == g_anchor exactly (warm, nonzero).
+    f.update_anchor("w", torch.randn(12, 7, generator=gen, dtype=torch.float32))
+    g_noisy = torch.randn(12, 7, generator=gen, dtype=torch.float32)
+    out = f.signed_ema_matrix("w", g_noisy.clone())
+    assert torch.allclose(out, g_noisy, atol=TOL), "alpha=1 must return G_noisy unchanged"
+    assert f.merger_coldM_fallbacks == 0, "anchor was warm => no cold-M fallback"
 
 
-def test_basis_cache_reused_across_correct_calls():
-    """Under basis_cache=cache the SAME cached basis serves repeated
-    correct_matrix calls between refreshes (the fast-mini-batch reuse path)."""
-    f = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.9, seed_anchor_cache=False, basis_cache="cache")
-    f.update_anchor("w", torch.randn(8, 8, generator=torch.Generator().manual_seed(31), dtype=torch.float32))
-    basis_id = id(f._basis["w"])
-    g = torch.randn(8, 8, generator=torch.Generator().manual_seed(32), dtype=torch.float32)
-    f.correct_matrix("w", g.clone())
-    f.correct_matrix("w", g.clone())
-    # No refresh happened between the two corrections => the cached basis object
-    # is unchanged (not recomputed per correction).
-    assert id(f._basis["w"]) == basis_id
+def test_signed_ema_alpha_zero_is_magnitude_g_sign_m():
+    """alpha=0 => G_corr == |G_noisy| * sign(M_anchor) elementwise."""
+    f = SpectralFilter(beta_anc=0.0, correction_mode="signed_ema", signed_ema_alpha=0.0)
+    gen = torch.Generator().manual_seed(32)
+    m_anchor = torch.randn(10, 10, generator=gen, dtype=torch.float32)
+    f.update_anchor("w", m_anchor)  # beta=0 => M == m_anchor
+    g_noisy = torch.randn(10, 10, generator=gen, dtype=torch.float32)
+    out = f.signed_ema_matrix("w", g_noisy.clone()).to(torch.float32)
+    expected = g_noisy.abs() * torch.sign(m_anchor)
+    assert torch.allclose(out, expected, atol=1e-5), "alpha=0 must be |G_noisy|*sign(M)"
+
+
+def test_signed_ema_cold_M_returns_g_noisy_and_counts_fallback():
+    """COLD-M guard: when M_anchor is unwarmed (zeros), the merger must return
+    G_noisy UNCHANGED (NOT silently zeroed) and bump merger_coldM_fallbacks.
+    This is the silent grad-zeroing guard — at alpha=0 a cold M would otherwise
+    give |G|*sign(0)=0."""
+    f = SpectralFilter(correction_mode="signed_ema", signed_ema_alpha=0.0)
+    g_noisy = torch.randn(8, 8, generator=torch.Generator().manual_seed(33), dtype=torch.float32)
+    # No update_anchor => M cold (zeros).
+    out = f.signed_ema_matrix("w", g_noisy.clone())
+    assert torch.allclose(out, g_noisy, atol=TOL), "cold M must return G_noisy UNCHANGED, not zeroed"
+    assert f.merger_coldM_fallbacks == 1, "cold-M fallback must be counted"
+    # After M warms, the fallback must NOT fire again for that matrix.
+    f.update_anchor("w", torch.ones(8, 8, dtype=torch.float32))
+    out2 = f.signed_ema_matrix("w", g_noisy.clone())
+    # alpha=0, M all-positive => |G_noisy| * (+1) = |G_noisy|.
+    assert torch.allclose(out2.to(torch.float32), g_noisy.abs(), atol=1e-5)
+    assert f.merger_coldM_fallbacks == 1, "warm M must not increment the fallback counter"
+
+
+def test_signed_ema_finds_anchor_across_fsdp_infix():
+    """Feed M_anchor under the CLONE (non-infixed) name, merge under the LIVE
+    (infixed) name — the merger must see the warmed anchor (no cold-M fallback)."""
+    f = SpectralFilter(beta_anc=0.0, correction_mode="signed_ema", signed_ema_alpha=0.0)
+    gen = torch.Generator().manual_seed(34)
+    g_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    f.update_anchor(CLONE_NAME, g_anchor)  # feed under clone (non-infixed) name
+    g_noisy = torch.randn(16, 16, generator=gen, dtype=torch.float32)
+    out = f.signed_ema_matrix(LIVE_NAME, g_noisy.clone()).to(torch.float32)
+    assert f.merger_coldM_fallbacks == 0, "M_anchor must be found warm across the FSDP infix"
+    expected = g_noisy.abs() * torch.sign(g_anchor)
+    assert torch.allclose(out, expected, atol=1e-5)
+    # Exactly one canonical EMA entry (no divergent live/clone buffers).
+    assert list(f._anchor.keys()) == [CLONE_NAME]
+    assert LIVE_NAME not in f._anchor
 
 
 # =========================================================================== #
@@ -368,8 +193,7 @@ def test_canon_strips_fsdp_infix():
 def test_inject_finds_anchor_across_fsdp_infix():
     """Feed under the clone name, inject under the live name, and ensure it fires."""
     f = SpectralFilter(
-        alpha=0.3, tau=1e-3, beta_anc=0.5, seed_anchor_cache=False,
-        correction_mode="inject", inject_gamma=1.0,
+        beta_anc=0.5, correction_mode="inject", inject_gamma=1.0,
     )
     gen = torch.Generator().manual_seed(7)
     # A clean anchor gradient (the K-stale unmasked G_anchor) fed under the clone name.
@@ -389,7 +213,7 @@ def test_inject_finds_anchor_across_fsdp_infix():
 def test_anchor_ema_shared_entry_across_infix():
     """The clone-name feed and the live-name read address the SAME _anchor entry
     (exactly one key, the canonical one) — not two divergent buffers."""
-    f = SpectralFilter(beta_anc=0.5, seed_anchor_cache=False, correction_mode="inject")
+    f = SpectralFilter(beta_anc=0.5, correction_mode="inject")
     g_anchor = torch.ones(8, 8, dtype=torch.float32)
     f.update_anchor(CLONE_NAME, g_anchor)          # feed under clone name
     # Exactly one EMA entry, keyed canonically.
@@ -403,20 +227,6 @@ def test_anchor_ema_shared_entry_across_infix():
     assert torch.allclose(anc_via_live, torch.full((8, 8), 0.5), atol=TOL)
 
 
-def test_correct_matrix_also_consistent_across_infix():
-    """The same key-consistency holds for the reweight path (correct_matrix),
-    so the behavior is mode-agnostic: feed under clone name, correct under live name."""
-    f = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.5, seed_anchor_cache=False)
-    gen = torch.Generator().manual_seed(11)
-    f.update_anchor(CLONE_NAME, torch.randn(12, 12, generator=gen, dtype=torch.float32))
-    # The basis was cached under the canonical key at update_anchor time.
-    assert CLONE_NAME in f._basis and LIVE_NAME not in f._basis
-    g_mask = torch.randn(12, 12, generator=gen, dtype=torch.float32)
-    out = f.correct_matrix(LIVE_NAME, g_mask.clone())
-    # alpha=0.3 (<1) with a real anchor => correction is active (output differs).
-    assert torch.linalg.norm(out - g_mask).item() > 1e-6
-
-
 # =========================================================================== #
 # Convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
 # eta=0 => G_mask exactly; eta=1 => scale-matched M_anchor; the blend must fire
@@ -425,7 +235,7 @@ def test_correct_matrix_also_consistent_across_infix():
 def test_blend_eta_zero_returns_g_mask_exactly():
     """eta=0 => the convex blend collapses to G_mask verbatim (the floor)."""
     f = SpectralFilter(
-        beta_anc=0.5, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.0
+        beta_anc=0.5, correction_mode="blend", blend_eta=0.0
     )
     gen = torch.Generator().manual_seed(21)
     # A nonzero anchor so the no-op short-circuit (anc_norm<=eps) is NOT what
@@ -439,14 +249,10 @@ def test_blend_eta_zero_returns_g_mask_exactly():
 def test_blend_eta_one_is_scale_matched_anchor():
     """eta=1 => G_corr ≈ scale*M_anchor with scale=||G_mask||/||M_anchor||, i.e.
     a vector PARALLEL to M_anchor whose magnitude equals ||G_mask||."""
-    f = SpectralFilter(
-        beta_anc=1.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=1.0
-    )
     gen = torch.Generator().manual_seed(22)
-    # beta_anc=1.0 over a zero start keeps M_anchor == 0 (EMA = 1*0 + 0*g), so
-    # feed the anchor with beta_anc<1 instead via a fresh filter for a real anchor.
+    # beta_anc=0 => M_anchor == m_anchor exactly (a real, warm anchor).
     f2 = SpectralFilter(
-        beta_anc=0.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=1.0
+        beta_anc=0.0, correction_mode="blend", blend_eta=1.0
     )
     m_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
     f2.update_anchor("w", m_anchor)  # beta=0 => M_anchor == m_anchor exactly
@@ -467,7 +273,7 @@ def test_blend_magnitude_stable_at_eta_0p7():
     For orthogonal terms it equals sqrt((1-eta)^2 + eta^2) < 1; for any anchor it
     is bounded by 1 under the convex blend (triangle ineq with scale-match)."""
     f = SpectralFilter(
-        beta_anc=0.0, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.7
+        beta_anc=0.0, correction_mode="blend", blend_eta=0.7
     )
     gen = torch.Generator().manual_seed(23)
     f.update_anchor("w", torch.randn(32, 32, generator=gen, dtype=torch.float32))
@@ -483,7 +289,7 @@ def test_blend_finds_anchor_across_fsdp_infix():
     (infixed) name. The blend MUST fire (result != G_mask) AND must NOT equal the
     eta=0 floor — proving M_anchor was found nonzero under the canonical key."""
     f = SpectralFilter(
-        beta_anc=0.5, seed_anchor_cache=False, correction_mode="blend", blend_eta=0.7
+        beta_anc=0.5, correction_mode="blend", blend_eta=0.7
     )
     gen = torch.Generator().manual_seed(24)
     g_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
@@ -498,6 +304,18 @@ def test_blend_finds_anchor_across_fsdp_infix():
     # Exactly one canonical EMA entry (no divergent live/clone buffers).
     assert list(f._anchor.keys()) == [CLONE_NAME]
     assert LIVE_NAME not in f._anchor
+
+
+# =========================================================================== #
+# relative_change is faithful: 0 when G_corr == G_noisy, > 0 when it differs.
+# =========================================================================== #
+def test_relative_change_zero_when_unchanged_and_positive_when_changed():
+    f = SpectralFilter(beta_anc=0.0, correction_mode="signed_ema", signed_ema_alpha=0.0)
+    g = torch.randn(8, 8, generator=torch.Generator().manual_seed(41), dtype=torch.float32)
+    assert f.relative_change(g, g.clone()) == 0.0
+    f.update_anchor("w", -torch.ones(8, 8, dtype=torch.float32))  # flip all signs
+    out = f.signed_ema_matrix("w", g.clone())
+    assert f.relative_change(g, out) > 0.0
 
 
 if __name__ == "__main__":

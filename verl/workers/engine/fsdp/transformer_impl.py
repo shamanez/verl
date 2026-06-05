@@ -889,6 +889,177 @@ class FSDPEngine(BaseEngine):
             return ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
         return tuple(substrs)
 
+    def _dp_all_reduce_anchor_grads(self, anchor_grads: dict) -> dict:
+        """EXP-25 (R1, FIX 5): all-reduce(MEAN) ``G_anchor`` across the actor DP group.
+
+        The anchor backward runs on a per-rank deep-copy clone with NO FSDP hooks,
+        so each rank's ``p.grad`` is the gradient of ITS OWN 1/dp_size data shard —
+        NOT the global gradient. Before feeding ``M_anchor``'s EMA we therefore
+        all-reduce(MEAN) each per-target grad over ``get_data_parallel_group()`` so
+        ``M_anchor`` is the GLOBAL stale gradient, bit-identical on every rank.
+
+        **MEAN is correct (not SUM).** The clean-PG ``agg_loss`` already scales by
+        ``dp_size`` (core_algos.py:1173, ``masked_sum/batch_num_tokens * dp_size``),
+        which cancels FSDP's mean gradient reduction; the anchor clone has no FSDP
+        reduction, so all-reduce-MEAN of the per-rank shard gradients reproduces
+        the true full-batch token-mean gradient. all-reduce-SUM would over-count by
+        ``dp_size`` and silently inflate ``sign(M)`` magnitude bookkeeping.
+
+        **Collective safety (deadlock guard).** Walk a FIXED ``sorted(keys)`` order
+        and contribute a correctly-shaped ZERO for any target a rank lacks, so
+        every rank issues the IDENTICAL collective sequence (mirrors the PowerSGD
+        sketch-sync discipline). The clone arch + target_substrs are identical
+        across ranks and the DP shards are symmetric, so the key set is identical
+        by construction; the zero-fill is belt-and-braces against any future asym.
+
+        Reduces on the GRAD's device (GPU) regardless of the EMA storage device
+        (cpu) — the EMA feed moves it to the storage device afterward. Logs each
+        target's pre/post-reduce norm (cheap mean-vs-sum proxy: a SUM bug shows
+        ~dp_size× inflation; a correct MEAN keeps the norm O(1)×).
+
+        Returns the in-place-reduced ``anchor_grads`` dict.
+        """
+        if not torch.distributed.is_initialized():
+            return anchor_grads
+        group = self.get_data_parallel_group()
+        try:
+            dp_world = torch.distributed.get_world_size(group=group)
+        except Exception:
+            dp_world = 1
+        if dp_world <= 1:
+            return anchor_grads
+        # FIXED sorted order so every rank issues the same collective sequence.
+        names = sorted(anchor_grads.keys())
+        norm_pre = {}
+        norm_post = {}
+        for name in names:
+            g = anchor_grads[name]
+            gd = g.to(torch.float32)
+            norm_pre[name] = float(torch.linalg.norm(gd).item())
+            # all-reduce(SUM) then divide by dp_world == MEAN. (ReduceOp.AVG is not
+            # available on every backend; SUM+/dp_world is portable + exact.)
+            torch.distributed.all_reduce(gd, op=torch.distributed.ReduceOp.SUM, group=group)
+            gd /= float(dp_world)
+            norm_post[name] = float(torch.linalg.norm(gd).item())
+            anchor_grads[name] = gd.to(g.dtype)
+        if names:
+            # Mean pre/post ratio across targets — a MEAN reduce keeps it ~O(1);
+            # a SUM bug would show ~dp_world. Greppable scale falsifier.
+            import statistics as _stats
+            ratios = [norm_post[n] / norm_pre[n] for n in names if norm_pre[n] > 0]
+            ratio_mean = _stats.fmean(ratios) if ratios else 0.0
+            print(
+                f"[comm_eff][EXP-25][dp-reduce] anchor G_anchor all-reduced(MEAN) over DP "
+                f"dp_world={dp_world} targets={len(names)} "
+                f"||G||_post/||G||_pre_mean={ratio_mean:.4f} "
+                f"(MEAN ⇒ ~O(1) per-rank-shard-dependent; a SUM bug ⇒ ~{dp_world}x)",
+                flush=True,
+            )
+        return anchor_grads
+
+    def _broadcast_anchor_M(self, spectral, anchor_grads: dict, *, src: int = 0) -> dict:
+        """EXP-25 (R2): ``dist.broadcast`` the anchor EMA ``M`` to every DP rank.
+
+        After the DP-reduce + EMA feed, ``M_anchor`` is already bit-identical
+        across ranks (the all-reduce made ``G_anchor`` identical, and the EMA is
+        deterministic). This broadcast is the POSITIVE-RECEIPT mechanism the (R2)
+        invariant requires: it proves every fast/DP rank holds the anchor's ``M``
+        (a wrong process group / dropped collective surfaces as recv != src). The
+        merger reads ``sign(M)`` on the fast path, so a stale/cold M on any rank
+        would silently break the correction there.
+
+        Walks the FIXED ``sorted(anchor_grads.keys())`` order (== the EMA's covered
+        targets) so every rank issues the identical collective sequence. Operates
+        on ``spectral._anchor`` (keyed by canonical name, the EMA store). Brings a
+        CPU-offloaded M onto the grad device for the broadcast, then restores it to
+        the EMA storage device. Returns a per-target receipt dict.
+        """
+        if not torch.distributed.is_initialized():
+            return {}
+        group = self.get_data_parallel_group()
+        try:
+            dp_world = torch.distributed.get_world_size(group=group)
+        except Exception:
+            dp_world = 1
+        if dp_world <= 1:
+            return {}
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        receipts: dict = {}
+        for name in sorted(anchor_grads.keys()):
+            cname = _canon(name)
+            m = spectral._anchor.get(cname)
+            if m is None:
+                continue
+            # Broadcast on a contiguous fp32 copy on the grad's compute device.
+            dev = anchor_grads[name].device
+            m_dev = m.detach().to(device=dev, dtype=torch.float32).contiguous()
+            pre = float(torch.linalg.norm(m_dev).item())
+            torch.distributed.broadcast(m_dev, src=src, group=group)
+            post = float(torch.linalg.norm(m_dev).item())
+            # Store back on the EMA storage device (re-pin if CPU-offloaded).
+            store_dev = spectral._ema_storage_device(dev)
+            stored = m_dev.to(store_dev)
+            if store_dev.type == "cpu" and dev.type == "cuda":
+                stored = stored.pin_memory()
+            spectral._anchor[cname] = stored
+            receipts[name] = {"pre_norm": pre, "post_norm": post, "changed": bool(abs(post - pre) > 0.0)}
+        return receipts
+
+    def _verify_anchor_M_dp_identical(self, spectral, anchor_grads: dict, *, step: int, atol: float = 1e-6) -> None:
+        """EXP-25 (R1, checklist #2): assert ``M_anchor`` is bit-identical across DP.
+
+        All-gathers a per-target fp64 checksum of the EMA ``M`` over the DP group
+        and asserts the max cross-rank relative deviation is ``<= atol``. After the
+        all-reduce(MEAN) of ``G_anchor`` the EMA is deterministic, so ``M`` MUST be
+        identical on every rank; a non-zero deviation proves the DP-reduce did not
+        run / used the wrong group (the R1 FIX-5 falsifier). Symmetric collective
+        (FIXED sorted target order, same-length vector on every rank). No-op when
+        single-rank / distributed unavailable.
+        """
+        if not torch.distributed.is_initialized():
+            return
+        group = self.get_data_parallel_group()
+        try:
+            world = torch.distributed.get_world_size(group=group)
+        except Exception:
+            world = 1
+        if world <= 1:
+            return
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        names = sorted(anchor_grads.keys())
+        dev = get_device_id()
+        ramp_sums = []
+        for name in names:
+            m = spectral._anchor.get(_canon(name))
+            if m is None:
+                ramp_sums.append(0.0)
+                continue
+            md = m.detach().to(torch.float64).reshape(-1)
+            # A deterministic ramp-weighted sum (sign/permutation/value sensitive).
+            ramp = torch.arange(1, md.numel() + 1, dtype=torch.float64, device=md.device)
+            ramp_sums.append(float((md * ramp).sum().item()))
+        vec = torch.tensor(ramp_sums, dtype=torch.float64, device=dev)
+        gathered = [torch.zeros_like(vec) for _ in range(world)]
+        torch.distributed.all_gather(gathered, vec, group=group)
+        ref = gathered[0]
+        max_abs = 0.0
+        for g in gathered[1:]:
+            max_abs = max(max_abs, float((g - ref).abs().max().item()))
+        scale = float(ref.abs().max().item()) or 1.0
+        max_rel = max_abs / scale
+        print(
+            f"[comm_eff][EXP-25][M-dp-identical] step={step} targets={len(names)} "
+            f"cross_rank_max_rel_dev={max_rel:.3e} (0 ⇒ M is the GLOBAL DP-reduced gradient)",
+            flush=True,
+        )
+        assert max_rel <= atol, (
+            f"comm_eff anchor M DIVERGED across DP ranks (max_rel_dev={max_rel:.3e} > atol={atol:.1e}); "
+            "the all-reduce(MEAN) of G_anchor did not make M identical — R1 FIX-5 broken "
+            "(wrong process group / reduce never ran)."
+        )
+
     def _build_anchor_pg_loss(self, fast_path_loss_function, anchor_pg_loss):
         """Bind the clean policy-gradient loss for the anchor pass.
 
@@ -950,8 +1121,8 @@ class FSDPEngine(BaseEngine):
            ``anchor_mask_applications`` is recorded as the (asserted-zero) delta
            of ``state.mask_applications`` around the pass.
         6. **Uncorrected.** ``G_anchor`` is read RAW and fed to
-           ``SpectralFilter.update_anchor`` (the EMA) BEFORE any
-           ``correct_matrix``; ``anchor_grad_corrected`` stays 0.
+           ``SpectralFilter.update_anchor`` (the EMA) BEFORE any fast-path
+           corrector; ``anchor_grad_corrected`` stays 0.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
@@ -992,7 +1163,16 @@ class FSDPEngine(BaseEngine):
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
-        max_targets = int(getattr(spec_cfg, "max_targets", 4)) if spec_cfg is not None else 4
+        # EXP-25: default to FULL coverage (-1) — the merger corrects ALL 196
+        # matrices, and max_targets caps BOTH the anchor extraction and the merger.
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+
+        # EXP-25 (R2): anchor-owns-Q — when on, the anchor's stale forward also
+        # harvests slow-net activations into the PowerSGD sketch V, computes
+        # Q ← orth(V), and broadcasts Q (and M) to every DP rank.
+        anchor_owns_q = bool(getattr(anchor_cfg, "owns_q", False))
+        powersgd = getattr(state, "powersgd", None)
+        do_anchor_q = anchor_owns_q and powersgd is not None
 
         use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
         module_is_fsdp1 = isinstance(self.module, FSDP)
@@ -1129,6 +1309,19 @@ class FSDPEngine(BaseEngine):
                 if p.grad is not None:
                     p.grad = None
 
+            # EXP-25 (R2): anchor-owns-Q. Register the PowerSGD projection hooks
+            # ON THE CLONE so the anchor's UNMASKED stale-weight forward folds its
+            # slow-net boundary activations into the SAME compressor's sketch V
+            # (V += Aᵀ(AQ)). The forward hook's sketch gate is routed by
+            # _anchor_sketch_mode (set True here) — it accumulates regardless of
+            # path_tag (None on the anchor pass) and is deduped per forward-
+            # generation against grad-ckpt recompute. The fast-path sketch
+            # accumulation stays gated OFF. We unregister + clear the mode in the
+            # finally so the live fast path is untouched.
+            if do_anchor_q:
+                powersgd.set_anchor_sketch_mode(True)
+                powersgd.register(self.module)  # self.module is the clone now
+
             # UNMASKED forward/backward on the CLONE. No FSDP hooks fire (the
             # clone has none). mask_active=False ⇒ no mask hooks fire on the
             # clone either (the masker is registered on self.module — now the
@@ -1161,6 +1354,15 @@ class FSDPEngine(BaseEngine):
                 full_grad_of=_full_grad_of,
             )
         finally:
+            # EXP-25 (R2): tear down the anchor's PowerSGD hooks on the clone and
+            # clear the sketch-harvest mode so the live fast path is untouched.
+            # The sketch V (just harvested) PERSISTS on the compressor — consumed
+            # by anchor_update_basis below. Q/M broadcasts also happen below.
+            if do_anchor_q:
+                try:
+                    powersgd.unregister()
+                finally:
+                    powersgd.set_anchor_sketch_mode(False)
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
@@ -1205,14 +1407,97 @@ class FSDPEngine(BaseEngine):
             "must stay 0; snapshot is OFF the optimizer's param group)."
         )
 
-        # Feed RAW grads into the EMA (update_anchor, NEVER correct_matrix).
+        # EXP-25 (R1, FIX 7): COVERAGE SET-EQUALITY — the anchor M must cover EVERY
+        # matrix the merger corrects (set-equal, NOT 4 / NOT boundary-only). Build
+        # the expected merger set from the SAME substring+2D selector the merger
+        # uses, over the live module's named_parameters (architecture == the
+        # clone), and assert set(anchor_grads canon) == set(expected canon) when
+        # uncapped. A mismatch is the EXP-23 coverage bug; emit the count + the
+        # symmetric difference so it is greppable. (Only meaningful when uncapped:
+        # max_targets<0; a diagnostic cap deliberately narrows both.)
+        from verl.workers.comm_eff.spectral_filter import _canon as _canon_cov
+        try:
+            with _summon_ctx():
+                _inner_cov = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                expected = {
+                    _canon_cov(n)
+                    for n, p in _inner_cov.named_parameters()
+                    if any(s in n for s in target_substrs) and getattr(p, "ndim", p.dim()) == 2
+                }
+        except Exception as _cov_exc:  # pragma: no cover - defensive
+            expected = set()
+            print(f"[comm_eff][EXP-25][coverage] WARN could not enumerate expected set: {_cov_exc!r}", flush=True)
+        got = {_canon_cov(k) for k in anchor_grads.keys()}
+        if expected:
+            missing = expected - got
+            extra = got - expected
+            print(
+                f"[comm_eff][EXP-25][coverage] anchor_targets={len(got)} merger_expected={len(expected)} "
+                f"set_equal={got == expected} missing={sorted(missing)[:6]}{'...' if len(missing) > 6 else ''} "
+                f"extra={sorted(extra)[:6]}{'...' if len(extra) > 6 else ''}",
+                flush=True,
+            )
+            if max_targets < 0:
+                assert got == expected, (
+                    f"comm_eff anchor coverage MISMATCH (R1 FIX 7): anchor covers {len(got)} targets but the "
+                    f"merger corrects {len(expected)}; missing={sorted(missing)[:8]} extra={sorted(extra)[:8]}. "
+                    "set(anchor M) MUST == set(merger targets) at full coverage (max_targets=-1)."
+                )
+
+        # EXP-25 (R1, FIX 5): all-reduce(MEAN) G_anchor across the DP group so
+        # M_anchor is the GLOBAL stale gradient (bit-identical across ranks, at the
+        # correct mean scale), BEFORE the EMA. The anchor clone had no FSDP
+        # reduction, so without this M is each rank's local-shard gradient.
+        anchor_grads = self._dp_all_reduce_anchor_grads(anchor_grads)
+
+        # Feed RAW (now DP-reduced) grads into the EMA (update_anchor, NEVER correct_matrix).
         deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
 
-        # EMA-evolution log line. String discovery (ema_device/svd_mode) is
-        # logged once at build, never here.
+        # EXP-25 (R2): anchor-owned Q. Now that the slow-net activations are
+        # harvested into V (during the clean anchor forward above), compute
+        # Q ← orth(V) on the ANCHOR (DP-synced) and BROADCAST both Q and the freshly
+        # EMA'd M to every DP rank with a positive receipt. The fast net's local
+        # Q-update is gated OFF (engine_workers.py), so the anchor is the SOLE Q
+        # writer. All ranks reach this in lockstep (the anchor fired on all ranks).
+        if do_anchor_q:
+            q_updated = powersgd.anchor_update_basis()
+            q_receipts = powersgd.broadcast_basis(src=0)
+            m_receipts = self._broadcast_anchor_M(spectral, anchor_grads, src=0)
+            # Cross-rank consensus guard (must not raise): the anchor-owned Q must
+            # be identical on every DP rank + both boundary sides.
+            try:
+                qdev = powersgd.verify_basis_agreement_across_ranks()
+            except RuntimeError:
+                raise
+            if q_receipts:
+                changed_q = sum(1 for r in q_receipts.values() if r.get("changed"))
+                print(
+                    f"[comm_eff][bcast] step={step} Q updated={q_updated} broadcast boundaries={len(q_receipts)} "
+                    f"changed={changed_q} cross_rank_max_rel_dev={qdev if qdev is not None else 'n/a'} "
+                    f"anchor_q_updates={getattr(state, 'anchor_q_updates', 0)} "
+                    f"anchor_q_broadcasts={getattr(state, 'anchor_q_broadcasts', 0)}",
+                    flush=True,
+                )
+            if m_receipts:
+                changed_m = sum(1 for r in m_receipts.values() if r.get("changed"))
+                print(
+                    f"[comm_eff][bcast] step={step} M broadcast targets={len(m_receipts)} changed={changed_m} "
+                    f"(sign(M) is what the merger reads; receipt proves every DP rank holds the anchor M)",
+                    flush=True,
+                )
+
+        # EXP-25 (R1, checklist #2): prove M is the GLOBAL gradient — bit-identical
+        # across DP ranks. All-gather a per-target M checksum over the DP group and
+        # assert the max cross-rank deviation is ~0 (the all-reduce(MEAN) of
+        # G_anchor made M identical on every rank). A non-zero deviation means the
+        # DP-reduce did not happen / used the wrong group. Greppable falsifier.
+        self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
+
+        # EMA-evolution log line. String discovery (ema_device/correction_mode)
+        # is logged once at build, never here.
         if deltas:
             mean_delta = sum(deltas.values()) / len(deltas)
             max_delta = max(deltas.values())
@@ -1277,7 +1562,9 @@ class FSDPEngine(BaseEngine):
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
-        max_targets = int(getattr(spec_cfg, "max_targets", 4)) if spec_cfg is not None else 4
+        # EXP-25: full coverage default (-1). max_targets caps the merger too, so a
+        # residual cap would silently skip matrices the merger should correct.
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
 
         fsdp_ver = None
         try:

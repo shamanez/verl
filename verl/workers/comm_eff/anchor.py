@@ -33,8 +33,9 @@ means three things:
 
 * **Raw gradient into the EMA, before any correction.** ``G_anchor`` is read
   RAW per target and fed to ``SpectralFilter.update_anchor`` BEFORE any
-  ``correct_matrix`` call (``anchor_grad_corrected == 0``). The anchor
-  gradient is never the input to the spectral projection.
+  fast-path corrector (``signed_ema_matrix`` / ``inject_matrix`` /
+  ``blend_matrix``) runs (``anchor_grad_corrected == 0``). The anchor
+  gradient is never the input to the correction.
 
 This module owns the FSDP-AGNOSTIC pieces so they are unit-testable on CPU with
 no distributed runtime:
@@ -311,7 +312,7 @@ def extract_target_grads(
     filter, same ``max_targets`` cap — but applies NO correction: it returns the
     raw full 2D gradients exactly as backward produced them. The engine feeds
     these straight into ``SpectralFilter.update_anchor``
-    (the EMA) before any ``correct_matrix`` is ever called on the fast path.
+    (the EMA) before any fast-path corrector is ever called.
 
     Args:
         named_params: iterator of ``(name, param)`` whose ``.grad`` is the

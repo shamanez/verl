@@ -389,76 +389,54 @@ comm_eff:
     # Target dataclass for this configuration
     _target_: verl.workers.config.CommEffSpectralConfig
 
-    # Whether spectral correction runs (gated by the parent comm_eff.enabled)
+    # Whether anchor-guided gradient correction runs (gated by comm_eff.enabled)
     enabled: false
-    # EXP-16 spectral-correction cadence in optimizer steps. 1 = fire every
-    # step (pre-EXP-16 behavior; strict no-op default). Validated >= 1.
-    # Mirrors anchor.cadence; set == anchor.cadence so corrections use a fresh basis.
+    # Correction cadence in optimizer steps. 1 = fire every step (strict no-op
+    # default). Validated >= 1. Mirrors anchor.cadence; set == anchor.cadence so
+    # corrections use a freshly-refreshed anchor EMA.
     cadence: 1
-
-    # Blend coefficient in [0,1]: G_proj = alpha*G_mask + (1-alpha)*G_filt.
-    # 1.0 => exact no-op; 0.0 => pure two-sided Tikhonov projection.
-    alpha: 0.3
-
-    # Tikhonov damping: d_i = s_i / (s_i + tau). Must be > 0.
-    tau: 1e-3
 
     # EMA decay for the anchor-gradient running matrix M_anchor.
     beta_anc: 0.95
-
-    # Populate M_anchor with a fixed deterministic PSD basis so the filter runs
-    # without the (not-yet-built, EXP-8) live anchor circuit.
-    seed_anchor_cache: true
-
-    # Base seed for the deterministic anchor cache.
-    anchor_seed: 0
 
     # Substrings selecting which named 2D params receive correction (skips
     # norms / biases / embeddings / lm head).
     target_substr: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
-    # Cap on target matrices corrected per step (keeps the discovery smoke
-    # cheap). -1 => no cap.
-    max_targets: 4
+    # Cap on target matrices corrected per step. -1 => no cap (EXP-25 default:
+    # full coverage of all 196 = 28 layers x 7 projection matrices the merger
+    # corrects; caps BOTH the anchor extraction AND the merger). >= 0 only as a
+    # diagnostic throttle.
+    max_targets: -1
 
-    # Retained for back-compat with the EXP-4 scaffold schema. Also used by
-    # svd_mode=lowrank as the retained rank for torch.svd_lowrank.
-    rank: 8
-
-    # Legacy alias kept for schema back-compat; the active damping knob is tau.
-    damping: 1e-6
-
-    # EXP-8 storage layer (cherry-picked into EXP-12). Where the anchor EMA
-    # M_anchor lives: "gpu" (HBM, faithful) | "cpu" (offloaded, memory-lean).
+    # Where the anchor EMA M_anchor lives between refreshes: "gpu" (HBM,
+    # faithful) | "cpu" (offloaded to pinned CPU, memory-lean).
     ema_device: gpu
 
-    # How the SVD basis is computed: "full" (thin SVD, faithful) | "lowrank"
-    # (torch.svd_lowrank(q=rank), memory-lean).
-    svd_mode: full
-
-    # Whether the U/S/V basis is computed once per refresh and reused across
-    # fast PPO mini-batches: "cache" | "recompute".
-    basis_cache: cache
-
-    # EXP-18/M4: correction mode. "reweight" (default) = the as-implemented
-    # two-sided Tikhonov reweighting of G_mask (byte-identical to every prior
-    # config). "inject" = ADD the scale-matched complement of the stale anchor
-    # EMA M_anchor (C1). "blend" = REPLACE via convex blend
-    # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor (C2, stable magnitude).
+    # Correction mode (anchor combiner the fast-path grad uses).
+    # "signed_ema" (EXP-25/R3, default) = the SL signed-EMA merger
+    # G_corr=signed_ema_alpha*G_noisy + (1-signed_ema_alpha)*|G_noisy|*sign(M).
+    # "inject" = ADD the scale-matched complement of the stale anchor EMA
+    # M_anchor. "blend" = REPLACE via convex blend
+    # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor.
     # Declared here so Hydra's struct-mode merge accepts
     # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=blend.
-    correction_mode: reweight
+    correction_mode: signed_ema
 
-    # EXP-18/M4: injection strength for correction_mode="inject" (force along the
-    # stale true-gradient direction, scale-matched to ||G_mask||). Unused under
-    # "reweight"/"blend". >= 0.
+    # Injection strength for correction_mode="inject" (force along the stale
+    # true-gradient direction, scale-matched to ||G_mask||). Unused otherwise. >= 0.
     inject_gamma: 1.0
 
-    # EXP-18/M4 C2: convex-blend weight for correction_mode="blend":
+    # Convex-blend weight for correction_mode="blend":
     # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor. 0 => pure G_mask,
-    # 1 => scale-matched stale true gradient. Unused under "reweight"/"inject".
-    # [0, 1].
+    # 1 => scale-matched stale true gradient. Unused otherwise. [0, 1].
     blend_eta: 0.5
+
+    # EXP-25 (R3) signed_ema merger weight alpha in
+    # G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M_anchor). alpha=0 is the
+    # SL-validated pure sign-merger; alpha=1 returns G_noisy unchanged. THE swept
+    # axis. Unused unless correction_mode=signed_ema. [0, 1].
+    signed_ema_alpha: 0.0
 
   # EXP-20/M6 PowerSGD-style pipeline-boundary activation-compression sub-config
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec

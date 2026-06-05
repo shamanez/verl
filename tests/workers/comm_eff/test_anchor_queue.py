@@ -31,9 +31,10 @@ The anchor invariants are exercised here at the unit level:
 4. **No optimizer step** — the anchor refresh never steps the optimizer.
 5. **mask_active == False on the anchor pass** — masking is disabled for the
    whole anchor fwd/bwd; ``anchor_mask_applications`` stays 0.
-6. **G_anchor read BEFORE any correct_matrix** — the raw grads are fed to
-   ``SpectralFilter.update_anchor`` (the EMA); ``correct_matrix`` is never
-   called on the anchor gradient (``anchor_grad_corrected`` stays 0).
+6. **G_anchor read BEFORE any fast-path correction** — the raw grads are fed to
+   ``SpectralFilter.update_anchor`` (the EMA); the fast-path corrector
+   (``signed_ema_matrix``) is never called on the anchor gradient
+   (``anchor_grad_corrected`` stays 0).
 """
 
 import importlib.util
@@ -223,31 +224,32 @@ def test_extract_skips_none_grad():
 
 
 # =========================================================================== #
-# feed_anchor_grads_into_ema calls update_anchor (EMA), never correct_matrix.
+# feed_anchor_grads_into_ema calls update_anchor (EMA), never the fast-path
+# corrector (signed_ema_matrix).
 # =========================================================================== #
-def test_feed_uses_update_anchor_not_correct_matrix():
-    f = SpectralFilter(beta_anc=0.95, seed_anchor_cache=False, ema_device="gpu", svd_mode="full", basis_cache="cache")
+def test_feed_uses_update_anchor_not_corrector():
+    f = SpectralFilter(beta_anc=0.95, ema_device="gpu", correction_mode="signed_ema")
 
-    called = {"correct_matrix": 0, "update_anchor": 0}
-    orig_correct = f.correct_matrix
+    called = {"signed_ema_matrix": 0, "update_anchor": 0}
+    orig_correct = f.signed_ema_matrix
     orig_update = f.update_anchor
 
     def _spy_correct(name, g):
-        called["correct_matrix"] += 1
+        called["signed_ema_matrix"] += 1
         return orig_correct(name, g)
 
     def _spy_update(name, g):
         called["update_anchor"] += 1
         return orig_update(name, g)
 
-    f.correct_matrix = _spy_correct
+    f.signed_ema_matrix = _spy_correct
     f.update_anchor = _spy_update
 
     grads = {"model.layers.0.self_attn.q_proj.weight": torch.ones(8, 8)}
     deltas = feed_anchor_grads_into_ema(grads, f)
 
     assert called["update_anchor"] == 1, "anchor grad must go through update_anchor (the EMA)"
-    assert called["correct_matrix"] == 0, "GUARD 6: anchor grad must NEVER pass through correct_matrix"
+    assert called["signed_ema_matrix"] == 0, "GUARD 6: anchor grad must NEVER pass through the fast-path corrector"
     # ΔM_anchor > 0 (EMA moved off zeros): beta=0.95 => M = 0.05 * ones != 0.
     assert deltas["model.layers.0.self_attn.q_proj.weight"] > 0.0
 
@@ -255,7 +257,7 @@ def test_feed_uses_update_anchor_not_correct_matrix():
 def test_feed_evolves_ema_across_refreshes():
     """Two refreshes with DIFFERENT G_anchor must move M_anchor each time
     (||ΔM_anchor|| > 0 between the first and a later refresh)."""
-    f = SpectralFilter(beta_anc=0.5, seed_anchor_cache=False)
+    f = SpectralFilter(beta_anc=0.5)
     name = "model.layers.1.mlp.gate_proj.weight"
     d1 = feed_anchor_grads_into_ema({name: torch.ones(6, 4)}, f)
     m_after_1 = f._anchor[name].clone()
@@ -340,7 +342,7 @@ def _simulate_anchor_refresh(module, opt, spectral, state, loss_function, *, mas
 def test_anchor_reuses_grpo_loss_unmasked_no_step_no_rollout():
     module = _TinyDecoder()
     opt = torch.optim.AdamW(module.parameters(), lr=1e-3)
-    spectral = SpectralFilter(beta_anc=0.95, seed_anchor_cache=False)
+    spectral = SpectralFilter(beta_anc=0.95)
     state = _FakeState()
 
     # The GRPO-actor-loss stand-in: a function of the model OUTPUT (advantage-
@@ -393,7 +395,7 @@ def test_anchor_pass_does_not_fire_mask_even_if_hook_present():
     anchor pass (mask_active=False) fires zero mask applications."""
     module = _TinyDecoder()
     opt = torch.optim.AdamW(module.parameters(), lr=1e-3)
-    spectral = SpectralFilter(seed_anchor_cache=False)
+    spectral = SpectralFilter()
     state = _FakeState()
     # Pre-set a nonzero global mask count (from prior fast-path steps) to ensure
     # we measure the DELTA, not the absolute.
