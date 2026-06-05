@@ -19,13 +19,15 @@ GRPO's actor update normally runs one dense forward/backward over the
 rollout-expanded batch, then `optimizer.step()`. The method splits that update
 into two coupled circuits on the **same process, same batch, same optimizer**:
 
-1. **Fast (masked) circuit** — every step applies an in-graph per-(token, dim)
-   PRF activation mask at pipeline-boundary decoder blocks (`h_tilde = h * mask`),
-   keyed on each token's stable `(sample_id, position_id)` so it is
-   packing-invariant across the old-logprob and train forwards, producing a noisy
-   gradient `G_mask`. `mask.rescale` (inverted-dropout `1/(1-p)`) is **ON and
-   settled** — it unbiases the masked activation (`E[h̃]=h`); without it grad_norm
-   explodes (~2700 vs ~0.4 dense).
+1. **Fast (compressed) circuit** — every step applies the configured **codec** at the
+   pipeline-boundary decoder blocks (the one variable axis). Two codecs exist: the
+   **PRF mask** (`prf_mask`) masks per-(token, dim) `h_tilde = h * mask`, keyed on each
+   token's stable `(sample_id, position_id)` so it is packing-invariant across the
+   old-logprob and train forwards (`mask.rescale` inverted-dropout `1/(1-p)` is **ON**
+   to unbias `E[h̃]=h`; without it grad_norm explodes ~2700 vs ~0.4 dense); **PowerSGD**
+   (`powersgd`, the current default) projects each boundary activation onto a shared
+   low-rank basis, `h_hat = (h Q) Qᵀ`, sending only `Y = h Q`. Either produces the noisy
+   gradient the rest of the step corrects.
 2. **Anchor (unmasked) circuit** — every `cadence` steps, an *unmasked*
    GRPO-actor-loss forward/backward runs from a `delay_K`-stale weight
    snapshot on a **no-hook clone** of the module, producing a clean
@@ -47,15 +49,24 @@ Ordering invariant: **masked fwd/bwd → FSDP all-reduce → spectral correction
 → AdamW**. The anchor block runs *before* the masked fwd/bwd so its raw
 gradient feeds the EMA before any correction touches the masked grads.
 
-**Status — the settled base keeps anchor + spectral OFF.** The proven base is the
-masked circuit + `mask.rescale=true` + a periodic dense **clean step**
-(`clean_cadence`, every K steps; the lever that makes masked GRPO learn — K≤20 →
-GSM8K dense parity; see `research/runs/SUMMARY.md`). The anchor+spectral correction
-above, **as implemented, does not work** — EXP-16 ran it with no clean steps → GSM8K
-0.080 (≈ random), inert. It fails by **orthogonality**: the filter linearly reweights
-`G_mask` in the anchor's SVD subspace, but the mask's bias is ~orthogonal to that
-subspace, and `G_anchor` is never *applied* (only feeds the EMA). Redesigning it into
-a cheap continuous corrector is the open frontier — `research/findings/NEXT_RESEARCH.md`.
+**Status.** The **codec is the one variable axis** (`dense | prf_mask | powersgd`; see
+`research/runs/FIXED_CONTROL_SURFACE.md`). The chosen codec is **PowerSGD-style activation
+compression**: a shared low-rank orthonormal basis `Q` projects each boundary activation,
+`M_hat = (M Q) Qᵀ`, so only `Y = M Q` (rank-`r` coords/token) crosses the boundary; `Q` is
+updated by block power iteration on the activation Gram matrix (`Q ← orth(V_global)`,
+DP-synced), frozen within a step.
+
+The **current frontier — make this realistic via the anchor circuit (issue #25, prerequisite
+for #24).** The anchor computes a clean full gradient from **stale (delayed) weights** every
+few steps and folds it into the fast compressed gradient, replacing the impractical periodic
+dense step. Two defects in the existing anchor path must be fixed first: (a) `M_anchor` is
+EMA-updated for only a 4-of-~196-matrix slice (`extract_target_grads` breaks at `max_targets`,
+`anchor.py:341-342`), not the full-network gradient; (b) the anchor backward runs on a plain
+per-rank clone with **no DP all-reduce** of `G_anchor`, so `M_anchor` is a per-rank local-shard
+gradient, not the global one. Then `Q` moves to the anchor and a sign-based merger
+(`α·G + (1−α)·|G|·sign(M_anchor)`) combines the two circuits. The existing `inject`/`blend`/
+`reweight` spectral combiners are inert here — the stale anchor gradient is ~orthogonal to the
+compressed gradient — so the merger is new work.
 
 Settled-base config: `mask.p=0.9`, `mask.rescale=true`, `mask_recompute=true`,
 `clean_cadence` set (e.g. 20), `anchor.enabled=false`, `spectral.enabled=false`; no
@@ -71,7 +82,8 @@ KL, no entropy; `fsdp_config.use_orig_params=true`. Authoritative defaults:
 |---|---|
 | `verl/workers/config/comm_eff.py` | `CommEffConfig` + `Mask`/`Anchor`/`Spectral` sub-configs; all defaults DISABLED; bounds validated in `__post_init__` (no allocation) |
 | `verl/workers/comm_eff/state.py` | `CommEffState` + `maybe_build_comm_eff_state` factory + path-tag set + numeric counters; the single object owning masker, spectral filter, anchor queue |
-| `verl/workers/comm_eff/activation_mask.py` | `ActivationMasker`, counter-based splitmix64 `prf_token_mask` (per-(token, dim), keyed on stable `(sample_id, position_id)`), decoder-boundary index selection; train-only forward hooks |
+| `verl/workers/comm_eff/activation_mask.py` | `ActivationMasker`, counter-based splitmix64 `prf_token_mask` (per-(token, dim), keyed on stable `(sample_id, position_id)`), `decoder_boundary_indices` selection; train-only forward hooks |
+| `verl/workers/comm_eff/powersgd_activation.py` | `PowerSGDActivationCompressor`: per-boundary low-rank basis `Q` (deterministic seed, fp32 QR), `Y=MQ`/`M_hat=YQᵀ` projection hooks, block-power-iteration `Q←orth(V)` update with cross-DP sketch all-reduce (`sync_basis`) + a cross-rank agreement guard; the `powersgd` codec |
 | `verl/workers/comm_eff/anchor.py` | staleness queue, snapshot/extract/feed helpers, `anchor_should_fire`, `build_anchor_module` (clone-no-hook), `assert_anchor_module_isolated` — the FSDP-agnostic, CPU-testable pieces |
 | `verl/workers/comm_eff/spectral_filter.py` | `SpectralFilter`: EMA, full/lowrank SVD, Tikhonov, two-sided projection, α-blend; pure 2D-matrix logic, CPU-unit-testable |
 | `verl/workers/engine/base.py` | `train_batch`: anchor refresh → fwd/bwd → grad correction → optimizer step; base no-op stubs |
@@ -133,14 +145,16 @@ runtime (a violation raises, it does not silently corrupt a measurement):
 
 ## 5. Not yet built (gap list)
 
-The open frontier:
-- **A working anchor+spectral correction.** The implemented form is inert (§1);
-  redesigning it into a cheap continuous surrogate for the clean step — attacking the
-  mask's curvature bias directly — is the next direction (`research/findings/NEXT_RESEARCH.md`).
+The open frontier is the realistic **anchor circuit** (issue **#25**, prerequisite for
+**#24**): the anchor `M_anchor` fixes (§1 — global DP all-reduce + full target coverage),
+moving the projection basis `Q` to the anchor, and the new sign-based gradient merger
+(`α·G + (1−α)·|G|·sign(M_anchor)`) plus error-feedback on the PowerSGD residual. The
+existing `inject`/`blend`/`reweight` spectral combiners are inert (§1), so the merger is
+new work.
 
 Deferred (later milestones):
-- **DP gradient compression** (PowerSGD + Streaming-DiLoCo) — out of scope until the
-  correction path works.
+- **DP-axis gradient compression** (Streaming-DiLoCo / cross-replica) — distinct from the
+  PP-boundary activation compression here; out of scope for now.
 - **Per-mini-batch anchor gradients** (the heavier variant) — current code is the
   same-loop periodic refresh.
 - **Megatron / Automodel engine integration** — only the FSDP backend overrides the

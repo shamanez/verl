@@ -28,9 +28,9 @@ once, here, and read it off for every launch.
 | **max_prompt_length** | **1024** | |
 | **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
 | **ppo_max_token_len_per_gpu** | **36864** | (+ log_prob / ref variants) |
-| **total_training_steps** | **50** | the standard short-run horizon |
-| **total_epochs** | **2** | a ceiling; 50 steps is reached inside epoch 1 (≈59 steps/epoch) |
-| **clean_cadence** (comm-eff arms only) | **5** | ⇒ 10 clean/dense steps {5,10,…,50} + 40 compressed; inert when comm-eff OFF |
+| **total_training_steps** | **50 → 100** | start at 50; extend to 100 once 50 trains cleanly |
+| **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
+| **anchor refresh cadence** (realistic setting) | **5** | the anchor circuit refreshes `M` (and `Q`) every 5 steps from stale, delayed weights — this REPLACES any periodic dense clean step; do **not** assume a `clean_cadence` |
 | **save_freq** | **50** | |
 | **val_before_train** | **True** | the step-0 val point |
 | **calculate_log_probs** | **True** | train-inference mismatch diagnostic; rollout CORRECTION stays OFF (old_log_prob always recomputed) |
@@ -55,41 +55,31 @@ the learning ceiling / reference trajectory.
 These don't touch the trained model (validation is a separate, read-only pass), so
 they can differ between runs without breaking comparability:
 
-- **`test_freq`** — validation cadence. **Canonical = 10** going forward (val at
-  0/10/20/30/40/50 on a 50-step run) so the early trajectory — in particular the
-  *post-step-10* region the central research question hinges on — is resolved.
-  The three EXP-20 arms predate this and ran at `test_freq=25` (val@0/25/50);
-  their finer-grained signal is the per-step **train** reward (`critic/score/mean`,
-  logged every step regardless of `test_freq`). The dense control `ce_dense_50s_gsm8k`
-  runs at `test_freq=10`.
+- **`test_freq`** — validation cadence. **= 25** (val at 0/25/50 on a 50-step run;
+  0/25/50/75/100 at 100 steps). The per-step **train** reward (`critic/score/mean`,
+  logged every step regardless of `test_freq`) is the fine-grained signal between
+  validations.
 
 ## How to launch on this surface
 
-One canonical launcher, override only the codec axis (+ experiment_name):
+One canonical launcher (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`);
+override only the codec axis + run length:
 
 ```bash
-# dense control (this run):
-COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=10 \
-  EXPERIMENT_NAME=ce_dense_50s_gsm8k \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
-
-# PowerSGD r=77 (byte-matched):
+# PowerSGD r=77 (byte-matched), 50 steps, validation every 25:
 COMM_EFF_ENABLED=true COMM_EFF_COMPRESSION_TYPE=powersgd COMM_EFF_POWERSGD_RANK=77 \
-  COMM_EFF_CLEAN_CADENCE=5 TOTAL_TRAINING_STEPS=50 TEST_FREQ=10 \
-  EXPERIMENT_NAME=ce_powersgd_r77_clean5_50s_gsm8k \
+  TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 \
+  EXPERIMENT_NAME=ce_powersgd_r77_50s_gsm8k \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
-# PRF mask p=0.95:
-COMM_EFF_ENABLED=true COMM_EFF_COMPRESSION_TYPE=prf_mask COMM_EFF_MASK_P=0.95 \
-  COMM_EFF_CLEAN_CADENCE=5 TOTAL_TRAINING_STEPS=50 TEST_FREQ=10 \
-  EXPERIMENT_NAME=ce_mask_p95_clean5_50s_gsm8k \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+# dense reference: same launch with COMM_EFF_ENABLED=false.
 ```
 
-The launcher's `${VAR:-default}` defaults already encode the rest of this surface
-(batch sizes, lr, rollout shape, contexts, objective). The TWO defaults that do
-NOT match (and so must be passed every time) are `TOTAL_TRAINING_STEPS` (default
-100 → 50) and `TEST_FREQ` (default 25 → 10).
+The launcher's `${VAR:-default}` defaults encode the core surface (batch sizes, lr,
+rollout shape, contexts, objective). Pass `TOTAL_TRAINING_STEPS` (50, then 100) and
+`TEST_FREQ=25` per launch. The realistic anchor setting (issue #25) adds the anchor
+flags — stale-weight gradient refresh, anchor-owned `Q`, signed-EMA merger — and runs
+**without** a periodic dense clean step.
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).

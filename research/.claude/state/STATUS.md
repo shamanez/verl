@@ -1,31 +1,17 @@
-# Research Status — 2026-06-05T04:38:43+00:00 (log-writer · EXP-23 DONE)
+# Research Status — 2026-06-05
 
 ## Active
-No active experiments. 0 live Vast.ai instances. No idle GPU bleed.
+No active experiments. 0 live Vast.ai instances.
 
-## Issue pipeline
+## Next
+- **issue #25** (`research:claim`, M6 — GitHub `shamanez/verl-compression-research#25`, Linear RES-133): make the PowerSGD communication-efficient GRPO trainer **realistic** via the anchor circuit. (1) Fix the anchor `M_anchor` update — globally DP-reduce the raw anchor gradient + cover all compressed targets. (2) Move the projection basis `Q` to the anchor (computed from stale, delayed weights) and broadcast it to the fast net. (3) Add the signed-EMA gradient merger `α·G + (1−α)·|G|·sign(M_anchor)`. The anchor refresh replaces any periodic dense step. Awaiting `research-planner` (no plan file yet) → human `status:approved`.
+- **issue #24** (`research:claim`, M6): error-feedback on the PowerSGD residual + basis-aligned anchor. Blocked on #25.
 
-| EXP | Title | State | Vast runs | Verdict | Notes |
-|---|---|---|---|---|---|
-| 23 | Stale full-grad re-anchor for PowerSGD (delay_K=5 + inject/blend) | DONE | 1×4H200 (i_39447338, torn down 2026-06-05T04:31+10) | STOP | Hypothesis FALSIFIED. max(A2,A3)=0.6967 ≤ floor+0.02=0.7114. cos(G,M)≈0.001 (structural orthogonality). Integration worked. Next lever: EXP-24 error-feedback. Launcher wiring MERGED via shamanez/verl#14 (squash 9edea6105); exp/23 branch deleted. |
-| 20 | PowerSGD activation codec (parent) | DONE | — | PASS | A0=0.7415 (r=77 clean@5), dense ceiling=0.7536 — EXP-23 reference points (not re-run) |
-
-## EXP-23 outcome summary
-- A1 no-refresh floor: val@50=0.6914
-- A2 stale inject (γ=1.0, delay_K=5): val@50=0.6967 (+0.005 vs floor — INERT)
-- A3 stale blend (η=0.5, delay_K=5): val@50=0.6861 (−0.005 vs floor — INERT)
-- Reference: A0 fresh-clean@5 (EXP-20)=0.7415, dense=0.7536
-- Falsification predicate: max(0.6967,0.6861)=0.6967 ≤ 0.6914+0.02=0.7114 → TRUE → STOP
-- Mechanism: cos(G_powersgd, M_anchor)≈0.001 (near-orthogonal throughout; PowerSGD r=77 discards the directions M lives in)
-- All 6 smoke hard-gate invariants passed; circuits fired (anchor_backwards=20, spectral_corrections=80/arm); codec health green; 0 NaN/OOM
-
-## Milestone M6 progress
-- 1 PASS (EXP-20). Milestone summary requires ≥2 PASS entries. Not yet written.
-- EXP-23 = STOP; does NOT count toward M6 PASS tally.
-- Follow-up: EXP-24 (error-feedback PowerSGD residual + staleness-aware blend η∝1/K) — next M6 candidate.
-
-## Last tick
-2026-06-05T04:38:43+00:00 · running=[] · analyzing=[] · logging=[23] · blocked=[]
+## Hyperparameters
+- **Core (held constant):** Qwen2.5-1.5B-Instruct + GSM8K, vanilla GRPO (no-KL/no-entropy), lr 1e-6, train_batch 128, ppo_mini 64, micro 1, rollout.n 8, rollout TP 2, max_prompt 1024, max_response 16384, seed 0, val_before_train True.
+- **Run control (realistic setting):** total_training_steps **50** (extend to **100** once 50 trains cleanly); validation every **25** steps; anchor refresh every **5** steps from stale (delayed) weights; **no periodic dense clean step** (the anchor refresh is the realistic substitute).
+- **Codec:** PowerSGD activation compression (the chosen method).
+- Full surface: `runs/FIXED_CONTROL_SURFACE.md` + the launcher `${VAR:-default}` defaults (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`) + `project.yaml.fixed_control_surface`.
 
 ## Budget
-$/hr now: $0.00 (0 instances) · EXP-23 final: ~$100.66 lifetime spend (check_budget.py). Monthly cap $1500 — headroom intact.
+$0/hr (0 live instances).
