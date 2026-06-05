@@ -41,7 +41,9 @@ apply_bundle() {
 reapply_bundle() {
   cd /workspace/verl || return 1
   git fetch origin "$BRANCH" 2>&1 | tail -2
-  git reset --hard "origin/$BRANCH" 2>&1 | tail -2
+  # single-branch template clones lack the origin/<branch> ref; FETCH_HEAD always
+  # points at the just-fetched tip.
+  git reset --hard FETCH_HEAD 2>&1 | tail -2
   echo "=== reapplied: $(git log --oneline -1) ==="
   (command -v uv >/dev/null 2>&1 && uv pip install --no-deps -e . || pip install --no-deps -e .) \
     > /workspace/pip.log 2>&1
@@ -64,6 +66,10 @@ common_env() {
   export COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE=false
   export COMM_EFF_SPECTRAL_EMA_DEVICE=cpu
   export PPO_MAX_TOKEN_LEN_PER_GPU=18432
+  # Skip the ~15-min pre-train validation rollout. The id-0/id-1 probes only need
+  # the 2 training steps to fire the anchor; the arms get val@25 + val@50 from
+  # TEST_FREQ=25 (the plan's metric), so a val@0 baseline is pure GPU cost.
+  export VAL_BEFORE_TRAIN=False
 }
 
 run_launcher() {
@@ -75,7 +81,12 @@ run_launcher() {
 probe0() {
   common_env
   export COMM_EFF_ANCHOR_OWNS_Q=false
-  export COMM_EFF_SPECTRAL_CORRECTION_MODE=reweight
+  # R3 OFF for the anchor-M-isolation probe: signed_ema @ alpha=1.0 is the IDENTITY
+  # merger (G_corr = 1*G_noisy + 0*|G|*sign(M) = G_noisy), so M is computed + verified
+  # with NO correction applied. (The old 'reweight' mode was removed in e9931b23e;
+  # signed_ema/inject/blend are the only valid modes now.)
+  export COMM_EFF_SPECTRAL_CORRECTION_MODE=signed_ema
+  export COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=1.0
   export COMM_EFF_ANCHOR_CADENCE=1
   export COMM_EFF_ANCHOR_DELAY_K=1
   export TOTAL_TRAINING_STEPS=2

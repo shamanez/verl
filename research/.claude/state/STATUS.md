@@ -1,13 +1,14 @@
 # Research Status — 2026-06-05
 
 ## Active
-**No live Vast.ai instances ($0/hr).** EXP-25 GPU work is **PAUSED by operator** (2026-06-05) pending an account-level Vast SSH fix the operator owns. Code is implemented + pushed; only on-GPU probes/sweep are blocked.
+EXP-25 GPU work is **PAUSED by operator** (2026-06-05) pending an account-level Vast SSH fix the operator owns. Code is implemented + pushed; only on-GPU probes/sweep are blocked.
+⚠️ **One live Vast box `39602487` (4×H200, ~$15.23/hr)** appeared during the cleanup window — NOT harness-provisioned (not in ledger), almost certainly the operator's own SSH-fix test box. **Left untouched per "do not work on SSH/Vast."** If it is an accidental orphan, operator should `vastai destroy instance 39602487`.
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 25 | Anchor-circuit default (stale-M + anchor-owns-Q + signed_ema merger) | **PAUSED (infra)** | 3× provisioned, all TORN_DOWN | — | R1/R2/R3 built + CPU-validated + pushed `exp/25-anchor-default`@`bf351c6e4`. Provision BLOCKED: Vast SSH key injection broken (`ssh_key_ids:null`, attach API SQL type-bug, both account keys `default:None`). GPU work paused per operator; SSH fix operator-owned. |
+| 25 | Anchor-circuit default (stale-M + anchor-owns-Q + signed_ema merger) | **PAUSED (infra)** | 3× provisioned, all TORN_DOWN | — | R1/R2/R3 built + CPU-validated + pushed `exp/25-anchor-default`@`e9931b23e` (incl. Thread-B cleanup: dead reweight/SVD/Tikhonov/seeded path removed, 128 CPU tests green, launch-breakers in actor.yaml + launcher fixed). Provision BLOCKED: Vast SSH key injection broken (`ssh_key_ids:null`, attach API SQL type-bug, both account keys `default:None`). GPU work paused per operator; SSH fix operator-owned. |
 | 24 | Error-feedback on PowerSGD residual + basis-aligned anchor | BLOCKED | — | — | `depends_on: #25` — needs #25 VERDICT=PASS first. |
 
 ## Blocker (operator-owned — DO NOT auto-work)
