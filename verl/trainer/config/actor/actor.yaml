@@ -380,6 +380,13 @@ comm_eff:
     # steps. 0 = current weights; 1 = the prior step's weights.
     delay_K: 1
 
+    # EXP-25 (R2): when true the ANCHOR owns + broadcasts the PowerSGD basis Q
+    # (computed from its own stale-weight forward activations) and the fast net's
+    # maybe_update_basis is gated OFF. Declared here so Hydra struct-mode accepts
+    # actor_rollout_ref.actor.comm_eff.anchor.owns_q=<bool>; mirrors
+    # CommEffAnchorConfig.owns_q (default false => byte-identical to EXP-20).
+    owns_q: false
+
   # Spectral-correction sub-config (inert while enabled=false). EXP-7 M2 paper
   # formula: anchor-EMA -> full thin SVD -> Tikhonov weights -> two-sided
   # projection -> alpha blend, applied after actor backward / FSDP grad

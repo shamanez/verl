@@ -911,7 +911,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # maybe_update_basis. Strict no-op for the mask/dense/disabled
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
-                if powersgd is not None:
+                # EXP-25 (R2): when the ANCHOR owns Q the fast net is a pure
+                # read-only consumer — its end-of-step basis update is GATED OFF
+                # (Q is updated only by the anchor's slow-net forward +
+                # broadcast, in the engine's _maybe_comm_eff_anchor_refresh).
+                # The fast-side sketch accumulation is already gated off in
+                # _should_accumulate_sketch, so there is no V to consume here.
+                fast_owns_q = not bool(getattr(powersgd, "anchor_owns_q", False)) if powersgd is not None else False
+                if powersgd is not None and fast_owns_q:
                     did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
                     # After the first basis update, verify Q is bit-identical on
                     # every DP rank. This gate is symmetric across ranks and
@@ -962,6 +969,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # Explicit zeros on the disabled path for PowerSGD counters.
                     "comm_eff/powersgd_applications": 0,
                     "comm_eff/powersgd_basis_updates": 0,
+                    # Explicit zeros on the disabled path for EXP-25 counters.
+                    "comm_eff/anchor_q_updates": 0,
+                    "comm_eff/anchor_q_broadcasts": 0,
+                    "comm_eff/merger_coldM_fallbacks": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)

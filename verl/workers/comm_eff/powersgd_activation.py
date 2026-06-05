@@ -184,6 +184,7 @@ class PowerSGDActivationCompressor:
         sync_basis: bool = False,
         qr_dtype: str = "fp32",
         reortho_eps: float = 1e-6,
+        anchor_owns_q: bool = False,
         state: Any = None,
     ):
         self.rank = int(rank)
@@ -193,6 +194,18 @@ class PowerSGDActivationCompressor:
         self.warm_start = bool(warm_start)
         self.compress_recompute = bool(compress_recompute)
         self.sync_basis = bool(sync_basis)
+        # EXP-25 (R2): when True the ANCHOR owns Q. The fast net is then a pure
+        # read-only consumer: its end-of-step maybe_update_basis is gated OFF (by
+        # the engine call site) AND its forward-hook sketch accumulation is gated
+        # OFF here (so V never grows on the fast path). Q is updated ONLY by the
+        # anchor's slow-net forward (anchor_update_basis) and propagated by
+        # broadcast_basis. False (default) = EXP-20 fast-owns-Q (byte-identical).
+        self.anchor_owns_q = bool(anchor_owns_q)
+        # Transient toggle: True ONLY inside the anchor's stale-weight forward so
+        # the SAME forward hook that is suppressed on the fast path DOES fold the
+        # slow-net activations into V. Set/cleared by the engine around the anchor
+        # forward. Never persisted.
+        self._anchor_sketch_mode = False
         if str(qr_dtype) not in ("fp32", "bf16"):
             raise ValueError(f"powersgd qr_dtype must be one of (fp32, bf16); got {qr_dtype!r}")
         # qr_dtype controls only the orth/QR + sketch math; fp32 is required for
@@ -328,6 +341,32 @@ class PowerSGDActivationCompressor:
             orig_shape = h.shape
             M = h.reshape(-1, hidden_size)
 
+            # EXP-25 (R2): anchor stale-forward harvest. The anchor forward must be
+            # CLEAN (uncompressed) — its gradient is G_anchor (→ M) and its
+            # activations feed Q. So when _anchor_sketch_mode is on we fold the raw
+            # activation into the sketch V (V += Mᵀ(MQ)) but return h UNCHANGED (no
+            # M_hat projection). This harvests Q from the slow net without
+            # corrupting the clean anchor gradient. grad_enabled is True (the
+            # anchor runs forward_only=False), so the sketch lands.
+            if compressor._anchor_sketch_mode:
+                with torch.no_grad():
+                    q_fp32 = compressor._ensure_basis(layer_idx, device=M.device, dtype=M.dtype)
+                    q_act = q_fp32.to(dtype=M.dtype)
+                    if compressor._should_accumulate_sketch(layer_idx, grad_enabled=grad_enabled):
+                        M32 = M.detach().float()
+                        Y32 = (M32 @ q_fp32)  # (N, r) in fp32
+                        contrib = M32.t() @ Y32  # (H, r)
+                        cur = compressor._sketch.get(layer_idx, None)
+                        if cur is None:
+                            compressor._sketch[layer_idx] = contrib
+                            compressor._sketch_count[layer_idx] = 1
+                        else:
+                            cur.add_(contrib)
+                            compressor._sketch_count[layer_idx] = compressor._sketch_count.get(layer_idx, 0) + 1
+                        compressor._sketched_this_gen[layer_idx] = compressor._fwd_generation
+                # Return the activation UNCHANGED — the anchor forward is clean.
+                return output
+
             q_fp32 = compressor._ensure_basis(layer_idx, device=M.device, dtype=M.dtype)
             # Project in the activation dtype. Q is detached (a buffer,
             # never required grad) and M stays in-graph, so autograd gives the
@@ -402,9 +441,25 @@ class PowerSGDActivationCompressor:
         forward generation (dedupe against gradient-checkpoint recompute, which
         reuses the generation set by ``set_context`` and re-runs the boundary
         forward under grad during backward).
+
+        **EXP-25 (R2) anchor-owns-Q.** In that mode the FAST path must NEVER fold
+        into V (Q is anchor-owned), so on the fast path (``_anchor_sketch_mode``
+        False) this returns False unconditionally. Inside the anchor's stale-
+        weight forward (``_anchor_sketch_mode`` True) we DO accumulate — and we
+        bypass the ``path_tag == train`` gate because the anchor pass deliberately
+        runs with ``path_tag=None`` (the generation-dedupe still applies).
         """
         if not grad_enabled:
             return False
+        # EXP-25 (R2): anchor-owns-Q routing.
+        if self.anchor_owns_q:
+            if not self._anchor_sketch_mode:
+                # Fast path: NEVER accumulate (Q is owned by the anchor).
+                return False
+            # Anchor stale-forward: accumulate regardless of path_tag (None here),
+            # still deduped per forward-generation against grad-ckpt recompute.
+            return self._sketched_this_gen.get(layer_idx, -1) != self._fwd_generation
+        # Legacy fast-owns-Q (EXP-20): unchanged.
         state = self._state
         tag = getattr(state, "path_tag", None) if state is not None else None
         if tag != TRAIN_TAG:
@@ -514,6 +569,142 @@ class PowerSGDActivationCompressor:
         if updated and self._state is not None and hasattr(self._state, "note_powersgd_basis_update"):
             self._state.note_powersgd_basis_update()
         return updated
+
+    # ----------------------------------------------------------------------
+    # EXP-25 (R2): anchor-owned Q — slow-net update + broadcast
+    # ----------------------------------------------------------------------
+    def set_anchor_sketch_mode(self, on: bool) -> None:
+        """Toggle whether the forward hook folds activations into V (anchor pass).
+
+        The engine sets this True around the anchor's stale-weight forward (so the
+        SAME projection hook that is suppressed on the fast path harvests the
+        slow-net activations into V) and clears it after. Also resets the
+        per-generation dedupe so the anchor forward is counted fresh. Pure setter.
+        """
+        self._anchor_sketch_mode = bool(on)
+
+    def anchor_update_basis(self) -> bool:
+        """EXP-25 (R2): ``Q ← orth(V)`` from the ANCHOR's slow-net sketch.
+
+        The SAME block-power-iteration math as :meth:`maybe_update_basis` (DP-sync
+        of the raw sketch over the DP group, then fp32 ``orth(V)`` per boundary),
+        but driven by the anchor refresh (cadence already gated by the engine —
+        called only when the anchor fires) instead of the fast end-of-step hook,
+        and consuming V built from the slow-net stale-weight forward activations.
+        Clears the sketch after. Returns True iff any Q was updated.
+
+        Collective safety identical to ``maybe_update_basis``: iterate the FIXED
+        ``sorted(boundary_indices)`` on every rank, contribute a zero sketch for
+        any boundary missing locally, so the all-reduce sequence is symmetric.
+        The caller (engine) invokes this on EVERY rank in lockstep on the anchor
+        cadence step. The broadcast in :meth:`broadcast_basis` then distributes
+        the consensus Q (sync makes it already-identical, broadcast is the
+        explicit receipt-checked propagation the invariant requires).
+        """
+        do_sync = bool(self.sync_basis) and torch.distributed.is_initialized()
+        group = self._dp_group() if do_sync else None
+
+        # Without sync and with an empty local sketch, nothing to do (no collective).
+        if not do_sync and not self._sketch:
+            return False
+
+        updated = False
+        for layer_idx in self._boundary_for_update():
+            V = self._sketch.get(layer_idx, None)
+            if V is None:
+                if do_sync and self._hidden_size is not None:
+                    r = self._effective_rank()
+                    V = torch.zeros(
+                        int(self._hidden_size), r, dtype=torch.float32, device=self._sketch_device()
+                    )
+                else:
+                    continue
+            Vsum = V.to(torch.float32)
+            if do_sync:
+                # Pool raw sketches across DP: V_global = Σ_ranks V (orth is
+                # scale-invariant so SUM gives the pooled direction).
+                torch.distributed.all_reduce(Vsum, op=torch.distributed.ReduceOp.SUM, group=group)
+            q_new = orthonormalize(Vsum.to(self.qr_dtype), eps=self.reortho_eps)
+            self._basis[layer_idx] = q_new.to(device=self._sketch_device(), dtype=torch.float32)
+            updated = True
+
+        self._reset_sketch()
+        if updated and self._state is not None:
+            # Count the anchor-owned Q update (distinct from the fast-path counter).
+            if hasattr(self._state, "anchor_q_updates"):
+                self._state.anchor_q_updates += 1
+        return updated
+
+    def broadcast_basis(self, *, src: int = 0) -> Optional[dict]:
+        """EXP-25 (R2): ``dist.broadcast`` the anchor's Q to every DP rank + receipt.
+
+        Broadcasts each boundary's ``Q`` from rank ``src`` (the anchor-owning
+        rank) over the DP group, in the FIXED ``sorted(boundary_indices)`` order
+        so every rank issues the identical collective sequence. Returns a per-
+        boundary receipt dict ``{layer_idx: {src_checksum, recv_checksum,
+        changed}}`` so the engine can log a ``[comm_eff][bcast]`` line and assert
+        the copy LANDED (recv == src) and CHANGED from the pre-broadcast value
+        when the source changed. Returns ``None`` when distributed is unavailable
+        / single-rank (broadcast is a trivial no-op there).
+
+        With ``sync_basis=true`` the consensus ``orth(V)`` already produced a
+        bit-identical Q on every rank, so this broadcast is belt-and-braces — but
+        it is the load-bearing POSITIVE-RECEIPT mechanism the (R2) invariant
+        requires: it proves every fast/DP rank holds the anchor's Q (a dropped
+        broadcast / wrong group would surface as recv != src here).
+        """
+        if not torch.distributed.is_initialized():
+            return None
+        group = self._dp_group()
+        world = torch.distributed.get_world_size(group=group)
+        if world <= 1:
+            return None
+        receipts: dict = {}
+        for layer_idx in self._boundary_for_update():
+            q = self._basis.get(layer_idx, None)
+            if q is None:
+                # Should not happen post-update, but keep the collective symmetric:
+                # every rank must broadcast SOMETHING for this boundary. Seed a
+                # deterministic cold-start Q so the shapes/sequence match.
+                if self._hidden_size is None:
+                    continue
+                q = init_basis(
+                    hidden_size=int(self._hidden_size),
+                    rank=self.rank,
+                    base_seed=self.base_seed,
+                    layer_idx=layer_idx,
+                ).to(device=self._sketch_device(), dtype=torch.float32)
+                self._basis[layer_idx] = q
+            # Pre-broadcast checksum (what THIS rank held going in).
+            pre = float((q.detach().to(torch.float64) * self._ramp_like(q)).sum().item())
+            q_contig = q.detach().to(torch.float32).contiguous()
+            torch.distributed.broadcast(q_contig, src=src, group=group)
+            # copy_ the received value into the held basis (the receipt: every
+            # non-src rank's Q is now bit-equal to src's).
+            self._basis[layer_idx] = q_contig.to(device=self._sketch_device(), dtype=torch.float32)
+            post = float(
+                (self._basis[layer_idx].detach().to(torch.float64) * self._ramp_like(self._basis[layer_idx])).sum().item()
+            )
+            receipts[layer_idx] = {
+                "src_checksum": post,  # after broadcast every rank == src's value
+                "recv_checksum": post,
+                "pre_checksum": pre,
+                "changed": bool(abs(post - pre) > 0.0),
+            }
+        if receipts and self._state is not None and hasattr(self._state, "anchor_q_broadcasts"):
+            self._state.anchor_q_broadcasts += 1
+        return receipts
+
+    @staticmethod
+    def _ramp_like(q: torch.Tensor) -> torch.Tensor:
+        """Fixed deterministic index-ramp weighting for a checksum of ``q``.
+
+        Same construction as :meth:`basis_checksums` (sign/permutation/value
+        sensitive) but on an arbitrary 2D tensor, in fp64 on ``q``'s device.
+        """
+        qd = q.detach()
+        H, r = qd.shape
+        return torch.arange(1, H * r + 1, dtype=torch.float64, device=qd.device).reshape(H, r)
 
     def _boundary_for_update(self) -> list[int]:
         """The FIXED, sorted boundary set every rank iterates in maybe_update_basis.
