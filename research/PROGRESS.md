@@ -55,3 +55,4 @@ Live: **#25** (RES-133) — realistic anchor-circuit PowerSGD GRPO trainer. One 
 [2026-06-05T19:53:53Z] [training-log-monitor] EXP-25 α=0.3 TIMEOUT at step 41/50: FULL ENTROPY COLLAPSE confirmed. T1/T3/T4/T5 ALL RED. Trajectory: s37 ent=0.70 resp=6256 clip=0.32 → s38 0.64/8867/0.47 → s39 0.54/10806/0.59 → s40 0.45/12681/0.72 → s41 0.32/13735/0.79. val@25=0.6937. val@50 NOT CAPTURED (run continues at ~10 min/step; expected completion ~21:10 UTC). α=0.5 arm NOT STARTED. No OOM/errors. TMUX ALIVE. val@50 almost certainly STOP-tier (<0.35) given T1-RED at step 40-41 and 79% clip_ratio.
 [2026-06-06T06:00:45+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
 [2026-06-06T06:10:43+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
+[2026-06-06T06:20:45+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
