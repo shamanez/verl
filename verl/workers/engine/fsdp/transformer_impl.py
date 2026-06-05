@@ -1241,6 +1241,33 @@ class FSDPEngine(BaseEngine):
         if stale is None:  # pragma: no cover - queue always has >=1 after push
             return
 
+        # EXP-25 (point 3): log the ACTUAL stale snapshot step used + realized delay.
+        # get_stale() falls back to the OLDEST retained snapshot while warming up
+        # (step < delay_K — the t-delay_K snapshot has not been taken yet), so the
+        # first refresh can be near-current; that is finite/expected. Post-warmup
+        # (step >= delay_K) push-runs-every-step + queue maxlen=delay_K+1 guarantee
+        # t-delay_K is still retained, so the realized delay MUST equal delay_K —
+        # hard-assert it so a silently-too-fresh anchor cannot pass unnoticed. (This
+        # mirrors get_stale's own fallback logic via the public .steps property.)
+        _req_step = int(step) - int(delay_K)
+        _avail_steps = queue.steps
+        _used_step = _req_step if _req_step in _avail_steps else (_avail_steps[0] if _avail_steps else int(step))
+        _realized_delay = int(step) - _used_step
+        print(
+            f"[comm_eff][EXP-25][stale] step={step} delay_K={delay_K} requested_step={_req_step} "
+            f"used_step={_used_step} realized_delay={_realized_delay} "
+            f"warmup_fallback={_used_step != _req_step}",
+            flush=True,
+        )
+        if int(step) >= int(delay_K):
+            assert _used_step == _req_step, (
+                f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
+                f"snapshot step={_req_step} (delay_K={delay_K}) but used step={_used_step} "
+                f"(realized_delay={_realized_delay}). push runs every step + the queue retains "
+                f"delay_K+1 snapshots, so t-delay_K MUST be available once step>=delay_K; a "
+                f"mismatch means the snapshot was evicted or the push cadence changed."
+            )
+
         # Ensure masking is off for the anchor pass and the path
         # tag is NOT "train" (the mask hook requires both to fire). We measure
         # mask applications as a delta so a leak is a loud failure.
@@ -1320,10 +1347,24 @@ class FSDPEngine(BaseEngine):
                     if s is not None and s.shape == p.shape:
                         p.copy_(s.to(p.device, p.dtype))
                         loaded += 1
+            total = sum(1 for _ in anchor_module.named_parameters())
             print(
-                f"[comm_eff][EXP-18][anchor-load] loaded {loaded}/{sum(1 for _ in anchor_module.named_parameters())} "
+                f"[comm_eff][EXP-18][anchor-load] loaded {loaded}/{total} "
                 f"stale params into clone (canon-matched)",
                 flush=True,
+            )
+            # Fail-closed (R1, plan invariant): a PARTIAL load means the canonical
+            # key-match failed and the clone kept its RANDOM init for the unmatched
+            # params ⇒ G_anchor (and thus M) is computed from garbage (the EXP-18
+            # bug). The stale snapshot is taken with target_substrs=None (ALL params),
+            # so every clone param MUST canon-match a shape-equal snapshot entry —
+            # hard-assert loaded==total every refresh instead of only logging it.
+            assert loaded == total, (
+                f"comm_eff anchor clone load INCOMPLETE: loaded {loaded}/{total} stale "
+                f"params (canon-matched). A partial load leaves the clone on RANDOM init "
+                f"for the unmatched params ⇒ G_anchor/M are garbage (the EXP-18 bug). The "
+                f"snapshot covers ALL params (target_substrs=None), so this MUST be full; a "
+                f"mismatch means the _canon key normalization regressed."
             )
 
             # Swap `self.module` to point at the clone for the duration of
@@ -1492,9 +1533,51 @@ class FSDPEngine(BaseEngine):
         # Q-update is gated OFF (engine_workers.py), so the anchor is the SOLE Q
         # writer. All ranks reach this in lockstep (the anchor fired on all ranks).
         if do_anchor_q:
+            # Fail-closed (R2 must-fire): the anchor clone's clean forward MUST have
+            # harvested slow-net activations into the sketch V (it persists past the
+            # finally above and is consumed here). An EMPTY sketch means the PowerSGD
+            # projection hooks never fired on the clone (find_decoder_layers returned
+            # None / register() no-op'd) — and under sync_basis anchor_update_basis
+            # would then silently ZERO-fill Q instead of failing. Assert the hooks
+            # fired rather than trusting register()'s log-only warning path.
+            assert getattr(powersgd, "_sketch", None), (
+                "comm_eff anchor-owns-Q: the anchor clone forward harvested an EMPTY sketch V "
+                "— PowerSGD projection hooks did not fire on the clone (find_decoder_layers/"
+                "register no-op?). Q would be silently zero-filled under sync_basis. Refusing "
+                "to continue (#25 R2 must-fire)."
+            )
             q_updated = powersgd.anchor_update_basis()
             q_receipts = powersgd.broadcast_basis(src=0)
             m_receipts = self._broadcast_anchor_M(spectral, anchor_grads, src=0)
+            # Fail-closed (R2 must-fire): the anchor is the SOLE Q/M writer, so each of
+            # these MUST do real work every refresh. q_updated False = orth(V) produced
+            # no Q; empty receipts on a genuinely multi-rank DP group = the broadcast
+            # never propagated, leaving fast/DP ranks on a cold/stale Q,M the merger then
+            # reads. The [comm_eff][bcast] prints below are gated on non-empty receipts and
+            # would otherwise vanish SILENTLY — hard-assert instead. (Receipts are a
+            # legitimate no-op when dp_world<=1, so the receipt asserts are gated on a
+            # genuinely multi-rank DP group; q_updated holds even single-rank.)
+            assert q_updated, (
+                "comm_eff anchor-owns-Q: anchor_update_basis() did NOT update Q (orth(V) "
+                "produced nothing). Q must refresh every anchor cadence (#25 R2)."
+            )
+            _dp_multi = False
+            if torch.distributed.is_initialized():
+                try:
+                    _dp_multi = torch.distributed.get_world_size(group=self.get_data_parallel_group()) > 1
+                except Exception:
+                    _dp_multi = False
+            if _dp_multi:
+                assert q_receipts, (
+                    "comm_eff anchor-owns-Q: broadcast_basis() returned NO receipts on a "
+                    "multi-rank DP group — the anchor Q broadcast did not fire; every fast/DP "
+                    "rank would keep a stale/cold Q (#25 R2 broadcast-receipt invariant)."
+                )
+                assert m_receipts, (
+                    "comm_eff anchor-owns-Q: _broadcast_anchor_M() returned NO receipts on a "
+                    "multi-rank DP group — the anchor M broadcast did not fire; sign(M) the "
+                    "merger reads could be stale/cold on other ranks (#25 R2 M-receipt invariant)."
+                )
             # Cross-rank consensus guard (must not raise): the anchor-owned Q must
             # be identical on every DP rank + both boundary sides.
             try:
