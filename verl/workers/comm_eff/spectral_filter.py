@@ -269,6 +269,7 @@ class SpectralFilter:
         correction_mode: str = "reweight",
         inject_gamma: float = 1.0,
         blend_eta: float = 0.5,
+        signed_ema_alpha: float = 0.0,
     ):
         self.alpha = float(alpha)
         self.tau = float(tau)
@@ -287,12 +288,19 @@ class SpectralFilter:
         self.rank = int(rank)
         # Correction mode. "reweight" = two-sided Tikhonov reweighting;
         # "inject" = additive injection of the scale-matched anchor complement;
-        # "blend" = convex blend toward the scale-matched anchor.
+        # "blend" = convex blend toward the scale-matched anchor;
+        # "signed_ema" (EXP-25/R3) = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
         # Validated in CommEffConfig.__post_init__; assert defensively here too.
-        assert correction_mode in ("reweight", "inject", "blend"), correction_mode
+        assert correction_mode in ("reweight", "inject", "blend", "signed_ema"), correction_mode
         self.correction_mode = str(correction_mode)
         self.inject_gamma = float(inject_gamma)
         self.blend_eta = float(blend_eta)
+        # EXP-25 (R3): the signed_ema merger weight alpha.
+        self.signed_ema_alpha = float(signed_ema_alpha)
+        # EXP-25 (R3): per-step count of matrices whose M was cold (||M||<=eps) so
+        # the merger no-op'd to G_noisy (the silent grad-zeroing guard). Reset by
+        # the engine each grad-correction step before the loop.
+        self.merger_coldM_fallbacks = 0
         # name -> M_anchor (float32). Lives on the gradient's device when
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / correct_matrix).
@@ -404,11 +412,11 @@ class SpectralFilter:
             stored = stored.pin_memory()
         self._anchor[name] = stored
         # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
-        # Inject and blend modes need no SVD basis (they combine the
-        # scale-matched anchor with G_mask directly), so skip the cache —
-        # computing the full SVD of every targeted matrix per refresh would
-        # stall the run.
-        if self.basis_cache == "cache" and self.correction_mode not in ("inject", "blend"):
+        # Inject, blend and signed_ema modes need no SVD basis (they combine the
+        # anchor with G_mask directly — signed_ema only consults sign(M)), so skip
+        # the cache — computing the full SVD of every targeted matrix per refresh
+        # would stall the run (196 full SVDs at full coverage).
+        if self.basis_cache == "cache" and self.correction_mode not in ("inject", "blend", "signed_ema"):
             self._basis[name] = compute_basis(new, svd_mode=self.svd_mode, rank=self.rank)
         return new
 
@@ -526,6 +534,48 @@ class SpectralFilter:
               flush=True)
         return g_corr.to(g_mask.dtype)
 
+    def signed_ema_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-25 (R3) signed-EMA merger: ``G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)``.
+
+        The SL-validated merger. The MAGNITUDE comes from the fast compressed
+        gradient ``G_noisy`` (= ``g_mask``), the SIGN from the β-EMA of the
+        K-stale anchor gradient ``M_anchor`` (NOT the fresh full gradient).
+        ``α`` (``signed_ema_alpha``) is the swept axis; ``α=0`` ⇒ pure
+        ``|G_noisy|·sign(M)`` (the SFT default), ``α=1`` ⇒ ``G_noisy`` unchanged.
+
+        **COLD-M FALLBACK (MANDATORY — silent grad-zeroing guard).** Mirrors the
+        cold-anchor guard in :meth:`blend_matrix` (``if anc_norm <= eps: return
+        g_mask``). When ``M[name]`` is unwarmed/zero (the first ``delay_K`` steps
+        before the first anchor refresh, and any matrix ``M`` does not cover),
+        ``sign(0)=0`` and at ``α=0`` the term ``(1−α)·|G_noisy|·sign(M)=0`` ⇒
+        ``G_corr = α·G_noisy = 0`` — the gradient is SILENTLY ZEROED and the run
+        keeps going while quietly not learning that matrix. To prevent this we
+        return ``g_mask`` UNCHANGED (behave as ``α=1`` for that matrix) and bump
+        ``self.merger_coldM_fallbacks`` so the probe can prove the fallback fired
+        on step 1 (M cold) and then stopped after M warms.
+
+        Returns ``G_corr`` with ``g_mask``'s shape/dtype/device.
+        """
+        name = _canon(name)  # read M_anchor under the same key the feed wrote
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps:
+            # COLD M → return G_noisy UNCHANGED (NOT zeroed). Count the fallback.
+            self.merger_coldM_fallbacks += 1
+            return g_mask
+        alpha = self.signed_ema_alpha
+        # |G_noisy| * sign(M): magnitude from the fast compressed grad, sign from
+        # the stale-anchor EMA. sign(M) is ±1 on warmed entries (anc_norm>eps
+        # guarantees a non-trivial M, though individual entries can still be 0 →
+        # sign 0, which correctly zeroes only those single coordinates, not the
+        # whole matrix — the matrix-level cold guard above is what prevents the
+        # catastrophic all-zero case).
+        g_corr = alpha * gm + (1.0 - alpha) * gm.abs() * torch.sign(anc)
+        return g_corr.to(g_mask.dtype)
+
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
 
@@ -577,6 +627,11 @@ def apply_spectral_correction_to_params(
     """
     instrumented = bool(state.fsdp_grad_repr)  # log discovery only once
     corrected = 0
+    # EXP-25 (R3): reset the per-step cold-M fallback counter before the loop so
+    # the [comm_eff][merger] line below reports THIS step's fallbacks (N==target
+    # count on step 1 when M is cold, → 0 after M warms). Mirror it onto the
+    # state so comm_eff metrics can surface it.
+    spectral.merger_coldM_fallbacks = 0
 
     for name, p in named_params:
         grad = getattr(p, "grad", None)
@@ -607,6 +662,8 @@ def apply_spectral_correction_to_params(
             g_proj = spectral.inject_matrix(name, full)
         elif _mode == "blend":
             g_proj = spectral.blend_matrix(name, full)
+        elif _mode == "signed_ema":
+            g_proj = spectral.signed_ema_matrix(name, full)
         else:
             g_proj = spectral.correct_matrix(name, full)
         rel = spectral.relative_change(full, g_proj)
@@ -622,6 +679,24 @@ def apply_spectral_correction_to_params(
 
         corrected += 1
         state.spectral_corrections += 1
+
+    # EXP-25 (R3): surface the merger's per-step cold-M fallback count + the
+    # corrected-matrix count so the probe can grep them. On step 1 (M cold) the
+    # fallback count == corrected (the merger no-op'd every matrix to G_noisy, NOT
+    # zeroed); after M warms it drops to ~0. A signed_ema run with
+    # merger_coldM_fallbacks==corrected on a LATE step would mean M never warmed
+    # (coverage / broadcast broken).
+    _mode = getattr(spectral, "correction_mode", "reweight")
+    if _mode == "signed_ema":
+        cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
+        if hasattr(state, "merger_coldM_fallbacks"):
+            state.merger_coldM_fallbacks = cold
+        print(
+            f"[comm_eff][merger] correction_mode=signed_ema alpha={spectral.signed_ema_alpha} "
+            f"corrected={corrected} merger_coldM_fallbacks={cold} "
+            f"(cold==corrected ⇒ M still cold this step; cold==0 ⇒ M fully warm)",
+            flush=True,
+        )
 
     if corrected:
         logger.info("comm_eff: spectral correction applied to %d target matrices", corrected)

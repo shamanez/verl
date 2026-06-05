@@ -106,11 +106,22 @@ class CommEffAnchorConfig(BaseConfig):
         delay_K (int): Staleness of the weight snapshot the anchor forwards
             from, in trainer steps. ``0`` = current weights; ``1`` = the prior
             step's weights. Must be ``>= 0``.
+        owns_q (bool): EXP-25 (R2) structural inversion. When ``true`` the ANCHOR
+            owns the PowerSGD projection basis ``Q``: (a) the fast net's
+            ``maybe_update_basis`` + sketch accumulation are gated OFF (the fast
+            net is a pure read-only consumer of ``Q``), and (b) the anchor
+            computes ``Q ← orth(V)`` from its OWN slow-net stale-weight forward
+            ACTIVATIONS (the same ``V += Aᵀ(AQ)`` block-power-iteration the fast
+            path used, relocated fast→slow) and ``dist.broadcast``s both ``Q`` and
+            the gradient-EMA ``M`` to every DP rank each refresh. ``false``
+            (default) keeps the EXP-20 fast-owns-Q behaviour byte-identical
+            (Prime Directive). Gated by ``anchor.enabled`` + the powersgd codec.
     """
 
     enabled: bool = False
     cadence: int = 20
     delay_K: int = 20
+    owns_q: bool = False
 
 
 @dataclass
@@ -160,7 +171,12 @@ class CommEffSpectralConfig(BaseConfig):
             Defaults select the decoder attention/MLP projection matrices and
             skip norms, biases, embeddings and the lm head.
         max_targets (int): Cap on the number of target matrices corrected per
-            step (keeps the discovery smoke cheap). ``-1`` ⇒ no cap.
+            step (keeps the discovery smoke cheap). ``-1`` ⇒ no cap (the EXP-25
+            default — full coverage of ALL 196 = 28 layers × 7 projection
+            matrices, the set the signed_ema merger corrects; ``max_targets``
+            caps BOTH the anchor extraction AND the merger, so a residual cap
+            silently drops merger targets). Set ``>= 0`` only as a diagnostic
+            throttle, never in production.
         rank (int): Retained low-rank truncation rank. Under ``svd_mode=lowrank``
             it is the ``q`` passed to ``torch.svd_lowrank``; under ``full`` it is
             unused. Must be ``>= 1``.
@@ -214,7 +230,11 @@ class CommEffSpectralConfig(BaseConfig):
             "down_proj",
         ]
     )
-    max_targets: int = 4
+    # EXP-25: full coverage by default (-1 = no cap). The signed_ema merger must
+    # correct ALL 196 weight matrices (the activation compression corrupts weight
+    # gradients throughout the network); a residual cap re-creates the EXP-23
+    # coverage bug. Caps BOTH the anchor extraction and the merger (one knob).
+    max_targets: int = -1
     rank: int = 8
     damping: float = 1e-6
     # EMA/SVD storage defaults: keep tensors on GPU, use full SVD, and cache the
@@ -224,12 +244,18 @@ class CommEffSpectralConfig(BaseConfig):
     basis_cache: str = "cache"
     # Correction mode. "reweight" applies two-sided Tikhonov reweighting.
     # "inject" adds a scale-matched anchor-EMA complement. "blend" uses
-    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor.
+    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor. "signed_ema" (EXP-25/R3) uses
+    # the SL signed-EMA merger G_corr=alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
     correction_mode: str = "reweight"
     # Injection strength for correction_mode="inject"; unused otherwise.
     inject_gamma: float = 1.0
     # Convex-blend weight for correction_mode="blend"; validated to [0, 1].
     blend_eta: float = 0.5
+    # EXP-25 (R3): the signed_ema merger weight alpha in
+    # G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M_anchor). alpha=0 is the
+    # SFT-validated pure sign-merger; alpha=1 returns G_noisy unchanged. THE swept
+    # axis (id-2). Validated to [0, 1]. Unused unless correction_mode=signed_ema.
+    signed_ema_alpha: float = 0.0
 
 
 @dataclass
@@ -458,9 +484,9 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
             )
-        if self.spectral.correction_mode not in ("reweight", "inject", "blend"):
+        if self.spectral.correction_mode not in ("reweight", "inject", "blend", "signed_ema"):
             raise ValueError(
-                f"comm_eff.spectral.correction_mode must be one of (reweight, inject, blend); "
+                f"comm_eff.spectral.correction_mode must be one of (reweight, inject, blend, signed_ema); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if self.spectral.inject_gamma < 0.0:
@@ -469,6 +495,13 @@ class CommEffConfig(BaseConfig):
         # scale-matched stale true gradient. Unused unless correction_mode=blend.
         if not 0.0 <= self.spectral.blend_eta <= 1.0:
             raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
+        # EXP-25 (R3) signed_ema merger weight. [0, 1]: 0 => pure |G|*sign(M)
+        # sign-merger, 1 => G_noisy unchanged. Unused unless
+        # correction_mode=signed_ema.
+        if not 0.0 <= self.spectral.signed_ema_alpha <= 1.0:
+            raise ValueError(
+                f"comm_eff.spectral.signed_ema_alpha must be in [0, 1]; got {self.spectral.signed_ema_alpha}"
+            )
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
         if self.clean_cadence < 0:

@@ -252,6 +252,19 @@ class CommEffState:
         self.powersgd_applications = 0
         self.powersgd_basis_updates = 0
 
+        # EXP-25 (R2) anchor-owns-Q counters.
+        #   anchor_q_updates    — orth(V) Q refreshes the ANCHOR computed from its
+        #                         slow-net stale-forward activations (replaces the
+        #                         fast net's maybe_update_basis in owns_q mode).
+        #   anchor_q_broadcasts — dist.broadcast of (Q, M) from the anchor-owning
+        #                         rank to every DP rank (one per refresh).
+        self.anchor_q_updates = 0
+        self.anchor_q_broadcasts = 0
+        # EXP-25 (R3): per-step count of matrices the signed_ema merger no-op'd to
+        # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
+        # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
+        self.merger_coldM_fallbacks = 0
+
         # Whether masking is currently active. Set True only on entry to the
         # actor-train forward/backward (around update_actor) and cleared on
         # exit, so log-prob / ref / infer / val / checkpoint forwards stay clean.
@@ -326,6 +339,11 @@ class CommEffState:
             from verl.workers.comm_eff.powersgd_activation import PowerSGDActivationCompressor
 
             ps_cfg = getattr(self.config, "powersgd", None)
+            # EXP-25 (R2): anchor-owns-Q lives on the anchor sub-config so it can be
+            # set alongside anchor.enabled/cadence/delay_K. Read it here to build the
+            # compressor in the right mode (fast Q-update gated off + slow-net Q).
+            anc_cfg_for_q = getattr(self.config, "anchor", None)
+            anchor_owns_q = bool(getattr(anc_cfg_for_q, "owns_q", False)) if anc_cfg_for_q is not None else False
             self.powersgd = PowerSGDActivationCompressor(
                 rank=int(getattr(ps_cfg, "rank", 102)),
                 base_seed=int(getattr(ps_cfg, "seed", 0)),
@@ -336,6 +354,7 @@ class CommEffState:
                 sync_basis=bool(getattr(ps_cfg, "sync_basis", False)),
                 qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
                 reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
+                anchor_owns_q=anchor_owns_q,
                 state=self,
             )
             logger.info(
@@ -353,7 +372,8 @@ class CommEffState:
                 f"update_cadence={self.powersgd.update_cadence} warm_start={self.powersgd.warm_start} "
                 f"compress_recompute={self.powersgd.compress_recompute} "
                 f"sync_basis={self.powersgd.sync_basis} "
-                f"qr_dtype={getattr(ps_cfg, 'qr_dtype', 'fp32')}",
+                f"qr_dtype={getattr(ps_cfg, 'qr_dtype', 'fp32')} "
+                f"anchor_owns_q={self.powersgd.anchor_owns_q}",
                 flush=True,
             )
 
@@ -377,6 +397,7 @@ class CommEffState:
                 correction_mode=str(getattr(spec_cfg, "correction_mode", "reweight")),
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
                 blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
+                signed_ema_alpha=float(getattr(spec_cfg, "signed_ema_alpha", 0.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s "
@@ -633,6 +654,10 @@ class CommEffState:
             # Lets logs confirm spectral_corrections increments only on the
             # cadence steps (spectral_step % spectral.cadence == 0), not every step.
             "comm_eff/spectral_step": self.spectral_step,
+            # EXP-25 (R2) anchor-owns-Q counters + (R3) merger cold-M fallbacks.
+            "comm_eff/anchor_q_updates": self.anchor_q_updates,
+            "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
+            "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
         }
 
 
