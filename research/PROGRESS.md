@@ -80,3 +80,4 @@ Live: **#25** (RES-133) — realistic anchor-circuit PowerSGD GRPO trainer. One 
 [2026-06-06T09:22:31+10:00] [analyst #25] verdict=STOP
 PROMOTE_SKIPPED: EXP-25 reason="no promote_launcher_as (plan: promote_launcher_as: none)"
 [2026-06-06T09:24:54+10:00] [log-writer #25] logged verdict=STOP milestone=M6
+[2026-06-06T09:27:31+10:00] [orchestrator] TICK (terminal-state verification per playbook): plans=[25] open_issues=[25:status:stop]. State map: EXP-25=VERDICT_STOP (verdict.md STOP + LOG.md entry + label status:stop + log-writer done) = TERMINAL, no dispatch. #24 not open (needs #25 PASS=did-not-happen + correction-primitive redesign). Ledger: all 4 rows TORN_DOWN, 0 live Vast instances (verified). Budget ~8.5/48 GPU-hr. Box mandate honored (only pinned 39613656 used, destroyed). DISPATCHES THIS TICK: none — all work terminal. Orchestrator loop has nothing pending; EXP-25 lineage complete (STOP).
