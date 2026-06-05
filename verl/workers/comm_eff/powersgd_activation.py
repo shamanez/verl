@@ -507,6 +507,18 @@ class PowerSGDActivationCompressor:
         in lockstep, so a
         symmetric per-boundary collective set is sufficient.
         """
+        # Fail-closed (R2 sole-Q-writer): the FAST net must NEVER write Q when the
+        # anchor owns it. The sole call site (engine_workers.py) is gated on
+        # ``fast_owns_q``, so reaching here in anchor_owns_q mode means that gate
+        # leaked — Q would get two writers (fast overwrite vs anchor broadcast),
+        # silently invalidating the stale-anchor experiment. Crash instead of
+        # drifting; this is the durable engine-side equivalent of the probe's
+        # ``powersgd_basis_updates == 0`` check.
+        assert not getattr(self, "anchor_owns_q", False), (
+            "comm_eff.powersgd: maybe_update_basis() entered in anchor_owns_q mode — the "
+            "FAST net must NEVER update Q when the anchor owns it (#25 R2 sole-writer "
+            "invariant). The engine_workers gate (fast_owns_q) must have leaked."
+        )
         if is_clean_step:
             # No V accumulated on a clean step (the train forward ran dense, no
             # hook) — nothing to do; keep Q_t. Clear any stray sketch defensively.
