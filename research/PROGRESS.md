@@ -37,3 +37,5 @@ Live: **#25** (RES-133) — realistic anchor-circuit PowerSGD GRPO trainer. One 
 - **Recommendation**: STOP for α=0.0; dispatch analyst + dispatch new monitor for arm1 cold-M check
 [2026-06-06T04:09:43+10:00] [orchestrator] EXP-25 α=0.0 DONE: val@50=0.354 — CATASTROPHIC CRASH from val@25=0.718 (≪ floor 0.6914, ≪ STOP 0.7114). Confirms entropy-collapse analysis: α=0 |G|·sign(M) sign-SGD destroyed the policy. .arm-done written, reached step50. Sweep HEALTHY + chaining: α=0.3 LAUNCHED (train.log live 18:08Z); α=0.5 pending. Member's 'α=0.3 missing' was WandB lag. Decision: let sweep run to completion (experiment-failure=keep box; need α=0.3 severity-order + α=0.5 knee test). α=0.5 is decisive for #25 PASS/STOP. Re-arming monitor w/ entropy T1-T7 panel on α=0.3.
 [2026-06-06T04:10:34+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
+
+## 2026-06-05T18:12:58Z EXP-25 monitor: α=0.0 DONE val@50=0.3541 (vs val@25=0.7180, STOP-zone), α=0.3 launched step3 cold-M=0 (guard ok). GPU healthy, no errors. [continue_in_place_iteration]
