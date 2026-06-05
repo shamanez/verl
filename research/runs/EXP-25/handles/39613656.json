@@ -1,0 +1,16 @@
+{
+  "instance_id": "39613656",
+  "ssh_host": "46.243.55.155",
+  "ssh_port": 40872,
+  "public_ipaddr": "46.243.55.155",
+  "gpu_name": "H200",
+  "num_gpus": 4,
+  "gpu_ram": 143771,
+  "dph_total": 15.230994152046781,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 40872 root@46.243.55.155 -L 8080:localhost:8080",
+  "schema_version": "1",
+  "reused": true,
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true",
+  "note": "operator-provided warm box (EXP-25 reuse; do-not-provision). instance 39613656 replaced nuked 39602487 at same public IP 46.243.55.155. Operator pinned the DIRECT route -p 40872 root@46.243.55.155 (Vast proxy route ssh6.vast.ai:13656 also valid)."
+}
