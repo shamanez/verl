@@ -1121,8 +1121,8 @@ class FSDPEngine(BaseEngine):
            ``anchor_mask_applications`` is recorded as the (asserted-zero) delta
            of ``state.mask_applications`` around the pass.
         6. **Uncorrected.** ``G_anchor`` is read RAW and fed to
-           ``SpectralFilter.update_anchor`` (the EMA) BEFORE any
-           ``correct_matrix``; ``anchor_grad_corrected`` stays 0.
+           ``SpectralFilter.update_anchor`` (the EMA) BEFORE any fast-path
+           corrector; ``anchor_grad_corrected`` stays 0.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
@@ -1496,8 +1496,8 @@ class FSDPEngine(BaseEngine):
         # DP-reduce did not happen / used the wrong group. Greppable falsifier.
         self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
 
-        # EMA-evolution log line. String discovery (ema_device/svd_mode) is
-        # logged once at build, never here.
+        # EMA-evolution log line. String discovery (ema_device/correction_mode)
+        # is logged once at build, never here.
         if deltas:
             mean_delta = sum(deltas.values()) / len(deltas)
             max_delta = max(deltas.values())

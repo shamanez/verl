@@ -63,22 +63,22 @@ for convergence, lower the cadence (more frequent clean steps).**
 | `COMM_EFF_ANCHOR_ENABLED` | `anchor.enabled` | `false` | turn on the anchor EMA. |
 | `COMM_EFF_ANCHOR_CADENCE` | `anchor.cadence` | `1` | refresh the anchor every Nth step (fires on multiples only — verified: `step=2,4,6,…` for cadence 2). |
 | `COMM_EFF_ANCHOR_DELAY_K` | `anchor.delay_K` | `20` | use a K-step-stale snapshot. **For short runs set it to the cadence (e.g. `2`)** — a `delay_K=20` snapshot never materializes in a ≤20-step run. |
-| `COMM_EFF_SPECTRAL_ENABLED` | `spectral.enabled` | `false` | turn on spectral grad correction. |
-| `COMM_EFF_SPECTRAL_CADENCE` | `spectral.cadence` | `1` | **(added EXP-16)** apply correction only every Nth step via `state.should_run_spectral_correction()`. `1` = every step = prior behavior = strict no-op when disabled. Set **equal to `anchor.cadence`** so corrections use a fresh basis. |
-| `COMM_EFF_SPECTRAL_ALPHA` | `spectral.alpha` | `0.5` | projection strength (less `G_mask`). Lower (`0.3`) ⇒ stronger projection toward the dense direction. |
-| `COMM_EFF_SPECTRAL_TAU` | `spectral.tau` | `0.01` | singular-value threshold. |
+| `COMM_EFF_SPECTRAL_ENABLED` | `spectral.enabled` | `false` | turn on anchor-guided grad correction. |
+| `COMM_EFF_SPECTRAL_CADENCE` | `spectral.cadence` | `1` | apply correction only every Nth step via `state.should_run_spectral_correction()`. `1` = every step = strict no-op when disabled. Set **equal to `anchor.cadence`** so corrections use a freshly-refreshed anchor EMA. |
 | `COMM_EFF_SPECTRAL_BETA_ANC` | `spectral.beta_anc` | `0.9` | anchor EMA decay. |
 | `COMM_EFF_SPECTRAL_EMA_DEVICE` | `spectral.ema_device` | `gpu` | `cpu` to offload the EMA (saves GPU memory; slower). |
-| `COMM_EFF_SPECTRAL_SVD_MODE` | `spectral.svd_mode` | `full` | `lowrank` for cheaper SVD / less memory. |
-| `COMM_EFF_SPECTRAL_BASIS_CACHE` | `spectral.basis_cache` | `cache` | basis-cache mode (note: `cache` grows GPU memory over steps). |
-| `COMM_EFF_SPECTRAL_MAX_TARGETS` | `spectral.max_targets` | `4` | how many 2D weight targets to correct per firing. |
+| `COMM_EFF_SPECTRAL_MAX_TARGETS` | `spectral.max_targets` | `-1` | how many 2D weight targets to correct per firing. `-1` = no cap = full coverage of all 196 projection matrices the merger corrects; caps BOTH anchor extraction AND the merger. |
+| `COMM_EFF_SPECTRAL_CORRECTION_MODE` | `spectral.correction_mode` | `signed_ema` | anchor combiner. `signed_ema` (EXP-25/R3): `α·G_noisy + (1−α)·\|G_noisy\|·sign(M)`. `inject`: add the scale-matched anchor complement. `blend`: convex blend toward the scale-matched anchor. |
+| `COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA` | `spectral.signed_ema_alpha` | `0.0` | the signed_ema merger weight α. `0` = pure `\|G_noisy\|·sign(M)`; `1` = `G_noisy` unchanged. THE swept axis. Active iff `correction_mode=signed_ema`. |
+| `COMM_EFF_SPECTRAL_INJECT_GAMMA` | `spectral.inject_gamma` | `1.0` | injection strength for `correction_mode=inject`; unused otherwise. |
+| `COMM_EFF_SPECTRAL_BLEND_ETA` | `spectral.blend_eta` | `0.5` | convex-blend weight for `correction_mode=blend`; unused otherwise. |
 
-> **EXP-16 result:** anchor+spectral as configured (`alpha0.5/tau0.01/beta_anc0.9`)
-> runs **stably under FSDP1** (grad_norm 4.56, no DTensor/FSDP error, cadence gate
-> verified) but does **not** close the train↔inference gap (pearson stays ~0.0045,
-> val acc ~0.08). It is a layered fix kept **OFF by default**; the clean step is the
-> working lever today. To make spectral matter, push `alpha` lower and/or combine
-> with clean steps.
+> **Note (EXP-25):** the initial SVD/Tikhonov/two-sided-projection "reweight"
+> correction and its seeded-anchor cache were removed — project evidence (EXP-21)
+> proved that projection operator inert on this circuit (cos≈0.5, `G_filt`≈0). The
+> live correction is the signed-EMA merger (`correction_mode=signed_ema`), which
+> takes the gradient MAGNITUDE from the fast compressed grad and the SIGN from the
+> K-stale anchor EMA. Kept **OFF by default** (`spectral.enabled=false`).
 
 ## 4. Throughput / memory (not comm_eff fields, but you will need these)
 

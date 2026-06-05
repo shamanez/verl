@@ -384,32 +384,23 @@ class CommEffState:
             from verl.workers.comm_eff.spectral_filter import SpectralFilter
 
             self.spectral = SpectralFilter(
-                alpha=float(getattr(spec_cfg, "alpha", 0.3)),
-                tau=float(getattr(spec_cfg, "tau", 1e-3)),
                 beta_anc=float(getattr(spec_cfg, "beta_anc", 0.95)),
-                seed_anchor_cache=bool(getattr(spec_cfg, "seed_anchor_cache", True)),
-                anchor_seed=int(getattr(spec_cfg, "anchor_seed", 0)),
-                # Storage layer defaults: gpu/full/cache.
+                # Storage layer default: gpu.
                 ema_device=str(getattr(spec_cfg, "ema_device", "gpu")),
-                svd_mode=str(getattr(spec_cfg, "svd_mode", "full")),
-                basis_cache=str(getattr(spec_cfg, "basis_cache", "cache")),
-                rank=int(getattr(spec_cfg, "rank", 8)),
-                correction_mode=str(getattr(spec_cfg, "correction_mode", "reweight")),
+                correction_mode=str(getattr(spec_cfg, "correction_mode", "signed_ema")),
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
                 blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
                 signed_ema_alpha=float(getattr(spec_cfg, "signed_ema_alpha", 0.0)),
             )
             logger.info(
-                "comm_eff: spectral filter built (alpha=%s tau=%s beta_anc=%s seed_anchor_cache=%s "
-                "ema_device=%s svd_mode=%s basis_cache=%s rank=%s)",
-                self.spectral.alpha,
-                self.spectral.tau,
+                "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "
+                "inject_gamma=%s blend_eta=%s signed_ema_alpha=%s)",
                 self.spectral.beta_anc,
-                self.spectral.seed_anchor_cache,
                 self.spectral.ema_device,
-                self.spectral.svd_mode,
-                self.spectral.basis_cache,
-                self.spectral.rank,
+                self.spectral.correction_mode,
+                self.spectral.inject_gamma,
+                self.spectral.blend_eta,
+                self.spectral.signed_ema_alpha,
             )
             # Discovery line is string-valued, so it goes to stdout only:
             # reduce_metrics does np.mean on every metric value and crashes on a
@@ -419,8 +410,8 @@ class CommEffState:
             isolation_mode = "clone" if anchor_enabled else "n/a (anchor.enabled=false)"
             print(
                 f"[comm_eff][EXP-12] spectral storage: ema_device={self.spectral.ema_device} "
-                f"svd_mode={self.spectral.svd_mode} basis_cache={self.spectral.basis_cache} "
-                f"rank={self.spectral.rank} seed_anchor_cache={self.spectral.seed_anchor_cache} "
+                f"correction_mode={self.spectral.correction_mode} "
+                f"signed_ema_alpha={self.spectral.signed_ema_alpha} "
                 f"anchor_backward_isolation_mode={isolation_mode}",
                 flush=True,
             )

@@ -19,16 +19,14 @@ No GPU, no torch.distributed, no FSDP runtime. Loads the (lightweight)
 ``verl.__init__`` import chain (tensordict, vllm, ...) is not required.
 
 These tests cover the CPU-checkable core loop: original 2D params are corrected,
-near-zero-but-present gradients still fire the hook, reducible metrics stay
-numeric, and seeded anchors are deterministic across Python hash salts. Actual
-FSDP1/FSDP2 grad containers, ``summon_full_params``, and distributed writeback
-must be covered by the real multi-GPU probe instead of mocked here.
+near-zero-but-present gradients still fire the hook, and reducible metrics stay
+numeric. Actual FSDP1/FSDP2 grad containers, ``summon_full_params``, and
+distributed writeback must be covered by the real multi-GPU probe instead of
+mocked here.
 """
 
 import importlib.util
-import os
 import pathlib
-import subprocess
 import sys
 
 import pytest
@@ -111,11 +109,9 @@ class _MinimalConfig:
 
     class _Spectral:
         enabled = True
-        alpha = 0.3
-        tau = 1e-3
         beta_anc = 0.95
-        seed_anchor_cache = True
-        anchor_seed = 0
+        correction_mode = "signed_ema"
+        signed_ema_alpha = 0.0
 
     enabled = True
     spectral = _Spectral()
@@ -146,6 +142,24 @@ def _writeback(grad, g_proj):
     grad.copy_(g_proj.to(grad.dtype))
 
 
+def _warm_anchor_sign_flipped(module, spectral, target_substrs):
+    """Warm the signed_ema anchor EMA so the cold-M guard does NOT fire and the
+    merger provably CHANGES the grad.
+
+    The real engine warms ``M_anchor`` via the anchor circuit (``update_anchor``)
+    before the fast-path corrector runs; the cold-M guard is a no-op only until
+    that happens. Feeding the NEGATED current grad makes ``sign(M)`` oppose
+    ``sign(G_noisy)`` everywhere, so at ``signed_ema_alpha=0`` the merger output
+    ``|G_noisy|*sign(M) = -|G_noisy|*sign(G_noisy)`` differs from ``G_noisy``
+    wherever a coordinate is nonzero (rel_change > 0).
+    """
+    for name, p in module.named_parameters():
+        if p.grad is None or p.grad.dim() != 2:
+            continue
+        if any(s in name for s in target_substrs):
+            spectral.update_anchor(name, -p.grad.detach().clone())
+
+
 _DISCOVERY_META = {"fsdp_version": "test", "module_is_FSDP1": "False"}
 
 
@@ -157,11 +171,15 @@ def test_hook_fires_records_discovery_and_corrections():
     _run_backward_nonzero(module)
     state = _build_state()
     assert state.spectral is not None
+    _TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
+    # Warm the signed_ema anchor (the engine does this via the anchor circuit
+    # before the corrector); without it the cold-M guard makes the merger a no-op.
+    _warm_anchor_sign_flipped(module, state.spectral, _TARGETS)
 
     corrected = apply_spectral_correction_to_params(
         module.named_parameters(),
         spectral=state.spectral,
-        target_substrs=("q_proj", "k_proj", "v_proj", "o_proj"),
+        target_substrs=_TARGETS,
         max_targets=4,
         state=state,
         discovery_meta=_DISCOVERY_META,
@@ -180,10 +198,14 @@ def test_hook_fires_records_discovery_and_corrections():
     assert state.spectral_corrections == corrected
     assert corrected == 4  # capped by max_targets
 
-    # rel_change strictly in (0, 1] for every corrected target at alpha=0.3
+    # rel_change > 0 for every corrected target (the merger actually changed the
+    # grad — not a silent no-op). With sign-flipped M and alpha=0 the merger
+    # negates each nonzero coordinate, so rel_change is strictly positive.
     assert state.spectral_rel_change, "no rel_change recorded"
     for name, rel in state.spectral_rel_change.items():
-        assert 0.0 < rel <= 1.0, f"{name}: rel_change={rel} not in (0, 1]"
+        assert rel > 0.0, f"{name}: rel_change={rel} — correction was a silent no-op"
+    # No cold-M fallbacks fired (the anchor was warmed for every target).
+    assert state.spectral.merger_coldM_fallbacks == 0
 
 
 def test_norm_and_non_target_params_are_skipped():
@@ -211,6 +233,8 @@ def test_writeback_mutates_the_grad_in_place():
     _run_backward_nonzero(module)
     before = {n: p.grad.clone() for n, p in module.named_parameters() if "q_proj" in n}
     state = _build_state()
+    # Warm the anchor so the signed_ema merger provably changes the grad.
+    _warm_anchor_sign_flipped(module, state.spectral, ("q_proj",))
     apply_spectral_correction_to_params(
         module.named_parameters(),
         spectral=state.spectral,
@@ -310,38 +334,6 @@ def test_none_grad_is_skipped():
     assert corrected == 0
     assert state.spectral_corrections == 0
     assert not state.fsdp_grad_repr
-
-
-# --------------------------------------------------------------------------- #
-# Cross-process seeded-anchor determinism (stable hash).
-# --------------------------------------------------------------------------- #
-def test_seeded_anchor_identical_across_processes():
-    """Two SpectralFilter instances in DIFFERENT processes (different
-    PYTHONHASHSEED salts) must build the IDENTICAL seeded anchor for the same
-    (name, anchor_seed). The builtin hash() this replaced was salted per
-    process => divergent anchors per FSDP rank => corrupted correction."""
-    name = "model.layers.3.self_attn.q_proj.weight"
-    code = (
-        "import importlib.util, sys, pathlib, torch\n"
-        f"repo = pathlib.Path({str(_REPO)!r})\n"
-        "spec = importlib.util.spec_from_file_location('_sf', repo/'verl/workers/comm_eff/spectral_filter.py')\n"
-        "m = importlib.util.module_from_spec(spec); sys.modules['_sf']=m; spec.loader.exec_module(m)\n"
-        "f = m.SpectralFilter(seed_anchor_cache=True, anchor_seed=7)\n"
-        "g = torch.zeros(8, 6, dtype=torch.float32)\n"
-        f"a = f.ensure_anchor({name!r}, g)\n"
-        "import hashlib;print(hashlib.sha256(a.numpy().tobytes()).hexdigest())\n"
-    )
-
-    def _digest(hashseed):
-        env = dict(os.environ, PYTHONHASHSEED=str(hashseed))
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
-        assert out.returncode == 0, out.stderr
-        return out.stdout.strip()
-
-    # Two different hash salts -> identical anchor digest under the sha256 seed.
-    d0 = _digest(0)
-    d1 = _digest(12345)
-    assert d0 == d1, f"seeded anchor diverged across PYTHONHASHSEED salts: {d0} != {d1}"
 
 
 if __name__ == "__main__":

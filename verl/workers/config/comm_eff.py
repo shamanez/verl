@@ -126,45 +126,31 @@ class CommEffAnchorConfig(BaseConfig):
 
 @dataclass
 class CommEffSpectralConfig(BaseConfig):
-    """Spectral-correction sub-config (inert while disabled).
+    """Anchor-guided gradient-correction sub-config (inert while disabled).
 
-    Implements the anchor-EMA -> SVD -> Tikhonov weights -> two-sided projection
-    -> alpha blend applied to selected 2D decoder gradients after the actor
-    backward and before ``optimizer.step()``. See
+    Applies an anchor combiner to selected 2D decoder gradients after the actor
+    backward and before ``optimizer.step()``, using the anchor-gradient EMA
+    ``M_anchor`` (no SVD / no basis). See
     ``verl.workers.comm_eff.spectral_filter.SpectralFilter``.
 
-    The formula (per targeted 2D matrix ``G_mask`` with anchor-EMA ``M_anchor``)::
+    The live correction is the signed-EMA merger (per targeted 2D matrix
+    ``G_noisy`` with anchor-EMA ``M_anchor``)::
 
-        M_anchor = beta_anc * M_anchor + (1 - beta_anc) * G_anchor   # EMA
-        M_anchor = U S V^T                                           # full thin SVD
-        d_i      = s_i / (s_i + tau)                                 # Tikhonov weights
-        X        = U^T G_mask V
-        G_filt   = U diag(d) X diag(d) V^T                           # two-sided projection
-        G_proj   = alpha * G_mask + (1 - alpha) * G_filt             # blend
+        M_anchor = beta_anc * M_anchor + (1 - beta_anc) * G_anchor    # EMA
+        G_corr   = alpha * G_noisy + (1 - alpha) * |G_noisy| * sign(M_anchor)
 
-    At ``alpha=1.0`` this is an exact no-op (``G_proj == G_mask``); at
-    ``alpha=0`` it is the pure two-sided Tikhonov projection. The masked
-    gradient is never discarded — the anchor supplies geometry, not a
-    replacement.
+    Magnitude from ``G_noisy``, sign from ``M_anchor``. ``inject`` and ``blend``
+    are alternate anchor combiners. A cold-M guard returns ``G_noisy`` unchanged
+    whenever ``M_anchor`` is unwarmed, so the masked gradient is never silently
+    zeroed.
 
     Args:
-        enabled (bool): Whether spectral correction of masked gradients runs.
-            Gated by the parent ``comm_eff.enabled`` regardless of this value.
-            ``false`` (default) ⇒ the grad-correction hook is a strict no-op and
-            the actor path is identical to dense GRPO.
-        alpha (float): Blend coefficient in ``[0, 1]``: ``alpha * G_mask +
-            (1 - alpha) * G_filt``. ``1.0`` ⇒ no-op; ``0.0`` ⇒ pure projection.
-            Default ``0.3``.
-        tau (float): Tikhonov damping added to each singular value before
-            forming the spectral weight ``d_i = s_i / (s_i + tau)``. Default
-            ``1e-3``.
+        enabled (bool): Whether anchor-guided correction of masked gradients
+            runs. Gated by the parent ``comm_eff.enabled`` regardless of this
+            value. ``false`` (default) ⇒ the grad-correction hook is a strict
+            no-op and the actor path is identical to dense GRPO.
         beta_anc (float): EMA decay for the anchor-gradient running matrix
             ``M_anchor``. Default ``0.95``.
-        seed_anchor_cache (bool): When ``true``, populate ``M_anchor`` with a
-            fixed deterministic PSD basis (seeded) so the filter runs without
-            a live anchor refresh. When ``false`` the anchor EMA starts empty
-            and is populated by the live anchor circuit.
-        anchor_seed (int): Base seed for the deterministic anchor cache.
         target_substr (list[str]): Substrings used to SELECT which named 2D
             parameters receive correction. A parameter is targeted iff its name
             contains one of these substrings AND its logical shape is 2D.
@@ -177,48 +163,42 @@ class CommEffSpectralConfig(BaseConfig):
             caps BOTH the anchor extraction AND the merger, so a residual cap
             silently drops merger targets). Set ``>= 0`` only as a diagnostic
             throttle, never in production.
-        rank (int): Retained low-rank truncation rank. Under ``svd_mode=lowrank``
-            it is the ``q`` passed to ``torch.svd_lowrank``; under ``full`` it is
-            unused. Must be ``>= 1``.
-        damping (float): Legacy alias kept for schema back-compat; the active
-            damping knob is ``tau``.
         ema_device (str): Where the anchor-gradient EMA ``M_anchor`` is stored
             between refreshes — ``"gpu"`` (default, faithful: kept in HBM) or
             ``"cpu"`` (memory-lean: offloaded to pinned CPU, moved to GPU only
             inside the refresh/correct call and moved back). ``M_anchor`` is
             touched only at refresh, so CPU offload costs one H2D/D2H per refresh,
             not per mini-batch. Validated against {gpu, cpu}.
-        svd_mode (str): How the anchor SVD basis is computed — ``"full"``
-            (default, faithful: ``torch.linalg.svd`` full thin SVD) or
-            ``"lowrank"`` (memory-lean: ``torch.svd_lowrank(M_anchor, q=rank)``,
-            shrinking ``U/S/V`` from ``O(m·k)`` to ``O(m·rank)``). Validated
-            against {full, lowrank}.
-        basis_cache (str): Whether the ``U/S/V`` basis is computed once per
-            refresh and reused across the fast PPO mini-batches — ``"cache"``
-            (default, faithful: compute at refresh, store on GPU, reuse) or
-            ``"recompute"`` (memory-lean inverse: recompute the SVD on every
-            ``correct_matrix``). The basis is touched every fast mini-batch, so
-            it stays on-GPU during the refresh window
-            regardless. Validated against {cache, recompute}.
-        cadence (int): Spectral-correction cadence in optimizer steps.
+        correction_mode (str): The anchor combiner the fast-path grad uses —
+            ``"signed_ema"`` (default, EXP-25/R3:
+            ``alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M_anchor)``), ``"inject"``
+            (additive scale-matched anchor complement) or ``"blend"``
+            (``(1-eta)*G_mask + eta*scale*M_anchor``). Validated against
+            {inject, blend, signed_ema}.
+        inject_gamma (float): Injection strength for
+            ``correction_mode="inject"``; unused otherwise. Must be ``>= 0``.
+        blend_eta (float): Convex-blend weight for ``correction_mode="blend"``;
+            validated to ``[0, 1]``. Unused otherwise.
+        signed_ema_alpha (float): The signed_ema merger weight ``alpha`` in
+            ``G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M_anchor)``.
+            ``alpha=0`` is the SL-validated pure sign-merger; ``alpha=1`` returns
+            ``G_noisy`` unchanged. THE swept axis. Validated to ``[0, 1]``.
+            Unused unless ``correction_mode=signed_ema``.
+        cadence (int): Correction cadence in optimizer steps.
             The grad-correction hook (``_maybe_comm_eff_grad_correction``) fires
             only when ``(spectral_step % cadence) == 0`` on the monotonic
             per-optimizer-step counter, MIRRORING the anchor cadence
             (``anchor_should_fire``) and the clean-step cadence
             (``CommEffState.is_clean_step``). ``1`` (default) fires EVERY step =
             the default behavior. Set ``> 1`` (e.g. ``2``) to align
-            spectral correction with a matching ``anchor.cadence`` so the
-            correction always uses a freshly-refreshed anchor basis instead of a
+            correction with a matching ``anchor.cadence`` so the
+            correction always uses a freshly-refreshed anchor EMA instead of a
             stale one on the in-between steps. Must be ``>= 1``.
     """
 
     enabled: bool = False
-    alpha: float = 0.3
-    tau: float = 1e-3
     beta_anc: float = 0.95
     cadence: int = 1
-    seed_anchor_cache: bool = True
-    anchor_seed: int = 0
     target_substr: list = field(
         default_factory=lambda: [
             "q_proj",
@@ -235,18 +215,13 @@ class CommEffSpectralConfig(BaseConfig):
     # gradients throughout the network); a residual cap re-creates the EXP-23
     # coverage bug. Caps BOTH the anchor extraction and the merger (one knob).
     max_targets: int = -1
-    rank: int = 8
-    damping: float = 1e-6
-    # EMA/SVD storage defaults: keep tensors on GPU, use full SVD, and cache the
-    # basis per refresh.
+    # EMA storage default: keep tensors on GPU.
     ema_device: str = "gpu"
-    svd_mode: str = "full"
-    basis_cache: str = "cache"
-    # Correction mode. "reweight" applies two-sided Tikhonov reweighting.
+    # Correction mode (anchor combiner). "signed_ema" (EXP-25/R3) uses the SL
+    # signed-EMA merger G_corr=alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
     # "inject" adds a scale-matched anchor-EMA complement. "blend" uses
-    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor. "signed_ema" (EXP-25/R3) uses
-    # the SL signed-EMA merger G_corr=alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
-    correction_mode: str = "reweight"
+    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor.
+    correction_mode: str = "signed_ema"
     # Injection strength for correction_mode="inject"; unused otherwise.
     inject_gamma: float = 1.0
     # Convex-blend weight for correction_mode="blend"; validated to [0, 1].
@@ -458,12 +433,6 @@ class CommEffConfig(BaseConfig):
                 "comm_eff.mask.rescale=true requires comm_eff.mask.p < 1.0 (the 1/(1-p) "
                 f"magnitude-preservation factor is undefined at p>=1); got p={self.mask.p}"
             )
-        if self.spectral.rank < 1:
-            raise ValueError(f"comm_eff.spectral.rank must be >= 1; got {self.spectral.rank}")
-        if not 0.0 <= self.spectral.alpha <= 1.0:
-            raise ValueError(f"comm_eff.spectral.alpha must be in [0, 1]; got {self.spectral.alpha}")
-        if self.spectral.tau <= 0.0:
-            raise ValueError(f"comm_eff.spectral.tau must be > 0; got {self.spectral.tau}")
         if not 0.0 <= self.spectral.beta_anc <= 1.0:
             raise ValueError(f"comm_eff.spectral.beta_anc must be in [0, 1]; got {self.spectral.beta_anc}")
         # Spectral-correction cadence. 1 = fire every step. A value < 1 is a
@@ -475,18 +444,12 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
         if self.anchor.delay_K < 0:
             raise ValueError(f"comm_eff.anchor.delay_K must be >= 0; got {self.anchor.delay_K}")
-        # Storage-layer enums.
+        # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")
-        if self.spectral.svd_mode not in ("full", "lowrank"):
-            raise ValueError(f"comm_eff.spectral.svd_mode must be one of (full, lowrank); got {self.spectral.svd_mode!r}")
-        if self.spectral.basis_cache not in ("cache", "recompute"):
+        if self.spectral.correction_mode not in ("inject", "blend", "signed_ema"):
             raise ValueError(
-                f"comm_eff.spectral.basis_cache must be one of (cache, recompute); got {self.spectral.basis_cache!r}"
-            )
-        if self.spectral.correction_mode not in ("reweight", "inject", "blend", "signed_ema"):
-            raise ValueError(
-                f"comm_eff.spectral.correction_mode must be one of (reweight, inject, blend, signed_ema); "
+                f"comm_eff.spectral.correction_mode must be one of (inject, blend, signed_ema); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if self.spectral.inject_gamma < 0.0:
