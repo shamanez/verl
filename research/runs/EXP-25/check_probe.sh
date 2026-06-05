@@ -50,9 +50,24 @@ if [[ "$PID" == "1" ]]; then
   grep -qE "\[comm_eff\]\[bcast\].*cross_rank_max_rel_dev=(0\.|0e|n/a)" "$LOG" && ok "Q cross-rank consensus OK (no raise)" || note "check bcast cross_rank line"
   grep -qE "basis Q DIVERGED across DP ranks" "$LOG" && bad "verify_basis_agreement RAISED" || ok "verify_basis_agreement did NOT raise"
   grep -qE "\[comm_eff\]\[bcast\].*M broadcast targets=" "$LOG" && ok "M broadcast landed" || bad "no M broadcast line"
-  # fast net issues NO local Q-update: anchor_q_updates>0 but powersgd_basis_updates(fast)==0
-  note "fast-vs-anchor Q-update counters (fast basis_updates should be 0; anchor_q_updates>0):"
-  grep -oE "anchor_q_updates=[0-9]+ anchor_q_broadcasts=[0-9]+" "$LOG" | tail -1
+  # R2 "the anchor is the SOLE Q writer" — HARD CHECK (not just a print):
+  #   anchor_q_updates MUST be > 0 (the anchor actually refreshed Q each cadence), and
+  #   the FAST-net powersgd_basis_updates MUST be 0 (fast maybe_update_basis gated OFF).
+  # Both counters are emitted on the [comm_eff][bcast] "Q updated" line (fires only when
+  # anchor_owns_q=true), so anchor them to that line.
+  aqu=$(grep -E "\[comm_eff\]\[bcast\].*anchor_q_updates=" "$LOG" | tail -1 | grep -oE "anchor_q_updates=[0-9]+" | grep -oE "[0-9]+")
+  fbu=$(grep -E "\[comm_eff\]\[bcast\].*powersgd_basis_updates=" "$LOG" | tail -1 | grep -oE "powersgd_basis_updates=[0-9]+" | grep -oE "[0-9]+")
+  note "Q-writer counters: anchor_q_updates=${aqu:-<missing>} fast_powersgd_basis_updates=${fbu:-<missing>}"
+  if [[ -n "$aqu" && "$aqu" -gt 0 ]]; then
+    ok "anchor updated Q (anchor_q_updates=$aqu > 0) — anchor is a Q writer"
+  else
+    bad "anchor never updated Q (anchor_q_updates=${aqu:-missing}) — R2 anchor-as-Q-writer did NOT fire"
+  fi
+  if [[ -n "$fbu" && "$fbu" -eq 0 ]]; then
+    ok "fast net issued NO local Q-update (powersgd_basis_updates=0) — fast maybe_update_basis gated off"
+  else
+    bad "fast net updated Q (powersgd_basis_updates=${fbu:-missing}) — fast maybe_update_basis NOT gated off (R2 SOLE-writer violated)"
+  fi
   # COLD-M fallback: step-1 cold==corrected then warms
   echo "--- merger cold-M fallback trace (step1 cold==corrected, then ->0) ---"
   grep -oE "\[comm_eff\]\[merger\].*corrected=[0-9]+ merger_coldM_fallbacks=[0-9]+" "$LOG"
