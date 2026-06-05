@@ -26,3 +26,14 @@ Live: **#25** (RES-133) — realistic anchor-circuit PowerSGD GRPO trainer. One 
 [2026-06-06T03:50:33+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
 [2026-06-06T04:00:12+10:00] [orchestrator] ENTROPY COLLAPSE found in EXP-25 α=0.0 arm (operator-flagged): entropy 5.69→0.06 monotonic, response_length explodes ~step30 (300→8600), reward peaks 0.79@28 then degrades to 0.32@45. Prime suspect = α=0 signed_ema |G|·sign(M) = magnitude-preserving sign-SGD w/ persistent EMA signs (no cancellation→sharpening), no-KL/no-entropy to arrest. Isolated by 4 anchor-OFF control runs (no collapse). Dedicated team 'entropy-collapse' (member entropy-analyst) writing runs/EXP-25/ENTROPY_COLLAPSE_FINDINGS.md + standing research/diagnostics/ENTROPY_COLLAPSE_WATCH.md. Prediction: α=0.3/0.5 arrest it (sweep tests H1). Entropy/length/IS now a STANDING per-run watch.
 [2026-06-06T04:00:34+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
+
+## EXP-25 Monitor Session 2 (2026-06-05 17:15-18:05 UTC) — arm0 COMPLETE
+
+- **exit_state**: DONE_1FLAG (exp25_alpha_0p0.arm-done written, arm1 starting)
+- **val@25**: 0.7180 | **val@50**: 0.3541 — STOP (threshold ≤0.7114 triggered)
+- **Errors**: 0 training errors; 5 benign post-teardown RuntimeError matches
+- **Artifacts**: runs/EXP-25/logs/train.log (1994179b), exp25_alpha_0p0.arm-done
+- **arm1 (α=0.3)**: started, loading weights at session end (cold-M check pending)
+- **Recommendation**: STOP for α=0.0; dispatch analyst + dispatch new monitor for arm1 cold-M check
+[2026-06-06T04:09:43+10:00] [orchestrator] EXP-25 α=0.0 DONE: val@50=0.354 — CATASTROPHIC CRASH from val@25=0.718 (≪ floor 0.6914, ≪ STOP 0.7114). Confirms entropy-collapse analysis: α=0 |G|·sign(M) sign-SGD destroyed the policy. .arm-done written, reached step50. Sweep HEALTHY + chaining: α=0.3 LAUNCHED (train.log live 18:08Z); α=0.5 pending. Member's 'α=0.3 missing' was WandB lag. Decision: let sweep run to completion (experiment-failure=keep box; need α=0.3 severity-order + α=0.5 knee test). α=0.5 is decisive for #25 PASS/STOP. Re-arming monitor w/ entropy T1-T7 panel on α=0.3.
+[2026-06-06T04:10:34+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
