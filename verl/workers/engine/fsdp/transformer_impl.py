@@ -1259,8 +1259,12 @@ class FSDPEngine(BaseEngine):
             f"warmup_fallback={_used_step != _req_step}",
             flush=True,
         )
-        # Step numbers are 1-based, so the t-delay_K snapshot is only available
-        # after step == delay_K. At equality the requested step would be 0.
+        # 1-based steps (no step 0): the t-delay_K snapshot only becomes available
+        # at step == delay_K + 1 (at step == delay_K the request is step 0, which
+        # never existed). So the post-warmup guarantee holds for step > delay_K,
+        # NOT step >= delay_K — the latter hard-asserts one step too early and
+        # crashes the FIRST eligible step (delay_K=1 -> step 1; delay_K=5 -> step
+        # 5). (EXP-25 id-0 hotfix.)
         if int(step) > int(delay_K):
             assert _used_step == _req_step, (
                 f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "

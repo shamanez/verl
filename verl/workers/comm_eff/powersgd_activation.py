@@ -124,8 +124,12 @@ def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
         gen = torch.Generator(device="cpu").manual_seed((H * 1_000_003 + r) & _MASK31)
         rand = torch.randn(H, r, generator=gen, dtype=torch.float32)
         q_fix, _ = torch.linalg.qr(rand, mode="reduced")
-        # q lives on the compute device; q_fix is built on CPU for a deterministic
-        # repair. Move the repair basis only when selecting degenerate columns.
+        # q lives on the compute device (cuda); q_fix was built on CPU via the
+        # DETERMINISTIC cpu generator + a CPU QR (keep it on CPU so the repair is
+        # bit-identical across ranks — a GPU QR could differ in low bits and
+        # break the cross-rank Q consensus). Move ONLY the result onto q's device
+        # right before torch.where so the degenerate-column repair does not raise
+        # a cross-device error. dtype is already fp32 on both (EXP-25 id-0 hotfix).
         q = torch.where(bad.unsqueeze(0), q_fix.to(q.device), q)
     return q
 
