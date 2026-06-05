@@ -1,0 +1,38 @@
+diff --git a/verl/workers/comm_eff/powersgd_activation.py b/verl/workers/comm_eff/powersgd_activation.py
+index 29b9272..2d48f63 100644
+--- a/verl/workers/comm_eff/powersgd_activation.py
++++ b/verl/workers/comm_eff/powersgd_activation.py
+@@ -124,7 +124,13 @@ def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
+         gen = torch.Generator(device="cpu").manual_seed((H * 1_000_003 + r) & _MASK31)
+         rand = torch.randn(H, r, generator=gen, dtype=torch.float32)
+         q_fix, _ = torch.linalg.qr(rand, mode="reduced")
+-        q = torch.where(bad.unsqueeze(0), q_fix, q)
++        # q lives on the compute device (cuda); q_fix was built on CPU via the
++        # DETERMINISTIC cpu generator + a CPU QR (keep it on CPU so the repair is
++        # bit-identical across ranks — a GPU QR could differ in low bits and
++        # break the cross-rank Q consensus). Move ONLY the result onto q's device
++        # right before torch.where so the degenerate-column repair does not raise
++        # a cross-device error. dtype is already fp32 on both (EXP-25 id-0 hotfix).
++        q = torch.where(bad.unsqueeze(0), q_fix.to(q.device), q)
+     return q
+ 
+ 
+diff --git a/verl/workers/engine/fsdp/transformer_impl.py b/verl/workers/engine/fsdp/transformer_impl.py
+index a41d727..2b33f55 100644
+--- a/verl/workers/engine/fsdp/transformer_impl.py
++++ b/verl/workers/engine/fsdp/transformer_impl.py
+@@ -1259,7 +1259,13 @@ class FSDPEngine(BaseEngine):
+             f"warmup_fallback={_used_step != _req_step}",
+             flush=True,
+         )
+-        if int(step) >= int(delay_K):
++        # 1-based steps (no step 0): the t-delay_K snapshot only becomes available
++        # at step == delay_K + 1 (at step == delay_K the request is step 0, which
++        # never existed). So the post-warmup guarantee holds for step > delay_K,
++        # NOT step >= delay_K — the latter hard-asserts one step too early and
++        # crashes the FIRST eligible step (delay_K=1 -> step 1; delay_K=5 -> step
++        # 5). (EXP-25 id-0 hotfix.)
++        if int(step) > int(delay_K):
+             assert _used_step == _req_step, (
+                 f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
+                 f"snapshot step={_req_step} (delay_K={delay_K}) but used step={_used_step} "
