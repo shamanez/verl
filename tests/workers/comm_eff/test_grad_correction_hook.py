@@ -12,32 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU reproduction + regression for the EXP-7 spectral grad-correction hook.
+"""CPU regression tests for the spectral grad-correction hook.
 
 No GPU, no torch.distributed, no FSDP runtime. Loads the (lightweight)
 ``spectral_filter`` and ``state`` modules by file path so the heavy
 ``verl.__init__`` import chain (tensordict, vllm, ...) is not required.
 
-This test ENCODES the two EXP-7 defects the first Vast run hit:
+These tests cover:
 
-* DEFECT 2 — the grad-correction hook body never executed. The original engine
+* The grad-correction hook must execute on original 2D params. The original engine
   iterated ``module._fsdp_wrapped_module.named_parameters()`` directly, which
   under FSDP1 (``use_orig_params=false``) yields a 1-D ``_flat_param`` whose
   name has no ``q_proj``/etc. substring and whose grad is not 2-D, so EVERY
   param was skipped: no ``[FSDP-DISCOVERY]`` line, ``spectral_corrections=0``.
-  The fix exposes the original 2-D named params + grads and routes them through
-  ``apply_spectral_correction_to_params``. The first three tests assert the
-  fixed core: discovery recorded once, ``spectral_corrections > 0``,
+  The engine exposes the original 2-D named params + grads and routes them
+  through ``apply_spectral_correction_to_params``. The first three tests assert
+  discovery is recorded once, ``spectral_corrections > 0``,
   ``rel_change`` in ``(0, 1]``. ``test_legacy_flatparam_iteration_reproduces_bug``
-  reproduces the ORIGINAL failure (flat-param iteration => zero corrections).
+  captures the flat-param iterator case that would produce zero corrections.
 
 * The hook must fire REGARDLESS of gradient magnitude — only ``grad is None``
   is skipped. ``test_hook_fires_on_near_zero_grad`` proves a ~0 (but present)
   grad still triggers discovery + a correction.
 
-It also covers DEFECT 3 — cross-process anchor determinism — by simulating two
-processes with different ``PYTHONHASHSEED`` salts and asserting identical seeded
-anchors for the same parameter name.
+* Seeded anchors must be cross-process deterministic. Two processes with
+  different ``PYTHONHASHSEED`` salts should build identical anchors for the same
+  parameter name.
 """
 
 import importlib.util
@@ -165,7 +165,7 @@ _DISCOVERY_META = {"fsdp_version": "test", "module_is_FSDP1": "False"}
 
 
 # --------------------------------------------------------------------------- #
-# DEFECT 2 — fixed core: hook fires, discovery recorded once, corrections > 0
+# Fixed core: hook fires, discovery is recorded once, corrections > 0.
 # --------------------------------------------------------------------------- #
 def test_hook_fires_records_discovery_and_corrections():
     module = _TinyDecoder()
@@ -247,8 +247,7 @@ def test_writeback_mutates_the_grad_in_place():
 def test_hook_fires_on_near_zero_grad():
     """The hook must fire regardless of gradient magnitude — only grad=None is
     skipped. A present-but-~0 grad still records discovery and runs a
-    correction (this is exactly the degenerate-loss situation DEFECT 1 created;
-    the hook itself must not silently no-op on small grads)."""
+    correction. The hook itself must not silently no-op on small grads."""
     module = _TinyDecoder()
     _run_backward_nonzero(module)
     # Crush every grad to ~0 but keep it present (not None).
@@ -276,10 +275,9 @@ def test_spectral_metrics_are_all_numeric():
 
     reduce_metrics() does np.mean() on EVERY metric value; a string value
     (e.g. a flattened FSDP-discovery field) raises UFuncNoLoopError and crashes
-    the step's metric reduction before global_step is logged. This is the
-    defect that killed the second spectral_on run AFTER the correction fired.
-    The string-valued FSDP discovery must live only on state.fsdp_grad_repr /
-    the stdout line, never in the reducible metrics dict.
+    the step's metric reduction before global_step is logged. The string-valued
+    FSDP discovery must live only on state.fsdp_grad_repr / the stdout line,
+    never in the reducible metrics dict.
     """
     import numbers
 
@@ -296,7 +294,7 @@ def test_spectral_metrics_are_all_numeric():
         full_grad_of=_full_grad_of,
         writeback=_writeback,
     )
-    # The discovery log IS populated (headline deliverable still recorded)...
+    # The discovery log is populated...
     assert state.fsdp_grad_repr
     # ...but it must NOT leak string values into the reducible metrics.
     metrics = _st.comm_eff_metrics(state)
@@ -330,8 +328,7 @@ def test_none_grad_is_skipped():
 
 
 # --------------------------------------------------------------------------- #
-# DEFECT 2 — reproduce the ORIGINAL bug: FSDP1-style flat-param iteration.
-# This is what the engine did before the fix and why nothing fired.
+# FSDP1-style flat-param iteration produces no target matrices.
 # --------------------------------------------------------------------------- #
 class _FakeFlatParam:
     """Mimics an FSDP1 use_orig_params=false FlatParameter: a single 1-D param
@@ -349,10 +346,9 @@ def _flat_named_params(module):
 
 
 def test_legacy_flatparam_iteration_reproduces_bug():
-    """With FSDP1 flat-param iteration the core fires ZERO corrections — the
-    name has no proj substring and the grad is 1-D. This is the first-run
-    failure; the engine fix (summon_full_params -> original 2-D params) is what
-    avoids feeding this iterator in the real path."""
+    """With FSDP1 flat-param iteration the core fires ZERO corrections: the name
+    has no proj substring and the grad is 1-D. The engine avoids this by using
+    summon_full_params to expose original 2D params."""
     module = _TinyDecoder()
     _run_backward_nonzero(module)
     state = _build_state()
@@ -366,13 +362,13 @@ def test_legacy_flatparam_iteration_reproduces_bug():
         full_grad_of=_full_grad_of,
         writeback=_writeback,
     )
-    assert corrected == 0  # the bug: nothing matched
+    assert corrected == 0  # nothing matched
     assert state.spectral_corrections == 0
     assert not state.fsdp_grad_repr  # no FSDP-DISCOVERY line => exactly the symptom
 
 
 # --------------------------------------------------------------------------- #
-# DEFECT 3 — cross-process seeded-anchor determinism (stable hash).
+# Cross-process seeded-anchor determinism (stable hash).
 # --------------------------------------------------------------------------- #
 def test_seeded_anchor_identical_across_processes():
     """Two SpectralFilter instances in DIFFERENT processes (different

@@ -125,8 +125,7 @@ class BaseEngine:
         if state is None or not getattr(state, "enabled", False):
             return
         # Enabled path: backend engines that implement spectral correction
-        # OVERRIDE this method (see FSDPEngine._maybe_comm_eff_grad_correction,
-        # EXP-7) to apply the paper's spectral filter to the targeted 2D
+        # override this method to apply the filter to the targeted 2D
         # gradient matrices and bump state.spectral_corrections, here — after
         # backward / FSDP reduction and before optimizer_step / grad clipping.
         # The base implementation is a no-op even when a state is attached so a
@@ -141,8 +140,8 @@ class BaseEngine:
         masked fast path runs. When comm_eff is disabled (the default) this
         returns immediately, touching neither gradients nor any collective op.
 
-        Backend engines that implement the anchor circuit OVERRIDE this method
-        (see FSDPEngine._maybe_comm_eff_anchor_refresh, EXP-8/EXP-12); the base
+        Backend engines that implement the anchor circuit override this method
+        (see FSDPEngine._maybe_comm_eff_anchor_refresh); the base
         implementation is a no-op even when a state is attached so a backend
         without an anchor override leaves the train path byte-identical.
         """
@@ -166,7 +165,7 @@ class BaseEngine:
         maybe_fix_3d_position_ids(data)
 
         self.optimizer_zero_grad()
-        # EXP-8 / EXP-12 anchor circuit. Runs at the TOP of train_batch:
+        # Anchor circuit. Runs at the top of train_batch:
         # unmasked K-stale fwd/bwd on a no-hook clone -> RAW G_anchor -> spectral
         # EMA, BEFORE the masked fast path. No-op when disabled.
         self._maybe_comm_eff_anchor_refresh(data, loss_function)

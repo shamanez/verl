@@ -629,11 +629,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        # EXP-6 path tag: reference-policy log-prob is an RL-measurement path;
-        # masking must NOT fire here. The ref forward runs on a separate engine
-        # that has no comm_eff state attached, so this is inherently mask-free;
-        # the tag makes the intent explicit and trips the assert if anything
-        # ever shares the actor engine with the ref path.
+        # Reference-policy log-prob is an RL-measurement path; masking must not
+        # fire here. The tag trips the assert if this path ever shares the actor
+        # engine.
         with self._comm_eff_path("ref_logprob"):
             output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
@@ -642,28 +640,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        # EXP-6 path tag: old-policy log-prob recompute is an RL-measurement
-        # path. By default (EXP-6) the mask hook's assert catches any leak here
-        # — infer_batch runs forward_only so no hooks are registered, and
-        # mask_active is False. The "old_logprob" tag is belt-and-braces.
-        #
-        # EXP-9: when ``comm_eff.mask.mask_recompute=true`` the fast (masked)
-        # circuit ALSO covers this recompute. We stamp ``mask_active=True``
-        # inside the ``_comm_eff_path("old_logprob")`` context so the engine's
-        # ``_comm_eff_mask_active(forward_only=True)`` permits the masker to
-        # register for this forward (the engine checks the
-        # ``mask_eligible_tags(state)`` set and the pass-type/path consistency).
-        # The bwd-bearing actor train forward is unaffected — it stays the
-        # ``path_tag="train"`` ⇒ ``forward_only=False`` branch.
-        #
-        # The restore in ``finally`` matches the symmetry in ``update_actor``:
-        # the prior ``mask_active`` (always False outside the
-        # update_actor / compute_log_prob entrypoints) is restored on exit so
-        # nesting (a ckpt forward inside the recompute, etc.) does not leak.
+        # Old-policy log-prob recompute is an RL-measurement path. By default no
+        # compression hooks register here. When mask_recompute or
+        # compress_recompute is enabled, this path is deliberately compressed
+        # under the "old_logprob" tag and then restores the prior mask_active
+        # state on exit.
         with self._comm_eff_path("old_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
-            # EXP-14: thread the trainer step so the clean-step gate below (and
-            # the mask PRF key) see the real global_step. No-op when disabled.
+            # Thread the trainer step so clean-step gates and PRF keys see the
+            # real global_step. No-op when disabled.
             global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_mask_active = False
             prev_mask_active = False
@@ -671,7 +656,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
                 mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
                 mask_recompute = bool(getattr(mask_cfg, "mask_recompute", False)) if mask_cfg is not None else False
-                # EXP-14: on a clean step the old-logprob recompute MUST run
+                # On a clean step the old-logprob recompute MUST run
                 # unmasked too (both gradient-feeding forwards clean ⇒ the PPO
                 # IS ratio r≈1 and the train forward sees the true dense grad).
                 # So suppress the mask_recompute stamp when is_clean_step().
@@ -685,15 +670,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
-                # EXP-20/M6: PowerSGD compress_recompute. When the powersgd codec
-                # is active and compress_recompute=true, the old-logprob recompute
-                # is ALSO projected through the SAME frozen Q_t as the train
-                # forward, so both gradient-feeding forwards agree ⇒ ρ≈1 (INF-17).
-                # The recompute runs forward_only (no_grad) so it folds NOTHING
-                # into the basis sketch V (the compressor's _should_accumulate
-                # gate requires grad-enabled). Suppressed on a clean step (both
-                # forwards dense). compress_recompute=false leaves the recompute
-                # dense (the IS-ratio denominator is the dense old-logprob).
+                # PowerSGD compress_recompute projects old-logprob through the
+                # same frozen Q_t as train. Because this recompute is no_grad, it
+                # does not update the basis sketch. Clean steps stay dense.
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
                 if (
@@ -748,15 +727,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     state.build(getattr(engine, "module", None))
                     object.__setattr__(engine, "_comm_eff_state", state)
                     logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
-                    # EXP-20: bind the actor's DATA-PARALLEL group to the PowerSGD
-                    # compressor so the basis-consensus all-reduce pools the
-                    # sketch over exactly the DP ranks (not blindly the world).
-                    # For this actor world==DP (SP=1, no TP/PP in the training
-                    # mesh), so this equals the default group — but binding it
-                    # explicitly is the correctness safeguard if a future config
-                    # adds a TP/PP dim. get_data_parallel_group() is the engine's
-                    # DP process group (the same group the loss-norm all_reduce
-                    # uses in _forward_backward_batch_inner).
+                    # Bind the actor DP group so the PowerSGD basis all-reduce
+                    # pools sketches over exactly the data-parallel ranks.
                     powersgd = getattr(state, "powersgd", None)
                     if powersgd is not None and hasattr(engine, "get_data_parallel_group"):
                         try:
@@ -802,7 +774,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
 
     def _comm_eff_thread_global_step(self, data: TensorDict, state) -> Optional[int]:
-        """EXP-14: thread the trainer step onto the comm_eff state.
+        """Thread the trainer step onto the comm_eff state.
 
         The trainer stamps ``batch.meta_info["comm_eff_global_step"]`` before each
         ``update_actor`` / ``compute_log_prob`` call; ``DataProto.to_tensordict``
@@ -843,7 +815,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _comm_eff_path(self, tag: str):
         """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
 
-        EXP-6 contamination guard. The activation-mask hook asserts the state's
+        The activation-mask hook asserts the state's
         ``path_tag == "train"`` before firing, so stamping ``"old_logprob"`` /
         ``"ref_logprob"`` / ``"infer"`` / ``"ckpt"`` here turns any mask leak
         onto an RL-measurement path into a loud assertion instead of silent
@@ -873,20 +845,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # comm_eff.enabled=true; the disabled path never touches the gradient, so
         # the no-op parity holds.
         #
-        # Optimizer-step ordering (EXP-7 spectral + EXP-8 anchor, M2 paper). Per
+        # Optimizer-step ordering. Per
         # actor train_batch (reached via train_mini_batch -> engine.train_batch):
-        #   [EXP-8 anchor: UNMASKED K-stale fwd/bwd -> RAW G_anchor -> EMA, NO step]
+        #   [anchor: UNMASKED K-stale fwd/bwd -> RAW G_anchor -> EMA, NO step]
         #   -> masked fwd/bwd -> FSDP grad reduction -> spectral correction -> AdamW.
         # Building the state here attaches the SpectralFilter (+ the anchor's
         # staleness queue, lazily) to the actor train engine; the engine's
         # _maybe_comm_eff_anchor_refresh hook fires at the TOP of
-        # BaseEngine.train_batch (before the masked path; GUARD 6 reads G_anchor
+        # BaseEngine.train_batch (before the masked path; G_anchor is read
         # raw before any correction) and the _maybe_comm_eff_grad_correction hook
         # fires AFTER backward (grads FSDP-reduced) and BEFORE optimizer_step.
         # The anchor cadence (comm_eff.anchor.cadence) gates per-step firing.
         comm_eff_state = self._maybe_comm_eff_state()
 
-        # EXP-14: thread the trainer step and decide whether this whole step runs
+        # Thread the trainer step and decide whether this whole step runs
         # unmasked (the periodic clean optimizer-state refresh). No-op when
         # disabled (state None ⇒ global_step None ⇒ clean_step False).
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
@@ -898,7 +870,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # them on exit, gated on this flag; log_prob / infer / ref / validation /
         # checkpoint forwards never set it, so they stay byte-identical to dense.
         #
-        # EXP-14: on a clean step, force mask_active=False so NO mask hooks
+        # On a clean step, force mask_active=False so NO mask hooks
         # register for this train forward — the step takes the byte-identical
         # dense path (no clone, no spectral surgery; it inherits that path's FSDP
         # correctness) and the single optimizer.step() (base.py:178) refreshes
@@ -915,7 +887,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._comm_eff_stamp_sample_ids(data, comm_eff_state)
         if comm_eff_state is not None:
             comm_eff_state.mask_active = not clean_step
-            # EXP-6: stamp the ONLY path tag the mask hook is allowed to fire on.
+            # Stamp the only path tag the mask hook is allowed to fire on.
             comm_eff_state.set_path_tag("train")
             if clean_step:
                 # Count the clean step once per trainer step (the train stamp
@@ -929,26 +901,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
                 comm_eff_state.set_path_tag(None)
-                # EXP-20/M6: PowerSGD block-power-iteration basis update. Runs
+                # PowerSGD block-power-iteration basis update. Runs
                 # ONCE per trainer step, AFTER all PPO mini-batch forwards/backwards
                 # of this update_actor have run (so the sketch V has folded in
                 # every gradient-bearing actor-train forward) and AFTER the
                 # gradient-bearing work (so Q was frozen for both paired GRPO
-                # forwards this step — INF-17). Sets Q_t -> Q_{t+1} for the NEXT
+                # forwards this step). Sets Q_t -> Q_{t+1} for the NEXT
                 # step. Skipped on a clean step and on non-cadence steps inside
                 # maybe_update_basis. Strict no-op for the mask/dense/disabled
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
                 if powersgd is not None:
                     did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
-                    # EXP-20 hard-invariant #4: after the FIRST basis update,
-                    # verify Q is bit-identical on every DP rank (the sync_basis
-                    # consensus actually agreed). All ranks reach their first
-                    # update on the SAME cadence step (lockstep update_actor), so
-                    # this gate is symmetric and the all_gather inside cannot
-                    # deadlock. Done once (the flag flips on all ranks together);
-                    # the result is stashed for the metrics block below. RAISES on
-                    # a real divergence so a broken consensus fails loudly.
+                    # After the first basis update, verify Q is bit-identical on
+                    # every DP rank. This gate is symmetric across ranks and
+                    # raises on a real divergence.
                     if did_update and not getattr(comm_eff_state, "_powersgd_q_agreement_checked", False):
                         try:
                             dev = powersgd.verify_basis_agreement_across_ranks()
@@ -967,8 +934,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                     flush=True,
                                 )
                         except RuntimeError:
-                            # A genuine divergence — re-raise so the probe fails
-                            # (do NOT swallow; training 4 divergent codebooks is wrong).
+                            # A genuine divergence must fail the training step.
                             raise
 
         # Surface the comm_eff operation counters into training metrics. When
@@ -983,19 +949,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/mask_applications": 0,
                     "comm_eff/anchor_backwards": 0,
                     "comm_eff/spectral_corrections": 0,
-                    # EXP-8 anchor counters: explicit zeros on the disabled path so
-                    # the no-op stays machine-checkable (analyst greps by name).
+                    # Anchor counters: explicit zeros on the disabled path so
+                    # the no-op stays machine-checkable.
                     "comm_eff/anchor_mask_applications": 0,
                     "comm_eff/anchor_grad_corrected": 0,
                     "comm_eff/anchor_rollouts_generated": 0,
                     "comm_eff/anchor_rewards_recomputed": 0,
                     "comm_eff/anchor_optimizer_steps": 0,
                     "comm_eff/anchor_batch_fraction": 1.0,
-                    # EXP-14: explicit zero on the disabled path (Test 1 gate cells
-                    # run comm_eff.enabled=false) so the no-op stays greppable.
+                    # Explicit zero on the disabled path.
                     "comm_eff/clean_steps": 0,
-                    # EXP-20: explicit zeros on the disabled path so the PowerSGD
-                    # codec counters stay greppable even on the mask/dense arms.
+                    # Explicit zeros on the disabled path for PowerSGD counters.
                     "comm_eff/powersgd_applications": 0,
                     "comm_eff/powersgd_basis_updates": 0,
                 }
@@ -1010,17 +974,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
-        # EXP-6 path tag: a checkpoint load may run a forward on the actor
-        # module; masking must NOT fire. Stamp "ckpt" so the assert trips on any
-        # leak. No-op when comm_eff is disabled.
+        # A checkpoint load may run a forward on the actor module; masking must
+        # not fire. Stamp "ckpt" so the assert trips on any leak.
         with self._comm_eff_path("ckpt"):
             self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
-        # EXP-6 path tag: checkpoint save must NOT carry comm_eff/mask state into
-        # the synced weights and must not fire a mask. Stamp "ckpt".
+        # Checkpoint save must not carry comm_eff/mask state into synced weights
+        # and must not fire a mask. Stamp "ckpt".
         with self._comm_eff_path("ckpt"):
             self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 

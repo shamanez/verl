@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the EXP-20/M6 PowerSGD activation-compression codec.
+"""Unit tests for the PowerSGD activation-compression codec.
 
-These are the CPU-runnable machine-checkable encodings of the plan's
-``## Correctness invariants`` hard gates (off-path parity is covered by the
-config back-compat test + the engine no-op contract; the FSDP/dtype clean gate
-needs the live multi-GPU run and is exercised by the probe on the box):
+These are the CPU-runnable correctness invariants:
 
   * autograd / no-STE — backward equals the self-adjoint projector ``QQᵀ``;
-  * r=H lossless limiting case — ``M_hat == M`` to fp tolerance (INF-18);
+  * r=H lossless limiting case — ``M_hat == M`` to fp tolerance;
   * determinism / multi-rank Q — identical basis from the same per-layer seed;
-  * fp32 orthonormality / finite ``q_cond`` (INF-14);
+  * fp32 orthonormality / finite ``q_cond``;
   * frozen-Q-across-the-step — the basis advances ONLY at ``maybe_update_basis``
     (after the gradient-bearing work), never inside a forward;
   * sketch gating — V accumulates on the gradient-bearing train forward only,
@@ -133,7 +130,7 @@ class TestPowerSGDProjector(unittest.TestCase):
         self.assertLess(rel.item(), 1e-5)
 
     def test_r_equals_H_lossless(self):
-        # INF-18: with rank == H the projector is the identity, M_hat == M.
+        # With rank == H the projector is the identity, M_hat == M.
         H, N = 128, 9
         Qfull = init_basis(hidden_size=H, rank=H, base_seed=0, layer_idx=7)
         M = torch.randn(N, H)
@@ -263,10 +260,10 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
 
 
 class TestPowerSGDSyncBasis(unittest.TestCase):
-    """EXP-20 cross-rank consensus codebook (sync_basis) + collective safety.
+    """Cross-rank consensus codebook (sync_basis) and collective safety.
 
     The all-reduce / all-gather collectives need a process group, so the actual
-    cross-rank agreement is exercised on the box. Here we test the SINGLE-PROCESS
+    cross-rank agreement is exercised separately. Here we test the single-process
     invariants that gate it: the symmetric boundary iteration (deadlock guard),
     the checksum determinism/sensitivity, set_dp_group, and the single-rank
     verification short-circuit."""

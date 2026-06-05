@@ -25,16 +25,16 @@ The integration contract is deliberately asymmetric so the disabled path is a
 
 * Only when ``config.enabled`` is true is a ``CommEffState`` constructed; that
   is where mask RNG, anchor EMA buffers and the spectral workspace get
-  allocated (lazily, by ``build()``, which later M2 work fills in).
+  allocated lazily by ``build()``.
 
 Because construction is gated, a dense GRPO run with this scaffolding merged
 consumes the exact same RNG sequence and issues the exact same collective ops
-as one without it — the criterion-7 rel-tol-1e-4 parity check holds.
+as one without it.
 
 The instrumented counters (``mask_applications``, ``anchor_backwards``,
 ``spectral_corrections``) live on the state object. When disabled there is no
 state object, so the counters are *absent* rather than zero — which the
-analyst treats as equivalent to ``== 0`` (no comm_eff op fired). When enabled
+caller can treat as equivalent to ``== 0`` (no comm_eff op fired). When enabled
 they start at 0 and increment per fired op.
 """
 
@@ -63,9 +63,8 @@ __all__ = [
 # The exhaustive set of execution-path tags a comm_eff state can carry. The
 # activation mask is allowed to fire on EXACTLY ONE of these (``train``); every
 # other tag is an RL-measurement / serving path that must stay byte-identical to
-# dense GRPO even while masking is enabled. EXP-6 makes contamination of those
-# paths a *loud* failure (an assert in the mask hook) rather than a counter that
-# someone has to remember to grep.
+# dense GRPO even while masking is enabled. Contamination is a loud failure in
+# the mask hook.
 #
 #   train        -> actor-train forward/backward (the ONLY masked path)
 #   rollout      -> vLLM/sglang generation (policy rollouts + eval generation)
@@ -76,8 +75,8 @@ __all__ = [
 #   ckpt         -> checkpoint save / load forward (none expected, tagged for safety)
 TRAIN_TAG = "train"
 # The old-policy log-prob recompute path. Always present in PATH_TAGS for
-# contamination accounting; EXP-9 makes it the ONLY other path the mask is
-# permitted to fire on (and only when comm_eff.mask.mask_recompute=true).
+# contamination accounting; it is eligible for masking only when
+# comm_eff.mask.mask_recompute=true.
 OLD_LOGPROB_TAG = "old_logprob"
 PATH_TAGS = (
     TRAIN_TAG,
@@ -90,11 +89,9 @@ PATH_TAGS = (
 )
 
 # The set of execution-path tags the activation mask is allowed to fire on by
-# default (EXP-5 → EXP-12 contract): only ``train``. EXP-9 widens this to
-# ``{train, old_logprob}`` *iff* ``state.mask.mask_recompute=True``; the widen
-# is computed at hook-fire time by ``mask_eligible_tags(state)`` so flipping
-# the YAML knob does not require restarting the worker. ``None`` (anchor pass,
-# GUARD 5) is never eligible — anchors stay unmasked unconditionally.
+# default: only ``train``. ``mask_eligible_tags(state)`` widens this to
+# ``{train, old_logprob}`` only when ``state.mask.mask_recompute=True``. ``None``
+# (anchor pass) is never eligible, so anchors stay unmasked unconditionally.
 MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
 
 
@@ -104,12 +101,11 @@ def mask_eligible_tags(state: Any) -> frozenset:
 
     The default eligibility (``{TRAIN_TAG}``) is widened to
     ``{TRAIN_TAG, OLD_LOGPROB_TAG}`` *only* when both
-    ``state.mask.enabled`` and ``state.mask.mask_recompute`` are truthy (EXP-9).
+    ``state.mask.enabled`` and ``state.mask.mask_recompute`` are truthy.
     Anything else (disabled state, missing mask sub-config, ``mask_recompute``
-    unset / falsy) returns the singleton default, preserving the EXP-5 ⇒ EXP-12
-    behavior bit-for-bit.
+    unset / falsy) returns the singleton default.
 
-    ``None`` (anchor pass / GUARD 5) is intentionally NOT in either set: the
+    ``None`` (anchor pass) is intentionally NOT in either set: the
     anchor circuit runs unmasked regardless of this flag.
     """
     if state is None:
@@ -135,19 +131,17 @@ def _is_enabled(config: Any) -> bool:
 
 
 def resolve_compression_type(config: Any) -> str:
-    """Resolve the effective boundary codec from a comm_eff config (EXP-20/M6).
+    """Resolve the effective boundary codec from a comm_eff config.
 
     Returns one of ``{"dense", "prf_mask", "powersgd"}``. Pure read — no side
     effects, no allocation. The resolution is back-compatible:
 
     * an explicit ``compression_type`` of ``prf_mask`` or ``powersgd`` wins;
     * ``dense`` (the field default) falls back to the LEGACY selector — if the
-      mask sub-config is enabled with ``p > 0`` the codec is ``prf_mask`` (so
-      every pre-EXP-20 mask config keeps working without setting the new field),
+      mask sub-config is enabled with ``p > 0`` the codec is ``prf_mask``;
       otherwise ``dense``.
 
-    This is what lets the step-1 mask arm run unchanged while the step-2
-    PowerSGD arm is selected purely by ``compression_type=powersgd``.
+    This keeps legacy mask configs working while PowerSGD is selected explicitly.
     """
     ctype = getattr(config, "compression_type", "dense") if config is not None else "dense"
     if ctype in ("prf_mask", "powersgd"):
@@ -164,8 +158,8 @@ class CommEffState:
     """Per-worker communication-efficient compression state.
 
     Constructed **only** when ``comm_eff.enabled=true``. Holds the operation
-    counters and (once ``build()`` is implemented by later M2 work) the mask
-    RNG generator, anchor EMA buffers and spectral workspace. The disabled path
+    counters, mask RNG generator, anchor EMA buffers and spectral workspace.
+    The disabled path
     never instantiates this class — see ``maybe_build_comm_eff_state``.
     """
 
@@ -179,7 +173,7 @@ class CommEffState:
         self.config = config
         self.enabled = True
         self._built = False
-        # EXP-20/M6 active boundary codec, resolved in build(). Until build() the
+        # Active boundary codec, resolved in build(). Until build() the
         # conservative default is "dense" (no codec). Read by metrics() and the
         # engine to decide which compressor lifecycle to drive.
         self.compression_type = "dense"
@@ -189,15 +183,14 @@ class CommEffState:
         self.anchor_backwards = 0
         self.spectral_corrections = 0
 
-        # EXP-8 anchor-circuit counters. These are the load-bearing falsifiers
-        # the analyst greps by NAME (see plan ## Success criteria):
+        # Anchor-circuit counters. These are guard/falsifier metrics:
         #   anchor_mask_applications  — mask hooks fired DURING the anchor pass.
-        #                               MUST stay 0 (GUARD 5: the anchor runs
+        #                               MUST stay 0 (the anchor runs
         #                               unmasked even though it's on the train
         #                               path). Captured as a delta around the
         #                               anchor fwd/bwd, not the global counter.
         #   anchor_grad_corrected     — anchor gradients fed THROUGH correct_matrix.
-        #                               MUST stay 0 (GUARD 6: G_anchor read raw
+        #                               MUST stay 0 (G_anchor read raw
         #                               into the EMA before any correction).
         #   anchor_rollouts_generated — new rollouts the anchor produced. MUST 0.
         #   anchor_rewards_recomputed — reward recomputations by the anchor. MUST 0.
@@ -218,7 +211,7 @@ class CommEffState:
         # once per actor train_batch).
         self.anchor_step = 0
 
-        # EXP-16 monotonic optimizer-step counter the SPECTRAL cadence is keyed
+        # Monotonic optimizer-step counter the spectral cadence is keyed
         # on. Advanced once per actor train_batch by the grad-correction hook
         # (_maybe_comm_eff_grad_correction), in lockstep with anchor_step (both
         # +1 per train_batch), so when anchor.cadence == spectral.cadence the
@@ -229,11 +222,11 @@ class CommEffState:
         # on the None/enabled guard before advancing it).
         self.spectral_step = 0
 
-        # EXP-14 periodic clean-step counter. Incremented once per trainer step
+        # Periodic clean-step counter. Incremented once per trainer step
         # whose (global_step % clean_cadence) == 0 while clean_cadence > 0 — i.e.
         # every step on which masking is forced OFF and AdamW takes a step on the
-        # true dense gradient. Surfaced as comm_eff/clean_steps so the analyst can
-        # prove the clean step fired at exactly steps clean_cadence, 2*clean_cadence,
+        # true dense gradient. Surfaced as comm_eff/clean_steps so logs can prove
+        # the clean step fired at exactly steps clean_cadence, 2*clean_cadence,
         # ... (incremented from the train stamp in update_actor, NOT the old_logprob
         # stamp, so a step is counted once even when mask_recompute also forces the
         # recompute clean). Stays 0 when clean_cadence == 0 (every prior config).
@@ -246,17 +239,16 @@ class CommEffState:
         # when the mask sub-config is disabled.
         self.masker = None
 
-        # EXP-20/M6 PowerSGD activation compressor (boundary codec). Constructed
+        # PowerSGD activation compressor (boundary codec). Constructed
         # in build() ONLY when compression_type == "powersgd"; None otherwise
         # (the disabled path, the dense codec, and the prf_mask codec never
         # touch it). Mutually exclusive with `masker`: a run is either the mask
         # codec or the powersgd codec, never both.
         self.powersgd = None
-        # PowerSGD op counters (analyst greps these by name). Cumulative.
+        # PowerSGD op counters. Cumulative.
         #   powersgd_applications  — projection hooks fired on the train path.
         #   powersgd_basis_updates — orth(V) basis refreshes taken (one per
-        #                            non-clean cadence step). Lets the analyst
-        #                            confirm the basis advanced on schedule.
+        #                            non-clean cadence step).
         self.powersgd_applications = 0
         self.powersgd_basis_updates = 0
 
@@ -265,7 +257,7 @@ class CommEffState:
         # exit, so log-prob / ref / infer / val / checkpoint forwards stay clean.
         self.mask_active = False
 
-        # Explicit execution-path tag (EXP-6 contamination guard). Defaults to
+        # Explicit execution-path tag. Defaults to
         # ``None`` (no path entered). Each entrypoint stamps it before its
         # forward: ``update_actor`` -> "train"; ``compute_log_prob`` ->
         # "old_logprob"; ``compute_ref_log_prob`` -> "ref_logprob"; rollout ->
@@ -278,22 +270,22 @@ class CommEffState:
 
         # Per-path mask-application counters. The contract: every key except
         # ``train`` MUST stay 0 for the whole run. They are surfaced into
-        # metrics as ``comm_eff/mask_applications/<tag>`` so the analyst can
+        # metrics as ``comm_eff/mask_applications/<tag>`` so callers can
         # confirm confinement by KEY PREFIX (no substring false positives).
         self.mask_applications_by_path = {tag: 0 for tag in PATH_TAGS}
 
         # The spectral filter (third circuit). Constructed in build() when
         # ``comm_eff.spectral.enabled`` is true; None otherwise. Holds the
-        # (seeded) anchor-EMA cache and applies the paper formula at the
+        # (seeded) anchor-EMA cache and applies the correction formula at the
         # grad-correction hook point. See verl.workers.comm_eff.spectral_filter.
         self.spectral = None
 
-        # FSDP gradient-representation discovery log (EXP-7 headline deliverable).
+        # FSDP gradient-representation discovery log.
         # The engine's grad-correction hook fills this once, on the first
         # correction, with type(p.grad), the grad container shape, the logical
         # 2D matrix shape, the FSDP wrapping/version, and whether correction ran
         # before/after FSDP gradient reduction and gradient clipping, for >=1
-        # target matrix. Surfaced into metrics so the analyst greps it.
+        # target matrix.
         self.fsdp_grad_repr: dict = {}
 
         # Per-target ||G_proj - G_mask|| / ||G_mask|| from the most recent
@@ -309,11 +301,11 @@ class CommEffState:
         them only on entry to the train forward and removes them on exit). When
         ``comm_eff.spectral.enabled`` is true this constructs the
         ``SpectralFilter`` with its (optionally seeded) anchor-EMA cache. Anchor
-        circuit (EXP-8) allocation is still deferred.
+        refresh remains lazy in the engine.
         """
         if self._built:
             return
-        # EXP-20/M6: resolve the active boundary codec ONCE. Exactly one of the
+        # Resolve the active boundary codec once. Exactly one of the
         # mask / powersgd compressors is constructed; `dense` constructs neither.
         self.compression_type = resolve_compression_type(self.config)
         mask_cfg = getattr(self.config, "mask", None)
@@ -377,7 +369,7 @@ class CommEffState:
                 beta_anc=float(getattr(spec_cfg, "beta_anc", 0.95)),
                 seed_anchor_cache=bool(getattr(spec_cfg, "seed_anchor_cache", True)),
                 anchor_seed=int(getattr(spec_cfg, "anchor_seed", 0)),
-                # EXP-8 storage layer (defaults faithful: gpu/full/cache).
+                # Storage layer defaults: gpu/full/cache.
                 ema_device=str(getattr(spec_cfg, "ema_device", "gpu")),
                 svd_mode=str(getattr(spec_cfg, "svd_mode", "full")),
                 basis_cache=str(getattr(spec_cfg, "basis_cache", "cache")),
@@ -398,11 +390,9 @@ class CommEffState:
                 self.spectral.basis_cache,
                 self.spectral.rank,
             )
-            # EXP-12 discovery line (string-valued ⇒ stdout only, NEVER metrics:
+            # Discovery line is string-valued, so it goes to stdout only:
             # reduce_metrics does np.mean on every metric value and crashes on a
-            # string — the EXP-7 lesson). The analyst greps this for cell 3's
-            # "ema_device=cpu + svd_lowrank" confirmation, AND for the EXP-12
-            # anchor-backward isolation-mode confirmation (criterion 13).
+            # string. Keep it out of metrics.
             anc_cfg = getattr(self.config, "anchor", None)
             anchor_enabled = bool(getattr(anc_cfg, "enabled", False)) if anc_cfg is not None else False
             isolation_mode = "clone" if anchor_enabled else "n/a (anchor.enabled=false)"
@@ -428,7 +418,7 @@ class CommEffState:
         self.path_tag = tag
 
     def is_clean_step(self, global_step: Optional[int] = None) -> bool:
-        """EXP-14: True iff the given trainer ``global_step`` is a clean step.
+        """True iff the given trainer ``global_step`` is a clean step.
 
         A clean step is one on which masking is forced OFF for the whole step
         and AdamW refreshes its moments on the true dense gradient. The rule is
@@ -436,8 +426,7 @@ class CommEffState:
         ``global_step`` is ``None`` the most-recently-threaded ``self.global_step``
         is used. Pure read — no side effects, no allocation.
 
-        ``clean_cadence`` is read from the config (default 0 ⇒ always False, so
-        every pre-EXP-14 config and the disabled path keep their exact behavior).
+        ``clean_cadence`` is read from the config (default 0 ⇒ always False).
         ``global_step <= 0`` is never a clean step: step 0 is the pre-train
         ``val_before_train`` / first-increment boundary (the trainer's first
         train step is global_step=1), and a negative sentinel means "never
@@ -452,15 +441,13 @@ class CommEffState:
         return (gs % cadence) == 0
 
     def should_run_spectral_correction(self, step: Optional[int] = None) -> bool:
-        """EXP-16: True iff the spectral grad-correction fires on this opt step.
+        """True iff the spectral grad-correction fires on this optimizer step.
 
         Mirrors :meth:`is_clean_step` (and ``anchor_should_fire``): a pure
         predicate keyed on the monotonic per-optimizer-step counter
         ``self.spectral_step`` (1-based — the grad-correction hook advances it
         before calling this). The rule is ``(step % cadence) == 0`` with
-        ``cadence = comm_eff.spectral.cadence`` (default ``1`` ⇒ always True ⇒
-        fire every step ⇒ the pre-EXP-16 behavior, so every prior config and the
-        disabled path keep their exact behavior).
+        ``cadence = comm_eff.spectral.cadence`` (default ``1`` ⇒ always True).
 
         ``cadence=2`` fires on steps 2, 4, 6, … — aligned with an
         ``anchor.cadence=2`` refresh (both counters advance once per
@@ -486,27 +473,27 @@ class CommEffState:
         counter for ``self.path_tag``. A fire while the tag is anything other
         than ``train`` is a contamination event; the masker asserts against it
         before calling this, but if the assert is ever disabled (``python -O``)
-        the per-path counter still records the leak so the analyst catches it.
+        the per-path counter still records the leak.
         """
         self.mask_applications += 1
         tag = self.path_tag if self.path_tag in self.mask_applications_by_path else TRAIN_TAG
         self.mask_applications_by_path[tag] += 1
 
     def note_powersgd_application(self) -> None:
-        """Record one PowerSGD projection-hook fire (EXP-20). Called from the
+        """Record one PowerSGD projection-hook fire. Called from the
         compressor hook. Pure counter bump — no allocation."""
         self.powersgd_applications += 1
 
     def note_powersgd_basis_update(self) -> None:
-        """Record one PowerSGD block-power-iteration basis refresh (EXP-20).
+        """Record one PowerSGD block-power-iteration basis refresh.
         Called from ``maybe_update_basis`` after a successful ``orth(V)``."""
         self.powersgd_basis_updates += 1
 
     def path_metrics(self) -> dict:
         """Per-path mask-application counters, surfaced under a stable KEY prefix.
 
-        Emits ``comm_eff/mask_applications/<tag>`` for every tag. The analyst
-        asserts the only nonzero key is ``.../train``; any other nonzero key is
+        Emits ``comm_eff/mask_applications/<tag>`` for every tag. The only
+        nonzero key should be ``.../train``; any other nonzero key is
         the contamination falsifier. Emitting all keys (including the zeros)
         makes the confinement machine-checkable without substring grepping.
         """
@@ -528,8 +515,8 @@ class CommEffState:
         out = {"comm_eff/mask_ratio": mean_ratio}
         for idx, r in sorted(ratios.items()):
             out[f"comm_eff/mask_ratio/layer_{idx}"] = r
-        # EXP-20 matched-budget metric: PRF kept coords per token = (1-p)*H. The
-        # analyst asserts this equals PowerSGD's n*r (=rank) within 1% so the two
+        # Matched-budget metric: PRF kept coords per token = (1-p)*H. This should
+        # equal PowerSGD's n*r (=rank) within 1% so the two
         # arms carry the IDENTICAL logical PP byte budget (a confound guard). Use
         # the configured p (exact, not the measured ratio which jitters per draw)
         # and the recorded H.
@@ -551,16 +538,9 @@ class CommEffState:
         ``np.mean(val)`` on EVERY value. A string value (e.g. a flattened FSDP
         discovery field like ``grad_container_type="Tensor"``) makes np.mean
         raise ``UFuncNoLoopError: ufunc 'add' did not contain a loop ... <U59``
-        and crashes the trainer's metric-reduction at the end of the step (this
-        is exactly what killed the second EXP-7 spectral_on run before it
-        reached global_step=2). So the FSDP gradient-representation DISCOVERY log
-        (string-valued container type / placements / fsdp_version / correction
-        point) is deliberately NOT emitted here. It is the headline deliverable
-        and is surfaced the analyst-greppable way it was designed for: the
-        ``[comm_eff][EXP-7][FSDP-DISCOVERY] {...}`` stdout line and the
-        ``logger.warning`` record, both written by the engine hook. It also
-        stays available in-process on ``state.fsdp_grad_repr`` for any non-metric
-        consumer. Reducible metrics must stay numeric.
+        and crashes the trainer's metric-reduction at the end of the step. The
+        FSDP gradient-representation discovery log is therefore emitted via
+        stdout/logger, not this metrics dict. Reducible metrics must stay numeric.
         """
         if self.spectral is None:
             return {}
@@ -573,11 +553,10 @@ class CommEffState:
         return out
 
     def powersgd_metrics(self) -> dict:
-        """Return PowerSGD codec health/diagnostic metrics (EXP-20/M6).
+        """Return PowerSGD codec health/diagnostic metrics.
 
         All NUMERIC (the reduce_metrics-must-stay-numeric contract). Empty when
-        the powersgd codec is not active. Surfaces, per the plan's success
-        criteria:
+        the powersgd codec is not active. Surfaces:
           comm_eff/powersgd_q_cond                     — mean Q condition number
                                                          (≈1 orthonormal; non-finite
                                                          ⇒ basis collapse falsifier).
@@ -586,9 +565,8 @@ class CommEffState:
                                                          (must stay < 1.0).
           comm_eff/powersgd_reconstruction_rel_error/layer_<i>
           comm_eff/logical_pp_bytes_powersgd_y_only    — n·r coords/token-layer
-                                                         (the matched-budget metric;
-                                                         the analyst asserts equality
-                                                         against the PRF q·H bytes).
+                                                         (matched-budget metric
+                                                         against PRF q·H bytes).
           comm_eff/powersgd_basis_updates              — cumulative orth(V) refreshes.
         """
         if self.powersgd is None:
@@ -598,7 +576,7 @@ class CommEffState:
         if qc:
             finite = [v for v in qc.values() if v == v and v not in (float("inf"), float("-inf"))]
             # Report the mean of finite conds; if ANY is non-finite, surface inf
-            # for the mean so the analyst's finiteness check trips.
+            # for the mean so finiteness checks trip.
             if len(finite) == len(qc):
                 out["comm_eff/powersgd_q_cond"] = sum(finite) / len(finite)
             else:
@@ -611,18 +589,17 @@ class CommEffState:
             for idx, v in sorted(re.items()):
                 out[f"comm_eff/powersgd_reconstruction_rel_error/layer_{idx}"] = v
         # Logical PP byte budget actually carried: n·r coordinate-values per
-        # token-layer (Y = M @ Q is the only thing "sent"). The analyst asserts
-        # this equals the PRF q·H within 1% (matched budget).
+        # token-layer (Y = M @ Q is the only thing "sent"). This should equal
+        # the PRF q·H within 1% (matched budget).
         out["comm_eff/logical_pp_bytes_powersgd_y_only"] = float(
             getattr(self.powersgd, "last_y_coords_per_token", self.powersgd.rank)
         )
         out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
         out["comm_eff/powersgd_applications"] = self.powersgd_applications
-        # EXP-20 hard-invariant #4: max relative cross-rank deviation of the
+        # Max relative cross-rank deviation of the
         # consensus basis Q after the first update (0.0 = bit-identical on every
-        # DP rank). Set once by update_actor's verify_basis_agreement_across_ranks;
-        # surfaced so the analyst can confirm the shared codebook agreed. Omitted
-        # until the check runs (single-rank / pre-first-update).
+        # DP rank). Set once by update_actor's verify_basis_agreement_across_ranks
+        # and omitted until the check runs.
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
@@ -631,10 +608,9 @@ class CommEffState:
     def metrics(self) -> dict:
         """Return the comm_eff operation counters for logging.
 
-        All values are NUMERIC (the EXP-7 reduce_metrics lesson: a string here
-        crashes np.mean). The anchor counters are emitted unconditionally so the
-        analyst can grep them by name even on a 0-fire step; the contamination /
-        guard counters (anchor_mask_applications, anchor_grad_corrected,
+        All values are numeric; a string here crashes np.mean. The anchor
+        counters are emitted unconditionally even on a 0-fire step; the
+        contamination / guard counters (anchor_mask_applications, anchor_grad_corrected,
         anchor_rollouts_generated, anchor_rewards_recomputed,
         anchor_optimizer_steps) are the load-bearing falsifiers.
         """
@@ -648,13 +624,13 @@ class CommEffState:
             "comm_eff/anchor_rewards_recomputed": self.anchor_rewards_recomputed,
             "comm_eff/anchor_optimizer_steps": self.anchor_optimizer_steps,
             "comm_eff/anchor_batch_fraction": self.anchor_batch_fraction,
-            # EXP-14: cumulative count of clean (unmasked) optimizer steps fired.
+            # Cumulative count of clean (unmasked) optimizer steps fired.
             # Monotonic; increments at exactly steps clean_cadence, 2*clean_cadence,
-            # ... so the analyst can grep that the clean cadence fired correctly.
+            # ... so logs can confirm that the clean cadence fired correctly.
             "comm_eff/clean_steps": self.clean_steps,
-            # EXP-16: monotonic per-optimizer-step counter the spectral cadence is
+            # Monotonic per-optimizer-step counter the spectral cadence is
             # keyed on. Numeric (the reduce_metrics-must-stay-numeric contract).
-            # Lets the analyst confirm spectral_corrections increments only on the
+            # Lets logs confirm spectral_corrections increments only on the
             # cadence steps (spectral_step % spectral.cadence == 0), not every step.
             "comm_eff/spectral_step": self.spectral_step,
         }

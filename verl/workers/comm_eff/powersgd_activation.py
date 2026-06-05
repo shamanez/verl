@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PowerSGD-style pipeline-boundary activation compression (EXP-20 / M6).
+"""PowerSGD-style pipeline-boundary activation compression.
 
 A shared, frozen, per-layer orthonormal basis ``Q`` (shape ``(H, r)``) projects
 each pipeline-boundary block's hidden-state output ``M`` (shape ``(N, H)`` —
@@ -25,25 +25,24 @@ The boundary therefore transmits only the ``N·r`` projected coordinates
 PP byte budget as the PRF mask at ``p = 1 − r/H`` (``r=102 ≡ p=0.95`` at
 ``H=2048``).
 
-Three properties make this correct (issue Parts III.4, III.7, V.3; INF-9,
-INF-13, INF-14, INF-17, INF-18):
+Three properties make this correct:
 
 * **No straight-through.** ``Q`` is detached and ``M`` stays in-graph, so the
   autograd backward of ``M_hat = (M @ Q) @ Qᵀ`` is the exact self-adjoint
   projector ``dL/dM = (dL/dM_hat) Q Qᵀ`` — no STE, no custom autograd Function.
 * **Deterministic zero-comm bootstrap.** ``Q_L = orth(randn(H, r))`` seeded by
   ``seed_L = (base_seed·1_000_003 + layer_idx·7919) & 0x7FFFFFFF``, drawn in fp32
-  on CPU so it is bit-identical on every rank/device (INF-13).
+  on CPU so it is bit-identical on every rank/device.
 * **Block power iteration, off-graph.** On compressed *train* forwards we
   accumulate ``V += Mᵀ (M Q)`` under ``torch.no_grad()`` (one sketch per boundary
   forward, deduplicated against gradient-checkpoint recompute), then once at
   end-of-actor-update set ``Q ← orth(V)`` in fp32 and clear ``V``. ``Q`` is
   **frozen for the whole global step** so the old-logprob recompute and the
-  actor-train forward see the same ``Q_t`` (``ρ ≈ 1`` at step 0; INF-17).
+  actor-train forward see the same ``Q_t``.
 
-fp32 QR is REQUIRED (INF-14): bf16-QR loses orthogonality (``QᵀQ`` drifts from
-``I``), degrades the projector identity ``P² = P``, and is a frequent NaN /
-``q_cond`` source. The projection itself runs in the activation dtype.
+fp32 QR is REQUIRED: bf16-QR loses orthogonality (``QᵀQ`` drifts from ``I``),
+degrades the projector identity ``P² = P``, and is a frequent NaN / ``q_cond``
+source. The projection itself runs in the activation dtype.
 """
 
 from __future__ import annotations
@@ -72,16 +71,16 @@ __all__ = [
     "PowerSGDActivationCompressor",
 ]
 
-# INF-13 per-layer seed mixing constants. seed_L = (base_seed*MIX_BASE +
-# layer_idx*MIX_LAYER) & MASK31. The 0x7FFFFFFF mask keeps the value a positive
-# int31 so it is a valid torch.Generator manual_seed on every backend.
+# Per-layer seed mixing constants. seed_L = (base_seed*MIX_BASE +
+# layer_idx*MIX_LAYER) & MASK31. The mask keeps the value positive int31 so it is
+# a valid torch.Generator manual_seed on every backend.
 _PRF_MIX_BASE = 1_000_003
 _PRF_MIX_LAYER = 7919
 _MASK31 = 0x7FFFFFFF
 
 
 def powersgd_layer_seed(base_seed: int, layer_idx: int) -> int:
-    """INF-13 deterministic per-layer basis seed.
+    """Deterministic per-layer basis seed.
 
     ``seed_L = (base_seed·1_000_003 + layer_idx·7919) & 0x7FFFFFFF``. Pure — no
     side effects. The mask keeps it int31-positive so the same value is a legal
@@ -93,8 +92,8 @@ def powersgd_layer_seed(base_seed: int, layer_idx: int) -> int:
 def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
     """Return an orthonormal basis spanning the columns of ``mat`` (fp32 QR).
 
-    ``mat`` is ``(H, r)``. Runs ``torch.linalg.qr`` in fp32 (INF-14: bf16-QR
-    loses orthogonality), normalises the sign of ``Q`` against ``R``'s diagonal
+    ``mat`` is ``(H, r)``. Runs ``torch.linalg.qr`` in fp32, normalises the sign
+    of ``Q`` against ``R``'s diagonal
     so the basis is deterministic across backends, and falls back to a fresh
     deterministic orthonormal frame if the input is rank-deficient / non-finite
     (so a degenerate sketch never propagates a NaN basis). The result is fp32.
@@ -140,7 +139,7 @@ def init_basis(
 
     Drawn in fp32 on CPU with a ``torch.Generator`` seeded by
     :func:`powersgd_layer_seed`, so the basis is bit-identical on every
-    rank/device (the zero-communication codebook bootstrap, INF-13). ``rank`` is
+    rank/device. ``rank`` is
     clamped to ``hidden_size`` (``r == H`` is the lossless limiting case
     ``M_hat = M``). Returns an fp32 ``(H, min(rank, H))`` tensor on CPU; the
     caller moves it to the activation device/dtype for the forward.
@@ -159,7 +158,7 @@ class PowerSGDActivationCompressor:
     lifecycle so the engine can drive it identically:
 
     * ``register(module)`` discovers the boundary decoder blocks, lazily
-      bootstraps each block's deterministic basis ``Q`` (INF-13), and installs a
+      bootstraps each block's deterministic basis ``Q`` and installs a
       forward hook that replaces the block output ``M`` with ``M_hat=(M@Q)@Qᵀ``.
     * ``unregister()`` removes the hooks.
     * ``set_context(global_step, ...)`` stamps the trainer step and bumps the
@@ -167,8 +166,7 @@ class PowerSGDActivationCompressor:
       against gradient-checkpoint recompute.
     * ``maybe_update_basis()`` runs the block-power-iteration ``Q ← orth(V)`` at
       cadence, AFTER the gradient-bearing actor work — called by the engine's
-      end-of-train_batch hook so ``Q`` is frozen across the paired GRPO forwards
-      (Part V.3).
+      end-of-train_batch hook so ``Q`` is frozen across the paired GRPO forwards.
 
     The basis lives on the worker (one ``Q`` per boundary layer), so it persists
     across steps (warm start) independent of the hook register/unregister cycle.
@@ -197,8 +195,8 @@ class PowerSGDActivationCompressor:
         self.sync_basis = bool(sync_basis)
         if str(qr_dtype) not in ("fp32", "bf16"):
             raise ValueError(f"powersgd qr_dtype must be one of (fp32, bf16); got {qr_dtype!r}")
-        # qr_dtype controls ONLY the orth/QR + sketch math; fp32 is required for
-        # orthogonality (INF-14). bf16 is a diagnostic knob.
+        # qr_dtype controls only the orth/QR + sketch math; fp32 is required for
+        # orthogonality. bf16 is a diagnostic knob.
         self.qr_dtype = torch.float32 if str(qr_dtype) == "fp32" else torch.bfloat16
         self.reortho_eps = float(reortho_eps)
         self._state = state  # CommEffState, for counters
@@ -207,8 +205,8 @@ class PowerSGDActivationCompressor:
         self.boundary_indices: list[int] = []
         self._hidden_size: Optional[int] = None
         # DP process group the basis consensus all-reduces over. None ⇒ world
-        # group (correct when world==DP: SP=1, no TP/PP in the training mesh —
-        # the EXP-20 actor). Bound by the engine via set_dp_group when a narrower
+        # group (correct when world==DP: SP=1, no TP/PP in the training mesh).
+        # Bound by the engine via set_dp_group when a narrower
         # DP subgroup is needed.
         self._dp_process_group = None
 
@@ -243,7 +241,7 @@ class PowerSGDActivationCompressor:
         self.last_reconstruction_rel_error: dict[int, float] = {}
         # The logical PP byte budget actually carried, n·r per token-layer; the
         # engine logs comm_eff/logical_pp_bytes_powersgd_y_only against the PRF
-        # equivalent so the analyst asserts budget equality.
+        # equivalent for budget-equality checks.
         self.last_y_coords_per_token: int = self.rank
 
     # ----------------------------------------------------------------------
@@ -258,8 +256,7 @@ class PowerSGDActivationCompressor:
         """Return the frozen fp32 basis for ``layer_idx``, bootstrapping if absent.
 
         The basis is stored in fp32 on the activation device. The forward casts
-        it to the activation dtype for the projection (INF-14: store/QR in fp32,
-        project in activation dtype).
+        it to the activation dtype for the projection.
         """
         q = self._basis.get(layer_idx, None)
         if q is None:
@@ -332,7 +329,7 @@ class PowerSGDActivationCompressor:
             M = h.reshape(-1, hidden_size)
 
             q_fp32 = compressor._ensure_basis(layer_idx, device=M.device, dtype=M.dtype)
-            # Project in the ACTIVATION dtype (INF-14). Q is detached (a buffer,
+            # Project in the activation dtype. Q is detached (a buffer,
             # never required grad) and M stays in-graph, so autograd gives the
             # exact self-adjoint projector dL/dM = (dL/dM_hat) Q Qᵀ — NO STE.
             q_act = q_fp32.to(dtype=M.dtype)
@@ -369,7 +366,7 @@ class PowerSGDActivationCompressor:
                 # forward (path_tag == train) and at most once per forward
                 # generation (so grad-ckpt recompute never double-counts).
                 if compressor._should_accumulate_sketch(layer_idx, grad_enabled=grad_enabled):
-                    # Mᵀ Y in qr_dtype (fp32 by default; INF-14). Use the
+                    # Mᵀ Y in qr_dtype (fp32 by default). Use the
                     # already-computed Y in fp32.
                     contrib = M32.t() @ Y.detach().to(torch.float32)  # (H, r)
                     cur = compressor._sketch.get(layer_idx, None)
@@ -400,7 +397,7 @@ class PowerSGDActivationCompressor:
         diagnostics block) — a forward_only / old-logprob recompute pass runs the
         whole forward under ``torch.no_grad()`` so this is False there, which
         means V is built from the gradient-bearing actor-train forward ONLY
-        (never the old-logprob recompute, Part III.7); (b) the path tag is
+        (never the old-logprob recompute); (b) the path tag is
         ``train``; and (c) this layer has not already contributed in the current
         forward generation (dedupe against gradient-checkpoint recompute, which
         reuses the generation set by ``set_context`` and re-runs the boundary
@@ -427,9 +424,9 @@ class PowerSGDActivationCompressor:
 
         Because this runs AFTER backward, ``Q`` was frozen for both paired GRPO
         forwards of this step; the update advances ``Q_t → Q_{t+1}`` for the NEXT
-        step (Part V.3 / INF-17).
+        step.
 
-        **Cross-rank consensus codebook (operator clarification, EXP-20).** The
+        **Cross-rank consensus codebook.** The
         basis ``Q`` is a SINGLE shared codebook that must differ ONLY per
         layer-boundary and be IDENTICAL on every DP rank. Each rank, however,
         builds its local sketch ``V = Σ Mᵀ(MQ)`` from its OWN data shard (the
@@ -451,8 +448,8 @@ class PowerSGDActivationCompressor:
         shaped ZERO sketch for any boundary a rank happens to be missing locally,
         so all ranks issue the identical sequence of collectives. A rank-relative
         iteration over ``self._sketch`` (different/missing keys, different order)
-        would mismatch the collective and HANG (all GPUs pinned-but-idle — the
-        exact stall signature). All ranks call ``update_actor`` in lockstep, so a
+        would mismatch the collective and hang. All ranks call ``update_actor``
+        in lockstep, so a
         symmetric per-boundary collective set is sufficient.
         """
         if is_clean_step:
@@ -542,8 +539,8 @@ class PowerSGDActivationCompressor:
         """The process group the basis is synchronized over.
 
         For THIS actor — FSDP, Ulysses SP=1, and NO tensor/pipeline-parallel dim
-        in the *training* mesh (the launcher's TP=2 is ROLLOUT-only, a separate
-        vLLM mesh) — the world process group IS the DP group: world_size ==
+        in the *training* mesh (the launcher's TP=2 is rollout-only, a separate
+        vLLM mesh) — the world process group is the DP group: world_size ==
         data_parallel_size == 4. So the default (world) group is correct here and
         the basis is pooled over exactly the ranks whose data shards we want to
         consensus over. The engine may inject a narrower group via
@@ -558,18 +555,17 @@ class PowerSGDActivationCompressor:
 
         Called by the engine with its data-parallel group. ``None`` (default)
         ⇒ the world group, which is correct when world == DP (SP=1, no TP/PP in
-        the training mesh — the EXP-20 actor). Pure setter; no collective."""
+        the training mesh). Pure setter; no collective."""
         self._dp_process_group = group
 
     def basis_checksums(self) -> dict:
-        """Per-boundary fp64 checksum of the current basis Q (hard-invariant #4).
+        """Per-boundary fp64 checksum of the current basis Q.
 
         Returns ``{layer_idx: float}`` — a deterministic scalar summary of each
         ``Q`` (sum of Q ⊙ a fixed index ramp, in fp64, so sign/permutation/value
         differences all show up). The engine all-gathers these across ranks and
-        asserts equality to VERIFY that ``sync_basis`` produced an identical
-        consensus ``Q`` on every rank (the plan invariant "identical Q after one
-        update on every rank", previously unverifiable). Pure read."""
+        verifies that ``sync_basis`` produced an identical consensus ``Q`` on
+        every rank. Pure read."""
         out: dict = {}
         for layer_idx in self._boundary_for_update():
             q = self._basis.get(layer_idx, None)
@@ -584,7 +580,7 @@ class PowerSGDActivationCompressor:
         return out
 
     def verify_basis_agreement_across_ranks(self, *, atol: float = 1e-6) -> Optional[float]:
-        """Assert ``Q`` is identical on every DP rank — hard-invariant #4 (EXP-20).
+        """Assert ``Q`` is identical on every DP rank.
 
         All-gathers a per-boundary checksum VECTOR (built over the FIXED
         ``boundary_indices``, so every rank contributes the same-length, same-order
@@ -594,12 +590,10 @@ class PowerSGDActivationCompressor:
         (``0.0`` = bit-identical) so the engine can log it, or ``None`` when
         distributed is unavailable / single-rank (the check is trivially true).
 
-        This DIRECTLY validates "identical Q after one update on every rank",
-        which was unverifiable before ``sync_basis``. A non-zero result with
-        ``sync_basis=true`` would mean the consensus all-reduce failed to make the
-        basis agree (e.g. wrong process group, asymmetric sketch). RAISES on a
-        mismatch so a broken consensus fails the probe loudly rather than
-        silently training 4 divergent codebooks.
+        A non-zero result with ``sync_basis=true`` means the consensus all-reduce
+        failed to make the basis agree (for example, wrong process group or
+        asymmetric sketch). Raises on mismatch rather than silently training
+        divergent codebooks.
 
         MUST be called on EVERY rank in lockstep (it issues an all_gather). The
         caller gates it on a condition identical across ranks (e.g. the first

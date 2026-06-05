@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the comm_eff spectral correction filter (EXP-7, M2).
+"""Unit tests for the comm_eff spectral correction filter.
 
-These cover the formula-correctness invariants the EXP-7 plan requires
-codex-verify to gate on, none of which need a GPU or a distributed runtime
-(the filter operates on logical 2D matrices; FSDP unsharding is the engine's
-job, deliberately decoupled from this module):
+These cover formula-correctness invariants without a GPU or distributed runtime.
+The filter operates on logical 2D matrices; FSDP unsharding is the engine's job.
 
 * alpha=1.0  => G_proj == G_mask           (max abs diff <= 1e-6), any anchor
 * alpha=0    => G_proj == pure two-sided Tikhonov projection (<= 1e-6)
@@ -199,7 +197,7 @@ def test_alpha_one_noop_through_filter():
 
 
 def test_rel_change_active_at_alpha_0p3():
-    # The EXP-7 operating point: correction must actually fire (rel_change > 0).
+    # Correction must actually fire (rel_change > 0).
     f = SpectralFilter(alpha=0.3, tau=1e-3, seed_anchor_cache=True, anchor_seed=2)
     g = torch.randn(12, 12, dtype=torch.float32)
     out = f.correct_matrix("w", g.clone())
@@ -219,7 +217,7 @@ def test_ema_update_moves_anchor():
 
 
 # =========================================================================== #
-# EXP-8: svd_mode=lowrank reconstruction error is bounded and decreasing in rank
+# svd_mode=lowrank reconstruction error is bounded and decreasing in rank.
 # =========================================================================== #
 def _recon_error_at_rank(m_anchor, rank):
     """||M - U_r diag(S_r) V_r^T||_F for the rank-r lowrank basis of M."""
@@ -270,7 +268,7 @@ def test_lowrank_correct_matrix_runs_and_preserves_shape():
 
 
 # =========================================================================== #
-# EXP-8: ema_device=cpu round-trip yields the same M_anchor as on-device
+# ema_device=cpu round-trip yields the same M_anchor as on-device.
 # =========================================================================== #
 def test_ema_device_cpu_roundtrip_equals_on_device():
     # On CPU-only CI both "gpu" and "cpu" storage resolve to CPU tensors, so the
@@ -308,7 +306,7 @@ def test_ema_device_cpu_correct_matrix_matches_gpu():
 
 
 # =========================================================================== #
-# EXP-8: basis_cache=recompute is numerically equal to basis_cache=cache
+# basis_cache=recompute is numerically equal to basis_cache=cache.
 # =========================================================================== #
 def test_basis_cache_recompute_equals_cache():
     g_anchor = torch.randn(12, 9, generator=torch.Generator().manual_seed(21), dtype=torch.float32)
@@ -344,16 +342,14 @@ def test_basis_cache_reused_across_correct_calls():
 
 
 # =========================================================================== #
-# EXP-18 / M4 — anchor-circuit name-key consistency (the bug fix this run gates)
+# Anchor-circuit name-key consistency across FSDP wrap infixes.
 #
 # The anchor EMA is FED from the anchor CLONE's named_parameters() (which, when
 # build_anchor_module's deepcopy fails and the config-rebuild fallback runs, are
 # NON-infixed: "model.layers.0.self_attn.q_proj.weight") and READ back via the
 # LIVE FSDP module's summoned names (per-layer-wrapped => carry the
-# "._fsdp_wrapped_module." infix). Pre-fix these keys never matched, so M_anchor
-# read as ZERO at inject time and injection silently no-op'd (spectral_corrections
-# counted up, but ZERO [comm_eff][EXP-18][inject] effect). These tests assert the
-# feed-key and the read-key resolve to the SAME EMA entry.
+# "._fsdp_wrapped_module." infix). These tests assert the feed-key and read-key
+# resolve to the same EMA entry.
 # =========================================================================== #
 CLONE_NAME = "model.layers.0.self_attn.q_proj.weight"                      # fallback clone (non-infixed)
 LIVE_NAME = "model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight"  # live FSDP per-layer-wrapped
@@ -370,10 +366,7 @@ def test_canon_strips_fsdp_infix():
 
 
 def test_inject_finds_anchor_across_fsdp_infix():
-    """THE load-bearing fix. Feed the EMA under the CLONE (non-infixed) name, then
-    inject under the LIVE (infixed) name. The injection MUST fire — i.e. the
-    result is NOT g_mask unchanged — proving M_anchor was found nonzero under the
-    canonical key. Pre-fix this returned g_mask verbatim (anchor read as zero)."""
+    """Feed under the clone name, inject under the live name, and ensure it fires."""
     f = SpectralFilter(
         alpha=0.3, tau=1e-3, beta_anc=0.5, seed_anchor_cache=False,
         correction_mode="inject", inject_gamma=1.0,
@@ -412,7 +405,7 @@ def test_anchor_ema_shared_entry_across_infix():
 
 def test_correct_matrix_also_consistent_across_infix():
     """The same key-consistency holds for the reweight path (correct_matrix),
-    so the fix is mode-agnostic: feed under clone name, correct under live name."""
+    so the behavior is mode-agnostic: feed under clone name, correct under live name."""
     f = SpectralFilter(alpha=0.3, tau=1e-3, beta_anc=0.5, seed_anchor_cache=False)
     gen = torch.Generator().manual_seed(11)
     f.update_anchor(CLONE_NAME, torch.randn(12, 12, generator=gen, dtype=torch.float32))
@@ -425,7 +418,7 @@ def test_correct_matrix_also_consistent_across_infix():
 
 
 # =========================================================================== #
-# EXP-18/M4 C2 convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
+# Convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
 # eta=0 => G_mask exactly; eta=1 => scale-matched M_anchor; the blend must fire
 # across the FSDP name infix (the same key-consistency the inject path needs).
 # =========================================================================== #
@@ -470,7 +463,7 @@ def test_blend_eta_one_is_scale_matched_anchor():
 
 
 def test_blend_magnitude_stable_at_eta_0p7():
-    """The C2 fix vs C1: ||G_corr||/||G_mask|| <= 1 (never the sqrt(2) blow-up).
+    """The convex blend keeps ||G_corr||/||G_mask|| <= 1.
     For orthogonal terms it equals sqrt((1-eta)^2 + eta^2) < 1; for any anchor it
     is bounded by 1 under the convex blend (triangle ineq with scale-match)."""
     f = SpectralFilter(

@@ -29,15 +29,11 @@ __all__ = ["BaseRollout"]
 class BaseRollout(ABC):
     """Base class for rollout.
 
-    EXP-6 mask-contamination invariant: rollout generation runs mask-free even
-    while ``comm_eff.mask.enabled=true``. The activation-mask circuit
-    (``verl.workers.comm_eff``) is attached ONLY to the FSDP actor-train engine
-    and its forward hooks are registered ONLY inside ``update_actor``'s train
-    forward/backward. Rollout uses a separate inference backend (vLLM/SGLang)
-    that never holds a ``CommEffState`` and never sets the ``train`` path tag, so
-    no mask can fire on generated rollouts. Weight sync into rollout carries only
-    the normal actor-optimizer update (see ``fsdp_checkpoint_manager`` guard) —
-    never masks, anchor EMA, or spectral caches.
+    Rollout generation runs mask-free even while ``comm_eff`` is enabled. The
+    activation hooks are attached only to the actor-train engine during
+    ``update_actor``; rollout backends never hold ``CommEffState`` and never set
+    the ``train`` path tag. Weight sync carries normal actor weights only, not
+    masks, anchor EMA, or spectral caches.
     """
 
     def __init__(

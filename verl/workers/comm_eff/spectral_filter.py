@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spectral correction of masked gradients (M2, the *third circuit*).
+"""Spectral correction of masked gradients.
 
-This implements the paper's spectral filter exactly. For a single targeted 2D
-gradient matrix ``G_mask`` with a running anchor-gradient EMA ``M_anchor``::
+For a single targeted 2D gradient matrix ``G_mask`` with a running
+anchor-gradient EMA ``M_anchor``::
 
     M_anchor = beta_anc * M_anchor + (1 - beta_anc) * G_anchor   # anchor EMA
     M_anchor = U S V^T                                           # full thin SVD
@@ -43,13 +43,13 @@ Load-bearing invariants (each unit-tested in
 * **Determinism.** With a fixed seed the seeded anchor cache and therefore the
   whole pipeline is reproducible.
 
-FSDP NOTE — DELIBERATE DECOUPLING. This module operates purely on **logical 2D
-matrices**. It knows nothing about FSDP, ``DTensor``, ``FlatParameter`` or
+FSDP note: this module operates purely on **logical 2D matrices**. It knows
+nothing about FSDP, ``DTensor``, ``FlatParameter`` or
 sharding. The engine-side caller (``FSDPEngine._maybe_comm_eff_grad_correction``)
 owns the discovery of what container ``p.grad`` actually is and how to present a
-full 2D matrix to ``correct_matrix`` — that is the EXP-7 deliverable, and
-keeping it out of this file is what makes the formula unit-testable on CPU with
-no distributed runtime. ``correct_matrix`` asserts its input is 2D so a bad
+full 2D matrix to ``correct_matrix``. Keeping that out of this file makes the
+formula unit-testable on CPU with no distributed runtime. ``correct_matrix``
+asserts its input is 2D so a bad
 unshard upstream fails loudly here rather than silently mangling a gradient.
 """
 
@@ -76,13 +76,10 @@ __all__ = [
 def _canon(name: str) -> str:
     """Canonicalize a parameter name by stripping the FSDP per-layer-wrap infix.
 
-    EXP-18/M4 anchor-circuit bug fix. The anchor EMA is FED from the anchor
-    clone's ``named_parameters()`` and READ back via the LIVE FSDP module's
-    summoned ``named_parameters()``. When ``build_anchor_module``'s deepcopy
-    fails and the config-rebuild fallback runs, the clone is a PLAIN
-    (non-FSDP) module whose names lack the per-layer FSDP wrap infix
-    ``._fsdp_wrapped_module.`` that the live per-layer-wrapped module's
-    summoned names carry. Without canonicalization the feed-side key
+    The anchor EMA is fed from the anchor clone's ``named_parameters()`` and read
+    back via the live FSDP module's summoned ``named_parameters()``. The clone
+    can have plain names while the live module's names carry the
+    ``._fsdp_wrapped_module.`` infix. Without canonicalization the feed-side key
     (``model.layers.0.self_attn.q_proj.weight``) and the read-side key
     (``model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight``) never
     match, so ``M_anchor`` reads as zero at injection/correction time and the
@@ -105,7 +102,7 @@ def compute_basis(m_anchor: torch.Tensor, *, svd_mode: str = "full", rank: int =
     """Compute the (U, S, V) basis of the anchor used by the two-sided projection.
 
     ``svd_mode="full"`` uses ``torch.linalg.svd(full_matrices=False)`` — the
-    exact thin SVD the EXP-7 filter used; ``U`` is ``(m, k)``, ``S`` is ``(k,)``,
+    exact thin SVD; ``U`` is ``(m, k)``, ``S`` is ``(k,)``,
     ``V`` is ``(n, k)`` with ``k = min(m, n)``.
 
     ``svd_mode="lowrank"`` uses ``torch.svd_lowrank(m_anchor, q=rank)``, returning
@@ -196,7 +193,7 @@ def spectral_correct(
     ``g_mask``, and the alpha blend. Returns ``G_proj`` with the SAME
     shape/dtype/device as ``g_mask``.
 
-    ``svd_mode`` selects ``full`` thin SVD (EXP-7 behaviour) vs ``lowrank``
+    ``svd_mode`` selects ``full`` thin SVD vs ``lowrank``
     (``torch.svd_lowrank(q=rank)``). When ``basis`` (a precomputed ``(u, s, v)``)
     is supplied it is reused verbatim and ``m_anchor`` is consulted only for its
     shape/dtype — this is the ``basis_cache=cache`` path (compute U/S/V once at
@@ -245,13 +242,13 @@ class SpectralFilter:
     """Stateful per-target spectral filter (anchor-EMA cache + correction).
 
     Holds the running anchor-gradient EMA ``M_anchor`` for every targeted
-    matrix, keyed by parameter name, and applies the paper formula on demand.
+    matrix, keyed by parameter name, and applies the correction on demand.
     Stateless math lives in the module-level functions above; this class owns
     only the EMA buffers and the knobs.
 
     The anchor cache can be **seeded** (``seed_anchor_cache=true``): on first
     sight of a target it is populated with a fixed deterministic PSD basis so
-    the filter runs before the live anchor circuit (EXP-8) exists. The basis is
+    the filter runs before a live anchor refresh exists. The basis is
     ``Q diag(lin) Q^T``-style only conceptually — for a rectangular ``(m, n)``
     matrix we build a deterministic full-shape matrix whose SVD has a smooth,
     strictly positive spectrum, so the Tikhonov weights are well conditioned.
@@ -278,8 +275,8 @@ class SpectralFilter:
         self.beta_anc = float(beta_anc)
         self.seed_anchor_cache = bool(seed_anchor_cache)
         self.anchor_seed = int(anchor_seed)
-        # EXP-8 config-driven storage layer. Defaults faithful (gpu/full/cache);
-        # validation happens in CommEffConfig.__post_init__ so by the time the
+        # Storage layer defaults: gpu/full/cache. Validation happens in
+        # CommEffConfig.__post_init__ so by the time the
         # filter is built the values are known-good — assert defensively anyway.
         assert ema_device in ("gpu", "cpu"), ema_device
         assert svd_mode in ("full", "lowrank"), svd_mode
@@ -288,10 +285,9 @@ class SpectralFilter:
         self.svd_mode = str(svd_mode)
         self.basis_cache = str(basis_cache)
         self.rank = int(rank)
-        # EXP-18/M4 correction mode. "reweight" = the as-implemented two-sided
-        # Tikhonov reweighting (correct_matrix); "inject" = additive injection of
-        # the scale-matched stale-anchor complement (inject_matrix); "blend" =
-        # convex blend toward the scale-matched stale anchor (blend_matrix, C2).
+        # Correction mode. "reweight" = two-sided Tikhonov reweighting;
+        # "inject" = additive injection of the scale-matched anchor complement;
+        # "blend" = convex blend toward the scale-matched anchor.
         # Validated in CommEffConfig.__post_init__; assert defensively here too.
         assert correction_mode in ("reweight", "inject", "blend"), correction_mode
         self.correction_mode = str(correction_mode)
@@ -323,7 +319,7 @@ class SpectralFilter:
         k = min(m, n)
         # A per-target deterministic seed from a STABLE hash of the name.
         #
-        # DEFECT-3 FIX. Python's builtin hash() is salted per-process via
+        # Python's builtin hash() is salted per-process via
         # PYTHONHASHSEED, so two FSDP ranks (separate processes) would seed
         # DIFFERENT anchors for the same parameter name -> each rank builds a
         # different M_anchor -> a different G_proj -> cross-rank replica
@@ -359,7 +355,7 @@ class SpectralFilter:
         ``ema_device=cpu``, else the gradient's device). Seeding builds the
         deterministic basis on the grad's device, then moves it to storage.
         """
-        name = _canon(name)  # EXP-18: match feed-side & read-side keys
+        name = _canon(name)  # match feed-side and read-side keys
         anc = self._anchor.get(name)
         if anc is None:
             store_dev = self._ema_storage_device(grad.device)
@@ -378,14 +374,14 @@ class SpectralFilter:
         Used at refresh/correction time to bring a CPU-offloaded EMA onto the
         compute device. The stored copy is left on its storage device.
         """
-        name = _canon(name)  # EXP-18: match feed-side & read-side keys
+        name = _canon(name)  # match feed-side and read-side keys
         anc = self._anchor[name]
         return anc.to(device) if anc.device != torch.device(device) else anc
 
     def update_anchor(self, name: str, g_anchor: torch.Tensor) -> torch.Tensor:
         """EMA-update ``M_anchor <- beta * M_anchor + (1 - beta) * G_anchor`` (RAW).
 
-        This is the live-anchor entry point (EXP-8 GUARD 6): ``g_anchor`` is the
+        This is the live-anchor entry point: ``g_anchor`` is the
         RAW per-target gradient read BEFORE any ``correct_matrix`` call, so the
         anchor gradient never passes through the spectral projection. The EMA is
         computed on the gradient's device (bringing a CPU-offloaded ``M_anchor``
@@ -395,7 +391,7 @@ class SpectralFilter:
         is refreshed here (once per anchor refresh) so every subsequent fast
         mini-batch reuses it; under ``recompute`` no basis is cached.
         """
-        name = _canon(name)  # EXP-18: store EMA + basis under the canonical key
+        name = _canon(name)  # store EMA + basis under the canonical key
         self.ensure_anchor(name, g_anchor)
         compute_dev = g_anchor.device
         anc = self.anchor_on(name, compute_dev).to(torch.float32)
@@ -408,7 +404,7 @@ class SpectralFilter:
             stored = stored.pin_memory()
         self._anchor[name] = stored
         # Cache the basis ON THE COMPUTE DEVICE for reuse by fast mini-batches.
-        # EXP-18/M4 inject AND blend modes need NO SVD basis (they combine the
+        # Inject and blend modes need no SVD basis (they combine the
         # scale-matched anchor with G_mask directly), so skip the cache —
         # computing the full SVD of every targeted matrix per refresh would
         # stall the run.
@@ -420,10 +416,10 @@ class SpectralFilter:
         """Force-(re)compute and cache the ``(u, s, v)`` basis for ``name``.
 
         Used when the cache must be primed without an EMA update (e.g. the
-        seeded-cache path the EXP-7 reproduction cell relies on). The basis is
+        seeded-cache path). The basis is
         cached on ``device`` (defaults to the EMA's current device).
         """
-        name = _canon(name)  # EXP-18: match feed-side & read-side keys
+        name = _canon(name)  # match feed-side and read-side keys
         anc = self._anchor[name]
         dev = device if device is not None else anc.device
         basis = compute_basis(anc.to(dev).to(torch.float32), svd_mode=self.svd_mode, rank=self.rank)
@@ -441,11 +437,11 @@ class SpectralFilter:
 
         ``basis_cache=cache`` reuses the cached ``(u, s, v)`` from the most
         recent refresh (computing it once on first sight if absent — e.g. the
-        seeded-cache reproduction cell); ``basis_cache=recompute`` recomputes the
-        SVD here, exactly as the pre-EXP-8 code did. A CPU-offloaded EMA is
+        seeded-cache case); ``basis_cache=recompute`` recomputes the SVD here.
+        A CPU-offloaded EMA is
         brought onto the gradient's device for the (recompute) SVD.
         """
-        name = _canon(name)  # EXP-18: match feed-side & read-side keys
+        name = _canon(name)  # match feed-side and read-side keys
         self.ensure_anchor(name, g_mask)
         basis = None
         if self.basis_cache == "cache":
@@ -470,7 +466,7 @@ class SpectralFilter:
         )
 
     def inject_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
-        """EXP-18/M4 additive injection: G_corr = G_mask + gamma*scale*(M_anchor - P_Gmask(M_anchor)).
+        """Additive injection: G_corr = G_mask + gamma*scale*(M_anchor - P_Gmask(M_anchor)).
 
         Supplies the component of the stale true-gradient EMA M_anchor that G_mask
         does NOT already span (the part masking rotated away), scale-matched to
@@ -479,7 +475,7 @@ class SpectralFilter:
         projection ~0 and this is scale-matched direct injection of M_anchor.
         Returns G_corr with g_mask's shape/dtype/device.
         """
-        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
+        name = _canon(name)  # read M_anchor under the same key the feed wrote
         self.ensure_anchor(name, g_mask)
         anc = self.anchor_on(name, g_mask.device).to(torch.float32)
         gm = g_mask.to(torch.float32)
@@ -501,17 +497,17 @@ class SpectralFilter:
         return g_corr.to(g_mask.dtype)
 
     def blend_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
-        """EXP-18/M4 C2 convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
+        """Convex blend: G_corr = (1-eta)*G_mask + eta*scale*M_anchor.
 
         REPLACES (downweights) the biased G_mask with the scale-matched stale
         true-gradient EMA M_anchor, scale=||G_mask||/||M_anchor||. Unlike inject
         (which ADDS an orthogonal force and inflates magnitude to sqrt(2)*||G_mask||
-        at eta=1, C1's collapse cause), the convex blend keeps a stable magnitude:
+        at eta=1), the convex blend keeps a stable magnitude:
         for orthogonal terms ||G_corr|| = ||G_mask||*sqrt((1-eta)^2 + eta^2) <= ||G_mask||.
         eta->0 returns G_mask exactly; eta->1 returns the scale-matched M_anchor.
         Returns G_corr with g_mask's shape/dtype/device.
         """
-        name = _canon(name)  # EXP-18: read M_anchor under the SAME key the feed wrote
+        name = _canon(name)  # read M_anchor under the same key the feed wrote
         self.ensure_anchor(name, g_mask)
         anc = self.anchor_on(name, g_mask.device).to(torch.float32)
         gm = g_mask.to(torch.float32)
@@ -571,7 +567,7 @@ def apply_spectral_correction_to_params(
     * ``writeback(grad, g_proj)`` copies the corrected full matrix back into the
       (possibly sharded) ``.grad`` in place.
 
-    DEFECT-2 contract this function encodes:
+    Discovery/correction contract:
     * the discovery log is recorded **once**, on the first target with a
       non-``None`` grad, **regardless of gradient magnitude** (a near-zero grad
       still proves the hook ran — only ``grad is None`` is skipped); and

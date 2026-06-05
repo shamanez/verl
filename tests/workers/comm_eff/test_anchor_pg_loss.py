@@ -12,28 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-18 / M4 C4 — the CLEAN anchor policy-gradient loss.
+"""Tests for the clean anchor policy-gradient loss.
 
-C1/C2/C3 all degraded the policy because the anchor reused the fast-path PPO
-loss: the batch's MASKED ``old_log_probs`` against the anchor's UNMASKED forward
-gave an importance ratio != 1, so the PPO clip mangled ``G_anchor`` and
-``M_anchor`` was never the clean true gradient. ``anchor_pg_loss`` (ratio == 1,
-no clip, no ``old_log_probs``) fixes that. These tests pin the two load-bearing
-claims of the C4 spec on a 2-token toy:
+The anchor must not reuse the fast-path PPO ratio/clip loss: masked
+``old_log_probs`` against the anchor's unmasked forward can corrupt
+``G_anchor``. ``anchor_pg_loss`` uses ratio == 1, no clip, and no
+``old_log_probs``. These tests pin two invariants on a 2-token toy:
 
 A. **Gradient == plain PG.** ``∂loss/∂θ == -(A · ∇logπ) / N`` (token-mean
    normalization), i.e. the clean unmasked policy gradient — no ratio, no clip.
 B. **``old_log_probs`` is IGNORED.** The loss + gradient are byte-identical for
    wildly different ``old_log_probs`` (the corruption channel is gone), whereas
    the fast-path ``compute_policy_loss_vanilla`` produces a DIFFERENT gradient
-   once ``old_log_probs != logπ`` (ratio != 1) — proving the anchor and the fast
-   path now differ exactly as C4 intends.
+   once ``old_log_probs != logπ`` (ratio != 1), proving the anchor and fast path
+   intentionally differ here.
 
 Unlike the file-path-isolated harness in ``test_anchor_queue.py``, these tests
 import through the real ``verl`` package (the runner's env / the box both have
 the full deps), so they exercise the actual ``anchor_pg_loss`` reduction. We
 monkeypatch ``no_padding_2_padding`` to an identity extractor so the test isolates
-the NEW logic (the PG reduction + ratio==1 + no-old_log_probs) from verl's nested
+the PG reduction + ratio==1 + no-old_log_probs from verl's nested
 rmpad plumbing, which ``ppo_loss`` already shares and which is tested elsewhere.
 """
 
@@ -127,7 +125,7 @@ def test_anchor_pg_loss_gradient_equals_plain_pg(_identity_extract):
     expected_loss = (-(advantages * log_probs.detach() * response_mask)).sum() / n_tokens
     torch.testing.assert_close(loss.detach(), expected_loss, rtol=1e-6, atol=1e-7)
 
-    # ratio is identically 1 (the on-box falsifier that the corruption is gone).
+    # Ratio is identically 1.
     assert metrics["actor/anchor_ratio_mean"].values[0] == 1.0
 
 

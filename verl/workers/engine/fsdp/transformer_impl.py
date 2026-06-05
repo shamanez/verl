@@ -611,17 +611,15 @@ class FSDPEngine(BaseEngine):
     def _comm_eff_mask_active(self, forward_only: bool) -> bool:
         """True iff the activation-mask hooks should be live for this forward.
 
-        Masking is confined to the actor-train forward/backward by default
-        (EXP-5 ⇒ EXP-12), and additionally to the old-policy log-prob recompute
-        when ``comm_eff.mask.mask_recompute=true`` (EXP-9). This returns False
+        Masking is confined to the actor-train forward/backward by default, and
+        additionally to the old-policy log-prob recompute when
+        ``comm_eff.mask.mask_recompute=true``. This returns False
         (strict no-op) unless ALL of:
           * an enabled ``CommEffState`` is attached,
           * the worker has set ``state.mask_active`` (set only around
             ``update_actor`` and, with mask_recompute, around
             ``compute_log_prob``; cleared everywhere else),
-          * the path_tag is eligible per ``mask_eligible_tags(state)``
-            (EXP-6 contamination guard — a second, independent gate alongside
-            ``mask_active`` so a leak requires BOTH to be wrong),
+          * the path_tag is eligible per ``mask_eligible_tags(state)``,
           * a masker was constructed (mask sub-config enabled, ``p > 0``),
           * the pass-type matches the path:
               - ``train``        ⇒ requires ``forward_only=False`` (the
@@ -633,8 +631,8 @@ class FSDPEngine(BaseEngine):
                                      against this forward — but the recomputed
                                      old_logp ENTERS the next train forward via
                                      the PPO importance ratio).
-        Anchor pass (``path_tag=None``) never enters this method positively —
-        the anchor uses ``state.mask_active=False`` (GUARD 5).
+        Anchor pass (``path_tag=None``) never enters this method positively; the
+        anchor uses ``state.mask_active=False``.
         """
         # Import locally to keep the engine's import surface unchanged.
         from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
@@ -733,13 +731,12 @@ class FSDPEngine(BaseEngine):
     def _comm_eff_powersgd_active(self, forward_only: bool) -> bool:
         """True iff the PowerSGD projection hooks should be live for this forward.
 
-        EXP-20/M6 analogue of ``_comm_eff_mask_active``. The projector is confined
-        to the actor-train forward/backward (``path_tag == "train"``,
+        The projector is confined to the actor-train forward/backward
+        (``path_tag == "train"``,
         ``forward_only=False``) and, when ``powersgd.compress_recompute=true``, to
         the old-policy log-prob recompute (``path_tag == "old_logprob"``,
-        ``forward_only=True``). Both paired forwards see the SAME frozen ``Q_t``
-        (the basis only advances after the gradient-bearing work), which is what
-        makes the GRPO importance ratio ``ρ ≈ 1`` at step 0 (INF-17). Returns
+        ``forward_only=True``). Both paired forwards see the same frozen ``Q_t``;
+        the basis only advances after the gradient-bearing work. Returns
         False (strict no-op) unless an enabled state with the powersgd codec and a
         live ``mask_active`` flag is attached.
         """
@@ -765,7 +762,7 @@ class FSDPEngine(BaseEngine):
         return False
 
     def _comm_eff_register_powersgd_hooks(self) -> bool:
-        """Register the PowerSGD projection hooks on the boundary blocks (EXP-20).
+        """Register the PowerSGD projection hooks on the boundary blocks.
 
         SP guard mirrors the mask: the boundary activation token axis is what
         Ulysses SP>1 slices across ranks (out of scope) — refuse it loudly. The
@@ -785,16 +782,16 @@ class FSDPEngine(BaseEngine):
         return compressor.is_registered
 
     def _comm_eff_maybe_set_powersgd_context(self, micro_batch: TensorDict, input_ids) -> None:
-        """Bump the PowerSGD forward generation + stamp global_step (EXP-20).
+        """Bump the PowerSGD forward generation and stamp global_step.
 
         No-op unless the projection hooks are live. Unlike the mask, PowerSGD does
         not key on token identity (its basis is shared across all tokens), so the
         only per-micro-batch state is the generation counter (dedupes the sketch
         against gradient-checkpoint recompute) and the trainer step.
 
-        rmpad guard (EXP-20 hardening, mirrors the mask): the boundary activation
-        ``M`` the projector compresses is the rmpad (nested / no-padding) token
-        axis. If a caller ever ran without ``use_remove_padding=True`` the
+        rmpad guard: the boundary activation ``M`` the projector compresses is
+        the rmpad (nested / no-padding) token axis. If a caller ever ran without
+        ``use_remove_padding=True`` the
         activation would be a PADDED ``(B, T, H)`` block and the projector +
         basis sketch ``V`` would silently fold PAD tokens into ``M`` and into the
         codebook — corrupting both the reconstruction metric and the learned
@@ -824,7 +821,7 @@ class FSDPEngine(BaseEngine):
         # disabled (default) or not on the actor-train path, nothing is registered
         # and no RNG is drawn, so the pass is byte-identical to dense GRPO.
         #
-        # EXP-20: the PowerSGD codec uses the SAME register/unregister lifecycle.
+        # The PowerSGD codec uses the same register/unregister lifecycle.
         # The two codecs are mutually exclusive (state.build constructs exactly
         # one), so at most one branch fires.
         _mask_hooks_live = False
@@ -893,7 +890,7 @@ class FSDPEngine(BaseEngine):
         return tuple(substrs)
 
     def _build_anchor_pg_loss(self, fast_path_loss_function, anchor_pg_loss):
-        """Bind the CLEAN policy-gradient loss (EXP-18 / M4 C4) for the anchor pass.
+        """Bind the clean policy-gradient loss for the anchor pass.
 
         The anchor must NOT reuse the fast-path PPO ratio/clip loss (its
         ``old_log_probs`` are from the MASKED path; the ratio against the
@@ -922,13 +919,13 @@ class FSDPEngine(BaseEngine):
         return partial(anchor_pg_loss, config=config)
 
     def _maybe_comm_eff_anchor_refresh(self, data, loss_function) -> None:
-        """FSDP anchor-circuit refresh (EXP-8): unmasked K-stale GRPO-actor-loss
+        """FSDP anchor-circuit refresh: unmasked K-stale GRPO-actor-loss
         fwd/bwd -> RAW G_anchor -> spectral anchor EMA, NO optimizer step.
 
         Runs at the TOP of ``BaseEngine.train_batch`` (before the masked fast
         path). The six non-negotiable invariants this enforces:
 
-        1. **Clean unmasked policy-gradient loss (EXP-18 / M4 C4).** The anchor
+        1. **Clean unmasked policy-gradient loss.** The anchor
            uses ``anchor_pg_loss`` (ratio ≡ 1, no clip, no ``old_log_probs``)
            over THIS rollout-expanded batch — its gradient is the CLEAN true
            policy gradient ``-(A·∇logπ_unmasked)`` at the K-stale weights. It is
@@ -937,7 +934,7 @@ class FSDPEngine(BaseEngine):
            it is NOT the fast-path PPO loss: reusing the fast path's ``ppo_loss``
            here would feed the MASKED-path ``old_log_probs`` against the anchor's
            UNMASKED forward, making the importance ratio ≠ 1 and letting the PPO
-           clip corrupt ``G_anchor`` (the C1/C2/C3 failure). The fast-path loss
+           clip corrupt ``G_anchor``. The fast-path loss
            is left UNTOUCHED — this is anchor-pass-only.
         2. **No rollout / no reward recompute.** It only re-forwards ``data``
            (which already carries ``responses``/``old_log_probs``/``advantages``);
@@ -948,11 +945,11 @@ class FSDPEngine(BaseEngine):
            optimizer's param group; this method never calls ``optimizer_step``.
         4. **enabled=false ⇒ no-op.** Gated on ``state.enabled`` AND
            ``anchor.enabled``; the cadence predicate gates per-step firing.
-        5. **GUARD 5 — unmasked.** The pass runs with ``state.mask_active=False``
+        5. **Unmasked.** The pass runs with ``state.mask_active=False``
            and ``path_tag != "train"`` so the mask hooks are NOT registered;
            ``anchor_mask_applications`` is recorded as the (asserted-zero) delta
            of ``state.mask_applications`` around the pass.
-        6. **GUARD 6 — uncorrected.** ``G_anchor`` is read RAW and fed to
+        6. **Uncorrected.** ``G_anchor`` is read RAW and fed to
            ``SpectralFilter.update_anchor`` (the EMA) BEFORE any
            ``correct_matrix``; ``anchor_grad_corrected`` stays 0.
         """
@@ -974,7 +971,7 @@ class FSDPEngine(BaseEngine):
             feed_anchor_grads_into_ema,
             snapshot_named_params,
         )
-        # EXP-18: canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
+        # Canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
         # anchor clone matches the live module's per-layer-wrapped snapshot keys.
         from verl.workers.comm_eff.spectral_filter import _canon
 
@@ -1006,7 +1003,7 @@ class FSDPEngine(BaseEngine):
 
         # --- snapshot THIS step's (full) weights into the staleness ring -------
         # Snapshot OFF the optimizer's param group (plain detached clones) so no
-        # accidental optimizer step can ever touch them (criterion 7). For FSDP1
+        # accidental optimizer step can ever touch them. For FSDP1
         # we summon the full params to clone the logical matrices; FSDP2 keeps
         # original names (DTensor) — we clone the local shard's full_tensor.
         def _summon_ctx():
@@ -1035,9 +1032,9 @@ class FSDPEngine(BaseEngine):
         if stale is None:  # pragma: no cover - queue always has >=1 after push
             return
 
-        # GUARD 5 setup: ensure masking is OFF for the anchor pass and the path
+        # Ensure masking is off for the anchor pass and the path
         # tag is NOT "train" (the mask hook requires both to fire). We measure
-        # mask applications as a delta so a leak is a loud, greppable failure.
+        # mask applications as a delta so a leak is a loud failure.
         prev_mask_active = getattr(state, "mask_active", False)
         prev_path_tag = getattr(state, "path_tag", None)
         state.mask_active = False
@@ -1051,7 +1048,7 @@ class FSDPEngine(BaseEngine):
         anchor_data = data.copy() if hasattr(data, "copy") else data
 
         anchor_grads = {}
-        # EXP-12 FIX (criterion 13): the anchor's loss.backward() MUST NOT
+        # The anchor's loss.backward() MUST NOT
         # trigger the live FSDP1 module's `_post_backward_hook` (which would
         # call `_check_grad_to_accumulate(flat_param._saved_grad_shard.shape)`
         # outside the fast-path window where `_saved_grad_shard is None` →
@@ -1070,7 +1067,7 @@ class FSDPEngine(BaseEngine):
         try:
             with _summon_ctx():
                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
-                # EXP-12 iter04: cache anchor clone across refreshes so we do NOT
+                # Cache anchor clone across refreshes so we do NOT
                 # allocate a fresh Qwen2ForCausalLM (~3 GB) every step — that was
                 # tripping vLLM v1's sleep_replicas memory assertion at step 2.
                 # The K-stale snapshot is loaded INTO the cached clone below.
@@ -1084,7 +1081,7 @@ class FSDPEngine(BaseEngine):
 
             # Belt-and-braces: the clone's params share NO id() with either
             # the live optimizer's param_groups OR the live FSDP module. Cheap
-            # runtime guard — protects criterion 7 + 13 against future drift.
+            # Runtime guard against future aliasing drift.
             assert_anchor_module_isolated(
                 anchor_module, optimizer=self.optimizer, fsdp_module=inner
             )
@@ -1099,7 +1096,7 @@ class FSDPEngine(BaseEngine):
 
             # Load the K-stale snapshot weights into the clone (NOT into the
             # live module — the live optimizer's params remain untouched).
-            # EXP-18: the `stale` snapshot is keyed by the LIVE module's
+            # The `stale` snapshot is keyed by the live module's
             # (FSDP per-layer-wrapped) names — those carry the
             # `._fsdp_wrapped_module.` infix — while the clone (when the deepcopy
             # path fell back to a plain config-rebuild) has NON-infixed names. A
@@ -1138,7 +1135,7 @@ class FSDPEngine(BaseEngine):
             # clone — but mask_active gates the work). forward_only=False
             # populates .grad on the clone's plain Parameters.
             #
-            # EXP-18 / M4 C4 — CLEAN anchor gradient. The anchor uses a plain
+            # Clean anchor gradient. The anchor uses a plain
             # policy-gradient loss (ratio ≡ 1, no clip, no old_log_probs) instead
             # of the fast-path PPO loss. The batch's old_log_probs came from the
             # MASKED fast path; reusing them against this UNMASKED forward makes
@@ -1151,7 +1148,7 @@ class FSDPEngine(BaseEngine):
             anchor_loss_function = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
             self._forward_backward_batch_inner(anchor_data, anchor_loss_function, forward_only=False)
 
-            # GUARD 6: read G_anchor RAW per target (NO correct_matrix) off
+            # Read G_anchor RAW per target (NO correct_matrix) off
             # the clone. full_grad_of is the identity — the clone is a plain
             # nn.Module so its p.grad is already a full 2D tensor.
             def _full_grad_of(grad):
@@ -1167,7 +1164,7 @@ class FSDPEngine(BaseEngine):
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
-            # EXP-12 iter04: keep the cached clone alive (reused next refresh)
+            # Keep the cached clone alive (reused next refresh)
             # but zero its grads + clear the reference held by the local name so
             # the next refresh re-loads the K-stale snapshot into clean params.
             # Empty PyTorch's CUDA cache so transient allocations from the
@@ -1191,9 +1188,9 @@ class FSDPEngine(BaseEngine):
             # The live optimizer's param.grads were NEVER touched by the
             # anchor pass (we ran fwd/bwd on the clone), so the masked fast
             # path that follows starts from whatever grads were there at
-            # entry — which is exactly the EXP-8 contract.
+            # entry.
 
-        # GUARD 5 assertion: the anchor pass must have fired ZERO mask hooks.
+        # The anchor pass must have fired zero mask hooks.
         mask_apps_after = int(getattr(state, "mask_applications", 0))
         anchor_mask_delta = mask_apps_after - mask_apps_before
         state.anchor_mask_applications += max(0, anchor_mask_delta)
@@ -1202,21 +1199,20 @@ class FSDPEngine(BaseEngine):
             "(anchor_mask_applications must be 0 — the anchor runs UNMASKED on "
             "the actor-train path; GUARD 5 violated)."
         )
-        # GUARD 7 (criterion): the anchor took no optimizer step.
+        # The anchor took no optimizer step.
         assert int(getattr(state, "anchor_optimizer_steps", 0)) == opt_steps_before, (
             "comm_eff anchor pass took an optimizer step (anchor_optimizer_steps "
             "must stay 0; snapshot is OFF the optimizer's param group)."
         )
 
-        # GUARD 6: feed RAW grads into the EMA (update_anchor, NEVER correct_matrix).
+        # Feed RAW grads into the EMA (update_anchor, NEVER correct_matrix).
         deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
 
-        # EMA-evolution log line (numeric ||ΔM_anchor||; the analyst greps these
-        # across refreshes to confirm M_anchor evolves, criterion 3). String
-        # discovery (ema_device/svd_mode) is logged ONCE at build, never here.
+        # EMA-evolution log line. String discovery (ema_device/svd_mode) is
+        # logged once at build, never here.
         if deltas:
             mean_delta = sum(deltas.values()) / len(deltas)
             max_delta = max(deltas.values())
@@ -1230,9 +1226,8 @@ class FSDPEngine(BaseEngine):
                 f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
                 f"anchor_batch_fraction={state.anchor_batch_fraction} "
                 f"anchor_backward_isolation_mode=clone "
-                # EXP-18 / M4 C4: the anchor now uses the CLEAN policy-gradient
-                # loss (ratio ≡ 1, no clip, no old_log_probs). This tag is the
-                # on-box falsifier that the ratio-corruption is gone.
+                # Anchor uses clean policy-gradient loss: ratio = 1, no clip,
+                # no old_log_probs.
                 f"anchor_loss=clean_pg anchor_ratio=1.0",
                 flush=True,
             )
@@ -1244,7 +1239,7 @@ class FSDPEngine(BaseEngine):
             )
 
     def _maybe_comm_eff_grad_correction(self) -> None:
-        """FSDP spectral gradient-correction hook (EXP-7 discovery + correction).
+        """FSDP spectral gradient-correction hook.
 
         Runs in ``BaseEngine.train_batch`` AFTER the actor backward and BEFORE
         ``optimizer_step`` (which is where gradient clipping happens). Under
@@ -1255,10 +1250,10 @@ class FSDPEngine(BaseEngine):
         rather than assumes.
 
         Strict no-op when comm_eff is disabled or no spectral filter is attached
-        (the EXP-5 / dense path is untouched, no collective is issued, no grad
+        (the dense path is untouched, no collective is issued, no grad
         is read).
 
-        THE HEADLINE DELIVERABLE: on the first correction it logs, for >=1 target
+        On the first correction it logs, for >=1 target
         matrix, ``type(p.grad)``, the grad container shape, the logical 2D matrix
         shape, the FSDP wrapping/version, the DTensor placements/mesh, and the
         correction point relative to FSDP reduction and gradient clipping. The
@@ -1272,17 +1267,10 @@ class FSDPEngine(BaseEngine):
         if spectral is None:
             return
 
-        # EXP-16 spectral-correction cadence gate. Advance the monotonic
-        # per-optimizer-step counter (1-based, in lockstep with anchor_step:
-        # both +1 per train_batch) and fire ONLY on cadence steps. This MIRRORS
-        # the clean-step gate (CommEffState.is_clean_step) and the anchor gate
-        # (anchor_should_fire): default cadence=1 ⇒ fire every step ⇒ the
-        # pre-EXP-16 behavior, so the disabled path AND every prior method config
-        # are a STRICT no-op. With spectral.cadence==anchor.cadence the correction
-        # fires on exactly the steps the anchor EMA was just refreshed at the TOP
-        # of this same train_batch (a fresh basis, never a stale one on the
-        # in-between steps). The counter advances only AFTER the enabled+spectral
-        # guards above, so a dense/disabled run never touches it.
+        # Spectral-correction cadence gate. Advance the 1-based optimizer-step
+        # counter and fire only on cadence steps. If spectral and anchor cadence
+        # match, correction uses the anchor EMA refreshed earlier in this
+        # train_batch. Dense/disabled runs never advance this counter.
         state.spectral_step += 1
         if not state.should_run_spectral_correction():
             return
@@ -1313,20 +1301,10 @@ class FSDPEngine(BaseEngine):
             "world_size": str(torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1),
         }
 
-        # DEFECT-2 FIX — expose the ORIGINAL 2D named params + their grads.
-        #
-        # Root cause of the first failed run: the default FSDP1 path wraps the
-        # model with use_orig_params=False, which FLATTENS every FSDP unit's
-        # parameters into a single 1-D FlatParameter. Iterating
-        # `module._fsdp_wrapped_module.named_parameters()` then yields names like
-        # `_flat_param` (NOT `...q_proj.weight`) whose grads are 1-D. So
-        #   (i) `any(substr in name)` matched NOTHING  -> loop body never ran,
-        #   (ii) even if matched, `full.dim() != 2`    -> `continue`.
-        # Net: zero targets, no FSDP-DISCOVERY print, spectral_corrections=0 —
-        # exactly the observed failure. The fix is to materialise the original
-        # (unflattened) parameters and grads via FSDP.summon_full_params for
-        # FSDP1; FSDP2 (fully_shard) already keeps original names with DTensor
-        # grads, so its `named_parameters()` is used directly.
+        # Expose original 2D named params and grads. FSDP1 can flatten wrapped
+        # units into 1-D FlatParameters, so materialize original unflattened
+        # params/grads via summon_full_params. FSDP2 keeps original names with
+        # DTensor grads and can be iterated directly.
         if module_is_fsdp1 and not module_is_fsdp2:
             # with_grads=True surfaces the unsharded .grad on each original
             # param inside the context; writeback=True copies edits back into
@@ -1334,7 +1312,7 @@ class FSDPEngine(BaseEngine):
             # so this is the unsharded full-matrix view the filter needs.
             # NOTE: with_grads=True is ONLY supported when the module was wrapped
             # with use_orig_params=True (the launcher sets this for the
-            # spectral_on cell). Guard so a misconfigured run fails LOUDLY with a
+            # spectral correction). Guard so a misconfigured run fails loudly with a
             # clear message rather than a cryptic FSDP internal assert.
             use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
             if not use_orig:
@@ -1384,8 +1362,8 @@ class FSDPEngine(BaseEngine):
         ``param`` exposes a full logical-2D ``.grad`` — a plain ``Tensor`` or a
         ``DTensor``), and for every targeted 2D matrix:
 
-        * logs the FSDP gradient-representation discovery ONCE (the headline
-          deliverable), **regardless of gradient magnitude** — it fires on the
+        * logs the FSDP gradient representation once, **regardless of gradient
+          magnitude** — it fires on the
           first target with a non-``None`` grad even if that grad is ~0, so a
           degenerate-loss step still proves the hook ran;
         * applies the spectral filter and records the per-target
@@ -1746,8 +1724,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # comm_eff: set the per-token mask context for this micro-batch before
             # the forward fires the boundary hooks (no-op unless masking is live).
             self._comm_eff_maybe_set_mask_context(micro_batch, input_ids)
-            # EXP-20: bump the PowerSGD forward generation + stamp the step before
-            # the boundary projection hooks fire (no-op unless powersgd is live).
+            # Bump the PowerSGD forward generation and stamp the step before the
+            # boundary projection hooks fire (no-op unless powersgd is live).
             self._comm_eff_maybe_set_powersgd_context(micro_batch, input_ids)
             # support per sample temperature
             # temperature (bsz,)

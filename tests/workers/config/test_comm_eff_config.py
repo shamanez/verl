@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the comm_eff config group (EXP-4 M2 no-op scaffolding).
+"""Unit tests for the comm_eff config group.
 
-Headline assertions (machine-checkable by codex-verify / the analyst):
+Headline assertions:
   1. comm_eff defaults to DISABLED (enabled=false) at every level — the
      top-level config, the actor-nested config, and the YAML-composed config.
   2. The structured schema REJECTS unknown comm_eff.* keys (typos fail fast)
@@ -73,8 +73,7 @@ class TestCommEffConfigDefaults(unittest.TestCase):
         self.assertFalse(cfg.enabled)
 
     def test_explicit_enabled_false_and_true_roundtrip(self):
-        """enabled is honored both ways; this is the Run-A `comm_eff.enabled=false`
-        path and the (future) enabled path through the same field."""
+        """enabled is honored both ways through the same field."""
         disabled = omega_conf_to_dataclass({"enabled": False}, dataclass_type=CommEffConfig)
         self.assertFalse(disabled.enabled)
         enabled = omega_conf_to_dataclass({"enabled": True}, dataclass_type=CommEffConfig)
@@ -94,7 +93,7 @@ class TestCommEffConfigDefaults(unittest.TestCase):
 
     def test_yaml_plain_override_enabled_false(self):
         """The plain (no `+`) override comm_eff.enabled=false composes — i.e. the
-        key is registered in the schema (Run A uses the plain key)."""
+        key is registered in the schema."""
         from hydra import compose, initialize_config_dir
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
@@ -148,9 +147,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
 
 
 class TestCommEffPowerSGDConfig(unittest.TestCase):
-    """EXP-20/M6: the compression_type enum + powersgd block must be registered
-    (so a launcher arg parses regardless of compression_type — the clean_cadence
-    struct-mode gotcha) and validated."""
+    """The compression_type enum and powersgd block must be registered and validated."""
 
     def test_default_compression_type_dense_powersgd_block_present(self):
         from verl.workers.config import CommEffPowerSGDConfig
@@ -158,13 +155,11 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         cfg = CommEffConfig()
         self.assertEqual(cfg.compression_type, "dense")
         self.assertIsInstance(cfg.powersgd, CommEffPowerSGDConfig)
-        # Issue VII.1 defaults.
         self.assertEqual(cfg.powersgd.rank, 102)
         self.assertEqual(cfg.powersgd.update_cadence, 1)
         self.assertTrue(cfg.powersgd.warm_start)
         self.assertTrue(cfg.powersgd.compress_recompute)
-        # EXP-20 operator clarification: the shared codebook MUST be synced
-        # across DP ranks (default true), else per-rank Q diverges on its shard.
+        # The shared codebook must be synced across DP ranks by default.
         self.assertTrue(cfg.powersgd.sync_basis)
         self.assertEqual(cfg.powersgd.qr_dtype, "fp32")
 
@@ -186,7 +181,7 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
 
     def test_resolve_compression_type_back_compat(self):
         """resolve_compression_type honors an explicit codec, else falls back to
-        the legacy mask selector (so every pre-EXP-20 mask config still runs)."""
+        the legacy mask selector."""
         from verl.workers.config import CommEffMaskConfig
         from verl.workers.comm_eff.state import resolve_compression_type
 
@@ -210,8 +205,7 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         """The whole launcher arg path (compression_type=powersgd +
         comm_eff.powersgd.rank=102 + a prf_mask run forwarding powersgd.rank)
         composes through the actor YAML — the registered-keys requirement that
-        bit clean_cadence. Mask-arm and powersgd-arm share ONE launcher, so the
-        mask arm DOES forward powersgd.* args; that must parse."""
+        keeps the shared launcher valid for both mask and PowerSGD arms."""
         from hydra import compose, initialize_config_dir
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
@@ -232,8 +226,8 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         self.assertEqual(config.comm_eff.compression_type, "powersgd")
         self.assertEqual(config.comm_eff.powersgd.rank, 102)
 
-        # The mask arm forwards the SAME powersgd.* args (shared launcher) while
-        # selecting prf_mask — must also parse (the gotcha).
+        # The mask arm forwards the same powersgd.* args while selecting
+        # prf_mask; those keys must still parse.
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
             cfg2 = compose(
                 config_name="dp_actor",

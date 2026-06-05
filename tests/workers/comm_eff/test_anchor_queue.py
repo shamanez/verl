@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for the EXP-8 anchor circuit (no GPU / no torch.distributed).
+"""CPU unit tests for the anchor circuit (no GPU / no torch.distributed).
 
 Loads the (lightweight) ``anchor`` and ``spectral_filter`` modules by file path
 so the heavy ``verl.__init__`` chain (tensordict / vllm / ray) is not required —
 same harness as ``test_grad_correction_hook.py``.
 
-The six non-negotiable anchor invariants (the verify gate + the on-box
-falsifiers) are exercised here at the unit level:
+The anchor invariants are exercised here at the unit level:
 
 1. **K-staleness snapshot integrity** — the queue returns the ``t - delay_K``
    snapshot, with a documented warm-up fallback to the oldest snapshot, and
@@ -160,7 +159,7 @@ def test_anchor_should_fire_cadence():
 
 
 # =========================================================================== #
-# Snapshot decoupling from the optimizer's param group (criterion 7 support)
+# Snapshot decoupling from the optimizer's param group.
 # =========================================================================== #
 def test_snapshot_is_detached_clone_off_optimizer():
     module = _TinyDecoder()
@@ -186,7 +185,7 @@ def test_snapshot_target_filter():
 
 
 # =========================================================================== #
-# 6. extract_target_grads reads RAW grads, applies NO correction
+# extract_target_grads reads raw grads and applies no correction.
 # =========================================================================== #
 def test_extract_target_grads_is_raw_and_2d_only():
     module = _TinyDecoder()
@@ -224,7 +223,7 @@ def test_extract_skips_none_grad():
 
 
 # =========================================================================== #
-# 6. feed_anchor_grads_into_ema calls update_anchor (EMA), NEVER correct_matrix
+# feed_anchor_grads_into_ema calls update_anchor (EMA), never correct_matrix.
 # =========================================================================== #
 def test_feed_uses_update_anchor_not_correct_matrix():
     f = SpectralFilter(beta_anc=0.95, seed_anchor_cache=False, ema_device="gpu", svd_mode="full", basis_cache="cache")
@@ -255,7 +254,7 @@ def test_feed_uses_update_anchor_not_correct_matrix():
 
 def test_feed_evolves_ema_across_refreshes():
     """Two refreshes with DIFFERENT G_anchor must move M_anchor each time
-    (criterion 3: ||ΔM_anchor|| > 0 between the first and a later refresh)."""
+    (||ΔM_anchor|| > 0 between the first and a later refresh)."""
     f = SpectralFilter(beta_anc=0.5, seed_anchor_cache=False)
     name = "model.layers.1.mlp.gate_proj.weight"
     d1 = feed_anchor_grads_into_ema({name: torch.ones(6, 4)}, f)
@@ -267,8 +266,8 @@ def test_feed_evolves_ema_across_refreshes():
 
 
 # =========================================================================== #
-# 2-5. Engine-ordering SIMULATION: same loss, unmasked, no rollout/reward,
-#       no optimizer step, G_anchor read before any correction.
+# Engine-ordering simulation: same loss, unmasked, no rollout/reward, no
+# optimizer step, G_anchor read before any correction.
 # =========================================================================== #
 class _FakeState:
     """Minimal CommEffState-shaped object recording mask_active over time."""
@@ -299,7 +298,7 @@ def _simulate_anchor_refresh(module, opt, spectral, state, loss_function, *, mas
     """
     trace = []
 
-    # --- GUARD 5: ensure masking off for the anchor pass --------------------
+    # Ensure masking off for the anchor pass.
     prev_mask_active, prev_tag = state.mask_active, state.path_tag
     state.mask_active = False
     state.set_path_tag(None)
@@ -311,7 +310,7 @@ def _simulate_anchor_refresh(module, opt, spectral, state, loss_function, *, mas
 
     x = torch.randn(4, 8)
     out = module(x)
-    # GUARD 1+5: reuse the SAME loss_function the fast path uses; the mask hook
+    # Reuse the same loss_function the fast path uses; the mask hook
     # would fire here ONLY if mask_active were True (it is not).
     if mask_hook_fires_if_active and state.mask_active:
         state.mask_applications += 1
@@ -320,7 +319,7 @@ def _simulate_anchor_refresh(module, opt, spectral, state, loss_function, *, mas
     loss.backward()
     trace.append("backward")
 
-    # --- GUARD 6: read G_anchor RAW, feed EMA, BEFORE any correct_matrix ----
+    # Read G_anchor raw, feed EMA, before any correct_matrix.
     grads = extract_target_grads(
         module.named_parameters(), target_substrs=_TARGETS, max_targets=4, full_grad_of=_identity_full_grad_of
     )
@@ -390,7 +389,7 @@ def test_anchor_reuses_grpo_loss_unmasked_no_step_no_rollout():
 
 
 def test_anchor_pass_does_not_fire_mask_even_if_hook_present():
-    """GUARD 5: even with a mask hook that WOULD fire on the train path, the
+    """Even with a mask hook that would fire on the train path, the
     anchor pass (mask_active=False) fires zero mask applications."""
     module = _TinyDecoder()
     opt = torch.optim.AdamW(module.parameters(), lr=1e-3)
@@ -408,34 +407,19 @@ def test_anchor_pass_does_not_fire_mask_even_if_hook_present():
 
 
 # =========================================================================== #
-# 13. FSDP1 anchor-backward isolation regression (EXP-12 criterion 13).
+# FSDP1 anchor-backward isolation regression.
 #
-# EXP-8 cells 1+3 crashed because the anchor's loss.backward() fired FSDP1's
-# _post_backward_hook on the live FlatParameter. That hook calls
-# _check_grad_to_accumulate(sharded_grad, flat_param._saved_grad_shard); but
-# _saved_grad_shard is None outside the fast-path's backward window, so it
-# raises `AttributeError: 'NoneType' object has no attribute 'shape'`.
-#
-# The fix (EXP-12): run the anchor on a copy.deepcopy'd plain nn.Module whose
-# parameters are NOT registered with FSDP, so no post-backward hook fires on
-# the anchor pass. This test SIMULATES that hook collision at the CPU layer:
+# The anchor backward must not fire post-backward hooks registered on the live
+# FSDP parameters. This test simulates that hook collision at the CPU layer:
 #
 #   - We attach a `register_post_accumulate_grad_hook` to the live params that
 #     reads a sentinel attribute `_saved_grad_shard` — None by default
 #     (emulating "outside the fast-path window"). The hook calls
 #     `_check_grad_to_accumulate(_saved_grad_shard.shape)` which raises
 #     AttributeError when the sentinel is None.
-#   - The EXP-8 code path (anchor backward on LIVE module) triggers that hook
-#     and the test asserts AttributeError is raised — proving the failure mode
-#     reproduces on the simulated hook.
-#   - The EXP-12 code path (anchor backward on a `copy.deepcopy(live)` clone)
-#     does NOT trigger the hook (the clone has no such hook registered) and
-#     the test asserts (a) no AttributeError, (b) the live params' sentinel
-#     remains untouched after the anchor pass.
-#
-# This is the only way to certify the fix without burning a Vast.ai run to
-# discover a regression; the on-box runtime check (criterion 8) is the second
-# gate.
+#   - Backward on the live module triggers the hook and raises AttributeError.
+#   - Backward on a deep-cloned module does not trigger the hook and leaves the
+#     live params' sentinel untouched.
 # =========================================================================== #
 def _simulated_fsdp1_post_backward_check(p):
     """Mirror FSDP1's _post_backward_hook -> _check_grad_to_accumulate.
@@ -456,7 +440,7 @@ def _attach_simulated_fsdp1_hooks(module):
 
     Returns the list of hook handles so callers can detach if needed. The
     `_saved_grad_shard` sentinel is initialized to None to mimic "outside the
-    fast-path's backward window" — which is exactly the EXP-8 collision state.
+    fast-path's backward window".
     """
     handles = []
     for _, p in module.named_parameters():
@@ -470,7 +454,7 @@ def _attach_simulated_fsdp1_hooks(module):
 
 
 def _build_anchor_clone(live_module):
-    """EXP-12 fix: deep-clone the underlying nn.Module so the anchor's backward
+    """Deep-clone the underlying nn.Module so the anchor's backward
     does NOT trigger any hook registered on the LIVE params.
 
     Delegates to the canonical helper ``verl.workers.comm_eff.anchor.build_anchor_module``
@@ -483,25 +467,23 @@ def _build_anchor_clone(live_module):
 
 
 def test_fsdp_anchor_backward_no_collision():
-    """EXP-12 criterion 13 — regression test for the EXP-8 FSDP1 collision.
+    """Regression test for the FSDP1 live-hook collision.
 
     (a) Instantiates a small FSDP1-like wrapped module (here: an `nn.Module`
         with post-accumulate-grad hooks simulating FSDP1's
         ``_post_backward_hook``).
-    (b) Runs an anchor-style ``loss.backward()`` through the EXP-12
-        clone-no-hook path.
+    (b) Runs an anchor-style ``loss.backward()`` through the clone-no-hook path.
     (c) Asserts no AttributeError from ``_check_grad_to_accumulate``.
     (d) Asserts ``flat_param._saved_grad_shard`` for live params remains
         undisturbed across the anchor pass.
 
-    Also asserts that the EXP-8 broken path (anchor backward on the LIVE
-    module) DOES raise AttributeError on the simulated hook, so the test
-    actually exercises the failure mode.
+    Also asserts that anchor backward on the LIVE module raises AttributeError
+    on the simulated hook, so the test exercises the failure mode.
     """
     live = _TinyDecoder()
     _attach_simulated_fsdp1_hooks(live)
 
-    # --- (a) EXP-8 broken path: backward on the LIVE module triggers the hook.
+    # --- (a) Backward on the live module triggers the hook.
     # We expect AttributeError to be raised because `_saved_grad_shard is None`.
     with pytest.raises(AttributeError):
         out = live(torch.randn(4, 8))
@@ -513,7 +495,7 @@ def test_fsdp_anchor_backward_no_collision():
         p._saved_grad_shard = None
         p._fsdp1_hook_fired = 0
 
-    # --- (b) EXP-12 fix path: backward on the deep-cloned module fires NO hooks.
+    # --- (b) Backward on the deep-cloned module fires no hooks.
     clone = _build_anchor_clone(live)
 
     # Confirm the clone carries no FSDP1 sentinel/hook (deepcopy copies the
@@ -564,11 +546,10 @@ def test_fsdp_anchor_backward_no_collision():
 
 
 def test_anchor_clone_is_off_optimizer_param_group():
-    """EXP-12 belt-and-braces (next_actions §anchor_optimizer_param_group):
-    the anchor clone's params must NOT appear in any live optimizer's
-    param_groups. This guards criterion 7 (anchor_optimizer_steps == 0)
-    against a future refactor that accidentally shares storage with a live
-    FSDP-handled FlatParameter.
+    """The anchor clone's params must not appear in any live optimizer param_groups.
+
+    This guards ``anchor_optimizer_steps == 0`` against accidental storage
+    sharing with a live FSDP-handled FlatParameter.
     """
     live = _TinyDecoder()
     opt = torch.optim.AdamW(live.parameters(), lr=1e-3)
@@ -579,8 +560,7 @@ def test_anchor_clone_is_off_optimizer_param_group():
             "anchor clone param appears in the live optimizer's param_groups — "
             "criterion 7 at risk (clone must be deep-copied OFF the optimizer)"
         )
-    # Belt-and-braces helper also catches the alias by id() — same path the
-    # engine uses at runtime.
+    # Runtime helper also catches aliasing by id().
     assert_anchor_module_isolated(clone, optimizer=opt, fsdp_module=live)
 
 

@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Asynchronous unmasked anchor circuit (M2, the *second circuit*) — EXP-8.
+"""Asynchronous unmasked anchor circuit.
 
 The anchor circuit produces a CLEAN per-target gradient ``G_anchor`` that the
-spectral filter (EXP-7) consumes into its anchor-gradient EMA ``M_anchor``.
-"Clean" means three things, all of which are load-bearing falsifiers
-(``tests/workers/comm_eff/test_anchor_queue.py`` and the on-box counters):
+spectral filter consumes into its anchor-gradient EMA ``M_anchor``. "Clean"
+means three things:
 
 * **Same loss as the fast path, UNMASKED.** The anchor reuses the GRPO
   actor-loss over the rollout-expanded batch (``responses``, ``response_mask``,
   ``old_log_probs``, ``advantages``, optional ``ref_log_prob``) — exactly the
   fast path's ``ppo_loss`` — but with the activation masker DISABLED even though
-  it runs on the actor-train path (GUARD 5: ``mask_active=False`` ⇒
+  it runs on the actor-train path (``mask_active=False`` ⇒
   ``anchor_mask_applications == 0``). It is NOT a supervised next-token loss; it
   does NOT generate rollouts; it does NOT recompute rewards.
 
@@ -34,7 +33,7 @@ spectral filter (EXP-7) consumes into its anchor-gradient EMA ``M_anchor``.
 
 * **Raw gradient into the EMA, before any correction.** ``G_anchor`` is read
   RAW per target and fed to ``SpectralFilter.update_anchor`` BEFORE any
-  ``correct_matrix`` call (GUARD 6: ``anchor_grad_corrected == 0``). The anchor
+  ``correct_matrix`` call (``anchor_grad_corrected == 0``). The anchor
   gradient is never the input to the spectral projection.
 
 This module owns the FSDP-AGNOSTIC pieces so they are unit-testable on CPU with
@@ -82,7 +81,7 @@ __all__ = [
 
 
 def _canon(name: str) -> str:
-    """Strip the FSDP per-layer-wrap infix from a parameter name (EXP-18).
+    """Strip the FSDP per-layer-wrap infix from a parameter name.
 
     Mirrors ``spectral_filter._canon`` (kept local so this CPU-testable module
     has no cross-module import dependency). When ``build_anchor_module`` falls
@@ -105,7 +104,7 @@ def anchor_should_fire(step: int, cadence: int, enabled: bool) -> bool:
     Pure predicate (no side effects) so the cadence policy is unit-testable.
     ``step`` is 1-based (the engine advances it before the check). The anchor
     fires when ``enabled`` and ``(step % cadence) == 0`` — so ``cadence=1`` fires
-    every step (smoke), ``cadence=20`` fires on steps 20, 40, ... (paper).
+    every step and ``cadence=20`` fires on steps 20, 40, ...
     """
     if not enabled or cadence < 1:
         return False
@@ -113,7 +112,7 @@ def anchor_should_fire(step: int, cadence: int, enabled: bool) -> bool:
 
 
 def anchor_pg_loss(config, model_output, data, dp_group=None):
-    """CLEAN policy-gradient loss for the anchor pass (EXP-18 / M4 candidate C4).
+    """CLEAN policy-gradient loss for the anchor pass.
 
     **Why this replaces the fast-path ``ppo_loss`` for the anchor refresh.**
     The anchor circuit does ONE forward/backward per refresh, so the PPO
@@ -122,9 +121,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     the MASKED fast path, while the anchor re-forwards UNMASKED at the
     ``delay_K``-stale weights. That mismatch drives the ratio away from 1, the
     PPO clip then mangles the per-token loss, and the resulting ``G_anchor`` is
-    NOT the clean unmasked policy gradient the M4 method assumes ``M_anchor`` to
-    be. C1/C2/C3 all tested that corrupted signal and degraded the policy
-    (reward → 0). See ``runs/EXP-18/candidate-04-C4-cleangrad-spec.md``.
+    NOT the clean unmasked policy gradient that ``M_anchor`` should represent.
 
     **What this computes instead — the clean true gradient at θ_{t-K}.**
     With ratio ≡ 1 (no ``old_log_probs``, no clip), ``compute_policy_loss_vanilla``
@@ -156,8 +153,8 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
 
     Returns:
         ``(loss, metrics)`` — ``metrics`` carries ``actor/anchor_pg_loss`` plus
-        ``actor/anchor_ratio_mean`` (≡ 1.0 by construction, the on-box
-        ratio-corruption falsifier) under MEAN aggregation.
+        ``actor/anchor_ratio_mean`` (≡ 1.0 by construction) under MEAN
+        aggregation.
     """
     # Lazy imports: keep module import cheap + CPU-testable; the engine path and
     # the CPU tests both have these available.
@@ -199,8 +196,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
 
     metrics = {
         "actor/anchor_pg_loss": Metric(value=pg_loss, aggregation=metric_aggregation),
-        # ratio is identically 1 here (no old_log_probs / no clip); surfaced so
-        # the on-box log can confirm the ratio-corruption is gone (the C4 check).
+        # ratio is identically 1 here (no old_log_probs / no clip).
         "actor/anchor_ratio_mean": Metric(value=1.0, aggregation=AggregationType.MEAN),
     }
     return pg_loss, metrics
@@ -269,7 +265,7 @@ def snapshot_named_params(
 ) -> dict:
     """Detached clones of the model's named parameters (the anchor snapshot).
 
-    CRITICAL (criterion 7): the returned tensors are plain detached clones that
+    The returned tensors are plain detached clones that
     the optimizer NEVER sees — they are not registered in any param group, so no
     optimizer step can be taken on them. The anchor restores these into the live
     module for its forward, runs backward to populate ``.grad`` on the LIVE
@@ -313,8 +309,8 @@ def extract_target_grads(
     This mirrors the iteration/selection of the spectral hook's
     ``apply_spectral_correction_to_params`` — same target substrings, same 2D
     filter, same ``max_targets`` cap — but applies NO correction: it returns the
-    raw full 2D gradients exactly as backward produced them. This is the GUARD-6
-    seam: the engine feeds these straight into ``SpectralFilter.update_anchor``
+    raw full 2D gradients exactly as backward produced them. The engine feeds
+    these straight into ``SpectralFilter.update_anchor``
     (the EMA) before any ``correct_matrix`` is ever called on the fast path.
 
     Args:
@@ -350,19 +346,18 @@ def extract_target_grads(
 
 
 def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
-    """EXP-12 fix — return a deep-cloned ``nn.Module`` for the anchor's backward
-    that is **fully detached from any FSDP wrapping / post-backward hooks**
+    """Return a deep-cloned ``nn.Module`` for the anchor's backward that is
+    **fully detached from any FSDP wrapping / post-backward hooks**
     registered on the live actor module.
 
-    Why this exists (the EXP-8 collision):
-        EXP-8 ran the anchor's ``loss.backward()`` on the FSDP1-wrapped actor.
+    Why this exists:
         FSDP1's ``_post_backward_hook`` calls
         ``_check_grad_to_accumulate(sharded_grad, flat_param._saved_grad_shard)``
         on the registered ``FlatParameter``s. ``_saved_grad_shard`` is only set
         up between the fast-path's pre-backward and the optimizer step, so the
         anchor backward (outside that window) hit
         ``AttributeError: 'NoneType' object has no attribute 'shape'``. The fix
-        is to break the autograd-hook chain entirely — the anchor pass must NOT
+        fix is to break the autograd-hook chain entirely — the anchor pass must NOT
         be allowed to fire any hook registered on the live FSDP params.
 
     Mechanism:
@@ -400,11 +395,9 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
     try:
         clone = copy.deepcopy(inner_module)
     except TypeError as exc:
-        # EXP-12 iter02: verl/HF monkey-patches install function attributes
-        # holding Python module references on the model class, which are not
-        # picklable. deepcopy uses pickle reductors, so it fails. Fall back
-        # to config-rebuild + state_dict load: structurally identical clone,
-        # no monkey-patched closures travel through the rebuild.
+        # verl/HF monkey-patches can install function attributes holding Python
+        # module references on the model class, which are not picklable. Fall
+        # back to config-rebuild + state_dict load.
         if "cannot pickle" not in str(exc):
             raise
         cfg = getattr(inner_module, "config", None)
@@ -420,13 +413,9 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
         # currently un-sharded; state_dict() returns full logical tensors.
         # strict=False guards against monkey-patched buffers that may not
         # be present on the freshly-instantiated clone.
-        # EXP-12 iter03: state_dict() under FSDP1+use_orig_params returns DTensor
-        # entries (even inside summon_full_params), but the freshly-instantiated
-        # clone has plain torch.Tensor params. load_state_dict()'s copy_ guard
-        # rejects mixed DTensor/Tensor combos with
-        # "aten.copy_.default got mixed torch.Tensor and DTensor". Bypass
-        # load_state_dict and copy each param/buffer manually with DTensor->
-        # plain-Tensor materialization via .full_tensor() / .to_local().
+        # FSDP1+use_orig_params may return DTensor entries even inside
+        # summon_full_params, while the rebuilt clone has plain Tensor params.
+        # Copy each param/buffer manually after DTensor -> Tensor materialization.
         import torch as _torch
         def _to_plain(t):
             # DTensor -> full unsharded plain Tensor (works inside summon).
@@ -441,7 +430,7 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
                 except Exception:
                     pass
             return t
-        # EXP-18: match by canonical (FSDP-infix-stripped) key. The rebuilt clone
+        # Match by canonical (FSDP-infix-stripped) key. The rebuilt clone
         # has NON-infixed names; the live inner_module's summoned names may carry
         # the `._fsdp_wrapped_module.` infix (per-layer wrapping). A raw `n in
         # src_params` lookup then misses for every layer and the clone keeps its
@@ -486,12 +475,10 @@ def assert_anchor_module_isolated(
 ) -> None:
     """Sanity-assert the anchor clone is fully off the live optimizer and FSDP.
 
-    Belt-and-braces (next_actions §anchor_optimizer_param_group + EXP-12
-    criterion 13): the clone's parameters must NOT appear in any optimizer
-    param_group (criterion 7) and must NOT be registered with any FSDP
-    ``_handles`` / ``_fsdp_wrapped_module`` instance on the live actor
-    (criterion 13). Cheap to run; called from
-    ``_maybe_comm_eff_anchor_refresh`` once per refresh as a runtime guard.
+    The clone's parameters must NOT appear in any optimizer param_group and must
+    NOT be registered with any FSDP ``_handles`` / ``_fsdp_wrapped_module``
+    instance on the live actor. Cheap to run; called from
+    ``_maybe_comm_eff_anchor_refresh`` once per refresh.
 
     Raises:
         AssertionError if any clone param aliases or shares ``id()`` with a
@@ -521,12 +508,11 @@ def assert_anchor_module_isolated(
 def feed_anchor_grads_into_ema(grads: dict, spectral, *, state=None) -> dict:
     """Feed RAW ``{name: G_anchor}`` into the spectral filter's anchor EMA.
 
-    GUARD 6: this calls ``spectral.update_anchor`` (the RAW EMA blend
+    This calls ``spectral.update_anchor`` (the RAW EMA blend
     ``M_anchor <- beta*M_anchor + (1-beta)*G_anchor``) — NEVER ``correct_matrix``
     — so the anchor gradient is never spectrally corrected. Returns
     ``{name: ||ΔM_anchor||}`` (Frobenius norm of the EMA change this refresh) so
-    the engine can log EMA evolution (``||ΔM_anchor|| > 0`` across >= 2
-    refreshes is the criterion-3 falsifier).
+    the engine can log EMA evolution.
 
     If ``state`` is given, ``state.anchor_grad_corrected`` is left untouched by
     this function by design — it stays 0 unless a corrected tensor is

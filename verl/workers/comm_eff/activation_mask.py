@@ -266,8 +266,8 @@ class ActivationMasker:
         # Last-measured masked fraction per boundary (comm_eff/mask_ratio).
         self.last_mask_ratio: dict[int, float] = {}
         # Hidden size H, recorded on first fire. Used to surface the PRF logical
-        # PP byte budget (kept coords/token = (1-p)*H) so the EXP-20 analyst can
-        # assert budget equality against PowerSGD's n*r. None until a mask fires.
+        # PP byte budget (kept coords/token = (1-p)*H) for comparison against
+        # PowerSGD's n*r. None until a mask fires.
         self.hidden_size: Optional[int] = None
 
     def set_context(

@@ -21,11 +21,8 @@ in which case the integration hooks in the actor train path are strict no-ops
 (see ``verl.workers.comm_eff.state`` and the guards in ``engine_workers``,
 ``engine/base`` and ``engine/fsdp/transformer_impl``).
 
-The nested sub-configs (mask / anchor / spectral) are declared here so the
-Hydra schema is validated up front (typos in ``comm_eff.mask.*`` etc. are
-rejected by OmegaConf's structured-config merge), but they carry no behavior
-while ``enabled=false``. They are consumed only by later M2 work that flips
-``enabled=true``.
+The nested sub-configs validate the Hydra schema up front, but carry no
+behavior while ``enabled=false``.
 """
 
 from dataclasses import dataclass, field
@@ -43,8 +40,8 @@ __all__ = [
 # The compression codecs ``comm_eff.compression_type`` may select. Exactly one
 # codec is active per run (mutually exclusive). ``dense`` is the byte-identical
 # off-path (equivalent to ``comm_eff.enabled=false`` for the activation path);
-# ``prf_mask`` is the EXP-5..EXP-18 per-(token,dim) PRF Bernoulli mask;
-# ``powersgd`` (EXP-20/M6) is the shared frozen-basis PowerSGD-style projector
+# ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask; ``powersgd`` is the
+# shared frozen-basis PowerSGD-style projector
 # ``M_hat = (M @ Q) @ Qᵀ`` at the same logical PP byte budget.
 COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd")
 
@@ -94,26 +91,21 @@ class CommEffMaskConfig(BaseConfig):
 class CommEffAnchorConfig(BaseConfig):
     """Asynchronous unmasked-anchor-circuit sub-config (inert while disabled).
 
-    The anchor circuit (EXP-8) runs, every ``cadence`` trainer steps, ONE
-    unmasked GRPO-actor-loss forward/backward from a ``delay_K``-stale weight
-    snapshot to produce a clean per-target gradient ``G_anchor``. ``G_anchor`` is
-    read RAW (before any spectral correction) into the anchor-gradient EMA
-    ``M_anchor`` — whose decay is ``spectral.beta_anc`` (the EMA is owned by the
-    spectral filter, NOT a separate anchor knob; that is why the EXP-4 scaffold's
-    ``ema_decay`` is dropped here). The anchor takes NO optimizer step and
-    generates NO rollouts / recomputes NO rewards.
+    Every ``cadence`` trainer steps, the anchor circuit runs one unmasked
+    GRPO-actor-loss forward/backward from a ``delay_K``-stale weight snapshot to
+    produce a clean per-target gradient ``G_anchor``. ``G_anchor`` is read RAW
+    into the spectral filter's EMA ``M_anchor``. The anchor takes NO optimizer
+    step and generates NO rollouts / recomputes NO rewards.
 
     Args:
         enabled (bool): Whether the anchor circuit runs. Gated by the parent
             ``comm_eff.enabled`` regardless of this value. ``false`` (default) is
             a strict no-op — opt-in only.
-        cadence (int): Anchor-refresh cadence in trainer steps (paper ``K``). The
-            anchor fires when ``(step % cadence) == 0``. Smoke uses ``1`` (fire
-            every step); the paper default is ``20``. Must be ``>= 1``.
+        cadence (int): Anchor-refresh cadence in trainer steps. The anchor fires
+            when ``(step % cadence) == 0``. Must be ``>= 1``.
         delay_K (int): Staleness of the weight snapshot the anchor forwards
             from, in trainer steps. ``0`` = current weights; ``1`` = the prior
-            step's weights (smoke). Must be ``>= 0``. Replaces the EXP-4 scaffold
-            field ``every_n_steps`` (which was never consumed).
+            step's weights. Must be ``>= 0``.
     """
 
     enabled: bool = False
@@ -125,10 +117,9 @@ class CommEffAnchorConfig(BaseConfig):
 class CommEffSpectralConfig(BaseConfig):
     """Spectral-correction sub-config (inert while disabled).
 
-    Implements the M2 paper formula (anchor-EMA -> full thin SVD -> Tikhonov
-    spectral weights -> two-sided projection -> alpha blend) applied to the
-    gradients of selected 2D decoder matrices after the actor backward and
-    before ``optimizer.step()``. See
+    Implements the anchor-EMA -> SVD -> Tikhonov weights -> two-sided projection
+    -> alpha blend applied to selected 2D decoder gradients after the actor
+    backward and before ``optimizer.step()``. See
     ``verl.workers.comm_eff.spectral_filter.SpectralFilter``.
 
     The formula (per targeted 2D matrix ``G_mask`` with anchor-EMA ``M_anchor``)::
@@ -149,10 +140,10 @@ class CommEffSpectralConfig(BaseConfig):
         enabled (bool): Whether spectral correction of masked gradients runs.
             Gated by the parent ``comm_eff.enabled`` regardless of this value.
             ``false`` (default) ⇒ the grad-correction hook is a strict no-op and
-            the actor path is identical to EXP-5 / dense GRPO.
+            the actor path is identical to dense GRPO.
         alpha (float): Blend coefficient in ``[0, 1]``: ``alpha * G_mask +
             (1 - alpha) * G_filt``. ``1.0`` ⇒ no-op; ``0.0`` ⇒ pure projection.
-            Default ``0.3`` (the EXP-7 operating point).
+            Default ``0.3``.
         tau (float): Tikhonov damping added to each singular value before
             forming the spectral weight ``d_i = s_i / (s_i + tau)``. Default
             ``1e-3``.
@@ -160,9 +151,8 @@ class CommEffSpectralConfig(BaseConfig):
             ``M_anchor``. Default ``0.95``.
         seed_anchor_cache (bool): When ``true``, populate ``M_anchor`` with a
             fixed deterministic PSD basis (seeded) so the filter runs without
-            the (not-yet-built, EXP-8) live anchor circuit. The EXP-7 discovery
-            smoke uses this. When ``false`` the anchor EMA starts empty and is
-            populated by the live anchor circuit.
+            a live anchor refresh. When ``false`` the anchor EMA starts empty
+            and is populated by the live anchor circuit.
         anchor_seed (int): Base seed for the deterministic anchor cache.
         target_substr (list[str]): Substrings used to SELECT which named 2D
             parameters receive correction. A parameter is targeted iff its name
@@ -191,17 +181,16 @@ class CommEffSpectralConfig(BaseConfig):
             refresh and reused across the fast PPO mini-batches — ``"cache"``
             (default, faithful: compute at refresh, store on GPU, reuse) or
             ``"recompute"`` (memory-lean inverse: recompute the SVD on every
-            ``correct_matrix`` as the pre-EXP-8 code did). The basis is touched
-            every fast mini-batch, so it stays on-GPU during the refresh window
+            ``correct_matrix``). The basis is touched every fast mini-batch, so
+            it stays on-GPU during the refresh window
             regardless. Validated against {cache, recompute}.
-        cadence (int): EXP-16 spectral-correction cadence in optimizer steps.
+        cadence (int): Spectral-correction cadence in optimizer steps.
             The grad-correction hook (``_maybe_comm_eff_grad_correction``) fires
             only when ``(spectral_step % cadence) == 0`` on the monotonic
             per-optimizer-step counter, MIRRORING the anchor cadence
             (``anchor_should_fire``) and the clean-step cadence
             (``CommEffState.is_clean_step``). ``1`` (default) fires EVERY step =
-            the pre-EXP-16 behavior, so every prior method config and the
-            disabled path are a STRICT no-op. Set ``> 1`` (e.g. ``2``) to align
+            the default behavior. Set ``> 1`` (e.g. ``2``) to align
             spectral correction with a matching ``anchor.cadence`` so the
             correction always uses a freshly-refreshed anchor basis instead of a
             stale one on the in-between steps. Must be ``>= 1``.
@@ -228,33 +217,24 @@ class CommEffSpectralConfig(BaseConfig):
     max_targets: int = 4
     rank: int = 8
     damping: float = 1e-6
-    # EXP-8 config-driven EMA/SVD storage layer. Defaults stay FAITHFUL
-    # (gpu/full/cache) so cell 1 and the EXP-7 contract are numerically unchanged.
+    # EMA/SVD storage defaults: keep tensors on GPU, use full SVD, and cache the
+    # basis per refresh.
     ema_device: str = "gpu"
     svd_mode: str = "full"
     basis_cache: str = "cache"
-    # EXP-18/M4: correction mode. "reweight" (default) = the as-implemented
-    # two-sided Tikhonov reweighting of G_mask (byte-identical to every prior
-    # config). "inject" = ADD the scale-matched complement of the stale anchor
-    # EMA M_anchor (supply the missing true-gradient component; C1). "blend" =
-    # REPLACE via a convex blend G_corr=(1-eta)*G_mask + eta*scale*M_anchor with
-    # scale=||G_mask||/||M_anchor|| (C2 — steer toward the stale true gradient at
-    # a stable magnitude; fixes C1's sqrt(2) blow-up).
+    # Correction mode. "reweight" applies two-sided Tikhonov reweighting.
+    # "inject" adds a scale-matched anchor-EMA complement. "blend" uses
+    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor.
     correction_mode: str = "reweight"
-    # EXP-18/M4: injection strength for correction_mode="inject" (force along the
-    # stale true-gradient direction, scale-matched to ||G_mask||). Unused under
-    # "reweight"/"blend". >= 0.
+    # Injection strength for correction_mode="inject"; unused otherwise.
     inject_gamma: float = 1.0
-    # EXP-18/M4 C2: convex-blend weight for correction_mode="blend":
-    # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor. 0 => pure G_mask
-    # (floor), 1 => scale-matched stale true gradient. Unused under
-    # "reweight"/"inject". Validated to [0, 1].
+    # Convex-blend weight for correction_mode="blend"; validated to [0, 1].
     blend_eta: float = 0.5
 
 
 @dataclass
 class CommEffPowerSGDConfig(BaseConfig):
-    """PowerSGD-style pipeline-boundary activation-compression sub-config (EXP-20/M6).
+    """PowerSGD-style pipeline-boundary activation-compression sub-config.
 
     The codec replaces each boundary block's hidden-state output ``M`` (shape
     ``(N, H)`` — ``N`` packed tokens × ``H`` hidden dims) with its rank-``r``
@@ -268,27 +248,23 @@ class CommEffPowerSGDConfig(BaseConfig):
     — the **identical logical PP byte budget as the PRF mask at ``p = 1 − r/H``**
     (``r=102 ≡ p=0.95`` at ``H=2048``). Because ``Q`` is detached and ``M`` stays
     in-graph, the backward is the exact self-adjoint projector
-    ``dL/dM = (dL/dM_hat) · Q Qᵀ`` with no straight-through estimator (INF-9,
-    Part III.7).
+    ``dL/dM = (dL/dM_hat) · Q Qᵀ`` with no straight-through estimator.
 
     The basis is bootstrapped with **zero communication** from a deterministic
     per-layer seed ``seed_L = (base_seed·1_000_003 + layer_idx·7919) & 0x7FFFFFFF``
-    (INF-13) — ``Q_L = orth(randn(H, r))`` in fp32, identical on every rank — and
-    refined by block power iteration: on compressed *train* forwards we
+    in fp32, identical on every rank, and refined by block power iteration: on
+    compressed *train* forwards we
     accumulate, OFF the autograd graph, ``V += Mᵀ (M Q)`` (one sketch per
     boundary forward), then once at end-of-actor-update (when not a clean step
     and ``global_step % update_cadence == 0``) set ``Q ← orth(V)`` in fp32 and
-    clear ``V`` (Part III.7). ``Q`` is **frozen for the entire global step** — the
+    clear ``V``. ``Q`` is **frozen for the entire global step** — the
     old-logprob recompute and the actor-train forward both see ``Q_t``; the
     update to ``Q_{t+1}`` happens only after the gradient-bearing actor work, so
-    the GRPO importance ratio ``ρ ≈ 1`` at step 0 with no weight change (INF-17,
-    Part V.3).
+    the GRPO importance ratio starts near 1 with no weight change.
 
     Inert unless ``comm_eff.enabled=true`` AND ``comm_eff.compression_type ==
     "powersgd"``. Every key is registered regardless of ``compression_type`` so a
-    ``prf_mask`` run that passes ``comm_eff.powersgd.rank=...`` still parses (the
-    structured-config "unknown key rejected regardless of enabled flag" gotcha
-    that bit ``clean_cadence``).
+    ``prf_mask`` run that passes ``comm_eff.powersgd.rank=...`` still parses.
 
     Args:
         enabled (bool): Sub-switch; gated by the parent ``comm_eff.enabled`` AND
@@ -297,11 +273,10 @@ class CommEffPowerSGDConfig(BaseConfig):
             gates remain the real master switches.
         rank (int): Retained projection rank ``r``. ``r=102`` matches the PRF
             mask at ``p=0.95`` (``q·H = 0.05·2048 = 102.4``). Must be ``>= 1``.
-            ``r == H`` (=2048) is the lossless limiting case ``M_hat = M`` used
-            by the correctness probe (INF-18).
+            ``r == H`` is the lossless limiting case ``M_hat = M``.
         seed (int): Base seed for the deterministic per-layer basis bootstrap
-            (folded with ``layer_idx`` via the INF-13 mixing constants). Identical
-            on every rank ⇒ zero-communication codebook init.
+            folded with ``layer_idx``. Identical on every rank ⇒
+            zero-communication codebook init.
         pp_size (int): Logical pipeline-shard count; the same boundary-block
             selection as the PRF mask (last block of every shard except the
             final). ``L=16, pp_size=8 -> [1,3,5,7,9,11,13]``. Must be ``>= 1``.
@@ -326,17 +301,16 @@ class CommEffPowerSGDConfig(BaseConfig):
             after the first update. ``True`` all-reduces the raw sketches over the
             DP group before ``orth`` so every rank orthonormalizes the SAME pooled
             ``V_global = Σ_ranks V`` → a bit-identical consensus ``Q`` on every
-            rank, differing only per boundary (the operator's "single shared
-            codebook, identical across ranks" intent; hard-invariant #4). The
-            collective is made deadlock-safe by iterating the fixed
+            rank, differing only per boundary. The collective is made
+            deadlock-safe by iterating the fixed
             ``boundary_indices`` on every rank. ``False`` (diagnostic only) keeps
             each rank's basis local — only correct if every rank sees identical
             data, which DP does not.
         qr_dtype (str): Dtype for the orthonormalization (``orth``/QR) and the
             stored basis math — ``"fp32"`` (default, REQUIRED for correctness:
             bf16-QR loses orthogonality, drifts ``QᵀQ`` from ``I``, and is a
-            frequent NaN / ``q_cond`` source — INF-14) or ``"bf16"`` (diagnostic
-            only, expected to degrade). The projection itself runs in the
+            frequent NaN / ``q_cond`` source) or ``"bf16"`` (diagnostic only,
+            expected to degrade). The projection itself runs in the
             activation dtype regardless; only the QR/orth + ``V`` accumulation are
             in ``qr_dtype``.
         reortho_eps (float): Floor added under the QR when forming the basis, and
@@ -379,22 +353,21 @@ class CommEffConfig(BaseConfig):
         enabled (bool): Master switch. ``false`` (default) makes every comm_eff
             hook a no-op. Must be set ``true`` explicitly to activate any
             circuit.
-        compression_type (str): EXP-20/M6 codec selector, one of
+        compression_type (str): Codec selector, one of
             ``{dense, prf_mask, powersgd}`` (mutually exclusive per run).
             ``dense`` (default) = no activation compression. ``prf_mask`` = the
             existing PRF mask. ``powersgd`` = the shared frozen-basis projector.
             For back-compat the legacy ``mask.enabled`` path still selects the
             mask when ``compression_type`` is left at its ``dense`` default, so
-            every pre-EXP-20 config behaves unchanged; an explicit
+            older mask configs behave unchanged; an explicit
             ``compression_type=powersgd`` selects the PowerSGD codec.
         mask (CommEffMaskConfig): Pipeline activation-masking sub-config.
         anchor (CommEffAnchorConfig): Asynchronous anchor-circuit sub-config.
         spectral (CommEffSpectralConfig): Spectral-correction sub-config.
-        powersgd (CommEffPowerSGDConfig): EXP-20 PowerSGD activation-compression
+        powersgd (CommEffPowerSGDConfig): PowerSGD activation-compression
             sub-config.
-        clean_cadence (int): EXP-14 periodic clean (unmasked) optimizer-step
-            cadence, in trainer steps. ``0`` (default) = off, so the disabled
-            path AND every pre-EXP-14 method config stay a strict no-op. When
+        clean_cadence (int): Periodic clean (unmasked) optimizer-step cadence,
+            in trainer steps. ``0`` (default) = off. When
             ``> 0``, the trainer step ``s`` runs **entirely unmasked** whenever
             ``(s % clean_cadence) == 0`` — both gradient-feeding forwards (the
             ``compute_log_prob`` old-logprob recompute AND the actor-train
@@ -412,18 +385,15 @@ class CommEffConfig(BaseConfig):
     """
 
     enabled: bool = False
-    # EXP-20/M6 codec selector. Exactly one boundary codec is active per run:
+    # Codec selector. Exactly one boundary codec is active per run:
     #   "dense"    -> no activation compression (the boundary forward is
     #                 byte-identical to dense; equivalent to the activation path
-    #                 of enabled=false). The DEFAULT, so every pre-EXP-20 config
-    #                 and the disabled path keep their exact behavior — a
-    #                 mask-circuit run is selected by mask.enabled, NOT by this
-    #                 field, for back-compat (see __post_init__).
-    #   "prf_mask" -> the EXP-5..EXP-18 per-(token,dim) PRF Bernoulli mask.
-    #   "powersgd" -> the EXP-20 shared frozen-basis projector M_hat=(M@Q)@Qᵀ.
-    # Registered (with the powersgd block) regardless of value so a prf_mask run
-    # that passes comm_eff.powersgd.rank=... still parses (the clean_cadence
-    # struct-mode gotcha).
+    #                 of enabled=false). A legacy mask-circuit run is selected
+    #                 by mask.enabled, NOT by this field, for back-compat.
+    #   "prf_mask" -> the per-(token, dim) PRF Bernoulli mask.
+    #   "powersgd" -> the shared frozen-basis projector M_hat=(M@Q)@Qᵀ.
+    # Registered with the powersgd block regardless of value so a prf_mask run
+    # that passes comm_eff.powersgd.rank=... still parses.
     compression_type: str = "dense"
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
@@ -441,7 +411,7 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.p must be in [0, 1]; got {self.mask.p}")
         if self.mask.pp_size < 1:
             raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
-        # EXP-9: mask_recompute is a strict bool. Validation here turns a YAML
+        # mask_recompute is a strict bool. Validation here turns a YAML
         # typo ("False" string) or a numeric override into a loud error instead
         # of a silent truthy/falsy surprise that would mis-route masking.
         if not isinstance(self.mask.mask_recompute, bool):
@@ -470,18 +440,16 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.spectral.tau must be > 0; got {self.spectral.tau}")
         if not 0.0 <= self.spectral.beta_anc <= 1.0:
             raise ValueError(f"comm_eff.spectral.beta_anc must be in [0, 1]; got {self.spectral.beta_anc}")
-        # EXP-16 spectral-correction cadence. 1 = fire every step (the pre-EXP-16
-        # behavior, so every prior config and the disabled path stay a strict
-        # no-op). A value < 1 is a config error (it would never fire), not a
-        # silent disable — mirrors the anchor.cadence >= 1 contract above.
+        # Spectral-correction cadence. 1 = fire every step. A value < 1 is a
+        # config error, not a silent disable; mirrors anchor.cadence >= 1.
         if self.spectral.cadence < 1:
             raise ValueError(f"comm_eff.spectral.cadence must be >= 1; got {self.spectral.cadence}")
-        # EXP-8 anchor cadence/staleness (replaces the unused EXP-4 ema_decay).
+        # Anchor cadence/staleness.
         if self.anchor.cadence < 1:
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
         if self.anchor.delay_K < 0:
             raise ValueError(f"comm_eff.anchor.delay_K must be >= 0; got {self.anchor.delay_K}")
-        # EXP-8 storage-layer enums (faithful defaults: gpu/full/cache).
+        # Storage-layer enums.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")
         if self.spectral.svd_mode not in ("full", "lowrank"):
@@ -497,16 +465,15 @@ class CommEffConfig(BaseConfig):
             )
         if self.spectral.inject_gamma < 0.0:
             raise ValueError(f"comm_eff.spectral.inject_gamma must be >= 0; got {self.spectral.inject_gamma}")
-        # EXP-18/M4 C2 convex-blend weight. [0, 1]: 0 => pure G_mask, 1 =>
+        # Convex-blend weight. [0, 1]: 0 => pure G_mask, 1 =>
         # scale-matched stale true gradient. Unused unless correction_mode=blend.
         if not 0.0 <= self.spectral.blend_eta <= 1.0:
             raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
-        # EXP-14 periodic clean-step cadence. 0 = off (strict no-op for the
-        # disabled path and every pre-EXP-14 config). A negative value is a
-        # config error, not a silent disable.
+        # Periodic clean-step cadence. 0 = off. A negative value is a config
+        # error, not a silent disable.
         if self.clean_cadence < 0:
             raise ValueError(f"comm_eff.clean_cadence must be >= 0; got {self.clean_cadence}")
-        # EXP-20/M6 codec selector. Validated to the closed enum so a typo
+        # Codec selector. Validated to the closed enum so a typo
         # (compression_type=powerSGD / powergsd) is a loud error, not a silent
         # fall-through to dense.
         if self.compression_type not in COMPRESSION_TYPES:
@@ -514,7 +481,7 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.compression_type must be one of {COMPRESSION_TYPES}; "
                 f"got {self.compression_type!r}"
             )
-        # EXP-20/M6 PowerSGD block. Validated unconditionally (the keys are
+        # PowerSGD block. Validated unconditionally (the keys are
         # registered regardless of compression_type) so a prf_mask run that
         # forwards comm_eff.powersgd.* args still fails fast on a bad value.
         if self.powersgd.rank < 1:
