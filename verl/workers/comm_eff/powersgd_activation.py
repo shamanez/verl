@@ -124,7 +124,9 @@ def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
         gen = torch.Generator(device="cpu").manual_seed((H * 1_000_003 + r) & _MASK31)
         rand = torch.randn(H, r, generator=gen, dtype=torch.float32)
         q_fix, _ = torch.linalg.qr(rand, mode="reduced")
-        q = torch.where(bad.unsqueeze(0), q_fix, q)
+        # q lives on the compute device; q_fix is built on CPU for a deterministic
+        # repair. Move the repair basis only when selecting degenerate columns.
+        q = torch.where(bad.unsqueeze(0), q_fix.to(q.device), q)
     return q
 
 

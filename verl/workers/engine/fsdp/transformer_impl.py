@@ -1259,7 +1259,9 @@ class FSDPEngine(BaseEngine):
             f"warmup_fallback={_used_step != _req_step}",
             flush=True,
         )
-        if int(step) >= int(delay_K):
+        # Step numbers are 1-based, so the t-delay_K snapshot is only available
+        # after step == delay_K. At equality the requested step would be 0.
+        if int(step) > int(delay_K):
             assert _used_step == _req_step, (
                 f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
                 f"snapshot step={_req_step} (delay_K={delay_K}) but used step={_used_step} "
