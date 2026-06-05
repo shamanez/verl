@@ -905,12 +905,17 @@ class FSDPEngine(BaseEngine):
         the true full-batch token-mean gradient. all-reduce-SUM would over-count by
         ``dp_size`` and silently inflate ``sign(M)`` magnitude bookkeeping.
 
-        **Collective safety (deadlock guard).** Walk a FIXED ``sorted(keys)`` order
-        and contribute a correctly-shaped ZERO for any target a rank lacks, so
-        every rank issues the IDENTICAL collective sequence (mirrors the PowerSGD
-        sketch-sync discipline). The clone arch + target_substrs are identical
-        across ranks and the DP shards are symmetric, so the key set is identical
-        by construction; the zero-fill is belt-and-braces against any future asym.
+        **Collective safety (deadlock guard).** Build the GLOBAL union of target
+        names via ``all_gather_object`` over the DP group, walk it in FIXED sorted
+        order, and contribute a correctly-shaped ZERO for any target a rank lacks,
+        so every rank issues the IDENTICAL collective sequence (mirrors the
+        PowerSGD sketch-sync discipline). The clone arch + target_substrs are
+        identical across ranks and the DP shards are symmetric, so the union ==
+        every rank's local set by construction (the coverage assert enforces
+        set-equality at full coverage) and this adds no values on the normal path;
+        the union + zero-fill is the genuine deadlock guard the plan's (R1 pt-5)
+        collective-safety invariant requires, not merely a comment — it makes the
+        sequence symmetric even if a rank were pathologically missing a target.
 
         Reduces on the GRAD's device (GPU) regardless of the EMA storage device
         (cpu) — the EMA feed moves it to the storage device afterward. Logs each
@@ -928,20 +933,44 @@ class FSDPEngine(BaseEngine):
             dp_world = 1
         if dp_world <= 1:
             return anchor_grads
-        # FIXED sorted order so every rank issues the same collective sequence.
-        names = sorted(anchor_grads.keys())
+        # Cross-rank UNION of target names (collective-safety). All-gather each
+        # rank's {name: (shape, dtype)} so every rank walks the IDENTICAL sorted
+        # target list and contributes a correctly-shaped ZERO for any target it
+        # lacks. Normally the union == this rank's local set (identical by
+        # construction), so this is a no-op on values; it only guarantees the
+        # collective sequence can never go asymmetric (deadlock guard).
+        local_meta = {name: (tuple(g.shape), g.dtype) for name, g in anchor_grads.items()}
+        gathered_meta: list = [None] * dp_world
+        torch.distributed.all_gather_object(gathered_meta, local_meta, group=group)
+        union_meta: dict = {}
+        for meta in gathered_meta:
+            if not meta:
+                continue
+            for name, shape_dtype in meta.items():
+                union_meta.setdefault(name, shape_dtype)
+        # Reference device for zero-fill: a local grad's device, else the current GPU.
+        ref_device = next(iter(anchor_grads.values())).device if anchor_grads else get_device_id()
+        # FIXED sorted order over the UNION so every rank issues the same sequence.
+        names = sorted(union_meta.keys())
         norm_pre = {}
         norm_post = {}
         for name in names:
-            g = anchor_grads[name]
-            gd = g.to(torch.float32)
+            if name in anchor_grads:
+                g = anchor_grads[name]
+                gd = g.to(torch.float32)
+                out_dtype = g.dtype
+            else:
+                # Target absent on this rank — contribute a correctly-shaped ZERO so
+                # the all_reduce stays symmetric (cannot happen on the normal path).
+                shape, out_dtype = union_meta[name]
+                gd = torch.zeros(shape, dtype=torch.float32, device=ref_device)
             norm_pre[name] = float(torch.linalg.norm(gd).item())
             # all-reduce(SUM) then divide by dp_world == MEAN. (ReduceOp.AVG is not
             # available on every backend; SUM+/dp_world is portable + exact.)
             torch.distributed.all_reduce(gd, op=torch.distributed.ReduceOp.SUM, group=group)
             gd /= float(dp_world)
             norm_post[name] = float(torch.linalg.norm(gd).item())
-            anchor_grads[name] = gd.to(g.dtype)
+            anchor_grads[name] = gd.to(out_dtype)
         if names:
             # Mean pre/post ratio across targets — a MEAN reduce keeps it ~O(1);
             # a SUM bug would show ~dp_world. Greppable scale falsifier.
@@ -1478,7 +1507,11 @@ class FSDPEngine(BaseEngine):
                     f"[comm_eff][bcast] step={step} Q updated={q_updated} broadcast boundaries={len(q_receipts)} "
                     f"changed={changed_q} cross_rank_max_rel_dev={qdev if qdev is not None else 'n/a'} "
                     f"anchor_q_updates={getattr(state, 'anchor_q_updates', 0)} "
-                    f"anchor_q_broadcasts={getattr(state, 'anchor_q_broadcasts', 0)}",
+                    f"anchor_q_broadcasts={getattr(state, 'anchor_q_broadcasts', 0)} "
+                    # Fast-net basis-update counter (R2: MUST stay 0 in anchor-owns-Q
+                    # mode — the fast maybe_update_basis is gated off). Surfaced here so
+                    # check_probe.sh can HARD-fail if the fast net ever wrote Q.
+                    f"powersgd_basis_updates={getattr(state, 'powersgd_basis_updates', 0)}",
                     flush=True,
                 )
             if m_receipts:
