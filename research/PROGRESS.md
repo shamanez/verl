@@ -16,3 +16,4 @@ Live: **#25** (RES-133) — realistic anchor-circuit PowerSGD GRPO trainer. One 
 [2026-06-06T02:38:10+10:00] [sync] EXP-25 box drift detected (powersgd_activation.py, transformer_impl.py) but local vast-ai-workload already has these changes committed — no new commit needed. Patch refreshed (38 lines, no delta). Local ahead of origin by 3 commits (autosave loop handles push).
 [2026-06-06T02:40:59+10:00] [sync] EXP-25 box drift (powersgd_activation.py, transformer_impl.py) unchanged from last sync — local already up-to-date, no commit.
 [2026-06-06T02:50:40+10:00] [sync] no box source drift (diff unchanged from prior tick — powersgd_activation.py + transformer_impl.py still same hotfix, already local-committed)
+[2026-06-06T03:00:33+10:00] [sync] no box source drift (diff unchanged — same 2 hotfix files, already local-committed)
