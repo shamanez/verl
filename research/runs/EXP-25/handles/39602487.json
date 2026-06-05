@@ -1,0 +1,14 @@
+{
+  "instance_id": "39602487",
+  "ssh_host": "ssh7.vast.ai",
+  "ssh_port": 12486,
+  "public_ipaddr": "46.243.55.155",
+  "gpu_name": "H200",
+  "num_gpus": 4,
+  "gpu_ram": 143771,
+  "dph_total": 15.230994152046781,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 12486 root@ssh7.vast.ai",
+  "schema_version": "1",
+  "reused": true,
+  "note": "operator-provided warm box (EXP-25); SSH via proxy ssh7.vast.ai:12486"
+}
