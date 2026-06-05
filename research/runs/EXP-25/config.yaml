@@ -25,14 +25,13 @@ anchor_default_flags:
   spectral.beta_anc: 0.95
   spectral.cadence: 1
   spectral.max_targets: -1            # full coverage (all 196)
-  spectral.seed_anchor_cache: false   # live anchor owns M
   spectral.ema_device: cpu
   clean_cadence: 0                     # NO periodic clean step
 cells:
   - id: 0
     name: probe0-anchorM
     role: gate
-    flags: { anchor.owns_q: false, correction_mode: reweight, anchor.cadence: 1, anchor.delay_K: 1 }
+    flags: { anchor.owns_q: false, correction_mode: signed_ema, signed_ema_alpha: 1.0, anchor.cadence: 1, anchor.delay_K: 1 }
     total_training_steps: 2
     test_freq: 0
     experiment_name: exp-25-probe0-anchorM

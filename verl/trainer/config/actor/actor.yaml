@@ -387,10 +387,12 @@ comm_eff:
     # CommEffAnchorConfig.owns_q (default false => byte-identical to EXP-20).
     owns_q: false
 
-  # Spectral-correction sub-config (inert while enabled=false). EXP-7 M2 paper
-  # formula: anchor-EMA -> full thin SVD -> Tikhonov weights -> two-sided
-  # projection -> alpha blend, applied after actor backward / FSDP grad
-  # reduction and before optimizer.step() / grad clipping.
+  # Spectral-correction sub-config (inert while enabled=false). Applies an
+  # anchor-guided correction to the fast-path gradient after actor backward /
+  # FSDP grad reduction and before optimizer.step() / grad clipping. Live
+  # mergers (see correction_mode below): signed_ema (default), inject, blend.
+  # The old SVD -> Tikhonov -> two-sided-projection path was removed in EXP-25
+  # (the signed_ema merger needs only sign(M_anchor), no SVD).
   spectral:
 
     # Target dataclass for this configuration

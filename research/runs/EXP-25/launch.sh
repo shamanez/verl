@@ -63,7 +63,6 @@ common_env() {
   export COMM_EFF_SPECTRAL_BETA_ANC=0.95
   export COMM_EFF_SPECTRAL_CADENCE=1
   export COMM_EFF_SPECTRAL_MAX_TARGETS=-1
-  export COMM_EFF_SPECTRAL_SEED_ANCHOR_CACHE=false
   export COMM_EFF_SPECTRAL_EMA_DEVICE=cpu
   export PPO_MAX_TOKEN_LEN_PER_GPU=18432
   # Skip the ~15-min pre-train validation rollout. The id-0/id-1 probes only need
