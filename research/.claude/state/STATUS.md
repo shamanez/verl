@@ -1,17 +1,26 @@
 # Research Status — 2026-06-05
 
 ## Active
-No active experiments. 0 live Vast.ai instances.
+**No live Vast.ai instances ($0/hr).** EXP-25 GPU work is **PAUSED by operator** (2026-06-05) pending an account-level Vast SSH fix the operator owns. Code is implemented + pushed; only on-GPU probes/sweep are blocked.
 
-## Next
-- **issue #25** (`research:claim`, M6 — GitHub `shamanez/verl-compression-research#25`, Linear RES-133): make the PowerSGD communication-efficient GRPO trainer **realistic** via the anchor circuit. (1) Fix the anchor `M_anchor` update — globally DP-reduce the raw anchor gradient + cover all compressed targets. (2) Move the projection basis `Q` to the anchor (computed from stale, delayed weights) and broadcast it to the fast net. (3) Add the signed-EMA gradient merger `α·G + (1−α)·|G|·sign(M_anchor)`. The anchor refresh replaces any periodic dense step. Awaiting `research-planner` (no plan file yet) → human `status:approved`.
-- **issue #24** (`research:claim`, M6): error-feedback on the PowerSGD residual + basis-aligned anchor. Blocked on #25.
+## Issue pipeline
 
-## Hyperparameters
-- **Core (held constant):** Qwen2.5-1.5B-Instruct + GSM8K, vanilla GRPO (no-KL/no-entropy), lr 1e-6, train_batch 128, ppo_mini 64, micro 1, rollout.n 8, rollout TP 2, max_prompt 1024, max_response 16384, seed 0, val_before_train True.
-- **Run control (realistic setting):** total_training_steps **50** (extend to **100** once 50 trains cleanly); validation every **25** steps; anchor refresh every **5** steps from stale (delayed) weights; **no periodic dense clean step** (the anchor refresh is the realistic substitute).
-- **Codec:** PowerSGD activation compression (the chosen method).
-- Full surface: `runs/FIXED_CONTROL_SURFACE.md` + the launcher `${VAR:-default}` defaults (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`) + `project.yaml.fixed_control_surface`.
+| EXP | Title | State | Vast runs | Verdict | Notes |
+|---|---|---|---|---|---|
+| 25 | Anchor-circuit default (stale-M + anchor-owns-Q + signed_ema merger) | **PAUSED (infra)** | 3× provisioned, all TORN_DOWN | — | R1/R2/R3 built + CPU-validated + pushed `exp/25-anchor-default`@`bf351c6e4`. Provision BLOCKED: Vast SSH key injection broken (`ssh_key_ids:null`, attach API SQL type-bug, both account keys `default:None`). GPU work paused per operator; SSH fix operator-owned. |
+| 24 | Error-feedback on PowerSGD residual + basis-aligned anchor | BLOCKED | — | — | `depends_on: #25` — needs #25 VERDICT=PASS first. |
+
+## Blocker (operator-owned — DO NOT auto-work)
+Vast.ai SSH key injection is broken: every provisioned box comes up `ssh_key_ids:null` → `Permission denied (publickey)` for both registered keys. Root cause: no DEFAULT key set on the account (no CLI to set one) + `vastai attach ssh` server-side bug (`psycopg2 InvalidTextRepresentation: ... integer: "ssh-ed25519 ..."`). Likely fix: set a default SSH key / delete+re-add in the Vast web console. Operator is handling this.
+
+## Resume path (once SSH works — operator signals)
+Re-provision one warm box (4×H200 → 8×H100) → id-0 anchor-M probe (cadence=1/delay_K=1) → id-1 all-flags-ON probe → α∈{0.0,0.3,0.5} sweep (50 steps, delay_K=5/cadence=5, seed_anchor_cache=false, max_targets=-1, powersgd r=77) → analyst → log-writer. Scaffold ready in `runs/EXP-25/` (launch.sh, check_probe.sh, exp.bundle).
+
+## Hyperparameters (FIXED control surface)
+Qwen2.5-1.5B-Instruct + GSM8K, vanilla GRPO (no-KL/no-entropy), lr 1e-6, train_batch 128, ppo_mini 64, n=8, max_response 16384, seed 0. Run control: total_steps 50→100, val every 25, anchor refresh every 5 from θ_{t−5} stale, NO periodic clean step. Codec: PowerSGD r=77. Source: `runs/FIXED_CONTROL_SURFACE.md` + launcher `${VAR:-default}` + `project.yaml`.
+
+## Last tick
+2026-06-05 · running=[] · paused=[25 infra] · blocked=[24 dep] · offline-work=[Thread-B dead-code cleanup in progress]
 
 ## Budget
-$0/hr (0 live instances).
+$0/hr now (0 live instances). Wasted spend this session: 3× 4×H200 up only minutes each (unreachable, torn down on detection). max_gpu_hr=48 cap untouched (no probe/arm ran).

@@ -1,0 +1,63 @@
+# EXP-25 anchor-circuit-default — materialized run config.
+# Sequence runs on ONE warm box (fanout_max=1): id-0 probe -> id-1 probe ->
+# 3 alpha arms back-to-back. Only signed_ema_alpha varies across the arms.
+experiment: EXP-25
+branch: exp/25-anchor-default
+codec: powersgd
+powersgd_rank: 77            # NOT 102
+mask: false                  # NOT prf_mask
+locked_surface:
+  model: Qwen2.5-1.5B-Instruct
+  dataset: GSM8K
+  loss: vanilla_grpo_no_kl_no_entropy
+  lr: 1.0e-6
+  train_batch_size: 128
+  ppo_mini_batch_size: 64
+  rollout_n: 8
+  max_response_length: 16384
+  ppo_max_token_len_per_gpu: 18432    # anchor path OOM guard (NOT 36864 dense)
+  seed: 0
+anchor_default_flags:
+  anchor.enabled: true
+  anchor.owns_q: true
+  spectral.enabled: true
+  spectral.correction_mode: signed_ema
+  spectral.beta_anc: 0.95
+  spectral.cadence: 1
+  spectral.max_targets: -1            # full coverage (all 196)
+  spectral.seed_anchor_cache: false   # live anchor owns M
+  spectral.ema_device: cpu
+  clean_cadence: 0                     # NO periodic clean step
+cells:
+  - id: 0
+    name: probe0-anchorM
+    role: gate
+    flags: { anchor.owns_q: false, correction_mode: reweight, anchor.cadence: 1, anchor.delay_K: 1 }
+    total_training_steps: 2
+    test_freq: 0
+    experiment_name: exp-25-probe0-anchorM
+  - id: 1
+    name: probe1-allflags
+    role: gate
+    flags: { anchor.owns_q: true, correction_mode: signed_ema, signed_ema_alpha: 0.0, anchor.cadence: 1, anchor.delay_K: 1 }
+    total_training_steps: 2
+    test_freq: 0
+    experiment_name: exp-25-probe1-allflags
+  - id: 2a
+    name: alpha-0.0
+    flags: { signed_ema_alpha: 0.0, anchor.cadence: 5, anchor.delay_K: 5 }
+    total_training_steps: 50
+    test_freq: 25
+    experiment_name: exp-25-alpha0p0
+  - id: 2b
+    name: alpha-0.3
+    flags: { signed_ema_alpha: 0.3, anchor.cadence: 5, anchor.delay_K: 5 }
+    total_training_steps: 50
+    test_freq: 25
+    experiment_name: exp-25-alpha0p3
+  - id: 2c
+    name: alpha-0.5
+    flags: { signed_ema_alpha: 0.5, anchor.cadence: 5, anchor.delay_K: 5 }
+    total_training_steps: 50
+    test_freq: 25
+    experiment_name: exp-25-alpha0p5
