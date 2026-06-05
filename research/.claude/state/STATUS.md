@@ -1,22 +1,28 @@
-# Research Status — 2026-06-06T02:15+10:00
+# Research Status — 2026-06-06T04:10+10:00
 
 ## Active
-**EXP-25** anchor-circuit default (stale-M + anchor-owns-Q + signed_ema merger). Both hard probe gates PASS; the id-2 α-sweep is LIVE on warm box **39613656** (operator-pinned `-p 40872 root@46.243.55.155`). Sweep chains α∈{0.0,0.3,0.5} back-to-back in tmux `exp25-sweep`; training-log-monitor watching in the background. DO-NOT-PROVISION.
+**EXP-25** anchor-circuit default α-sweep LIVE on warm box **39613656** (operator-pinned `-p 40872 root@46.243.55.155`). Both probe gates PASS; 4-circuit deep audit CLEAN. **NEW: α=0.0 arm shows an entropy-collapse / length-degeneration spiral** — root-caused to the α=0 signed_ema merger (`|G_noisy|·sign(M)` = sign-SGD); dedicated team `entropy-collapse` documented it (findings + standing watch). DO-NOT-PROVISION.
 
 ## Issue pipeline
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 25 | Anchor-circuit default | RUNNING | 1×4H200 (i_39613656, pinned -p40872) | — | id-0 + id-1 probes PASS; α=0.0 @step20/50, auto-chains α=0.3→0.5; winner extends 50→100. |
+| 25 | Anchor-circuit default | RUNNING | 1×4H200 (i_39613656, pinned -p40872) | — | id-0+id-1 PASS; α=0.0 ~step48/50 (collapsed); α=0.3/0.5 pending; winner→100. |
 | 24 | Error-feedback + basis-aligned anchor | BLOCKED | — | — | `depends_on:#25` (needs PASS). |
 
 ## EXP-25 sequence
-- id-0 (anchor M / R1): **PASS** — coverage 196/196 set-equal, M DP-reduce MEAN (ratio~0.71-0.79 not 4×), anchor-load 338/338 canon-matched, ‖dM‖>0, anchor clean (ratio≡1/no-opt/no-mask/clone-iso), staleness realized_delay from step2.
-- id-1 (anchor-owns-Q R2 + signed_ema merger R3): **PASS** — Q anchor-owned + broadcast every refresh (cross_rank_dev=0), fast net never updates Q, M bcast to 196 ranks, merger fires, cold-M fallback wired.
-- id-2 (α sweep {0.0,0.3,0.5} ×50 steps, cadence=5/delay_K=5): **α=0.0 RUNNING @step20/50** (train-reward ~0.63-0.72, grad_norm 3.49 finite, spectral_corrections firing, anchor counters clean, no errors); α=0.3 + α=0.5 auto-chained; winner extends 50→100.
-- analyst verdict + log-writer + teardown: blocked on id-2.
+- id-0 (anchor M / R1): **PASS** · id-1 (anchor-owns-Q R2 + signed_ema R3): **PASS**
+- 4-circuit deep audit (anchor grad/DP/EMA, Q ownership/bcast, merger, fast/parity/config): **CLEAN** (LOW/INFO punch-list only; pt-5b scale by proxy).
+- **Unit nuance**: anchor.cadence/delay_K count OPTIMIZER TICKS (2/global-step) ⇒ refresh every ~2.5 global steps + 2.5-step staleness (held fixed → no α-confound; documented for analyst).
+- id-2 α-sweep: **α=0.0 ~step 48/50** — val@25=0.718; **ENTROPY COLLAPSE** (entropy 5.69→0.06, resp_len→~8600, reward 0.79@28→0.32@45). α=0.3 + α=0.5 pending. Monitor watching for val@50 + handoff.
+- analyst verdict + log-writer + teardown: pending sweep completion.
+
+## Entropy-collapse investigation (team `entropy-collapse`, member `entropy-analyst`)
+- Root cause: α=0 merger `|G_noisy|·sign(M)` = magnitude-preserving sign-SGD w/ persistent β=0.95 EMA signs → no cancellation → sharpening; collapse onset pinned to merger_coldM_fallbacks 196→0 @step3; warm rel_change median=√2 (≈50% sign disagreement/step). Isolated by 4 anchor-OFF control runs (no collapse).
+- Prediction (falsifiable, to test on the sweep): severity α=0 ≫ α=0.3 > α=0.5, phase transition at α≈0.5.
+- Deliverables: `runs/EXP-25/ENTROPY_COLLAPSE_FINDINGS.md` + standing `research/diagnostics/ENTROPY_COLLAPSE_WATCH.md` (T1–T7 triggers, reusable on EVERY run).
 
 ## Last tick
-2026-06-06T02:15+10:00 · running=[25] · analyzing=[] · logging=[] · blocked=[24 dep]
+2026-06-06T04:10+10:00 · running=[25] · analyzing=[entropy-collapse done] · logging=[] · blocked=[24 dep]
 
 ## Budget
-1 live box 39613656 (4×H200, $15.23/hr) · max_gpu_hr=48 → ~12h wall-clock headroom · started 00:44:45 (~1.5h elapsed). Tear down at verdict / SSH-unreachable. NEVER reprovision (operator mandate).
+1 live box 39613656 (4×H200, $15.23/hr) · max_gpu_hr=48 · started 00:44:45 (~3.4h elapsed). Tear down at verdict / SSH-unreachable. NEVER reprovision (operator mandate).
