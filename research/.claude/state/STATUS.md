@@ -7,7 +7,7 @@ No active experiments. 0 live Vast.ai instances. No idle GPU bleed.
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 23 | Stale full-grad re-anchor for PowerSGD (delay_K=5 + inject/blend) | DONE | 1×4H200 (i_39447338, torn down 2026-06-05T04:31+10) | STOP | Hypothesis FALSIFIED. max(A2,A3)=0.6967 ≤ floor+0.02=0.7114. cos(G,M)≈0.001 (structural orthogonality). Integration worked. Next lever: EXP-24 error-feedback. Launcher wiring (f42b7f36) on exp/23-stale-reanchor, UNMERGED. |
+| 23 | Stale full-grad re-anchor for PowerSGD (delay_K=5 + inject/blend) | DONE | 1×4H200 (i_39447338, torn down 2026-06-05T04:31+10) | STOP | Hypothesis FALSIFIED. max(A2,A3)=0.6967 ≤ floor+0.02=0.7114. cos(G,M)≈0.001 (structural orthogonality). Integration worked. Next lever: EXP-24 error-feedback. Launcher wiring MERGED via shamanez/verl#14 (squash 9edea6105); exp/23 branch deleted. |
 | 20 | PowerSGD activation codec (parent) | DONE | — | PASS | A0=0.7415 (r=77 clean@5), dense ceiling=0.7536 — EXP-23 reference points (not re-run) |
 
 ## EXP-23 outcome summary

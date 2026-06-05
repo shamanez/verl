@@ -2,6 +2,20 @@
 
 Concise index of completed experiments. Full per-run detail in `runs/<ID>/`, the formal log in `LOG.md`, and analysis in the research-repo issues.
 
+## EXP-23 (M6) — Stale full-grad re-anchor for PowerSGD (delay_K=5 · inject/blend) · STOP (FALSIFIED) · 2026-06-05
+Follow-up to EXP-20: can a **stale** full-gradient re-anchor replace the fresh `clean@5` step for PowerSGD r=77? One warm 4×H200 box, 3 arms on the fixed surface, codec held at PowerSGD r=77, fresh clean step OFF.
+
+| arm | refresh mechanism | val GSM8K acc@50 |
+|---|---|---|
+| A0 fresh-clean@5 (EXP-20 ref, not re-run) | fresh full-grad every 5 | 0.7415 |
+| A1 no-refresh (floor) | none | **0.6914** |
+| A2 stale inject (γ=1.0) | stale anchor + additive inject | 0.6967 |
+| A3 stale blend (η=0.5) | stale anchor + convex blend | 0.6861 |
+
+- **FALSIFIED:** `max(A2,A3)=0.6967 ≤ floor+0.02=0.7114`; neither additive mode recovers the ~0.05 fresh-clean benefit. A1 sits 0.05 below A0 → refresh *does* matter for r=77, but a stale one can't supply it.
+- **Root cause (measured, all 50 steps, both arms):** `cos(G_powersgd, M_anchor) ≈ 0.001` — the rank-77 compression subspace is ~orthogonal to the stale full-grad *by construction* (10× more orthogonal than the mask's ~0.5). Inject adds an orthogonal vector (grad-clip dilutes it); blend just shrinks the step to `√0.5·‖G‖`. Integration was clean (circuits fired `anchor_backwards=20`/`spectral_corrections=80` per arm, codec green `q_cond≈1`/`q_cross_rank=0`, 0 NaN/OOM) — a decisive negative result, not a failed run.
+- **Next lever (issue #24):** error-feedback on the PowerSGD residual + basis-aligned anchor (NOT `delay_K` — orthogonality won't yield to smaller K). Launcher-wiring PR shamanez/verl#14 **merged** → vast-ai-workload (squash `9edea6105`). Full analysis: `runs/EXP-23/verdict.md` + `runs/EXP-23/stale_gradient_research/STALE_GRADIENT_ALTERNATIVES.md`.
+
 ## EXP-20 (M6) — PowerSGD-style PP activation compression · PASS · 2026-06-04
 Qwen2.5-1.5B-Instruct + GSM8K, vanilla GRPO (no-KL/no-entropy), `clean_cadence=5`, 50 steps, 4×H200. Codec is the only axis (fixed surface: `runs/FIXED_CONTROL_SURFACE.md`).
 
