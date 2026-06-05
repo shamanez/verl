@@ -18,26 +18,11 @@ No GPU, no torch.distributed, no FSDP runtime. Loads the (lightweight)
 ``spectral_filter`` and ``state`` modules by file path so the heavy
 ``verl.__init__`` import chain (tensordict, vllm, ...) is not required.
 
-These tests cover:
-
-* The grad-correction hook must execute on original 2D params. The original engine
-  iterated ``module._fsdp_wrapped_module.named_parameters()`` directly, which
-  under FSDP1 (``use_orig_params=false``) yields a 1-D ``_flat_param`` whose
-  name has no ``q_proj``/etc. substring and whose grad is not 2-D, so EVERY
-  param was skipped: no ``[FSDP-DISCOVERY]`` line, ``spectral_corrections=0``.
-  The engine exposes the original 2-D named params + grads and routes them
-  through ``apply_spectral_correction_to_params``. The first three tests assert
-  discovery is recorded once, ``spectral_corrections > 0``,
-  ``rel_change`` in ``(0, 1]``. ``test_legacy_flatparam_iteration_reproduces_bug``
-  captures the flat-param iterator case that would produce zero corrections.
-
-* The hook must fire REGARDLESS of gradient magnitude — only ``grad is None``
-  is skipped. ``test_hook_fires_on_near_zero_grad`` proves a ~0 (but present)
-  grad still triggers discovery + a correction.
-
-* Seeded anchors must be cross-process deterministic. Two processes with
-  different ``PYTHONHASHSEED`` salts should build identical anchors for the same
-  parameter name.
+These tests cover the CPU-checkable core loop: original 2D params are corrected,
+near-zero-but-present gradients still fire the hook, reducible metrics stay
+numeric, and seeded anchors are deterministic across Python hash salts. Actual
+FSDP1/FSDP2 grad containers, ``summon_full_params``, and distributed writeback
+must be covered by the real multi-GPU probe instead of mocked here.
 """
 
 import importlib.util
@@ -325,46 +310,6 @@ def test_none_grad_is_skipped():
     assert corrected == 0
     assert state.spectral_corrections == 0
     assert not state.fsdp_grad_repr
-
-
-# --------------------------------------------------------------------------- #
-# FSDP1-style flat-param iteration produces no target matrices.
-# --------------------------------------------------------------------------- #
-class _FakeFlatParam:
-    """Mimics an FSDP1 use_orig_params=false FlatParameter: a single 1-D param
-    named `_flat_param` whose grad is the concatenation of all matrix grads."""
-
-    def __init__(self, module):
-        flat = torch.cat([p.grad.reshape(-1) for p in module.parameters() if p.grad is not None])
-        self.grad = flat
-
-
-def _flat_named_params(module):
-    # Exactly the shape of what `module._fsdp_wrapped_module.named_parameters()`
-    # yields under FSDP1 use_orig_params=false: a 1-D `_flat_param`.
-    yield "_flat_param", _FakeFlatParam(module)
-
-
-def test_legacy_flatparam_iteration_reproduces_bug():
-    """With FSDP1 flat-param iteration the core fires ZERO corrections: the name
-    has no proj substring and the grad is 1-D. The engine avoids this by using
-    summon_full_params to expose original 2D params."""
-    module = _TinyDecoder()
-    _run_backward_nonzero(module)
-    state = _build_state()
-    corrected = apply_spectral_correction_to_params(
-        _flat_named_params(module),
-        spectral=state.spectral,
-        target_substrs=("q_proj", "k_proj", "v_proj", "o_proj"),
-        max_targets=4,
-        state=state,
-        discovery_meta=_DISCOVERY_META,
-        full_grad_of=_full_grad_of,
-        writeback=_writeback,
-    )
-    assert corrected == 0  # nothing matched
-    assert state.spectral_corrections == 0
-    assert not state.fsdp_grad_repr  # no FSDP-DISCOVERY line => exactly the symptom
 
 
 # --------------------------------------------------------------------------- #

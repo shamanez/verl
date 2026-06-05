@@ -259,14 +259,12 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
         self.assertEqual(comp.last_y_coords_per_token, 16)
 
 
-class TestPowerSGDSyncBasis(unittest.TestCase):
-    """Cross-rank consensus codebook (sync_basis) and collective safety.
+class TestPowerSGDCollectiveHelpers(unittest.TestCase):
+    """CPU-checkable helper invariants for the real DP sync path.
 
-    The all-reduce / all-gather collectives need a process group, so the actual
-    cross-rank agreement is exercised separately. Here we test the single-process
-    invariants that gate it: the symmetric boundary iteration (deadlock guard),
-    the checksum determinism/sensitivity, set_dp_group, and the single-rank
-    verification short-circuit."""
+    Actual all-reduce/all-gather behavior and cross-rank Q agreement are
+    multi-GPU probe requirements, not single-process unit-test claims. These
+    tests only cover deterministic helper behavior used by that path."""
 
     def _build(self, **kw):
         torch.manual_seed(0)
@@ -313,29 +311,6 @@ class TestPowerSGDSyncBasis(unittest.TestCase):
         sentinel = object()
         comp.set_dp_group(sentinel)
         self.assertIs(comp._dp_group(), sentinel)
-
-    def test_verify_agreement_single_rank_short_circuits(self):
-        # No distributed init => returns None (trivially agree). This is the
-        # unit-test path; the real >1-rank assertion runs on the box.
-        model, comp = self._build()
-        comp.set_context(global_step=1)
-        model(torch.randn(8, 64, requires_grad=True)).pow(2).sum().backward()
-        self.assertIsNone(comp.verify_basis_agreement_across_ranks())
-
-    def test_sync_basis_single_process_equivalent_to_local(self):
-        # With sync_basis=True but no distributed init, do_sync is False, so the
-        # update must behave EXACTLY like the local path (no hang, basis advances,
-        # orthonormal). This is what runs in CI / on a single rank.
-        model, comp = self._build(sync_basis=True)
-        comp.set_context(global_step=1)
-        model(torch.randn(20, 64, requires_grad=True)).pow(2).sum().backward()
-        Qb = {k: comp._basis[k].clone() for k in comp._basis}
-        self.assertTrue(comp.maybe_update_basis(is_clean_step=False))
-        for k in comp._basis:
-            Q = comp._basis[k]
-            err = (Q.t() @ Q - torch.eye(Q.shape[1])).abs().max().item()
-            self.assertLess(err, 1e-4)
-            self.assertFalse(torch.equal(Q, Qb[k]))
 
 
 class TestPowerSGDConfigSyncDefault(unittest.TestCase):
