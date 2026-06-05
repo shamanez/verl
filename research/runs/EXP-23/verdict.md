@@ -1,5 +1,16 @@
 # Verdict EXP-23 — 2026-06-04T18:36:00+00:00
 
+> ## ERRATUM (post-hoc, 2026-06-05) — the anchor `M_anchor` update was BUGGY; the anchor-network conclusions below are CONFOUNDED
+>
+> A later code audit (tracked on issue #25) found that EXP-23's stale-anchor gradient `M_anchor` was NOT the full global gradient this verdict treats it as. Two bugs:
+> 1. **Partial coverage (point 7):** `M_anchor` was EMA-updated for only 4 of ~196 target matrices (`max_targets=4` → `model.layers.0.{q,k,v,o}_proj`); `extract_target_grads` breaks at the cap (`verl/workers/comm_eff/anchor.py:341-342`). The other ~192 computed gradients were discarded, so `M_anchor` was a layer-0-attention slice, not a full-network gradient.
+> 2. **No global DP reduce (point 5):** the anchor backward ran on a plain per-rank clone with NO all-reduce of `G_anchor` (`anchor.py` has zero `dist.*`; `update_anchor` is a local EMA). So `M_anchor` was each rank's local 1/world_size-data gradient, differing per rank, not the global stale gradient.
+>
+> **Impact on the conclusions below:**
+> - The EMPIRICAL headline stands as a result for the AS-IMPLEMENTED anchor: inject(γ=1) and blend(η=0.5), as wired, did not beat the no-refresh floor (A2=0.6967, A3=0.6861 ≈ floor 0.6914).
+> - But the MECHANISTIC claim — `cos(G_powersgd, M_anchor) ≈ 0.001` ⇒ "the stale FULL gradient is orthogonal, so stale re-anchoring is inert" — is CONFOUNDED: that geometry was measured against a 4/196, per-rank, single-shard slice, NOT a true full global stale gradient. So EXP-23 does NOT cleanly falsify a correctly-built stale anchor; it falsifies a buggy one.
+> - The correct test (full target coverage + global DP-reduced `M_anchor`) is deferred to issue #25, which fixes both bugs as `gate: hard` invariants before re-running. Read every "stale full gradient" statement below with this caveat.
+
 ## Result
 VERDICT: STOP
 
