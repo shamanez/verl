@@ -329,24 +329,43 @@ exactly at α=0.5.
 
 ---
 
-## 7. The pending KL diagnostic — prediction to fold in
+## 7. The KL diagnostic — prediction CONFIRMED by the live run
 
-A KL-divergence run (α=0 signed_ema + `use_kl_loss=true`, `kl_loss_coef=0.001` to a frozen
-reference policy; `runs/EXP-25/exp25_a0_kl001.sh`) is running on a separate box.
+A KL-divergence run (α=0 signed_ema + `use_kl_loss=true`, `kl_loss_coef=0.001` to a frozen reference
+policy; `runs/EXP-25/exp25_a0_kl001.sh`, W&B run `kaixg76f`) tested the §6 thesis that the proximate
+killer is a length-degeneration reward-hack with no brake — by adding the brake while leaving the
+merger untouched. **The prediction was confirmed on every axis.**
 
-**Prediction (mechanism-grounded):** the KL brake should SUBSTANTIALLY ARREST the length explosion.
-The reference policy assigns very low probability to runaway-length non-EOS continuations, so a KL
-penalty to it directly opposes the §6 degenerate basin — supplying exactly the brake the no-KL
-surface lacks (§6.2). If so, it ISOLATES "the merger injects a persistent wrong-direction force"
-(still present, unchanged — `rel_change` should stay √2) from "nothing stops the resulting runaway"
-(now braked). Expected outcome: entropy still declines and the merger bias still degrades the
-DIRECTION, so val should recover from 0.354 toward the α=0.5/PowerSGD band BUT is unlikely to beat
-the PowerSGD-only control (0.741) — because the KL brake removes the catastrophic length channel
-without making the stale-sign correction *helpful* (the monotonic α-dose-response, DEEP_FINDINGS §c,
-says correction is net-harmful regardless of the brake). A clean falsifier of my account would be:
-KL does NOT arrest the length explosion (would implicate something beyond the reward-only degenerate
-channel) OR `rel_change` departs from √2 under KL (would mean KL changes the gradient geometry, not
-just the brake). Update this section when the result lands.
+**Predicted (mechanism-grounded):** the KL brake should ARREST the length explosion (the reference
+policy starves runaway non-EOS continuations) WITHOUT making the stale-sign correction helpful —
+isolating "the merger injects a persistent wrong-direction force" (unchanged) from "nothing stops the
+resulting runaway" (now braked). So entropy should still decline and `rel_change` should stay √2,
+while length stays bounded and val recovers from 0.354 toward the α=0.5/PowerSGD band but does NOT beat
+the PowerSGD-only control (0.741).
+
+**Observed (run `kaixg76f`, step-10 decisive early verdict):**
+- **The merger is untouched — the force is still there.** Entropy still declines `5.74 → 2.14` by s10
+  (≈ the no-KL arm's 2.08 at s10), T3 fired at s6, and the α=0 sign-flip fingerprint `rel_change ≈ √2`
+  (1.37–1.40) PERSISTS throughout. KL does not fix the stale-sign correction (as predicted — it can't;
+  the correction is net-harmful regardless of the brake, DEEP_FINDINGS §c).
+- **The degeneration channel is CLOSED — exactly the §6 brake.** Response length stays BOUNDED 239–291
+  tokens, `clip_ratio = 0.000` — vs the no-KL arm's explosion to ~8600 tokens / clip 0.46 by s30.
+  Reward rises MONOTONICALLY to 0.556 @ s10 with NO peak-then-crash (no-KL peaked 0.79 @ s28 then
+  crashed to 0.32 @ s50). The train↔rollout IS-gap stays healthy > 0.6 (vs the no-KL collapse to 0.07).
+  `kl_loss` is active and decaying 9.9 → 5.9.
+
+**Interpretation:** this is a clean confirmation that KL is a GUARDRAIL/ENABLER, not a cure for the
+stale-sign correction. It converts the α=0 catastrophe (val@50 = 0.354) into a likely ~parity landing
+by removing the length reward-hack channel — but the merger bias still degrades the DIRECTION, so it is
+not expected to beat the PowerSGD-only 0.741. This validates the §6 thesis (length-degeneration, not
+low entropy, is the proximate killer; the no-KL/no-entropy surface is the permissive condition) and the
+§3/§5 verdict (signed-replacement is net-harmful, only its collapse symptom — not its bias — is
+brakeable). It is exactly why the surpass-dense plan (§9) puts KL + length brakes on EVERY arm as the
+enabler that makes a zero-mean perturbation safe to push, NOT as the source of any surplus.
+
+**val@25 / val@50 pending** (a monitor is capturing the exact number; the team-lead will relay it).
+Prediction for the final number: recovers far above 0.354 into the α=0.5/parity band (~0.70–0.74), does
+NOT beat the PowerSGD-only control 0.741. [FOLD IN THE VAL NUMBER WHEN RELAYED.]
 
 ---
 

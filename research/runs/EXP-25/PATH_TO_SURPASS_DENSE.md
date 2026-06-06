@@ -631,6 +631,26 @@ that *interprets* the mask result.
   the comm win at ~dense quality; optionally the cheap **rank sweep** (Lever 3) as a last
   check on the regularization route (prior: too weak).
 
+### EXP-SURPASS-2 candidate — the CREDIT-ASSIGNMENT variant (follows from "real diversity that doesn't convert")
+
+Mechanist's round-2 result (§2.5) — compression already produces *real, uncompressed-
+corroborated* policy diversity (rollout_ppl 1.40 vs dense 1.24) that **fails to convert to
+reward** — points to a second, mechanistically-distinct surpass path: the conversion failure
+may be a **credit-assignment** problem, not a noise problem. If the diverse rollouts ARE being
+sampled but GRPO's group-relative advantage with n=8 doesn't reward the rare *better* ones
+strongly enough, the diversity is averaged away before it can steer the policy. **Cheap probe:
+raise n (rollouts per prompt) ONLY on the compressed arm** (e.g. n=8→16) and ask whether the
+real diversity then converts. Mechanism: more samples per group → the rare high-reward
+completions the diffuse policy already produces get surfaced and get a stronger group-relative
+advantage → diversity→reward. This is a surpass path that *needs compression's exploration*
+(dense is less diffuse, gains less from extra n) **plus denser credit** — a genuine
+compression-specific edge, not available to dense. Run it as EXP-SURPASS-2 if the mask-p sweep
+shows the same leak-not-convert signature as psgd (real diversity, flat val): it tests whether
+the bottleneck is *generating* exploration (mask-p's job) or *converting* it (n's job). Cost:
+1–2 arms (compressed + raised n vs compressed baseline), with the dense+raised-n control to
+confirm the gain is compression-specific. (Higher n raises rollout cost — keep the response
+cap on.)
+
 ### Why this ordering (mask-p sweep → controls → parity) and not the old rank-first plan
 The first draft's EXP-SURPASS-1 (rank × EF grid) assumed low-rank PowerSGD injects zero-mean
 *exploration* noise. Mechanist falsified that: frozen-Q PowerSGD's residual is a deterministic
