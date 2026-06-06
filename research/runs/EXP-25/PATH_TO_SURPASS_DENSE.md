@@ -1,14 +1,18 @@
 # Path to Surpass Dense — Compression-as-Exploration in Communication-Efficient RL
 
-**Status: DRAFT (round 1, pre-mechanist-convergence).** This document develops the
-operator's thesis — *that communication-efficient training can SURPASS dense in RL
-(unlike SFT, where compression is pure information loss)* — into a rigorous,
-falsifiable program. It is the `strategist` deliverable for the `surpass-dense`
-team (task #2). The bias/noise characterization that the central argument hinges on
-is being grounded by `mechanist` (task #1); sections tagged **[PENDING-MECHANIST]**
-will be tightened once those answers land. Citations: `runs/EXP-25/DEEP_FINDINGS.md`,
-`runs/EXP-25/ENTROPY_COLLAPSE_FINDINGS.md`, `diagnostics/ENTROPY_COLLAPSE_WATCH.md`,
-issue #24, `verl/workers/comm_eff/spectral_filter.py`, and W&B
+**Status: CONVERGED with mechanist (round 2).** This document develops the operator's
+thesis — *that communication-efficient training can SURPASS dense in RL (unlike SFT, where
+compression is pure information loss)* — into a rigorous, falsifiable program. It is the
+`strategist` deliverable for the `surpass-dense` team (task #2). The bias/noise
+characterization the central argument hinges on was grounded by `mechanist`
+(`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`, task #1) over a full converging exchange — their
+findings **falsified the naive routes and reshaped the plan** (see §2.6, §5). Net honest
+position: no >dense edge has been demonstrated by what has run; the surviving testable
+surpass hypothesis is *variance-controlled zero-mean perturbation*, gated by a single cheap
+codec-free experiment (the Gaussian-noise probe, §4). Citations:
+`runs/EXP-25/COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` (mechanist), `DEEP_FINDINGS.md`,
+`ENTROPY_COLLAPSE_FINDINGS.md`, `diagnostics/ENTROPY_COLLAPSE_WATCH.md`, issue #24,
+`verl/workers/comm_eff/{spectral_filter,activation_mask}.py`, and W&B
 (`shamanework-pl/verl_compression_research`).
 
 ---
@@ -221,7 +225,7 @@ reason there is "no recipe to copy" (GOAL.md):
   intuition ("compression is pure loss") simply transfers and the rank curve saturates
   at dense. EXP-SURPASS-1 (§4) is designed to settle exactly that, either way.
 
-### 2.5 The candidate empirical fingerprint — dense is *confident*, comm-eff *explores* (CAVEATED, mechanist-gated)
+### 2.5 The entropy "fingerprint" — investigated and DEMOTED (dense is *confident*, not under-exploring)
 
 There is a suggestive existing signal that compression is *already* doing the
 exploration the thesis predicts — but it must be read carefully and is gated on
@@ -277,172 +281,157 @@ on the *obvious* comm-eff story and it must be stated bluntly:
 This kills two framings at once: (a) PowerSGD-noise-as-exploration (no zero-mean noise to
 exploit, §2.2) and (b) anchor-corrects-compression-bias (parity-only, above). The honest
 question becomes: **what information channel does a communication-efficient trainer have
-that a dense single-step trainer does not?** Three candidates survive, and they are the
-spine of the revised program. (Mechanist is pressure-testing each; tagged
-**[MECHANIST-PENDING-R2]** where their read is still incoming.)
+that a dense single-step trainer does not?** After a full converging exchange with
+mechanist (their `COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §8.2/§9), the candidates and their
+verdicts are:
 
-- **Channel A — Variance-reduced / look-ahead gradient (the EMA-as-momentum channel,
-  mechanist-named in §8.1).** Dense uses a single-step gradient `G_t`. The anchor's
-  β=0.95 EMA `M` is a *variance-reduced* estimate of the gradient averaged over ~20 ticks
-  — a quantity the dense single-step trainer **does not have**. With n=8 GRPO advantages
-  that are genuinely noisy (high-variance per-coordinate PG, §1.2 of the analysis: the
-  per-coordinate gradient is near-zero-mean = high relative variance), a *direction-
-  preserving* blend `G_used = G_noisy + λ·(M − proj_{G}(M))` could give a lower-variance,
-  more reliable descent direction than dense's single noisy step. **This is the most
-  defensible surpass mechanism** because it identifies a concrete channel dense lacks
-  (the cross-step average) and it is direction-preserving (does NOT repeat the signed_ema
-  error). The bar shifts: not "correct the compression bias" but "supply a variance-
-  reduced gradient dense cannot compute in one step." [MECHANIST-PENDING-R2]
+- **Channel A — Variance-reduced / look-ahead gradient (anchor-EMA-as-momentum). DEMOTED
+  by mechanist's decisive objection.** The idea: the anchor's β=0.95 EMA `M` is a cross-
+  step variance-reduced gradient dense cannot compute in one step (n=8 GRPO advantages are
+  noisy). The objection (mechanist §8.2): **Adam already supplies fresh β1=0.9 momentum**,
+  so a *stale* β=0.95 EMA of a K-old, clean, smoothed gradient adds little the live
+  optimizer's own momentum doesn't already provide — and it pays a staleness cost the live
+  momentum doesn't. The anchor is therefore best used only for **parity-recovery** (drop
+  the periodic clean step) — NOT a surpass lever. Retired from the surpass path; kept only
+  as the error-feedback re-grounding flush.
 
 - **Channel B — Compression as an implicit trust-region / subspace regularizer.** Frozen-Q
-  PowerSGD constrains every update to the dominant-energy subspace `P` (drops the low-
-  energy tail deterministically). In a *non-stationary* RL objective, restricting updates
-  to the stable high-energy subspace is an implicit regularizer — it prevents the step
-  from chasing low-energy, batch-specific directions that overfit *this* rollout set,
-  biasing toward flatter, better-generalizing policies (the IGR / flat-minima pillar,
-  §2.4, achieved by *constraint* rather than by *noise*). This predicts comm-eff > dense
-  via **regularization, not exploration** — and it is consistent with mechanist's
-  stationary-recon-error result (§2.3: a stable, constant constraint). The risk
-  (mechanist's §2.2 caveat): if the constraint is too *weak* (direction-faithful,
-  recon_err only 2.5%), it may not regularize enough to matter. The rank sweep is then a
-  test of *this* channel: lower rank = tighter trust region = stronger regularization —
-  is there an `r*` whose regularization beats dense? [MECHANIST-PENDING-R2]
+  PowerSGD constrains every update to the dominant-energy subspace `P`. In a non-stationary
+  RL objective this is an implicit regularizer (constrain the step → flatter, less batch-
+  overfit policy, §2.4 by *constraint* not noise). It can be tested for free via the rank
+  sweep (lower r = tighter trust region). **Risk (mechanist §2.2): the constraint is too
+  WEAK** — direction-faithful, recon_err only 2.5%, SNR ~42:1 — so deterministic PowerSGD
+  likely doesn't regularize enough to beat dense. Kept as a cheap secondary test, not the
+  lead.
 
-- **Channel C — Explicit zero-mean exploration via STOCHASTIC compression.** The §2.2
-  "no zero-mean noise" result is specific to *frozen-Q* PowerSGD. A compression whose
-  residual is zero-mean *by construction* — stochastic rounding/quantization, per-step
-  re-sampled random-mask sparsification, or PowerSGD with a **re-randomized basis each
-  step** — restores a genuine per-step fluctuation `ξ`, reviving the original SGD-noise /
-  RL-exploration argument for real. This is the closest to the operator's literal "noise
-  = exploration" thesis, but it is now correctly scoped to *stochastic* codecs, not the
-  deterministic low-rank one we have. The risk: random projections may destroy the
-  dominant-subspace signal (§2.2) faster than they add useful exploration; variance must
-  be tuned. [MECHANIST-PENDING-R2]
+- **Channel C — Explicit zero-mean exploration noise (the operator's literal thesis,
+  done right). THE LEAD CHANNEL.** Mechanist's key empirical addition: the codebase
+  *already has* a genuinely zero-mean knob — the **prf_mask + rescale** codec is inverted
+  dropout (`E[h̃]=h`, `activation_mask.py:243`, re-sampled per global step), so its residual
+  IS zero-mean by construction. BUT plain high-p mask is **too high-variance** (∝p/(1−p) ≈
+  19× at p=0.95) and **stalls** (the known GOAL.md result). So the literal "compression
+  noise = exploration" route is real but unusable as-is. The fix mechanist specifies (§9):
+  a **variance-CONTROLLED unbiased perturbation** — three properties at once that NO
+  existing codec (dense / prf_mask / PowerSGD) has: (a) **zero-mean** (explores, not
+  biases — PowerSGD fails this), (b) **controlled/low variance** (trains, not stalls — the
+  p=0.95 mask fails this), (c) **tunable as an exploration TEMPERATURE** (the bias-variance
+  tradeoff is a swept axis). Realized as: rescaled mask at **swept/annealed p + error-
+  feedback** re-injecting the dropped residual to lower variance while staying unbiased;
+  with an explicit **zero-mean Gaussian-noise probe** as the codec-free decoupled control.
 
-**The reframed thesis.** Compression-as-exploration in its literal form requires Channel
-C (stochastic codec). But the *stronger and more defensible* surpass argument is Channel
-A (variance-reduced gradient dense cannot compute) and/or Channel B (implicit trust-region
-regularization) — both of which beat dense not by adding noise but by supplying a
-*better-conditioned update* than a single dense step. The operator's intuition — "RL
-under-explores, so perturbing/regularizing the update can help where it would only hurt in
-SFT" — is **correct in spirit**, and survives mechanist's falsification of the naive
-PowerSGD-noise route, but its mechanism is variance-reduction + regularization (A+B), with
-explicit exploration (C) as a separate testable variant.
+**The reframed thesis (converged with mechanist).** The operator's intuition — "RL under-
+explores, so zero-mean perturbation can help where it would only hurt in SFT" — is
+**correct in spirit and the right thing to test**, but mechanist has shown the naive routes
+fail: deterministic PowerSGD has no zero-mean noise (Channel A/B parity ceiling), and the
+one genuinely zero-mean codec (the mask) is too high-variance to train. The surviving,
+honest surpass hypothesis is **Channel C with variance control**: *zero-mean, low-variance,
+temperature-tunable* perturbation. And the decisive first test is not a codec at all — it
+is the **explicit Gaussian-noise probe** (§4), the operator's thesis stripped to its
+irreducible core with zero codec confound: *does ideal zero-mean tunable noise beat dense
+GRPO at all?* If yes, the variance-controlled mask is the comm-efficient realization; if no,
+compression-as-exploration is falsified for this surface and we stop. **Crucial honest
+caveat (mechanist §8.2):** no >dense edge has been demonstrated by anything that has run;
+this section specifies the experiment that *would* show one, grounded in the §1 theory of
+why it could exist — it is a hypothesis with a clean test, not a claimed result.
 
 ---
 
 ## 3. The ranked levers toward beating dense (REVISED post-mechanist)
 
-Ranked by `P(moves us above dense) × leverage / cost`. **The ranking changed after
-mechanist's analysis:** the old top lever (rank-as-exploration-noise) was falsified
-(frozen-Q PowerSGD has no zero-mean noise, §2.2), and error-feedback was demoted from
-surpass-tool to parity-tool (it can only recover the ~0.06%-energy compression bias,
-§2.6). The surviving surpass levers are organized by the §2.6 channels — each must use a
-signal **dense does not already have**. Every lever is direction-preserving (the hard
-constraint below). The KL brake (Lever 4) is the enabler that makes all of them safe to
-push past dense's operating point.
+Ranked by `P(moves us above dense) × leverage / cost`, **fully converged with mechanist**.
+Two big changes from the first draft: the old top lever (rank-as-exploration-noise via
+PowerSGD) was falsified (frozen-Q PowerSGD has no zero-mean noise, §2.2); error-feedback
+and the anchor-EMA were demoted to *parity* tools (the §2.6 ceiling + the Adam-momentum
+objection). What survives as a surpass lever is **variance-controlled zero-mean
+perturbation** (Channel C done right) — and the decisive first test is the codec-free
+**Gaussian-noise probe**. Every lever is direction-preserving (the hard constraint below);
+the KL brake + length cap are the enablers that make any perturbation safe to push.
 
-### Lever 1 — Variance-reduced / look-ahead gradient (Channel A): the most defensible surpass lever
-- **Mechanism.** Dense uses a single noisy step `G_t`. The anchor EMA `M` is a *cross-step
-  variance-reduced* gradient estimate — a quantity dense **cannot compute in one step**.
-  Use it direction-preservingly: `G_used = G_noisy + λ·(M − proj_{G_noisy}(M))`, i.e. add
-  ONLY the component of the variance-reduced average that the live step does not already
-  span (never override the live sign — the signed_ema lesson). This is momentum/look-ahead
-  by another name, but sourced from the *clean uncompressed* anchor rather than from the
-  compressed live stream.
-- **Why it can beat dense.** The per-coordinate GRPO gradient is near-zero-mean = high
-  *relative* variance (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §1.2); with n=8 the single-step
-  estimate is noisy. A lower-variance descent direction can reach a better policy than a
-  sequence of noisy single steps — and crucially this is a channel **dense does not use**,
-  so it clears the §2.6 parity ceiling (unlike "correct the compression bias," which does
-  not). This is mechanist's own §8.1 "different and testable" surpass candidate.
-- **Cost.** Reuses the verified anchor substrate (M is provably global/full-coverage/real-
-  weight, EXP-25 gates). One new direction-preserving merge mode (not signed_ema). 2–3 arms.
-- **Risk / open.** The EMA is also *stale* (θ_{t−K}) and *smoothed*, so M is a biased proxy
-  for the true variance-reduced gradient; mechanist [Q2/§1] shows staleness is second-order
-  to the structural coin-flip, which is encouraging, but the look-ahead benefit must beat
-  the staleness cost. [MECHANIST-PENDING-R2: prior on whether variance-reduction > staleness.]
-  NB: a pure-dense ablation (dense + plain momentum/EMA on its OWN gradient) is the control
-  that isolates "variance-reduction helps RL" from "the anchor specifically helps."
+### Lever 1 — Variance-controlled UNBIASED perturbation (Channel C, the lead surpass lever)
+- **Mechanism (mechanist §9.1).** The genuinely zero-mean knob already in the stack is the
+  prf_mask + rescale codec (inverted dropout, `E[h̃]=h`, re-sampled per global step,
+  `activation_mask.py:243`). Plain high-p mask stalls because its variance is huge
+  (∝p/(1−p) ≈ 19× at p=0.95). Fix it to satisfy all THREE required properties at once —
+  **zero-mean + controlled-variance + temperature-tunable** — via: (i) **sweep/anneal p**
+  as the exploration temperature (lower p = less noise; anneal high→low = explore early /
+  exploit late), and (ii) **error-feedback on the dropped activation residual `(I−mask)·h`**,
+  re-injecting it next step so the estimator stays unbiased at *lower* variance (the exact
+  fix the high-p mask lacks).
+- **Why it can beat dense.** This is the operator's literal "compression noise = exploration"
+  thesis, now correctly engineered: a zero-mean, low-variance, tunable perturbation is the
+  one object that can supply *productive* exploration (SGD-noise flat-minima §2.4 + RL
+  exploration C2) without the bias that collapsed signed_ema or the variance that stalls the
+  raw mask. Dense sits at zero injected noise; if the optimal noise temperature for this
+  policy/task is > 0, the swept p finds it.
+- **Falsifier (mechanist §9.1).** If no p (fixed or annealed), with EF on, beats dense, then
+  compression-as-exploration is dead for this surface.
+- **Cost.** Reuses the existing mask codec + the error-feedback machinery #24 was scoped
+  for. p-sweep `{0.5, 0.7, 0.9}` ± anneal × EF on = 3–4 arms. Medium (needs the EF wiring).
 
-### Lever 2 — Compression as an implicit trust-region (Channel B): rank-sweep, reinterpreted
-- **Mechanism.** Frozen-Q PowerSGD constrains every update to the dominant-energy subspace
-  `P` (deterministically drops the low-energy tail). In a non-stationary RL objective this
-  is an **implicit regularizer / trust region** — it prevents the step from chasing low-
-  energy batch-specific directions that overfit *this* rollout set, biasing toward flatter,
-  better-generalizing policies (IGR / flat-minima, §2.4) by *constraint*, not by noise.
-- **Why it can beat dense.** Dense takes the full-rank step including the low-energy,
-  high-variance tail. If that tail is mostly overfitting noise for *this* batch, projecting
-  it out each step is free regularization — an edge dense does not have. The rank `r` is the
-  trust-region radius: **lower r = tighter constraint = stronger regularization**; the thesis
-  predicts an interior `r*` whose regularization beats dense.
-- **The reinterpretation (important).** This is the SAME rank sweep as the old (falsified)
-  Lever 3, but the predicted MECHANISM is regularization, not exploration-noise — so the
-  prediction flips: the win (if any) comes from constraining the step, not from injecting
-  noise, and EF would *remove* the regularization (re-adds the dropped tail) rather than
-  enable it. The sweep still discriminates: a non-monotone val(r) with an interior peak
-  above dense confirms Channel B; monotone-saturating-at-dense falsifies it.
-- **Risk / open.** Mechanist §2.2: the constraint may be too WEAK (recon_err only 2.5%,
-  direction-faithful) to regularize meaningfully. If so, lower r (tighter) is needed to see
-  the effect — hence the sweep includes aggressive ranks. [MECHANIST-PENDING-R2.]
-- **Cost.** Rank sweep `r ∈ {38, 77, 154}` × 50 steps; cheap; reuses the green codec.
+### Lever 2 — Explicit zero-mean Gaussian-noise probe (the decisive SCIENCE GATE)
+- **Mechanism (mechanist §9.2).** Add `σ·N(0,1)` to the boundary activation (or the weight
+  gradient), `σ` the temperature, decorrelated per step, exactly zero-mean by construction,
+  variance fully controlled by σ. Run it as a **mechanism probe, not a comm-eff arm** (it
+  saves no bytes) — it isolates "noise-as-exploration" from every codec / byte-budget
+  confound.
+- **Why this is the first thing to run.** It is the operator's thesis stripped to its
+  irreducible core: *does ideal, perfectly-controlled, zero-mean tunable noise beat dense
+  GRPO AT ALL?* If even this cannot beat dense, compression-as-exploration is falsified
+  **independent of any codec**, and we never pay to build the variance-controlled mask
+  (Lever 1). If it CAN, the thesis is proven in principle and Lever 1 becomes the
+  comm-efficient realization of a demonstrated effect. Cheapest, cleanest, most decisive
+  gate in the program.
+- **Cost.** Tiny code (add noise at the boundary), a σ-sweep `{small, med, large}` × 50
+  steps = 3 arms; lowest engineering cost of any lever.
 
-### Lever 3 — Explicit zero-mean exploration via STOCHASTIC compression (Channel C)
-- **Mechanism.** Replace frozen-Q PowerSGD with a codec whose residual is zero-mean *by
-  construction*: stochastic rounding/quantization, per-step re-sampled random-mask
-  sparsification, or **re-randomized-basis PowerSGD** (resample Q every step instead of
-  power-iterating a frozen one). This restores the genuine per-step fluctuation `ξ` that
-  the operator's literal "noise = exploration" thesis needs.
-- **Why it can beat dense.** Now the SGD-noise/flat-minima + RL-exploration argument applies
-  for real: zero-mean gradient noise of the right (aligned) scale improves generalization
-  and perturbs the policy off its greedy path (C2). Dense sits at zero injected noise; if the
-  optimal noise level is > 0, a stochastic codec at the right variance beats dense.
-- **Risk / open.** Mechanist §2.2's caveat is the crux: activation energy is concentrated in
-  a low-rank dominant subspace, so a *random* projection may destroy signal faster than it
-  adds useful exploration (unaligned noise does not select flat minima — the §2.4 alignment
-  result). Variance/rank must be tuned, and the noise must stay aligned enough to help.
-  [MECHANIST-PENDING-R2: whether stochastic ξ would be too large-variance/unaligned.]
-- **Cost.** Requires a new codec (more code than Levers 2/3). Run only if A/B underperform
-  or to test the literal thesis directly. Medium.
+### Lever 3 — Compression-as-trust-region rank sweep (Channel B, cheap secondary)
+- **Mechanism.** Frozen-Q PowerSGD constrains updates to the dominant-energy subspace — an
+  implicit regularizer (constrain the step → flatter, less batch-overfit policy, §2.4 by
+  constraint not noise). Rank `r` is the trust-region radius (lower r = tighter).
+- **Why it can beat dense / risk.** If dense's full-rank low-energy tail is mostly batch-
+  overfitting noise, projecting it out is free regularization. **But mechanist §2.2 says the
+  constraint is likely too WEAK** (direction-faithful, SNR ~42:1) to beat dense — so this is
+  a cheap secondary test, not the lead. Discriminator: non-monotone val(r) with an interior
+  peak above dense confirms; monotone-saturating-at-dense falsifies.
+- **Cost.** Rank sweep `r ∈ {38, 77, 154}` vs dense+KL × 50 steps; cheap; reuses green codec.
 
-### Lever 4 — KL brake: the keystone enabler
-- **Mechanism.** A small KL-to-reference penalty (`use_kl_loss=true`, coef 0.001) adds a
-  restoring force toward the base policy, bounding the policy's excursion and closing the
-  length-degeneration reward-hack channel (the proximate killer of every collapse arm,
-  DEEP_FINDINGS §A2). It does not itself supply surplus — it is the **guardrail that makes
-  any of Channels A/B/C safe to push past dense's operating point** without falling off the
-  collapse cliff.
+### Lever 4 — KL brake + length cap: the keystone enablers
+- **Mechanism.** Small KL-to-reference (`use_kl_loss=true`, coef 0.001) bounds the policy
+  excursion (divergence axis); an unconditional `max_response_length` cap 1024–2048 + length
+  penalty closes the reward-hack (degeneration axis). Neither supplies surplus — together
+  they are the **guardrails that make any perturbation (Levers 1–3) safe to push past
+  dense's operating point** without the collapse cliff.
 - **Status.** A0+KL(0.001) diagnostic in flight (team-lead relaying). Mechanist predicts
-  (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §7) it arrests the length explosion but does NOT
-  itself beat the PowerSGD-only 0.741 — KL removes the collapse channel without making a
-  stale-sign correction helpful. Treated as a prior-tightener, not a blocker (§4).
-- **Caveat.** KL changes the FIXED control surface (no-KL/no-entropy). Run as a deliberate,
-  labelled new lineage — not a silent drift (DEEP_FINDINGS §d.2).
+  (§7) it arrests the length explosion but does NOT itself beat the PowerSGD-only 0.741 —
+  consistent with KL being the enabler, not the surplus. Prior-tightener, not a blocker (§4).
+- **Caveat.** KL/length-cap change the FIXED no-KL/no-entropy surface — run as a deliberate,
+  labelled new lineage, not a silent drift (DEEP_FINDINGS §d.2).
 
-### Lever 5 — Error-feedback (#24): now a PARITY tool, not a surpass tool
-- **Re-ranked DOWN by mechanist's ceiling (§2.6/§8.1).** EF removes the deterministic
-  compression bias `(I−P)·G`. But that bias is ~0.06% of activation energy / single-digit-%
-  of the update, and removing it only recovers toward dense — it is mechanically a **parity
-  + comm-savings** tool (it lets you drop the periodic clean step), NOT a surpass lever. It
-  also *opposes* Channel B (re-adds the regularizing tail). Keep it for the GOAL.md
-  parity+savings deliverable, but it is no longer on the critical path to *beating* dense.
+### Lever 5 — Anchor-EMA + Error-feedback PowerSGD: PARITY tools (the comm-savings banked win)
+- **Re-ranked OFF the surpass path (mechanist §8.1/§8.2).** Two demoted ideas folded here:
+  (a) the anchor-EMA-as-momentum (Channel A) — **Adam already has fresh β1=0.9 momentum**, so
+  a stale β=0.95 clean EMA adds little and pays a staleness cost; (b) error-feedback on the
+  PowerSGD residual — recovers only the ~0.06%-energy compression bias. Both are mechanically
+  **parity + comm-savings** (they let you drop the periodic clean step at ~dense quality),
+  NOT surpass. Run EF-PowerSGD **in parallel** as the honest comm-efficiency deliverable
+  (GOAL.md parity+savings) while Levers 1/2 chase the exploration edge.
 
-### Direction-preserving correction is now a HARD CONSTRAINT, not a lever
+### Direction-preserving correction is a HARD CONSTRAINT, not a lever
 Mechanist's central result: never use a stale signal to OVERRIDE the live update direction
-(the falsified signed_ema primitive). Every lever above (A's complement-add, B's projection,
-C's zero-mean residual) is direction-preserving by construction. The dead operators
-(signed_ema, inject, blend) are retired; blend/inject are inert by orthogonality, signed_ema
-net-harmful. This is a design rule the whole program obeys, not a candidate to test.
+(the falsified signed_ema primitive). Every lever is direction-preserving by construction
+(Lever 1's residual is zero-mean and re-injected, Lever 2's noise is additive, Lever 3
+projects, Lever 5's EF adds back the dropped component). The dead operators (signed_ema,
+inject, blend) are retired — blend/inject inert by orthogonality, signed_ema net-harmful.
 
-### Lever ranking summary (REVISED post-mechanist)
+### Lever ranking summary (CONVERGED)
 
-| rank | lever | channel | beats-dense path | mechanist verdict | cost |
+| rank | lever | role | beats-dense path | mechanist verdict | cost |
 |---|---|---|---|---|---|
-| 1 | **Variance-reduced/look-ahead grad** | A | uses a channel dense LACKS (cross-step average) | the §8.1 "different & testable" candidate | low |
-| 2 | **Compression-as-trust-region** (rank sweep) | B | regularization (constrain the step) | plausible if constraint strong enough | low |
-| 3 | Stochastic-compression exploration | C | zero-mean noise (the literal thesis) | risk: unaligned noise destroys signal | medium |
-| 4 | KL brake | enabler | makes A/B/C safe to push | confirmed-good guardrail | in flight |
-| 5 | Error-feedback (#24) | — | **PARITY only** (clears §2.6 ceiling NO) | de-bias = recover toward dense | low |
+| 1 | **Variance-controlled unbiased mask + EF** | Channel C realization | zero-mean low-var tunable noise (the thesis, engineered) | the §9.1 forward primitive | medium |
+| 2 | **Gaussian-noise probe** | the SCIENCE GATE | does ideal noise beat dense at all? | the §9.2 decoupled control | lowest |
+| 3 | Rank-as-trust-region sweep | Channel B regularization | constrain the step | likely too weak (§2.2) | cheap |
+| 4 | KL brake + length cap | enablers | make 1–3 safe to push | confirmed-good guardrails | in flight |
+| 5 | Anchor-EMA / EF-PowerSGD | PARITY + comm-savings | recover toward dense (drop clean step) | NOT surpass (§8.1) | low |
 
 ---
 
@@ -474,113 +463,147 @@ low-rank arm from burning hours generating 16K-token garbage:
    (length-explosion is the discriminator — kill any arm that fires composite-RED early,
    don't wait for step 50).
 
-### The ONE experiment to run first: **Variance-reduced gradient (Channel A) vs dense, isolated**
+**Required instrumentation on EVERY surpass arm (mechanist §9, HARD gate).** Log per-step:
+(a) the **dense-vs-perturbed update COSINE** (the never-logged EXP-20 success criterion) —
+without it we cannot tell "noise explored productively" from "noise Adam just averaged
+away"; (b) **sign-agreement(perturbed, dense) and the policy entropy + IS-gap** (to confirm
+the perturbation moved the policy, not just the metric). These two numbers are the
+difference between a real result and an uninterpretable one.
 
-The first experiment targets **Channel A** — the most defensible surpass lever (it uses a
-signal dense provably lacks: the cross-step variance-reduced gradient) and the one
-mechanist independently named as the only "different and testable" surpass candidate
-(§8.1). It is also the cheapest decisive test, and its key control (dense+momentum)
-isolates *whether variance-reduction helps RL at all* from *whether the anchor specifically
-helps* — the single most important confound.
+### The ONE experiment to run first: **the zero-mean Gaussian-noise probe (the decisive gate)**
 
-> **EXP-SURPASS-1 — "Does a variance-reduced gradient beat a single dense step?"**
+The first experiment is **not a codec** — it is the operator's thesis stripped to its
+irreducible core. Mechanist's §9.2 decoupled control, elevated to the lead because it is the
+cheapest, cleanest, most decisive test in the entire program: it answers *does ideal,
+perfectly-controlled, zero-mean tunable noise beat dense GRPO AT ALL?* with zero codec or
+byte-budget confound. Everything downstream (the variance-controlled mask, the comm-eff
+payoff) is conditional on this gate.
+
+> **EXP-SURPASS-1 — "Does ideal zero-mean tunable noise beat dense GRPO?"**
 >
-> All arms on the fixed surface, KL(0.001) + length-cap brakes ON everywhere, 50 steps:
+> All arms on the fixed surface, KL(0.001) + length-cap(1024–2048) brakes ON everywhere,
+> 50 steps, the two instrumentation gates logged:
 >
-> | arm | gradient used | tests | role |
-> |---|---|---|---|
-> | **D0** dense+KL | single-step `G_t` | — | **the bar** (re-run with KL so the comparison is brake-matched) |
-> | **D1** dense + EMA-momentum on its OWN grad | `G_t + λ·(M_self − proj)` | does variance-reduction help RL *per se*? | **the key control** — no compression, no anchor |
-> | **A1** comm-eff + anchor-EMA, direction-preserving blend | `G_noisy + λ·(M_anchor − proj_{G}M)` | does the (stale, clean) anchor average beat dense? | **the surpass candidate** (Channel A) |
-> | **A2** comm-eff, plain PowerSGD r77, no anchor | `G_noisy` | the §3 benign floor | reference (≈0.741) |
+> | arm | perturbation | role |
+> |---|---|---|
+> | **D0** dense + KL + length-cap | none | **the bar** (brake-matched, so the comparison isolates the noise) |
+> | **G_lo** dense + `σ_lo·N(0,1)` on boundary activations | small zero-mean noise | low exploration temperature |
+> | **G_mid** dense + `σ_mid·N(0,1)` | medium | the candidate sweet spot |
+> | **G_hi** dense + `σ_hi·N(0,1)` | large | high temperature (expect over-noise → ≤ dense) |
 >
-> `λ` is a small sweep `{0.25, 0.5}`; the merge is the verified-substrate `blend`/inject
-> machinery REPURPOSED as a *complement-add* (add only `M`'s component orthogonal to the
-> live step — never override sign). Anchor `cadence`/`delay_K` re-pinned to global-step units.
+> Noise is added at the boundary activation, decorrelated per step, exactly zero-mean.
+> `σ` is the exploration temperature; scale σ relative to the measured boundary-activation
+> RMS so the sweep is interpretable. (It saves no comm — it is a *mechanism probe*, run as
+> a science control, not a comm-eff arm.)
 
 **Why this one first.**
-1. **It targets the channel that can actually clear the §2.6 parity ceiling.** Channels B
-   (regularization) and C (stochastic noise) might beat dense, but A is the one with a
-   named, mechanically-distinct signal (the cross-step average) and the cleanest control.
-2. **D1 is the decisive control no prior experiment ran.** If D1 (dense+self-momentum)
-   already beats D0 (dense), then variance-reduction helps RL *independent of compression*
-   — and the comm-eff story becomes "get the surplus for free while also saving comm" (A1
-   should then match D1 at lower comm). If D1 does NOT beat D0 but A1 DOES, the anchor's
-   stale-clean average carries something self-momentum cannot — a stronger, stranger
-   result. If neither beats D0, Channel A is falsified cleanly.
-3. **It is direction-preserving by construction** (complement-add, never sign-replacement)
-   — it cannot reproduce the signed_ema collapse, and the KL+length brakes backstop it.
-4. **It fits the budget and reuses verified machinery:** 4 arms (+1 for the λ sweep) × 50
-   steps on one 4–8 GPU box; the anchor substrate is green (EXP-25 gates), only the merge
-   mode changes.
+1. **It is the irreducible test of the operator's thesis.** If even ideal zero-mean tunable
+   noise cannot beat dense, "compression-as-exploration" is falsified for this surface —
+   independent of any codec — and we save all the mask+EF engineering. If some σ DOES beat
+   dense, the thesis is proven in principle and the codec work has a demonstrated target.
+2. **It removes every confound.** No byte budget, no basis warmup, no staleness, no bias —
+   just `G_t + ξ`, `ξ` exactly zero-mean. Whatever it shows is about *noise-as-exploration*,
+   nothing else. That is precisely the isolation mechanist demanded (§9.2).
+3. **Cheapest + lowest-engineering in the program** (add noise at the boundary; a 4-arm
+   σ-sweep × 50 steps on one box), and it directly de-risks the more expensive Lever 1.
 
-**Pre-registered predictions (honest, mechanism-grounded):**
-- **Channel A real:** A1 > D0 by > noise (≥ ~0.76). Sub-cases: (i) D1 > D0 too ⇒
-  variance-reduction is the mechanism, anchor is just a free way to get it; (ii) D1 ≈ D0
-  but A1 > D0 ⇒ the stale-clean anchor average specifically helps (publish this).
-- **Channel A null:** A1 ≈ A2 ≈ D0 (the anchor add is inert/parity, consistent with
-  mechanist's §8.1 ceiling) ⇒ Channel A does not surpass; pivot to Channel B (rank sweep)
-  as EXP-SURPASS-2, then Channel C if B also nulls.
-- **Mechanist's KL-diagnostic prediction (§7)** — KL arrests the length explosion but does
-  not by itself beat 0.741 — is the prior: KL is the enabler, not the surplus, exactly as
-  Channel A assumes.
+**Pre-registered predictions (honest, mechanism-grounded — and the honest prior is SKEPTICAL).**
+- **Thesis confirmed:** an interior `σ*` gives `val(σ*) > val(D0)` by > noise (a non-
+  monotone temperature curve with a peak above dense). The win is at *medium* σ; G_hi
+  degrades (over-noise).
+- **Thesis falsified (mechanist's prior, §8.2):** val is monotone *decreasing* in σ — any
+  zero-mean noise only adds variance that Adam averages away and hurts, so dense (σ=0) is
+  best. Mechanist's standing position is that no >dense edge has been demonstrated and the
+  existing entropy "fingerprint" is anti-correlated with val — so the honest base rate
+  favors this outcome. Stating it up front keeps the result credible either way.
+- **The COSINE gate (a) is the tell:** if a helping σ shows update-cosine to dense
+  *dropping below ~0.98* while val *rises*, that is genuine productive exploration (the
+  noise is steering, not just jittering). If val rises with cosine ≈ 1.0, the "win" is noise
+  Adam absorbed and is likely seed noise — demand the 2-seed confirmation.
 
-**Decision rule.** A1 > D0 (surplus) ⇒ 2-seed A1, sweep λ, write it up as the headline,
-and report the D1-vs-D0 control to attribute the surplus (variance-reduction vs anchor-
-specific). A1 ≈ D0 (parity) ⇒ Channel A is a comm-savings win at best; advance to
-**EXP-SURPASS-2 = the Channel-B rank sweep** (`r ∈ {38, 77, 154}` vs dense+KL; predicts a
-non-monotone interior peak if compression-as-trust-region regularization beats dense), and
-hold **Channel C (stochastic codec)** as EXP-SURPASS-3 if B also nulls.
+**Decision rule.**
+- **Gate PASSES (some σ beats dense):** proceed to **EXP-SURPASS-2 = Lever 1**, the
+  variance-controlled UNBIASED mask (swept/annealed p + error-feedback) — the *comm-
+  efficient realization* of the now-demonstrated effect. This is the headline path.
+- **Gate FAILS (dense is best at σ=0):** compression-as-exploration is falsified for this
+  surface. Pivot the deliverable to the honest **parity + comm-savings** result: run
+  **EF-PowerSGD** (Lever 5) to bank the comm win at ~dense quality (drop the clean step),
+  and optionally the cheap **Channel-B rank sweep** (Lever 3) as a last check on the
+  regularization route (mechanist's prior: too weak to surpass).
 
-### Why this ordering (A → B → C) and not the old rank-first plan
-The old EXP-SURPASS-1 (rank × EF grid) was built on the now-falsified premise that low
-rank injects zero-mean *exploration* noise. Mechanist showed frozen-Q PowerSGD has no such
-noise (§2.2) and that EF only buys parity (§2.6). So the rank sweep is demoted to a test of
-*regularization* (Channel B, EXP-SURPASS-2), and EF drops off the surpass path entirely.
-Channel A goes first because it is the only lever with (a) a signal dense provably lacks and
-(b) a clean dense-side control (D1) that isolates the mechanism. This ordering spends the
-first (cheapest) box on the highest-probability, most-interpretable surpass test.
-
----
-
-## 5. Open dependencies on mechanist (to close before finalizing)
-
-- **[Q1 — pivotal]** Is PowerSGD's `(I−P)·G` residual zero-mean/step-decorrelated
-  (→ Lever 3 valid as-is) or a coherent low-rank bias (→ needs Lever 2 first)? + an SNR
-  estimate. **This determines whether rank-as-temperature works directly or only after
-  error-feedback.**
-- **[Q2]** Three-way split of the α=0 sign-disagreement (staleness / compression / EMA)
-  — confirms whether the collapse is "adversarial because stale" (freshen) or "the sign
-  operator is fundamentally wrong" (abandon — current read).
-- **[Q3]** Does blend's M_anchor injection carry direction-correct signal vs the true
-  dense gradient, or only magnitude? Decides if Lever 5 has any live content.
-- **[Q4]** Is there an EXISTING fingerprint (higher sustained entropy / wider train↔
-  rollout gap) that compression already adds exploration in the healthy arms? Empirical
-  seed for the whole thesis.
+### Why this ordering (Gaussian probe → mask → parity) and not the old rank-first plan
+The first draft's EXP-SURPASS-1 (rank × EF grid) assumed low-rank PowerSGD injects zero-mean
+*exploration* noise. Mechanist falsified that: frozen-Q PowerSGD's residual is a deterministic
+*bias*, not noise (§2.2), and EF only buys parity (§2.6). The genuinely zero-mean codec (the
+mask) exists but stalls from variance. So the decisive question moved upstream — *is
+zero-mean noise useful in RL here at all?* — and the cleanest way to answer it is the
+codec-free Gaussian probe, BEFORE paying to engineer the variance-controlled mask. This
+spends the first, cheapest box on the single experiment that can kill or confirm the whole
+thesis, and only then invests in the comm-efficient realization.
 
 ---
 
-## 6. One-paragraph thesis (the elevator version)
+## 5. Mechanist convergence — what is settled (was: open dependencies)
+
+All four grounding questions are CLOSED, converged with mechanist
+(`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`). The resolved answers reshaped this document:
+
+- **[Q1 — RESOLVED]** PowerSGD's `(I−P)·G` residual is a **deterministic structured BIAS**
+  (frozen Q, same off-subspace dropped every step), low-magnitude (recon ~0.025, SNR ~42:1,
+  0.06% energy dropped), direction-faithful — **NOT zero-mean noise**. ⇒ killed rank-as-
+  exploration-via-PowerSGD; the genuinely zero-mean knob is the *mask*, not PowerSGD.
+- **[Q2 — RESOLVED]** The ~50% sign-disagreement is **structural** (coin-flip of two
+  estimators of a near-zero-mean GRPO gradient), already 50% at the first warm step, uniform
+  across layers — NOT staleness/compression/EMA. ⇒ signed-replacement is fundamentally
+  wrong; abandon, don't freshen.
+- **[Q3 — RESOLVED]** blend/inject are inert by orthogonality (`cos(G,M)≈0.001`); no live
+  directional content. Retired with signed_ema.
+- **[Q4 — RESOLVED]** The comm-eff "high entropy" is a **codec-warmup artifact** (coincides
+  with recon 0.97→0.14 as Q warms), and even the subtler sustained ~0.1-nat entropy edge in
+  the trained regime is **anti-correlated with val** (slower convergence, not exploration).
+  ⇒ the entropy fingerprint is NOT a surpass argument; dropped from the case.
+- **Joint converged verdict:** no >dense edge has been demonstrated by anything that has
+  run; the surviving testable surpass hypothesis is **variance-controlled zero-mean
+  perturbation** (Lever 1), gated by the **Gaussian-noise probe** (the EXP-SURPASS-1
+  decision). The anchor-EMA and error-feedback are parity/comm-savings tools, not surpass.
+
+---
+
+## 6. One-paragraph thesis (the elevator version, converged)
 
 In SFT, gradient compression is pure information loss because the objective is a fixed
 target — every dropped bit is descent lost. In RL the objective is non-stationary,
-exploration-limited, implicitly regularized by gradient-sign cancellation, and coupled
-to a self-shaping reward, so the *sign* of compression's effect depends entirely on
-whether the compression deviation is a **zero-mean fluctuation** (rides the implicit
-regularizer, perturbs the policy off its greedy path, sustains exploration → can BEAT
-dense via SGD-noise flat-minima + RL exploration) or a **persistent structured bias**
-(breaks the regularizer, accumulates under no-KL/no-entropy, drives the length-explosion
-reward-hack → collapse, the α=0 result). The signed_ema collapse is the negative image
-that locates the cliff; the path to surpass dense runs along the opposite edge: a small
-PowerSGD rank (maximal zero-mean exploration noise) with **error-feedback** removing the
-bias and a **small KL** guardrail making the noise safe to inject — and the decisive,
-falsifiable test is whether some compressed rank `r* < H` beats dense+KL on GSM8K val@50.
+exploration-limited, implicitly regularized by gradient-sign cancellation, and coupled to a
+self-shaping reward, so a perturbation's effect depends entirely on whether it is a
+**zero-mean fluctuation** (rides the implicit regularizer, perturbs the policy off its
+greedy path → could BEAT dense via SGD-noise flat-minima + RL exploration) or a
+**persistent structured bias** (breaks the regularizer, drives the length-explosion reward-
+hack → the α=0 collapse). Mechanist's gradient-flow analysis falsified the naive routes:
+frozen-Q PowerSGD's residual is a *deterministic bias*, not noise (so "low rank = more
+exploration noise" is false), the genuinely zero-mean codec (the mask) *stalls* from
+variance, and the stale clean anchor is information dense already has fresh (so anchor
+correction is parity, not surpass; Adam's own momentum already covers the variance-reduction
+channel). What survives is the operator's thesis *correctly engineered*: a **zero-mean,
+low-variance, temperature-tunable** perturbation. The decisive, falsifiable test is the
+codec-free **Gaussian-noise probe** — *does ideal zero-mean tunable noise beat dense GRPO at
+all?* — with the dense-vs-perturbed update cosine logged to tell productive exploration from
+noise-Adam-averages-away. If it passes, the **variance-controlled unbiased mask + error-
+feedback** is the comm-efficient realization; if it fails, the honest deliverable is
+**error-feedback PowerSGD** for parity at materially lower comm. The honest prior (mechanist):
+no >dense edge has yet been shown — this is a clean hypothesis with a one-experiment gate,
+not a claimed win.
 
 ---
 
 ## 7. References
 
 **Internal (this fork).**
+- `runs/EXP-25/COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` (**mechanist, task #1**) — the gradient-
+  flow account: compression is benign (PowerSGD-only ties dense 0.741); residual is
+  deterministic bias not noise (SNR ~42:1, 0.06% energy); the ~50% disagreement is
+  structural; length-hack not low-entropy is the killer; the mask is the zero-mean knob but
+  stalls; §8.1 parity-vs-surpass ceiling; §9 forward primitive (variance-controlled unbiased
+  mask + EF, Gaussian probe). The load-bearing input to this strategy.
 - `runs/EXP-25/DEEP_FINDINGS.md` — the signed_ema α-sweep dose-response, the √2 sign-
   disagreement signature, the monotonicity (signed_ema is net-harmful), the ranked
   improvement menu (error-feedback #24 = top successor).

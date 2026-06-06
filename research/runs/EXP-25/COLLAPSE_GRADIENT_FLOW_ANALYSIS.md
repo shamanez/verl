@@ -394,18 +394,35 @@ STEPS only, not within. **Net:** the only genuinely zero-mean knob we have is to
 a clean test of "compression-as-exploration" needs a primitive that is zero-mean AND low-variance AND
 tunable-as-temperature — which does not exist in-stack today (§9).
 
-**(B) Is the high comm-eff entropy productive exploration? NO — it is a CODEC-WARMUP ARTIFACT.** The
-high entropy (5.7→9.1) at steps 1–4 coincides EXACTLY with the cold basis: PowerSGD
-`reconstruction_rel_error` 0.976→0.691→0.398→0.144 over steps 1–4 as Q's block-power-iteration
-converges onto the dominant activation subspace (W&B `oquyeic3`). A cold Q garbles the activation ⇒
-near-uniform (high-entropy) output. Once Q warms (recon ~0.02 by step 5), entropy CRASHES to 0.41 and
-tracks dense thereafter (0.38, 0.33). It confers ZERO val benefit: `oquyeic3` has the 5.7→0.41 warmup
-spike yet ties dense (0.741 vs 0.754), does not beat it; and the arms that SUSTAIN high entropy LONGER
-(α=0.5: 3.6@s5, 2.3@s10, 1.0@s25; α=0) do WORSE (0.705 / collapse), not better. Dense itself starts at
-entropy 0.37 (the Qwen2.5-1.5B-Instruct model is already confident) and settles to 0.22 — LOWER than
-every comm-eff arm's floor, with the best val. **Sustained high entropy is ANTI-correlated with val
-here.** Low entropy is the healthy regime; the comm-eff "high entropy" is transient garbling, not
-productive exploration. This removes the "comm-eff explores more" lever as currently observed.
+**(B) Is the high comm-eff entropy productive exploration? PARTLY REAL — the warmup spike is an
+artifact, but the trained-regime gap is a GENUINE diffuse-policy fingerprint that fails to convert.**
+(Revised; supersedes an earlier "pure artifact" read.) Two regimes must be separated:
+- **Steps 1–4 (entropy 5.7→9.1, bouncing) = ARTIFACT.** `actor/entropy` is computed as
+  `entropy_from_logits(output.logits)` on the actor-TRAIN forward (`fsdp/transformer_impl.py:2375`), and
+  the PowerSGD hook IS active there. While the basis is COLD (`reconstruction_rel_error`
+  0.976→0.691→0.398→0.144 over steps 1–4 as Q's power-iteration converges, W&B `oquyeic3`), the
+  compressed forward is garbled ⇒ inflated/erratic entropy (the 5→9→0.4→7.8 bouncing is that numerical
+  instability). Drop this from any exploration claim.
+- **Steps 5–45 (~0.08–0.12 nat above dense) = REAL, uncompressed-corroborated.** After Q warms, psgd
+  sustains higher entropy than dense at every matched step (s25 0.335 vs 0.222; s45 0.266 vs 0.146).
+  Decisive corroboration it is a genuine policy property and NOT a training-forward measurement artifact:
+  `rollout_corr/rollout_ppl` — the perplexity of the UNCOMPRESSED vLLM generator, which has NO
+  compression hooks — is consistently HIGHER for psgd than dense (s25 1.401 vs 1.238; s45 1.283 vs
+  1.150), with `rollout_ppl ≈ training_ppl` for both (train↔rollout consistent). So PowerSGD r77 sustains
+  a genuinely MORE DIFFUSE policy than dense in the trained regime.
+
+**But the real diversity does NOT CONVERT.** psgd's score LAGS dense at every step (s25 0.688 vs 0.786)
+and val ties-not-beats (0.741 vs 0.754); the arms that sustain high entropy LONGER (α=0.5, α=0) do
+WORSE. Dense runs at entropy 0.22→0.122 (the Qwen instruct model is confident) with the BEST val. So the
+honest read: **compression produces a real, sustained, uncompressed-corroborated exploration fingerprint
+that dense lacks — but it is currently LOST, not harnessed into reward.** This is not a >dense edge
+as-observed; it identifies an open lever (a mechanism to CONVERT the diversity — variance-controlled
+noise or denser credit assignment, §9), not a demonstrated win.
+
+NB metric-comparability: `rollout_probs_diff_mean` is ~0.0035 for BOTH dense and psgd but ~0.62 for BOTH
+α=0 and α=0.5 — the ~180× gap is ANCHOR-arms vs NON-anchor-arms (the anchor circuit renormalizes the
+metric), NOT dense-vs-compression. Use `rollout_ppl` (comparable across all runs) as the exploration
+proxy, not `rollout_probs_diff_mean` across the anchor boundary.
 
 ### 8.1 The parity-vs-surpass ceiling (load-bearing for the surpass-dense plan)
 
@@ -433,16 +450,22 @@ success criterion); log it on the next run.
 
 ### 8.2 Honest converged verdict
 
-The existing evidence supports **NO demonstrated >dense edge.** Specifically: (1) compression is
-dense-grade parity (`oquyeic3` 0.741 ≈ dense 0.754); (2) the off-subspace bias an anchor could correct
-is ~0.06%, so anchor correction is a parity-recovery (drop-the-clean-step comm saving), not a surpass
-mechanism; (3) the high comm-eff entropy is a codec-warmup artifact, not exploration, and is
-anti-correlated with val; (4) the only genuinely zero-mean noise source (the rescaled mask) is too
-high-variance to train on alone; (5) the stale clean anchor is not an extra-dense information channel
-(dense sees full uncompressed activations fresh every step), and Adam already supplies fresh β1=0.9
-momentum, so a stale β=0.95 EMA adds little. A surpass-dense claim is therefore not supported by what
-has run. The most valuable forward deliverable is naming the NEW primitive that would genuinely test
-the operator's "compression-as-exploration" thesis (§9).
+The existing evidence supports **NO demonstrated >dense edge** — but it DOES expose a real, unconverted
+exploration fingerprint that defines the surpass lever. Specifically: (1) compression is dense-grade
+parity (`oquyeic3` 0.741 ≈ dense 0.754); (2) the off-subspace bias an anchor could correct is ~0.06%,
+so anchor correction is a parity-recovery (drop-the-clean-step comm saving), not a surpass mechanism;
+(3) compression sustains a GENUINELY more diffuse policy than dense in the trained regime (uncompressed
+`rollout_ppl` corroborates: psgd 1.40 vs dense 1.24 @s25) — a REAL exploration fingerprint — but it
+currently FAILS TO CONVERT (psgd score lags dense at every step, val ties not beats); only the steps-1–4
+high-entropy spike is a codec-warmup artifact; (4) the only genuinely zero-mean noise source (the
+rescaled mask) is too high-variance to train on alone; (5) the stale clean anchor is not an extra-dense
+information channel (dense sees full uncompressed activations fresh every step), and Adam already supplies
+fresh β1=0.9 momentum, so a stale β=0.95 EMA adds little. A surpass-dense claim is therefore not
+supported by what has run — BUT the unconverted real diversity (3) is the most promising lead: the
+surpass question is whether a mechanism can HARNESS the diversity compression already produces (convert
+it to reward) rather than let the optimizer average it away. The most valuable forward deliverable is the
+NEW primitive that would test that (§9) — either variance-controlled zero-mean noise, or denser credit
+assignment (higher n) to convert the diversity that already exists.
 
 ---
 
