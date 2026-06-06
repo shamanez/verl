@@ -90,3 +90,4 @@ PROMOTE_SKIPPED: EXP-25 reason="no promote_launcher_as (plan: promote_launcher_a
 [2026-06-06T10:30:21+10:00] [sync] SSH refused (8th consecutive) — box gone, skipping.
 [2026-06-06T10:40:21+10:00] [sync] SSH refused (9th consecutive) — box gone, skipping.
 [2026-06-06T10:50:24+10:00] [sync] SSH refused (10th consecutive) — box torn down, loop idle.
+[2026-06-06T11:00:22+10:00] [sync] SSH refused (11th consecutive) — box gone, loop idle.
