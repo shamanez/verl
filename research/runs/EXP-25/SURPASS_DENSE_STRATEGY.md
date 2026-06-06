@@ -265,6 +265,29 @@ The Route-B surpass test. Promoted to lead because it is the only bet that (i) a
   so the project banks a real result even if every surpass bet nulls. The activation mask lives
   here too, as the comm-eff codec — NOT as a surpass lever (Finding 1).
 
+### BET 6 (CONSIDERED, RED-FLAGGED, ranked LAST) — Entropy / exploration-credit reward shaping
+
+Named for completeness (the team-lead asked us to consider the entropy-bonus / reward-shaping
+family) and **explicitly deprioritized with reason**, not silently dropped.
+
+- **Mechanism (two variants).** (i) Raw entropy bonus `entropy_coeff>0` to sustain diversity;
+  (ii) a *directed* exploration-credit term that rewards within-group ANSWER diversity (attacks
+  cause (d): undirected diversity).
+- **Why it is the most DANGEROUS arm (critic-escalated red-flag).** COLLAPSE_ANALYSIS §6.2: under
+  the no-KL/no-entropy surface the only shaping signal is reward, and the collapse channel is a
+  LENGTH-degeneration reward-hack (the H3 loop: low-entropy-gone → longer non-EOS → length
+  runaway). A raw entropy bonus pushes the EXACT axis the KL+length-cap brakes are fighting — it
+  is the single arm most likely to detonate the length-hack *even with* the brakes. Predicted
+  outcome: either the KL cancels the bonus (does nothing) or it re-collapses. ⇒ ranked LAST,
+  run only after BET 1, with the length cap mandatory.
+- **The directed variant is more interesting but costlier.** Rewarding within-group answer
+  diversity is *directed* credit (attacks (d) head-on), but it is NEW reward-shaping code and
+  changes the surface. **Scope it as a follow-up ONLY if BET 1's pass@k coverage curve proves the
+  diversity is real-but-undirected** (best-of-group rises, greedy-val flat, pass@k flat-in-k) —
+  i.e. only if the diagnosis says the diversity exists but points the wrong way.
+- **Cost.** Raw bonus = config (cheap but high detonation risk); directed variant = new loss
+  code (higher), follow-up only.
+
 ### Ranked summary
 
 | rank | bet | route | beats-greedy-dense path | compression-specific? | cost |
@@ -272,7 +295,8 @@ The Route-B surpass test. Promoted to lead because it is the only bet that (i) a
 | GATE | **BET 2** surface calibration on dense | — | does ANY T/n lift dense? | no (control) | cheapest (~4 arms) |
 | 1 | **BET 1** raise n + temperature T (+1b rank-weighted adv) | **B** | diffuse training → mode relocation via clean credit | **YES** (d(val)/dn steeper) | ~8 arms |
 | 2 | **BET 3** Gaussian probe | — | interprets BET 1; codec-free falsifier | control | tiny |
-| 3 | **BET 4** explore-then-exploit anneal | B | front-load diversity, collapse late | yes | cheap (schedule) |
+| 3 | **BET 4** explore-then-exploit anneal (run as TEMPERATURE-anneal, not mask-p — the only direct sampling-distribution knob) | B | front-load diversity, collapse late | yes | cheap (schedule) |
+| LAST | **BET 6** entropy / exploration-credit shaping | — | sustain/direct diversity | risky | config (raw) / new code (directed) |
 | — | **BET 5** EF-PowerSGD (+ mask as codec) | — | PARITY + comm-savings (NOT surpass) | n/a | low |
 
 ---
