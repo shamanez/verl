@@ -256,6 +256,17 @@ reversed coordinate, so a wrong-signed step is taken at full strength. There is 
 the merged object that improves on `G_noisy` — it strictly degrades the direction on half the mass
 while keeping the magnitude.
 
+**Literature anchor (why this was predictable).** Sign-based gradient compression (signSGD and
+variants) is a known technique, but its convergence guarantees REQUIRE a majority-vote /
+variance-reduction step that makes the transmitted sign an UNBIASED estimator of the true sign
+(Sparse-SignSGD with majority vote, arXiv 2302.07475). `signed_ema` has no such unbiasing step — it
+takes the sign from a SINGLE stale β=0.95 EMA, which is a BIASED sign estimator by construction. The
+gradient-flow result here (§1.2) is the *why* behind that bias: the per-coordinate GRPO sign is a
+near-coin-flip between two different estimators of a near-zero-mean gradient, so a single stale-EMA
+sign disagrees with the live sign on ~50% of mass. signed_ema is therefore sign-compression with the
+mandatory unbiasing step removed — the literature predicts exactly its failure, and §1/§5 supply the
+mechanism. (Corroboration noted by `strategist`; see `PATH_TO_SURPASS_DENSE.md` §2.4.)
+
 ### 5.2 Why α=0.5 escapes and α=0/0.3 do not — same mechanism, dose-graded
 
 At α=0.5 the merger is `G_noisy` on the agreeing half and 0 on the disagreeing half: a strict
@@ -476,24 +487,32 @@ match it), the test needs a perturbation that is simultaneously: (a) ZERO-MEAN (
 than biases — PowerSGD fails this); (b) LOW/CONTROLLED variance (so it trains rather than stalls — the
 p=0.95 mask fails this); and (c) TUNABLE as an exploration TEMPERATURE (so the bias-variance/explore
 tradeoff is a swept axis, not a fixed codec). None of the three in-stack codecs (dense, prf_mask,
-PowerSGD) is all three. Candidate primitives, in order of how cleanly they isolate the thesis:
+PowerSGD) is all three. Candidate primitives, in the CONVERGED run-order (mechanist + strategist):
+**the Gaussian probe is the science GATE run first; the mask is the comm-eff PAYOFF conditional on the
+gate passing; EF-PowerSGD is the parity banked-win run in parallel.**
 
-1. **Variance-controlled UNBIASED mask = rescaled mask at SWEPT p WITH error-feedback.** Keep the
-   zero-mean inverted-dropout estimator (8.0A) but (i) sweep p as the exploration-temperature knob
-   (lower p = less noise) and (ii) add error-feedback on the dropped activation residual
-   `(I−mask)·h`, re-injecting it next step so the estimator stays unbiased at LOWER variance — exactly
-   the variance fix the high-p mask lacks. Optionally ANNEAL p high→low over training (explore early,
-   exploit late). This is the most direct in-spirit test: does zero-mean activation noise at
-   controlled variance beat dense, or just add variance? It reuses the existing mask + the
-   error-feedback machinery #24 was scoped for. **Falsifier:** if no p (annealed or fixed) beats
-   dense, "compression-as-exploration" is dead for this surface.
-2. **Explicit zero-mean Gaussian gradient/activation noise with a swept scale.** The cleanest decoupled
-   control — add `σ·N(0,1)` to the boundary activation (or the weight gradient) with `σ` the
-   temperature, decorrelated per step, exactly zero-mean by construction, variance fully controlled by
-   σ. This separates "noise-as-exploration" from any codec/byte-budget confound; it is NOT
-   comm-efficient (it's a mechanism probe), so run it as a science control, not a comm-eff arm. If even
-   ideal zero-mean tunable noise cannot beat dense GRPO here, the exploration thesis is falsified
-   independent of compression.
+1. **(RUN FIRST — the science gate) Explicit zero-mean Gaussian noise with a swept scale.** The
+   irreducible-core falsifier with ZERO codec/byte-budget confound: add `σ·N(0,1)`, decorrelated per
+   step, exactly zero-mean by construction, variance fully controlled by σ. It being NON-comm-eff is its
+   VIRTUE — it isolates "does zero-mean tunable noise help RL AT ALL?" from "does compression help?",
+   so a null is interpretable (noise itself doesn't help) rather than confounded (maybe it was the
+   byte budget). Three design requirements or the probe gives a FALSE null: **(i) injection site** — run
+   BOTH a gradient-space arm (`G_used = G + σ·N(0,1)`, the cleanest core) AND a boundary-activation arm
+   (mimics a real lossy boundary, propagates through the rest of backward); they are different objects.
+   **(ii) scale σ RELATIVE to the running gradient RMS, swept** (`σ/‖g‖ ∈ {0.1, 0.3, 1.0}`), never an
+   absolute σ — dense grad_norm is tiny (~0.387) and drifts, so an absolute σ is negligible or
+   catastrophic at different points; a mis-scaled σ is the most likely false-null source. **(iii) the
+   cosine is mandatory** (see below) so a flat val(σ) is diagnosable. **Decisive falsifier:** if no
+   σ beats dense+KL, compression-as-exploration is dead for this surface and the mask path is never
+   built.
+2. **(CONDITIONAL PAYOFF — only if the gate passes) Variance-controlled UNBIASED mask = rescaled mask
+   at SWEPT p WITH error-feedback.** The comm-efficient REALIZATION of a proven effect: keep the
+   zero-mean inverted-dropout estimator (8.0A) but (i) sweep p as the exploration-temperature knob and
+   (ii) add error-feedback on the dropped activation residual `(I−mask)·h`, re-injecting it next step so
+   the estimator stays unbiased at LOWER variance — the variance fix the high-p mask lacks. Optionally
+   ANNEAL p high→low (explore early, exploit late). Reuses the existing mask + the error-feedback
+   machinery #24 was scoped for. Run this ONLY if the Gaussian gate (1) shows zero-mean noise helps —
+   otherwise it is wasted engineering.
 3. **Error-feedback PowerSGD (the parity test, run alongside).** Not an exploration primitive, but the
    clean way to BANK the comm win: accumulate `(I−P)g` and re-inject next step (issue #24's primitive),
    removing the clean step. Expected outcome PARITY (0.741-band) at lower comms — the honest
@@ -503,3 +522,66 @@ PowerSGD) is all three. Candidate primitives, in order of how cleanly they isola
 dense-vs-compressed update COSINE (EXP-20's never-logged success criterion) and the
 sign-agreement(M, G_noisy) at delay_K=0 (the §1.2 OPEN). Without those two numbers we cannot
 distinguish "noise explored productively" from "noise just added variance Adam averaged away."
+
+---
+
+## 10. The prf_mask as a tunable bias↔variance dial — gradient-level analysis (mask-p-as-temperature)
+
+The headline surpass test (per the team-lead's reframe) sweeps the rescaled `prf_mask` `p` as an
+exploration TEMPERATURE. This section grounds the design: what stalled EXP-16, whether a low-`p`
+regime dodges it, and whether the mask is zero-mean at the GRADIENT level (not just the activation).
+
+### 10.1 What stalled EXP-16 (p=0.9/0.95): DIRECTION corruption, and it SCALES with mask variance
+
+With `rescale=true` the masked grad NORM was near-dense (4.4 ≈ 2.3× dense) — so raw magnitude was NOT
+the stall driver once rescaled (EXP-16 root-cause, 2026-05-30). The killer was the gradient DIRECTION:
+`pearson(masked-actor, rollout) = 0.006` vs dense `0.9996` — the masked subnetwork became a different
+function, so its gradient pointed the wrong way. Critically the corruption is not a fixed floor — it
+is the Jensen/curvature bias (§10.2) whose size is set by the mask variance `p/(1−p)` (9× at p=0.9,
+19× at p=0.95). So EXP-16 only ever sampled the high-variance STALL zone; the low-to-mid `p` regime
+(variance 0.11×–1.0×) is untested for beat-dense.
+
+### 10.2 Is the mask zero-mean at the GRADIENT level? ACTIVATION: exact. GRADIENT: only approximate, bias ∝ variance
+
+- **Activation: EXACTLY zero-mean.** `E[h̃] = h·E[m]/(1−p) = h` (inverted dropout, `activation_mask.py:243`).
+- **Gradient: NOT exact.** The loss is `L(f(h̃))` where `f` is the deep NONLINEAR remainder of the
+  network (+ RMSNorm + reward-weighted log-prob) between the masked boundary and the loss. Even with
+  `E[h̃]=h`, `f` nonlinear ⇒ `E_m[∇L(f(h̃))] ≠ ∇L(f(h)) = G_dense` by Jensen/curvature. The bias is
+  `≈ ½·Var(h̃)·(curvature of f)`, so it GROWS with the mask variance `p/(1−p)`.
+- **⇒ the mask is a TUNABLE INTERPOLATION on the bias↔variance axis.** Low `p` (variance 0.1–0.4×):
+  smaller Jensen bias ⇒ the mask gradient is closer to zero-mean ⇒ closer to the ideal Gaussian probe
+  (§9.1). High `p` (variance 9–19×): large Jensen bias ⇒ strongly biased gradient = the EXP-16
+  direction corruption. `p` dials the bias/variance tradeoff: low-p ≈ Gaussian-ish, high-p ≈
+  PowerSGD-style structured bias.
+- **Empirical confirmation (toy nonlinear net, CPU).** A minimal `h → (Linear, SiLU, RMSNorm, Linear) →
+  advantage-weighted PG loss` Monte-Carlo over 4000 mask draws measures
+  `‖E_m[G_masked] − G_dense‖ / ‖G_dense‖`: **p=0.1 → 0.076, p=0.3 → 0.23, p=0.5 → 0.39, p=0.7 → 0.58**
+  (p=0.9 → NaN, the RMSNorm blows up under 9× variance — itself a stall signature). This confirms the
+  analytical claim — the gradient bias is real, nonzero, and grows monotonically with variance — and
+  SHARPENS it: the bias is NOT negligible even at low p (7.6% at p=0.1, 23% at p=0.3). So the mask is
+  meaningfully biased at the gradient level across the whole usable range, not just at high p. (Toy-net
+  absolute numbers won't transfer to Qwen2.5-1.5B; the load-bearing result is the monotone
+  bias-grows-with-variance TREND and that the bias is appreciable at low p.) Consequence for the plan:
+  the mask-p sweep is a SOFTER test of the pure zero-mean-exploration thesis than the activation-level
+  `E[h̃]=h` property suggests — which strengthens the case for keeping the codec-free Gaussian probe
+  (§9.1, exactly zero-mean by construction) as the clean instrument (§10.4).
+
+### 10.3 Predicted stall threshold and the locked p-sweep
+
+Variance ladder `p/(1−p)`: p=0.1→0.11× · p=0.3→0.43× · p=0.5→1.0× · p=0.9→9× · p=0.95→19×. EXP-16
+stalled hard at 9–19×; dense's own intrinsic step is ~1× scale, so **p=0.5 (variance 1.0×) is the knee
+— a perturbation comparable to the gradient's own magnitude** (plausibly "mild productive," plausibly
+"starting to corrupt"). p=0.1/0.3 are clearly in the trains-fine zone. **Locked sweep: p ∈ {0.1, 0.3,
+0.5}, all with `rescale=true`** (keeps grad-norm near-dense so we test direction-perturbation, not
+scale-blowup) + KL/length brakes; p=0.9/0.95 known to stall, don't spend arms there. Predicted
+transition trains-fine→stall around p ≈ 0.5–0.7.
+
+### 10.4 Why KEEP the Gaussian probe (§9.1) as the control even with the mask-p headline
+
+Because the mask gradient is only APPROXIMATELY zero-mean (§10.2), at the `p` where it perturbs
+meaningfully (≈0.5) it is ALSO injecting Jensen bias — so the mask is a WEAKER test of the pure
+"zero-mean noise explores" thesis than the codec-free Gaussian probe (exactly zero-mean by
+construction). Running BOTH is strictly more diagnostic: mask-helps-but-Gaussian-doesn't ⇒ it's the
+bias not the noise that helped; both-help ⇒ clean confirmation; Gaussian-helps-but-mask-doesn't ⇒ the
+mask's residual bias is killing it. This is the mechanistic case for keeping the Gaussian as the
+exactly-zero-mean control alongside the comm-eff-realizable mask sweep, not dropping it.

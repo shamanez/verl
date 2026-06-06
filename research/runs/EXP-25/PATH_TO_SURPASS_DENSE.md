@@ -33,6 +33,20 @@ exceeds it. The operator's claim is that this is *attainable in RL specifically*
 because the channel that makes compression pure loss in SFT (information bottleneck)
 is, in RL, also a channel for productive exploration noise.
 
+**HONEST CURRENT VERDICT (stated up front, not softened).** *Every comm-eff arm that has
+run sits AT or BELOW dense:* PowerSGD-only 0.741, A0 fresh-clean 0.7415, signed_ema-best
+0.707 — all ≤ dense 0.7536. So **no >dense edge has been demonstrated.** The nuance
+(mechanist round-2, §2.5): PowerSGD *does* carry a **REAL, uncompressed-rollout-corroborated**
+higher policy diversity than dense in the trained regime (rollout perplexity 1.40 vs 1.24 at
+s25, measured on the hook-free vLLM generator — not a measurement artifact) — but that
+diversity **does NOT convert to reward** (score lags, val ties-not-beats). So the precise
+verdict is: **"compression injects real, sustained, UNCONVERTED exploration; it reaches
+dense-grade parity but no surpass edge has been shown."** The surpass thesis is therefore
+**hypothetical** and rests on a *conversion* mechanism we have not yet tested — a CONTROLLED
+(zero-mean, variance-tunable, temperature-dialed) perturbation that could harness the
+diversity dense lacks. This document specifies the minimal experiment that could reveal (or
+kill) it. Anything stronger than "here is the falsifiable test" would be overclaiming.
+
 ---
 
 ## 1. Why RL ≠ SFT: the four channels that flip compression from "pure loss" to "possibly net-positive"
@@ -250,18 +264,46 @@ collapsing *while* exploring (that is exactly what the KL+length brakes in §4 a
 if so, the high-entropy exploring policy has room to find a better basin than dense's
 confident one.
 
-**MECHANIST [Q4] DEMOTED THIS to "not a clean signal."** The detailed analysis
-(`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §6.1) shows **dense trains down to entropy 0.122 —
-LOWER than ANY non-collapsing comm-eff arm — with bounded length and the BEST val**. A
-confident low-entropy GRPO policy on GSM8K is *correct*, not collapsed. So "comm-eff sits
-at higher entropy ⇒ it explores more ⇒ it should beat dense" does **not** follow: dense's
-low entropy is exploitation of a *correct* policy, and the comm-eff arms' high/noisy
-`actor/entropy` (the 5→9→0.4 bouncing) is most likely a metric/scale artifact (the
-parallel ~180× gap in `rollout_probs_diff_mean`, 0.0035 dense vs 0.62 comm-eff, points
-to a metric-definition difference, not a real diversity gap). **I am NOT using the
-entropy fingerprint as a surpass argument.** Higher entropy is not the goal; *the right
-kind of update* is. The surpass case must rest on the mechanism in §2.6, not on this
-observation.
+**MECHANIST [Q4] RESOLVED THIS — and it splits into two pieces, both pointing away from a
+surpass edge.** (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §6.1/§8 + the Q4 quantification.)
+
+1. **The early 5→9→0.4 bouncing is a codec-WARMUP ARTIFACT, not exploration.** It coincides
+   exactly with the cold-basis reconstruction error 0.97→0.14 as Q's power-iteration
+   converges (steps 1–4); `actor/entropy` is computed on the actor-train forward, which the
+   PowerSGD hook garbles while the basis is cold. Drop the warmup spike from any claim.
+2. **The trained-regime fingerprint is REAL — uncompressed-rollout-corroborated — but it
+   does not CONVERT (mechanist round-2 disambiguation).** Two independent measurements agree:
+   (a) at matched warmed steps PowerSGD-r77 sustains ~**0.08–0.12 nat higher `actor/entropy`**
+   than dense (s25: 0.335 vs 0.222; s45: 0.266 vs 0.146); (b) decisively, the **uncompressed
+   vLLM generator's perplexity** (`rollout_corr/rollout_ppl`, a separate inference engine with
+   NO compression hooks) is also higher for psgd (s25 1.401 vs dense 1.238; s45 1.283 vs
+   1.150). Because the *uncompressed* sampling policy is genuinely more diffuse, **the higher
+   entropy is a REAL policy property, not a training-forward measurement artifact.** This
+   *rescues* a piece of the thesis: compression DOES inject real, sustained policy diversity.
+   **BUT it does not convert to reward:** psgd's score lags dense at every step (s25 0.688 vs
+   0.786) and val ties-not-beats (0.741 vs 0.754); the extra diversity is *lost, not
+   harnessed.* And dense trains to 0.122 entropy — lower than any healthy comm-eff arm — with
+   the best val (confident ≠ collapsed).
+3. **IS-gap correction (do not misuse this metric).** `rollout_probs_diff_mean` is ~0.0035
+   for BOTH dense AND psgd (no diversity difference *in this metric*), and ~0.62 for BOTH
+   anchor/merger arms. The ~180× gap is **anchor-arms vs non-anchor-arms** (the anchor circuit
+   changes the metric's normalization), **NOT dense-vs-compression** — my earlier draft mis-
+   attributed it. So: dense-vs-psgd IS comparable on this metric (both 0.0035); merger-vs-dense
+   is NOT. The clean exploration proxy is **`rollout_corr/rollout_ppl`** (comparable across all
+   runs, uncompressed) — use it, not the IS-gap, going forward.
+
+**Net (refined honest framing): the exploration fingerprint is REAL and uncompressed-
+corroborated, but UNCONVERTED.** This is a *stronger* and more accurate seed than "probably an
+artifact": compression already produces genuine, sustained policy diversity that dense does not
+have — yet it currently fails to convert into reward (score lags, val ties). So the thesis is
+NOT "compression explores better → beats dense" (the data refutes the second clause); it IS
+"compression injects real unconverted diversity, and the open question is whether a *controlled*
+mechanism can harness it into reward." Higher entropy is not the goal; *converting* it is.
+That is exactly what EXP-SURPASS-1 tests: whether a *controlled* zero-mean perturbation (mask-p,
+§2.6/§4) can convert the diversity into reward where the *uncontrolled* compression entropy does
+not (the psgd entropy is an untunable byproduct of a biased codec; the mask-p knob is zero-mean,
+variance-controlled, and temperature-tunable — the three properties the harness needs). The
+surpass case rests on that mechanism, not on the bare entropy observation.
 
 ### 2.6 The parity-vs-surpass ceiling, and the three channels that survive it
 
@@ -304,20 +346,61 @@ verdicts are:
   likely doesn't regularize enough to beat dense. Kept as a cheap secondary test, not the
   lead.
 
-- **Channel C — Explicit zero-mean exploration noise (the operator's literal thesis,
-  done right). THE LEAD CHANNEL.** Mechanist's key empirical addition: the codebase
-  *already has* a genuinely zero-mean knob — the **prf_mask + rescale** codec is inverted
-  dropout (`E[h̃]=h`, `activation_mask.py:243`, re-sampled per global step), so its residual
-  IS zero-mean by construction. BUT plain high-p mask is **too high-variance** (∝p/(1−p) ≈
-  19× at p=0.95) and **stalls** (the known GOAL.md result). So the literal "compression
-  noise = exploration" route is real but unusable as-is. The fix mechanist specifies (§9):
-  a **variance-CONTROLLED unbiased perturbation** — three properties at once that NO
-  existing codec (dense / prf_mask / PowerSGD) has: (a) **zero-mean** (explores, not
-  biases — PowerSGD fails this), (b) **controlled/low variance** (trains, not stalls — the
-  p=0.95 mask fails this), (c) **tunable as an exploration TEMPERATURE** (the bias-variance
-  tradeoff is a swept axis). Realized as: rescaled mask at **swept/annealed p + error-
-  feedback** re-injecting the dropped residual to lower variance while staying unbiased;
-  with an explicit **zero-mean Gaussian-noise probe** as the codec-free decoupled control.
+- **Channel C — Explicit zero-mean exploration noise via the prf_mask, with p as the
+  TEMPERATURE dial. THE LEAD CHANNEL — and the in-stack, comm-efficient primitive already
+  exists.** The **prf_mask + rescale=true** codec is inverted dropout (`h*mask/(1−p)`,
+  `E[h̃]=h` exactly, `activation_mask.py:243,257`, re-sampled per global step) — so its
+  residual is **genuinely ZERO-MEAN and step-decorrelated** by construction, the structural
+  opposite of PowerSGD's fixed bias. And it is **tunable**: `p` is the drop probability, so
+  the per-coordinate noise variance is exactly **p/(1−p)** — `p` IS the exploration
+  temperature dial. So the mask, swept over p, satisfies all three required properties in
+  ONE existing codec: **zero-mean + variance-tunable + comm-efficient** (it transmits only
+  the kept `(1−p)·H` coords/token). My earlier claim that "no in-stack codec has all three"
+  was wrong — it does; the dial is `p`.
+- **The untested regime is the whole point.** EXP-16 only ever ran p=0.9/0.95 — the
+  **high-variance** end (p/(1−p) = 9× / 19×) — where the mask stalls. The **low-to-mid p**
+  regime (0.1 / 0.3 / 0.5 → variance 0.11× / 0.43× / 1.0×) has **never been tested for the
+  beat-dense question.** That is exactly where a zero-mean perturbation could be mild enough
+  to *train* yet nonzero enough to *explore*. The mask-p sweep is therefore the genuine,
+  in-stack, falsifiable test of the operator's thesis (and it is the headline of §4).
+- **The comm-savings ↔ exploration tension (state it honestly).** `p` couples two things:
+  noise variance AND comm savings (kept = (1−p)·H). Low p = mild noise but modest savings
+  (p=0.5 → 1.0× var, 50% comm cut); the big comm wins live at high p (p=0.95 → 5% kept) —
+  exactly where it stalls. So the dream outcome is a **mid p** that beats dense *and* still
+  cuts comm; a low-p-only win is a real thesis confirmation with modest savings; and if only
+  the high-comm-savings p's stall, the comm-eff-AND-surpass goal is in tension and we fall
+  back to parity (EF-PowerSGD). The sweep is designed to find where on the ladder (if
+  anywhere) the perturbation helps before it stalls. **Optional variance-control arm**
+  (error-feedback on the dropped mask residual, or `clean_cadence`) at the most-promising p
+  to push the usable p higher — the comm-eff lever if a raw-mask sweet spot exists but is
+  too low-p to save much.
+
+#### Every candidate zero-mean noise knob in our stack — explicitly evaluated
+
+The decisive question (is there ANY genuinely zero-mean, step-decorrelated noise source?)
+deserves a complete enumeration, not just the winner. Evaluated with mechanist:
+
+| candidate | zero-mean? | step-decorrelated? | variance | comm-eff? | verdict |
+|---|---|---|---|---|---|
+| **prf_mask + rescale, p as the dial** | **YES** — inverted dropout `E[h̃]=h`, re-sampled/step | YES | **TUNABLE via p** (p/(1−p): 0.11×@p0.1 → 19×@p0.95) | **YES** (transmits (1−p)·H) | **THE LEAD** — in-stack zero-mean+tunable+comm-eff knob; low-to-mid p UNTESTED → Lever 1 / EXP-SURPASS-1 |
+| **PowerSGD rank** (lower r) | **NO** — fixed off-subspace bias (frozen Q) | NO (same dims every step) | low | yes | **WRONG knob** — lowering r adds *bias*, not noise; EF's job is to *remove* it (→ parity test, Lever 3) |
+| **explicit Gaussian** `σ·N(0,1)` | **YES** by construction | YES | **fully tunable via σ** | NO (probe only) | **the codec-free decoupled CONTROL** — Lever 2, confirms the mask result isn't a codec artifact |
+| **higher rollout temperature** | n/a (output-space, not gradient) | per-rollout | tunable | yes (rollouts already non-PP) | **distinct, cheap headroom control (T0)** — see below |
+| **dropout-style stochasticity** | YES (if rescaled) | YES | tunable via p | partial | = the prf_mask case; subsumed by Lever 1 |
+| **anchor-EMA** | NO (biased stale average) | NO (smoothed) | low | yes | not noise — variance-reduction, loses to Adam momentum (Channel A) |
+
+**On rollout temperature (the team-lead's candidate worth its own line).** This is a
+*different kind* of exploration than gradient-space noise: it widens the rollout
+distribution directly (output-space), is essentially free (rollouts are already non-PP
+vLLM, out of scope for compression), and is the *standard* RL exploration knob. It is worth
+including as a **cheap orthogonal control arm**: dense + raised rollout temperature. If
+raising rollout temperature alone lifts dense above 0.7536, then "RL is exploration-limited
+here" is confirmed *independent of compression* — and the comm-eff question becomes "can a
+zero-mean gradient perturbation match or beat that cheaper output-space exploration?" If
+raising temperature does NOT help dense, that is itself strong evidence this surface is
+*not* exploration-limited at the policy level, which would lower the prior on the whole
+thesis. Either way it is one cheap dense arm that calibrates how much exploration headroom
+exists at all — I am adding it to EXP-SURPASS-1 as control **T0**.
 
 **The reframed thesis (converged with mechanist).** The operator's intuition — "RL under-
 explores, so zero-mean perturbation can help where it would only hurt in SFT" — is
@@ -338,49 +421,60 @@ why it could exist — it is a hypothesis with a clean test, not a claimed resul
 
 ## 3. The ranked levers toward beating dense (REVISED post-mechanist)
 
-Ranked by `P(moves us above dense) × leverage / cost`, **fully converged with mechanist**.
-Two big changes from the first draft: the old top lever (rank-as-exploration-noise via
-PowerSGD) was falsified (frozen-Q PowerSGD has no zero-mean noise, §2.2); error-feedback
-and the anchor-EMA were demoted to *parity* tools (the §2.6 ceiling + the Adam-momentum
-objection). What survives as a surpass lever is **variance-controlled zero-mean
-perturbation** (Channel C done right) — and the decisive first test is the codec-free
-**Gaussian-noise probe**. Every lever is direction-preserving (the hard constraint below);
-the KL brake + length cap are the enablers that make any perturbation safe to push.
+Ranked by `P(moves us above dense) × leverage / cost`, **fully converged with mechanist +
+the team-lead's mask-p reframe**. Big changes from the first draft: the old top lever
+(rank-as-exploration-noise via PowerSGD) was falsified (frozen-Q PowerSGD has no zero-mean
+noise, §2.2); error-feedback and the anchor-EMA were demoted to *parity* tools (§2.6 +
+Adam-momentum). The lead surpass lever is the **prf_mask with p as the exploration-
+temperature dial** — the in-stack, comm-efficient, genuinely zero-mean knob whose low-to-mid
+p regime is untested for beat-dense. Every lever is direction-preserving (the hard
+constraint below); the KL brake + length cap are the enablers that make any perturbation
+safe to push.
 
-### Lever 1 — Variance-controlled UNBIASED perturbation (Channel C, the lead surpass lever)
-- **Mechanism (mechanist §9.1).** The genuinely zero-mean knob already in the stack is the
-  prf_mask + rescale codec (inverted dropout, `E[h̃]=h`, re-sampled per global step,
-  `activation_mask.py:243`). Plain high-p mask stalls because its variance is huge
-  (∝p/(1−p) ≈ 19× at p=0.95). Fix it to satisfy all THREE required properties at once —
-  **zero-mean + controlled-variance + temperature-tunable** — via: (i) **sweep/anneal p**
-  as the exploration temperature (lower p = less noise; anneal high→low = explore early /
-  exploit late), and (ii) **error-feedback on the dropped activation residual `(I−mask)·h`**,
-  re-injecting it next step so the estimator stays unbiased at *lower* variance (the exact
-  fix the high-p mask lacks).
+### Lever 1 — prf_mask with p-as-temperature (Channel C, THE LEAD — in-stack, comm-efficient, zero-mean)
+- **Mechanism.** prf_mask + rescale=true is inverted dropout (`h*mask/(1−p)`, `E[h̃]=h`,
+  re-sampled per global step, `activation_mask.py:243,257`) — genuinely zero-mean, step-
+  decorrelated. `p` (the drop probability) is the **exploration temperature**: per-coordinate
+  noise variance = `p/(1−p)`, and the codec transmits only the kept `(1−p)·H` coords/token,
+  so the same dial sets BOTH exploration strength AND comm savings. Sweep `p` — no new codec,
+  no new math, the primitive already exists and is comm-efficient.
 - **Why it can beat dense.** This is the operator's literal "compression noise = exploration"
-  thesis, now correctly engineered: a zero-mean, low-variance, tunable perturbation is the
-  one object that can supply *productive* exploration (SGD-noise flat-minima §2.4 + RL
-  exploration C2) without the bias that collapsed signed_ema or the variance that stalls the
-  raw mask. Dense sits at zero injected noise; if the optimal noise temperature for this
-  policy/task is > 0, the swept p finds it.
-- **Falsifier (mechanist §9.1).** If no p (fixed or annealed), with EF on, beats dense, then
-  compression-as-exploration is dead for this surface.
-- **Cost.** Reuses the existing mask codec + the error-feedback machinery #24 was scoped
-  for. p-sweep `{0.5, 0.7, 0.9}` ± anneal × EF on = 3–4 arms. Medium (needs the EF wiring).
+  thesis with the *correct* knob: a zero-mean perturbation supplies productive exploration
+  (SGD-noise flat-minima §2.4 + RL exploration C2) without the bias that collapsed signed_ema.
+  Dense sits at p=0 (zero injected noise); if the optimal noise temperature is > 0, some p
+  beats dense.
+- **The untested regime = the whole opportunity.** EXP-16 only tested p=0.9/0.95 (variance
+  9×/19×) — the stall zone. **Low-to-mid p (0.1/0.3/0.5 → variance 0.11×/0.43×/1.0×) is
+  UNTESTED for beat-dense.** That is where the noise may be mild enough to train yet nonzero
+  enough to explore.
+- **Falsifier.** If val is monotone-declining in p (saturating at dense as p→0), zero-mean
+  exploration noise does not help GRPO on this surface — thesis falsified cleanly, in-stack,
+  no new primitive needed.
+- **Variance-control enhancement (only if a sweet spot exists but is too low-p to save much).**
+  Add **error-feedback on the dropped mask residual `(I−mask)·h`** (re-inject next step) or a
+  periodic `clean_cadence` — this lowers effective variance at a *given* p, pushing the usable
+  (trainable) p HIGHER toward the big-comm-savings end. This is the comm-eff lever; deploy it
+  at the most-promising p from the raw sweep.
+- **Cost.** The raw p-sweep reuses the existing mask codec with ZERO new code (just config) —
+  cheapest possible surpass test. The EF enhancement reuses the #24 machinery. ~3 p-arms + 2
+  controls, then 1 EF arm if warranted.
 
-### Lever 2 — Explicit zero-mean Gaussian-noise probe (the decisive SCIENCE GATE)
-- **Mechanism (mechanist §9.2).** Add `σ·N(0,1)` to the boundary activation (or the weight
-  gradient), `σ` the temperature, decorrelated per step, exactly zero-mean by construction,
-  variance fully controlled by σ. Run it as a **mechanism probe, not a comm-eff arm** (it
-  saves no bytes) — it isolates "noise-as-exploration" from every codec / byte-budget
-  confound.
-- **Why this is the first thing to run.** It is the operator's thesis stripped to its
-  irreducible core: *does ideal, perfectly-controlled, zero-mean tunable noise beat dense
-  GRPO AT ALL?* If even this cannot beat dense, compression-as-exploration is falsified
-  **independent of any codec**, and we never pay to build the variance-controlled mask
-  (Lever 1). If it CAN, the thesis is proven in principle and Lever 1 becomes the
-  comm-efficient realization of a demonstrated effect. Cheapest, cleanest, most decisive
-  gate in the program.
+### Lever 2 — Explicit zero-mean Gaussian-noise probe (the codec-free DECOUPLED CONTROL)
+- **Mechanism (mechanist §9.2).** Add `σ·N(0,1)` to the boundary activation, `σ` the
+  temperature, decorrelated per step, exactly zero-mean, variance fully controlled by σ.
+  Run as a **mechanism probe, not a comm-eff arm** (it saves no bytes).
+- **Role: the confound-killer for Lever 1.** If the mask-p sweep shows an edge, the Gaussian
+  probe confirms it is *zero-mean-noise-as-exploration* and not a mask-specific codec
+  artifact (PRF structure, the rescale gain, the kept-coord pattern). If the mask sweep
+  nulls, the Gaussian probe is the cleaner second opinion that *no* zero-mean noise helps —
+  the strongest possible falsification (codec-independent). It answers the irreducible
+  question — *does ideal zero-mean tunable noise beat dense GRPO AT ALL?*  Run alongside or
+  immediately after the mask sweep.
+- **Why not first.** The mask-p sweep is *also* the comm-efficient deliverable and reuses an
+  existing primitive at zero code cost, so it is the better first spend; the Gaussian probe is
+  the science control that *interprets* the mask result (mask-edge real vs codec-artifact; or
+  mask-null corroborated codec-independently). If even ideal zero-mean noise cannot beat
+  dense, compression-as-exploration is falsified **independent of any codec.**
 - **Cost.** Tiny code (add noise at the boundary), a σ-sweep `{small, med, large}` × 50
   steps = 3 arms; lowest engineering cost of any lever.
 
@@ -427,9 +521,9 @@ inject, blend) are retired — blend/inject inert by orthogonality, signed_ema n
 
 | rank | lever | role | beats-dense path | mechanist verdict | cost |
 |---|---|---|---|---|---|
-| 1 | **Variance-controlled unbiased mask + EF** | Channel C realization | zero-mean low-var tunable noise (the thesis, engineered) | the §9.1 forward primitive | medium |
-| 2 | **Gaussian-noise probe** | the SCIENCE GATE | does ideal noise beat dense at all? | the §9.2 decoupled control | lowest |
-| 3 | Rank-as-trust-region sweep | Channel B regularization | constrain the step | likely too weak (§2.2) | cheap |
+| 1 | **prf_mask p-as-temperature sweep** (+EF if needed) | Channel C, IN-STACK + comm-eff | zero-mean tunable noise; low-to-mid p untested | the genuine in-stack test | cheapest (config only) |
+| 2 | **Gaussian-noise probe** | codec-free DECOUPLED CONTROL | does ideal noise beat dense at all? | interprets/corroborates the mask result | lowest code |
+| 3 | Rank-as-trust-region sweep | Channel B regularization (parity test) | constrain the step | likely too weak (§2.2) | cheap |
 | 4 | KL brake + length cap | enablers | make 1–3 safe to push | confirmed-good guardrails | in flight |
 | 5 | Anchor-EMA / EF-PowerSGD | PARITY + comm-savings | recover toward dense (drop clean step) | NOT surpass (§8.1) | low |
 
@@ -448,9 +542,9 @@ winning arm).
 died by a *response-length-explosion reward-hack* (clip_ratio 0.46/0.92 to the 16384
 cap, DEEP_FINDINGS §A2); KL and a length cap address *different* failure axes and we use
 both unconditionally — the length cap costs nothing in the non-collapse cells and stops a
-low-rank arm from burning hours generating 16K-token garbage:
+high-noise arm from burning hours generating 16K-token garbage:
 1. **KL brake (divergence axis).** `use_kl_loss=true`, coef 0.001 — bounds the policy's
-   excursion from the reference (Lever 1). This is the *entropy/divergence* guardrail.
+   excursion from the reference (Lever 4). This is the *entropy/divergence* guardrail.
 2. **Length brake (degeneration axis), UNCONDITIONAL.** Cap `max_response_length` to
    **1024–2048** (down from 16384) and/or add an explicit length penalty in the reward.
    GSM8K healthy responses are ~170–290 tokens (DEEP_FINDINGS §A2), so a 1024–2048 cap is
@@ -458,7 +552,7 @@ low-rank arm from burning hours generating 16K-token garbage:
    stops the reward-hack channel and bounds per-arm cost. **This is baked in regardless
    of the KL diagnostic result**: KL is the divergence brake, the cap is the orthogonal
    degeneration brake. (Note: dropping the cap from 16384 also speeds every arm, so the
-   whole grid is cheaper than the EXP-25 runs.)
+   whole sweep is cheaper than the EXP-25 runs.)
 3. **Mandatory monitor on every arm:** the ENTROPY_COLLAPSE_WATCH T1–T7 triggers
    (length-explosion is the discriminator — kill any arm that fires composite-RED early,
    don't wait for step 50).
@@ -470,76 +564,82 @@ away"; (b) **sign-agreement(perturbed, dense) and the policy entropy + IS-gap** 
 the perturbation moved the policy, not just the metric). These two numbers are the
 difference between a real result and an uninterpretable one.
 
-### The ONE experiment to run first: **the zero-mean Gaussian-noise probe (the decisive gate)**
+### The ONE experiment to run first: **the prf_mask p-as-temperature sweep**
 
-The first experiment is **not a codec** — it is the operator's thesis stripped to its
-irreducible core. Mechanist's §9.2 decoupled control, elevated to the lead because it is the
-cheapest, cleanest, most decisive test in the entire program: it answers *does ideal,
-perfectly-controlled, zero-mean tunable noise beat dense GRPO AT ALL?* with zero codec or
-byte-budget confound. Everything downstream (the variance-controlled mask, the comm-eff
-payoff) is conditional on this gate.
+The headline test is **in-stack and comm-efficient**: sweep the prf_mask drop probability
+`p` as an exploration temperature. The mask with rescale=true is genuinely zero-mean
+(inverted dropout, §2.6), `p` sets both the noise variance (p/(1−p)) and the comm savings
+((1−p)·H kept), and the **low-to-mid p regime is untested for beat-dense** (EXP-16 only ran
+the high-variance stall zone p=0.9/0.95). This is the operator's "compression noise =
+exploration" thesis given a real, runnable, falsifiable test with an existing primitive at
+near-zero code cost. The Gaussian probe (Lever 2) runs alongside as the codec-free control
+that *interprets* the mask result.
 
-> **EXP-SURPASS-1 — "Does ideal zero-mean tunable noise beat dense GRPO?"**
+> **EXP-SURPASS-1 — "Is there a mask temperature p that beats dense via zero-mean exploration?"**
 >
-> All arms on the fixed surface, KL(0.001) + length-cap(1024–2048) brakes ON everywhere,
-> 50 steps, the two instrumentation gates logged:
+> All arms on the fixed surface, codec=prf_mask + rescale=true, KL(0.001) + length-cap
+> (1024–2048) brakes ON everywhere, 50 steps, instrumentation gates logged:
 >
-> | arm | perturbation | role |
-> |---|---|---|
-> | **D0** dense + KL + length-cap | none | **the bar** (brake-matched, so the comparison isolates the noise) |
-> | **G_lo** dense + `σ_lo·N(0,1)` on boundary activations | small zero-mean noise | low exploration temperature |
-> | **G_mid** dense + `σ_mid·N(0,1)` | medium | the candidate sweet spot |
-> | **G_hi** dense + `σ_hi·N(0,1)` | large | high temperature (expect over-noise → ≤ dense) |
+> | arm | config | noise var (p/(1−p)) | comm (kept) | role |
+> |---|---|---|---|---|
+> | **D0** dense + KL + length-cap | p=0 (no mask) | 0 | 100% | **the bar** (brake-matched) |
+> | **M1** mask p=0.1 | 0.11× | 90% | mild noise, modest savings |
+> | **M3** mask p=0.3 | 0.43× | 70% | the candidate low-stall sweet spot |
+> | **M5** mask p=0.5 | 1.0× | 50% | mid noise + real comm savings (the dream cell) |
+> | **G_mid** dense + `σ·N(0,1)`, σ matched to M3/M5 var | (matched) | 100% (probe) | **codec-free control** — mask-edge real or artifact? |
+> | **T0** dense + raised rollout temperature | — | 100% (probe) | **headroom calibration** — does ANY exploration help dense? |
 >
-> Noise is added at the boundary activation, decorrelated per step, exactly zero-mean.
-> `σ` is the exploration temperature; scale σ relative to the measured boundary-activation
-> RMS so the sweep is interpretable. (It saves no comm — it is a *mechanism probe*, run as
-> a science control, not a comm-eff arm.)
+> Mask is re-sampled per global step (zero-mean), keyed on `global_step`. The M-arms are the
+> comm-efficient surpass test; G_mid + T0 are science controls (save no comm). If an M-arm
+> shows an edge but only at low p (modest savings), add the **EF variance-control arm**
+> (error-feedback on the dropped mask residual) at the best p in a follow-up to push the
+> usable p higher toward bigger savings.
 
 **Why this one first.**
-1. **It is the irreducible test of the operator's thesis.** If even ideal zero-mean tunable
-   noise cannot beat dense, "compression-as-exploration" is falsified for this surface —
-   independent of any codec — and we save all the mask+EF engineering. If some σ DOES beat
-   dense, the thesis is proven in principle and the codec work has a demonstrated target.
-2. **It removes every confound.** No byte budget, no basis warmup, no staleness, no bias —
-   just `G_t + ξ`, `ξ` exactly zero-mean. Whatever it shows is about *noise-as-exploration*,
-   nothing else. That is precisely the isolation mechanist demanded (§9.2).
-3. **Cheapest + lowest-engineering in the program** (add noise at the boundary; a 4-arm
-   σ-sweep × 50 steps on one box), and it directly de-risks the more expensive Lever 1.
+1. **It is the genuine, in-stack, comm-efficient test of the thesis.** Unlike the Gaussian
+   probe (saves no comm) and the rank sweep (tests bias, not exploration), the mask-p sweep
+   is *both* the exploration test *and* the comm-eff deliverable — a win here is the dream
+   result (surpass AND save comm), and it reuses an existing primitive at config-only cost.
+2. **The untested regime is exactly where the thesis could live.** EXP-16 stalled at high p
+   (variance 9-19×); low-to-mid p (0.11-1.0× variance) has never been run for beat-dense.
+   This is the cheapest way to find whether a trainable-yet-exploratory p exists.
+3. **The Gaussian + T0 controls make it interpretable.** G_mid (σ matched to the mask
+   variance) tells us a mask edge is *zero-mean-noise-as-exploration*, not a mask codec
+   artifact. T0 tells us whether this surface is exploration-limited at all (if even rollout
+   temperature can't lift dense, the prior on the whole thesis drops).
 
-**Pre-registered predictions (honest, mechanism-grounded — and the honest prior is SKEPTICAL).**
-- **Thesis confirmed:** an interior `σ*` gives `val(σ*) > val(D0)` by > noise (a non-
-  monotone temperature curve with a peak above dense). The win is at *medium* σ; G_hi
-  degrades (over-noise).
-- **Thesis falsified (mechanist's prior, §8.2):** val is monotone *decreasing* in σ — any
-  zero-mean noise only adds variance that Adam averages away and hurts, so dense (σ=0) is
-  best. Mechanist's standing position is that no >dense edge has been demonstrated and the
-  existing entropy "fingerprint" is anti-correlated with val — so the honest base rate
-  favors this outcome. Stating it up front keeps the result credible either way.
-- **The COSINE gate (a) is the tell:** if a helping σ shows update-cosine to dense
-  *dropping below ~0.98* while val *rises*, that is genuine productive exploration (the
-  noise is steering, not just jittering). If val rises with cosine ≈ 1.0, the "win" is noise
-  Adam absorbed and is likely seed noise — demand the 2-seed confirmation.
+**Pre-registered predictions (honest — the prior is SKEPTICAL, per mechanist §8.2).**
+- **Thesis confirmed:** an interior `p*` gives `val(p*) > val(D0)` by > noise (non-monotone
+  temperature curve, peak above dense). Dream outcome: `p*` is mid (e.g. 0.5) → surpass +
+  50% comm cut. Acceptable: `p*` low (e.g. 0.1) → thesis confirmed, modest savings (then EF
+  to push p up).
+- **Thesis falsified (mechanist's prior):** val is monotone *decreasing* in p — any mask
+  noise only adds variance Adam averages away, dense (p=0) is best. Mechanist's standing
+  position is no >dense edge demonstrated + entropy anti-correlated with val, so the honest
+  base rate favors this. Stated up front to keep the result credible.
+- **The COSINE gate is the tell:** a helping p with update-cosine-to-dense *dropping below
+  ~0.98* while val rises = genuine productive exploration (noise steering, not jittering). val
+  up with cosine ≈ 1.0 = noise Adam absorbed = likely seed noise → demand 2-seed confirmation.
 
 **Decision rule.**
-- **Gate PASSES (some σ beats dense):** proceed to **EXP-SURPASS-2 = Lever 1**, the
-  variance-controlled UNBIASED mask (swept/annealed p + error-feedback) — the *comm-
-  efficient realization* of the now-demonstrated effect. This is the headline path.
-- **Gate FAILS (dense is best at σ=0):** compression-as-exploration is falsified for this
-  surface. Pivot the deliverable to the honest **parity + comm-savings** result: run
-  **EF-PowerSGD** (Lever 5) to bank the comm win at ~dense quality (drop the clean step),
-  and optionally the cheap **Channel-B rank sweep** (Lever 3) as a last check on the
-  regularization route (mechanist's prior: too weak to surpass).
+- **A mask arm beats dense:** 2-seed it, then sweep p finer around `p*` and add the EF
+  variance-control arm to push the trainable p toward bigger comm savings. **This is the
+  headline surpass + comm-savings result.** Cross-check with G_mid (real vs artifact).
+- **No mask arm beats dense:** check G_mid (does *any* zero-mean noise help? if not, thesis
+  falsified codec-independently) and T0 (is the surface exploration-limited at all?). Then
+  pivot the deliverable to **parity + comm-savings** — run **EF-PowerSGD** (Lever 5) to bank
+  the comm win at ~dense quality; optionally the cheap **rank sweep** (Lever 3) as a last
+  check on the regularization route (prior: too weak).
 
-### Why this ordering (Gaussian probe → mask → parity) and not the old rank-first plan
+### Why this ordering (mask-p sweep → controls → parity) and not the old rank-first plan
 The first draft's EXP-SURPASS-1 (rank × EF grid) assumed low-rank PowerSGD injects zero-mean
 *exploration* noise. Mechanist falsified that: frozen-Q PowerSGD's residual is a deterministic
-*bias*, not noise (§2.2), and EF only buys parity (§2.6). The genuinely zero-mean codec (the
-mask) exists but stalls from variance. So the decisive question moved upstream — *is
-zero-mean noise useful in RL here at all?* — and the cleanest way to answer it is the
-codec-free Gaussian probe, BEFORE paying to engineer the variance-controlled mask. This
-spends the first, cheapest box on the single experiment that can kill or confirm the whole
-thesis, and only then invests in the comm-efficient realization.
+*bias*, not noise (§2.2), and EF only buys parity (§2.6). The genuinely zero-mean knob is the
+*mask*, and `p` is its temperature dial — but only the high-variance stall zone was ever run.
+So the headline test is the **mask-p sweep in its untested low-to-mid regime**: it is in-stack,
+comm-efficient, reuses an existing primitive at config-only cost, and is *both* the exploration
+test and the comm-eff deliverable. The Gaussian probe and rollout-temperature arm are the
+science controls that interpret it; the rank sweep is demoted to a separate bias/parity check.
 
 ---
 
@@ -562,10 +662,15 @@ All four grounding questions are CLOSED, converged with mechanist
   with recon 0.97→0.14 as Q warms), and even the subtler sustained ~0.1-nat entropy edge in
   the trained regime is **anti-correlated with val** (slower convergence, not exploration).
   ⇒ the entropy fingerprint is NOT a surpass argument; dropped from the case.
-- **Joint converged verdict:** no >dense edge has been demonstrated by anything that has
-  run; the surviving testable surpass hypothesis is **variance-controlled zero-mean
-  perturbation** (Lever 1), gated by the **Gaussian-noise probe** (the EXP-SURPASS-1
-  decision). The anchor-EMA and error-feedback are parity/comm-savings tools, not surpass.
+- **Joint converged verdict (+ team-lead's mask-p reframe):** no >dense edge has been
+  demonstrated by anything that has run; the surviving testable surpass hypothesis is a
+  **zero-mean, variance-tunable perturbation**, and the in-stack realization is the
+  **prf_mask with `p` as the exploration-temperature dial** (low-to-mid p untested for
+  beat-dense) — the EXP-SURPASS-1 headline, with the Gaussian-noise probe + rollout-temp arm
+  as the interpreting controls. The anchor-EMA and error-feedback are parity/comm-savings
+  tools, not surpass; the PowerSGD rank sweep tests *bias-tolerance/regularization*, not
+  exploration. **Open item:** fold in the in-flight A0+KL(0.001) diagnostic when it lands
+  (prior: KL arrests length, does not beat 0.741 = enabler not surplus).
 
 ---
 
@@ -584,14 +689,17 @@ exploration noise" is false), the genuinely zero-mean codec (the mask) *stalls* 
 variance, and the stale clean anchor is information dense already has fresh (so anchor
 correction is parity, not surpass; Adam's own momentum already covers the variance-reduction
 channel). What survives is the operator's thesis *correctly engineered*: a **zero-mean,
-low-variance, temperature-tunable** perturbation. The decisive, falsifiable test is the
-codec-free **Gaussian-noise probe** — *does ideal zero-mean tunable noise beat dense GRPO at
-all?* — with the dense-vs-perturbed update cosine logged to tell productive exploration from
-noise-Adam-averages-away. If it passes, the **variance-controlled unbiased mask + error-
-feedback** is the comm-efficient realization; if it fails, the honest deliverable is
-**error-feedback PowerSGD** for parity at materially lower comm. The honest prior (mechanist):
-no >dense edge has yet been shown — this is a clean hypothesis with a one-experiment gate,
-not a claimed win.
+variance-tunable** perturbation — and the in-stack realization already exists: the **prf_mask
+with `p` as the exploration-temperature dial** (zero-mean inverted dropout, variance p/(1−p),
+comm-efficient). The decisive, falsifiable test is the **mask-p sweep in its untested
+low-to-mid regime** (EXP-16 only ran the high-p stall zone) — *is there a p that perturbs
+productively before it stalls, beating dense?* — with the codec-free Gaussian-noise probe and
+a rollout-temperature arm as the controls that interpret it, and the dense-vs-perturbed update
+cosine logged to tell productive exploration from noise-Adam-averages-away. If a mask arm
+wins, that is *both* surpass *and* comm-savings (the dream), pushed further with error-feedback
+variance control; if none wins, the honest deliverable is **error-feedback PowerSGD** for
+parity at materially lower comm. The honest prior (mechanist): no >dense edge has yet been
+shown — this is a clean hypothesis with a one-experiment gate, not a claimed win.
 
 ---
 
