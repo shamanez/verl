@@ -84,3 +84,4 @@ PROMOTE_SKIPPED: EXP-25 reason="no promote_launcher_as (plan: promote_launcher_a
 [2026-06-06T09:30:22+10:00] [sync] SSH still refused (port 40872) — box likely torn down. Skipping tick.
 [2026-06-06T09:40:22+10:00] [sync] SSH refused (3rd consecutive) — box 39613656 torn down. Loop continues in case of IP reuse, but no further action until box is reachable.
 [2026-06-06T09:50:21+10:00] [sync] SSH refused (4th consecutive) — box gone, skipping.
+[2026-06-06T10:00:20+10:00] [sync] SSH refused (5th consecutive) — box gone, skipping.
