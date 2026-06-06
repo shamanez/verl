@@ -245,17 +245,21 @@ The Route-B surpass test. Promoted to lead because it is the only bet that (i) a
 
 ### BET 4 (CONDITIONAL FOLLOW-UP) — Explore-then-exploit anneal
 
-- **Mechanism.** Schedule the perturbation/temperature HIGH early (explore the diffuse regime,
-  surface better completions) → LOW late (sharpen onto the better basin found), on the compressed
-  arm.
+- **Mechanism.** Schedule diversity HIGH early (explore the diffuse regime, surface better
+  completions) → LOW late (sharpen onto the better basin found). **Run as ROLLOUT-TEMPERATURE
+  anneal (T high→low), NOT mask-p anneal** — temperature is the only knob that perturbs the
+  actual sampling distribution directly (Finding 1: the mask is train-only), it is free
+  (rollout-side, out of scope for comm), and it directly widens then narrows the sampled support
+  (the C2/C4 channel). Mask-p anneal would only anneal a train-side gradient perturbation we are
+  not sure converts (BET 3's weakness) — temperature-anneal avoids that.
 - **Why it is MORE than speculative — the data SUPPORT the shape.** The entropy
   anti-correlation (COLLAPSE_ANALYSIS:445-446): "the arms that sustain high entropy LONGER
   (α=0.5, α=0) do WORSE; dense runs at entropy 0.122 with the BEST val." Sustained diversity
   hurts; this argues diversity must be **front-loaded then collapsed**, which is exactly the
-  anneal shape. Run only after BET 1 establishes whether *constant* diffusion converts — if
+  anneal shape. Run only after BET 1 establishes whether *constant* T-diffusion converts — if
   constant converts, anneal may push it further; if constant nulls, anneal tests whether the
   *timing* (not the amount) was the leak.
-- **Cost.** Schedule only (no new codec) — cheap; 2 arms (anneal vs best-constant from BET 1).
+- **Cost.** Schedule only (no new codec) — cheap; 2 arms (T-anneal vs best-constant-T from BET 1).
 
 ### BET 5 (PARITY — off the surpass path) — Error-feedback PowerSGD, the banked comm-savings win
 
