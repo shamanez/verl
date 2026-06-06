@@ -372,6 +372,41 @@ sign replacement. There is no compression-noise exploration edge to exploit here
 must come from the stale clean signal CORRECTING the (small, off-subspace) compression BIAS without
 touching direction.
 
+### 8.0 Two grounding audits for the surpass-dense crux (zero-mean noise source; entropy artifact)
+
+Added in response to the team-lead's two grounding asks (whether comm-eff has an EXPLORATION edge,
+not just collapse-avoidance).
+
+**(A) Is there a genuinely ZERO-MEAN, step-decorrelated noise source in-stack? YES — `prf_mask` with
+`rescale=true` — but it is high-variance and stalls, so it is not a free exploration win.**
+`prf_token_mask` (`activation_mask.py:168-214`) draws a per-(token,dim) Bernoulli keep mask keyed on
+`(base_seed, layer_idx, global_step, sample_id, position_id, channel)` — keyed on `global_step` ⇒ it
+CHANGES every step (step-decorrelated). With `rescale_mode="constant"` (`= rescale=true`):
+`h̃ = h·mask/(1−p)`, which is INVERTED DROPOUT ⇒ `E[h̃] = h` exactly (`activation_mask.py:243`). So
+the MASK is a genuinely UNBIASED, zero-mean-per-element, step-decorrelated activation-noise estimator
+— structurally the OPPOSITE of PowerSGD's deterministic biased projection (§2). This refutes any "all
+our codecs inject bias" assumption: the mask is zero-mean, PowerSGD is biased. BUT the mask's variance
+is high (∝ `p/(1−p) ≈ 19×` at p=0.95), and EXP-16 proved pure-masked training STALLS (reward
+0.13→0.15) without the periodic clean step (variance reset). PowerSGD (biased, low-variance) trains
+fine; the mask (unbiased, high-variance) cannot train alone. NOTE the mask is FROZEN within a global
+step (same draw on old-logprob recompute + actor-train, to keep ρ≈1), so the decorrelation is across
+STEPS only, not within. **Net:** the only genuinely zero-mean knob we have is too noisy to train on;
+a clean test of "compression-as-exploration" needs a primitive that is zero-mean AND low-variance AND
+tunable-as-temperature — which does not exist in-stack today (§9).
+
+**(B) Is the high comm-eff entropy productive exploration? NO — it is a CODEC-WARMUP ARTIFACT.** The
+high entropy (5.7→9.1) at steps 1–4 coincides EXACTLY with the cold basis: PowerSGD
+`reconstruction_rel_error` 0.976→0.691→0.398→0.144 over steps 1–4 as Q's block-power-iteration
+converges onto the dominant activation subspace (W&B `oquyeic3`). A cold Q garbles the activation ⇒
+near-uniform (high-entropy) output. Once Q warms (recon ~0.02 by step 5), entropy CRASHES to 0.41 and
+tracks dense thereafter (0.38, 0.33). It confers ZERO val benefit: `oquyeic3` has the 5.7→0.41 warmup
+spike yet ties dense (0.741 vs 0.754), does not beat it; and the arms that SUSTAIN high entropy LONGER
+(α=0.5: 3.6@s5, 2.3@s10, 1.0@s25; α=0) do WORSE (0.705 / collapse), not better. Dense itself starts at
+entropy 0.37 (the Qwen2.5-1.5B-Instruct model is already confident) and settles to 0.22 — LOWER than
+every comm-eff arm's floor, with the best val. **Sustained high entropy is ANTI-correlated with val
+here.** Low entropy is the healthy regime; the comm-eff "high entropy" is transient garbling, not
+productive exploration. This removes the "comm-eff explores more" lever as currently observed.
+
 ### 8.1 The parity-vs-surpass ceiling (load-bearing for the surpass-dense plan)
 
 A blunt quantitative caution on how much head-room a direction-preserving correction actually has.
@@ -395,3 +430,53 @@ lacks — a *different* and testable claim from "correct the compression bias").
 converge on. **OPEN:** the one number that would settle whether even parity is reachable is the
 dense-vs-compressed update COSINE (predicted ≳0.98 post-warmup, never logged — EXP-20 `verdict.md`
 success criterion); log it on the next run.
+
+### 8.2 Honest converged verdict
+
+The existing evidence supports **NO demonstrated >dense edge.** Specifically: (1) compression is
+dense-grade parity (`oquyeic3` 0.741 ≈ dense 0.754); (2) the off-subspace bias an anchor could correct
+is ~0.06%, so anchor correction is a parity-recovery (drop-the-clean-step comm saving), not a surpass
+mechanism; (3) the high comm-eff entropy is a codec-warmup artifact, not exploration, and is
+anti-correlated with val; (4) the only genuinely zero-mean noise source (the rescaled mask) is too
+high-variance to train on alone; (5) the stale clean anchor is not an extra-dense information channel
+(dense sees full uncompressed activations fresh every step), and Adam already supplies fresh β1=0.9
+momentum, so a stale β=0.95 EMA adds little. A surpass-dense claim is therefore not supported by what
+has run. The most valuable forward deliverable is naming the NEW primitive that would genuinely test
+the operator's "compression-as-exploration" thesis (§9).
+
+---
+
+## 9. What a NEW primitive that genuinely tests "compression-as-exploration" looks like (the forward ask)
+
+If the operator's thesis is that the lossy boundary channel can EXPLORE its way past dense (not just
+match it), the test needs a perturbation that is simultaneously: (a) ZERO-MEAN (so it explores rather
+than biases — PowerSGD fails this); (b) LOW/CONTROLLED variance (so it trains rather than stalls — the
+p=0.95 mask fails this); and (c) TUNABLE as an exploration TEMPERATURE (so the bias-variance/explore
+tradeoff is a swept axis, not a fixed codec). None of the three in-stack codecs (dense, prf_mask,
+PowerSGD) is all three. Candidate primitives, in order of how cleanly they isolate the thesis:
+
+1. **Variance-controlled UNBIASED mask = rescaled mask at SWEPT p WITH error-feedback.** Keep the
+   zero-mean inverted-dropout estimator (8.0A) but (i) sweep p as the exploration-temperature knob
+   (lower p = less noise) and (ii) add error-feedback on the dropped activation residual
+   `(I−mask)·h`, re-injecting it next step so the estimator stays unbiased at LOWER variance — exactly
+   the variance fix the high-p mask lacks. Optionally ANNEAL p high→low over training (explore early,
+   exploit late). This is the most direct in-spirit test: does zero-mean activation noise at
+   controlled variance beat dense, or just add variance? It reuses the existing mask + the
+   error-feedback machinery #24 was scoped for. **Falsifier:** if no p (annealed or fixed) beats
+   dense, "compression-as-exploration" is dead for this surface.
+2. **Explicit zero-mean Gaussian gradient/activation noise with a swept scale.** The cleanest decoupled
+   control — add `σ·N(0,1)` to the boundary activation (or the weight gradient) with `σ` the
+   temperature, decorrelated per step, exactly zero-mean by construction, variance fully controlled by
+   σ. This separates "noise-as-exploration" from any codec/byte-budget confound; it is NOT
+   comm-efficient (it's a mechanism probe), so run it as a science control, not a comm-eff arm. If even
+   ideal zero-mean tunable noise cannot beat dense GRPO here, the exploration thesis is falsified
+   independent of compression.
+3. **Error-feedback PowerSGD (the parity test, run alongside).** Not an exploration primitive, but the
+   clean way to BANK the comm win: accumulate `(I−P)g` and re-inject next step (issue #24's primitive),
+   removing the clean step. Expected outcome PARITY (0.741-band) at lower comms — the honest
+   comm-efficiency result while (1)/(2) chase the (unlikely) exploration edge.
+
+**Instrumentation that must be added to ANY of these (the missing measurement):** log per-step the
+dense-vs-compressed update COSINE (EXP-20's never-logged success criterion) and the
+sign-agreement(M, G_noisy) at delay_K=0 (the §1.2 OPEN). Without those two numbers we cannot
+distinguish "noise explored productively" from "noise just added variance Adam averaged away."

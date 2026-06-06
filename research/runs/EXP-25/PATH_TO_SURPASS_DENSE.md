@@ -144,18 +144,24 @@ The whole thesis reduces to the relative size and structure of `b` vs `ξ`:
 |---|---|---|---|---|
 | **signed_ema α=0** | `\|G\|·sign(M_stale) − G` — full magnitude, fixed stale sign on ~50% of coords | **maximal coherent bias** (β=0.95 EMA, ~20-tick persistence) | val 0.354, length→16K cap | **collapse** (confirmed) |
 | signed_ema α=0.5 | disagreeing coords zeroed (projection onto sign-agreement set) | bias removed but ~half the gradient dropped (a *shrinkage*, not noise) | val 0.707, bounded length | survives but underperforms — loses signal, doesn't explore |
-| **plain PowerSGD r77** | `(I−P)·G` dropped — the off-low-rank-subspace residual | **[PENDING-MECHANIST Q1]** — is `(I−P)·G` step-stable (bias) or basis-rotating (≈ξ)? | val ~0.74, nearly harmless | **near-zero-mean ⇒ candidate for the productive-noise regime** (hypothesis) |
+| **plain PowerSGD r77 (frozen Q)** | `(I−P)·G` dropped — the off-low-rank-subspace residual | **MECHANIST-RESOLVED [Q1]: deterministic structured BIAS**, not zero-mean noise. Q frozen for the whole step ⇒ the SAME (H−r) directions dropped every forward. Low-magnitude (recon_rel_err ~0.025, stationary), direction-faithful (kept subspace = dominant energy) | val ~0.74 ≈ dense — benign | **dense-grade signal; NO exploration-noise channel** (frozen-Q PowerSGD is the worst case for the thesis) |
 | inject (γ=1) | adds orthogonal scale-matched M_anchor component | tiny (‖M‖≪‖G‖ after rescale) — inert | inert (EXP-23 A2 0.6967) | neither helps nor hurts |
-| blend (η=0.5) | convex pull toward scale-matched M_anchor; cos(G,M)≈0.001 | shrinks step to 0.71× along ~orthogonal M | inert (EXP-23 A3 0.6861) | **[PENDING-MECHANIST Q3]** direction-correct or just magnitude? |
+| blend (η=0.5) | convex pull toward scale-matched M_anchor; cos(G,M)≈0.001 | shrinks step to 0.71× along ~orthogonal M | inert (EXP-23 A3 0.6861) | direction-uncorrelated; not a live surpass lever |
 
-The single most important open cell is **plain PowerSGD's `(I−P)·G` residual**: issue
-#24 measured `cos(G_powersgd, M_anchor) ≈ 0.001` — PowerSGD discards *exactly* the
-directions the full-rank anchor lives in. That orthogonality is what killed inject/blend
-(they tried to add back an orthogonal component), but it is also the *fingerprint of
-where the dropped signal went*. Whether that dropped component is a coherent bias
-(→ error-feedback #24 is the fix, removes the bias and KEEPS the noise) or a step-
-decorrelated fluctuation (→ it is already the productive exploration noise and rank is
-the temperature knob) is the pivotal empirical question for mechanist [Q1].
+**MECHANIST [Q1] resolved the pivotal cell — and it reshapes the whole thesis.** The
+detailed gradient-flow analysis (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §2) settles that
+plain PowerSGD's residual is the **opposite** of zero-mean exploration noise: with Q
+*frozen* for the whole global step, the same off-subspace directions are dropped on every
+forward — a *deterministic, structured, low-magnitude, direction-faithful BIAS*
+(`reconstruction_rel_error` ~0.025 and **stationary** across the run; the PowerSGD-only
+control ties dense at 0.741). There is **no fresh per-step randomness** to act as an
+SGD-noise exploration source. This **falsifies "rank-as-temperature via PowerSGD noise"
+as originally drafted** — that lever assumed a zero-mean fluctuation that does not exist
+for frozen-Q PowerSGD. The consequence is decisive for the program: *the surpass edge
+cannot come from "PowerSGD compression noise explores," nor from "the anchor corrects the
+(tiny) compression bias" (that is mechanically PARITY, §2.6).* The thesis must be rebuilt
+on channels that supply signal **dense does not already use** — which is exactly what §2.6
+and the revised levers (§3) do.
 
 ### 2.3 Why the α=0 collapse is the *negative image* of the thesis, not a refutation
 
@@ -240,18 +246,88 @@ collapsing *while* exploring (that is exactly what the KL+length brakes in §4 a
 if so, the high-entropy exploring policy has room to find a better basin than dense's
 confident one.
 
-**The caveat (why this is gated on [Q4], not yet a claim).** The ~15× entropy gap at
-step 1 (5.7 vs 0.4) on an identical surface is too large and too noisy (A0's 5→9→0.4
-bouncing) to be obviously a clean policy-entropy difference; it may be a metric/scale
-artifact — `actor/entropy` computed on a forward that the codec perturbs, a different
-logging normalization, or the rollout-correction config differing between runs (the
-parallel ~180× gap in `rollout_probs_diff_mean`, 0.0035 dense vs 0.62 comm-eff, smells
-like a metric-definition difference). I have asked mechanist [Q4] to disambiguate
-artifact (R1) vs real exploration (R2) and to corroborate with a *rollout-side*
-diversity measure (response-length spread, distinct-n, rollout-prob distribution) that
-does not depend on the suspect scalar. **If R2 holds even partially, this becomes the
-headline empirical motivation; if R1, the thesis rests entirely on the prospective
-rank-as-temperature test (§4), which is self-contained and does not need this signal.**
+**MECHANIST [Q4] DEMOTED THIS to "not a clean signal."** The detailed analysis
+(`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §6.1) shows **dense trains down to entropy 0.122 —
+LOWER than ANY non-collapsing comm-eff arm — with bounded length and the BEST val**. A
+confident low-entropy GRPO policy on GSM8K is *correct*, not collapsed. So "comm-eff sits
+at higher entropy ⇒ it explores more ⇒ it should beat dense" does **not** follow: dense's
+low entropy is exploitation of a *correct* policy, and the comm-eff arms' high/noisy
+`actor/entropy` (the 5→9→0.4 bouncing) is most likely a metric/scale artifact (the
+parallel ~180× gap in `rollout_probs_diff_mean`, 0.0035 dense vs 0.62 comm-eff, points
+to a metric-definition difference, not a real diversity gap). **I am NOT using the
+entropy fingerprint as a surpass argument.** Higher entropy is not the goal; *the right
+kind of update* is. The surpass case must rest on the mechanism in §2.6, not on this
+observation.
+
+### 2.6 The parity-vs-surpass ceiling, and the three channels that survive it
+
+Mechanist's sharpest result (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §8.1) is a hard ceiling
+on the *obvious* comm-eff story and it must be stated bluntly:
+
+> **"Anchor corrects the compression bias" is mechanically PARITY, not surpass.** The
+> recoverable bias is the dropped off-subspace component `(I−P)·g`, whose relative size
+> is bounded by the dropped activation energy ≈ `recon_rel_err² = 0.025² ≈ 0.0006` (~0.06%
+> of activation energy; the boundary weight gradient is genuinely low-rank, EXP-20/#21).
+> A correction that adds this back recovers single-digit-% of the update at most — it can
+> let you drop the periodic clean step (pure comm savings) but it cannot exceed dense,
+> because **the stale clean anchor gradient is information dense already has fresh every
+> step.** To SURPASS dense, the extra signal must come from a channel *dense does not
+> already use.*
+
+This kills two framings at once: (a) PowerSGD-noise-as-exploration (no zero-mean noise to
+exploit, §2.2) and (b) anchor-corrects-compression-bias (parity-only, above). The honest
+question becomes: **what information channel does a communication-efficient trainer have
+that a dense single-step trainer does not?** Three candidates survive, and they are the
+spine of the revised program. (Mechanist is pressure-testing each; tagged
+**[MECHANIST-PENDING-R2]** where their read is still incoming.)
+
+- **Channel A — Variance-reduced / look-ahead gradient (the EMA-as-momentum channel,
+  mechanist-named in §8.1).** Dense uses a single-step gradient `G_t`. The anchor's
+  β=0.95 EMA `M` is a *variance-reduced* estimate of the gradient averaged over ~20 ticks
+  — a quantity the dense single-step trainer **does not have**. With n=8 GRPO advantages
+  that are genuinely noisy (high-variance per-coordinate PG, §1.2 of the analysis: the
+  per-coordinate gradient is near-zero-mean = high relative variance), a *direction-
+  preserving* blend `G_used = G_noisy + λ·(M − proj_{G}(M))` could give a lower-variance,
+  more reliable descent direction than dense's single noisy step. **This is the most
+  defensible surpass mechanism** because it identifies a concrete channel dense lacks
+  (the cross-step average) and it is direction-preserving (does NOT repeat the signed_ema
+  error). The bar shifts: not "correct the compression bias" but "supply a variance-
+  reduced gradient dense cannot compute in one step." [MECHANIST-PENDING-R2]
+
+- **Channel B — Compression as an implicit trust-region / subspace regularizer.** Frozen-Q
+  PowerSGD constrains every update to the dominant-energy subspace `P` (drops the low-
+  energy tail deterministically). In a *non-stationary* RL objective, restricting updates
+  to the stable high-energy subspace is an implicit regularizer — it prevents the step
+  from chasing low-energy, batch-specific directions that overfit *this* rollout set,
+  biasing toward flatter, better-generalizing policies (the IGR / flat-minima pillar,
+  §2.4, achieved by *constraint* rather than by *noise*). This predicts comm-eff > dense
+  via **regularization, not exploration** — and it is consistent with mechanist's
+  stationary-recon-error result (§2.3: a stable, constant constraint). The risk
+  (mechanist's §2.2 caveat): if the constraint is too *weak* (direction-faithful,
+  recon_err only 2.5%), it may not regularize enough to matter. The rank sweep is then a
+  test of *this* channel: lower rank = tighter trust region = stronger regularization —
+  is there an `r*` whose regularization beats dense? [MECHANIST-PENDING-R2]
+
+- **Channel C — Explicit zero-mean exploration via STOCHASTIC compression.** The §2.2
+  "no zero-mean noise" result is specific to *frozen-Q* PowerSGD. A compression whose
+  residual is zero-mean *by construction* — stochastic rounding/quantization, per-step
+  re-sampled random-mask sparsification, or PowerSGD with a **re-randomized basis each
+  step** — restores a genuine per-step fluctuation `ξ`, reviving the original SGD-noise /
+  RL-exploration argument for real. This is the closest to the operator's literal "noise
+  = exploration" thesis, but it is now correctly scoped to *stochastic* codecs, not the
+  deterministic low-rank one we have. The risk: random projections may destroy the
+  dominant-subspace signal (§2.2) faster than they add useful exploration; variance must
+  be tuned. [MECHANIST-PENDING-R2]
+
+**The reframed thesis.** Compression-as-exploration in its literal form requires Channel
+C (stochastic codec). But the *stronger and more defensible* surpass argument is Channel
+A (variance-reduced gradient dense cannot compute) and/or Channel B (implicit trust-region
+regularization) — both of which beat dense not by adding noise but by supplying a
+*better-conditioned update* than a single dense step. The operator's intuition — "RL
+under-explores, so perturbing/regularizing the update can help where it would only hurt in
+SFT" — is **correct in spirit**, and survives mechanist's falsification of the naive
+PowerSGD-noise route, but its mechanism is variance-reduction + regularization (A+B), with
+explicit exploration (C) as a separate testable variant.
 
 ---
 
