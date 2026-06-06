@@ -169,6 +169,90 @@ does not refute compression-as-exploration; it **locates the cliff edge** — an
 us the lever to beat dense must live at the opposite end (zero-mean, step-decorrelated,
 no sign-replacement).
 
+### 2.4 Prior art — the thesis is grounded in known theory but unexplored in RL
+
+Two of the three pillars are well-established theory; the third (compression-as-
+exploration *in RL*) appears genuinely novel, which is both the opportunity and the
+reason there is "no recipe to copy" (GOAL.md):
+
+- **Zero-mean gradient noise → flat minima (PILLAR 1, established).** Implicit Gradient
+  Regularization (Barrett & Dherin, ICLR 2021) shows GD implicitly penalizes large
+  gradient norm and biases toward flat minima that generalize better and are robust to
+  parameter perturbation. The stability analysis of SGD noise (arXiv 2207.02628) adds
+  the load-bearing nuance for us: it is the **alignment** of the noise with the loss
+  geometry that selects flat minima — i.e. the noise must be the *right kind* (zero-mean
+  along the right directions), exactly the bias-vs-fluctuation distinction in §2.1. This
+  is why "more noise" is not automatically good and why rank-as-temperature (Lever 3) is
+  a *sweep for an interior optimum*, not "minimize rank."
+
+- **Regularization prevents reward-hacking (PILLAR 2, established + directly on-point).**
+  "Gradient Regularization Prevents Reward Hacking in RLHF and RLVR" (arXiv 2602.18037)
+  is almost exactly our α=0 failure mode: an under-regularized RL objective gets hacked
+  (our length-explosion, DEEP_FINDINGS §A2) and an explicit regularizer closes the hack
+  channel. This is independent literature support for Lever 1 (KL brake) as the enabler
+  that makes noise injection safe. It also reframes the whole program correctly: the
+  collapse risk is *reward-hacking under insufficient regularization*, not "compression
+  is bad" — so the fix is to regularize and then inject, not to stop compressing.
+
+- **Why signed_ema specifically failed (compression theory).** Sign-based gradient
+  compression is a known technique (signSGD, Sparse-SignSGD with **majority vote**,
+  arXiv 2302.07475) — but its convergence guarantees REQUIRE a variance-reduction /
+  majority-vote step that makes the transmitted sign an *unbiased* estimator of the true
+  sign. signed_ema has no majority vote; it takes the sign from a single **stale β=0.95
+  EMA**, which is a *biased* sign estimator (DEEP_FINDINGS §B3: wrong on ~50% of mass).
+  So signed_ema is sign-compression with the unbiasing step removed — the literature
+  predicts exactly its failure. Error-feedback (Lever 2, EF/PULSELoCo per issue #24) is
+  the canonical unbiasing mechanism for the *magnitude* path; it is the principled
+  successor.
+
+- **The novelty (and the risk).** The communication-efficient-training literature
+  (quantization, sparsification, error-feedback, low-rank PowerSGD) is overwhelmingly
+  **federated / supervised**; it treats compression as something to *minimize the harm
+  of*, and measures success as "matches dense at lower comm." A survey-level scan turns
+  up essentially **no** work framing compression noise as a *productive exploration
+  source in RL/RLHF*. So the operator's thesis is unexplored territory: the upside is a
+  genuinely new result (compression > dense in RL); the risk is that the SFT/federated
+  intuition ("compression is pure loss") simply transfers and the rank curve saturates
+  at dense. EXP-SURPASS-1 (§4) is designed to settle exactly that, either way.
+
+### 2.5 The candidate empirical fingerprint — dense is *confident*, comm-eff *explores* (CAVEATED, mechanist-gated)
+
+There is a suggestive existing signal that compression is *already* doing the
+exploration the thesis predicts — but it must be read carefully and is gated on
+mechanist [Q4]. At matched early steps on the identical model/data/no-KL surface
+(W&B `actor/entropy`):
+
+- **dense** (`5e2jpho9`, val 0.7536): entropy is **FLAT and LOW** — ~0.37→0.42 over
+  steps 1–8, ending 0.13 @s48, smooth throughout. Crucially, this is a **confident, not
+  collapsed** regime: dense keeps stable response length (~280) and clip_ratio ≈ 0 and
+  reaches the best val. A confident low-entropy policy on GSM8K is *correct* (the model
+  is sure of the right tokens), not pathological (DEEP_FINDINGS §A2 point 1 makes the
+  same point). This is the SAME dense-low-entropy regime the team observed earlier.
+- **A0 PowerSGD r77+clean5** (`oquyeic3`, val 0.7415): entropy is **HIGH and NOISY** —
+  bouncing 5.7→9.0→0.4→7.8 over steps 1–8, ending 1.55 @s48 — yet it stays healthy
+  (bounded length, near-dense val).
+
+If real, this is almost a *direct* picture of the thesis: **dense exploits at low
+entropy; compression keeps the policy at high, noisy entropy (exploring) while still
+reaching near-dense val — i.e. compression sustains exploration without paying for it in
+performance.** The decisive missing piece is whether a comm-eff arm can be kept from
+collapsing *while* exploring (that is exactly what the KL+length brakes in §4 are for) —
+if so, the high-entropy exploring policy has room to find a better basin than dense's
+confident one.
+
+**The caveat (why this is gated on [Q4], not yet a claim).** The ~15× entropy gap at
+step 1 (5.7 vs 0.4) on an identical surface is too large and too noisy (A0's 5→9→0.4
+bouncing) to be obviously a clean policy-entropy difference; it may be a metric/scale
+artifact — `actor/entropy` computed on a forward that the codec perturbs, a different
+logging normalization, or the rollout-correction config differing between runs (the
+parallel ~180× gap in `rollout_probs_diff_mean`, 0.0035 dense vs 0.62 comm-eff, smells
+like a metric-definition difference). I have asked mechanist [Q4] to disambiguate
+artifact (R1) vs real exploration (R2) and to corroborate with a *rollout-side*
+diversity measure (response-length spread, distinct-n, rollout-prob distribution) that
+does not depend on the suspect scalar. **If R2 holds even partially, this becomes the
+headline empirical motivation; if R1, the thesis rests entirely on the prospective
+rank-as-temperature test (§4), which is self-contained and does not need this signal.**
+
 ---
 
 ## 3. The ranked levers toward beating dense
@@ -272,13 +356,30 @@ effect on the bias/fluctuation balance, and cost in GPU-hours on the fixed surfa
 ## 4. The falsifiable experiment program
 
 **Shared surface (fixed):** Qwen2.5-1.5B-Instruct, GSM8K, GRPO, batch 128 / mini 64,
-lr 1e-6, n=8, resp 16384, 50 steps, 4–8 GPU. **Metric:** `val@50`
-(`val-core/openai/gsm8k/acc/mean@1`). **Bar:** dense = 0.7536. **Mandatory guardrail
-on every arm:** the ENTROPY_COLLAPSE_WATCH T1–T7 triggers (length-explosion is the
-discriminator — kill any arm that fires composite-RED). **Surplus claim is two-sided:**
-val@50 > 0.7536 by more than run-to-run noise (estimate noise from the dense + A0
-spread ≈ ±0.005–0.01; require a margin, ideally a 2-seed confirmation of the winning
-arm).
+lr 1e-6, n=8, 50 steps, 4–8 GPU. **Metric:** `val@50`
+(`val-core/openai/gsm8k/acc/mean@1`). **Bar:** dense = 0.7536. **Surplus claim is
+two-sided:** val@50 > 0.7536 by more than run-to-run noise (estimate noise from the
+dense + A0 spread ≈ ±0.005–0.01; require a margin, ideally a 2-seed confirmation of the
+winning arm).
+
+**TWO ORTHOGONAL BRAKES, both ON in every arm (defense-in-depth).** The collapse arms
+died by a *response-length-explosion reward-hack* (clip_ratio 0.46/0.92 to the 16384
+cap, DEEP_FINDINGS §A2); KL and a length cap address *different* failure axes and we use
+both unconditionally — the length cap costs nothing in the non-collapse cells and stops a
+low-rank arm from burning hours generating 16K-token garbage:
+1. **KL brake (divergence axis).** `use_kl_loss=true`, coef 0.001 — bounds the policy's
+   excursion from the reference (Lever 1). This is the *entropy/divergence* guardrail.
+2. **Length brake (degeneration axis), UNCONDITIONAL.** Cap `max_response_length` to
+   **1024–2048** (down from 16384) and/or add an explicit length penalty in the reward.
+   GSM8K healthy responses are ~170–290 tokens (DEEP_FINDINGS §A2), so a 1024–2048 cap is
+   ~4–8× headroom over the healthy regime — it never bites a non-degenerate arm but hard-
+   stops the reward-hack channel and bounds per-arm cost. **This is baked in regardless
+   of the KL diagnostic result**: KL is the divergence brake, the cap is the orthogonal
+   degeneration brake. (Note: dropping the cap from 16384 also speeds every arm, so the
+   whole grid is cheaper than the EXP-25 runs.)
+3. **Mandatory monitor on every arm:** the ENTROPY_COLLAPSE_WATCH T1–T7 triggers
+   (length-explosion is the discriminator — kill any arm that fires composite-RED early,
+   don't wait for step 50).
 
 ### The ONE experiment to run first: **EF + rank-as-temperature sweep under a KL guardrail**
 
@@ -320,15 +421,54 @@ arm).
 - If it is not (SFT-like): val is monotone increasing in r, saturating at dense; no
   cell beats dense+KL. EF still closes most of the plain-PowerSGD gap (recovers to
   ~dense), which is a real comm-savings result even without the surplus.
-- The α=0 collapse arm + KL diagnostic (in flight) is the **pre-flight gate**: if KL
-  does NOT bound the α=0 collapse, the guardrail is unreliable and we must add a hard
-  length cap before running the low-rank arms.
+- The α=0 + KL(0.001) diagnostic (in flight; team-lead relaying) is a **prior-tightener,
+  not a blocker**: if KL bounds the α=0 collapse (entropy holds, length stays bounded),
+  it directly proves the KL brake decouples noise-injection from collapse — strong
+  support for running the low-rank arms aggressively. If KL does NOT bound it, the
+  unconditional length cap (§4 brake 2) is the backstop and the low-rank arms still run,
+  just with the cap doing more of the work. Either way EXP-SURPASS-1 is launchable; the
+  diagnostic only sets how much we lean on KL vs the length cap.
 
 **Decision rule.** Surplus CONFIRMED ⇒ 2-seed the winning cell, then sweep finer rank
 around `r*` and write the result up as the headline. Surplus REJECTED but EF reaches
 dense ⇒ pivot the headline to "comm-eff matches dense at materially lower comm" (the
 GOAL.md parity+savings bar, with the exploration question answered negative). Either is
 a publishable, decisive outcome.
+
+### How EXP-SURPASS-1 adapts to mechanist's Q1 answer (decision-ready either way)
+
+The pivotal Q1 (is PowerSGD's `(I−P)·G` residual zero-mean noise, or coherent bias?)
+does not change *whether* we run the grid — it changes *which cell we expect to win*
+and *how we read a null*. The design is robust to both branches:
+
+- **If Q1 = zero-mean / step-decorrelated (the residual already looks like exploration
+  noise).** Then rank IS a temperature knob directly. Expectation: the **EF-OFF
+  low-rank** arm (`r=38, EF off, KL on`) may already beat dense, because EF would only
+  *remove* the productive noise. The EF-ON row becomes the *control that should be
+  WORSE or equal* (it sanitizes away the exploration). This would be the cleanest
+  possible confirmation: "the dropped component IS the exploration; adding it back
+  (EF) costs us the surplus." We'd then sweep rank finer on the EF-OFF row.
+
+- **If Q1 = coherent low-rank bias (the residual is systematic, accumulates).** Then
+  EF-OFF low-rank is *dangerous* (bias → drift → collapse, a milder cousin of α=0), and
+  the surplus, if any, lives in the **EF-ON** row: EF removes the bias, leaving whatever
+  zero-mean fluctuation remains as the exploration source. Expectation: EF-ON beats
+  EF-OFF at every rank, and the surplus (if real) is `r=38/77, EF on, KL on`. If even
+  EF-ON saturates at dense, the SFT intuition transferred and the answer is "match, not
+  beat" (still a comm-savings win).
+
+- **Either branch shares the same falsifier and the same controls**, so we commit to the
+  full 2×3 grid + 2 controls now and let Q1 set the prior on which cell to 2-seed. The
+  KL guardrail (Lever 1) is ON in every cell precisely so the EF-OFF low-rank arm is
+  survivable enough to *measure* even in the bias branch — that is what de-risks running
+  the grid before Q1 fully lands.
+
+**Stage-gating to save compute.** Run in two waves on one box: **Wave A** =
+`{dense+KL, r=77 EF-off (floor ref), r=38 EF-off, r=38 EF-on}` — 4 arms that already
+bracket the most informative corners (current floor, the high-noise cell both with and
+without de-biasing, and the bar). Read Wave A against the Q1 prior; only spend **Wave B**
+(`r=154` both rows + `dense+entropy`) if Wave A shows a non-monotone signal worth
+resolving. This halves the expected spend if the answer is an early, clean "no surplus."
 
 ---
 
@@ -364,3 +504,44 @@ that locates the cliff; the path to surpass dense runs along the opposite edge: 
 PowerSGD rank (maximal zero-mean exploration noise) with **error-feedback** removing the
 bias and a **small KL** guardrail making the noise safe to inject — and the decisive,
 falsifiable test is whether some compressed rank `r* < H` beats dense+KL on GSM8K val@50.
+
+---
+
+## 7. References
+
+**Internal (this fork).**
+- `runs/EXP-25/DEEP_FINDINGS.md` — the signed_ema α-sweep dose-response, the √2 sign-
+  disagreement signature, the monotonicity (signed_ema is net-harmful), the ranked
+  improvement menu (error-feedback #24 = top successor).
+- `runs/EXP-25/ENTROPY_COLLAPSE_FINDINGS.md` — α=0 root-cause: magnitude-preserving
+  sign-SGD with persistent EMA signs → length-explosion reward-hack; per-hypothesis
+  verdicts; the rollout-correction/IS analysis.
+- `runs/EXP-25/verdict.md` — STOP (best-α 0.7066 ≤ falsification line 0.7114).
+- `diagnostics/ENTROPY_COLLAPSE_WATCH.md` — the T1–T7 collapse triggers; length-
+  explosion is the discriminator (the mandatory guardrail for every surpass-dense arm).
+- Issue #24 — error-feedback on the PowerSGD residual + basis-aligned/staleness-aware
+  blend; the measured `cos(G_powersgd, M_anchor) ≈ 0.001` orthogonality.
+- `verl/workers/comm_eff/spectral_filter.py` — `signed_ema_matrix` (:268), `blend_matrix`
+  (:238), `inject_matrix` (:207), `update_anchor` (:181).
+- W&B (`shamanework-pl/verl_compression_research`): dense `5e2jpho9` (0.7536), A0
+  PowerSGD r77+clean5 `oquyeic3` (0.7415), α=0.5 `1wulaelw` (0.7066), α=0.3 `r8kc702g`
+  (0.6164), α=0.0 `uyrpaftw` (0.3541).
+
+**External prior art.**
+- Barrett & Dherin, *Implicit Gradient Regularization*, ICLR 2021 —
+  https://openreview.net/forum?id=3q5IqUrkcF (GD biases toward flat minima; the
+  zero-mean-noise pillar).
+- *The alignment property of SGD noise and how it helps select flat minima: a stability
+  analysis*, arXiv 2207.02628 — https://arxiv.org/pdf/2207.02628 (noise must be
+  *aligned*/right-kind to select flat minima → the bias-vs-fluctuation distinction; why
+  rank-as-temperature is an interior-optimum sweep, not "minimize rank").
+- *Gradient Regularization Prevents Reward Hacking in RLHF and RLVR*, arXiv 2602.18037 —
+  https://arxiv.org/pdf/2602.18037 (under-regularized RL gets reward-hacked; regularizer
+  closes the hack channel → supports Lever 1 KL-brake as the enabler; mirrors our α=0
+  length-explosion hack).
+- *Sparse-SignSGD with Majority Vote for Communication-Efficient Distributed Learning*,
+  arXiv 2302.07475 — https://arxiv.org/pdf/2302.07475 (sign compression needs majority-
+  vote/variance-reduction to be unbiased → explains why signed_ema's single stale-EMA
+  sign is biased and fails).
+- Vogels et al., *PowerSGD* (the low-rank codec used here) and error-feedback / PULSELoCo
+  (issue #24) — the canonical unbiasing mechanism for the magnitude path.
