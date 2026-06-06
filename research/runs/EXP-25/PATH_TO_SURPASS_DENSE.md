@@ -342,7 +342,7 @@ signal **dense does not already have**. Every lever is direction-preserving (the
 constraint below). The KL brake (Lever 4) is the enabler that makes all of them safe to
 push past dense's operating point.
 
-### Lever 2 — Variance-reduced / look-ahead gradient (Channel A): the most defensible surpass lever
+### Lever 1 — Variance-reduced / look-ahead gradient (Channel A): the most defensible surpass lever
 - **Mechanism.** Dense uses a single noisy step `G_t`. The anchor EMA `M` is a *cross-step
   variance-reduced* gradient estimate — a quantity dense **cannot compute in one step**.
   Use it direction-preservingly: `G_used = G_noisy + λ·(M − proj_{G_noisy}(M))`, i.e. add
@@ -365,7 +365,7 @@ push past dense's operating point.
   NB: a pure-dense ablation (dense + plain momentum/EMA on its OWN gradient) is the control
   that isolates "variance-reduction helps RL" from "the anchor specifically helps."
 
-### Lever 3 — Compression as an implicit trust-region (Channel B): rank-sweep, reinterpreted
+### Lever 2 — Compression as an implicit trust-region (Channel B): rank-sweep, reinterpreted
 - **Mechanism.** Frozen-Q PowerSGD constrains every update to the dominant-energy subspace
   `P` (deterministically drops the low-energy tail). In a non-stationary RL objective this
   is an **implicit regularizer / trust region** — it prevents the step from chasing low-
@@ -387,7 +387,7 @@ push past dense's operating point.
   the effect — hence the sweep includes aggressive ranks. [MECHANIST-PENDING-R2.]
 - **Cost.** Rank sweep `r ∈ {38, 77, 154}` × 50 steps; cheap; reuses the green codec.
 
-### Lever 4 — Explicit zero-mean exploration via STOCHASTIC compression (Channel C)
+### Lever 3 — Explicit zero-mean exploration via STOCHASTIC compression (Channel C)
 - **Mechanism.** Replace frozen-Q PowerSGD with a codec whose residual is zero-mean *by
   construction*: stochastic rounding/quantization, per-step re-sampled random-mask
   sparsification, or **re-randomized-basis PowerSGD** (resample Q every step instead of
@@ -405,15 +405,21 @@ push past dense's operating point.
 - **Cost.** Requires a new codec (more code than Levers 2/3). Run only if A/B underperform
   or to test the literal thesis directly. Medium.
 
-### Lever 5 — KL brake is the keystone enabler (was Lever 1; re-stated for the new channels)
-- **Mechanism + status:** as in Lever 1 above — small KL-to-reference bounds the policy
-  excursion and closes the length reward-hack. Under the new channel framing its role is the
-  same: it is the **guardrail that makes any of A/B/C safe to push past dense's operating
-  point.** A0+KL(0.001) diagnostic in flight (mechanist predicts it arrests the length
-  explosion but does NOT itself beat the PowerSGD-only 0.741 — KL removes the collapse
-  channel without making a stale-sign correction helpful). Treated as a prior-tightener.
+### Lever 4 — KL brake: the keystone enabler
+- **Mechanism.** A small KL-to-reference penalty (`use_kl_loss=true`, coef 0.001) adds a
+  restoring force toward the base policy, bounding the policy's excursion and closing the
+  length-degeneration reward-hack channel (the proximate killer of every collapse arm,
+  DEEP_FINDINGS §A2). It does not itself supply surplus — it is the **guardrail that makes
+  any of Channels A/B/C safe to push past dense's operating point** without falling off the
+  collapse cliff.
+- **Status.** A0+KL(0.001) diagnostic in flight (team-lead relaying). Mechanist predicts
+  (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` §7) it arrests the length explosion but does NOT
+  itself beat the PowerSGD-only 0.741 — KL removes the collapse channel without making a
+  stale-sign correction helpful. Treated as a prior-tightener, not a blocker (§4).
+- **Caveat.** KL changes the FIXED control surface (no-KL/no-entropy). Run as a deliberate,
+  labelled new lineage — not a silent drift (DEEP_FINDINGS §d.2).
 
-### Lever 6 — Error-feedback (#24): now a PARITY tool, not a surpass tool
+### Lever 5 — Error-feedback (#24): now a PARITY tool, not a surpass tool
 - **Re-ranked DOWN by mechanist's ceiling (§2.6/§8.1).** EF removes the deterministic
   compression bias `(I−P)·G`. But that bias is ~0.06% of activation energy / single-digit-%
   of the update, and removing it only recovers toward dense — it is mechanically a **parity
@@ -468,94 +474,72 @@ low-rank arm from burning hours generating 16K-token garbage:
    (length-explosion is the discriminator — kill any arm that fires composite-RED early,
    don't wait for step 50).
 
-### The ONE experiment to run first: **EF + rank-as-temperature sweep under a KL guardrail**
+### The ONE experiment to run first: **Variance-reduced gradient (Channel A) vs dense, isolated**
 
-> **EXP-SURPASS-1 — "Is there a compressed rank that beats dense?"**
+The first experiment targets **Channel A** — the most defensible surpass lever (it uses a
+signal dense provably lacks: the cross-step variance-reduced gradient) and the one
+mechanist independently named as the only "different and testable" surpass candidate
+(§8.1). It is also the cheapest decisive test, and its key control (dense+momentum)
+isolates *whether variance-reduction helps RL at all* from *whether the anchor specifically
+helps* — the single most important confound.
+
+> **EXP-SURPASS-1 — "Does a variance-reduced gradient beat a single dense step?"**
 >
-> A 2×3 grid on the verified PowerSGD substrate, KL guardrail ON (coef 0.001),
-> error-feedback the only correction (signed_ema OFF, anchor as EF re-grounding flush):
+> All arms on the fixed surface, KL(0.001) + length-cap brakes ON everywhere, 50 steps:
 >
-> | | r = 38 (high noise) | r = 77 (current) | r = 154 (low noise) |
+> | arm | gradient used | tests | role |
 > |---|---|---|---|
-> | **EF off** | exploration, biased | the floor ref | near-dense fidelity |
-> | **EF on** | exploration, de-biased ← **the surplus cell** | de-biased | de-biased |
+> | **D0** dense+KL | single-step `G_t` | — | **the bar** (re-run with KL so the comparison is brake-matched) |
+> | **D1** dense + EMA-momentum on its OWN grad | `G_t + λ·(M_self − proj)` | does variance-reduction help RL *per se*? | **the key control** — no compression, no anchor |
+> | **A1** comm-eff + anchor-EMA, direction-preserving blend | `G_noisy + λ·(M_anchor − proj_{G}M)` | does the (stale, clean) anchor average beat dense? | **the surpass candidate** (Channel A) |
+> | **A2** comm-eff, plain PowerSGD r77, no anchor | `G_noisy` | the §3 benign floor | reference (≈0.741) |
 >
-> Plus two controls run on the SAME surface: **dense+KL(0.001)** (the real bar — KL is
-> on everywhere, so the comparison is comm-eff+KL vs dense+KL, not vs no-KL dense) and
-> **dense+entropy-bonus** (Lever 4 control).
+> `λ` is a small sweep `{0.25, 0.5}`; the merge is the verified-substrate `blend`/inject
+> machinery REPURPOSED as a *complement-add* (add only `M`'s component orthogonal to the
+> live step — never override sign). Anchor `cadence`/`delay_K` re-pinned to global-step units.
 
 **Why this one first.**
-1. It tests the thesis **directly**: the surplus cell (low rank, EF on, KL on) is the
-   precise theoretical sweet spot — maximal zero-mean exploration noise (low r), bias
-   removed (EF), collapse-proofed (KL). If *any* cell exceeds dense+KL, the operator's
-   thesis is confirmed with a number.
-2. It is **falsifiable and decisive**: monotonic "more rank = better, plateau at dense"
-   falsifies compression-as-exploration (compression is then pure loss, as in SFT). A
-   non-monotone curve with an interior peak above dense **confirms** it. Either way we
-   learn the shape.
-3. It **isolates** the exploration benefit via the two controls: comm-eff+KL vs
-   dense+KL removes KL as a confound; the dense+entropy-bonus arm tells us whether
-   compression's exploration is just entropy-reg-by-another-name or structurally
-   different (gradient-space).
-4. It **fits the budget**: 6 comm-eff arms + 2 controls × 50 steps on 4–8 GPU, reusing
-   one box (memory: GPU-idle box reuse). It is built entirely from already-verified
-   machinery (PowerSGD codec green, anchor substrate verified in #25) plus EF (#24,
-   now unblocked) and a config flag for KL.
+1. **It targets the channel that can actually clear the §2.6 parity ceiling.** Channels B
+   (regularization) and C (stochastic noise) might beat dense, but A is the one with a
+   named, mechanically-distinct signal (the cross-step average) and the cleanest control.
+2. **D1 is the decisive control no prior experiment ran.** If D1 (dense+self-momentum)
+   already beats D0 (dense), then variance-reduction helps RL *independent of compression*
+   — and the comm-eff story becomes "get the surplus for free while also saving comm" (A1
+   should then match D1 at lower comm). If D1 does NOT beat D0 but A1 DOES, the anchor's
+   stale-clean average carries something self-momentum cannot — a stronger, stranger
+   result. If neither beats D0, Channel A is falsified cleanly.
+3. **It is direction-preserving by construction** (complement-add, never sign-replacement)
+   — it cannot reproduce the signed_ema collapse, and the KL+length brakes backstop it.
+4. **It fits the budget and reuses verified machinery:** 4 arms (+1 for the λ sweep) × 50
+   steps on one 4–8 GPU box; the anchor substrate is green (EXP-25 gates), only the merge
+   mode changes.
 
-**Pre-registered predictions (so the result is honest):**
-- If compression-as-exploration is real: `val(r=38, EF on, KL on) > val(dense+KL)`,
-  with `r=77` intermediate and `r=154` ≈ dense. The win comes from the LOW-rank arm.
-- If it is not (SFT-like): val is monotone increasing in r, saturating at dense; no
-  cell beats dense+KL. EF still closes most of the plain-PowerSGD gap (recovers to
-  ~dense), which is a real comm-savings result even without the surplus.
-- The α=0 + KL(0.001) diagnostic (in flight; team-lead relaying) is a **prior-tightener,
-  not a blocker**: if KL bounds the α=0 collapse (entropy holds, length stays bounded),
-  it directly proves the KL brake decouples noise-injection from collapse — strong
-  support for running the low-rank arms aggressively. If KL does NOT bound it, the
-  unconditional length cap (§4 brake 2) is the backstop and the low-rank arms still run,
-  just with the cap doing more of the work. Either way EXP-SURPASS-1 is launchable; the
-  diagnostic only sets how much we lean on KL vs the length cap.
+**Pre-registered predictions (honest, mechanism-grounded):**
+- **Channel A real:** A1 > D0 by > noise (≥ ~0.76). Sub-cases: (i) D1 > D0 too ⇒
+  variance-reduction is the mechanism, anchor is just a free way to get it; (ii) D1 ≈ D0
+  but A1 > D0 ⇒ the stale-clean anchor average specifically helps (publish this).
+- **Channel A null:** A1 ≈ A2 ≈ D0 (the anchor add is inert/parity, consistent with
+  mechanist's §8.1 ceiling) ⇒ Channel A does not surpass; pivot to Channel B (rank sweep)
+  as EXP-SURPASS-2, then Channel C if B also nulls.
+- **Mechanist's KL-diagnostic prediction (§7)** — KL arrests the length explosion but does
+  not by itself beat 0.741 — is the prior: KL is the enabler, not the surplus, exactly as
+  Channel A assumes.
 
-**Decision rule.** Surplus CONFIRMED ⇒ 2-seed the winning cell, then sweep finer rank
-around `r*` and write the result up as the headline. Surplus REJECTED but EF reaches
-dense ⇒ pivot the headline to "comm-eff matches dense at materially lower comm" (the
-GOAL.md parity+savings bar, with the exploration question answered negative). Either is
-a publishable, decisive outcome.
+**Decision rule.** A1 > D0 (surplus) ⇒ 2-seed A1, sweep λ, write it up as the headline,
+and report the D1-vs-D0 control to attribute the surplus (variance-reduction vs anchor-
+specific). A1 ≈ D0 (parity) ⇒ Channel A is a comm-savings win at best; advance to
+**EXP-SURPASS-2 = the Channel-B rank sweep** (`r ∈ {38, 77, 154}` vs dense+KL; predicts a
+non-monotone interior peak if compression-as-trust-region regularization beats dense), and
+hold **Channel C (stochastic codec)** as EXP-SURPASS-3 if B also nulls.
 
-### How EXP-SURPASS-1 adapts to mechanist's Q1 answer (decision-ready either way)
-
-The pivotal Q1 (is PowerSGD's `(I−P)·G` residual zero-mean noise, or coherent bias?)
-does not change *whether* we run the grid — it changes *which cell we expect to win*
-and *how we read a null*. The design is robust to both branches:
-
-- **If Q1 = zero-mean / step-decorrelated (the residual already looks like exploration
-  noise).** Then rank IS a temperature knob directly. Expectation: the **EF-OFF
-  low-rank** arm (`r=38, EF off, KL on`) may already beat dense, because EF would only
-  *remove* the productive noise. The EF-ON row becomes the *control that should be
-  WORSE or equal* (it sanitizes away the exploration). This would be the cleanest
-  possible confirmation: "the dropped component IS the exploration; adding it back
-  (EF) costs us the surplus." We'd then sweep rank finer on the EF-OFF row.
-
-- **If Q1 = coherent low-rank bias (the residual is systematic, accumulates).** Then
-  EF-OFF low-rank is *dangerous* (bias → drift → collapse, a milder cousin of α=0), and
-  the surplus, if any, lives in the **EF-ON** row: EF removes the bias, leaving whatever
-  zero-mean fluctuation remains as the exploration source. Expectation: EF-ON beats
-  EF-OFF at every rank, and the surplus (if real) is `r=38/77, EF on, KL on`. If even
-  EF-ON saturates at dense, the SFT intuition transferred and the answer is "match, not
-  beat" (still a comm-savings win).
-
-- **Either branch shares the same falsifier and the same controls**, so we commit to the
-  full 2×3 grid + 2 controls now and let Q1 set the prior on which cell to 2-seed. The
-  KL guardrail (Lever 1) is ON in every cell precisely so the EF-OFF low-rank arm is
-  survivable enough to *measure* even in the bias branch — that is what de-risks running
-  the grid before Q1 fully lands.
-
-**Stage-gating to save compute.** Run in two waves on one box: **Wave A** =
-`{dense+KL, r=77 EF-off (floor ref), r=38 EF-off, r=38 EF-on}` — 4 arms that already
-bracket the most informative corners (current floor, the high-noise cell both with and
-without de-biasing, and the bar). Read Wave A against the Q1 prior; only spend **Wave B**
-(`r=154` both rows + `dense+entropy`) if Wave A shows a non-monotone signal worth
-resolving. This halves the expected spend if the answer is an early, clean "no surplus."
+### Why this ordering (A → B → C) and not the old rank-first plan
+The old EXP-SURPASS-1 (rank × EF grid) was built on the now-falsified premise that low
+rank injects zero-mean *exploration* noise. Mechanist showed frozen-Q PowerSGD has no such
+noise (§2.2) and that EF only buys parity (§2.6). So the rank sweep is demoted to a test of
+*regularization* (Channel B, EXP-SURPASS-2), and EF drops off the surpass path entirely.
+Channel A goes first because it is the only lever with (a) a signal dense provably lacks and
+(b) a clean dense-side control (D1) that isolates the mechanism. This ordering spends the
+first (cheapest) box on the highest-probability, most-interpretable surpass test.
 
 ---
 
