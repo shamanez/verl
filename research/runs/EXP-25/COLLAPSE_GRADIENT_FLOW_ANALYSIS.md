@@ -363,9 +363,16 @@ low entropy, is the proximate killer; the no-KL/no-entropy surface is the permis
 brakeable). It is exactly why the surpass-dense plan (§9) puts KL + length brakes on EVERY arm as the
 enabler that makes a zero-mean perturbation safe to push, NOT as the source of any surplus.
 
-**val@25 / val@50 pending** (a monitor is capturing the exact number; the team-lead will relay it).
-Prediction for the final number: recovers far above 0.354 into the α=0.5/parity band (~0.70–0.74), does
-NOT beat the PowerSGD-only control 0.741. [FOLD IN THE VAL NUMBER WHEN RELAYED.]
+**val@25 = 0.7119 (CAPTURED; run kaixg76f, step 25).** Prediction CONFIRMED: it recovers far above the
+no-KL α=0 catastrophe (val@50 0.354) — KL closed the length-reward-hack channel (length bounded 170–290,
+clip 0.000 through step 25) so the late crash that took no-KL from val@25 0.718 → val@50 0.354 is
+structurally absent. The landing is ~floor parity (0.7119 > floor 0.6914, ≈ the 0.7114 STOP line) and
+remains BELOW PowerSGD-only 0.741 / dense 0.7536 — i.e. KL prevents the catastrophe but the stale-sign
+correction's DIRECTION bias still drags val below codec parity, exactly as predicted. (val@50 not run:
+the box was torn down on cost discipline once val@25 + the bounded-length trajectory had captured the
+science — the crash mechanism being absent, val@50 projects to ~0.71; the conclusion does not depend on
+the exact value.) Net: signed_ema is net-harmful at every level — catastrophic without KL, sub-parity
+with it — confirming the §3/§5/§9 verdict to abandon signed-replacement.
 
 ---
 
