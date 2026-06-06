@@ -411,3 +411,70 @@ the compound grid.
   as the enabler that closes the reward-hack channel — supports the KL+length-cap guardrail).
 - pass@k vs greedy decode: the standard result that higher-entropy policies win pass@k while
   greedy reads only the mode — the literature basis for the Route-A/Route-B split (§2).
+
+---
+
+## 7. Critic's adversarial appendix — per-bet verdict, the falsifiers, and "what would make me wrong"
+
+This is the `critic` contribution stated as a crisp ledger: for each bet, the adversarial
+VERDICT (survives / killed / demoted, with the one-line mechanism reason), the HARDENED form
+already folded into §3, and the PRE-REGISTERED FALSIFIER (the observation that kills the bet
+before step 50 — so we never wait out a dead arm). The body argues these inline; this section is
+the single place to check them against.
+
+### 7.1 The verdict ledger
+
+| bet | VERDICT | mechanism reason (one line) | pre-registered falsifier (kills it) |
+|---|---|---|---|
+| **BET 1** raise n + T (Route B) | **SURVIVES — the single best shot** | only lever that is BOTH compression-specific (steeper d(val)/dn) AND attacks the proven advantage-washing leak | pass@k coverage curve: compressed-minus-dense advantage FLAT in k ⇒ generic more-samples win, not compression-specific |
+| **BET 1b** rank/tail-credit advantage | **SURVIVES as follow-up — most compression-specific** | mean-baseline structurally UNDER-credits the diffuse tail (see 7.2) | best-of-group rises but val (greedy AND pass@k) flat ⇒ tail is off-task, not under-credited |
+| **BET 2** dense T/n calibration gate | **SURVIVES as the cheap GATE** | cheapest read on whether the surface is exploration-limited at all | (a control; no falsifier — but a dense-null does NOT kill BET 1, see 7.3) |
+| **BET 3** Gaussian probe | **SURVIVES as CONTROL only — NOT a surpass lever** | train-only, same channel class as PowerSGD that failed to convert; Adam AMPLIFIES it on near-zero coords | noise-dominated-coord fraction (|ξ|>|g|) > 50% at the smallest σ that perturbs val ⇒ random walk ⇒ dead |
+| **BET 4** explore-then-exploit anneal | **SURVIVES as conditional follow-up** | entropy anti-correlation supports front-load-then-collapse; run as TEMPERATURE-anneal (the only direct sampling knob), not mask-p | anneal does not beat the best constant-T cell from BET 1 ⇒ timing adds nothing |
+| **mask-p sweep (old headline)** | **DEMOTED OUT of the surpass ranking** | train-only generation bet; we are conversion-limited not generation-limited | (moved to the parity codec; not a surpass arm) |
+| **BET 6** entropy / exploration-credit shaping | **SURVIVES but RANKED LAST — highest detonation risk** | raw entropy bonus pushes the EXACT length-hack axis the brakes fight (COLLAPSE §6.2) | the entropy-bonus arm fires the ENTROPY_COLLAPSE_WATCH length-explosion trigger early ⇒ kill on sight, don't wait for step 50 |
+| **BET 5** EF-PowerSGD | **OFF the surpass path — the likely REAL deliverable** | parity ceiling (≤0.06% recoverable); banked comm-savings, not surpass | n/a (it is the parity fallback, not a surpass claim) |
+
+### 7.2 The tail-credit mechanism (BET 1b) — why mean-baseline GRPO structurally under-credits diversity
+
+GRPO advantage is `A_b = (r_b − mean(r)) / std(r)` over the n-sample group. A diffuse policy's
+value is in its TAIL — the rare-good completion. With the mean baseline at n=8, a single good
+sample's advantage is ≈ `(1 − 1/8)·spread` — the 7 bad samples barely move the mean — and the
+std-normalization then SHRINKS a lone outlier's credit further. So the mean baseline
+**structurally under-credits exactly the tail that diversity contributes.** This is the
+mechanistic complement to raising n: **n SURFACES more tail samples; tail-credit (max/quantile
+baseline or rank/top-k weighting) CREDITS them.** It is the most compression-specific conversion
+lever (it directly monetizes the diffuse tail dense lacks), but it changes the LOCKED vanilla-GRPO
+surface and carries its own reward-hack risk (over-crediting an outlier is itself a hackable
+channel — the α=0 length-hack family), so it is a labelled-lineage follow-up, deployed only on the
+"best-of-group up, val flat" signature (§4 row 3).
+
+### 7.3 Two methodological HARD GATES (pre-registered, non-negotiable)
+
+1. **2-seed any winner — the variance is BORROWED, not measured.** EXP-25 ran 50 steps with
+   `test_freq=25` (TWO val ticks/arm) and NO seed replication (`verdict.md`). The σ≈0.0075 in the
+   0.765 surpass bar is inferred from the dense/PowerSGD *spread*, not a measured run-to-run
+   variance on this surface. ⇒ a single-seed val@50 in [0.754, 0.765] is PARITY, not surpass; and
+   a single-seed bump above 0.765 is a CANDIDATE that MUST be 2-seeded before it is reported as a
+   surpass result. This is the difference between a real result and a noise artifact.
+2. **The dense T/n null (BET 2) is INFORMATIVE, not FATAL to BET 1.** If raising T/n does not lift
+   *dense* above 0.7536, the prior on the thesis DROPS — but BET 1 must STILL run at least one
+   compressed×{T,n} cell, because the thesis is that the gain is compression-SPECIFIC and could
+   appear ONLY on the compressed arm (the diffuse tail T/n converts exists only there). The
+   conversion thesis is falsified ONLY if compressed×{T,n} ALSO fails to beat dense. Do not let a
+   dense-only null prematurely kill the compression-specific hypothesis.
+
+### 7.4 "What would make me (critic) wrong" — the constructive-adversary close
+
+My standing position is < 20% on a greedy-bar surpass, and PARITY+comm-savings (BET 5) as the
+likely real deliverable. The ONE observation that would move me to "surpass is live, push it
+hard": **a pass@k coverage curve whose compressed-minus-dense advantage GROWS with k** (BET 1's
+discriminator). That single signature would mean compression's 13%-more-diffuse policy is covering
+answer-modes dense's tight policy never samples — a genuine, compression-specific exploration edge
+— and would justify escalating BET 1 → 2-seed → tail-credit (BET 1b) and treating Route-B surpass
+as a real target rather than an aspiration. Absent that growing-with-k signature, the honest read
+is parity + the Route-A pass@k secondary, and the program should bank BET 5 and report the pass@k
+result without claiming the operator's greedy bar.
+
+*(Authorship note: §0–§6 are `strategist`'s with `critic`'s objections folded in over 3 rounds;
+§7 is `critic`'s adversarial ledger. The program is converged and is not re-opened.)*
