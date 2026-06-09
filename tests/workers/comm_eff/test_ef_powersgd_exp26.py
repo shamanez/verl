@@ -301,3 +301,37 @@ def test_capture_writer_stratified_subset():
         assert not w.dump(role="A", target_name="l1.q_proj.weight", tensor=t, global_step=1, optimizer_tick=1)
         # A different matrix-type (k_proj) is a separate bucket ⇒ admitted.
         assert w.dump(role="A", target_name="l0.k_proj.weight", tensor=t, global_step=1, optimizer_tick=1)
+
+
+# --------------------------------------------------------------------------- #
+# EXP-26 hotfix: unified capture tick (all roles share ONE (gs, tick) key)
+# --------------------------------------------------------------------------- #
+def test_capture_tick_unification():
+    """current_optimizer_tick()/capture_tick() give the per-train_batch tick.
+
+    Regression guard for the Step-A bug where the powersgd activation hook keyed
+    dumps by fwd_generation (hundreds/step) and starved the max_ticks budget so
+    NO gradient role (G_comp/G_corr/G_dense/M) ever landed. The fix: every role
+    reads ONE stamped tick via capture_tick().
+    """
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffSpectralConfig
+    from verl.workers.comm_eff.state import maybe_build_comm_eff_state
+
+    st = maybe_build_comm_eff_state(
+        CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=True))
+    )
+    # During the fast forward of train_batch N, spectral_step holds N-1, so the
+    # tick this batch's tensors belong to is N == spectral_step + 1.
+    st.spectral_step = 0
+    assert st.current_optimizer_tick() == 1
+    # Unstamped capture_tick() falls back to current_optimizer_tick().
+    assert st.capture_tick() == 1
+    # The forward stamps _capture_tick once; every role then reads the SAME value
+    # even after the grad-correction hook advances spectral_step (the merger runs
+    # post-advance but reads the stamp, not the live counter).
+    st._capture_tick = st.current_optimizer_tick()  # stamped at forward: tick=1
+    st.spectral_step += 1  # grad-correction hook advances it (now 1)
+    assert st.capture_tick() == 1, "merger must read the STAMPED tick, not the advanced counter"
+    # Next batch: re-stamp.
+    st._capture_tick = st.current_optimizer_tick()  # spectral_step=1 => tick=2
+    assert st.capture_tick() == 2

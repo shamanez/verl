@@ -468,12 +468,14 @@ def apply_spectral_correction_to_params(
     # EXP-26 Step B: reset the per-step ef_powersgd residual-reset counter so the
     # [comm_eff][merger] line + metrics report THIS step's shape-mismatch resets.
     spectral.residual_reset_on_shape_mismatch = 0
-    # EXP-26 Step A: optional capture writer + the (gs, tick) key, threaded from
-    # the engine. None ⇒ no dump (the byte-identical path). The optimizer tick is
-    # spectral_step (advanced once per train_batch, 1-based).
+    # EXP-26 Step A: optional capture writer + the UNIFIED (gs, tick) key, threaded
+    # from the engine. None ⇒ no dump (the byte-identical path). The optimizer tick
+    # is state.capture_tick() — the SINGLE per-train_batch tick stamped at the start
+    # of the fast-path forward — so G_comp/G_corr co-locate with the powersgd-hook
+    # A/Â/Q, the anchor M/G_anchor, and the parallel G_dense under ONE key.
     _cap = getattr(state, "_capture_writer", None)
     _cap_gs = int(getattr(state, "global_step", -1) or -1)
-    _cap_tick = int(getattr(state, "spectral_step", 0) or 0)
+    _cap_tick = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0)
 
     for name, p in named_params:
         grad = getattr(p, "grad", None)

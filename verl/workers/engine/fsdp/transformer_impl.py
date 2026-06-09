@@ -830,6 +830,24 @@ class FSDPEngine(BaseEngine):
             _mask_hooks_live = self._comm_eff_register_mask_hooks()
         elif self._comm_eff_powersgd_active(forward_only=forward_only):
             _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
+        # EXP-26 capture: stash the SINGLE per-train_batch optimizer tick on the
+        # state at the start of the real fast-path forward (NOT a forward_only
+        # recompute, NOT the anchor/G_dense clone passes which call
+        # _forward_backward_batch_inner directly). Every capture role (powersgd-hook
+        # A/Â/Q, merger G_comp/G_corr, anchor M/G_anchor, parallel G_dense) reads
+        # this ONE value so they co-locate under one (global_step, optimizer_tick)
+        # and the max_ticks budget counts optimizer ticks. Computed here because
+        # spectral_step has NOT been advanced yet (the grad-correction hook advances
+        # it after backward), so current_optimizer_tick() == this batch's tick N.
+        _ce_state = getattr(self, "_comm_eff_state", None)
+        if (
+            not forward_only
+            and _ce_state is not None
+            and getattr(_ce_state, "enabled", False)
+            and getattr(_ce_state, "_capture_writer", None) is not None
+            and hasattr(_ce_state, "current_optimizer_tick")
+        ):
+            object.__setattr__(_ce_state, "_capture_tick", _ce_state.current_optimizer_tick())
         try:
             return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
         finally:
@@ -1181,6 +1199,15 @@ class FSDPEngine(BaseEngine):
         # Advance the trainer-step counter the cadence is keyed on (1-based).
         state.anchor_step += 1
         step = state.anchor_step
+
+        # EXP-26 capture: stamp the SINGLE per-train_batch optimizer tick NOW (the
+        # anchor refresh is the first comm_eff hook in train_batch, before
+        # forward_backward_batch re-stamps the same value). spectral_step has not
+        # advanced this batch yet, so current_optimizer_tick() == this batch's tick
+        # N. The anchor's own M/G_anchor dumps (on a cadence step) then read the
+        # correct N via state.capture_tick(), co-located with every other role.
+        if getattr(state, "_capture_writer", None) is not None and hasattr(state, "current_optimizer_tick"):
+            object.__setattr__(state, "_capture_tick", state.current_optimizer_tick())
 
         # Lazily build the staleness queue on the state (survives across steps).
         # CommEffState is a plain class with a __dict__, so a direct setattr is
@@ -1535,15 +1562,19 @@ class FSDPEngine(BaseEngine):
         # EXP-26 Step A: dump the K-stale G_anchor (DP-reduced) AND the post-feed
         # anchor EMA M per target — both detached/fp32, dump-only (the writer
         # detaches+clones, so this NEVER feeds the optimizer/EMA). The optimizer
-        # tick is anchor_step (advanced once per train_batch, aligned with the
-        # merger's spectral_step). No-op unless a capture writer is attached.
+        # tick is state.capture_tick() — the SINGLE per-train_batch tick stamped at
+        # the fast-path forward — so M/G_anchor co-locate with G_comp/G_corr/G_dense
+        # and the powersgd-hook A/Â/Q under ONE (global_step, optimizer_tick) key.
+        # NB the anchor refresh runs BEFORE the fast forward stamps _capture_tick;
+        # capture_tick() falls back to current_optimizer_tick() (== this batch's
+        # tick N) so the key is correct even pre-stamp.
         _w = getattr(state, "_capture_writer", None)
         if _w is not None:
             from verl.workers.comm_eff.anchor import capture_anchor_tensors
             from verl.workers.comm_eff.spectral_filter import _canon as _canon_cap
 
             _gs = int(getattr(state, "global_step", -1) or -1)
-            _tk = int(getattr(state, "anchor_step", 0) or 0)
+            _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "anchor_step", 0) or 0)
             capture_anchor_tensors(
                 writer=_w, role="G_anchor", grads=anchor_grads,
                 global_step=_gs, optimizer_tick=_tk,
@@ -1794,10 +1825,12 @@ class FSDPEngine(BaseEngine):
         target_substrs = self._comm_eff_target_names(spec_cfg)
         max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
         _gs = int(getattr(state, "global_step", -1) or -1)
-        # Align with the merger's optimizer tick. The grad-correction hook
-        # advances spectral_step AFTER this call, so the tick this G_dense pairs
-        # with G_comp on is spectral_step + 1 (the value it will hold in the merger).
-        _tk = int(getattr(state, "spectral_step", 0) or 0) + 1
+        # Align with EVERY other role via the SINGLE per-train_batch tick
+        # state.capture_tick() (stamped at the fast-path forward, before the
+        # grad-correction hook advances spectral_step). This is what makes
+        # cos(G_dense, G_comp) / cos(G_dense, G_corr) computable: G_dense lands on
+        # the SAME (global_step, optimizer_tick) as the merger's G_comp/G_corr.
+        _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0) + 1
 
         module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
 

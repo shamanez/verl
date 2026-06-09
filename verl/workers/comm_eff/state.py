@@ -273,6 +273,12 @@ class CommEffState:
         # the anchor / merger / projection hooks can all reach it via the state).
         # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
         self._capture_writer = None
+        # EXP-26 capture: the SINGLE per-train_batch optimizer tick all capture
+        # roles key on, stamped at the start of the real fast-path forward (see
+        # FSDPEngine.forward_backward_batch). -1 = not yet stamped (fall back to
+        # current_optimizer_tick()). Unifying the key across roles is what keeps the
+        # max_ticks budget counting OPTIMIZER ticks, not per-forward generations.
+        self._capture_tick = -1
 
         # Whether masking is currently active. Set True only on entry to the
         # actor-train forward/backward (around update_actor) and cleared on
@@ -463,6 +469,34 @@ class CommEffState:
         if tag is not None and tag not in PATH_TAGS:
             raise ValueError(f"unknown comm_eff path tag {tag!r}; expected one of {PATH_TAGS} or None")
         self.path_tag = tag
+
+    def current_optimizer_tick(self) -> int:
+        """The optimizer tick the CURRENT train_batch will land on (1-based).
+
+        EXP-26 capture key. ``spectral_step`` / ``anchor_step`` are advanced AFTER
+        the backward (in the grad-correction / anchor hooks), so DURING the
+        forward + backward of train_batch N they still hold N-1. The tick this
+        batch's tensors belong to is therefore ``spectral_step + 1``. ALL capture
+        roles (the powersgd-hook A/Â/Q, the merger G_comp/G_corr, the anchor
+        M/G_anchor, the parallel G_dense, the delay_K=0 fresh-anchor probe) key on
+        THIS so they co-locate under one ``(global_step, optimizer_tick)`` and the
+        ``max_ticks`` budget counts OPTIMIZER ticks (not the hundreds of
+        per-micro-batch forward generations the activation hook would otherwise
+        emit, which starved the budget in the first Step-A run). Pure read.
+        """
+        return int(getattr(self, "spectral_step", 0) or 0) + 1
+
+    def capture_tick(self) -> int:
+        """The optimizer tick the CURRENT train_batch's capture dumps key on.
+
+        Returns the value stamped on ``self._capture_tick`` at the start of the
+        real fast-path forward (so every role in this batch shares ONE key), or
+        falls back to ``current_optimizer_tick()`` if it was never stamped (e.g. a
+        unit test, or a code path that did not go through
+        ``forward_backward_batch``). Pure read.
+        """
+        t = int(getattr(self, "_capture_tick", -1) or -1)
+        return t if t >= 0 else self.current_optimizer_tick()
 
     def is_clean_step(self, global_step: Optional[int] = None) -> bool:
         """True iff the given trainer ``global_step`` is a clean step.

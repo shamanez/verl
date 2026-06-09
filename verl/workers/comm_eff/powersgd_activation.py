@@ -414,16 +414,23 @@ class PowerSGDActivationCompressor:
                 compressor.last_y_coords_per_token = q_act.shape[1]
 
                 # EXP-26 Step A: dump A (the boundary activation M), Â=(A@Q)Qᵀ and
-                # the basis Q for THIS boundary, keyed by (global_step,
-                # fwd_generation) so the analyst can recompute reconstruction_rel_error
-                # from the dumped fp32 tensors and confirm it matches `rel` above (the
-                # fp32-dump-fidelity invariant). Gated on the gradient-bearing fast
-                # forward only (grad_enabled), so it captures the SAME activations the
-                # sketch/codec used — never the old-logprob recompute. Detached/fp32,
-                # dump-only. No-op unless a capture writer is attached to the state.
-                _w = getattr(compressor._state, "_capture_writer", None) if compressor._state is not None else None
+                # the basis Q for THIS boundary, keyed by the UNIFIED
+                # (global_step, optimizer_tick) so the analyst can recompute
+                # reconstruction_rel_error from the dumped fp32 tensors and confirm
+                # it matches `rel` above (the fp32-dump-fidelity invariant). CRITICAL
+                # (EXP-26 hotfix): key on state.current_optimizer_tick() — the SAME
+                # tick the merger / anchor / G_dense dumps use — NOT the
+                # per-micro-batch fwd_generation. Keying on fwd_generation made the
+                # activation dumps open a fresh tick per micro-batch forward and
+                # starve the max_ticks budget before any gradient dump ran (no
+                # G_comp/G_corr/G_dense landed). fwd_generation is kept in `extra`
+                # for disambiguation. Gated on the gradient-bearing fast forward
+                # (grad_enabled) so it captures the SAME activations the codec used.
+                _state = compressor._state
+                _w = getattr(_state, "_capture_writer", None) if _state is not None else None
                 if _w is not None and grad_enabled and not compressor._anchor_sketch_mode:
                     _tname = f"boundary_{layer_idx}"
+                    _tick = _state.capture_tick() if hasattr(_state, "capture_tick") else 0
                     _stats = {
                         "layer_idx": int(layer_idx),
                         "rank": int(q_act.shape[1]),
@@ -433,13 +440,13 @@ class PowerSGDActivationCompressor:
                     }
                     _w.dump(role="A", target_name=_tname, tensor=M32,
                             global_step=int(compressor._global_step),
-                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
+                            optimizer_tick=int(_tick), extra=_stats)
                     _w.dump(role="A_hat", target_name=_tname, tensor=Mhat32,
                             global_step=int(compressor._global_step),
-                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
+                            optimizer_tick=int(_tick), extra=_stats)
                     _w.dump(role="Q", target_name=_tname, tensor=q_fp32,
                             global_step=int(compressor._global_step),
-                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
+                            optimizer_tick=int(_tick), extra=_stats)
 
                 # Block-power-iteration sketch V += Mᵀ (M Q) = Mᵀ Y, OFF the
                 # graph, accumulated ONLY on the gradient-bearing actor-train
