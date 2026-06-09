@@ -1,10 +1,10 @@
-# Research Status — 2026-06-09T23:27:17.507014+10:00
+# Research Status — 2026-06-10T00:16:22.247136+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 26 | Geometry audit + ef_powersgd (#25 follow-up) | RUNNING (monitor active) | 4×H200 (i_40242796, $12.84/hr) | — | Step A ONLY (3 audit arms, capture ON); B/C gate on A-DECISION. exp/26-geometry-audit-ef-powersgd @06eab131c pushed. DOA box 40241159 reaped by Stop hook. |
+| 26 | Geometry audit + ef_powersgd (#25 follow-up) | RUNNING (monitor active) | 4×H200 (i_40242796) | — | AUTHORITATIVE Step A re-run (3 defects fixed, gates GREEN: anchor_q 0→4, rel_err→0.024, G_dense targets→14). exp/26 @e0d1e871. B/C gate on A-DECISION. |
 
 ## Last tick
 2026-06-09T22:38:52+10:00 · running=[26] · analyzing=[] · logging=[] · blocked=[]

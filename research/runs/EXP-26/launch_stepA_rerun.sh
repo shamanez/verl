@@ -8,6 +8,10 @@
 # warm box after fast-forwarding /workspace/verl to the hotfix commit.
 set -euo pipefail
 cd /workspace/verl
+# Disk pre-check: each arm needs headroom for rollouts + rank0 fp32 dumps.
+AVAIL_GB=$(df -BG --output=avail / | tail -1 | tr -dc "0-9")
+echo "=== Step A re-run disk pre-check: ${AVAIL_GB}G free ===" | tee -a /workspace/runs/EXP-26/stepA_rerun.log
+if [ "${AVAIL_GB:-0}" -lt 40 ]; then echo "RERUN_ABORT: only ${AVAIL_GB}G free (<40G) — clean /workspace/captures + checkpoints first" | tee -a /workspace/runs/EXP-26/stepA_rerun.log; exit 9; fi
 
 git config --global user.email "harness@verl-research.local"
 git config --global user.name  "verl-research-harness"
@@ -30,7 +34,7 @@ echo "=== pre-run invariants GREEN ===" | tee -a /workspace/runs/EXP-26/stepA_re
 # Common Step-A capture env.
 export COMM_EFF_CAPTURE_ENABLED=true
 export COMM_EFF_CAPTURE_MAX_TICKS=8
-export COMM_EFF_CAPTURE_STRATIFIED=4
+export COMM_EFF_CAPTURE_STRATIFIED=2
 export COMM_EFF_CAPTURE_G_DENSE=true
 export COMM_EFF_CAPTURE_FRESH_ANCHOR=true
 export COMM_EFF_CAPTURE_DUMP_DTYPE=fp32
@@ -51,9 +55,8 @@ run_arm () {
     > "/workspace/runs/EXP-26/train_${arm}_rerun.log" 2>&1 || {
       echo "ARM_FAILED: $arm (see train_${arm}_rerun.log)" | tee -a /workspace/runs/EXP-26/stepA_rerun.log
     }
-  mkdir -p "/workspace/runs/EXP-26/captures/$arm"
-  rm -rf "/workspace/runs/EXP-26/captures/$arm"/*   # replace the broken first-pass mirror
-  cp -r "$capdir"/. "/workspace/runs/EXP-26/captures/$arm/" 2>/dev/null || true
+  # NO on-box mirror into /workspace/runs (it doubled disk + filled the box). The
+  # laptop rsyncs the authoritative dumps straight from /workspace/captures/$arm/.
   # Quick role check so the log shows whether gradient roles landed this time.
   M="$capdir/rank0/manifest.jsonl"
   if [ -f "$M" ]; then
