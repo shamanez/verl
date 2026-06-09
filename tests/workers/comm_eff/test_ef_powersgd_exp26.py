@@ -373,3 +373,34 @@ def test_capture_writer_canonicalizes_target_name():
         # raw preserved
         raws = {r["role"]: r["target_name_raw"] for r in rows}
         assert "_fsdp_wrapped_module" in raws["G_comp"] and "_fsdp_wrapped_module" not in raws["G_dense"]
+
+
+def test_capture_min_tick_skips_cold_ticks_before_budget():
+    """EXP-26 bug #7 regression: min_tick must skip cold-Q ticks BEFORE the
+    max_ticks budget is consumed, so the post-warm anchor-fire ticks (10/15) land.
+    Previously COMM_EFF_CAPTURE_MIN_TICK was silently dropped (not wired) and the
+    8-slot budget filled with cold ticks 1-8, losing the H1 inputs.
+    """
+    from verl.workers.comm_eff.capture import CaptureWriter
+    import tempfile as _tf, os as _os
+    import torch as _torch
+    with _tf.TemporaryDirectory() as d:
+        w = CaptureWriter(capture_dir=d, max_ticks=8, min_tick=9, rank=0)
+        t = _torch.randn(2, 2)
+        # cold ticks 1..8 must NOT open (and must NOT consume budget slots)
+        for tk in range(1, 9):
+            assert not w.should_capture_tick(gs := tk, tk), f"cold tick {tk} should be skipped"
+            assert not w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t,
+                              global_step=tk, optimizer_tick=tk), f"cold tick {tk} dumped"
+        # post-warm ticks 9..16 must open (budget was untouched by the cold ticks)
+        opened = 0
+        for tk in range(9, 17):
+            if w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t,
+                      global_step=tk, optimizer_tick=tk):
+                opened += 1
+        assert opened == 8, f"expected ticks 9-16 to open (8), got {opened}"
+        # specifically the post-warm anchor-fire ticks 10 and 15 are present
+        import json as _json
+        ticks = {(_json.loads(l)["optimizer_tick"]) for l in open(w.manifest_path)}
+        assert 10 in ticks and 15 in ticks, f"post-warm fires 10/15 missing: {sorted(ticks)}"
+        assert 8 not in ticks and 1 not in ticks, f"cold ticks leaked: {sorted(ticks)}"

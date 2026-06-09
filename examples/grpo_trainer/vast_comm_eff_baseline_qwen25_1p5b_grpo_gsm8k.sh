@@ -315,8 +315,14 @@ COMM_EFF_CAPTURE_DIR="${COMM_EFF_CAPTURE_DIR:-/workspace/captures}"   # rsynced 
 COMM_EFF_CAPTURE_MAX_TICKS="${COMM_EFF_CAPTURE_MAX_TICKS:-10}"        # audit needs ~5-10 ticks
 COMM_EFF_CAPTURE_STRATIFIED="${COMM_EFF_CAPTURE_STRATIFIED:-0}"       # >0 => N targets/matrix-type (volume guard)
 COMM_EFF_CAPTURE_G_DENSE="${COMM_EFF_CAPTURE_G_DENSE:-false}"         # parallel uncompressed G_dense backward (highest-OOM-risk probe)
-COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe
+COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe (the Option-A dense reference)
 COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQUIRED for the fidelity invariant
+# EXP-26 (bug #7 fix): min_tick skips cold-Q ticks so the max_ticks budget holds
+# the POST-warm anchor fires (where G_fresh_anchor pairs with warm-Q G_comp/G_corr
+# = the H1 inputs). Was silently dropped before (declared in config/yaml/capture.py
+# but NEVER wired here). 0 = capture from start.
+COMM_EFF_CAPTURE_MIN_TICK="${COMM_EFF_CAPTURE_MIN_TICK:-0}"
+COMM_EFF_CAPTURE_RANK0_ONLY="${COMM_EFF_CAPTURE_RANK0_ONLY:-true}"    # capture rank0 only (disk guard); default true
 # --- PowerSGD activation compression (the base codec). Defaults: rank=77
 #     (byte-matched to the prf_mask at p=0.95 for H=1536: 0.05·1536≈77), block
 #     power iteration, compress the old-logprob recompute (=> ρ≈1), sync_basis=true
@@ -364,7 +370,7 @@ cat <<EOF
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
   ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
   q_basis (EXP-26):    $COMM_EFF_POWERSGD_Q_BASIS  (act=byte-identical; RLVR-native families gated on Step A H2)
-  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS stratified=$COMM_EFF_CAPTURE_STRATIFIED g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
+  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -483,6 +489,8 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.capture.capture_g_dense="$COMM_EFF_CAPTURE_G_DENSE" \
   actor_rollout_ref.actor.comm_eff.capture.capture_fresh_anchor="$COMM_EFF_CAPTURE_FRESH_ANCHOR" \
   actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
+  actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
+  actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!
