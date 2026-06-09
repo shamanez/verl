@@ -164,27 +164,51 @@ def audit(run_dir: Path, rank: int, warmup_tick: int, captures_subdir: str) -> d
     idx = _index(manifest)
     out["roles_present"] = sorted(idx.keys())
 
-    # ---- (a) cos(G_dense, G_comp) and cos(G_dense, G_corr), post-warmup ----
-    # G_comp/G_corr are keyed by (gs, tick, target) by the merger (tick=spectral_step);
-    # G_dense is keyed at tick=spectral_step+1 by the dense probe so it pairs with
-    # the SAME train_batch. Align G_dense[tick] with G_comp/G_corr at the same tick.
-    cos_dc_comp, cos_dc_corr = [], []
     gdense = idx.get("G_dense", {})
     gcomp = idx.get("G_comp", {})
     gcorr = idx.get("G_corr", {})
-    for (gs, tick, tgt), drow in gdense.items():
+    gfresh = idx.get("G_fresh_anchor", {})  # EXP-26 Option A: the TRUSTED dense reference
+
+    # ---- OPTION A (EXP-26 STUCK resolution) ----
+    # The parallel uncompressed `G_dense` clone backward does NOT compose with the
+    # codec-ON path (it comes back ~r/H of the true norm — the analyst's gate:
+    # cos(G_dense, G_fresh_anchor)≈0.24, norm_ratio≈0.28). So the dense REFERENCE
+    # for H1/H2 is now `G_fresh_anchor@delay_K=0` — a realism-GREEN FULL uncompressed
+    # backward at the SAME fast-net weights on the SAME batch (validated faithful on
+    # the dense arm: cos(G_fresh_anchor, G_dense)≈0.99). G_dense is still loaded for
+    # a footnote validity check but is NOT the reference. G_fresh_anchor is present
+    # ONLY at anchor-fire ticks (cadence), so the H1/H2 pairings are computed at
+    # those (post-Q-warm) ticks where G_comp/G_corr/A/Q are also present.
+
+    # ---- (a) cos(G_fresh_anchor, G_comp) and cos(G_fresh_anchor, G_corr) ----
+    cos_dc_comp, cos_dc_corr = [], []
+    for (gs, tick, tgt), frow in gfresh.items():
         if tick < warmup_tick:
             continue
-        dt = _load_tensor(cap_root, drow["path"])
+        ft = _load_tensor(cap_root, frow["path"])
         ck = (gs, tick, tgt)
         if ck in gcomp:
-            cos_dc_comp.append(_cos(dt, _load_tensor(cap_root, gcomp[ck]["path"])))
+            cos_dc_comp.append(_cos(ft, _load_tensor(cap_root, gcomp[ck]["path"])))
         if ck in gcorr:
-            cos_dc_corr.append(_cos(dt, _load_tensor(cap_root, gcorr[ck]["path"])))
-    out["cos_Gdense_Gcomp_median"] = _median(cos_dc_comp)
+            cos_dc_corr.append(_cos(ft, _load_tensor(cap_root, gcorr[ck]["path"])))
+    out["dense_reference"] = "G_fresh_anchor@delay_K=0 (Option A; G_dense clone retired — codec-ON contamination)"
+    out["cos_Gdense_Gcomp_median"] = _median(cos_dc_comp)   # key name kept for the analyst's existing greps
     out["cos_Gdense_Gcorr_median"] = _median(cos_dc_corr)
     out["cos_Gdense_Gcomp_n"] = len([x for x in cos_dc_comp if x == x])
     out["cos_Gdense_Gcorr_n"] = len([x for x in cos_dc_corr if x == x])
+
+    # ---- validity check: on the DENSE arm, cos(G_fresh_anchor, G_dense) should be
+    # ~0.99 (clean-PG vs PPO loss agreement) — proves the G_fresh_anchor
+    # substitution is sound. On codec-ON arms this is LOW (the broken G_dense) and
+    # is expected/ignored — it is the footnote that motivated Option A.
+    val_cos = []
+    for (gs, tick, tgt), frow in gfresh.items():
+        ck = (gs, tick, tgt)
+        if ck in gdense:
+            val_cos.append(_cos(_load_tensor(cap_root, frow["path"]),
+                                _load_tensor(cap_root, gdense[ck]["path"])))
+    out["validity_cos_Gfresh_Gdense_median"] = _median(val_cos)
+    out["validity_cos_Gfresh_Gdense_n"] = len([x for x in val_cos if x == x])
 
     # ---- (b) Q_act capture ratios (activation fidelity + UPDATE energy) ----
     # Activation: recompute ||A-Â||/||A|| from the dumped A/Â and compare to the
@@ -227,7 +251,11 @@ def audit(run_dir: Path, rank: int, warmup_tick: int, captures_subdir: str) -> d
         qt = _load_tensor(cap_root, qrow["path"])
         if qt is not None and qt.dim() == 2:
             q_by_H.setdefault(qt.shape[0], qt)  # (H, r)
-    for (gs, tick, tgt), drow in gdense.items():
+    # OPTION A: project the TRUSTED dense gradient G_fresh_anchor (NOT the broken
+    # G_dense clone) onto Q to measure ||QQᵀG||²/||G||² = the fraction of the GRPO
+    # UPDATE energy the activation basis Q captures (H2). G_fresh_anchor exists at
+    # anchor-fire (post-warm) ticks only.
+    for (gs, tick, tgt), drow in gfresh.items():
         if tick < warmup_tick:
             continue
         g = _load_tensor(cap_root, drow["path"])
@@ -340,14 +368,18 @@ def main() -> int:
     cos_corr = res.get("cos_Gdense_Gcorr_median", float("nan"))
     act = res.get("Q_act_activation_capture_ratio_median", float("nan"))
     fid = res.get("recon_rel_error_dump_fidelity_max_drift", float("nan"))
-    print(f"  H1 cos(G_dense,G_comp)>={COS_BENIGN}: "
+    valc = res.get("validity_cos_Gfresh_Gdense_median", float("nan"))
+    print(f"  [dense reference = G_fresh_anchor@delay_K=0 (Option A); n_pairs={res.get('cos_Gdense_Gcomp_n')}]")
+    print(f"  H1 cos(G_fresh_anchor,G_comp)>={COS_BENIGN}: "
           f"{'PASS' if cos_dc == cos_dc and cos_dc >= COS_BENIGN else 'FAIL/NA'} ({cos_dc:.4f})")
-    print(f"  H1 cos(G_dense,G_corr) materially below cos(G_dense,G_comp): "
+    print(f"  H1 cos(G_fresh_anchor,G_corr) materially below cos(G_fresh_anchor,G_comp): "
           f"{'see merger arm' if cos_corr == cos_corr else 'NA'} ({cos_corr:.4f})")
     print(f"  Q_act activation capture>={ACT_CAPTURE_MIN}: "
           f"{'PASS' if act == act and act >= ACT_CAPTURE_MIN else 'FAIL/NA'} ({act:.4f})")
     print(f"  fp32 dump fidelity (recon drift < 1e-3): "
           f"{'PASS' if fid == fid and fid < 1e-3 else 'FAIL/NA'} ({fid:.6f})")
+    print(f"  VALIDITY cos(G_fresh_anchor,G_dense) [~0.99 on DENSE arm proves the "
+          f"substitution is sound; LOW on codec-ON arms is the broken-G_dense footnote]: ({valc:.4f})")
 
     if args.emit:
         outp = run_dir / args.emit
