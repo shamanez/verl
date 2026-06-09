@@ -1,10 +1,10 @@
-# Research Status — 2026-06-10T01:44:17.176692+10:00
+# Research Status — 2026-06-10T02:45:37.623717+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 26 | Geometry audit + ef_powersgd (#25 follow-up) | STEP-A STUCK→hotfix | 4×H200 (i_40242796, warm) | — (stage gate) | H3 CONFIRMED (sign coin-flip); H1/H2 blocked on broken G_dense parallel-backward (codec-ON). Runner fixing w/ gate cos(G_dense,G_anchor)≥0.95. Escalate→STUCK if backward needs design change. No verdict.md (staged; box warm for Step B). |
+| 26 | Geometry audit + ef_powersgd (#25 follow-up) | OPERATOR GATE (STUCK) | 4×H200 (i_40242796, warm+idle) | — (H3 confirmed; H1/H2 blocked) | G_dense backward won't compose w/ codec-ON (grad-ckpt/loss-partial, design call). Runner recommends Option A (use G_fresh_anchor as dense ref). Awaiting operator design call + box decision. |
 
 ## Last tick
 2026-06-09T22:38:52+10:00 · running=[26] · analyzing=[] · logging=[] · blocked=[]
