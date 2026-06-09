@@ -363,16 +363,19 @@ low entropy, is the proximate killer; the no-KL/no-entropy surface is the permis
 brakeable). It is exactly why the surpass-dense plan (§9) puts KL + length brakes on EVERY arm as the
 enabler that makes a zero-mean perturbation safe to push, NOT as the source of any surplus.
 
-**val@25 = 0.7119 (CAPTURED; run kaixg76f, step 25).** Prediction CONFIRMED: it recovers far above the
-no-KL α=0 catastrophe (val@50 0.354) — KL closed the length-reward-hack channel (length bounded 170–290,
-clip 0.000 through step 25) so the late crash that took no-KL from val@25 0.718 → val@50 0.354 is
-structurally absent. The landing is ~floor parity (0.7119 > floor 0.6914, ≈ the 0.7114 STOP line) and
-remains BELOW PowerSGD-only 0.741 / dense 0.7536 — i.e. KL prevents the catastrophe but the stale-sign
-correction's DIRECTION bias still drags val below codec parity, exactly as predicted. (val@50 not run:
-the box was torn down on cost discipline once val@25 + the bounded-length trajectory had captured the
-science — the crash mechanism being absent, val@50 projects to ~0.71; the conclusion does not depend on
-the exact value.) Net: signed_ema is net-harmful at every level — catastrophic without KL, sub-parity
-with it — confirming the §3/§5/§9 verdict to abandon signed-replacement.
+**COMPLETE re-run (run 5hormzfk, German box, full 50 steps): val@25 = 0.6960, val@50 = 0.6793.**
+Prediction CONFIRMED on every axis. KL closed the length-reward-hack channel (response_length 294→120,
+clip_ratio 0.000 throughout all 50 steps) so the late crash that took no-KL α=0 from val@25 0.718 →
+val@50 0.354 is structurally ABSENT — val@50 declines only mildly (0.6960 → 0.6793, ~0.017), not
+catastrophically. (A first attempt, run kaixg76f, gave val@25 = 0.7119 then was torn down at step 25
+before val@50 — consistent within run-to-run noise; the 5hormzfk re-run is the authoritative complete
+result and both vals are now backfilled into WandB.) But the landing is sub-parity: val@50 0.6793 is
+*below* even the no-refresh floor 0.6914, and far below PowerSGD-only 0.741 / dense 0.7536 — i.e. KL
+prevents the catastrophe but the stale-sign correction's DIRECTION bias still drags val below codec
+parity, exactly as predicted. Entropy still collapsed (5.7 → 0.49) despite KL@0.001 — that coef bounds
+length but is too weak to hold entropy; a higher coef (0.01–0.1) would be needed for entropy stability,
+a separate experiment. Net: signed_ema is net-harmful at every level — catastrophic without KL,
+sub-parity (below floor) with it — confirming the §3/§5/§9 verdict to abandon signed-replacement.
 
 ---
 

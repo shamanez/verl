@@ -105,3 +105,14 @@ PROMOTE_SKIPPED: EXP-25 reason="no promote_launcher_as (plan: promote_launcher_a
 [2026-06-09T09:49:17+10:00] [orchestrator] STRIPPED broken Japan box 40155697 (machine_id 59484, IP 210.157.233.86, ssh_key_ids=null key-injection bug) per operator. Verified 0 live instances. Re-provisioning KL re-run box with machine_id!=59484 (bg b3p9tdfhg) to avoid the broken host. Will SSH-verify before launching exp25_a0_kl001 to step 50 (val@25+val@50).
 [2026-06-09T09:51:43+10:00] [orchestrator] OPERATOR RULE: do NOT use any Japan Vast box. The JP DC at IP 210.157.233.86 (machines 59483 + 59484) has a persistent ssh_key_ids=null key-injection bug → unreachable (publickey denied). Hit it 5x this account (39597500/39598629 session-start, 40155006 leaked, 40155697, 40156005). All stripped. Re-provisioning KL re-run with geolocation!=JP (bg bytzx4kv7); cheapest H200 keeps landing JP so the geo-exclusion is REQUIRED. Will SSH-verify before launch.
 [2026-06-09T09:55:41+10:00] [orchestrator] KL re-run LAUNCHED on GERMAN box 40156243 (geo=DE, 46.243.55.134:40059, machine 137738, SSH-VERIFIED; NO Japan per operator). HEAD 7496844 hotfix-matched, stripped secrets (leak guard passed), tmux exp25-kl started clean (GPUs detected, GSM8K preprocess). Full 50 steps → BOTH val@25+val@50. Ledger EXP-25-KL2 RUNNING ($14.63/hr). Monitor a2185dd → step50 then teardown. NOTE: ssh_key_ids=null even on this WORKING German box → that field is a red herring; JP failures were DC-specific (geolocation!=JP / use DE is the fix). 5 JP boxes stripped this session.
+
+## EXP-25 KL Diagnostic Re-Run (exp25_a0_kl001) - 2026-06-09
+- Config: α=0 signed_ema, use_kl_loss=True, kl_coef=0.001, powersgd rank=77, anchor cadence=5, delay_K=5
+- val@25 = 0.6960 (prior run 0.7119 - slightly lower, consistent with KL overhead)
+- val@50 = 0.6793 (no crash - vs no-KL run 0.354 crash, vs α=0.5 run 0.707)
+- Total: 50 steps, 1h12m51s, 4xH200 DE box (instance 40156243)
+- Entropy collapsed from 5.7→0.49 (KL coef=0.001 insufficient to prevent anchor-driven entropy drop)
+- clip_ratio=0.0 throughout (KL DID prevent length explosion)
+- Status: DONE_AGGREGATE (sentinel + WandB finished)
+
+[2026-06-09T13:13:28+10:00] [orchestrator] WANDB BACKFILL complete + verified for all 4 exp25 50-step runs (step-50 row + val@50 were missing due to teardown-before-flush): exp25_alpha_0p0 val@50=0.3541, _0p3=0.6164, _0p5=0.7066, exp25_a0_kl001(rerun 5hormzfk)=0.6793. Each resumed→logged ~344-metric step-50 row + val@50, summary set to val@50, _step now 50, history has val@25 AND val@50. KL re-run COMPLETE (50 steps, German box 40156243 torn down): val@25=0.6960 val@50=0.6793 (sub-parity, BELOW floor 0.6914) → KL=guardrail prevents crash but signed_ema net-harmful, confirmed. COLLAPSE doc §7 updated to complete re-run. 0 live Vast boxes.
