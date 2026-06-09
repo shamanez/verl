@@ -1532,6 +1532,111 @@ class FSDPEngine(BaseEngine):
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
 
+        # EXP-26 Step A: dump the K-stale G_anchor (DP-reduced) AND the post-feed
+        # anchor EMA M per target — both detached/fp32, dump-only (the writer
+        # detaches+clones, so this NEVER feeds the optimizer/EMA). The optimizer
+        # tick is anchor_step (advanced once per train_batch, aligned with the
+        # merger's spectral_step). No-op unless a capture writer is attached.
+        _w = getattr(state, "_capture_writer", None)
+        if _w is not None:
+            from verl.workers.comm_eff.anchor import capture_anchor_tensors
+            from verl.workers.comm_eff.spectral_filter import _canon as _canon_cap
+
+            _gs = int(getattr(state, "global_step", -1) or -1)
+            _tk = int(getattr(state, "anchor_step", 0) or 0)
+            capture_anchor_tensors(
+                writer=_w, role="G_anchor", grads=anchor_grads,
+                global_step=_gs, optimizer_tick=_tk,
+            )
+            # Pull the EMA M for the SAME targets (canonical-keyed in the store).
+            _m_map = {}
+            for _name in anchor_grads.keys():
+                _m = spectral._anchor.get(_canon_cap(_name))
+                if _m is not None:
+                    _m_map[_name] = _m
+            capture_anchor_tensors(
+                writer=_w, role="M", grads=_m_map,
+                global_step=_gs, optimizer_tick=_tk,
+            )
+
+            # ---- delay_K=0 fresh-anchor MEASUREMENT probe (Step A, sign decomp) ----
+            # A SECOND anchor backward from the CURRENT (delay_K=0) weights, on the
+            # SAME isolated clone. PURE MEASUREMENT: its grads are dumped as
+            # G_fresh_anchor and then DISCARDED — never fed to the EMA, the sketch
+            # V, Q, or the optimizer. The clone is a deep-copy off the optimizer's
+            # param group (assert_anchor_module_isolated above), so an extra
+            # backward on it cannot change optimizer state by construction. We
+            # additionally assert anchor_optimizer_steps is unchanged and do NOT
+            # register the PowerSGD hooks (so V is untouched). delay_K=0 appears
+            # ONLY here as a removed probe — never as a training config.
+            cap_cfg = getattr(state.config, "capture", None)
+            if cap_cfg is not None and bool(getattr(cap_cfg, "capture_fresh_anchor", False)):
+                _opt_before_probe = int(getattr(state, "anchor_optimizer_steps", 0))
+                _fresh_swap = None
+                try:
+                    with _summon_ctx():
+                        _inner_fresh = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                        # Current (delay_K=0) weights, canonical-keyed.
+                        _cur = {
+                            _canon(n): p.detach().clone()
+                            for n, p in _inner_fresh.named_parameters()
+                        }
+                    _fresh_clone = getattr(self, "_anchor_module_cache", None)
+                    if _fresh_clone is not None:
+                        with torch.no_grad():
+                            for n, p in _fresh_clone.named_parameters():
+                                s = _cur.get(_canon(n))
+                                if s is not None and s.shape == p.shape:
+                                    p.copy_(s.to(p.device, p.dtype))
+                                if p.grad is not None:
+                                    p.grad = None
+                        _fresh_swap = self.module
+                        self.module = _fresh_clone
+                        # NO powersgd.register here — V must stay the K-stale harvest.
+                        _fresh_lossf = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+                        self._forward_backward_batch_inner(
+                            anchor_data, _fresh_lossf, forward_only=False
+                        )
+
+                        def _full_grad_of_fresh(grad):
+                            return grad, {"grad_container_type": type(grad).__name__}
+
+                        _fresh_grads = extract_target_grads(
+                            _fresh_clone.named_parameters(),
+                            target_substrs=target_substrs,
+                            max_targets=max_targets,
+                            full_grad_of=_full_grad_of_fresh,
+                        )
+                        # DP-reduce so G_fresh_anchor is the GLOBAL fresh grad (same
+                        # scale as the K-stale G_anchor it is compared against).
+                        _fresh_grads = self._dp_all_reduce_anchor_grads(_fresh_grads)
+                        capture_anchor_tensors(
+                            writer=_w, role="G_fresh_anchor", grads=_fresh_grads,
+                            global_step=_gs, optimizer_tick=_tk,
+                        )
+                finally:
+                    if _fresh_swap is not None:
+                        self.module = _fresh_swap
+                    # Discard the probe grads on the clone so the NEXT refresh
+                    # re-loads the K-stale snapshot into clean params.
+                    try:
+                        for _p in getattr(self, "_anchor_module_cache").parameters():
+                            if _p.grad is not None:
+                                _p.grad = None
+                    except (AttributeError, UnboundLocalError):
+                        pass
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                # PROBE_LEAKS_INTO_OPTIMIZER falsifier: the fresh probe must NOT have
+                # taken an optimizer step (it ran on the isolated clone, dump-only).
+                assert int(getattr(state, "anchor_optimizer_steps", 0)) == _opt_before_probe, (
+                    "comm_eff capture: the delay_K=0 fresh-anchor MEASUREMENT probe changed "
+                    "anchor_optimizer_steps — it must be dump-only (PROBE_LEAKS_INTO_OPTIMIZER)."
+                )
+
         # EXP-25 (R2): anchor-owned Q. Now that the slow-net activations are
         # harvested into V (during the clean anchor forward above), compute
         # Q ← orth(V) on the ANCHOR (DP-synced) and BROADCAST both Q and the freshly
@@ -1644,6 +1749,146 @@ class FSDPEngine(BaseEngine):
                 f"(targets matched=0); check target_substr / use_orig_params",
                 flush=True,
             )
+
+    def _maybe_comm_eff_capture_g_dense(self, data, loss_function) -> None:
+        """FSDP override: parallel UNCOMPRESSED G_dense capture (EXP-26 Step A).
+
+        Runs a SECOND forward/backward of the SAME fast-path GRPO ``loss_function``
+        on an ISOLATED no-hook clone loaded with the CURRENT weights, with the
+        PowerSGD projection hooks DELIBERATELY NOT registered — so the clone's
+        boundary activations are UNCOMPRESSED and ``p.grad`` is the true dense GRPO
+        gradient ``G_dense`` at this step. We extract + DP-reduce + dump it as
+        ``G_dense`` (detached/dump-only) and discard.
+
+        **Why the clone (not a second backward on the live module).** A second
+        backward on the live FSDP module would (a) accumulate into the live
+        ``p.grad`` (double-counting G_comp), (b) re-fire FSDP1's post-backward
+        ``_check_grad_to_accumulate`` outside the fast-path window, and (c) risk
+        the optimizer consuming a contaminated grad. The clone is off the
+        optimizer's param group (assert_anchor_module_isolated), has no FSDP hooks,
+        and its grads are read then zeroed — so it CANNOT change optimizer state
+        (the measurement-only / PROBE_LEAKS_INTO_OPTIMIZER invariant).
+
+        Strict no-op unless ``comm_eff.capture.enabled`` AND
+        ``comm_eff.capture.capture_g_dense``. The clone is the SAME cached anchor
+        clone (reused — no extra ~3 GB allocation); the next anchor refresh
+        re-loads the K-stale snapshot into it.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        writer = getattr(state, "_capture_writer", None)
+        cap_cfg = getattr(getattr(state, "config", None), "capture", None)
+        if writer is None or cap_cfg is None or not bool(getattr(cap_cfg, "capture_g_dense", False)):
+            return
+
+        from verl.workers.comm_eff.anchor import (
+            assert_anchor_module_isolated,
+            build_anchor_module,
+            capture_anchor_tensors,
+            extract_target_grads,
+        )
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+        _gs = int(getattr(state, "global_step", -1) or -1)
+        # Align with the merger's optimizer tick. The grad-correction hook
+        # advances spectral_step AFTER this call, so the tick this G_dense pairs
+        # with G_comp on is spectral_step + 1 (the value it will hold in the merger).
+        _tk = int(getattr(state, "spectral_step", 0) or 0) + 1
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+
+        def _summon_ctx():
+            if module_is_fsdp1:
+                return FSDP.summon_full_params(self.module, with_grads=False, writeback=False)
+            return nullcontext()
+
+        _opt_before = int(getattr(state, "anchor_optimizer_steps", 0))
+        _dense_swap = None
+        try:
+            with _summon_ctx():
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                cached = getattr(self, "_anchor_module_cache", None)
+                if cached is None:
+                    cached = build_anchor_module(inner)
+                    self._anchor_module_cache = cached
+                # Current (delay_K=0) weights, canonical-keyed.
+                cur = {_canon(n): p.detach().clone() for n, p in inner.named_parameters()}
+            assert_anchor_module_isolated(cached, optimizer=self.optimizer, fsdp_module=inner)
+            try:
+                live_p = next(inner.parameters())
+                cached.to(device=live_p.device, dtype=live_p.dtype)
+            except StopIteration:
+                pass
+            with torch.no_grad():
+                for n, p in cached.named_parameters():
+                    s = cur.get(_canon(n))
+                    if s is not None and s.shape == p.shape:
+                        p.copy_(s.to(p.device, p.dtype))
+                    if p.grad is not None:
+                        p.grad = None
+
+            # Ensure NO mask / powersgd hooks fire on the clone (UNCOMPRESSED).
+            prev_mask_active = getattr(state, "mask_active", False)
+            prev_path_tag = getattr(state, "path_tag", None)
+            state.mask_active = False
+            if hasattr(state, "set_path_tag"):
+                state.set_path_tag(None)
+
+            dense_data = data.copy() if hasattr(data, "copy") else data
+            _dense_swap = self.module
+            self.module = cached
+            try:
+                # The REAL fast-path loss (PPO ratio/clip) — NOT anchor_pg_loss —
+                # so G_dense is the true dense GRPO update direction the audit
+                # compares G_comp against. No codec hooks ⇒ uncompressed activations.
+                self._forward_backward_batch_inner(dense_data, loss_function, forward_only=False)
+
+                def _full_grad_of(grad):
+                    return grad, {"grad_container_type": type(grad).__name__}
+
+                dense_grads = extract_target_grads(
+                    cached.named_parameters(),
+                    target_substrs=target_substrs,
+                    max_targets=max_targets,
+                    full_grad_of=_full_grad_of,
+                )
+                dense_grads = self._dp_all_reduce_anchor_grads(dense_grads)
+                n = capture_anchor_tensors(
+                    writer=writer, role="G_dense", grads=dense_grads,
+                    global_step=_gs, optimizer_tick=_tk,
+                )
+                print(
+                    f"[comm_eff][EXP-26][g_dense] step={_gs} tick={_tk} captured G_dense "
+                    f"targets={n} (uncompressed clone backward, dump-only)",
+                    flush=True,
+                )
+            finally:
+                state.mask_active = prev_mask_active
+                if hasattr(state, "set_path_tag"):
+                    state.set_path_tag(prev_path_tag)
+        finally:
+            if _dense_swap is not None:
+                self.module = _dense_swap
+            try:
+                for _p in getattr(self, "_anchor_module_cache").parameters():
+                    if _p.grad is not None:
+                        _p.grad = None
+            except (AttributeError, UnboundLocalError):
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        # PROBE_LEAKS_INTO_OPTIMIZER falsifier: the dense capture is dump-only.
+        assert int(getattr(state, "anchor_optimizer_steps", 0)) == _opt_before, (
+            "comm_eff capture: the parallel G_dense backward changed anchor_optimizer_steps "
+            "— it must be dump-only (PROBE_LEAKS_INTO_OPTIMIZER)."
+        )
 
     def _maybe_comm_eff_grad_correction(self) -> None:
         """FSDP spectral gradient-correction hook.

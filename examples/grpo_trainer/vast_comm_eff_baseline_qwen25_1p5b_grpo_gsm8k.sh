@@ -290,6 +290,33 @@ COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"               
 # alpha=0 = pure sign-merger (collapses); alpha=1 = G_noisy unchanged (= no merge).
 # 0.5 (default) = the EXP-25 best / resolved-config arm. THE swept research axis.
 COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.5}"
+# --- EXP-26 Step B: ef_powersgd merger (direction-PRESERVING error-feedback) ---
+# Select with COMM_EFF_SPECTRAL_CORRECTION_MODE=ef_powersgd. Re-adds the dropped
+# off-subspace residual to G_comp with NO sign term (keeps G_comp's direction).
+# ef_decay=ef_clip=0 (defaults) ⇒ G_corr==G_comp = the plain-PowerSGD limiting
+# case (the EF-residual-disabled ablation). A live arm sets ef_clip>0 (residual
+# norm cap as a fraction of ||G_comp||) and optionally ef_decay in [0,1).
+COMM_EFF_SPECTRAL_EF_DECAY="${COMM_EFF_SPECTRAL_EF_DECAY:-0.0}"
+COMM_EFF_SPECTRAL_EF_CLIP="${COMM_EFF_SPECTRAL_EF_CLIP:-0.0}"
+# --- EXP-26 Step C: Q-basis FAMILY (content of orth(V) at FIXED rank) ---
+# "act" (default) = the EXP-25 activation-energy basis (byte-identical substrate).
+# RLVR-native families {grad,adv,tail,hybrid,ticket} run ONLY after Step A's H2
+# finding; they require the analyst-named sketch construction (the compressor
+# fails loud on a non-"act" family until that is implemented). Steps A/B use "act".
+COMM_EFF_POWERSGD_Q_BASIS="${COMM_EFF_POWERSGD_Q_BASIS:-act}"
+# --- EXP-26 Step A: real-gradient geometry-audit tensor capture (OFF by default;
+#     a strict no-op ⇒ byte-identical to the EXP-25 substrate). When enabled the
+#     comm-eff hooks dump fp32 tensors (A/Â/Q, G_comp, G_corr, M/G_anchor, the
+#     parallel G_dense, the delay_K=0 fresh-anchor probe) keyed by (global_step,
+#     optimizer_tick, target_name, shape, dtype, norm) under CAPTURE_DIR. Every
+#     dump is detached/dump-only — NO numerical side effect on the optimizer. ---
+COMM_EFF_CAPTURE_ENABLED="${COMM_EFF_CAPTURE_ENABLED:-false}"
+COMM_EFF_CAPTURE_DIR="${COMM_EFF_CAPTURE_DIR:-/workspace/captures}"   # rsynced to runs/EXP-26/captures/
+COMM_EFF_CAPTURE_MAX_TICKS="${COMM_EFF_CAPTURE_MAX_TICKS:-10}"        # audit needs ~5-10 ticks
+COMM_EFF_CAPTURE_STRATIFIED="${COMM_EFF_CAPTURE_STRATIFIED:-0}"       # >0 => N targets/matrix-type (volume guard)
+COMM_EFF_CAPTURE_G_DENSE="${COMM_EFF_CAPTURE_G_DENSE:-false}"         # parallel uncompressed G_dense backward (highest-OOM-risk probe)
+COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe
+COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQUIRED for the fidelity invariant
 # --- PowerSGD activation compression (the base codec). Defaults: rank=77
 #     (byte-matched to the prf_mask at p=0.95 for H=1536: 0.05·1536≈77), block
 #     power iteration, compress the old-logprob recompute (=> ρ≈1), sync_basis=true
@@ -335,6 +362,9 @@ cat <<EOF
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
+  ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
+  q_basis (EXP-26):    $COMM_EFF_POWERSGD_Q_BASIS  (act=byte-identical; RLVR-native families gated on Step A H2)
+  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS stratified=$COMM_EFF_CAPTURE_STRATIFIED g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -443,6 +473,16 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.sync_basis="$COMM_EFF_POWERSGD_SYNC_BASIS" \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
+  actor_rollout_ref.actor.comm_eff.powersgd.q_basis="$COMM_EFF_POWERSGD_Q_BASIS" \
+  actor_rollout_ref.actor.comm_eff.spectral.ef_decay="$COMM_EFF_SPECTRAL_EF_DECAY" \
+  actor_rollout_ref.actor.comm_eff.spectral.ef_clip="$COMM_EFF_SPECTRAL_EF_CLIP" \
+  actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.capture.capture_dir="$COMM_EFF_CAPTURE_DIR" \
+  actor_rollout_ref.actor.comm_eff.capture.max_ticks="$COMM_EFF_CAPTURE_MAX_TICKS" \
+  actor_rollout_ref.actor.comm_eff.capture.stratified_targets="$COMM_EFF_CAPTURE_STRATIFIED" \
+  actor_rollout_ref.actor.comm_eff.capture.capture_g_dense="$COMM_EFF_CAPTURE_G_DENSE" \
+  actor_rollout_ref.actor.comm_eff.capture.capture_fresh_anchor="$COMM_EFF_CAPTURE_FRESH_ANCHOR" \
+  actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!

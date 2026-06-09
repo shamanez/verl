@@ -264,6 +264,15 @@ class CommEffState:
         # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
         # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
         self.merger_coldM_fallbacks = 0
+        # EXP-26 Step B: per-step count of ef_powersgd targets whose accumulated
+        # error-feedback residual was RESET because the target's logical 2D shape
+        # changed (no stale carry across shape change). The shape-aware-residual
+        # invariant surfaces this so the probe can prove the reset fired.
+        self.residual_reset_on_shape_mismatch = 0
+        # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
+        # the anchor / merger / projection hooks can all reach it via the state).
+        # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
+        self._capture_writer = None
 
         # Whether masking is currently active. Set True only on entry to the
         # actor-train forward/backward (around update_actor) and cleared on
@@ -355,6 +364,8 @@ class CommEffState:
                 qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
                 reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
                 anchor_owns_q=anchor_owns_q,
+                # EXP-26 Step C: Q-basis family (default "act" = byte-identical).
+                q_basis=str(getattr(ps_cfg, "q_basis", "act")),
                 state=self,
             )
             logger.info(
@@ -391,6 +402,9 @@ class CommEffState:
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
                 blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
                 signed_ema_alpha=float(getattr(spec_cfg, "signed_ema_alpha", 0.0)),
+                # EXP-26 Step B: error-feedback residual knobs (ef_powersgd).
+                ef_decay=float(getattr(spec_cfg, "ef_decay", 0.0)),
+                ef_clip=float(getattr(spec_cfg, "ef_clip", 0.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "
@@ -412,7 +426,28 @@ class CommEffState:
                 f"[comm_eff][EXP-12] spectral storage: ema_device={self.spectral.ema_device} "
                 f"correction_mode={self.spectral.correction_mode} "
                 f"signed_ema_alpha={self.spectral.signed_ema_alpha} "
+                f"ef_decay={self.spectral.ef_decay} ef_clip={self.spectral.ef_clip} "
                 f"anchor_backward_isolation_mode={isolation_mode}",
+                flush=True,
+            )
+
+        # EXP-26 Step A: build the diagnostic capture writer iff
+        # comm_eff.capture.enabled. Strict no-op (None) otherwise — the disabled /
+        # non-capture path never touches the filesystem. Lazy import so the
+        # disabled path never pays the import cost.
+        cap_cfg = getattr(self.config, "capture", None)
+        cap_enabled = bool(getattr(cap_cfg, "enabled", False)) if cap_cfg is not None else False
+        if cap_enabled:
+            from verl.workers.comm_eff.capture import maybe_build_capture_writer
+
+            self._capture_writer = maybe_build_capture_writer(self.config)
+            print(
+                f"[comm_eff][EXP-26] capture ENABLED: dir={getattr(cap_cfg, 'capture_dir', '') or './captures'} "
+                f"max_ticks={getattr(cap_cfg, 'max_ticks', 10)} "
+                f"stratified_targets={getattr(cap_cfg, 'stratified_targets', 0)} "
+                f"capture_g_dense={getattr(cap_cfg, 'capture_g_dense', False)} "
+                f"capture_fresh_anchor={getattr(cap_cfg, 'capture_fresh_anchor', False)} "
+                f"dump_dtype={getattr(cap_cfg, 'dump_dtype', 'fp32')}",
                 flush=True,
             )
         self._built = True
@@ -649,6 +684,8 @@ class CommEffState:
             "comm_eff/anchor_q_updates": self.anchor_q_updates,
             "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
+            # EXP-26 Step B: ef_powersgd shape-aware residual resets this step.
+            "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
         }
 
 

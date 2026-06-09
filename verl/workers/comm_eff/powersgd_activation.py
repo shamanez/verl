@@ -191,6 +191,7 @@ class PowerSGDActivationCompressor:
         qr_dtype: str = "fp32",
         reortho_eps: float = 1e-6,
         anchor_owns_q: bool = False,
+        q_basis: str = "act",
         state: Any = None,
     ):
         self.rank = int(rank)
@@ -200,6 +201,12 @@ class PowerSGDActivationCompressor:
         self.warm_start = bool(warm_start)
         self.compress_recompute = bool(compress_recompute)
         self.sync_basis = bool(sync_basis)
+        # EXP-26 Step C: the Q-basis FAMILY (content of the sketch orth(V) consumes
+        # at FIXED rank). "act" (default) = the EXP-25 activation-energy basis
+        # (V += Mᵀ(MQ)), byte-identical. The RLVR-native families bias V toward
+        # GRPO update energy; they require the Step-C sketch-construction the
+        # analyst specifies after Step A's H2 finding (gated — see _build_family_sketch).
+        self.q_basis = str(q_basis)
         # EXP-25 (R2): when True the ANCHOR owns Q. The fast net is then a pure
         # read-only consumer: its end-of-step maybe_update_basis is gated OFF (by
         # the engine call site) AND its forward-hook sketch accumulation is gated
@@ -405,6 +412,34 @@ class PowerSGDActivationCompressor:
                     rel = 0.0
                 compressor.last_reconstruction_rel_error[layer_idx] = rel
                 compressor.last_y_coords_per_token = q_act.shape[1]
+
+                # EXP-26 Step A: dump A (the boundary activation M), Â=(A@Q)Qᵀ and
+                # the basis Q for THIS boundary, keyed by (global_step,
+                # fwd_generation) so the analyst can recompute reconstruction_rel_error
+                # from the dumped fp32 tensors and confirm it matches `rel` above (the
+                # fp32-dump-fidelity invariant). Gated on the gradient-bearing fast
+                # forward only (grad_enabled), so it captures the SAME activations the
+                # sketch/codec used — never the old-logprob recompute. Detached/fp32,
+                # dump-only. No-op unless a capture writer is attached to the state.
+                _w = getattr(compressor._state, "_capture_writer", None) if compressor._state is not None else None
+                if _w is not None and grad_enabled and not compressor._anchor_sketch_mode:
+                    _tname = f"boundary_{layer_idx}"
+                    _stats = {
+                        "layer_idx": int(layer_idx),
+                        "rank": int(q_act.shape[1]),
+                        "fwd_generation": int(compressor._fwd_generation),
+                        "reconstruction_rel_error": rel,
+                        "q_cond": q_cond,
+                    }
+                    _w.dump(role="A", target_name=_tname, tensor=M32,
+                            global_step=int(compressor._global_step),
+                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
+                    _w.dump(role="A_hat", target_name=_tname, tensor=Mhat32,
+                            global_step=int(compressor._global_step),
+                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
+                    _w.dump(role="Q", target_name=_tname, tensor=q_fp32,
+                            global_step=int(compressor._global_step),
+                            optimizer_tick=int(compressor._fwd_generation), extra=_stats)
 
                 # Block-power-iteration sketch V += Mᵀ (M Q) = Mᵀ Y, OFF the
                 # graph, accumulated ONLY on the gradient-bearing actor-train
@@ -853,6 +888,22 @@ class PowerSGDActivationCompressor:
         """Install projection hooks on the boundary decoder blocks (idempotent)."""
         if self._handles:
             return
+        # EXP-26 Step C: fail LOUD if an unimplemented Q-basis family is selected.
+        # "act" (the EXP-25 activation-energy basis) is the only family with a
+        # built sketch path today; the RLVR-native families {grad,adv,tail,hybrid,
+        # ticket} require the Step-C sketch construction that the analyst specifies
+        # from Step A's H2 finding. Silently falling back to "act" would make a
+        # Step-C arm a mislabeled control, so crash instead. Steps A and B both run
+        # with q_basis="act", so this never blocks them.
+        if self.q_basis != "act":
+            raise NotImplementedError(
+                f"comm_eff.powersgd.q_basis={self.q_basis!r} (EXP-26 Step C) is not yet "
+                "implemented — only 'act' (the activation-energy basis) has a built sketch "
+                "path. Step C runs ONLY after Step A's H2 finding (Q_act under-captures "
+                "GRPO update energy); the analyst names the family's sketch construction "
+                "then, and the runner implements it on the exp/* branch before launching "
+                "Step C. Steps A and B use q_basis='act'."
+            )
         layers = find_decoder_layers(module)
         if layers is None:
             logger.warning(

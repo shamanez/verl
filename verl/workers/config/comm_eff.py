@@ -34,8 +34,17 @@ __all__ = [
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
+    "CommEffCaptureConfig",
     "CommEffConfig",
 ]
+
+# The Q-basis families PowerSGD may use (EXP-26 Step C). ``act`` is the existing
+# activation-energy basis (block power iteration on the boundary activations);
+# the others are RLVR-native candidates that bias Q toward GRPO UPDATE energy.
+# All share the SAME fixed rank ``r`` (the byte budget is invariant); only the
+# CONTENT of the sketch fed to ``orth(V)`` changes. ``act`` is the byte-identical
+# default (EXP-25 substrate) so a run that does not opt into a family is unchanged.
+Q_BASIS_FAMILIES = ("act", "grad", "adv", "tail", "hybrid", "ticket")
 
 # The compression codecs ``comm_eff.compression_type`` may select. Exactly one
 # codec is active per run (mutually exclusive). ``dense`` is the byte-identical
@@ -220,7 +229,8 @@ class CommEffSpectralConfig(BaseConfig):
     # Correction mode (anchor combiner). "signed_ema" (EXP-25/R3) uses the SL
     # signed-EMA merger G_corr=alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
     # "inject" adds a scale-matched anchor-EMA complement. "blend" uses
-    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor.
+    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor. "ef_powersgd" (EXP-26 Step B) is
+    # the direction-PRESERVING error-feedback merger (NO sign term).
     correction_mode: str = "signed_ema"
     # Injection strength for correction_mode="inject"; unused otherwise.
     inject_gamma: float = 1.0
@@ -231,6 +241,29 @@ class CommEffSpectralConfig(BaseConfig):
     # SFT-validated pure sign-merger; alpha=1 returns G_noisy unchanged. THE swept
     # axis (id-2). Validated to [0, 1]. Unused unless correction_mode=signed_ema.
     signed_ema_alpha: float = 0.0
+    # ---- EXP-26 Step B: error-feedback PowerSGD merger (direction-preserving) ----
+    # ``correction_mode="ef_powersgd"`` re-injects the PowerSGD reconstruction
+    # residual ``e_t = G_dense_proxy - G_comp`` (the off-subspace component the
+    # rank-r projection dropped), accumulated with decay, ADDED to G_comp with NO
+    # sign term — so the corrected gradient KEEPS G_comp's direction/sign and only
+    # restores the dropped magnitude along the off-principal directions. Unlike
+    # signed_ema (which REPLACES the sign with sign(M)), this is sign-preserving.
+    #
+    #   e_t   <- ef_decay * e_{t-1} + (M_anchor - P_Q(M_anchor))         # residual
+    #   e_t   <- clip(e_t, ef_clip * ||G_comp||)                         # norm cap
+    #   G_corr = G_comp + e_t                                            # NO sign
+    #
+    # The residual proxy uses the anchor EMA's OFF-subspace component (M_anchor
+    # minus its projection onto the span of G_comp), which is exactly the
+    # low-rank-compression bias the audit (Step A) measures. The merger reduces to
+    # plain PowerSGD (G_corr == G_comp) at the LIMITING setting ef_decay=0 AND
+    # ef_clip=0 (Correctness-invariant "EF residual limiting-case identity").
+    ef_decay: float = 0.0
+    # ef_clip: the residual norm cap as a FRACTION of ||G_comp|| (shape-aware,
+    # per-matrix). 0.0 ⇒ the residual is fully zeroed ⇒ G_corr == G_comp (the
+    # plain-PowerSGD limiting case). A typical live value is ~1.0 (the re-injected
+    # residual may not exceed the compressed gradient's own norm). Must be >= 0.
+    ef_clip: float = 0.0
 
 
 @dataclass
@@ -330,6 +363,72 @@ class CommEffPowerSGDConfig(BaseConfig):
     sync_basis: bool = True
     qr_dtype: str = "fp32"
     reortho_eps: float = 1e-6
+    # EXP-26 Step C: the Q-basis FAMILY (content of the sketch ``orth(V)`` consumes
+    # at FIXED rank). "act" (default) = the EXP-25 activation-energy basis (V is
+    # built from the boundary ACTIVATIONS, V += Mᵀ(MQ)) — byte-identical to the
+    # locked substrate so a run that does not opt in is unchanged. The RLVR-native
+    # families ("grad"/"adv"/"tail"/"hybrid"/"ticket") bias V toward GRPO UPDATE
+    # energy and ONLY run if Step A finds Q_act under-captures off-principal update
+    # energy (H2). Validated to Q_BASIS_FAMILIES. The byte budget (rank) is held
+    # fixed across families — only WHICH directions Q spans changes.
+    q_basis: str = "act"
+
+
+@dataclass
+class CommEffCaptureConfig(BaseConfig):
+    """EXP-26 Step A: real-gradient geometry-audit tensor-capture sub-config.
+
+    **OFF by default — a strict no-op so the EXP-25 / plain-PowerSGD path is
+    byte-identical** (Correctness invariant "off-path parity"). When
+    ``enabled=true`` the comm-eff hooks dump fp32 tensors (``A``, ``Â=(A@Q)Qᵀ``,
+    ``Q``, projection stats; ``G_comp`` the merger input; ``G_corr`` post-merger
+    pre-Adam; ``M``/``G_anchor``; the parallel uncompressed ``G_dense``; and the
+    ``delay_K=0`` fresh-anchor measurement grad) keyed by
+    ``(global_step, optimizer_tick, target_name, shape, dtype, norm)`` under
+    ``capture_dir``. Every dumped tensor is detached / dump-only — the capture
+    path adds NO numerical side effect, only I/O (Correctness invariant
+    "measurement-only probes never feed the optimizer").
+
+    The two measurement-only PROBES (``capture_g_dense`` = a second uncompressed
+    fast backward; ``capture_fresh_anchor`` = a delay_K=0 fresh-anchor grad) are
+    the expensive, highest-integration-risk dumps; they are independently gated so
+    the audit can be staged. ``delay_K=0`` appears ONLY here as a removed probe —
+    it is forbidden as a TRAINING config (Correctness invariant "mandatory anchor
+    staleness").
+
+    Args:
+        enabled (bool): Master capture switch. ``false`` (default) ⇒ NO dump hook
+            fires, NO probe backward runs, NO tensor is written; the training path
+            is byte-identical to the EXP-25 substrate.
+        capture_dir (str): Directory the fp32 dumps + the manifest are written to
+            (on the box; rsynced to ``runs/EXP-26/captures/``). Empty ⇒
+            ``./captures`` relative to cwd.
+        max_ticks (int): Cap on the number of optimizer ticks captured (the audit
+            needs only ~5-10). ``<= 0`` ⇒ no cap. Bounds disk + rsync volume.
+        stratified_targets (int): If ``> 0``, dump only this many targets PER
+            layer-type (the √2 disagreement was uniform across the 7 matrix types
+            in EXP-25, so a stratified subset is defensible — see ## Notes for
+            runner). ``0`` ⇒ dump every target (full 196-matrix coverage).
+        capture_g_dense (bool): Run the parallel UNCOMPRESSED fast backward to
+            capture ``G_dense`` alongside ``G_comp`` at the SAME step. Detached /
+            dump-only — MUST NOT touch the optimizer. ``false`` (default) ⇒ no
+            second backward (the highest-OOM-risk probe; gate it on first).
+        capture_fresh_anchor (bool): Capture the ``delay_K=0`` fresh-anchor grad as
+            a MEASUREMENT probe for the sign-agreement decomposition. Detached /
+            dump-only. ``false`` (default).
+        dump_dtype (str): Dump precision. ``"fp32"`` (default, REQUIRED for the
+            fidelity invariant — the reconstruction_rel_error recomputed from the
+            dump must match the logged ~0.024 scalar within 1e-3). ``"bf16"`` is a
+            volume-saving diagnostic only.
+    """
+
+    enabled: bool = False
+    capture_dir: str = ""
+    max_ticks: int = 10
+    stratified_targets: int = 0
+    capture_g_dense: bool = False
+    capture_fresh_anchor: bool = False
+    dump_dtype: str = "fp32"
 
 
 @dataclass
@@ -400,6 +499,9 @@ class CommEffConfig(BaseConfig):
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
+    # EXP-26 Step A diagnostic tensor capture. OFF by default ⇒ no numerical side
+    # effect (byte-identical to the EXP-25 substrate).
+    capture: CommEffCaptureConfig = field(default_factory=CommEffCaptureConfig)
     clean_cadence: int = 0
 
     def __post_init__(self):
@@ -447,9 +549,10 @@ class CommEffConfig(BaseConfig):
         # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")
-        if self.spectral.correction_mode not in ("inject", "blend", "signed_ema"):
+        if self.spectral.correction_mode not in ("inject", "blend", "signed_ema", "ef_powersgd"):
             raise ValueError(
-                f"comm_eff.spectral.correction_mode must be one of (inject, blend, signed_ema); "
+                f"comm_eff.spectral.correction_mode must be one of "
+                f"(inject, blend, signed_ema, ef_powersgd); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if self.spectral.inject_gamma < 0.0:
@@ -464,6 +567,19 @@ class CommEffConfig(BaseConfig):
         if not 0.0 <= self.spectral.signed_ema_alpha <= 1.0:
             raise ValueError(
                 f"comm_eff.spectral.signed_ema_alpha must be in [0, 1]; got {self.spectral.signed_ema_alpha}"
+            )
+        # EXP-26 Step B: error-feedback residual knobs. decay in [0, 1) (an EMA
+        # decay; 1.0 would never forget the residual). clip >= 0 (a norm-cap
+        # fraction; 0 ⇒ residual fully zeroed ⇒ G_corr==G_comp, the plain-PowerSGD
+        # limiting case). Both validated unconditionally so a typo is loud even on
+        # a non-ef_powersgd run that forwards them.
+        if not 0.0 <= self.spectral.ef_decay < 1.0:
+            raise ValueError(
+                f"comm_eff.spectral.ef_decay must be in [0, 1); got {self.spectral.ef_decay}"
+            )
+        if self.spectral.ef_clip < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.ef_clip must be >= 0; got {self.spectral.ef_clip}"
             )
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
@@ -509,3 +625,21 @@ class CommEffConfig(BaseConfig):
             )
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
+        # EXP-26 Step C: Q-basis family. Validated to the closed enum so a typo
+        # (q_basis=gradient) is a loud error, not a silent fall-through to "act".
+        if self.powersgd.q_basis not in Q_BASIS_FAMILIES:
+            raise ValueError(
+                f"comm_eff.powersgd.q_basis must be one of {Q_BASIS_FAMILIES}; "
+                f"got {self.powersgd.q_basis!r}"
+            )
+        # EXP-26 Step A: diagnostic-capture block. Validated unconditionally (the
+        # keys are registered regardless of capture.enabled) so a bad dump_dtype /
+        # negative cap fails fast even on a non-capture run that forwards them.
+        if self.capture.dump_dtype not in ("fp32", "bf16"):
+            raise ValueError(
+                f"comm_eff.capture.dump_dtype must be one of (fp32, bf16); got {self.capture.dump_dtype!r}"
+            )
+        if self.capture.stratified_targets < 0:
+            raise ValueError(
+                f"comm_eff.capture.stratified_targets must be >= 0; got {self.capture.stratified_targets}"
+            )
