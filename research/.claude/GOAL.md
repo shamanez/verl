@@ -32,47 +32,40 @@ With the method switched off, training is byte-identical to unmodified verl.
 
 ## Where we are
 
-The base is **settled**. Operational detail, the proven result + why, and knobs →
-`research/runs/SUMMARY.md`. In brief:
+The comm-eff base is **settled and realistic**: the **anchor circuit on a PowerSGD
+codec**. The full result + why + what's next, and all the numbers, live in
+`research/runs/SUMMARY.md` (the single source of truth — not restated here). In brief:
 
 - **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
-- **Settled comm-eff base** = mask (p=0.9, per-(token,channel), 7 boundaries) **+
-  rescale (ON, permanent — its job is unbias, not a learning fix) + a true dense
-  clean gradient every K steps (`clean_cadence`)**. Mask cross-pass consistency is
-  solved; judge on **val/score, not grad_norm**. Do not relitigate these.
-- **Proven result** — masked+clean@K is **stable** (clean-resettable sawtooth, no
-  ratchet) and reaches **GSM8K dense parity** (EXP-17: 0.735 vs 0.741) — but that is
-  **elicitation** (base already 0.715). On **Big-Math** (base 0.48) it **stalls flat
-  ~0.55** while dense reaches ~0.61: a gradient-fidelity limit, not a missing ceiling.
-- **Anchor + spectral as implemented did NOT work** (GSM8K 0.080, inert) — fails by
-  **orthogonality** (reweights the masked gradient in a subspace instead of applying
-  the true gradient). The clean step is the only lever that worked.
-- **Frontier** — redesign the anchor + spectral correction into a **cheap, continuous
-  surrogate** for the periodic clean step, grounded in the curvature-bias analysis (not
-  anchor-gradient-SVD). This is RL, not supervised learning — there is no recipe to
-  copy, so the correction must be found **empirically**. Concrete target: make the
-  **masked+correction training curve match the dense training curve within ≤50 steps**
-  (GSM8K, anchor `cadence`=5, staleness `delay_K`=5, `clean_cadence` OFF), via an agent
-  that **recursively** proposes a correction, runs it, compares curves, and refines.
+- **Settled comm-eff base** — PowerSGD r=77 + a mandatory **anchor**: a
+  continuously-maintained, `delay_K=5`-stale, full-coverage, DP-reduced gradient EMA
+  `M` that is **the only thing that updates the projection basis `Q`**
+  (`anchor.owns_q`; the fast compressed circuit is a read-only `Q` consumer). This
+  **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
+  is mechanically **proven** (EXP-25 R1+R2 probe gates green). Judge on **val/score,
+  not grad_norm**. Do not relitigate the substrate.
+- **Honest result** — the substrate is realistic + correct, but the current
+  `signed_ema` **merger** (how `M` corrects the fast gradient) is **falsified**: it
+  does not match plain PowerSGD, so we do **not** beat dense (EXP-25, STOP). This is a
+  good base to *start from*, not a finished result.
+- **Frontier** — the single open axis is the **gradient-correction merger primitive**.
+  `signed_ema` (sign-replacement) is the wrong primitive; the next candidate is
+  **error-feedback on the PowerSGD residual** (issue #24). This is RL — no recipe to
+  copy — so the correction is found **empirically**: propose a merger, run it, compare
+  the training curve to dense, refine. Target: match the dense curve within ≤50 steps.
 
-## The moment of truth
+## Why the anchor (the motivating logic)
 
-Masking alone makes a **biased, noisy** gradient that does not learn at high mask
-rates. The decisive finding: **periodically passing a full dense gradient every K
-steps re-anchors training and recovers results comparable to dense** (GSM8K parity).
-A sparse periodic correction pulls the drifting masked trajectory back — so **the
-signal is recoverable, not lost.** The opening: if a *sparse* full gradient works, a
-**cheaper, continuous spectral correction** (driven by an anchor — a low-frequency
-true-gradient reference) should recover the same at a fraction of the communication.
-That is the direction worth pursuing.
-
-Honest bar: GSM8K parity is *elicitation* (the base model is already strong there) —
-on genuinely harder data (Big-Math) even the periodic full gradient stalls, so the
-correction's real job is to recover *learning*, not just match the clean step; and
-the first anchor+spectral attempt failed by **orthogonality** (it reweighted the
-masked gradient instead of supplying the missing true-gradient component), so the
-redesign must target the bias directly. The core logic still stands: periodic true
-gradients work → a continuous correction should too.
+A compressed/masked gradient is **biased + noisy**; the decisive earlier finding was
+that **periodically passing a full dense gradient re-anchors training and recovers
+dense-comparable results** — so the signal is recoverable, not lost. But a periodic
+full-rank clean step is **not communication-efficient** (full-H transfer) and, on a
+real decentralized-PP link, would itself be stale. The anchor circuit is the realistic
+realization of that idea: a **low-frequency, stale, full-gradient reference**
+maintained continuously and folded into the fast compressed gradient — and it also
+owns the projection basis `Q`. The open question is no longer *whether* a correction
+helps but **which merger** converts the anchor into a dense-matching update;
+sign-replacement (`signed_ema`) does not (see `SUMMARY.md`).
 
 ## Why code changes are in scope
 

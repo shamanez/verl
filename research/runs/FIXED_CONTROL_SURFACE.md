@@ -1,10 +1,12 @@
 # Fixed Control Surface — GSM8K comm-eff experiments
 
-**Status: LOCKED (operator directive, 2026-06-04).** Every experiment in this
-project holds these constant. The **only** axis that may vary between arms is the
-**codec** (the line marked ☆). Changing anything else requires a separate,
-explicit justification — same bar as the model/loss/hardware controls in
-`CLAUDE.md §1`. This file extends those three with the *training* hyperparameters.
+**Status: LOCKED (operator directive, 2026-06-04; substrate extended 2026-06-09 / #25).**
+Every experiment in this project holds these constant. As of issue #25 the comm-eff
+**substrate** (PowerSGD r=77 + a mandatory anchor that owns `Q`) is also locked, and the
+**only** axis that may vary between arms is the **merger** (the ☆ section). Changing
+anything else requires a separate, explicit justification — same bar as the
+model/loss/hardware controls in `CLAUDE.md §1`. This file extends those three with the
+*training* hyperparameters + the locked comm-eff substrate.
 
 Why this exists: small RL deltas (the EXP-20 arms differ by ±0.005 val-acc) are
 only interpretable if the rest of the run is byte-for-byte comparable. Silent
@@ -30,25 +32,39 @@ once, here, and read it off for every launch.
 | **ppo_max_token_len_per_gpu** | **36864** | (+ log_prob / ref variants) |
 | **total_training_steps** | **50 → 100** | start at 50; extend to 100 once 50 trains cleanly |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
-| **anchor refresh cadence** (realistic setting) | **5** | the anchor circuit refreshes `M` (and `Q`) every 5 steps from stale, delayed weights — this REPLACES any periodic dense clean step; do **not** assume a `clean_cadence` |
+| **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
 | **save_freq** | **50** | |
 | **val_before_train** | **True** | the step-0 val point |
 | **calculate_log_probs** | **True** | train-inference mismatch diagnostic; rollout CORRECTION stays OFF (old_log_prob always recomputed) |
 | **Hardware** | 4×H200 (pref) or 8×H100 | Vast `verl-research-vllm020`; `max_dph=24` |
 | **seeds** | comm_eff `seed=0` (mask + powersgd) | |
 
-## ☆ The ONLY axis that varies — the codec
+## ☆ The locked substrate + the variable axis (the merger)
 
-| arm | `comm_eff.enabled` | `compression_type` | knob | logical bytes/tok |
-|---|---|---|---|---|
-| **dense control** | `false` | (n/a) | — | H (uncompressed) |
-| **PRF mask** | `true` | `prf_mask` | `mask.p` (e.g. 0.95) | (1−p)·H |
-| **PowerSGD** | `true` | `powersgd` | `powersgd.rank` r (e.g. 77, 102) | r |
+As of issue #25 the comm-eff base is the **anchor circuit on a PowerSGD codec**, and the
+substrate is **locked**. The single axis that may vary between arms is now the **merger**
+(how the anchor `M` corrects the fast gradient).
 
-Budget note (H=1536): the mask at p=0.95 keeps `0.05·1536 = 76.8` coords/token, so
-**r=77 is the byte-matched PowerSGD arm** (the equal-budget comparison); r=102 is
-+33% budget. The dense control sends the full activation (no compression) and is
-the learning ceiling / reference trajectory.
+**Locked substrate** — held constant across every comm-eff arm (exact values are the
+launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.txt`):
+
+| knob | value | note |
+|---|---|---|
+| `compression_type` | `powersgd` | the locked codec (only one compatible with anchor-owns-`Q`) |
+| `powersgd.rank` | `77` | byte-matched to mask p=0.95 (H=1536: `0.05·1536 ≈ 77`) |
+| `anchor.enabled` | `true` | MANDATORY — the stale full-grad reference `M` |
+| `anchor.owns_q` | `true` | the anchor is the ONLY thing that updates `Q` |
+| `anchor.cadence` / `delay_K` | `5` / `5` | refresh + staleness, in optimizer ticks |
+| `clean_cadence` | `0` | DEAD — the anchor replaced the periodic dense step |
+
+**The variable axis — the merger** (`spectral.correction_mode` + its weight, e.g.
+`signed_ema_alpha`): the research axis going forward. `signed_ema` is wired but
+**falsified** (net-harmful — result + why in `SUMMARY.md`); error-feedback on the
+PowerSGD residual (#24) is the next candidate.
+
+**Reference codecs (NOT the base; ablation only):** the dense control
+(`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
+(`mask.p`; cannot anchor-own-`Q`, so run it with `anchor.owns_q=false`).
 
 ## Measurement knobs (NOT control variables — may vary freely)
 
@@ -62,24 +78,27 @@ they can differ between runs without breaking comparability:
 
 ## How to launch on this surface
 
-One canonical launcher (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`);
-override only the codec axis + run length:
+One canonical launcher (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`)
+— its `${VAR:-default}` defaults ARE the anchor base + the core surface (batch, lr, rollout
+shape, contexts, objective, the substrate above). A bare comm-eff launch is the base; you
+override only the run length + the axis you're varying:
 
 ```bash
-# PowerSGD r=77 (byte-matched), 50 steps, validation every 25:
-COMM_EFF_ENABLED=true COMM_EFF_COMPRESSION_TYPE=powersgd COMM_EFF_POWERSGD_RANK=77 \
-  TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 \
-  EXPERIMENT_NAME=ce_powersgd_r77_50s_gsm8k \
+# the anchor base, 50 steps, validation every 25 (nothing else to set):
+TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=ce_anchor_base_50s \
+  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+
+# sweep the merger axis:
+COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.7 EXPERIMENT_NAME=ce_a0p7 \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
 # dense reference: same launch with COMM_EFF_ENABLED=false.
 ```
 
-The launcher's `${VAR:-default}` defaults encode the core surface (batch sizes, lr,
-rollout shape, contexts, objective). Pass `TOTAL_TRAINING_STEPS` (50, then 100) and
-`TEST_FREQ=25` per launch. The realistic anchor setting (issue #25) adds the anchor
-flags — stale-weight gradient refresh, anchor-owned `Q`, signed-EMA merger — and runs
-**without** a periodic dense clean step.
+Pass `TOTAL_TRAINING_STEPS` (50, then 100) + `TEST_FREQ=25` per launch. The substrate
+defaults (anchor on, owns `Q`, PowerSGD r=77, signed_ema merger, no clean step) are baked
+into the launcher — do **not** re-type them; the ground truth of any run is its
+`resolved_params.txt`.
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).
