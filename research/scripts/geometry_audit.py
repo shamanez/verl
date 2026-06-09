@@ -112,11 +112,34 @@ def _sign_agreement(m, g) -> float:
     return float((agree * w).sum() / wsum)
 
 
+def _canon(name: str) -> str:
+    """Strip the FSDP per-layer-wrap infix from a parameter name.
+
+    Mirrors ``verl.workers.comm_eff.spectral_filter._canon``. The dumped
+    ``target_name`` keys differ by container: the parallel G_dense / anchor dumps
+    come off the plain no-FSDP clone (NON-infixed, e.g.
+    ``model.layers.0.mlp.down_proj.weight``), while G_comp / G_corr come off the
+    LIVE FSDP module's ``named_parameters()`` (carry the
+    ``._fsdp_wrapped_module.`` infix). Without canonicalising, G_dense never pairs
+    with G_comp and the headline cosines come out empty (n=0). Canon-keying both
+    sides makes them match.
+    """
+    name = name.replace("._fsdp_wrapped_module", "")
+    if name.startswith("_fsdp_wrapped_module."):
+        name = name[len("_fsdp_wrapped_module."):]
+    return name
+
+
 def _index(manifest: list[dict]) -> dict:
-    """Index manifest rows by role -> {(gs, tick, target): row}."""
+    """Index manifest rows by role -> {(gs, tick, canon_target): row}.
+
+    The target is CANONICALISED (FSDP wrap-infix stripped) so dumps from the
+    plain clone (G_dense / anchor roles) and from the live FSDP module (G_comp /
+    G_corr) key on the SAME name and pair correctly.
+    """
     idx: dict = defaultdict(dict)
     for r in manifest:
-        key = (int(r["global_step"]), int(r["optimizer_tick"]), r["target_name"])
+        key = (int(r["global_step"]), int(r["optimizer_tick"]), _canon(r["target_name"]))
         idx[r["role"]][key] = r
     return idx
 

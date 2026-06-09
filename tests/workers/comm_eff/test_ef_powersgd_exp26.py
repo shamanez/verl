@@ -349,3 +349,27 @@ def test_capture_tick_unification():
     assert st2.current_optimizer_tick() == 1
     st2.anchor_step = 2  # batch 2
     assert st2.current_optimizer_tick() == 2, "no-merger arm must key the tick off anchor_step"
+
+
+def test_capture_writer_canonicalizes_target_name():
+    """G_comp (live-FSDP infixed name) and G_dense (clone non-infixed name) for the
+    SAME logical matrix must key on the SAME canonical target_name so the audit
+    pairs them. Regression guard for the cos(G_dense,G_comp) n=0 bug.
+    """
+    from verl.workers.comm_eff.capture import CaptureWriter
+    import json as _json
+    with tempfile.TemporaryDirectory() as d:
+        w = CaptureWriter(capture_dir=d, rank=0)
+        t = torch.randn(4, 4)
+        # live-FSDP infixed name (as the merger dumps G_comp)
+        w.dump(role="G_comp", target_name="model.layers.0._fsdp_wrapped_module.mlp.up_proj.weight",
+               tensor=t, global_step=1, optimizer_tick=1)
+        # clone non-infixed name (as the G_dense probe dumps)
+        w.dump(role="G_dense", target_name="model.layers.0.mlp.up_proj.weight",
+               tensor=t, global_step=1, optimizer_tick=1)
+        rows = [_json.loads(l) for l in open(w.manifest_path)]
+        names = {r["role"]: r["target_name"] for r in rows}
+        assert names["G_comp"] == names["G_dense"] == "model.layers.0.mlp.up_proj.weight", names
+        # raw preserved
+        raws = {r["role"]: r["target_name_raw"] for r in rows}
+        assert "_fsdp_wrapped_module" in raws["G_comp"] and "_fsdp_wrapped_module" not in raws["G_dense"]

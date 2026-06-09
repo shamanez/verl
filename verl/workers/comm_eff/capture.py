@@ -98,6 +98,21 @@ CAPTURE_ROLES = (
 _MATRIX_TYPES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
 
+def _canon(name: str) -> str:
+    """Strip the FSDP per-layer-wrap infix so every role keys on the SAME name.
+
+    Mirrors ``verl.workers.comm_eff.spectral_filter._canon`` (kept local to avoid a
+    cross-module import). The parallel-clone dumps (G_dense / anchor roles) use
+    NON-infixed names; the live-FSDP-module dumps (G_comp / G_corr) carry the
+    ``._fsdp_wrapped_module.`` infix. Canonicalising the manifest ``target_name``
+    here makes G_dense pair with G_comp in the audit without consumer-side fixes.
+    """
+    name = name.replace("._fsdp_wrapped_module", "")
+    if name.startswith("_fsdp_wrapped_module."):
+        name = name[len("_fsdp_wrapped_module."):]
+    return name
+
+
 def _sanitize(name: str) -> str:
     """Make a parameter name safe as a filename (dots/slashes -> underscores)."""
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name).replace(".", "_")
@@ -231,6 +246,13 @@ class CaptureWriter:
         cosines / reconstruction error offline.
         """
         assert role in CAPTURE_ROLES, f"unknown capture role {role!r}"
+        # Canonicalise the target name (strip the FSDP wrap-infix) so the SAME
+        # logical matrix keys identically whether it came off the live FSDP module
+        # (G_comp/G_corr) or the plain clone (G_dense / anchor roles) — else they
+        # never pair in the audit. The raw name is preserved in the manifest as
+        # ``target_name_raw`` for traceability.
+        target_name_raw = target_name
+        target_name = _canon(target_name)
         tick_key = (int(global_step), int(optimizer_tick))
         if not self.should_capture_tick(global_step, optimizer_tick):
             return False
@@ -253,6 +275,7 @@ class CaptureWriter:
                 "optimizer_tick": tick_key[1],
                 "role": role,
                 "target_name": target_name,
+                "target_name_raw": target_name_raw,
                 "shape": list(tensor.shape),
                 "dtype": str(self.dump_dtype).replace("torch.", ""),
                 "norm": norm,

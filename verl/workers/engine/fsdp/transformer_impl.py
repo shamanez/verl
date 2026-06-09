@@ -1967,6 +1967,61 @@ class FSDPEngine(BaseEngine):
             "— it must be dump-only (PROBE_LEAKS_INTO_OPTIMIZER)."
         )
 
+    def _maybe_capture_g_comp_no_merger(self, state) -> None:
+        """EXP-26 (Defect 5): dump the live COMPRESSED grad as ``G_comp`` when there
+        is no merger (``spectral is None``).
+
+        The audit's headline ``cos(G_dense, G_comp)`` needs the fast compressed
+        gradient. The merger normally dumps it; the A1 plain-PowerSGD arm has no
+        merger, so this capture-only path dumps it instead. NO correction is
+        applied — the grads are read, dumped (detached/fp32), and left UNCHANGED on
+        the optimizer's path (byte-identical to a no-merger run). Keyed by the same
+        ``state.capture_tick()`` so it pairs with G_dense. No-op unless a capture
+        writer is attached.
+        """
+        writer = getattr(state, "_capture_writer", None)
+        if writer is None:
+            return
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+        _gs = int(getattr(state, "global_step", -1) or -1)
+        _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else 0
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+
+        def _dump_named(named_params):
+            n = 0
+            for name, p in named_params:
+                grad = getattr(p, "grad", None)
+                if grad is None or not any(s in name for s in target_substrs):
+                    continue
+                if max_targets >= 0 and n >= max_targets:
+                    break
+                full = grad.full_tensor() if isinstance(grad, DTensor) else grad
+                if full.dim() != 2:
+                    continue
+                if writer.dump(role="G_comp", target_name=name, tensor=full,
+                               global_step=_gs, optimizer_tick=_tk):
+                    n += 1
+            return n
+
+        if module_is_fsdp1:
+            use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
+            if not use_orig:
+                return  # cannot surface 2D grads without use_orig_params; skip silently
+            with FSDP.summon_full_params(self.module, with_grads=True, writeback=False):
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                n = _dump_named(inner.named_parameters())
+        else:
+            inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            n = _dump_named(inner.named_parameters())
+        print(
+            f"[comm_eff][EXP-26][g_comp-no-merger] step={_gs} tick={_tk} dumped G_comp "
+            f"targets={n} (capture-only; NO correction applied)",
+            flush=True,
+        )
+
     def _maybe_comm_eff_grad_correction(self) -> None:
         """FSDP spectral gradient-correction hook.
 
@@ -1994,6 +2049,13 @@ class FSDPEngine(BaseEngine):
             return
         spectral = getattr(state, "spectral", None)
         if spectral is None:
+            # EXP-26 FIX (Defect 5): NO merger (the A1 plain-PowerSGD audit arm),
+            # but the audit still needs G_comp — the fast COMPRESSED gradient now
+            # living on the live p.grad — to compute the headline
+            # cos(G_dense, G_comp) (H1). The merger normally dumps G_comp; with no
+            # merger we dump it here (capture-only, NO correction). No-op unless a
+            # capture writer is attached.
+            self._maybe_capture_g_comp_no_merger(state)
             return
 
         # Spectral-correction cadence gate. Advance the 1-based optimizer-step
