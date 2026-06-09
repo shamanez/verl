@@ -1877,10 +1877,23 @@ class FSDPEngine(BaseEngine):
         try:
             with _summon_ctx():
                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
-                cached = getattr(self, "_anchor_module_cache", None)
+                # EXP-26 FIX (Defect 6 — the REAL H1 blocker): use a DEDICATED
+                # G_dense clone, NOT the shared self._anchor_module_cache. The
+                # shared cache gets PowerSGD projection forward-hooks registered on
+                # its decoder layers by the anchor's owns-Q sketch harvest
+                # (powersgd.register(clone)), and copy.deepcopy of a hook-carrying
+                # `inner` ALSO copies its _forward_hooks. Either way the clone's
+                # boundary forward then runs M_hat=(M@Q)Qᵀ with _anchor_sketch_mode
+                # False ⇒ FULL projection ⇒ G_dense had ~r/H≈5% of the true norm and
+                # was anti-correlated with the dense gradient (the analyst's gate:
+                # cos(G_dense,G_fresh_anchor)≈−0.02, norm_ratio≈0.05 on codec-ON
+                # arms). A dedicated clone that NEVER receives codec hooks + an
+                # explicit forward-hook strip + a hard assert below guarantees the
+                # uncompressed backward.
+                cached = getattr(self, "_g_dense_clone", None)
                 if cached is None:
                     cached = build_anchor_module(inner)
-                    self._anchor_module_cache = cached
+                    self._g_dense_clone = cached
                 # Current (delay_K=0) weights, canonical-keyed.
                 cur = {_canon(n): p.detach().clone() for n, p in inner.named_parameters()}
             assert_anchor_module_isolated(cached, optimizer=self.optimizer, fsdp_module=inner)
@@ -1896,17 +1909,46 @@ class FSDPEngine(BaseEngine):
                         p.copy_(s.to(p.device, p.dtype))
                     if p.grad is not None:
                         p.grad = None
-            # EXP-26 FIX (Defect 2): the G_dense clone backward was extracting 0
-            # target grads. The clone (a deepcopy / config-rebuild) can come back
-            # with requires_grad=False on its params (so .backward() populates NO
-            # .grad) and/or in eval mode. Force train mode + requires_grad=True so
-            # the uncompressed backward actually fills .grad on the 2D matrices that
-            # extract_target_grads reads. (The anchor path happened to work because
-            # its clone inherited grad from the summoned live params; the standalone
-            # G_dense clone must set this explicitly.)
+            # EXP-26 FIX (Defect 2): the clone can come back requires_grad=False /
+            # eval mode (so .backward() fills no .grad). Force train + requires_grad.
             cached.train()
             for _p in cached.parameters():
                 _p.requires_grad_(True)
+
+            # EXP-26 FIX (Defect 6): STRIP every forward / forward-pre hook from the
+            # clone and EVERY submodule so the PowerSGD projection cannot fire —
+            # regardless of whether deepcopy copied them or the anchor registered
+            # them on a shared object. Then HARD-ASSERT the boundary decoder layers
+            # are hook-free (the projector hooks live on the decoder blocks). This is
+            # the load-bearing guarantee that the parallel backward is UNCOMPRESSED.
+            _n_stripped = 0
+            for _m in cached.modules():
+                for _hreg in ("_forward_hooks", "_forward_pre_hooks",
+                              "_forward_hooks_with_kwargs", "_forward_pre_hooks_with_kwargs"):
+                    _hd = getattr(_m, _hreg, None)
+                    if _hd:
+                        _n_stripped += len(_hd)
+                        _hd.clear()
+            _resid = sum(
+                len(getattr(_m, "_forward_hooks", {}) or {}) + len(getattr(_m, "_forward_pre_hooks", {}) or {})
+                for _m in cached.modules()
+            )
+            assert _resid == 0, (
+                f"comm_eff G_dense: clone still has {_resid} forward hook(s) after strip — the "
+                "parallel backward would run COMPRESSED (M_hat=(M@Q)Qᵀ) and G_dense would be the "
+                "projected gradient, not the true dense one (EXP-26 Defect 6)."
+            )
+
+            # Belt-and-braces: defensively unregister the live PowerSGD compressor's
+            # handles in case any point at a shared module (they should already be
+            # gone after forward_backward_batch's finally), and ensure the codec
+            # cannot be re-activated on this pass.
+            _ps = getattr(state, "powersgd", None)
+            if _ps is not None and getattr(_ps, "is_registered", False):
+                try:
+                    _ps.unregister()
+                except Exception:
+                    pass
 
             # Ensure NO mask / powersgd hooks fire on the clone (UNCOMPRESSED).
             prev_mask_active = getattr(state, "mask_active", False)
@@ -1938,9 +1980,16 @@ class FSDPEngine(BaseEngine):
                     writer=writer, role="G_dense", grads=dense_grads,
                     global_step=_gs, optimizer_tick=_tk,
                 )
+                # EXP-26 (Defect 6) visibility: log the mean ||G_dense|| so a
+                # projected (codec-contaminated) gradient — which would be ~r/H of
+                # the true norm — is obvious in train.log even before the offline
+                # gate runs. A healthy uncompressed grad is O(0.1-1) per matrix.
+                _gd_norms = [float(torch.linalg.norm(g.float()).item()) for g in dense_grads.values()] if dense_grads else []
+                _gd_mean = (sum(_gd_norms) / len(_gd_norms)) if _gd_norms else 0.0
                 print(
                     f"[comm_eff][EXP-26][g_dense] step={_gs} tick={_tk} captured G_dense "
-                    f"targets={n} (uncompressed clone backward, dump-only)",
+                    f"targets={n} mean_norm={_gd_mean:.5f} (UNCOMPRESSED clone backward, "
+                    f"forward-hooks stripped; dump-only)",
                     flush=True,
                 )
             finally:
@@ -1951,7 +2000,7 @@ class FSDPEngine(BaseEngine):
             if _dense_swap is not None:
                 self.module = _dense_swap
             try:
-                for _p in getattr(self, "_anchor_module_cache").parameters():
+                for _p in getattr(self, "_g_dense_clone").parameters():
                     if _p.grad is not None:
                         _p.grad = None
             except (AttributeError, UnboundLocalError):

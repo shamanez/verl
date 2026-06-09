@@ -572,6 +572,12 @@ comm_eff:
     # disk. Declared here so Hydra struct-mode accepts the CLI override.
     rank0_only: true
 
+    # EXP-26: skip capture ticks below this (cold-Q warmup). The anchor warms Q at
+    # cadence (tick 5/10 for cadence=5); capturing from tick 1 fills the budget with
+    # PRE-warm ticks so H2 (Q activation/update-capture) reads cold-Q values. Set
+    # just above the first anchor refresh for POST-warm captures. 0 = from start.
+    min_tick: 0
+
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training

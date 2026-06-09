@@ -435,6 +435,12 @@ class CommEffCaptureConfig(BaseConfig):
     # (76 GB for ONE arm => torch.save crashed mid-write on the full disk). Set
     # False only if per-rank shards are genuinely needed.
     rank0_only: bool = True
+    # EXP-26: skip capture ticks below this (cold-Q warmup). The anchor warms Q at
+    # cadence (tick 5/10 for cadence=5); capturing from tick 1 fills the budget with
+    # PRE-warm ticks (recon ~0.97), making H2 (Q activation/update-capture)
+    # untrustworthy. Set just above the first anchor refresh so captured ticks are
+    # POST-warm. 0 (default) = capture from the start (back-compat).
+    min_tick: int = 0
 
 
 @dataclass

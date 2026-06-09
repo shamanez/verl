@@ -139,10 +139,19 @@ class CaptureWriter:
         dump_dtype: str = "fp32",
         rank: Optional[int] = None,
         rank0_only: bool = True,
+        min_tick: int = 0,
     ):
         self.base_dir = capture_dir or os.path.join(os.getcwd(), "captures")
         self.max_ticks = int(max_ticks)
         self.stratified_targets = int(stratified_targets)
+        # EXP-26: skip ticks BELOW min_tick (cold-Q warmup). The anchor warms Q at
+        # cadence (e.g. tick 5/10 for cadence=5), so a capture that starts at tick 1
+        # is dominated by PRE-warm ticks where Q is the cold seed basis
+        # (recon_rel_error ~0.97 -> the audit read ~0.065 post-"warmup", not the
+        # on-box ~0.024, and Q_act activation-capture read 0.525 not ~0.99). Setting
+        # min_tick just above the first anchor refresh ensures the captured ticks
+        # are POST-warm so H2 (Q update-capture / activation-capture) is trustworthy.
+        self.min_tick = int(min_tick)
         assert dump_dtype in ("fp32", "bf16"), dump_dtype
         self.dump_dtype = torch.float32 if dump_dtype == "fp32" else torch.bfloat16
         if rank is None:
@@ -178,7 +187,7 @@ class CaptureWriter:
         print(
             f"[comm_eff][EXP-26][capture] writer root={self.root} max_ticks={self.max_ticks} "
             f"stratified_targets={self.stratified_targets} dump_dtype={dump_dtype} rank={self.rank} "
-            f"rank0_only={self.rank0_only} inactive={self._inactive}",
+            f"rank0_only={self.rank0_only} min_tick={self.min_tick} inactive={self._inactive}",
             flush=True,
         )
 
@@ -189,12 +198,15 @@ class CaptureWriter:
         """True iff a dump at this ``(global_step, optimizer_tick)`` is in budget.
 
         A tick already open is always allowed (so all roles of an open tick land);
-        a fresh tick opens only while fewer than ``max_ticks`` have opened. Pure
-        read of the open-set under the lock; opening happens lazily in
-        :meth:`dump`. Always False on an inactive (non-rank-0) writer.
+        a fresh tick opens only while fewer than ``max_ticks`` have opened AND the
+        tick is at/above ``min_tick`` (post-Q-warm). Pure read of the open-set under
+        the lock; opening happens lazily in :meth:`dump`. Always False on an
+        inactive (non-rank-0) writer.
         """
         if self._inactive:
             return False
+        if self.min_tick > 0 and int(optimizer_tick) < self.min_tick:
+            return False  # pre-Q-warm tick — skip so the budget holds POST-warm ticks
         key = (int(global_step), int(optimizer_tick))
         with self._lock:
             if key in self._open_ticks:
@@ -311,4 +323,5 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
         dump_dtype=str(getattr(cap, "dump_dtype", "fp32")),
         rank=rank,
         rank0_only=bool(getattr(cap, "rank0_only", True)),
+        min_tick=int(getattr(cap, "min_tick", 0)),
     )
