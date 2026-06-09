@@ -566,6 +566,12 @@ comm_eff:
     # "bf16" (volume-saving diagnostic).
     dump_dtype: fp32
 
+    # EXP-26 disk-volume guard: capture ONLY rank 0 (default true). The audit's
+    # gradient roles are DP-reduced and Q/A/Â are sync_basis-consensus (identical
+    # across ranks), so rank 0 suffices; writing all 4 ranks blew the 200 GB box
+    # disk. Declared here so Hydra struct-mode accepts the CLI override.
+    rank0_only: true
+
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training

@@ -429,6 +429,12 @@ class CommEffCaptureConfig(BaseConfig):
     capture_g_dense: bool = False
     capture_fresh_anchor: bool = False
     dump_dtype: str = "fp32"
+    # EXP-26 disk-volume guard: capture ONLY rank 0 (default True). The audit's
+    # gradient roles are DP-reduced and Q/A/Â are sync_basis-consensus — identical
+    # across ranks — so rank 0 suffices, and writing all 4 ranks blew the box disk
+    # (76 GB for ONE arm => torch.save crashed mid-write on the full disk). Set
+    # False only if per-rank shards are genuinely needed.
+    rank0_only: bool = True
 
 
 @dataclass

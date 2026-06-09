@@ -123,6 +123,7 @@ class CaptureWriter:
         stratified_targets: int = 0,
         dump_dtype: str = "fp32",
         rank: Optional[int] = None,
+        rank0_only: bool = True,
     ):
         self.base_dir = capture_dir or os.path.join(os.getcwd(), "captures")
         self.max_ticks = int(max_ticks)
@@ -132,8 +133,17 @@ class CaptureWriter:
         if rank is None:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self.rank = int(rank)
+        # EXP-26 disk-volume guard: by default capture ONLY rank 0. The audit's
+        # gradient roles (G_dense / G_comp / G_corr / M / G_anchor) are DP-reduced
+        # (identical across ranks) and the powersgd Q/A/Â are sync_basis-consensus
+        # (also identical), so rank 0 is sufficient — and writing all 4 ranks blew
+        # the 200 GB box disk (76 GB for one arm) and crashed torch.save mid-write.
+        # ``rank0_only=False`` restores per-rank dumps (rarely needed).
+        self.rank0_only = bool(rank0_only)
+        self._inactive = self.rank0_only and self.rank != 0
         self.root = os.path.join(self.base_dir, f"rank{self.rank}")
-        os.makedirs(self.root, exist_ok=True)
+        if not self._inactive:
+            os.makedirs(self.root, exist_ok=True)
         self.manifest_path = os.path.join(self.root, "manifest.jsonl")
         self._lock = threading.Lock()
         # Set of (global_step, optimizer_tick) tuples that have opened a tick dir.
@@ -152,7 +162,8 @@ class CaptureWriter:
         )
         print(
             f"[comm_eff][EXP-26][capture] writer root={self.root} max_ticks={self.max_ticks} "
-            f"stratified_targets={self.stratified_targets} dump_dtype={dump_dtype} rank={self.rank}",
+            f"stratified_targets={self.stratified_targets} dump_dtype={dump_dtype} rank={self.rank} "
+            f"rank0_only={self.rank0_only} inactive={self._inactive}",
             flush=True,
         )
 
@@ -165,8 +176,10 @@ class CaptureWriter:
         A tick already open is always allowed (so all roles of an open tick land);
         a fresh tick opens only while fewer than ``max_ticks`` have opened. Pure
         read of the open-set under the lock; opening happens lazily in
-        :meth:`dump`.
+        :meth:`dump`. Always False on an inactive (non-rank-0) writer.
         """
+        if self._inactive:
+            return False
         key = (int(global_step), int(optimizer_tick))
         with self._lock:
             if key in self._open_ticks:
@@ -274,4 +287,5 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
         stratified_targets=int(getattr(cap, "stratified_targets", 0)),
         dump_dtype=str(getattr(cap, "dump_dtype", "fp32")),
         rank=rank,
+        rank0_only=bool(getattr(cap, "rank0_only", True)),
     )
