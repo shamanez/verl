@@ -116,3 +116,5 @@ PROMOTE_SKIPPED: EXP-25 reason="no promote_launcher_as (plan: promote_launcher_a
 - Status: DONE_AGGREGATE (sentinel + WandB finished)
 
 [2026-06-09T13:13:28+10:00] [orchestrator] WANDB BACKFILL complete + verified for all 4 exp25 50-step runs (step-50 row + val@50 were missing due to teardown-before-flush): exp25_alpha_0p0 val@50=0.3541, _0p3=0.6164, _0p5=0.7066, exp25_a0_kl001(rerun 5hormzfk)=0.6793. Each resumed→logged ~344-metric step-50 row + val@50, summary set to val@50, _step now 50, history has val@25 AND val@50. KL re-run COMPLETE (50 steps, German box 40156243 torn down): val@25=0.6960 val@50=0.6793 (sub-parity, BELOW floor 0.6914) → KL=guardrail prevents crash but signed_ema net-harmful, confirmed. COLLAPSE doc §7 updated to complete re-run. 0 live Vast boxes.
+[2026-06-09T21:41:25+10:00] [research-planner #26] plan written
+[2026-06-09T21:41:50+10:00] [triage] dispatched 1 planners, 0 issues already planned
