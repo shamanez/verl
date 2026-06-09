@@ -9,41 +9,43 @@
 # objective.
 #
 # ===========================================================================
-# THE "moment of truth" launcher for the next runs. EVERY circuit is an
-# independent env toggle so the full ablation grid is one launcher:
+# THE canonical communication-efficient base launcher. As of issue #25
+# (EXP-25, 2026-06-09) the comm-eff base is the ANCHOR CIRCUIT on a PowerSGD
+# codec, and the defaults below ENCODE it. Every circuit is still an
+# independent env toggle so ablations stay one-liners:
 #
-#   comm-eff master ........ COMM_EFF_ENABLED          (true)   off => byte-identical dense
-#   masking ................ COMM_EFF_MASK_ENABLED     (true)
-#   rescale ................ COMM_EFF_MASK_RESCALE     (true)   inverted-dropout h*mask/(1-p)
-#   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)  full (unmasked) grad every N steps
-#   anchor ................. COMM_EFF_ANCHOR_ENABLED   (false)
-#   spectral correction .... COMM_EFF_SPECTRAL_ENABLED (false)
+#   comm-eff master ........ COMM_EFF_ENABLED          (true)     off => byte-identical dense
+#   codec .................. COMM_EFF_COMPRESSION_TYPE (powersgd) the locked compressor
+#   PowerSGD rank .......... COMM_EFF_POWERSGD_RANK    (77)       byte-matched to mask p=0.95 (H=1536)
+#   anchor (MANDATORY) ..... COMM_EFF_ANCHOR_ENABLED   (true)     stale full-grad reference M
+#   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
+#   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
+#   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
+#   merger ................. COMM_EFF_SPECTRAL_ENABLED (true)     signed_ema fold of M into G
+#   merger weight alpha .... COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (0.5)
+#   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)    DEAD — the anchor replaced it
+#   legacy mask ............ COMM_EFF_MASK_ENABLED     (false)    prf_mask codec, reference only
 #
-# Defaults encode the project's findings on masked GRPO. NB a large grad_norm is
-# a SYMPTOM, not the disease: Adam's update is scale-invariant (mhat/sqrt(vhat)
-# cancels any constant gradient scaling) and bounded to ~order(lr), and verl
-# grad-clips on top — so a big raw norm cannot itself "explode" the update. The
-# two real failure modes are BIAS and VARIANCE.
-#   * the mask is per-element, keyed on each token's stable (sample_id,
-#     position_id) so it is packing-invariant across the differently-packed
-#     old_logprob and train forwards (exact cross-pass consistency).
-#   * rescale=true — inverted-dropout h*mask/(1-p) restores E[h*mask/(1-p)]=h,
-#     i.e. an UNBIASED mask. This is the load-bearing correctness property, not
-#     a "grad_norm tamer". WITHOUT it the mask is biased (E[h*mask]=(1-p)*h: the
-#     forward sits off-distribution, the GRPO importance ratio is corrupted),
-#     and Adam cannot fix a biased direction. DEFAULT ON.  ⚠ rescale is
-#     NECESSARY but NOT sufficient — it trades bias for VARIANCE (~p/(1-p)), so
-#     plain masked GRPO at high p is unbiased-but-noisy and still does not learn
-#     in a short run. That variance is what the anchor + spectral + grad-clip
-#     machinery (and a lower mask rate) exist to tame. Open: the mask-rate sweep
-#     p=0.9 -> 0.5 -> 0.1.
-#   * clean_cadence=0 (OFF). The periodic full-(unmasked)-gradient step is the
-#     NAIVE cadence method; it is NOT sustainable — the masked steps stay
-#     corrupted and the PPO clip fraction climbs toward saturation, so clipped
-#     tokens stop contributing gradient. Opt-in knob only, do not ship it.
-#   * anchor + spectral OFF — start from the mask-only path; layer these on only
-#     after a masked config is shown to actually LEARN (val/score), and to
-#     control the rescale's variance. Judge on learning, not on the grad_norm.
+# THE BASE in one line: PowerSGD r=77 + a continuously-maintained, delay_K=5
+# stale, full-coverage (196 matrices, DP-reduced) anchor gradient EMA M,
+# refreshed every 5 ticks from a no-hook isolated clone; the anchor OWNS the
+# PowerSGD basis Q (computes Q<-orth(V) from its stale-forward activations and
+# broadcasts it — the fast circuit is a read-only consumer, fail-closed from
+# ever writing Q); the signed_ema merger folds M into the fast gradient as
+# G = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M). These exact values are the
+# EXP-25 ground truth (runs/EXP-25/resolved_params.txt, alpha=0.5 arm).
+#
+# WHY this base + the honest result (do NOT restate numbers here — they live in
+# research/runs/SUMMARY.md): the anchor is the REALISTIC decentralized-PP
+# setting — a continuously-maintained stale anchor replaces the old clean_cadence
+# periodic-dense-step crutch, which was unrealizable (full-H transfer + itself
+# stale on a slow link). The circuit is mechanically PROVEN (R1 full-coverage
+# DP-reduced M + R2 anchor-owns-Q probe gates green). The signed_ema MERGER,
+# however, is FALSIFIED — net-harmful vs plain PowerSGD (#25 verdict STOP). So
+# the substrate is the settled base and the MERGER (correction_mode + its
+# weights) is the open research axis you sweep from here; the substrate is held
+# fixed. Grad_norm is a SYMPTOM not the disease (Adam is scale-invariant + verl
+# grad-clips); judge on val/critic-score, not grad_norm.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -57,21 +59,23 @@
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: multi-GPU only (4..8). With anchor OFF (default) the ~3 GB anchor
-# clone is NOT allocated, so 4×H200 fits the restored baseline knobs
-# (mini=64, wedge=36864, util=0.4) comfortably. Only re-enabling the anchor
-# (COMM_EFF_ANCHOR_ENABLED=true) brings the clone back — then prefer 8×GPU or
-# halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432.
+# Hardware: multi-GPU only (4..8). The mandatory anchor allocates a ~3 GB
+# no-hook clone/rank for its stale forward-backward, so the default actor token
+# budget is already halved (PPO_MAX_TOKEN_LEN_PER_GPU=18432) to fit 4×H200; this
+# is the EXP-25 footprint. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
+# a reference-only ablation) frees the clone and you can raise it back to 36864.
 #
-# Ablation examples:
-#   # mask-only, no rescale (the biased-mask A/B point):
-#   COMM_EFF_MASK_RESCALE=false EXPERIMENT_NAME=ce_mask_only bash <thisfile>
-#   # dense control via the same launcher:
+# Ablation examples (the substrate is held fixed; the MERGER is the axis):
+#   # sweep the merger weight (the research axis):
+#   COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.7 EXPERIMENT_NAME=ce_a0p7 bash <thisfile>
+#   # dense control via the same launcher (master switch off => byte-identical):
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
-#   # mask-rate sweep point:
-#   COMM_EFF_MASK_P=0.5 EXPERIMENT_NAME=ce_p0p5 bash <thisfile>
+#   # legacy prf_mask codec (reference only — NOT the base; cannot anchor-own-Q):
+#   COMM_EFF_COMPRESSION_TYPE=prf_mask COMM_EFF_MASK_ENABLED=true \
+#     COMM_EFF_ANCHOR_OWNS_Q=false EXPERIMENT_NAME=ce_mask_ref bash <thisfile>
 #
-# See examples/grpo_trainer/VAST_README.md for the broader Vast.ai pattern.
+# See examples/grpo_trainer/COMM_EFF_CONFIG.md for the full knob reference and
+# examples/grpo_trainer/VAST_README.md for the broader Vast.ai pattern.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -151,8 +155,8 @@ echo "=== test:  $(python3 -c "import pyarrow.parquet as p; print(p.read_table('
 # ---------------------------------------------------------------------------
 # 5. Model + training config — matches the dense baseline launcher 1:1
 #    EXCEPT the objective is no-KL no-entropy (the method's design) and
-#    `actor.fsdp_config.use_orig_params=true` (so the optional spectral hook,
-#    when enabled, sees full 2D Tensor gradients post-FSDP-reduce).
+#    `actor.fsdp_config.use_orig_params=true` (REQUIRED so the anchor + merger
+#    hooks see full 2D Tensor gradients post-FSDP-reduce — the base needs it).
 # ---------------------------------------------------------------------------
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 
@@ -208,30 +212,33 @@ export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_comm_eff_baseline}"
 
-# Token budget per micro-batch for dynamic batching.
-PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-36864}"
+# Token budget per micro-batch for dynamic batching. Actor budget halved to
+# 18432 (from 36864) to fit the mandatory anchor's ~3 GB clone on 4×H200 (the
+# EXP-25 footprint); log_prob/ref keep 36864 (no clone on those paths).
+PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-18432}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method — hydra knob surface (see header).
-#    Every circuit is an independent env toggle. Defaults = the mask-only
-#    "comm-eff baseline" (mask + rescale; cadence/anchor/spectral
-#    OFF). Field names mirror verl/trainer/config/actor/actor.yaml exactly —
-#    do NOT reference a knob absent from that schema (Hydra struct-mode rejects
-#    unknown keys regardless of enabled flags; that bit us on clean_cadence).
+#    Every circuit is an independent env toggle. Defaults = the ANCHOR-CIRCUIT
+#    base (PowerSGD r=77 + anchor on + anchor-owns-Q + signed_ema merger; the
+#    EXP-25 ground truth, runs/EXP-25/resolved_params.txt). Field names mirror
+#    verl/trainer/config/actor/actor.yaml exactly — do NOT reference a knob
+#    absent from that schema (Hydra struct-mode rejects unknown keys regardless
+#    of enabled flags; that bit us on clean_cadence).
 # ---------------------------------------------------------------------------
 COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
-# --- EXP-20/M6 codec selector: dense | prf_mask | powersgd ---
-# "dense" (default) keeps the LEGACY behavior: the codec is selected by
-# COMM_EFF_MASK_ENABLED below (mask on => prf_mask), so every prior comm-eff run
-# is byte-unchanged. Set COMM_EFF_COMPRESSION_TYPE=powersgd to select the EXP-20
-# PowerSGD activation projector instead. The mask arm and the powersgd arm thus
-# call THIS SAME launcher with only the codec knobs differing (stability
-# contract — never re-type the baseline).
-COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-dense}"
-# --- activation mask ---
-COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+# --- codec selector: dense | prf_mask | powersgd ---
+# powersgd (default) = the locked compressor for the anchor base; it is the ONLY
+# codec compatible with anchor-owns-Q. prf_mask is retained as a reference-only
+# codec (COMM_EFF_COMPRESSION_TYPE=prf_mask + COMM_EFF_MASK_ENABLED=true +
+# COMM_EFF_ANCHOR_OWNS_Q=false); "dense" selects the codec by COMM_EFF_MASK_ENABLED
+# (legacy). All arms call THIS SAME launcher with only the codec/merger knobs
+# differing (stability contract — never re-type the baseline).
+COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
+# --- activation mask (reference-only codec; OFF in the PowerSGD anchor base) ---
+COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
 COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
 COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
 COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
@@ -239,57 +246,57 @@ COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
 # Fallback if training is unstable: try N unmasked warmup steps (not yet
 # implemented) and/or COMM_EFF_MASK_RESCALE=true (theory's 1/(1-p), bf16-risky).
-# --- naive periodic clean (unmasked) step: 0=OFF. NOT sustainable (PPO clip saturation). ---
+# --- naive periodic clean (unmasked) step: 0=OFF. DEAD — the anchor replaced it
+#     (a full-rank clean@K is not realizable on a slow link + is itself stale).
+#     Leave at 0; do not re-enable in the base. ---
 COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
-# --- anchor circuit (OFF by default) ---
-COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-false}"
+# --- anchor circuit (MANDATORY — the comm-eff base; EXP-25) ---
+COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
+# how OFTEN the anchor recomputes M+Q, in optimizer/mini-batch TICKS (not global
+# steps: train_batch 128 / ppo_mini 64 = 2 ticks/step, so cadence 5 ≈ every 2.5 steps).
 COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
-# EXP-16: staleness (in optimizer steps) of the weight snapshot the anchor
-# forwards from. Config field already exists (comm_eff.anchor.delay_K, default
-# 20, validated >=0); EXP-16 plumbs it through env. Default keeps the schema
-# default so non-EXP-16 runs are unchanged.
-COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
-# EXP-25 (R2): anchor-owns-Q. When true the ANCHOR owns the PowerSGD basis Q
-# (fast maybe_update_basis + fast sketch gated OFF; anchor computes Q ← orth(V)
-# from its slow-net stale-forward activations and broadcasts Q + M every refresh).
-# false (default) = EXP-20 fast-owns-Q (byte-identical). Active iff
-# COMM_EFF_COMPRESSION_TYPE=powersgd AND COMM_EFF_ANCHOR_ENABLED=true.
-COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"
-# --- anchor-guided gradient correction (OFF by default) ---
-# EXP-25: the live correction is the signed_ema merger; the dead SVD/Tikhonov/
-# seeded "reweight" path was removed, so alpha/tau/svd_mode/basis_cache/
-# seed_anchor_cache/rank are gone from the schema. The combiners consult only
-# the anchor-gradient EMA M_anchor.
-COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-false}"
-COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.9}"
-# Correction cadence in optimizer steps. Default 1 = fire every step (strict
-# no-op for the disabled path). Set == COMM_EFF_ANCHOR_CADENCE so the correction
-# fires only on the steps the anchor EMA was just refreshed.
+# staleness: the anchor forwards from a delay_K-tick-stale weight snapshot.
+# delay_K=5 is the canonical staleness (matches cadence). NB the schema default
+# is 20 — the base PINS it to 5 here; do not rely on the schema default.
+COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-5}"
+# EXP-25 (R2): anchor-owns-Q — THE structural inversion + a mandatory base
+# property. true (default): the ANCHOR is the ONLY thing that updates the
+# PowerSGD basis Q (fast maybe_update_basis + fast sketch gated OFF, fail-closed;
+# anchor computes Q ← orth(V) from its stale-forward activations and broadcasts
+# Q + M every refresh). Set false only for the reference-only fast-owns-Q
+# ablation. Active iff COMM_EFF_COMPRESSION_TYPE=powersgd AND anchor enabled.
+COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
+# --- anchor-guided gradient correction = the MERGER (ON in the base; EXP-25/R3).
+#     The merger is the open RESEARCH AXIS — signed_ema is falsified (why + the
+#     numbers: research/runs/SUMMARY.md); sweep correction_mode + its weights from
+#     here. The combiners consult only the anchor-gradient EMA M_anchor. ---
+COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
+COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.95}"       # M EMA decay (matches the SL reference)
+# Correction cadence in optimizer ticks. 1 = fire every tick (the merger must
+# fire every fast step).
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
-COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-gpu}"
-# Cap on target matrices corrected per step. -1 = no cap = full coverage of all
-# 196 projection matrices the merger corrects (EXP-25 default; a residual cap
-# silently drops merger targets). >= 0 only as a diagnostic throttle.
+COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload full-coverage M (OOM guard)
+# Cap on target matrices corrected per tick. -1 = no cap = full coverage of all
+# 196 projection matrices the merger corrects (a >=0 cap silently drops merger
+# targets — diagnostic throttle only).
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
-# EXP-25 (R3): spectral correction MODE (anchor combiner) + its knobs. These
-# config fields exist + are validated in verl/workers/config/comm_eff.py and are
-# read into the SpectralFilter in verl/workers/comm_eff/state.py. The dead
-# "reweight" mode was removed; the dataclass default is now signed_ema (the SL
-# merger). "inject" (A2) / "blend" (A3) remain as alternate combiners.
-COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"  # signed_ema (default, dataclass) | inject | blend
-COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # inject force (correction_mode=inject); dataclass default 1.0
-COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # convex-blend weight (correction_mode=blend); dataclass default 0.5
+# EXP-25 (R3): merger MODE. signed_ema (default) = the live merger; inject/blend
+# remain as alternate combiners. Validated in verl/workers/config/comm_eff.py,
+# read into the SpectralFilter in verl/workers/comm_eff/state.py.
+COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"  # signed_ema | inject | blend
+COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # force when correction_mode=inject
+COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # weight when correction_mode=blend
 # EXP-25 (R3): signed_ema merger weight alpha in G=alpha*G_noisy+(1-alpha)*|G_noisy|*sign(M).
-# alpha=0 = pure sign-merger (SFT default); alpha=1 = G_noisy unchanged. THE swept axis.
-# Active iff correction_mode=signed_ema. dataclass default 0.0.
-COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.0}"
-# --- EXP-20/M6 PowerSGD activation compression (active iff
-#     COMM_EFF_COMPRESSION_TYPE=powersgd). Defaults = the issue VII.1 candidate:
-#     rank=102 (byte-matched to the PRF mask at p=0.95), warm block power
-#     iteration every step, compress the old-logprob recompute (=> ρ≈1),
-#     sync_basis=true (single shared consensus Q across DP ranks — REQUIRED
-#     under DP), fp32 QR (REQUIRED — bf16-QR loses orthogonality). ---
-COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-102}"               # r; 102 ≡ p=0.95 (q·H=102.4)
+# alpha=0 = pure sign-merger (collapses); alpha=1 = G_noisy unchanged (= no merge).
+# 0.5 (default) = the EXP-25 best / resolved-config arm. THE swept research axis.
+COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.5}"
+# --- PowerSGD activation compression (the base codec). Defaults: rank=77
+#     (byte-matched to the prf_mask at p=0.95 for H=1536: 0.05·1536≈77), block
+#     power iteration, compress the old-logprob recompute (=> ρ≈1), sync_basis=true
+#     (single shared consensus Q across DP — REQUIRED under DP), fp32 QR (REQUIRED
+#     — bf16-QR loses orthogonality). NB Q is updated by the ANCHOR (owns_q=true),
+#     NOT by the fast update_cadence path (which is gated off in the base). ---
+COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"               # r=77 ≡ p=0.95 (0.05·H, H=1536)
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
 COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks (same as mask)
 COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # orth(V) every N steps
@@ -300,7 +307,7 @@ COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 REQ
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
 if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
-  echo "WARN: anchor enabled -> ~3 GB clone/rank is back; prefer 8×GPU or halve PPO_MAX_TOKEN_LEN_PER_GPU to 18432." >&2
+  echo "INFO: anchor ON (the base) -> ~3 GB no-hook clone/rank; the default PPO_MAX_TOKEN_LEN_PER_GPU=18432 fits 4×H200. If you raise it, prefer 8×GPU." >&2
 fi
 
 LOG="${LOG:-/workspace/verl/runs/${EXPERIMENT_NAME}/train.log}"

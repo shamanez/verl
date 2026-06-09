@@ -4,15 +4,21 @@ This is the operator reference for the comm-eff method wired into
 `vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` (Qwen2.5-1.5B / GSM8K / vanilla
 GRPO). It documents **what the method does, every knob, and how to change it**.
 
-The method masks per-(token, channel) activations at the pipeline-stage boundary
-layers during the *training* forward/backward only. **Rollouts come from ordinary,
-unmasked vLLM** — compression is about inter-stage *training* traffic. With the
-method disabled the path is **byte-identical to upstream verl** (proven: dense
-reference cell, `grad_norm 0.387`, GSM8K val acc 74.1%).
+The comm-eff base (issue #25) is the **anchor circuit on a PowerSGD codec**: PowerSGD
+projects each pipeline-boundary activation onto a low-rank basis `Q`, a mandatory
+**anchor** maintains a stale full-gradient reference `M` and is the **only** thing that
+updates `Q`, and a **merger** folds `M` into the fast gradient. **Rollouts come from
+ordinary, unmasked vLLM** — compression is about inter-stage *training* traffic. With the
+method disabled (`comm_eff.enabled=false`) the path is **byte-identical to upstream verl**.
+The legacy per-(token, channel) activation **mask** (`prf_mask`) is retained as a
+reference-only codec. Result + why the merger is still open: `research/runs/SUMMARY.md`.
 
 > All knobs are leading `KEY=value` env overrides in front of the launcher
 > (`launcher reads them as ${VAR:-default}`). They map to
-> `actor_rollout_ref.actor.comm_eff.*` Hydra fields.
+> `actor_rollout_ref.actor.comm_eff.*` Hydra fields. **The `default` column below is the
+> Hydra dataclass default (the all-OFF state, so `enabled=false` is byte-identical dense);
+> the BASE values that actually run are the launcher `${VAR:-default}` — see the launcher
+> header + `FIXED_CONTROL_SURFACE.md`, not duplicated here.**
 
 ## The master switch
 
@@ -20,7 +26,12 @@ reference cell, `grad_norm 0.387`, GSM8K val acc 74.1%).
 |---|---|---|---|
 | `COMM_EFF_ENABLED` | `comm_eff.enabled` | `false` | **`false` ⇒ strict no-op = unmodified dense verl.** Set `true` to turn the method on. Everything below is inert when this is `false`. |
 
-## 1. Activation mask (the core)
+## 1. Activation mask (`prf_mask`) — reference-only codec (NOT the base)
+
+> The base codec is PowerSGD (§5). The mask below is the legacy codec, kept for
+> reference/ablation; to run it set `COMM_EFF_COMPRESSION_TYPE=prf_mask
+> COMM_EFF_MASK_ENABLED=true COMM_EFF_ANCHOR_OWNS_Q=false`.
+
 
 | env | hydra | default | how to change |
 |---|---|---|---|
@@ -43,20 +54,25 @@ How the masked activation `h⊙m` is re-scaled before it crosses the wire:
 
 To select explicitly: `actor_rollout_ref.actor.comm_eff.mask.rescale_mode=rms_match`.
 
-## 2. Clean cadence — *the stabilizer that works*
+## 2. Clean cadence — DEAD (superseded by the anchor)
 
 | env | hydra | default | how to change |
 |---|---|---|---|
-| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | Every Nth step runs **unmasked** (a true dense step). `0` = off. |
+| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | Every Nth step runs a full **unmasked** dense step. **Leave at `0`.** |
 
-**This is the lever that recovers dense parity.** EXP-16: pure mask stalls
-(reward 0.13→0.15); `clean_cadence=4` → 0.62 in 20 steps; `clean_cadence=5` over
-50 steps → reward **0.778 / val acc 72.9%** ≈ dense (0.779 / 74.1%). The clean
-step periodically re-correlates the masked actor with the on-policy rollout
-(pearson→0.999 on clean steps vs ~0.005 on masked steps). **To trade compression
-for convergence, lower the cadence (more frequent clean steps).**
+A periodic full-rank dense step recovered parity in early masked experiments, but it is
+**not communication-efficient** (full-H transfer) and, on a real decentralized-PP link,
+would itself be stale. The mandatory **anchor circuit** (§3) is its realistic replacement.
+`clean_cadence` is kept only as a historical/diagnostic knob, is OFF in the base, and
+should not be re-enabled.
 
-## 3. Anchor EMA + spectral correction (advanced; default OFF)
+## 3. Anchor circuit + merger — the MANDATORY base (issue #25)
+
+> These default OFF in the Hydra dataclass (byte-identity) but are **ON in the launcher
+> base**: the anchor is mandatory and is the only thing that updates `Q`
+> (`anchor.owns_q=true`); the `signed_ema` merger folds `M` into the fast gradient. The
+> merger is the open **research axis** (`signed_ema` is falsified — see `SUMMARY.md`).
+
 
 | env | hydra | default | how to change |
 |---|---|---|---|
@@ -73,12 +89,12 @@ for convergence, lower the cadence (more frequent clean steps).**
 | `COMM_EFF_SPECTRAL_INJECT_GAMMA` | `spectral.inject_gamma` | `1.0` | injection strength for `correction_mode=inject`; unused otherwise. |
 | `COMM_EFF_SPECTRAL_BLEND_ETA` | `spectral.blend_eta` | `0.5` | convex-blend weight for `correction_mode=blend`; unused otherwise. |
 
-> **Note (EXP-25):** the initial SVD/Tikhonov/two-sided-projection "reweight"
-> correction and its seeded-anchor cache were removed — project evidence (EXP-21)
-> proved that projection operator inert on this circuit (cos≈0.5, `G_filt`≈0). The
-> live correction is the signed-EMA merger (`correction_mode=signed_ema`), which
-> takes the gradient MAGNITUDE from the fast compressed grad and the SIGN from the
-> K-stale anchor EMA. Kept **OFF by default** (`spectral.enabled=false`).
+> **Note (EXP-25):** the old SVD/Tikhonov/two-sided-projection "reweight" correction +
+> its seeded-anchor cache were **removed** (EXP-21 proved that projection operator inert
+> here, `G_filt`≈0). The live merger is `signed_ema` — magnitude from the fast compressed
+> grad, sign from the stale anchor EMA `M`. It is **ON in the base** but **falsified** as a
+> learning improvement (net-harmful vs plain PowerSGD; see `SUMMARY.md`) — the merger
+> primitive is the open research axis, not a settled win.
 
 ## 4. Throughput / memory (not comm_eff fields, but you will need these)
 
@@ -99,19 +115,17 @@ control (byte-identical to upstream). This is the parity baseline.
 COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=25 \
 EXPERIMENT_NAME=dense_ref bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
-# Recommended comm-eff config (mask + rescale + clean cadence — recovers parity)
-COMM_EFF_ENABLED=true COMM_EFF_MASK_ENABLED=true COMM_EFF_MASK_P=0.9 \
-COMM_EFF_MASK_RESCALE=true COMM_EFF_CLEAN_CADENCE=5 \
-USE_DYNAMIC_BSZ=True PPO_MAX_TOKEN_LEN_PER_GPU=98304 \
-TOTAL_TRAINING_STEPS=50 EXPERIMENT_NAME=mask_p0p9_rescale_clean5 \
+# The anchor base — nothing to set, the launcher defaults ARE the base
+TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=ce_anchor_base \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
-# Spectral switch-on (advanced; halve token budget for anchor's 2nd pass)
-COMM_EFF_ENABLED=true COMM_EFF_MASK_ENABLED=true COMM_EFF_MASK_P=0.9 \
-COMM_EFF_MASK_RESCALE=true COMM_EFF_ANCHOR_ENABLED=true COMM_EFF_ANCHOR_CADENCE=2 \
-COMM_EFF_ANCHOR_DELAY_K=2 COMM_EFF_SPECTRAL_ENABLED=true COMM_EFF_SPECTRAL_CADENCE=2 \
-USE_DYNAMIC_BSZ=True PPO_MAX_TOKEN_LEN_PER_GPU=32768 \
-TOTAL_TRAINING_STEPS=20 EXPERIMENT_NAME=mask_anchor2_spectral2 \
+# Sweep the merger axis (the research axis)
+COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.7 EXPERIMENT_NAME=ce_a0p7 \
+bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+
+# Legacy prf_mask codec (reference only; cannot anchor-own-Q)
+COMM_EFF_COMPRESSION_TYPE=prf_mask COMM_EFF_MASK_ENABLED=true COMM_EFF_ANCHOR_OWNS_Q=false \
+COMM_EFF_MASK_P=0.9 EXPERIMENT_NAME=ce_mask_ref \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
