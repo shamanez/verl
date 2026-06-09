@@ -69,9 +69,24 @@ run_arm () {
   echo "=== EXP-26 Step A arm=$arm DONE $(date -Iseconds) ===" | tee -a /workspace/runs/EXP-26/stepA.log
 }
 
-# A0 dense control (comm-eff OFF). capture still on for the dense self-baseline.
+# A0 dense control. EXP-26 hotfix: capture.enabled has NO effect when
+# comm_eff.enabled=false (the master flag gates the whole comm_eff path incl.
+# the capture writer + the G_dense clone backward). So run A0 with comm_eff
+# ENABLED but a TRUE-IDENTITY codec/merger: compression_type=dense (no projector
+# => fast grad IS the dense grad, G_comp==G_dense) + mask OFF + ef_powersgd with
+# ef_decay=ef_clip=0 (the limiting-case identity => G_corr==G_comp). The anchor
+# stays on for parity with A1/A2. This makes the capture hooks + the parallel
+# uncompressed G_dense backward fire while applying ZERO compression/correction
+# (verified true-dense: powersgd compressor is None, merger is a no-op).
 run_arm A0_dense \
-  env COMM_EFF_ENABLED=false EXPERIMENT_NAME=exp26_A0_dense
+  env COMM_EFF_ENABLED=true \
+      COMM_EFF_COMPRESSION_TYPE=dense \
+      COMM_EFF_MASK_ENABLED=false \
+      COMM_EFF_SPECTRAL_ENABLED=true \
+      COMM_EFF_SPECTRAL_CORRECTION_MODE=ef_powersgd \
+      COMM_EFF_SPECTRAL_EF_DECAY=0.0 \
+      COMM_EFF_SPECTRAL_EF_CLIP=0.0 \
+      EXPERIMENT_NAME=exp26_A0_dense
 
 # A1 plain PowerSGD r77 (anchor on + owns Q, NO merger) — H1 discriminator.
 run_arm A1_powersgd_r77 \
