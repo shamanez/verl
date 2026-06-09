@@ -4,6 +4,13 @@ Move the comm-efficient GRPO frontier from "guess a merger and run a full traini
 
 > **Gating.** Step A (the real-gradient geometry audit) is a **diagnostic gate**. The training arms (Steps B/C/E) do **not** launch until Step A returns a decision. #24 (closed, EF-PowerSGD on the PowerSGD residual) is **carried forward here as Step B**, now gated behind the audit instead of launched blind.
 
+> **Non-negotiable substrate invariants — realism constraints (do NOT relax, even slightly, in any arm).** The north-star is a *realistic* communication-efficient, decentralized pipeline-parallel setting, so three properties of the **training path** are fixed for every arm here and may not be tuned, ablated, or "temporarily" relaxed:
+> 1. **`Q` is updated ONLY by the anchor network** (`anchor.owns_q=true`). The fast/compressed circuit is a strict read-only consumer of `Q` (fast `maybe_update_basis` is fail-closed). No arm may let the fast path write `Q`.
+> 2. **A full, uncompressed, full-coverage gradient pass happens ONLY inside the anchor network.** The fast/training path is *always* compressed — there is no fresh full-rank "clean step" on it. That fresh dense step is exactly the unrealistic crutch (`clean_cadence`) the anchor replaced: full-H transfer, impossible on a real decentralized link.
+> 3. **Anchor staleness is mandatory** (`delay_K ≥ 5`, optimizer ticks). The anchor reference is `delay_K`-stale by construction and is never made fresh — on a real decentralized-PP link the full-gradient reference is itself stale on a slow link. `delay_K=0` is **forbidden as a training configuration.**
+>
+> **These bind the METHOD/training path only.** Step A's audit additionally captures two *measurement-only* probes — a parallel uncompressed `G_dense` backward and a `delay_K=0` fresh anchor gradient — that exist solely to compute the geometry diagnostics (update cosine; structural-vs-staleness sign decomposition). Like a validation pass, these probes **never feed the optimizer, are not part of the method, and are removed after the audit.** They do not relax invariants 2–3.
+
 **Prior-experiment history (W&B):** https://wandb.ai/shamanework-pl/verl_compression_research?nw=nwusershamanework
 Reference runs (read, never re-run): dense `5e2jpho9` (val@50 **0.7536**) · A0 PowerSGD r77+fresh-clean@5 `oquyeic3` (**0.7415**) · no-refresh PowerSGD r77 floor = EXP-23 A1 (**0.6914**) · EXP-25 `signed_ema` α=0.5 `1wulaelw` (**0.7066**) / α=0.3 `r8kc702g` (0.6164) / α=0.0 `uyrpaftw` (0.3541) · α=0 + KL@0.001 `5hormzfk` (0.6793, below floor).
 
@@ -21,6 +28,11 @@ baseline_run:    EXP-25            # references (dense/A0/floor/EXP-25 arms) rea
 depends_on:      [EXP-25]          # terminal STOP → references + the falsified mechanism this issue starts from
 seed_replicates: 1                 # directional curve-match, single seed, matching EXP-20/23/25
 promote_launcher_as: none          # promote a canonical launcher only when a method recovers PARITY with a understood mechanism (human decides)
+non_negotiables:                   # REALISM constraints — bind the TRAINING path of EVERY arm; never tune/ablate/relax (see the invariants callout)
+  - anchor_owns_Q                  # Q updated ONLY by the anchor; fast path read-only on Q (maybe_update_basis fail-closed)
+  - full_pass_only_in_anchor       # the only uncompressed full-coverage gradient pass is the anchor's; fast/training path is ALWAYS compressed; NO fresh clean step
+  - mandatory_staleness            # anchor is delay_K>=5 stale by construction; delay_K=0 forbidden as a training config (a real decentralized link is stale)
+  # NB: Step A's parallel-uncompressed G_dense + delay_K=0 fresh-anchor grad are MEASUREMENT-ONLY probes (never fed to the optimizer), NOT a relaxation of the above.
 hypothesis: >
   On the fixed GSM8K surface (Qwen2.5-1.5B-Instruct, vanilla GRPO no-KL/no-entropy, lr 1e-6,
   train_batch 128, ppo_mini 64, n=8, max_response 16384, anchor on + owns Q, PowerSGD r=77,
@@ -101,7 +113,7 @@ The EXP-25/dense/PowerSGD logs and W&B scalars do **not** contain per-target gra
 
 - **H1 (primary, decided by Step A).** The #25 lag is merger **direction corruption**, not rank-77 compression. Prediction: `cos(G_dense, G_comp) ≥ 0.95` post-warmup for plain PowerSGD, while `cos(G_dense, G_corr)` collapses for `signed_ema`.
 - **H2 (`Q` geometry, decided by Step A).** `Q_act` (activation-energy basis) captures activation energy well (≈0.9994) but **under-captures GRPO update energy**, with the deficit concentrated in **off-principal** directions (per `2511.08567`). If true → an RLVR-native `Q` (Step C) is needed; if `Q_act` already captures update energy → skip Step C, go straight to EF (Step B).
-- **H3 (sign disagreement is structural).** Sign-agreement(`M`, `G_comp`) ≈ 50% **even at `delay_K=0`** (fresh anchor). If true → sign-replacement is permanently unrecoverable and must never return; if it rises sharply at `delay_K=0` → the disagreement was staleness, a different (still non-sign-replacement) fix applies.
+- **H3 (sign disagreement is structural).** Sign-agreement(`M`, `G_comp`) ≈ 50% **even at `delay_K=0`** (fresh anchor — a *measurement-only* probe; training staleness stays `delay_K≥5` per the invariants). If true → sign-replacement is permanently unrecoverable and must never return; if it rises sharply at `delay_K=0` → the disagreement was staleness, a different (still non-sign-replacement) fix applies.
 - **H4 (direction-preserving fix recovers parity).** Error-feedback on the PowerSGD residual (Step B) re-injects the dropped `(I−QQᵀ)` energy **without overriding direction**, recovering val@50 into the PowerSGD/fresh-clean band with improved update cosine and no length/clip collapse.
 - **H5 (parity ceiling — frames the non-goal).** Because only ~0.06% of activation energy is dropped, "anchor corrects compression bias" has a **realistic ceiling of parity with dense**, not surpass. A surpass claim would require an extra-dense information channel (the stale clean anchor is not one — dense already sees full uncompressed activations every step). **Parity first; surpass is out of scope here.**
 
@@ -148,6 +160,8 @@ All dumped in **fp32**, at the same `(global_step, optimizer_tick)` for the dens
 | Anchor gradient EMA | `M` (β=0.95) | `spectral_filter.py:181` | sign(`M`) vs sign(`G_comp`); `M` energy principal/off-principal |
 | Per-target update `rel_change` | `‖G_corr−G_comp‖/‖G_comp‖` | `spectral_filter.py:310` | cross-check the √2 disagreement signature |
 
+The `G_dense` parallel uncompressed backward and the `delay_K=0` fresh anchor gradient are **measurement-only probes** (see the non-negotiable invariants callout): they are captured to compute the diagnostics, **never feed the optimizer**, and are removed after the audit — they do not relax the "full pass only in the anchor" / mandatory-staleness invariants.
+
 Derived audit outputs (per target, per step): SVD of `G_dense` → top-k principal subspace (k at 90% energy) vs tail; fraction of `G_dense`/`G_comp`/`G_corr`/`M` energy in each; `‖QQᵀ G‖²/‖G‖²` for the **gradient** vs the activation; all four cosines; sign-agreement at `delay_K∈{0,5}`; per-layer principal-subspace rotation; bf16-zero-but-fp32-nonzero update fraction.
 
 ---
@@ -184,7 +198,7 @@ Stop a merger / arm immediately if any holds:
 - **response length explodes** (> 2× step-10 baseline) while val/train look superficially healthy;
 - `clip_ratio` enters the **0.3–0.9** danger band;
 - `val@50` falls **below the no-refresh floor (0.6914)** without a clear diagnostic reason;
-- the **fast path updates `Q`** (anchor must own `Q`).
+- **any realism invariant is broken on the training path** — the fast path updates `Q`; any full/uncompressed/full-coverage gradient pass runs on the fast/training path (the full pass must live only in the anchor); or anchor staleness is relaxed below `delay_K=5` / set fresh.
 
 ---
 
@@ -205,7 +219,7 @@ Stop a merger / arm immediately if any holds:
 - **No training-objective / verifier changes** — vanilla GRPO, no-KL/no-entropy stays the fixed control surface. KL / entropy / length caps may appear **only** as explicitly-labeled *guardrail diagnostics* on a separate lineage, never as a fix for a merger and never folded into the control surface.
 - **No broad rank sweep before the geometry is diagnosed** (rank 77 is held; `Q` *content* is the lever, not its size, until Step A says otherwise).
 - **No dense-surpass claim before parity is recovered** with a mechanism understood from the audit (H5: the anchor-corrects-bias ceiling is parity, ~0.06% recoverable energy).
-- **No fast-path ownership of `Q`.**
+- **No relaxation of the realism invariants** (the substrate-invariants callout): `Q` updated **only** by the anchor; the **full gradient pass only inside the anchor** (training path always compressed, no fresh clean step); **mandatory `delay_K≥5` staleness**. These define the realistic decentralized-PP scenario — they are not hyperparameters and may not be tuned or ablated. (Step A's measurement-only `G_dense` / `delay_K=0` probes are not an exception — they never touch the optimizer.)
 
 ---
 
