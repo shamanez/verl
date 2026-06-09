@@ -1,10 +1,10 @@
-# Research Status — 2026-06-10T00:16:22.247136+10:00
+# Research Status — 2026-06-10T01:44:17.176692+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 26 | Geometry audit + ef_powersgd (#25 follow-up) | RUNNING (monitor active) | 4×H200 (i_40242796) | — | AUTHORITATIVE Step A re-run (3 defects fixed, gates GREEN: anchor_q 0→4, rel_err→0.024, G_dense targets→14). exp/26 @e0d1e871. B/C gate on A-DECISION. |
+| 26 | Geometry audit + ef_powersgd (#25 follow-up) | STEP-A STUCK→hotfix | 4×H200 (i_40242796, warm) | — (stage gate) | H3 CONFIRMED (sign coin-flip); H1/H2 blocked on broken G_dense parallel-backward (codec-ON). Runner fixing w/ gate cos(G_dense,G_anchor)≥0.95. Escalate→STUCK if backward needs design change. No verdict.md (staged; box warm for Step B). |
 
 ## Last tick
 2026-06-09T22:38:52+10:00 · running=[26] · analyzing=[] · logging=[] · blocked=[]
