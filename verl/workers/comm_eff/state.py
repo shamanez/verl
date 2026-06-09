@@ -473,18 +473,36 @@ class CommEffState:
     def current_optimizer_tick(self) -> int:
         """The optimizer tick the CURRENT train_batch will land on (1-based).
 
-        EXP-26 capture key. ``spectral_step`` / ``anchor_step`` are advanced AFTER
-        the backward (in the grad-correction / anchor hooks), so DURING the
-        forward + backward of train_batch N they still hold N-1. The tick this
-        batch's tensors belong to is therefore ``spectral_step + 1``. ALL capture
-        roles (the powersgd-hook A/Â/Q, the merger G_comp/G_corr, the anchor
-        M/G_anchor, the parallel G_dense, the delay_K=0 fresh-anchor probe) key on
-        THIS so they co-locate under one ``(global_step, optimizer_tick)`` and the
-        ``max_ticks`` budget counts OPTIMIZER ticks (not the hundreds of
-        per-micro-batch forward generations the activation hook would otherwise
-        emit, which starved the budget in the first Step-A run). Pure read.
+        EXP-26 capture key. ALL capture roles (the powersgd-hook A/Â/Q, the merger
+        G_comp/G_corr, the anchor M/G_anchor, the parallel G_dense, the delay_K=0
+        fresh-anchor probe) key on THIS so they co-locate under one
+        ``(global_step, optimizer_tick)`` and the ``max_ticks`` budget counts
+        OPTIMIZER ticks (not the hundreds of per-micro-batch forward generations
+        the activation hook would otherwise emit, which starved the budget).
+
+        Both ``spectral_step`` (grad-correction hook) and ``anchor_step`` (anchor
+        refresh) advance once per ``train_batch`` AFTER/at the top of the batch, so
+        DURING the batch's forward+backward they trail by one. The per-batch tick
+        is therefore ``max(spectral_step, anchor_step) + 1``. We take the MAX
+        because either counter may be inert on a given arm: a no-merger arm
+        (``spectral.enabled=false``, e.g. the A1 plain-PowerSGD audit arm) never
+        advances ``spectral_step`` (the grad-correction hook early-returns on
+        ``spectral is None``) — so keying on ``spectral_step`` alone would collapse
+        EVERY tick to 1 and the dumps would overwrite. ``anchor_step`` is the live
+        per-batch counter there (it advances at the top of every anchor refresh).
+        Symmetrically an anchor-disabled arm keeps advancing ``spectral_step``.
+        Pure read.
         """
-        return int(getattr(self, "spectral_step", 0) or 0) + 1
+        # NB ``anchor_step`` is incremented at the TOP of the anchor refresh
+        # (before the stamp), so it ALREADY equals N during the batch; while
+        # ``spectral_step`` is incremented at the END (grad-correction), so it
+        # trails at N-1 during the batch. The batch tick is thus
+        # ``max(anchor_step, spectral_step + 1)`` — N from whichever counter is
+        # live. (Called only at the stamp sites — anchor-top + the fast forward —
+        # where this is exact; later reads go through the stamped capture_tick().)
+        ss = int(getattr(self, "spectral_step", 0) or 0)
+        as_ = int(getattr(self, "anchor_step", 0) or 0)
+        return max(as_, ss + 1)
 
     def capture_tick(self) -> int:
         """The optimizer tick the CURRENT train_batch's capture dumps key on.

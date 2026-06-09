@@ -1176,7 +1176,21 @@ class FSDPEngine(BaseEngine):
             return
         anchor_cfg = getattr(state.config, "anchor", None)
         spectral = getattr(state, "spectral", None)
-        if anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)) or spectral is None:
+        if anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)):
+            return
+        # EXP-26 FIX (Defect 1): the anchor circuit was ALSO gated on `spectral is
+        # not None` — so a `spectral.enabled=false` run (e.g. the Step-A A1 arm:
+        # plain PowerSGD r77, anchor-owns-Q, NO merger) skipped the WHOLE anchor
+        # refresh: anchor_step never advanced, anchor_should_fire never fired, and
+        # the ANCHOR-OWNED Q update never ran (q_cond frozen 1.0000003,
+        # reconstruction_rel_error stuck 0.975 — Q never warmed). But anchor-owns-Q
+        # (Q ← orth(V) from the anchor's stale forward + broadcast) is INDEPENDENT
+        # of the merger; only the M-EMA feed/broadcast needs `spectral`. So run the
+        # anchor when EITHER a spectral filter exists OR the anchor owns Q (powersgd
+        # codec). The spectral-dependent steps below are each guarded on
+        # `spectral is not None`. (EXP-25 always had spectral on, so this never bit.)
+        _anchor_owns_q_pre = bool(getattr(anchor_cfg, "owns_q", False)) and getattr(state, "powersgd", None) is not None
+        if spectral is None and not _anchor_owns_q_pre:
             return
 
         from verl.workers.comm_eff.anchor import (
@@ -1553,8 +1567,14 @@ class FSDPEngine(BaseEngine):
         # reduction, so without this M is each rank's local-shard gradient.
         anchor_grads = self._dp_all_reduce_anchor_grads(anchor_grads)
 
-        # Feed RAW (now DP-reduced) grads into the EMA (update_anchor, NEVER correct_matrix).
-        deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
+        # Feed RAW (now DP-reduced) grads into the EMA (update_anchor, NEVER
+        # correct_matrix). EXP-26 FIX (Defect 1): skip the M-EMA feed when there is
+        # no spectral filter (the A1 plain-PowerSGD arm: anchor-owns-Q, no merger);
+        # the anchor still runs to update Q below. With spectral on (A2 / EXP-25)
+        # the feed runs exactly as before.
+        deltas = {}
+        if spectral is not None:
+            deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
@@ -1580,11 +1600,14 @@ class FSDPEngine(BaseEngine):
                 global_step=_gs, optimizer_tick=_tk,
             )
             # Pull the EMA M for the SAME targets (canonical-keyed in the store).
+            # EXP-26 FIX (Defect 1): no spectral filter ⇒ no M EMA to dump (the A1
+            # plain-PowerSGD arm has no merger); G_anchor still dumps above.
             _m_map = {}
-            for _name in anchor_grads.keys():
-                _m = spectral._anchor.get(_canon_cap(_name))
-                if _m is not None:
-                    _m_map[_name] = _m
+            if spectral is not None:
+                for _name in anchor_grads.keys():
+                    _m = spectral._anchor.get(_canon_cap(_name))
+                    if _m is not None:
+                        _m_map[_name] = _m
             capture_anchor_tensors(
                 writer=_w, role="M", grads=_m_map,
                 global_step=_gs, optimizer_tick=_tk,
@@ -1690,7 +1713,13 @@ class FSDPEngine(BaseEngine):
             )
             q_updated = powersgd.anchor_update_basis()
             q_receipts = powersgd.broadcast_basis(src=0)
-            m_receipts = self._broadcast_anchor_M(spectral, anchor_grads, src=0)
+            # EXP-26 FIX (Defect 1): the M broadcast only applies when a merger
+            # reads sign(M) — i.e. spectral is on. The A1 plain-PowerSGD arm
+            # (spectral None) has no M; only Q is broadcast. Q-update/broadcast
+            # above are UNCONDITIONAL (the anchor owns Q regardless of the merger).
+            m_receipts = (
+                self._broadcast_anchor_M(spectral, anchor_grads, src=0) if spectral is not None else None
+            )
             # Fail-closed (R2 must-fire): the anchor is the SOLE Q/M writer, so each of
             # these MUST do real work every refresh. q_updated False = orth(V) produced
             # no Q; empty receipts on a genuinely multi-rank DP group = the broadcast
@@ -1715,10 +1744,11 @@ class FSDPEngine(BaseEngine):
                     "multi-rank DP group — the anchor Q broadcast did not fire; every fast/DP "
                     "rank would keep a stale/cold Q (#25 R2 broadcast-receipt invariant)."
                 )
-                assert m_receipts, (
+                assert m_receipts or spectral is None, (
                     "comm_eff anchor-owns-Q: _broadcast_anchor_M() returned NO receipts on a "
                     "multi-rank DP group — the anchor M broadcast did not fire; sign(M) the "
-                    "merger reads could be stale/cold on other ranks (#25 R2 M-receipt invariant)."
+                    "merger reads could be stale/cold on other ranks (#25 R2 M-receipt invariant). "
+                    "(Skipped when spectral is None: the plain-PowerSGD arm has no M to broadcast.)"
                 )
             # Cross-rank consensus guard (must not raise): the anchor-owned Q must
             # be identical on every DP rank + both boundary sides.
@@ -1752,7 +1782,10 @@ class FSDPEngine(BaseEngine):
         # assert the max cross-rank deviation is ~0 (the all-reduce(MEAN) of
         # G_anchor made M identical on every rank). A non-zero deviation means the
         # DP-reduce did not happen / used the wrong group. Greppable falsifier.
-        self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
+        # EXP-26 FIX (Defect 1): only when a merger consumes M (spectral on); the
+        # A1 plain-PowerSGD arm has no M.
+        if spectral is not None:
+            self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
 
         # EMA-evolution log line. String discovery (ema_device/correction_mode)
         # is logged once at build, never here.
@@ -1863,6 +1896,17 @@ class FSDPEngine(BaseEngine):
                         p.copy_(s.to(p.device, p.dtype))
                     if p.grad is not None:
                         p.grad = None
+            # EXP-26 FIX (Defect 2): the G_dense clone backward was extracting 0
+            # target grads. The clone (a deepcopy / config-rebuild) can come back
+            # with requires_grad=False on its params (so .backward() populates NO
+            # .grad) and/or in eval mode. Force train mode + requires_grad=True so
+            # the uncompressed backward actually fills .grad on the 2D matrices that
+            # extract_target_grads reads. (The anchor path happened to work because
+            # its clone inherited grad from the summoned live params; the standalone
+            # G_dense clone must set this explicitly.)
+            cached.train()
+            for _p in cached.parameters():
+                _p.requires_grad_(True)
 
             # Ensure NO mask / powersgd hooks fire on the clone (UNCOMPRESSED).
             prev_mask_active = getattr(state, "mask_active", False)

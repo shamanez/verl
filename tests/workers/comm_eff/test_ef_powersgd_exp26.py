@@ -323,6 +323,7 @@ def test_capture_tick_unification():
     # During the fast forward of train_batch N, spectral_step holds N-1, so the
     # tick this batch's tensors belong to is N == spectral_step + 1.
     st.spectral_step = 0
+    st.anchor_step = 0
     assert st.current_optimizer_tick() == 1
     # Unstamped capture_tick() falls back to current_optimizer_tick().
     assert st.capture_tick() == 1
@@ -335,3 +336,16 @@ def test_capture_tick_unification():
     # Next batch: re-stamp.
     st._capture_tick = st.current_optimizer_tick()  # spectral_step=1 => tick=2
     assert st.capture_tick() == 2
+
+    # EXP-26 Defect-1/tick regression: a NO-MERGER arm (spectral disabled) never
+    # advances spectral_step, so the tick MUST track anchor_step instead (else
+    # every dump collapses to tick=1 and overwrites). anchor_step is incremented
+    # at the TOP of the anchor refresh, so it already equals N during the batch.
+    st2 = maybe_build_comm_eff_state(
+        CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=False))
+    )
+    st2.spectral_step = 0  # stays 0 all run (grad-correction early-returns: spectral None)
+    st2.anchor_step = 1  # anchor refresh advanced it to 1 at the top of batch 1
+    assert st2.current_optimizer_tick() == 1
+    st2.anchor_step = 2  # batch 2
+    assert st2.current_optimizer_tick() == 2, "no-merger arm must key the tick off anchor_step"
