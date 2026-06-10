@@ -849,6 +849,17 @@ class FSDPEngine(BaseEngine):
         adv = micro_batch.get("advantages", None) if hasattr(micro_batch, "get") else None
         responses = micro_batch.get("responses", None) if hasattr(micro_batch, "get") else None
         if adv is None or responses is None:
+            # Diagnostic (cheap, fires only on the adv-family anchor pass): say WHICH
+            # field is missing so a uniform fallback is explainable without a re-run.
+            try:
+                _keys = list(micro_batch.keys()) if hasattr(micro_batch, "keys") else "?"
+            except Exception:
+                _keys = "?"
+            print(
+                f"[comm_eff][EXP-26][adv-weight] uniform fallback: advantages={'present' if adv is not None else 'MISSING'} "
+                f"responses={'present' if responses is not None else 'MISSING'} micro_batch_keys={_keys}",
+                flush=True,
+            )
             return None
         dev = input_ids.values().device
         total_nnz = int(input_ids.values().shape[0])
