@@ -428,8 +428,11 @@ comm_eff:
     # "inject" = ADD the scale-matched complement of the stale anchor EMA
     # M_anchor. "blend" = REPLACE via convex blend
     # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor.
+    # "ef_powersgd" (EXP-26 Step B) = direction-PRESERVING error-feedback: re-add
+    # the dropped off-subspace residual to G_comp with NO sign term (keeps
+    # G_comp's direction/sign; reduces to plain PowerSGD at ef_decay=ef_clip=0).
     # Declared here so Hydra's struct-mode merge accepts
-    # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=blend.
+    # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=ef_powersgd.
     correction_mode: signed_ema
 
     # Injection strength for correction_mode="inject" (force along the stale
@@ -447,7 +450,14 @@ comm_eff:
     # axis. Unused unless correction_mode=signed_ema. [0, 1].
     signed_ema_alpha: 0.0
 
-  # EXP-20/M6 PowerSGD-style pipeline-boundary activation-compression sub-config
+    # EXP-26 Step B error-feedback residual knobs (correction_mode=ef_powersgd).
+    # ef_decay: EMA decay on the accumulated off-subspace residual, [0, 1).
+    # ef_clip:  residual norm cap as a FRACTION of ||G_comp|| (shape-aware), >= 0.
+    # ef_decay=0 AND ef_clip=0 ⇒ G_corr == G_comp (the plain-PowerSGD limiting
+    # case = the EF-residual-disabled Correctness invariant + the science
+    # ablation). Declared here so Hydra struct-mode accepts the CLI overrides.
+    ef_decay: 0.0
+    ef_clip: 0.0
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
@@ -506,6 +516,86 @@ comm_eff:
     # Floor under the QR / singular-value floor for the q_cond diagnostic, so a
     # rank-deficient sketch never yields a non-finite condition number. > 0.
     reortho_eps: 1e-6
+
+    # EXP-26 Step C: Q-basis FAMILY (content of the sketch orth(V) consumes at
+    # FIXED rank). "act" (default) = the EXP-25 activation-energy basis
+    # (byte-identical substrate). RLVR-native families {grad,adv,tail,hybrid,
+    # ticket} bias Q toward GRPO UPDATE energy; only run if Step A finds Q_act
+    # under-captures off-principal update energy (H2). Declared here so Hydra
+    # struct-mode accepts actor_rollout_ref.actor.comm_eff.powersgd.q_basis=grad.
+    q_basis: act
+
+    # EXP-26 Step C1 PASSIVE screen: families to PASSIVELY accumulate inside the
+    # anchor pass (off the live Q / fast path / optimizer) so ONE short run builds
+    # candidate bases for ALL families at once. Hydra list, e.g.
+    # [act,grad,adv,tail,hybrid,ticket]. Empty (default) => no passive accumulation
+    # (byte-identical). Declared here so struct-mode accepts the CLI list override.
+    q_basis_passive: []
+
+    # EXP-26 Step C1 hybrid family column split at FIXED rank r (act + grad == r).
+    # -1/-1 (default) => AUTO: act=ceil(r/2), grad=r-act (39 + 38 = 77 at r=77).
+    # Set BOTH explicitly (>=0, summing to r) to override. Declared for struct-mode.
+    hybrid_act_cols: -1
+    hybrid_grad_cols: -1
+
+  # EXP-26 Step A: real-gradient geometry-audit tensor capture (inert by default
+  # => byte-identical to the EXP-25 substrate). When enabled the comm-eff hooks
+  # dump fp32 tensors (A/Â/Q, G_comp, G_corr, M/G_anchor, the parallel G_dense,
+  # the delay_K=0 fresh-anchor probe) keyed by (global_step, optimizer_tick,
+  # target_name, shape, dtype, norm). Every dump is detached/dump-only — NO
+  # numerical side effect (the measurement-only-probes-never-feed-the-optimizer
+  # invariant). Declared here so Hydra struct-mode accepts the CLI overrides.
+  capture:
+
+    # Target dataclass for this configuration
+    _target_: verl.workers.config.CommEffCaptureConfig
+
+    # Master capture switch. false (default) => no dump hook fires, no probe
+    # backward runs; the training path is byte-identical to the EXP-25 substrate.
+    enabled: false
+
+    # Directory the fp32 dumps + manifest are written to (rsynced to
+    # runs/EXP-26/captures/). Empty => ./captures relative to cwd.
+    capture_dir: ""
+
+    # Cap on optimizer ticks captured (the audit needs ~5-10). <=0 => no cap.
+    max_ticks: 10
+
+    # If >0, dump only this many targets PER layer-type (a defensible stratified
+    # subset — the disagreement was uniform across the 7 matrix types in EXP-25).
+    # 0 => dump every target (full 196-matrix coverage).
+    stratified_targets: 0
+
+    # Run the parallel UNCOMPRESSED fast backward to capture G_dense alongside
+    # G_comp (detached/dump-only; the highest-OOM-risk probe). false => no second
+    # backward.
+    capture_g_dense: false
+
+    # Capture the delay_K=0 fresh-anchor grad as a MEASUREMENT probe for the
+    # sign-agreement decomposition (detached/dump-only). false => off.
+    capture_fresh_anchor: false
+
+    # EXP-26 Step C/B should-have: loss for the delay_K=0 fresh-anchor probe.
+    # "clean_pg" (default, ratio≡1 like the anchor refresh) | "ppo_clip" (the fast
+    # path's PPO ratio/clip loss — removes the loss-mismatch confound). Dump-only
+    # probe; never the optimizer. Declared here so struct-mode accepts the override.
+    fresh_anchor_loss: clean_pg
+
+    # Dump precision. "fp32" (default, REQUIRED for the fidelity invariant) |
+    # "bf16" (volume-saving diagnostic).
+    dump_dtype: fp32
+
+    # EXP-26 disk-volume guard: capture ONLY rank 0 (default true). The audit's
+    # gradient roles are DP-reduced and Q/A/Â are sync_basis-consensus (identical
+    # across ranks), so rank 0 suffices; writing all 4 ranks blew the 200 GB box
+    # disk. Declared here so Hydra struct-mode accepts the CLI override.
+    rank0_only: true
+
+    # EXP-26: skip capture ticks below this (cold-Q warmup). The anchor warms Q at
+    # cadence (tick 5/10 for cadence=5); capturing from tick 1 fills the budget with
+    # PRE-warm ticks so H2 (Q activation/update-capture) reads cold-Q values. Set
+    # just above the first anchor refresh for POST-warm captures. 0 = from start.
+    min_tick: 0
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

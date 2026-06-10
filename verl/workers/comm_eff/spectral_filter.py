@@ -111,6 +111,8 @@ class SpectralFilter:
         inject_gamma: float = 1.0,
         blend_eta: float = 0.5,
         signed_ema_alpha: float = 0.0,
+        ef_decay: float = 0.0,
+        ef_clip: float = 0.0,
     ):
         self.beta_anc = float(beta_anc)
         # Storage layer default: gpu. Validation happens in
@@ -121,22 +123,37 @@ class SpectralFilter:
         # Correction mode (the anchor combiner the fast-path grad uses):
         # "inject" = additive injection of the scale-matched anchor complement;
         # "blend" = convex blend toward the scale-matched anchor;
-        # "signed_ema" (EXP-25/R3) = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
+        # "signed_ema" (EXP-25/R3) = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M);
+        # "ef_powersgd" (EXP-26 Step B) = direction-preserving error-feedback,
+        # G_corr = G_comp + clipped-residual, NO sign term.
         # Validated in CommEffConfig.__post_init__; assert defensively here too.
-        assert correction_mode in ("inject", "blend", "signed_ema"), correction_mode
+        assert correction_mode in ("inject", "blend", "signed_ema", "ef_powersgd"), correction_mode
         self.correction_mode = str(correction_mode)
         self.inject_gamma = float(inject_gamma)
         self.blend_eta = float(blend_eta)
         # EXP-25 (R3): the signed_ema merger weight alpha.
         self.signed_ema_alpha = float(signed_ema_alpha)
+        # EXP-26 Step B: error-feedback residual knobs. decay=clip=0 ⇒ the merger
+        # reduces to plain PowerSGD (G_corr == G_comp) — the limiting-case identity.
+        self.ef_decay = float(ef_decay)
+        self.ef_clip = float(ef_clip)
         # EXP-25 (R3): per-step count of matrices whose M was cold (||M||<=eps) so
         # the merger no-op'd to G_noisy (the silent grad-zeroing guard). Reset by
         # the engine each grad-correction step before the loop.
         self.merger_coldM_fallbacks = 0
+        # EXP-26: per-step count of ef_powersgd targets whose accumulated residual
+        # e_t was RESET because the target's logical 2D shape changed (no stale
+        # carry across a shape change). Reset by the engine each grad-correction
+        # step before the loop.
+        self.residual_reset_on_shape_mismatch = 0
         # name -> M_anchor (float32). Lives on the gradient's device when
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / the combiner).
         self._anchor: dict[str, torch.Tensor] = {}
+        # EXP-26 Step B: per-target accumulated error-feedback residual e_t
+        # (detached fp32). Lives on the EMA storage device; shape-keyed reset.
+        # Used ONLY by ef_powersgd; never read by the optimizer directly.
+        self._ef_residual: dict[str, torch.Tensor] = {}
 
     # ------------------------------------------------------------------ #
     # anchor cache
@@ -307,6 +324,91 @@ class SpectralFilter:
         g_corr = alpha * gm + (1.0 - alpha) * gm.abs() * torch.sign(anc)
         return g_corr.to(g_mask.dtype)
 
+    def ef_powersgd_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
+        """EXP-26 Step B: direction-PRESERVING error-feedback PowerSGD merger.
+
+        ``G_corr = G_comp + e_t`` where ``e_t`` is the accumulated, decayed,
+        norm-clipped OFF-SUBSPACE residual — the component of the stale anchor EMA
+        ``M_anchor`` that ``G_comp`` (= ``g_mask``) does NOT already span (exactly
+        the low-rank-compression bias the audit measures). There is **NO sign
+        term**: the correction only ADDS the dropped off-principal energy, so
+        ``G_corr`` keeps ``G_comp``'s direction/sign (direction-preserving, not
+        sign-replacing — the EXP-25 ``signed_ema`` failure mode is structurally
+        excluded).
+
+        Update (per targeted matrix, all detached fp32)::
+
+            comp_t  = M_anchor - <G_comp,M_anchor>/||G_comp||² · G_comp   # off-subspace
+            e_t     = ef_decay · e_{t-1} + comp_t                          # EMA residual
+            e_t     = clip(e_t,  ef_clip · ||G_comp||)                     # shape-aware norm cap
+            G_corr  = G_comp + e_t                                         # NO sign
+
+        **Limiting-case identity (Correctness invariant).** With ``ef_decay=0``
+        AND ``ef_clip=0`` the clip floors ``e_t`` to the zero vector, so
+        ``G_corr == G_comp`` bit-for-bit ⇒ ef_powersgd reduces to plain PowerSGD.
+
+        **Shape-aware / clipped / detached (Correctness invariant).** The residual
+        is keyed by the target's logical 2D shape; on a shape change the stale
+        residual is RESET to 0 (no cross-shape carry, counted in
+        ``residual_reset_on_shape_mismatch``). It is norm-clipped relative to
+        ``||G_comp||`` and is detached from autograd (it is built from already-
+        detached ``M_anchor`` + ``g_mask``). The cold-M guard returns ``g_mask``
+        unchanged (and clears any stale residual) so an unwarmed anchor is a no-op,
+        never a silent grad change.
+
+        Returns ``G_corr`` with ``g_mask``'s shape/dtype/device.
+        """
+        name = _canon(name)  # read M_anchor / residual under the same key the feed wrote
+        self.ensure_anchor(name, g_mask)
+        anc = self.anchor_on(name, g_mask.device).to(torch.float32)
+        gm = g_mask.to(torch.float32)
+        eps = 1e-12
+        gm_norm = torch.linalg.norm(gm)
+        anc_norm = torch.linalg.norm(anc)
+        # COLD M (anchor unwarmed) → return G_comp UNCHANGED; drop any stale
+        # residual so a later warm step starts clean.
+        if anc_norm <= eps or gm_norm <= eps:
+            self.merger_coldM_fallbacks += 1
+            self._ef_residual.pop(name, None)
+            return g_mask
+
+        # Off-subspace component of the anchor EMA: the part of M_anchor that
+        # G_comp does NOT span (== the inject "complement", but here it is the
+        # residual we error-feedback). coeff = <G_comp,M_anchor>/||G_comp||².
+        coeff = (gm * anc).sum() / (gm_norm * gm_norm + eps)
+        comp_t = anc - coeff * gm
+
+        # Shape-aware residual carry: reset on a logical-shape change so a stale
+        # residual from a differently-shaped target never leaks in.
+        prev = self._ef_residual.get(name)
+        if prev is not None and tuple(prev.shape) != tuple(gm.shape):
+            prev = None
+            self.residual_reset_on_shape_mismatch += 1
+        if prev is not None:
+            prev = prev.to(comp_t.device, torch.float32)
+            e_t = self.ef_decay * prev + comp_t
+        else:
+            e_t = comp_t
+
+        # Norm-clip the residual relative to ||G_comp||: ||e_t|| <= ef_clip·||G_comp||.
+        # ef_clip=0 ⇒ the cap is 0 ⇒ e_t is scaled to the zero vector ⇒ G_corr==G_comp.
+        cap = self.ef_clip * gm_norm
+        e_norm = torch.linalg.norm(e_t)
+        if float(cap.item()) <= 0.0:
+            e_t = torch.zeros_like(e_t)
+        elif float(e_norm.item()) > float(cap.item()):
+            e_t = e_t * (cap / (e_norm + eps))
+
+        # Persist the (clipped) residual on the EMA storage device, DETACHED.
+        store_dev = self._ema_storage_device(g_mask.device)
+        stored = e_t.detach().to(store_dev)
+        if store_dev.type == "cpu" and g_mask.device.type == "cuda":
+            stored = stored.pin_memory()
+        self._ef_residual[name] = stored
+
+        g_corr = gm + e_t
+        return g_corr.to(g_mask.dtype)
+
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
 
@@ -363,6 +465,17 @@ def apply_spectral_correction_to_params(
     # count on step 1 when M is cold, → 0 after M warms). Mirror it onto the
     # state so comm_eff metrics can surface it.
     spectral.merger_coldM_fallbacks = 0
+    # EXP-26 Step B: reset the per-step ef_powersgd residual-reset counter so the
+    # [comm_eff][merger] line + metrics report THIS step's shape-mismatch resets.
+    spectral.residual_reset_on_shape_mismatch = 0
+    # EXP-26 Step A: optional capture writer + the UNIFIED (gs, tick) key, threaded
+    # from the engine. None ⇒ no dump (the byte-identical path). The optimizer tick
+    # is state.capture_tick() — the SINGLE per-train_batch tick stamped at the start
+    # of the fast-path forward — so G_comp/G_corr co-locate with the powersgd-hook
+    # A/Â/Q, the anchor M/G_anchor, and the parallel G_dense under ONE key.
+    _cap = getattr(state, "_capture_writer", None)
+    _cap_gs = int(getattr(state, "global_step", -1) or -1)
+    _cap_tick = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0)
 
     for name, p in named_params:
         grad = getattr(p, "grad", None)
@@ -388,6 +501,14 @@ def apply_spectral_correction_to_params(
             print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
+        # EXP-26 Step A: dump G_comp (the merger INPUT — the fast compressed
+        # gradient) BEFORE any correction, detached/fp32. No-op when _cap is None.
+        if _cap is not None:
+            _cap.dump(
+                role="G_comp", target_name=name, tensor=full,
+                global_step=_cap_gs, optimizer_tick=_cap_tick,
+            )
+
         _mode = getattr(spectral, "correction_mode", "signed_ema")
         if _mode == "inject":
             g_proj = spectral.inject_matrix(name, full)
@@ -395,10 +516,19 @@ def apply_spectral_correction_to_params(
             g_proj = spectral.blend_matrix(name, full)
         elif _mode == "signed_ema":
             g_proj = spectral.signed_ema_matrix(name, full)
+        elif _mode == "ef_powersgd":
+            g_proj = spectral.ef_powersgd_matrix(name, full)
         else:
             raise ValueError(
                 f"comm_eff spectral correction_mode={_mode!r} is not supported; "
-                "expected one of (inject, blend, signed_ema)"
+                "expected one of (inject, blend, signed_ema, ef_powersgd)"
+            )
+        # EXP-26 Step A: dump G_corr (post-merger, pre-Adam — what the optimizer
+        # will consume after writeback), detached/fp32.
+        if _cap is not None:
+            _cap.dump(
+                role="G_corr", target_name=name, tensor=g_proj,
+                global_step=_cap_gs, optimizer_tick=_cap_tick,
             )
         rel = spectral.relative_change(full, g_proj)
         state.spectral_rel_change[name] = rel
@@ -429,6 +559,23 @@ def apply_spectral_correction_to_params(
             f"[comm_eff][merger] correction_mode=signed_ema alpha={spectral.signed_ema_alpha} "
             f"corrected={corrected} merger_coldM_fallbacks={cold} "
             f"(cold==corrected ⇒ M still cold this step; cold==0 ⇒ M fully warm)",
+            flush=True,
+        )
+    elif _mode == "ef_powersgd":
+        # EXP-26 Step B: surface the merger's per-step cold-M fallback + the
+        # shape-mismatch residual-reset count so the probe can grep them. With
+        # ef_decay=ef_clip=0 (the limiting case) G_corr==G_comp on every target.
+        cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
+        resets = int(getattr(spectral, "residual_reset_on_shape_mismatch", 0))
+        if hasattr(state, "merger_coldM_fallbacks"):
+            state.merger_coldM_fallbacks = cold
+        if hasattr(state, "residual_reset_on_shape_mismatch"):
+            state.residual_reset_on_shape_mismatch = resets
+        print(
+            f"[comm_eff][merger] correction_mode=ef_powersgd ef_decay={spectral.ef_decay} "
+            f"ef_clip={spectral.ef_clip} corrected={corrected} merger_coldM_fallbacks={cold} "
+            f"residual_reset_on_shape_mismatch={resets} "
+            f"(ef_decay==ef_clip==0 ⇒ G_corr==G_comp, the plain-PowerSGD limiting case)",
             flush=True,
         )
 

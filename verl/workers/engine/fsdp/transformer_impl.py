@@ -813,6 +813,96 @@ class FSDPEngine(BaseEngine):
                 "launcher runs rmpad + SP=1."
             )
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
+        # EXP-26 Step C1: during the anchor's family-harvest pass, set the per-row
+        # GRPO advantage-magnitude weight (aligned to the boundary M's rmpad row
+        # order) for the `adv` family. Only when the harvest is armed AND `adv` is a
+        # requested family (live or passive) — else a strict no-op (no extra work on
+        # the byte-identical / non-adv path). The boundary M covers ALL packed tokens
+        # (prompt+response); the weight is |a_t| on response positions, 0 on prompt.
+        if getattr(compressor, "_family_harvest", False) and (
+            compressor.q_basis == "adv" or "adv" in getattr(compressor, "q_basis_passive", [])
+        ):
+            try:
+                w = self._comm_eff_build_adv_weight(micro_batch, input_ids)
+                compressor.set_advantage_weight(w)
+            except Exception as _adv_exc:  # pragma: no cover - defensive
+                # A weight-build failure must not crash the anchor pass; the adv
+                # family falls back to uniform weights (logged) rather than aborting.
+                print(f"[comm_eff][EXP-26][adv-weight] WARN build failed: {_adv_exc!r} — adv uses uniform", flush=True)
+                compressor.set_advantage_weight(None)
+
+    def _comm_eff_build_adv_weight(self, micro_batch, input_ids):
+        """EXP-26 Step C1: build the per-row advantage-magnitude weight (total_nnz,)
+        aligned to the boundary activation M's rmpad packed-row order.
+
+        The boundary M is ``(total_nnz, H)`` where ``total_nnz`` is the packed
+        prompt+response token axis (same packing as ``input_ids.values()``). The
+        GRPO advantage is per RESPONSE token. For each sample ``i`` the response
+        tokens occupy the LAST ``resp_len_i`` packed positions of that sample's
+        block ``[seq_off_i - resp_len_i : seq_off_i]`` (mirrors
+        ``no_padding_2_padding``'s slicing; M is the activation AT each token, NOT the
+        one-shifted log_prob, so no left-shift). We scatter ``|advantages_i|`` into
+        those positions (prompt positions stay 0) then normalize by the nonzero mean
+        so ``w = |a_t| / mean(|a_t|)``. Returns an fp32 ``(total_nnz,)`` tensor on the
+        activation device, or ``None`` if the operands are missing.
+        """
+        adv = micro_batch.get("advantages", None) if hasattr(micro_batch, "get") else None
+        responses = micro_batch.get("responses", None) if hasattr(micro_batch, "get") else None
+        if adv is None or responses is None:
+            # Diagnostic (cheap, fires only on the adv-family anchor pass): say WHICH
+            # field is missing so a uniform fallback is explainable without a re-run.
+            try:
+                _keys = list(micro_batch.keys()) if hasattr(micro_batch, "keys") else "?"
+            except Exception:
+                _keys = "?"
+            print(
+                f"[comm_eff][EXP-26][adv-weight] uniform fallback: advantages={'present' if adv is not None else 'MISSING'} "
+                f"responses={'present' if responses is not None else 'MISSING'} micro_batch_keys={_keys}",
+                flush=True,
+            )
+            return None
+        dev = input_ids.values().device
+        total_nnz = int(input_ids.values().shape[0])
+        # Per-sample sequence (prompt+response) lengths from the input_ids packing.
+        seq_lens = input_ids.offsets().diff().to(device=dev)  # (nseq,)
+        seq_offsets = seq_lens.cumsum(dim=0)  # (nseq,) end offset of each sample's block
+        # Per-sample response lengths.
+        if getattr(responses, "is_nested", False):
+            resp_lens = responses.offsets().diff().to(device=dev)
+            adv_vals = adv.values().to(torch.float32) if getattr(adv, "is_nested", False) else adv.reshape(-1).to(torch.float32)
+            adv_offsets = (responses.offsets().to(device=dev) if getattr(adv, "is_nested", False) else None)
+        else:
+            # padded responses: response length is the 2nd dim; advantages padded too.
+            resp_lens = torch.full((seq_lens.shape[0],), int(responses.shape[1]), device=dev, dtype=seq_lens.dtype)
+            adv_vals = None
+            adv_offsets = None
+        w = torch.zeros(total_nnz, dtype=torch.float32, device=dev)
+        nseq = seq_lens.shape[0]
+        for i in range(nseq):
+            rl = int(resp_lens[i].item())
+            if rl <= 0:
+                continue
+            seq_off = int(seq_offsets[i].item())
+            start = seq_off - rl
+            if start < 0:
+                continue
+            # advantages for sample i (response tokens).
+            if getattr(adv, "is_nested", False):
+                a_i = adv[i].to(torch.float32).reshape(-1)
+            elif adv.dim() >= 2:
+                a_i = adv[i, :rl].to(torch.float32).reshape(-1)
+            else:
+                # flat per-token advantages already in packed-response order — rare.
+                a_i = adv.to(torch.float32).reshape(-1)[:rl]
+            n = min(rl, a_i.shape[0], total_nnz - start)
+            w[start:start + n] = a_i[:n].abs()
+        nz = w[w > 0]
+        if nz.numel() == 0:
+            return None
+        mean_abs = float(nz.mean().item())
+        if mean_abs > 0:
+            w = w / mean_abs
+        return w
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # comm_eff activation-mask hook lifecycle: register hooks on entry to the
@@ -830,6 +920,32 @@ class FSDPEngine(BaseEngine):
             _mask_hooks_live = self._comm_eff_register_mask_hooks()
         elif self._comm_eff_powersgd_active(forward_only=forward_only):
             _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
+        # EXP-26 capture: stash the SINGLE per-train_batch optimizer tick on the
+        # state at the start of the real fast-path forward (NOT a forward_only
+        # recompute, NOT the anchor/G_dense clone passes which call
+        # _forward_backward_batch_inner directly). Every capture role (powersgd-hook
+        # A/Â/Q, merger G_comp/G_corr, anchor M/G_anchor, parallel G_dense) reads
+        # this ONE value so they co-locate under one (global_step, optimizer_tick)
+        # and the max_ticks budget counts optimizer ticks. Computed here because
+        # spectral_step has NOT been advanced yet (the grad-correction hook advances
+        # it after backward), so current_optimizer_tick() == this batch's tick N.
+        _ce_state = getattr(self, "_comm_eff_state", None)
+        if (
+            not forward_only
+            and _ce_state is not None
+            and getattr(_ce_state, "enabled", False)
+            and getattr(_ce_state, "_capture_writer", None) is not None
+            and hasattr(_ce_state, "current_optimizer_tick")
+        ):
+            object.__setattr__(_ce_state, "_capture_tick", _ce_state.current_optimizer_tick())
+        # EXP-26 Step E: reset the per-tick comm-volume accumulators before the real
+        # fast-train forward so the powersgd hook accumulates THIS tick's Y/dense
+        # element counts cleanly (snapshotted into last_elems_* in engine_workers
+        # after backward). No-op unless the powersgd codec is live.
+        if not forward_only and _ce_state is not None and getattr(_ce_state, "enabled", False):
+            _ps = getattr(_ce_state, "powersgd", None)
+            if _ps is not None and hasattr(_ps, "reset_tick_comm_counters"):
+                _ps.reset_tick_comm_counters()
         try:
             return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
         finally:
@@ -1158,7 +1274,21 @@ class FSDPEngine(BaseEngine):
             return
         anchor_cfg = getattr(state.config, "anchor", None)
         spectral = getattr(state, "spectral", None)
-        if anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)) or spectral is None:
+        if anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)):
+            return
+        # EXP-26 FIX (Defect 1): the anchor circuit was ALSO gated on `spectral is
+        # not None` — so a `spectral.enabled=false` run (e.g. the Step-A A1 arm:
+        # plain PowerSGD r77, anchor-owns-Q, NO merger) skipped the WHOLE anchor
+        # refresh: anchor_step never advanced, anchor_should_fire never fired, and
+        # the ANCHOR-OWNED Q update never ran (q_cond frozen 1.0000003,
+        # reconstruction_rel_error stuck 0.975 — Q never warmed). But anchor-owns-Q
+        # (Q ← orth(V) from the anchor's stale forward + broadcast) is INDEPENDENT
+        # of the merger; only the M-EMA feed/broadcast needs `spectral`. So run the
+        # anchor when EITHER a spectral filter exists OR the anchor owns Q (powersgd
+        # codec). The spectral-dependent steps below are each guarded on
+        # `spectral is not None`. (EXP-25 always had spectral on, so this never bit.)
+        _anchor_owns_q_pre = bool(getattr(anchor_cfg, "owns_q", False)) and getattr(state, "powersgd", None) is not None
+        if spectral is None and not _anchor_owns_q_pre:
             return
 
         from verl.workers.comm_eff.anchor import (
@@ -1181,6 +1311,15 @@ class FSDPEngine(BaseEngine):
         # Advance the trainer-step counter the cadence is keyed on (1-based).
         state.anchor_step += 1
         step = state.anchor_step
+
+        # EXP-26 capture: stamp the SINGLE per-train_batch optimizer tick NOW (the
+        # anchor refresh is the first comm_eff hook in train_batch, before
+        # forward_backward_batch re-stamps the same value). spectral_step has not
+        # advanced this batch yet, so current_optimizer_tick() == this batch's tick
+        # N. The anchor's own M/G_anchor dumps (on a cadence step) then read the
+        # correct N via state.capture_tick(), co-located with every other role.
+        if getattr(state, "_capture_writer", None) is not None and hasattr(state, "current_optimizer_tick"):
+            object.__setattr__(state, "_capture_tick", state.current_optimizer_tick())
 
         # Lazily build the staleness queue on the state (survives across steps).
         # CommEffState is a plain class with a __dict__, so a direct setattr is
@@ -1439,6 +1578,14 @@ class FSDPEngine(BaseEngine):
                     powersgd.unregister()
                 finally:
                     powersgd.set_anchor_sketch_mode(False)
+                    # EXP-26 Step C1: remove the live G_b grad-hooks now that the
+                    # backward has fired + populated _family_Gb. The harvested
+                    # M/G_b buffers PERSIST (like the act sketch V) — consumed by
+                    # the passive screen + the LIVE family path below, then cleared.
+                    try:
+                        powersgd.remove_family_grad_hooks()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
@@ -1526,11 +1673,140 @@ class FSDPEngine(BaseEngine):
         # reduction, so without this M is each rank's local-shard gradient.
         anchor_grads = self._dp_all_reduce_anchor_grads(anchor_grads)
 
-        # Feed RAW (now DP-reduced) grads into the EMA (update_anchor, NEVER correct_matrix).
-        deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
+        # Feed RAW (now DP-reduced) grads into the EMA (update_anchor, NEVER
+        # correct_matrix). EXP-26 FIX (Defect 1): skip the M-EMA feed when there is
+        # no spectral filter (the A1 plain-PowerSGD arm: anchor-owns-Q, no merger);
+        # the anchor still runs to update Q below. With spectral on (A2 / EXP-25)
+        # the feed runs exactly as before.
+        deltas = {}
+        if spectral is not None:
+            deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
+
+        # EXP-26 Step A: dump the K-stale G_anchor (DP-reduced) AND the post-feed
+        # anchor EMA M per target — both detached/fp32, dump-only (the writer
+        # detaches+clones, so this NEVER feeds the optimizer/EMA). The optimizer
+        # tick is state.capture_tick() — the SINGLE per-train_batch tick stamped at
+        # the fast-path forward — so M/G_anchor co-locate with G_comp/G_corr/G_dense
+        # and the powersgd-hook A/Â/Q under ONE (global_step, optimizer_tick) key.
+        # NB the anchor refresh runs BEFORE the fast forward stamps _capture_tick;
+        # capture_tick() falls back to current_optimizer_tick() (== this batch's
+        # tick N) so the key is correct even pre-stamp.
+        _w = getattr(state, "_capture_writer", None)
+        if _w is not None:
+            from verl.workers.comm_eff.anchor import capture_anchor_tensors
+            from verl.workers.comm_eff.spectral_filter import _canon as _canon_cap
+
+            _gs = int(getattr(state, "global_step", -1) or -1)
+            _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "anchor_step", 0) or 0)
+            capture_anchor_tensors(
+                writer=_w, role="G_anchor", grads=anchor_grads,
+                global_step=_gs, optimizer_tick=_tk,
+            )
+            # Pull the EMA M for the SAME targets (canonical-keyed in the store).
+            # EXP-26 FIX (Defect 1): no spectral filter ⇒ no M EMA to dump (the A1
+            # plain-PowerSGD arm has no merger); G_anchor still dumps above.
+            _m_map = {}
+            if spectral is not None:
+                for _name in anchor_grads.keys():
+                    _m = spectral._anchor.get(_canon_cap(_name))
+                    if _m is not None:
+                        _m_map[_name] = _m
+            capture_anchor_tensors(
+                writer=_w, role="M", grads=_m_map,
+                global_step=_gs, optimizer_tick=_tk,
+            )
+
+            # ---- delay_K=0 fresh-anchor MEASUREMENT probe (Step A, sign decomp) ----
+            # A SECOND anchor backward from the CURRENT (delay_K=0) weights, on the
+            # SAME isolated clone. PURE MEASUREMENT: its grads are dumped as
+            # G_fresh_anchor and then DISCARDED — never fed to the EMA, the sketch
+            # V, Q, or the optimizer. The clone is a deep-copy off the optimizer's
+            # param group (assert_anchor_module_isolated above), so an extra
+            # backward on it cannot change optimizer state by construction. We
+            # additionally assert anchor_optimizer_steps is unchanged and do NOT
+            # register the PowerSGD hooks (so V is untouched). delay_K=0 appears
+            # ONLY here as a removed probe — never as a training config.
+            cap_cfg = getattr(state.config, "capture", None)
+            if cap_cfg is not None and bool(getattr(cap_cfg, "capture_fresh_anchor", False)):
+                _opt_before_probe = int(getattr(state, "anchor_optimizer_steps", 0))
+                _fresh_swap = None
+                try:
+                    with _summon_ctx():
+                        _inner_fresh = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                        # Current (delay_K=0) weights, canonical-keyed.
+                        _cur = {
+                            _canon(n): p.detach().clone()
+                            for n, p in _inner_fresh.named_parameters()
+                        }
+                    _fresh_clone = getattr(self, "_anchor_module_cache", None)
+                    if _fresh_clone is not None:
+                        with torch.no_grad():
+                            for n, p in _fresh_clone.named_parameters():
+                                s = _cur.get(_canon(n))
+                                if s is not None and s.shape == p.shape:
+                                    p.copy_(s.to(p.device, p.dtype))
+                                if p.grad is not None:
+                                    p.grad = None
+                        _fresh_swap = self.module
+                        self.module = _fresh_clone
+                        # NO powersgd.register here — V must stay the K-stale harvest.
+                        # EXP-26 Step C/B should-have: the probe loss is the clean PG
+                        # (ratio≡1, default) OR the fast path's PPO ratio/clip loss
+                        # (fresh_anchor_loss=ppo_clip) — the latter removes the
+                        # clean-PG-vs-PPO-clip loss-mismatch confound the Step-A audit
+                        # flagged, so cos(G_fresh_ppo, G_corr) is a clean direction
+                        # test. Either way this is dump-only (no optimizer step — the
+                        # clone is off the optimizer's param group + the assert below).
+                        _probe_mode = str(getattr(cap_cfg, "fresh_anchor_loss", "clean_pg"))
+                        if _probe_mode == "ppo_clip":
+                            _fresh_lossf = loss_function  # the real fast-path PPO ratio/clip loss
+                        else:
+                            _fresh_lossf = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+                        self._forward_backward_batch_inner(
+                            anchor_data, _fresh_lossf, forward_only=False
+                        )
+
+                        def _full_grad_of_fresh(grad):
+                            return grad, {"grad_container_type": type(grad).__name__}
+
+                        _fresh_grads = extract_target_grads(
+                            _fresh_clone.named_parameters(),
+                            target_substrs=target_substrs,
+                            max_targets=max_targets,
+                            full_grad_of=_full_grad_of_fresh,
+                        )
+                        # DP-reduce so G_fresh_anchor is the GLOBAL fresh grad (same
+                        # scale as the K-stale G_anchor it is compared against).
+                        _fresh_grads = self._dp_all_reduce_anchor_grads(_fresh_grads)
+                        capture_anchor_tensors(
+                            writer=_w, role="G_fresh_anchor", grads=_fresh_grads,
+                            global_step=_gs, optimizer_tick=_tk,
+                        )
+                finally:
+                    if _fresh_swap is not None:
+                        self.module = _fresh_swap
+                    # Discard the probe grads on the clone so the NEXT refresh
+                    # re-loads the K-stale snapshot into clean params.
+                    try:
+                        for _p in getattr(self, "_anchor_module_cache").parameters():
+                            if _p.grad is not None:
+                                _p.grad = None
+                    except (AttributeError, UnboundLocalError):
+                        pass
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                # PROBE_LEAKS_INTO_OPTIMIZER falsifier: the fresh probe must NOT have
+                # taken an optimizer step (it ran on the isolated clone, dump-only).
+                assert int(getattr(state, "anchor_optimizer_steps", 0)) == _opt_before_probe, (
+                    "comm_eff capture: the delay_K=0 fresh-anchor MEASUREMENT probe changed "
+                    "anchor_optimizer_steps — it must be dump-only (PROBE_LEAKS_INTO_OPTIMIZER)."
+                )
 
         # EXP-25 (R2): anchor-owned Q. Now that the slow-net activations are
         # harvested into V (during the clean anchor forward above), compute
@@ -1554,7 +1830,13 @@ class FSDPEngine(BaseEngine):
             )
             q_updated = powersgd.anchor_update_basis()
             q_receipts = powersgd.broadcast_basis(src=0)
-            m_receipts = self._broadcast_anchor_M(spectral, anchor_grads, src=0)
+            # EXP-26 FIX (Defect 1): the M broadcast only applies when a merger
+            # reads sign(M) — i.e. spectral is on. The A1 plain-PowerSGD arm
+            # (spectral None) has no M; only Q is broadcast. Q-update/broadcast
+            # above are UNCONDITIONAL (the anchor owns Q regardless of the merger).
+            m_receipts = (
+                self._broadcast_anchor_M(spectral, anchor_grads, src=0) if spectral is not None else None
+            )
             # Fail-closed (R2 must-fire): the anchor is the SOLE Q/M writer, so each of
             # these MUST do real work every refresh. q_updated False = orth(V) produced
             # no Q; empty receipts on a genuinely multi-rank DP group = the broadcast
@@ -1579,10 +1861,11 @@ class FSDPEngine(BaseEngine):
                     "multi-rank DP group — the anchor Q broadcast did not fire; every fast/DP "
                     "rank would keep a stale/cold Q (#25 R2 broadcast-receipt invariant)."
                 )
-                assert m_receipts, (
+                assert m_receipts or spectral is None, (
                     "comm_eff anchor-owns-Q: _broadcast_anchor_M() returned NO receipts on a "
                     "multi-rank DP group — the anchor M broadcast did not fire; sign(M) the "
-                    "merger reads could be stale/cold on other ranks (#25 R2 M-receipt invariant)."
+                    "merger reads could be stale/cold on other ranks (#25 R2 M-receipt invariant). "
+                    "(Skipped when spectral is None: the plain-PowerSGD arm has no M to broadcast.)"
                 )
             # Cross-rank consensus guard (must not raise): the anchor-owned Q must
             # be identical on every DP rank + both boundary sides.
@@ -1611,39 +1894,342 @@ class FSDPEngine(BaseEngine):
                     flush=True,
                 )
 
+            # EXP-26 Step C1 PASSIVE screen: build + dump a candidate basis Q_f for
+            # every q_basis_passive family from the harvested M / G_b / advantage.
+            # Runs on EVERY rank in lockstep (the do_anchor_q path is symmetric across
+            # ranks, and the screen's per-family DP all-reduces iterate a FIXED
+            # family×boundary order — deadlock guard). The live Q (already updated +
+            # broadcast above) is UNTOUCHED — the screen is purely passive/dump-only.
+            # Then clear the family harvest so the live fast path holds no stale state.
+            try:
+                if getattr(powersgd, "q_basis_passive", None):
+                    _w_screen = getattr(state, "_capture_writer", None)
+                    _gs_s = int(getattr(state, "global_step", -1) or -1)
+                    _tk_s = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "anchor_step", 0) or 0)
+                    _fam_q = powersgd.build_and_dump_family_sketches(
+                        writer=_w_screen, global_step=_gs_s, optimizer_tick=_tk_s
+                    )
+                    if _fam_q:
+                        print(
+                            f"[comm_eff][EXP-26][family-screen] step={step} tick={_tk_s} "
+                            f"families={list(_fam_q.keys())} "
+                            f"boundaries={len(next(iter(_fam_q.values()))) if _fam_q else 0} "
+                            f"family_screen_builds={getattr(state, 'family_screen_builds', 0)} "
+                            f"adv_weight={'set' if getattr(powersgd, '_adv_weight', None) is not None else 'uniform'}",
+                            flush=True,
+                        )
+            finally:
+                # Always clear the harvest (M/G_b/advantage + any stray grad-hook) so
+                # the live fast path that follows holds NO stale family state.
+                powersgd.clear_family_harvest()
+
         # EXP-25 (R1, checklist #2): prove M is the GLOBAL gradient — bit-identical
         # across DP ranks. All-gather a per-target M checksum over the DP group and
         # assert the max cross-rank deviation is ~0 (the all-reduce(MEAN) of
         # G_anchor made M identical on every rank). A non-zero deviation means the
         # DP-reduce did not happen / used the wrong group. Greppable falsifier.
-        self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
+        # EXP-26 FIX (Defect 1): only when a merger consumes M (spectral on); the
+        # A1 plain-PowerSGD arm has no M.
+        if spectral is not None:
+            self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
 
         # EMA-evolution log line. String discovery (ema_device/correction_mode)
-        # is logged once at build, never here.
-        if deltas:
-            mean_delta = sum(deltas.values()) / len(deltas)
-            max_delta = max(deltas.values())
-            print(
-                f"[comm_eff][EXP-12] anchor refresh step={step} fired backward "
-                f"(cadence={cadence} delay_K={delay_K}) targets={len(deltas)} "
-                f"||dM_anchor||_mean={mean_delta:.6e} ||dM_anchor||_max={max_delta:.6e} "
-                f"anchor_backwards={state.anchor_backwards} "
-                f"anchor_mask_applications={state.anchor_mask_applications} "
-                f"anchor_grad_corrected={state.anchor_grad_corrected} "
-                f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
-                f"anchor_batch_fraction={state.anchor_batch_fraction} "
-                f"anchor_backward_isolation_mode=clone "
-                # Anchor uses clean policy-gradient loss: ratio = 1, no clip,
-                # no old_log_probs.
-                f"anchor_loss=clean_pg anchor_ratio=1.0",
-                flush=True,
+        # is logged once at build, never here. EXP-26 FIX (Defect 7 / flag b):
+        # `deltas` is the MERGER's per-target EMA delta dict — populated ONLY when
+        # `spectral is not None` (the merger maintains M); see the `if spectral is
+        # not None: deltas = feed_anchor_grads_into_ema(...)` feed above. On a
+        # spectral-OFF arm (plain-PowerSGD / the C1 screen / the B-plain & B-dense
+        # arms: anchor-owns-Q, no merger) `deltas` is ALWAYS empty, so the bare
+        # `else` branch below printed the stale `[EXP-12] produced NO target grads
+        # (targets matched=0)` warning on EVERY anchor fire — a false alarm that
+        # cries wolf about MERGER coverage when there is no merger. The anchor's OWN
+        # success is logged elsewhere (the `[bcast] Q updated` line + the
+        # family-screen line + the anchor_backwards/anchor_q_updates counters), so we
+        # gate the WHOLE merger-EMA log block on `spectral is not None`. With a real
+        # merger present, an empty `deltas` is a genuine coverage bug and STILL
+        # surfaces the warning.
+        if spectral is not None:
+            if deltas:
+                mean_delta = sum(deltas.values()) / len(deltas)
+                max_delta = max(deltas.values())
+                print(
+                    f"[comm_eff][EXP-12] anchor refresh step={step} fired backward "
+                    f"(cadence={cadence} delay_K={delay_K}) targets={len(deltas)} "
+                    f"||dM_anchor||_mean={mean_delta:.6e} ||dM_anchor||_max={max_delta:.6e} "
+                    f"anchor_backwards={state.anchor_backwards} "
+                    f"anchor_mask_applications={state.anchor_mask_applications} "
+                    f"anchor_grad_corrected={state.anchor_grad_corrected} "
+                    f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
+                    f"anchor_batch_fraction={state.anchor_batch_fraction} "
+                    f"anchor_backward_isolation_mode=clone "
+                    # Anchor uses clean policy-gradient loss: ratio = 1, no clip,
+                    # no old_log_probs.
+                    f"anchor_loss=clean_pg anchor_ratio=1.0",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[comm_eff][EXP-12] anchor refresh step={step} produced NO target grads "
+                    f"(targets matched=0); check target_substr / use_orig_params",
+                    flush=True,
+                )
+
+    def _maybe_comm_eff_capture_g_dense(self, data, loss_function) -> None:
+        """FSDP override: parallel UNCOMPRESSED G_dense capture (EXP-26 Step A).
+
+        Runs a SECOND forward/backward of the SAME fast-path GRPO ``loss_function``
+        on an ISOLATED no-hook clone loaded with the CURRENT weights, with the
+        PowerSGD projection hooks DELIBERATELY NOT registered — so the clone's
+        boundary activations are UNCOMPRESSED and ``p.grad`` is the true dense GRPO
+        gradient ``G_dense`` at this step. We extract + DP-reduce + dump it as
+        ``G_dense`` (detached/dump-only) and discard.
+
+        **Why the clone (not a second backward on the live module).** A second
+        backward on the live FSDP module would (a) accumulate into the live
+        ``p.grad`` (double-counting G_comp), (b) re-fire FSDP1's post-backward
+        ``_check_grad_to_accumulate`` outside the fast-path window, and (c) risk
+        the optimizer consuming a contaminated grad. The clone is off the
+        optimizer's param group (assert_anchor_module_isolated), has no FSDP hooks,
+        and its grads are read then zeroed — so it CANNOT change optimizer state
+        (the measurement-only / PROBE_LEAKS_INTO_OPTIMIZER invariant).
+
+        Strict no-op unless ``comm_eff.capture.enabled`` AND
+        ``comm_eff.capture.capture_g_dense``. The clone is the SAME cached anchor
+        clone (reused — no extra ~3 GB allocation); the next anchor refresh
+        re-loads the K-stale snapshot into it.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        writer = getattr(state, "_capture_writer", None)
+        cap_cfg = getattr(getattr(state, "config", None), "capture", None)
+        if writer is None or cap_cfg is None or not bool(getattr(cap_cfg, "capture_g_dense", False)):
+            return
+
+        from verl.workers.comm_eff.anchor import (
+            assert_anchor_module_isolated,
+            build_anchor_module,
+            capture_anchor_tensors,
+            extract_target_grads,
+        )
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+        _gs = int(getattr(state, "global_step", -1) or -1)
+        # Align with EVERY other role via the SINGLE per-train_batch tick
+        # state.capture_tick() (stamped at the fast-path forward, before the
+        # grad-correction hook advances spectral_step). This is what makes
+        # cos(G_dense, G_comp) / cos(G_dense, G_corr) computable: G_dense lands on
+        # the SAME (global_step, optimizer_tick) as the merger's G_comp/G_corr.
+        _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0) + 1
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+
+        def _summon_ctx():
+            if module_is_fsdp1:
+                return FSDP.summon_full_params(self.module, with_grads=False, writeback=False)
+            return nullcontext()
+
+        _opt_before = int(getattr(state, "anchor_optimizer_steps", 0))
+        _dense_swap = None
+        try:
+            with _summon_ctx():
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                # EXP-26 FIX (Defect 6 — the REAL H1 blocker): use a DEDICATED
+                # G_dense clone, NOT the shared self._anchor_module_cache. The
+                # shared cache gets PowerSGD projection forward-hooks registered on
+                # its decoder layers by the anchor's owns-Q sketch harvest
+                # (powersgd.register(clone)), and copy.deepcopy of a hook-carrying
+                # `inner` ALSO copies its _forward_hooks. Either way the clone's
+                # boundary forward then runs M_hat=(M@Q)Qᵀ with _anchor_sketch_mode
+                # False ⇒ FULL projection ⇒ G_dense had ~r/H≈5% of the true norm and
+                # was anti-correlated with the dense gradient (the analyst's gate:
+                # cos(G_dense,G_fresh_anchor)≈−0.02, norm_ratio≈0.05 on codec-ON
+                # arms). A dedicated clone that NEVER receives codec hooks + an
+                # explicit forward-hook strip + a hard assert below guarantees the
+                # uncompressed backward.
+                cached = getattr(self, "_g_dense_clone", None)
+                if cached is None:
+                    cached = build_anchor_module(inner)
+                    self._g_dense_clone = cached
+                # Current (delay_K=0) weights, canonical-keyed.
+                cur = {_canon(n): p.detach().clone() for n, p in inner.named_parameters()}
+            assert_anchor_module_isolated(cached, optimizer=self.optimizer, fsdp_module=inner)
+            try:
+                live_p = next(inner.parameters())
+                cached.to(device=live_p.device, dtype=live_p.dtype)
+            except StopIteration:
+                pass
+            with torch.no_grad():
+                for n, p in cached.named_parameters():
+                    s = cur.get(_canon(n))
+                    if s is not None and s.shape == p.shape:
+                        p.copy_(s.to(p.device, p.dtype))
+                    if p.grad is not None:
+                        p.grad = None
+            # EXP-26 FIX (Defect 2): the clone can come back requires_grad=False /
+            # eval mode (so .backward() fills no .grad). Force train + requires_grad.
+            cached.train()
+            for _p in cached.parameters():
+                _p.requires_grad_(True)
+
+            # EXP-26 FIX (Defect 6): STRIP every forward / forward-pre hook from the
+            # clone and EVERY submodule so the PowerSGD projection cannot fire —
+            # regardless of whether deepcopy copied them or the anchor registered
+            # them on a shared object. Then HARD-ASSERT the boundary decoder layers
+            # are hook-free (the projector hooks live on the decoder blocks). This is
+            # the load-bearing guarantee that the parallel backward is UNCOMPRESSED.
+            _n_stripped = 0
+            for _m in cached.modules():
+                for _hreg in ("_forward_hooks", "_forward_pre_hooks",
+                              "_forward_hooks_with_kwargs", "_forward_pre_hooks_with_kwargs"):
+                    _hd = getattr(_m, _hreg, None)
+                    if _hd:
+                        _n_stripped += len(_hd)
+                        _hd.clear()
+            _resid = sum(
+                len(getattr(_m, "_forward_hooks", {}) or {}) + len(getattr(_m, "_forward_pre_hooks", {}) or {})
+                for _m in cached.modules()
             )
+            assert _resid == 0, (
+                f"comm_eff G_dense: clone still has {_resid} forward hook(s) after strip — the "
+                "parallel backward would run COMPRESSED (M_hat=(M@Q)Qᵀ) and G_dense would be the "
+                "projected gradient, not the true dense one (EXP-26 Defect 6)."
+            )
+
+            # Belt-and-braces: defensively unregister the live PowerSGD compressor's
+            # handles in case any point at a shared module (they should already be
+            # gone after forward_backward_batch's finally), and ensure the codec
+            # cannot be re-activated on this pass.
+            _ps = getattr(state, "powersgd", None)
+            if _ps is not None and getattr(_ps, "is_registered", False):
+                try:
+                    _ps.unregister()
+                except Exception:
+                    pass
+
+            # Ensure NO mask / powersgd hooks fire on the clone (UNCOMPRESSED).
+            prev_mask_active = getattr(state, "mask_active", False)
+            prev_path_tag = getattr(state, "path_tag", None)
+            state.mask_active = False
+            if hasattr(state, "set_path_tag"):
+                state.set_path_tag(None)
+
+            dense_data = data.copy() if hasattr(data, "copy") else data
+            _dense_swap = self.module
+            self.module = cached
+            try:
+                # The REAL fast-path loss (PPO ratio/clip) — NOT anchor_pg_loss —
+                # so G_dense is the true dense GRPO update direction the audit
+                # compares G_comp against. No codec hooks ⇒ uncompressed activations.
+                self._forward_backward_batch_inner(dense_data, loss_function, forward_only=False)
+
+                def _full_grad_of(grad):
+                    return grad, {"grad_container_type": type(grad).__name__}
+
+                dense_grads = extract_target_grads(
+                    cached.named_parameters(),
+                    target_substrs=target_substrs,
+                    max_targets=max_targets,
+                    full_grad_of=_full_grad_of,
+                )
+                dense_grads = self._dp_all_reduce_anchor_grads(dense_grads)
+                n = capture_anchor_tensors(
+                    writer=writer, role="G_dense", grads=dense_grads,
+                    global_step=_gs, optimizer_tick=_tk,
+                )
+                # EXP-26 (Defect 6) visibility: log the mean ||G_dense|| so a
+                # projected (codec-contaminated) gradient — which would be ~r/H of
+                # the true norm — is obvious in train.log even before the offline
+                # gate runs. A healthy uncompressed grad is O(0.1-1) per matrix.
+                _gd_norms = [float(torch.linalg.norm(g.float()).item()) for g in dense_grads.values()] if dense_grads else []
+                _gd_mean = (sum(_gd_norms) / len(_gd_norms)) if _gd_norms else 0.0
+                print(
+                    f"[comm_eff][EXP-26][g_dense] step={_gs} tick={_tk} captured G_dense "
+                    f"targets={n} mean_norm={_gd_mean:.5f} (UNCOMPRESSED clone backward, "
+                    f"forward-hooks stripped; dump-only)",
+                    flush=True,
+                )
+            finally:
+                state.mask_active = prev_mask_active
+                if hasattr(state, "set_path_tag"):
+                    state.set_path_tag(prev_path_tag)
+        finally:
+            if _dense_swap is not None:
+                self.module = _dense_swap
+            try:
+                for _p in getattr(self, "_g_dense_clone").parameters():
+                    if _p.grad is not None:
+                        _p.grad = None
+            except (AttributeError, UnboundLocalError):
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        # PROBE_LEAKS_INTO_OPTIMIZER falsifier: the dense capture is dump-only.
+        assert int(getattr(state, "anchor_optimizer_steps", 0)) == _opt_before, (
+            "comm_eff capture: the parallel G_dense backward changed anchor_optimizer_steps "
+            "— it must be dump-only (PROBE_LEAKS_INTO_OPTIMIZER)."
+        )
+
+    def _maybe_capture_g_comp_no_merger(self, state) -> None:
+        """EXP-26 (Defect 5): dump the live COMPRESSED grad as ``G_comp`` when there
+        is no merger (``spectral is None``).
+
+        The audit's headline ``cos(G_dense, G_comp)`` needs the fast compressed
+        gradient. The merger normally dumps it; the A1 plain-PowerSGD arm has no
+        merger, so this capture-only path dumps it instead. NO correction is
+        applied — the grads are read, dumped (detached/fp32), and left UNCHANGED on
+        the optimizer's path (byte-identical to a no-merger run). Keyed by the same
+        ``state.capture_tick()`` so it pairs with G_dense. No-op unless a capture
+        writer is attached.
+        """
+        writer = getattr(state, "_capture_writer", None)
+        if writer is None:
+            return
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+        _gs = int(getattr(state, "global_step", -1) or -1)
+        _tk = int(state.capture_tick()) if hasattr(state, "capture_tick") else 0
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+
+        def _dump_named(named_params):
+            n = 0
+            for name, p in named_params:
+                grad = getattr(p, "grad", None)
+                if grad is None or not any(s in name for s in target_substrs):
+                    continue
+                if max_targets >= 0 and n >= max_targets:
+                    break
+                full = grad.full_tensor() if isinstance(grad, DTensor) else grad
+                if full.dim() != 2:
+                    continue
+                if writer.dump(role="G_comp", target_name=name, tensor=full,
+                               global_step=_gs, optimizer_tick=_tk):
+                    n += 1
+            return n
+
+        if module_is_fsdp1:
+            use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
+            if not use_orig:
+                return  # cannot surface 2D grads without use_orig_params; skip silently
+            with FSDP.summon_full_params(self.module, with_grads=True, writeback=False):
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                n = _dump_named(inner.named_parameters())
         else:
-            print(
-                f"[comm_eff][EXP-12] anchor refresh step={step} produced NO target grads "
-                f"(targets matched=0); check target_substr / use_orig_params",
-                flush=True,
-            )
+            inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            n = _dump_named(inner.named_parameters())
+        print(
+            f"[comm_eff][EXP-26][g_comp-no-merger] step={_gs} tick={_tk} dumped G_comp "
+            f"targets={n} (capture-only; NO correction applied)",
+            flush=True,
+        )
 
     def _maybe_comm_eff_grad_correction(self) -> None:
         """FSDP spectral gradient-correction hook.
@@ -1672,6 +2258,13 @@ class FSDPEngine(BaseEngine):
             return
         spectral = getattr(state, "spectral", None)
         if spectral is None:
+            # EXP-26 FIX (Defect 5): NO merger (the A1 plain-PowerSGD audit arm),
+            # but the audit still needs G_comp — the fast COMPRESSED gradient now
+            # living on the live p.grad — to compute the headline
+            # cos(G_dense, G_comp) (H1). The merger normally dumps G_comp; with no
+            # merger we dump it here (capture-only, NO correction). No-op unless a
+            # capture writer is attached.
+            self._maybe_capture_g_comp_no_merger(state)
             return
 
         # Spectral-correction cadence gate. Advance the 1-based optimizer-step

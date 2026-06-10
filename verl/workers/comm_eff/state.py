@@ -264,6 +264,25 @@ class CommEffState:
         # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
         # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
         self.merger_coldM_fallbacks = 0
+        # EXP-26 Step B: per-step count of ef_powersgd targets whose accumulated
+        # error-feedback residual was RESET because the target's logical 2D shape
+        # changed (no stale carry across shape change). The shape-aware-residual
+        # invariant surfaces this so the probe can prove the reset fired.
+        self.residual_reset_on_shape_mismatch = 0
+        # EXP-26 Step C1: cumulative count of PASSIVE family-screen builds (one per
+        # anchor refresh that built candidate Q_f for the q_basis_passive families).
+        # 0 unless the screen is configured; lets the probe confirm the screen fired.
+        self.family_screen_builds = 0
+        # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
+        # the anchor / merger / projection hooks can all reach it via the state).
+        # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
+        self._capture_writer = None
+        # EXP-26 capture: the SINGLE per-train_batch optimizer tick all capture
+        # roles key on, stamped at the start of the real fast-path forward (see
+        # FSDPEngine.forward_backward_batch). -1 = not yet stamped (fall back to
+        # current_optimizer_tick()). Unifying the key across roles is what keeps the
+        # max_ticks budget counting OPTIMIZER ticks, not per-forward generations.
+        self._capture_tick = -1
 
         # Whether masking is currently active. Set True only on entry to the
         # actor-train forward/backward (around update_actor) and cleared on
@@ -355,6 +374,14 @@ class CommEffState:
                 qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
                 reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
                 anchor_owns_q=anchor_owns_q,
+                # EXP-26 Step C: LIVE Q-basis family (default "act" = byte-identical).
+                q_basis=str(getattr(ps_cfg, "q_basis", "act")),
+                # EXP-26 Step C1: PASSIVE screen families + hybrid column split.
+                q_basis_passive=list(getattr(ps_cfg, "q_basis_passive", []) or []),
+                hybrid_act_cols=int(getattr(ps_cfg, "hybrid_act_cols", -1)),
+                hybrid_grad_cols=int(getattr(ps_cfg, "hybrid_grad_cols", -1)),
+                # EXP-26 Step E: anchor cadence for the Q-broadcast byte amortization.
+                anchor_cadence=int(getattr(anc_cfg_for_q, "cadence", 1)) if anc_cfg_for_q is not None else 1,
                 state=self,
             )
             logger.info(
@@ -391,6 +418,9 @@ class CommEffState:
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
                 blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
                 signed_ema_alpha=float(getattr(spec_cfg, "signed_ema_alpha", 0.0)),
+                # EXP-26 Step B: error-feedback residual knobs (ef_powersgd).
+                ef_decay=float(getattr(spec_cfg, "ef_decay", 0.0)),
+                ef_clip=float(getattr(spec_cfg, "ef_clip", 0.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "
@@ -412,7 +442,28 @@ class CommEffState:
                 f"[comm_eff][EXP-12] spectral storage: ema_device={self.spectral.ema_device} "
                 f"correction_mode={self.spectral.correction_mode} "
                 f"signed_ema_alpha={self.spectral.signed_ema_alpha} "
+                f"ef_decay={self.spectral.ef_decay} ef_clip={self.spectral.ef_clip} "
                 f"anchor_backward_isolation_mode={isolation_mode}",
+                flush=True,
+            )
+
+        # EXP-26 Step A: build the diagnostic capture writer iff
+        # comm_eff.capture.enabled. Strict no-op (None) otherwise — the disabled /
+        # non-capture path never touches the filesystem. Lazy import so the
+        # disabled path never pays the import cost.
+        cap_cfg = getattr(self.config, "capture", None)
+        cap_enabled = bool(getattr(cap_cfg, "enabled", False)) if cap_cfg is not None else False
+        if cap_enabled:
+            from verl.workers.comm_eff.capture import maybe_build_capture_writer
+
+            self._capture_writer = maybe_build_capture_writer(self.config)
+            print(
+                f"[comm_eff][EXP-26] capture ENABLED: dir={getattr(cap_cfg, 'capture_dir', '') or './captures'} "
+                f"max_ticks={getattr(cap_cfg, 'max_ticks', 10)} "
+                f"stratified_targets={getattr(cap_cfg, 'stratified_targets', 0)} "
+                f"capture_g_dense={getattr(cap_cfg, 'capture_g_dense', False)} "
+                f"capture_fresh_anchor={getattr(cap_cfg, 'capture_fresh_anchor', False)} "
+                f"dump_dtype={getattr(cap_cfg, 'dump_dtype', 'fp32')}",
                 flush=True,
             )
         self._built = True
@@ -428,6 +479,52 @@ class CommEffState:
         if tag is not None and tag not in PATH_TAGS:
             raise ValueError(f"unknown comm_eff path tag {tag!r}; expected one of {PATH_TAGS} or None")
         self.path_tag = tag
+
+    def current_optimizer_tick(self) -> int:
+        """The optimizer tick the CURRENT train_batch will land on (1-based).
+
+        EXP-26 capture key. ALL capture roles (the powersgd-hook A/Â/Q, the merger
+        G_comp/G_corr, the anchor M/G_anchor, the parallel G_dense, the delay_K=0
+        fresh-anchor probe) key on THIS so they co-locate under one
+        ``(global_step, optimizer_tick)`` and the ``max_ticks`` budget counts
+        OPTIMIZER ticks (not the hundreds of per-micro-batch forward generations
+        the activation hook would otherwise emit, which starved the budget).
+
+        Both ``spectral_step`` (grad-correction hook) and ``anchor_step`` (anchor
+        refresh) advance once per ``train_batch`` AFTER/at the top of the batch, so
+        DURING the batch's forward+backward they trail by one. The per-batch tick
+        is therefore ``max(spectral_step, anchor_step) + 1``. We take the MAX
+        because either counter may be inert on a given arm: a no-merger arm
+        (``spectral.enabled=false``, e.g. the A1 plain-PowerSGD audit arm) never
+        advances ``spectral_step`` (the grad-correction hook early-returns on
+        ``spectral is None``) — so keying on ``spectral_step`` alone would collapse
+        EVERY tick to 1 and the dumps would overwrite. ``anchor_step`` is the live
+        per-batch counter there (it advances at the top of every anchor refresh).
+        Symmetrically an anchor-disabled arm keeps advancing ``spectral_step``.
+        Pure read.
+        """
+        # NB ``anchor_step`` is incremented at the TOP of the anchor refresh
+        # (before the stamp), so it ALREADY equals N during the batch; while
+        # ``spectral_step`` is incremented at the END (grad-correction), so it
+        # trails at N-1 during the batch. The batch tick is thus
+        # ``max(anchor_step, spectral_step + 1)`` — N from whichever counter is
+        # live. (Called only at the stamp sites — anchor-top + the fast forward —
+        # where this is exact; later reads go through the stamped capture_tick().)
+        ss = int(getattr(self, "spectral_step", 0) or 0)
+        as_ = int(getattr(self, "anchor_step", 0) or 0)
+        return max(as_, ss + 1)
+
+    def capture_tick(self) -> int:
+        """The optimizer tick the CURRENT train_batch's capture dumps key on.
+
+        Returns the value stamped on ``self._capture_tick`` at the start of the
+        real fast-path forward (so every role in this batch shares ONE key), or
+        falls back to ``current_optimizer_tick()`` if it was never stamped (e.g. a
+        unit test, or a code path that did not go through
+        ``forward_backward_batch``). Pure read.
+        """
+        t = int(getattr(self, "_capture_tick", -1) or -1)
+        return t if t >= 0 else self.current_optimizer_tick()
 
     def is_clean_step(self, global_step: Optional[int] = None) -> bool:
         """True iff the given trainer ``global_step`` is a clean step.
@@ -500,6 +597,11 @@ class CommEffState:
         """Record one PowerSGD block-power-iteration basis refresh.
         Called from ``maybe_update_basis`` after a successful ``orth(V)``."""
         self.powersgd_basis_updates += 1
+
+    def note_family_screen(self, n_families: int = 0) -> None:
+        """Record one EXP-26 Step-C1 passive family-screen build (one per anchor
+        refresh that built candidate Q_f). Pure counter bump."""
+        self.family_screen_builds += 1
 
     def path_metrics(self) -> dict:
         """Per-path mask-application counters, surfaced under a stable KEY prefix.
@@ -615,6 +717,20 @@ class CommEffState:
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
+        # EXP-26 Step C1: cumulative passive family-screen builds.
+        out["comm_eff/family_screen_builds"] = self.family_screen_builds
+        # EXP-26 Step E: measured inter-stage communication volume this tick (element
+        # counts; the RATIO is the reported Step-E number, dtype-invariant). Y=M@Q
+        # (N·r) coords + amortized Q-broadcast vs the dense activation (N·H). Only
+        # surfaced once a tick has been measured (last_* > 0). The analyst greps
+        # comm/bytes_compressed + comm/bytes_dense_equiv (and the ratio) from the
+        # metrics jsonl / train.log; the names use the plan's `comm/` namespace.
+        ec = float(getattr(self.powersgd, "last_elems_compressed", 0.0))
+        ed = float(getattr(self.powersgd, "last_elems_dense_equiv", 0.0))
+        if ed > 0.0:
+            out["comm/bytes_compressed"] = ec
+            out["comm/bytes_dense_equiv"] = ed
+            out["comm/bytes_ratio"] = ec / ed
         return out
 
     def metrics(self) -> dict:
@@ -649,6 +765,10 @@ class CommEffState:
             "comm_eff/anchor_q_updates": self.anchor_q_updates,
             "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
+            # EXP-26 Step B: ef_powersgd shape-aware residual resets this step.
+            "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
+            # EXP-26 Step C1: cumulative passive family-screen builds.
+            "comm_eff/family_screen_builds": self.family_screen_builds,
         }
 
 

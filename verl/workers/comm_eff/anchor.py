@@ -78,6 +78,7 @@ __all__ = [
     "anchor_pg_loss",
     "build_anchor_module",
     "assert_anchor_module_isolated",
+    "capture_anchor_tensors",
 ]
 
 
@@ -504,6 +505,37 @@ def assert_anchor_module_isolated(
             "FSDP module — criterion 13 at risk (clone must be a fresh deep-copy, "
             "not an alias)."
         )
+
+
+def capture_anchor_tensors(
+    *,
+    writer,
+    role: str,
+    grads: dict,
+    global_step: int,
+    optimizer_tick: int,
+) -> int:
+    """EXP-26 Step A: dump a ``{name: tensor}`` map under ``role`` (detached/fp32).
+
+    Pure I/O — used for the K-stale ``G_anchor`` map (role ``"G_anchor"``), the
+    anchor EMA ``M`` map (role ``"M"``), and the ``delay_K=0`` fresh-anchor
+    measurement grad (role ``"G_fresh_anchor"``). The writer detaches + clones, so
+    this NEVER feeds the optimizer or the EMA (the measurement-only invariant).
+    No-op (returns 0) when ``writer is None``. Returns the number of tensors
+    written.
+    """
+    if writer is None or not grads:
+        return 0
+    n = 0
+    for name, t in grads.items():
+        if t is None:
+            continue
+        if writer.dump(
+            role=role, target_name=name, tensor=t,
+            global_step=global_step, optimizer_tick=optimizer_tick,
+        ):
+            n += 1
+    return n
 
 
 def feed_anchor_grads_into_ema(grads: dict, spectral, *, state=None) -> dict:
