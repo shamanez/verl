@@ -269,6 +269,10 @@ class CommEffState:
         # changed (no stale carry across shape change). The shape-aware-residual
         # invariant surfaces this so the probe can prove the reset fired.
         self.residual_reset_on_shape_mismatch = 0
+        # EXP-26 Step C1: cumulative count of PASSIVE family-screen builds (one per
+        # anchor refresh that built candidate Q_f for the q_basis_passive families).
+        # 0 unless the screen is configured; lets the probe confirm the screen fired.
+        self.family_screen_builds = 0
         # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
         # the anchor / merger / projection hooks can all reach it via the state).
         # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
@@ -370,8 +374,14 @@ class CommEffState:
                 qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
                 reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
                 anchor_owns_q=anchor_owns_q,
-                # EXP-26 Step C: Q-basis family (default "act" = byte-identical).
+                # EXP-26 Step C: LIVE Q-basis family (default "act" = byte-identical).
                 q_basis=str(getattr(ps_cfg, "q_basis", "act")),
+                # EXP-26 Step C1: PASSIVE screen families + hybrid column split.
+                q_basis_passive=list(getattr(ps_cfg, "q_basis_passive", []) or []),
+                hybrid_act_cols=int(getattr(ps_cfg, "hybrid_act_cols", -1)),
+                hybrid_grad_cols=int(getattr(ps_cfg, "hybrid_grad_cols", -1)),
+                # EXP-26 Step E: anchor cadence for the Q-broadcast byte amortization.
+                anchor_cadence=int(getattr(anc_cfg_for_q, "cadence", 1)) if anc_cfg_for_q is not None else 1,
                 state=self,
             )
             logger.info(
@@ -588,6 +598,11 @@ class CommEffState:
         Called from ``maybe_update_basis`` after a successful ``orth(V)``."""
         self.powersgd_basis_updates += 1
 
+    def note_family_screen(self, n_families: int = 0) -> None:
+        """Record one EXP-26 Step-C1 passive family-screen build (one per anchor
+        refresh that built candidate Q_f). Pure counter bump."""
+        self.family_screen_builds += 1
+
     def path_metrics(self) -> dict:
         """Per-path mask-application counters, surfaced under a stable KEY prefix.
 
@@ -702,6 +717,20 @@ class CommEffState:
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
+        # EXP-26 Step C1: cumulative passive family-screen builds.
+        out["comm_eff/family_screen_builds"] = self.family_screen_builds
+        # EXP-26 Step E: measured inter-stage communication volume this tick (element
+        # counts; the RATIO is the reported Step-E number, dtype-invariant). Y=M@Q
+        # (N·r) coords + amortized Q-broadcast vs the dense activation (N·H). Only
+        # surfaced once a tick has been measured (last_* > 0). The analyst greps
+        # comm/bytes_compressed + comm/bytes_dense_equiv (and the ratio) from the
+        # metrics jsonl / train.log; the names use the plan's `comm/` namespace.
+        ec = float(getattr(self.powersgd, "last_elems_compressed", 0.0))
+        ed = float(getattr(self.powersgd, "last_elems_dense_equiv", 0.0))
+        if ed > 0.0:
+            out["comm/bytes_compressed"] = ec
+            out["comm/bytes_dense_equiv"] = ed
+            out["comm/bytes_ratio"] = ec / ed
         return out
 
     def metrics(self) -> dict:
@@ -738,6 +767,8 @@ class CommEffState:
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
             # EXP-26 Step B: ef_powersgd shape-aware residual resets this step.
             "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
+            # EXP-26 Step C1: cumulative passive family-screen builds.
+            "comm_eff/family_screen_builds": self.family_screen_builds,
         }
 
 

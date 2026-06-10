@@ -813,6 +813,85 @@ class FSDPEngine(BaseEngine):
                 "launcher runs rmpad + SP=1."
             )
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
+        # EXP-26 Step C1: during the anchor's family-harvest pass, set the per-row
+        # GRPO advantage-magnitude weight (aligned to the boundary M's rmpad row
+        # order) for the `adv` family. Only when the harvest is armed AND `adv` is a
+        # requested family (live or passive) — else a strict no-op (no extra work on
+        # the byte-identical / non-adv path). The boundary M covers ALL packed tokens
+        # (prompt+response); the weight is |a_t| on response positions, 0 on prompt.
+        if getattr(compressor, "_family_harvest", False) and (
+            compressor.q_basis == "adv" or "adv" in getattr(compressor, "q_basis_passive", [])
+        ):
+            try:
+                w = self._comm_eff_build_adv_weight(micro_batch, input_ids)
+                compressor.set_advantage_weight(w)
+            except Exception as _adv_exc:  # pragma: no cover - defensive
+                # A weight-build failure must not crash the anchor pass; the adv
+                # family falls back to uniform weights (logged) rather than aborting.
+                print(f"[comm_eff][EXP-26][adv-weight] WARN build failed: {_adv_exc!r} — adv uses uniform", flush=True)
+                compressor.set_advantage_weight(None)
+
+    def _comm_eff_build_adv_weight(self, micro_batch, input_ids):
+        """EXP-26 Step C1: build the per-row advantage-magnitude weight (total_nnz,)
+        aligned to the boundary activation M's rmpad packed-row order.
+
+        The boundary M is ``(total_nnz, H)`` where ``total_nnz`` is the packed
+        prompt+response token axis (same packing as ``input_ids.values()``). The
+        GRPO advantage is per RESPONSE token. For each sample ``i`` the response
+        tokens occupy the LAST ``resp_len_i`` packed positions of that sample's
+        block ``[seq_off_i - resp_len_i : seq_off_i]`` (mirrors
+        ``no_padding_2_padding``'s slicing; M is the activation AT each token, NOT the
+        one-shifted log_prob, so no left-shift). We scatter ``|advantages_i|`` into
+        those positions (prompt positions stay 0) then normalize by the nonzero mean
+        so ``w = |a_t| / mean(|a_t|)``. Returns an fp32 ``(total_nnz,)`` tensor on the
+        activation device, or ``None`` if the operands are missing.
+        """
+        adv = micro_batch.get("advantages", None) if hasattr(micro_batch, "get") else None
+        responses = micro_batch.get("responses", None) if hasattr(micro_batch, "get") else None
+        if adv is None or responses is None:
+            return None
+        dev = input_ids.values().device
+        total_nnz = int(input_ids.values().shape[0])
+        # Per-sample sequence (prompt+response) lengths from the input_ids packing.
+        seq_lens = input_ids.offsets().diff().to(device=dev)  # (nseq,)
+        seq_offsets = seq_lens.cumsum(dim=0)  # (nseq,) end offset of each sample's block
+        # Per-sample response lengths.
+        if getattr(responses, "is_nested", False):
+            resp_lens = responses.offsets().diff().to(device=dev)
+            adv_vals = adv.values().to(torch.float32) if getattr(adv, "is_nested", False) else adv.reshape(-1).to(torch.float32)
+            adv_offsets = (responses.offsets().to(device=dev) if getattr(adv, "is_nested", False) else None)
+        else:
+            # padded responses: response length is the 2nd dim; advantages padded too.
+            resp_lens = torch.full((seq_lens.shape[0],), int(responses.shape[1]), device=dev, dtype=seq_lens.dtype)
+            adv_vals = None
+            adv_offsets = None
+        w = torch.zeros(total_nnz, dtype=torch.float32, device=dev)
+        nseq = seq_lens.shape[0]
+        for i in range(nseq):
+            rl = int(resp_lens[i].item())
+            if rl <= 0:
+                continue
+            seq_off = int(seq_offsets[i].item())
+            start = seq_off - rl
+            if start < 0:
+                continue
+            # advantages for sample i (response tokens).
+            if getattr(adv, "is_nested", False):
+                a_i = adv[i].to(torch.float32).reshape(-1)
+            elif adv.dim() >= 2:
+                a_i = adv[i, :rl].to(torch.float32).reshape(-1)
+            else:
+                # flat per-token advantages already in packed-response order — rare.
+                a_i = adv.to(torch.float32).reshape(-1)[:rl]
+            n = min(rl, a_i.shape[0], total_nnz - start)
+            w[start:start + n] = a_i[:n].abs()
+        nz = w[w > 0]
+        if nz.numel() == 0:
+            return None
+        mean_abs = float(nz.mean().item())
+        if mean_abs > 0:
+            w = w / mean_abs
+        return w
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # comm_eff activation-mask hook lifecycle: register hooks on entry to the
@@ -848,6 +927,14 @@ class FSDPEngine(BaseEngine):
             and hasattr(_ce_state, "current_optimizer_tick")
         ):
             object.__setattr__(_ce_state, "_capture_tick", _ce_state.current_optimizer_tick())
+        # EXP-26 Step E: reset the per-tick comm-volume accumulators before the real
+        # fast-train forward so the powersgd hook accumulates THIS tick's Y/dense
+        # element counts cleanly (snapshotted into last_elems_* in engine_workers
+        # after backward). No-op unless the powersgd codec is live.
+        if not forward_only and _ce_state is not None and getattr(_ce_state, "enabled", False):
+            _ps = getattr(_ce_state, "powersgd", None)
+            if _ps is not None and hasattr(_ps, "reset_tick_comm_counters"):
+                _ps.reset_tick_comm_counters()
         try:
             return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
         finally:
@@ -1480,6 +1567,14 @@ class FSDPEngine(BaseEngine):
                     powersgd.unregister()
                 finally:
                     powersgd.set_anchor_sketch_mode(False)
+                    # EXP-26 Step C1: remove the live G_b grad-hooks now that the
+                    # backward has fired + populated _family_Gb. The harvested
+                    # M/G_b buffers PERSIST (like the act sketch V) — consumed by
+                    # the passive screen + the LIVE family path below, then cleared.
+                    try:
+                        powersgd.remove_family_grad_hooks()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
@@ -1647,7 +1742,18 @@ class FSDPEngine(BaseEngine):
                         _fresh_swap = self.module
                         self.module = _fresh_clone
                         # NO powersgd.register here — V must stay the K-stale harvest.
-                        _fresh_lossf = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+                        # EXP-26 Step C/B should-have: the probe loss is the clean PG
+                        # (ratio≡1, default) OR the fast path's PPO ratio/clip loss
+                        # (fresh_anchor_loss=ppo_clip) — the latter removes the
+                        # clean-PG-vs-PPO-clip loss-mismatch confound the Step-A audit
+                        # flagged, so cos(G_fresh_ppo, G_corr) is a clean direction
+                        # test. Either way this is dump-only (no optimizer step — the
+                        # clone is off the optimizer's param group + the assert below).
+                        _probe_mode = str(getattr(cap_cfg, "fresh_anchor_loss", "clean_pg"))
+                        if _probe_mode == "ppo_clip":
+                            _fresh_lossf = loss_function  # the real fast-path PPO ratio/clip loss
+                        else:
+                            _fresh_lossf = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
                         self._forward_backward_batch_inner(
                             anchor_data, _fresh_lossf, forward_only=False
                         )
@@ -1776,6 +1882,35 @@ class FSDPEngine(BaseEngine):
                     f"(sign(M) is what the merger reads; receipt proves every DP rank holds the anchor M)",
                     flush=True,
                 )
+
+            # EXP-26 Step C1 PASSIVE screen: build + dump a candidate basis Q_f for
+            # every q_basis_passive family from the harvested M / G_b / advantage.
+            # Runs on EVERY rank in lockstep (the do_anchor_q path is symmetric across
+            # ranks, and the screen's per-family DP all-reduces iterate a FIXED
+            # family×boundary order — deadlock guard). The live Q (already updated +
+            # broadcast above) is UNTOUCHED — the screen is purely passive/dump-only.
+            # Then clear the family harvest so the live fast path holds no stale state.
+            try:
+                if getattr(powersgd, "q_basis_passive", None):
+                    _w_screen = getattr(state, "_capture_writer", None)
+                    _gs_s = int(getattr(state, "global_step", -1) or -1)
+                    _tk_s = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "anchor_step", 0) or 0)
+                    _fam_q = powersgd.build_and_dump_family_sketches(
+                        writer=_w_screen, global_step=_gs_s, optimizer_tick=_tk_s
+                    )
+                    if _fam_q:
+                        print(
+                            f"[comm_eff][EXP-26][family-screen] step={step} tick={_tk_s} "
+                            f"families={list(_fam_q.keys())} "
+                            f"boundaries={len(next(iter(_fam_q.values()))) if _fam_q else 0} "
+                            f"family_screen_builds={getattr(state, 'family_screen_builds', 0)} "
+                            f"adv_weight={'set' if getattr(powersgd, '_adv_weight', None) is not None else 'uniform'}",
+                            flush=True,
+                        )
+            finally:
+                # Always clear the harvest (M/G_b/advantage + any stray grad-hook) so
+                # the live fast path that follows holds NO stale family state.
+                powersgd.clear_family_harvest()
 
         # EXP-25 (R1, checklist #2): prove M is the GLOBAL gradient — bit-identical
         # across DP ranks. All-gather a per-target M checksum over the DP group and

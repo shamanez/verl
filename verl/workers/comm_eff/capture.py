@@ -80,6 +80,11 @@ __all__ = [
 #   G_anchor       -> the RAW K-stale anchor gradient per target (DP-reduced)
 #   G_dense        -> the parallel UNCOMPRESSED fast gradient (measurement probe)
 #   G_fresh_anchor -> the delay_K=0 fresh-anchor gradient (measurement probe)
+#   G_b            -> the boundary activation gradient dL_anchor/dh (EXP-26 Step C1;
+#                     the operand the grad/tail/ticket family sketches are built from)
+#   Q_<family>     -> the EXP-26 Step-C1 PASSIVE-screen candidate basis per family
+#                     (Q_act / Q_grad / Q_adv / Q_tail / Q_hybrid / Q_ticket), each
+#                     an (H, r) orthonormal basis the analyst judges by update geometry
 CAPTURE_ROLES = (
     "A",
     "A_hat",
@@ -90,6 +95,13 @@ CAPTURE_ROLES = (
     "G_anchor",
     "G_dense",
     "G_fresh_anchor",
+    "G_b",
+    "Q_act",
+    "Q_grad",
+    "Q_adv",
+    "Q_tail",
+    "Q_hybrid",
+    "Q_ticket",
 )
 
 # Matrix-type substrings used to stratify the per-tick target subset (one bucket

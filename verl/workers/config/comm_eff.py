@@ -371,7 +371,34 @@ class CommEffPowerSGDConfig(BaseConfig):
     # energy and ONLY run if Step A finds Q_act under-captures off-principal update
     # energy (H2). Validated to Q_BASIS_FAMILIES. The byte budget (rank) is held
     # fixed across families — only WHICH directions Q spans changes.
+    #
+    # This is the LIVE basis the fast/training path consumes (anchor feeds V from
+    # the family's statistic). "act" is byte-identical; a non-"act" value is the
+    # C2/Step-B LIVE-family training path (the fast path stays a read-only
+    # consumer — the owns_q invariant is untouched, only the anchor's V content
+    # changes). The compressor fails LOUD on a family it does not implement.
     q_basis: str = "act"
+    # EXP-26 Step C1 PASSIVE screen: the families to PASSIVELY accumulate inside the
+    # anchor's stale-weight pass (in no_grad, off the live Q / fast path / optimizer)
+    # so ONE short run builds candidate bases for ALL families at once. Each family's
+    # candidate Q_f is orthonormalized + dumped at the anchor cadence; the judge
+    # metrics (update-capture, off-principal preservation) are computed offline
+    # against the SAME captured reference grads. Empty (default) ⇒ no passive
+    # accumulation (byte-identical). The live ``q_basis`` above is INDEPENDENT — the
+    # screen runs with q_basis="act" LIVE while these families accumulate passively.
+    # Validated to a subset of Q_BASIS_FAMILIES (minus "act"-only redundancy is OK —
+    # "act" passively re-derives the live basis as the control row in the dump).
+    q_basis_passive: list = field(default_factory=list)
+    # EXP-26 Step C1: the hybrid family column split at FIXED total rank r. ``Q_h =
+    # orth([Q_act[:, :hybrid_act_cols], Q_grad_deflated[:, :hybrid_grad_cols]])``.
+    # ``-1`` (default) ⇒ AUTO: ``hybrid_act_cols = ceil(r/2)``,
+    # ``hybrid_grad_cols = r − act`` (39 + 38 = 77 at the locked r=77 from
+    # STEP_C_SPEC.md). When BOTH are set explicitly (>= 0) they MUST sum to the rank
+    # (validated in __post_init__ only when "hybrid" is requested, so a non-hybrid
+    # run is unconstrained). The compressor reads the resolved values via
+    # ``resolved_hybrid_cols(rank)``.
+    hybrid_act_cols: int = -1
+    hybrid_grad_cols: int = -1
 
 
 @dataclass
@@ -416,6 +443,15 @@ class CommEffCaptureConfig(BaseConfig):
         capture_fresh_anchor (bool): Capture the ``delay_K=0`` fresh-anchor grad as
             a MEASUREMENT probe for the sign-agreement decomposition. Detached /
             dump-only. ``false`` (default).
+        fresh_anchor_loss (str): Loss the ``delay_K=0`` fresh-anchor MEASUREMENT
+            probe backward uses — ``"clean_pg"`` (default, ratio≡1 ``-A·logπ`` like
+            the anchor refresh) or ``"ppo_clip"`` (the SAME PPO ratio/clip loss as
+            the fast path, against the batch's ``old_log_probs``). EXP-26 Step-C/B
+            should-have: ``ppo_clip`` removes the clean-PG-vs-PPO-clip loss-mismatch
+            confound the Step-A audit flagged, giving a clean
+            ``cos(G_fresh_ppo, G_corr)`` improvement test. Affects ONLY the dump-only
+            fresh-anchor probe (never the optimizer, the EMA, or the K-stale
+            ``G_anchor`` that feeds ``M``). Validated to {clean_pg, ppo_clip}.
         dump_dtype (str): Dump precision. ``"fp32"`` (default, REQUIRED for the
             fidelity invariant — the reconstruction_rel_error recomputed from the
             dump must match the logged ~0.024 scalar within 1e-3). ``"bf16"`` is a
@@ -428,6 +464,11 @@ class CommEffCaptureConfig(BaseConfig):
     stratified_targets: int = 0
     capture_g_dense: bool = False
     capture_fresh_anchor: bool = False
+    # EXP-26 Step C/B should-have: loss for the delay_K=0 fresh-anchor probe.
+    # "clean_pg" (default, ratio≡1, matches the anchor refresh) or "ppo_clip" (the
+    # fast path's PPO ratio/clip loss vs old_log_probs — removes the loss-mismatch
+    # confound). Affects ONLY the dump-only probe.
+    fresh_anchor_loss: str = "clean_pg"
     dump_dtype: str = "fp32"
     # EXP-26 disk-volume guard: capture ONLY rank 0 (default True). The audit's
     # gradient roles are DP-reduced and Q/A/Â are sync_basis-consensus — identical
@@ -644,12 +685,46 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.powersgd.q_basis must be one of {Q_BASIS_FAMILIES}; "
                 f"got {self.powersgd.q_basis!r}"
             )
+        # EXP-26 Step C1: the PASSIVE screen family list. Every entry must be a
+        # known family; a typo is a loud error (a silently-dropped family would make
+        # the screen miss an arm). OmegaConf may pass a ListConfig — iterate it.
+        for _fam in list(self.powersgd.q_basis_passive):
+            if _fam not in Q_BASIS_FAMILIES:
+                raise ValueError(
+                    f"comm_eff.powersgd.q_basis_passive entries must each be one of "
+                    f"{Q_BASIS_FAMILIES}; got {_fam!r}"
+                )
+        # EXP-26 Step C1: the hybrid column split. Only meaningful when the hybrid
+        # family is requested (live or passive); otherwise the (default -1/-1 AUTO)
+        # values are inert. When BOTH are set EXPLICITLY (>= 0) they MUST sum to the
+        # rank; the -1 sentinel means AUTO (resolved to ceil(r/2) + (r-act) by the
+        # compressor) and is unconstrained. A single explicit value with the other
+        # at -1 is a config error (ambiguous).
+        _hybrid_used = (self.powersgd.q_basis == "hybrid") or ("hybrid" in list(self.powersgd.q_basis_passive))
+        if _hybrid_used:
+            _a, _g = self.powersgd.hybrid_act_cols, self.powersgd.hybrid_grad_cols
+            if (_a < 0) != (_g < 0):
+                raise ValueError(
+                    "comm_eff.powersgd.hybrid_act_cols / hybrid_grad_cols must BOTH be -1 "
+                    f"(AUTO) or BOTH be >= 0 (explicit); got {_a} / {_g}"
+                )
+            if _a >= 0 and _g >= 0 and _a + _g != self.powersgd.rank:
+                raise ValueError(
+                    "comm_eff.powersgd.hybrid_act_cols + hybrid_grad_cols must equal "
+                    f"powersgd.rank ({self.powersgd.rank}) when set explicitly + the hybrid "
+                    f"family is used; got {_a} + {_g} = {_a + _g}. (Use -1/-1 for AUTO.)"
+                )
         # EXP-26 Step A: diagnostic-capture block. Validated unconditionally (the
         # keys are registered regardless of capture.enabled) so a bad dump_dtype /
         # negative cap fails fast even on a non-capture run that forwards them.
         if self.capture.dump_dtype not in ("fp32", "bf16"):
             raise ValueError(
                 f"comm_eff.capture.dump_dtype must be one of (fp32, bf16); got {self.capture.dump_dtype!r}"
+            )
+        if self.capture.fresh_anchor_loss not in ("clean_pg", "ppo_clip"):
+            raise ValueError(
+                "comm_eff.capture.fresh_anchor_loss must be one of (clean_pg, ppo_clip); "
+                f"got {self.capture.fresh_anchor_loss!r}"
             )
         if self.capture.stratified_targets < 0:
             raise ValueError(

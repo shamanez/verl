@@ -300,10 +300,23 @@ COMM_EFF_SPECTRAL_EF_DECAY="${COMM_EFF_SPECTRAL_EF_DECAY:-0.0}"
 COMM_EFF_SPECTRAL_EF_CLIP="${COMM_EFF_SPECTRAL_EF_CLIP:-0.0}"
 # --- EXP-26 Step C: Q-basis FAMILY (content of orth(V) at FIXED rank) ---
 # "act" (default) = the EXP-25 activation-energy basis (byte-identical substrate).
-# RLVR-native families {grad,adv,tail,hybrid,ticket} run ONLY after Step A's H2
-# finding; they require the analyst-named sketch construction (the compressor
-# fails loud on a non-"act" family until that is implemented). Steps A/B use "act".
+# RLVR-native families {grad,adv,tail,hybrid,ticket} are IMPLEMENTED (EXP-26 Step
+# C1); the compressor fails loud on an UN-implemented family only. This is the LIVE
+# basis the fast/training path consumes (the C2/Step-B LIVE-family arm). The C1
+# screen keeps this "act" LIVE while families accumulate PASSIVELY (below). Steps
+# A/B (with q_basis=act) are byte-identical to the substrate.
 COMM_EFF_POWERSGD_Q_BASIS="${COMM_EFF_POWERSGD_Q_BASIS:-act}"
+# --- EXP-26 Step C1 PASSIVE screen: families to passively accumulate inside the
+#     anchor pass (off the live Q / fast path / optimizer) so ONE short run builds
+#     candidate bases for ALL families at once. Hydra list literal, e.g.
+#     COMM_EFF_POWERSGD_Q_BASIS_PASSIVE='[act,grad,adv,tail,hybrid,ticket]'.
+#     Empty default => no passive accumulation (byte-identical). ---
+COMM_EFF_POWERSGD_Q_BASIS_PASSIVE="${COMM_EFF_POWERSGD_Q_BASIS_PASSIVE:-[]}"
+# --- EXP-26 Step C1 hybrid family column split at FIXED rank r (act + grad == r).
+#     -1/-1 (default) = AUTO: act=ceil(r/2), grad=r-act (39 + 38 = 77 at r=77, the
+#     STEP_C_SPEC.md split). Set BOTH explicitly (>=0, summing to r) to override. ---
+COMM_EFF_POWERSGD_HYBRID_ACT_COLS="${COMM_EFF_POWERSGD_HYBRID_ACT_COLS:--1}"
+COMM_EFF_POWERSGD_HYBRID_GRAD_COLS="${COMM_EFF_POWERSGD_HYBRID_GRAD_COLS:--1}"
 # --- EXP-26 Step A: real-gradient geometry-audit tensor capture (OFF by default;
 #     a strict no-op ⇒ byte-identical to the EXP-25 substrate). When enabled the
 #     comm-eff hooks dump fp32 tensors (A/Â/Q, G_comp, G_corr, M/G_anchor, the
@@ -316,6 +329,11 @@ COMM_EFF_CAPTURE_MAX_TICKS="${COMM_EFF_CAPTURE_MAX_TICKS:-10}"        # audit ne
 COMM_EFF_CAPTURE_STRATIFIED="${COMM_EFF_CAPTURE_STRATIFIED:-0}"       # >0 => N targets/matrix-type (volume guard)
 COMM_EFF_CAPTURE_G_DENSE="${COMM_EFF_CAPTURE_G_DENSE:-false}"         # parallel uncompressed G_dense backward (highest-OOM-risk probe)
 COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe (the Option-A dense reference)
+# EXP-26 Step C/B should-have: loss for the delay_K=0 fresh-anchor probe.
+# clean_pg (default, ratio≡1 like the anchor refresh) | ppo_clip (the fast path's
+# PPO ratio/clip loss — removes the loss-mismatch confound; gives a clean
+# cos(G_fresh_ppo, G_corr) direction test). Dump-only probe; never the optimizer.
+COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS="${COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS:-clean_pg}"
 COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQUIRED for the fidelity invariant
 # EXP-26 (bug #7 fix): min_tick skips cold-Q ticks so the max_ticks budget holds
 # the POST-warm anchor fires (where G_fresh_anchor pairs with warm-Q G_comp/G_corr
@@ -369,8 +387,8 @@ cat <<EOF
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
   ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
-  q_basis (EXP-26):    $COMM_EFF_POWERSGD_Q_BASIS  (act=byte-identical; RLVR-native families gated on Step A H2)
-  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
+  q_basis (EXP-26):    live=$COMM_EFF_POWERSGD_Q_BASIS  passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE  hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)  (act=byte-identical; C1 screen: live act + passive families)
+  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -480,6 +498,9 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   actor_rollout_ref.actor.comm_eff.powersgd.q_basis="$COMM_EFF_POWERSGD_Q_BASIS" \
+  actor_rollout_ref.actor.comm_eff.powersgd.q_basis_passive="$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE" \
+  actor_rollout_ref.actor.comm_eff.powersgd.hybrid_act_cols="$COMM_EFF_POWERSGD_HYBRID_ACT_COLS" \
+  actor_rollout_ref.actor.comm_eff.powersgd.hybrid_grad_cols="$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS" \
   actor_rollout_ref.actor.comm_eff.spectral.ef_decay="$COMM_EFF_SPECTRAL_EF_DECAY" \
   actor_rollout_ref.actor.comm_eff.spectral.ef_clip="$COMM_EFF_SPECTRAL_EF_CLIP" \
   actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
@@ -488,6 +509,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.capture.stratified_targets="$COMM_EFF_CAPTURE_STRATIFIED" \
   actor_rollout_ref.actor.comm_eff.capture.capture_g_dense="$COMM_EFF_CAPTURE_G_DENSE" \
   actor_rollout_ref.actor.comm_eff.capture.capture_fresh_anchor="$COMM_EFF_CAPTURE_FRESH_ANCHOR" \
+  actor_rollout_ref.actor.comm_eff.capture.fresh_anchor_loss="$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS" \
   actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
   actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
   actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \

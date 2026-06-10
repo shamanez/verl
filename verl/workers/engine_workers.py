@@ -944,6 +944,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             # A genuine divergence must fail the training step.
                             raise
 
+        # EXP-26 Step E: finalize this train_batch's measured inter-stage comm
+        # volume. The powersgd hook accumulated Σ N·r (compressed Y) and Σ N·H
+        # (dense-equiv) over the fast-train forward; add the amortized per-tick
+        # Q-broadcast term (H·r/cadence per boundary) and snapshot into last_elems_*
+        # so powersgd_metrics() surfaces comm/bytes_compressed + comm/bytes_dense_equiv
+        # + comm/bytes_ratio. No-op for the mask/dense/disabled codecs.
+        if comm_eff_state is not None:
+            _ps = getattr(comm_eff_state, "powersgd", None)
+            if _ps is not None and hasattr(_ps, "add_amortized_q_broadcast_bytes"):
+                _ps.add_amortized_q_broadcast_bytes()
+                _ps.last_elems_compressed = float(getattr(_ps, "tick_elems_compressed", 0.0))
+                _ps.last_elems_dense_equiv = float(getattr(_ps, "tick_elems_dense_equiv", 0.0))
+
         # Surface the comm_eff operation counters into training metrics. When
         # disabled we emit explicit zeros (mask_applications / anchor_backwards /
         # spectral_corrections == 0) so the no-op is machine-checkable; emitting a
@@ -973,6 +986,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_q_updates": 0,
                     "comm_eff/anchor_q_broadcasts": 0,
                     "comm_eff/merger_coldM_fallbacks": 0,
+                    # Explicit zero on the disabled path for the EXP-26 family screen.
+                    "comm_eff/family_screen_builds": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)
