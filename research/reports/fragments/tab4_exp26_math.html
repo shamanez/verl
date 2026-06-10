@@ -1,0 +1,339 @@
+<section class="tab-content" id="tab4">
+  <h2>EXP-26 — The Moves, the Mathematics, the Geometry (and the Papers)</h2>
+  <p class="lede">
+    EXP-26 stopped guessing. Instead of inventing a merger and running an expensive training
+    arm to see if it helped, we dumped the <em>real</em> tensors — the activations, the
+    gradients, the basis — to <strong>fp32</strong> and measured the geometry directly. This
+    tab is the geometry made plain: what a subspace is, what our rank-77 basis actually
+    captures, and why a basis can hold 99.85% of the <em>picture</em> a layer sends yet only
+    31.8% of the <em>learning signal</em>. Then the three things we tested on that geometry —
+    a new basis content (Step&nbsp;C), error-feedback (Step&nbsp;B) — and what they taught us.
+    The headline: the issue lands at <span class="metric">REVISE</span>, with the best
+    realistic comm-efficient result to date (val@50 <span class="metric">0.7210</span>) two
+    points short of parity, and one clean, decisive falsification along the way.
+  </p>
+
+  <h3>1. The geometry primer — subspaces as camera angles</h3>
+  <p>
+    Everything that flows across a pipeline boundary in this model is a vector in a
+    <strong>1536-dimensional space</strong> (the hidden size \(H=1536\) of
+    Qwen2.5-1.5B). That is too many dimensions to picture, so use a smaller analogy and
+    scale it up. Imagine a cloud of points in ordinary 3D space. A <em>subspace</em> is a
+    flat slice through that cloud — a 2D plane, say. If you set up a camera pointed at that
+    plane, the photo it takes is a <strong>projection</strong>: the 3D world flattened onto
+    a 2D image. The camera keeps everything that lies in its plane and throws away everything
+    sticking out toward or away from the lens.
+  </p>
+  <p>
+    A <strong>rank-77 orthonormal basis \(Q\)</strong> is exactly that camera, but pointed at
+    a 77-dimensional slice of the 1536-dimensional space. "Orthonormal" means its 77
+    viewing directions are mutually perpendicular and unit-length — no direction is redundant
+    or stretched. We write \(Q\) as a tall thin matrix, \(1536\times 77\): 77 columns, each a
+    unit direction in the big space. The <strong>projection operator</strong>
+  </p>
+  $$ P_Q = Q\,Q^{\top} $$
+  <p>
+    is the verb "take the photo." Applied to any vector \(x\), the result \(P_Q x\) is "the
+    part of \(x\) the camera can see" — \(x\) flattened onto the 77-dimensional slice. The
+    part it can't see, \(x - P_Q x\), is what got thrown away. This is the whole compression
+    trick: instead of shipping a full 1536-number activation across the pipeline boundary, we
+    ship its 77 coordinates inside \(Q\) (that is the \(\hat A = (AQ)Q^{\top}\) you saw in
+    earlier tabs), a ~20&times; saving.
+  </p>
+  <div class="callout">
+    <strong>Energy capture ratio</strong> — the single most important number in this tab.
+    Ask "what fraction of the picture did the photo keep?" Measure it as the squared length
+    retained:
+    $$ \text{capture}(X) = \frac{\lVert P_Q X\rVert^2}{\lVert X\rVert^2} \in [0,1]. $$
+    A ratio of 1 means the camera saw everything (\(X\) already lay in the slice); a ratio
+    of 0 means \(X\) pointed entirely out of frame. \(\lVert\cdot\rVert\) is just the length
+    (Euclidean norm); squaring it makes it an energy, so the ratio is the fraction of total
+    energy the basis spans.
+  </div>
+  <p>
+    Two more words. The <strong>principal directions</strong> of a cloud are the few axes
+    along which it spreads the most — where the points usually sit. <strong>Off-principal</strong>
+    directions are the rest, where there is little spread. A good rank-77 camera is aimed at
+    the principal directions, because that is where most of the energy lives. Finally,
+    <strong>cosine similarity</strong> measures whether two vectors point the same way:
+    \(\cos(u,v)=\tfrac{u\cdot v}{\lVert u\rVert\,\lVert v\rVert}\). It is 1 when they are
+    identical in direction, 0 when they are perpendicular (unrelated), and negative when they
+    oppose. A cosine of 0.717 corresponds to about a 44&deg; angle; 0.956 is about 17&deg;.
+    We will lean on this number constantly, because the whole EXP-26 thesis is that the
+    failure of EXP-25 was a <em>direction</em> problem, not a magnitude problem.
+  </p>
+
+  <h3>2. The central surprise — 99.85% of the picture, 31.8% of the lesson</h3>
+  <p>
+    Our basis \(Q_{\text{act}}\) is built from <em>activations</em>: it is aimed at the
+    directions where the layer's outputs usually sit (block power iteration on the activation
+    second moment — Tab&nbsp;3's machinery). Step&nbsp;A measured two capture ratios for the
+    same basis on the same real tensors:
+  </p>
+  <ul>
+    <li><strong>Activation capture</strong> \(\lVert P_Q A\rVert^2/\lVert A\rVert^2 =\)
+      <span class="metric">0.9985</span> — the camera keeps 99.85% of the picture the layer
+      sends. Reconstruction is essentially lossless.</li>
+    <li><strong>Update (gradient) capture</strong> \(\lVert P_Q G\rVert^2/\lVert G\rVert^2 =\)
+      <span class="metric">0.318</span> — the same camera keeps only 31.8% of the
+      <em>learning signal</em>. The off-principal share — the part of the update the basis
+      cannot see — is <span class="metric">0.682</span>, more than two-thirds.</li>
+  </ul>
+  <div class="warn">
+    <strong>The security-camera analogy.</strong> Picture a camera bolted above a shop
+    doorway, aimed at the spot where customers usually <em>stand</em> to pay. For watching the
+    queue it is perfect — it sees 99.85% of where people are. But the interesting thing right
+    now is where people are <em>moving</em> — toward the back shelves, out the side exit — and
+    that motion happens largely outside the frame. The activation second moment (where the
+    layer's outputs sit) and the GRPO update (the direction the policy wants to change) live
+    in <strong>different subspaces</strong>. A basis tuned to reconstruct activations is the
+    camera aimed at where people stand; the learning signal is where they are moving. This is
+    not an artifact — it is a real property of RLVR training, and a published one (see the
+    papers section: RLVR provably learns <em>off</em> the principal directions).
+  </div>
+
+  <h3>3. What Step A actually measured — and the measurement craft</h3>
+  <p>
+    Step&nbsp;A dumped seven real fp32 tensors per target (the activation \(A\), its
+    reconstruction \(\hat A\), the basis \(Q\), the compressed gradient \(G_{\text{comp}}\),
+    the merger-corrected gradient \(G_{\text{corr}}\), the anchor's gradient EMA \(M\), and a
+    fresh full uncompressed anchor gradient \(G_{\text{fresh}}\) at \(\text{delay\_K}=0\)) and
+    computed the discriminators. Dump fidelity was tight: reconstruction drift
+    <span class="metric">4.5&times;10⁻⁵</span>, far below the \(10^{-3}\) gate — these are the
+    real tensors, not a bf16 readout.
+  </p>
+  <p>
+    The craft worth understanding is the <strong>confound</strong>. The plan's first instinct
+    was to compute \(\cos(G_{\text{dense}}, G_{\text{comp}})\) — does compression rotate the
+    update away from dense? But that comparison is polluted two ways. First, a <em>loss
+    mismatch</em>: the anchor computes a clean policy-gradient loss (ratio &equiv; 1, no clip),
+    while the fast path computes the real PPO-clip loss; once the policy drifts post-warmup the
+    two gradients diverge for reasons that have nothing to do with compression. Second, an
+    <em>operand mismatch</em>: PowerSGD compresses the <em>activation</em> gradient, not the
+    <em>weight</em> gradient, so \(G_{\text{comp}}\) is simply not \(Q Q^{\top} G_{\text{weight}}\).
+    Both push the naive cosine toward zero independent of direction (the measured
+    \(\cos(G_{\text{fresh}}, G_{\text{comp}})=0.010\) is an artifact — plain PowerSGD r77 ties
+    dense at 0.7415, so it cannot truly be orthogonal to dense).
+  </p>
+  <p>
+    The fix was to pivot to <strong>confound-free discriminators</strong> that never reference
+    a dense gradient: compare the merger against <em>its own input</em>,
+    \(\cos(G_{\text{comp}}, G_{\text{corr}})\), and rank families against the <em>same</em>
+    reference so the constant confound cancels. On that clean footing:
+  </p>
+  <table class="data">
+    <thead>
+      <tr><th>Step-A quantity</th><th>value</th><th>plain words</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>activation capture</td><td><span class="metric">0.9985</span></td><td>basis reconstructs the picture losslessly</td></tr>
+      <tr><td>update capture</td><td><span class="metric">0.318</span></td><td>basis misses 68% of the learning signal</td></tr>
+      <tr><td>sign-agreement @ delay_K=0</td><td>0.50&ndash;0.52</td><td>merger's sign vs the real gradient's sign is a coin-flip — even with a perfectly fresh anchor</td></tr>
+      <tr><td>signed_ema rotation \(\cos(G_{\text{comp}},G_{\text{corr}})\)</td><td>0.717 (≈44&deg;)</td><td>the EXP-25 merger swings the update direction badly</td></tr>
+    </tbody>
+  </table>
+  <p>
+    The coin-flip sign agreement at <em>zero</em> staleness is the kill shot for the EXP-25
+    merger: it proves the sign disagreement is <strong>structural</strong>, not a symptom of a
+    stale anchor you could fix by refreshing more often. That routed us to a sign-free
+    successor (Step&nbsp;B), and the 68% off-principal miss routed us to test the basis content
+    first (Step&nbsp;C).
+  </p>
+
+  <h3>4. Step C — the Q-content mathematics, and a beautiful falsification</h3>
+  <p>
+    If \(Q_{\text{act}}\) misses the learning signal, build a basis aimed at it instead. The
+    elegant trick: every candidate basis differs <em>only</em> in what statistic feeds the
+    power-iteration sketch \(V\) inside the anchor, so one short run can build all six
+    candidates <strong>passively</strong> — accumulated under <code>no_grad</code> in the
+    anchor's stale-weight pass, never touching the live \(Q\), the fast path, or the
+    optimizer. Six geometry arms collapse into one cheap cell. The operands available inside
+    the anchor are the boundary activation \(M\), the boundary activation gradient \(G_b\), and
+    the per-token GRPO advantage \(a\).
+  </p>
+  <table class="data">
+    <thead><tr><th>family</th><th>sketch construction (\(H=1536,\ r=77\))</th></tr></thead>
+    <tbody>
+      <tr><td><code>act</code> (control)</td><td>\(V \mathrel{+}= M^{\top}(MQ)\) — power iteration on the activation second moment (the live basis)</td></tr>
+      <tr><td><code>grad</code></td><td>\(V \mathrel{+}= G_b^{\top}(G_b P)\) — same iteration on the boundary <em>gradient</em>'s second moment</td></tr>
+      <tr><td><code>adv</code></td><td>\(V \mathrel{+}= (wM)^{\top}(wM\,Q),\ w=\operatorname{diag}(|a_t|/\overline{|a|})\) — advantage-magnitude-weighted activations</td></tr>
+      <tr><td><code>tail</code></td><td>\(V \mathrel{+}= G_t^{\top}(G_t P),\ G_t = G_b - (G_b Q_{\text{act}})Q_{\text{act}}^{\top}\) — gradient energy <em>deflated</em> of the act-principal subspace (aims straight at the missing 68%)</td></tr>
+      <tr><td><code>hybrid</code></td><td>\(Q_h = \operatorname{orth}\big([\,Q_{\text{act}}[:,:39]\ \big|\ Q_{\text{grad-defl}}[:,:38]\,]\big)\) — 39 activation columns + 38 deflated-gradient columns, jointly re-orthogonalized</td></tr>
+      <tr><td><code>ticket</code></td><td>\(Q_{\text{tk}} = I[:,S]\), \(S=\) top-77 coordinates of \(\operatorname{diag}(\sum_t G_b\odot G_b)\) — the axis-aligned "winning-ticket" coordinate basis (cheapest: indices, no dense broadcast)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    The grad-derived families are probed with a <em>fixed</em> deterministic orthonormal probe
+    \(P\) rather than \(Q_{\text{act}}\), because \(G_t\) is orthogonal to \(\operatorname{span}(Q_{\text{act}})\)
+    by construction — probing it with the act basis would sketch ~0. The screen ranked
+    families by update capture \(UC_f\) and off-principal preservation \(OPP_f\) against the
+    same reference grad:
+  </p>
+  <table class="data">
+    <thead><tr><th>family</th><th>\(UC_f\) (update capture)</th><th>\(OPP_f\) (off-principal)</th><th>\(AC_f\) (activation capture)</th><th>beats act?</th></tr></thead>
+    <tbody>
+      <tr><td><code>act</code> (control)</td><td>0.2010</td><td>~0</td><td>0.9993</td><td>—</td></tr>
+      <tr><td><code>grad</code></td><td>0.0498</td><td>0.0518</td><td>0.044 ⚠</td><td>no (UC collapses)</td></tr>
+      <tr><td><code>adv</code></td><td>0.2010</td><td>~0</td><td>0.9993</td><td>no (= act; weights were uniform)</td></tr>
+      <tr><td><code>tail</code></td><td>0.0498</td><td>0.0518</td><td>0.044 ⚠</td><td>no (= grad; deflation a no-op)</td></tr>
+      <tr><td><strong><code>hybrid</code></strong></td><td><span class="metric">0.2496</span></td><td>0.0685</td><td>0.9987</td><td><strong>YES</strong></td></tr>
+      <tr><td><code>ticket</code></td><td>0.2555</td><td>0.1391</td><td>0.293 ⚠</td><td>YES (but forward-fidelity hazard)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Hybrid won the geometry on the criterion that matters for a basis doing double duty: it
+    beat the control on update capture (0.2496 &gt; 0.2010) while keeping activation
+    reconstruction safe (\(AC=0.999\)). So we promoted it to a live 50-step training arm — and
+    it <strong>catastrophically anti-converted</strong>: val@50 <span class="metric">0.3730</span>,
+    with the train&harr;rollout KL exploding from 7.3 to ~13.1 even though activation
+    reconstruction stayed a healthy 0.023.
+  </p>
+  <div class="warn">
+    <strong>Why the geometry winner lost — the decisive lesson.</strong> The vLLM rollouts that
+    generate the training data run <em>uncompressed</em>. The trained policy must stay
+    consistent with the policy that produced its data. A basis reshaped toward update energy at
+    the expense of activation reconstruction lets the train-path policy <em>drift away</em> from
+    the rollout policy — and on-policy RL punishes that mismatch immediately (the KL blows up).
+    Training is a <strong>closed loop</strong>, not a static approximation problem: a geometry
+    that "captures more update energy" on paper is worthless if it breaks the train/rollout
+    contract. Step&nbsp;C is empirically falsified, cleanly. Honest footnote: even the
+    geometric "win" was modest — the pure grad families (<code>grad</code>/<code>tail</code>)
+    captured only ~5% of the gradient, because the boundary activation gradient is essentially
+    rank-diffuse, so no 77-dimensional subspace captures it. There was never a dramatic edge to
+    convert.
+  </div>
+
+  <h3>5. Step B — error-feedback mathematics (the result that survived)</h3>
+  <p>
+    Step&nbsp;B keeps the activation basis but fixes the merger. The idea of error feedback is
+    to <em>re-inject what compression dropped</em> rather than override the direction. Concretely,
+    per matrix (all fp32, detached):
+  </p>
+  $$
+  e_t = \operatorname{clip}\!\Big(\underbrace{\text{decay}\cdot e_{t-1}}_{\text{remembered residual}}
+        + \underbrace{(M - P(M))}_{\text{off-subspace part of the stale anchor EMA}},
+        \ \text{clip}\cdot \lVert G_{\text{comp}}\rVert\Big),
+  \qquad
+  G_{\text{corr}} = G_{\text{comp}} + e_t .
+  $$
+  <p>
+    In words: \(M\) is the stale anchor's gradient EMA; \(P(M)\) is the part of it that
+    \(G_{\text{comp}}\) already spans; the difference \(M-P(M)\) is the off-subspace residual —
+    the energy compression dropped. We accumulate it with a decay (a leaky memory), cap its
+    norm relative to \(\lVert G_{\text{comp}}\rVert\) so it can never dominate, and
+    <em>add</em> it to \(G_{\text{comp}}\). Crucially there is <strong>no sign term</strong>:
+    we only add dropped energy, so \(G_{\text{corr}}\) keeps \(G_{\text{comp}}\)'s direction.
+    The limiting case is a built-in correctness check: with
+    \(\text{decay}=\text{clip}=0\) the residual is floored to zero and
+    \(G_{\text{corr}}\equiv G_{\text{comp}}\) — bit-identical to plain PowerSGD.
+  </p>
+  <div class="callout">
+    <strong>An honest difference from classical error feedback.</strong> In the original
+    PowerSGD (Vogels et al.) and the Seide/Stich line of work, error feedback accumulates
+    <em>your own compression residual</em> — the exact part of <em>this</em> gradient you failed
+    to send, re-added next step — because a parameter-gradient residual has a stable home: the
+    same parameter slot recurs every step. Our boundary activations do <em>not</em> have a
+    stable slot (each residual is tied to a specific microbatch, trajectory, token, and weight
+    instance, which is why the local reference notes argue activation EF is unsafe in GRPO). So
+    we do not re-inject the activation residual directly; instead the residual <em>proxy</em> is
+    the anchor-EMA's off-subspace component, a weight-gradient quantity that <em>does</em>
+    persist across steps. It is error-feedback in spirit, on a different operand — we state this
+    plainly rather than claim the classical guarantee.
+  </div>
+  <p>
+    The geometry confirmed the design. The direction-preservation discriminator
+    \(\cos(G_{\text{comp}}, G_{\text{corr}})\) came in at <span class="metric">0.956</span>
+    (≈17&deg;) versus signed_ema's 0.717 (≈44&deg;) — the merger now nudges rather than swings
+    the update. The residual dose \(\lVert G_{\text{corr}}-G_{\text{comp}}\rVert/\lVert G_{\text{comp}}\rVert\)
+    sat at a median 0.32, rising to 0.47 as the basis went stale (a real, growing correction,
+    not a no-op). The outcome: <strong>val@50 0.7210</strong>, the best realistic
+    comm-efficient result to date — +1.4 points over the falsified EXP-25 signed_ema, +7.7
+    points over plain PowerSGD on the same realistic substrate, with no deterministic collapse
+    on the promoted run, and a measured ~19.8&times; communication reduction.
+  </p>
+  <div class="warn">
+    <strong>The catch.</strong> Parity is 0.7414; we landed 2.0 points short — hence
+    <span class="metric">REVISE</span>, not PASS. And error feedback at \(\text{clip}=1.0\)
+    showed a <em>stochastic</em> length-explosion ignition: of two identical-config
+    realizations, one fired the EXP-25 length-hack fingerprint and OOM'd at step 42 (the
+    ignition was dose-correlated), the other completed clean. The next iteration damps the
+    residual (clip 1.0&rarr;0.5, decay 0.9&rarr;0.5) and extends to 100 steps — capping the
+    dropped-energy kick that correlates with the ignition while keeping the direction-preserving
+    correction that bought +7.7 points.
+  </div>
+
+  <h3>6. The papers we read and used</h3>
+  <p>
+    <strong>PowerSGD</strong> — Vogels, Karimireddy, Jaggi,
+    <a href="https://arxiv.org/abs/1905.13727">arXiv:1905.13727</a>, "Practical Low-Rank
+    Gradient Compression for Distributed Optimization." The source of our compressor: power
+    iteration to find a low-rank sketch of a gradient matrix, shipping \(r(m+n)\) numbers
+    instead of \(mn\). It is also where the importance of <em>error feedback</em> comes from —
+    re-injecting the compression residual is what lets aggressive low-rank compression match
+    uncompressed SGD. Our <code>ef_powersgd</code> adapts that idea to the
+    activation/anchor setting (see Step&nbsp;B's honest caveat above).
+  </p>
+  <p>
+    <strong>The Path Not Taken: RLVR Provably Learns Off the Principals</strong> — Zhu et&nbsp;al.,
+    <a href="https://arxiv.org/abs/2511.08567">arXiv:2511.08567</a>. The most directly relevant
+    paper: it argues (with a "Three-Gate" theory) that RLVR updates concentrate in
+    <em>off-principal</em> parameter directions while leaving the principal spectrum stable.
+    This is the published mirror of our central measurement — an activation-principal basis
+    captures 99.85% of the picture but only 31.8% of the update, because the update genuinely
+    lives off-principal.
+  </p>
+  <p>
+    <strong>RL Finetunes Small Subnetworks</strong> — Mukherjee et&nbsp;al.,
+    <a href="https://arxiv.org/abs/2505.11711">arXiv:2505.11711</a>. Shows RL gains come from
+    updating only 5&ndash;30% of parameters, and that training that subnetwork alone nearly
+    recovers full finetuning. Motivation for the sparse/axis-aligned <code>ticket</code> family
+    (a coordinate subnetwork rather than a dense subspace).
+  </p>
+  <p>
+    <strong>The Multiple Ticket Hypothesis: Random Sparse Subnetworks Suffice for RLVR</strong> —
+    Adewuyi et&nbsp;al., <a href="https://arxiv.org/abs/2602.01599">arXiv:2602.01599</a>. Finds
+    that even <em>random</em> 1% sparse masks match full-model RLVR, and different masks barely
+    overlap yet all succeed. Directly names our <code>ticket</code> construction and warns why a
+    single hand-picked coordinate set has no special claim — consistent with <code>ticket</code>
+    winning the geometry but carrying a forward-fidelity hazard (\(AC=0.293\)).
+  </p>
+  <p>
+    <strong>RL's Razor: Why Online RL Forgets Less</strong> — Shenfeld, Pari, Agrawal,
+    <a href="https://arxiv.org/abs/2509.04259">arXiv:2509.04259</a>. Argues on-policy RL
+    implicitly favors solutions with minimal KL from the base policy. This is the theoretical
+    backdrop for our Step&nbsp;C falsification: a basis that drives the train policy away from
+    the (uncompressed) rollout policy fights the very KL-minimizing pressure that makes on-policy
+    RL stable, and the train&harr;rollout KL explosion is exactly that fight.
+  </p>
+  <p>
+    <strong>The Invisible Leash: Why RLVR May or May Not Escape Its Origin</strong> — Wu et&nbsp;al.,
+    <a href="https://arxiv.org/abs/2507.14843">arXiv:2507.14843</a>. RLVR sharpens precision but
+    can shrink exploration/support. A caution for our parity-vs-surpass framing: greedy val gains
+    need not mean expanded capability, so we treat parity (not surpass) as the realistic ceiling.
+  </p>
+  <p>
+    <strong>Does RL Really Incentivize Reasoning Beyond the Base Model?</strong> — Yue et&nbsp;al.,
+    <a href="https://arxiv.org/abs/2504.13837">arXiv:2504.13837</a>. Using pass@k, finds current
+    RLVR extracts rather than creates reasoning (base models can win at large \(k\)). Reinforces
+    why we do not claim a dense-surpass from greedy mean@1 and defer pass@k / answer-entropy until
+    parity is actually recovered.
+  </p>
+  <p>
+    The local distilled note at
+    <code>research/refs/powersgd_for_activation_compression/power_sgd_compression_grpo_loop.md</code>
+    supplied the activation-vs-gradient PowerSGD translation table and the specific argument that
+    activation residuals lack a stable next-step slot — the reasoning behind Step&nbsp;B's honest
+    "error-feedback in spirit, different operand" framing.
+  </p>
+
+  <p class="lede">
+    Sources: <code>research/runs/EXP-26/stepA_decision.md</code>,
+    <code>stepA_verdict.md</code>, <code>STEP_C_SPEC.md</code>,
+    <code>stepC_screen_report.md</code>, <code>verdict.md</code>,
+    <code>analysis.log</code>; <code>research/.claude/plans/26.md</code>;
+    metric definitions in <code>research/scripts/geometry_audit.py</code> and
+    <code>research/scripts/stepC_screen_audit.py</code>; implemented math in
+    <code>verl/workers/comm_eff/spectral_filter.py</code> (<code>ef_powersgd_matrix</code>,
+    ~line&nbsp;327) and <code>powersgd_activation.py</code> (family sketches, ~line&nbsp;886).
+  </p>
+</section>

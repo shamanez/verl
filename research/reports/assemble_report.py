@@ -156,8 +156,9 @@ def main():
         sections.append(frag)
     if missing:
         sys.exit(f"missing fragments for: {missing} — not assembling")
+    active_attr = ' class="active"'
     buttons = "\n".join(
-        f'  <button data-tab="{tid}"{" class=\"active\"" if i == 0 else ""}>{label}</button>'
+        f'  <button data-tab="{tid}"{active_attr if i == 0 else ""}>{label}</button>'
         for i, (tid, label) in enumerate(TABS)
     )
     html = SHELL.format(today=date.today().isoformat(), tab_buttons=buttons,
