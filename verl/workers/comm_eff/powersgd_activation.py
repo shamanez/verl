@@ -486,13 +486,37 @@ class PowerSGDActivationCompressor:
                     and grad_enabled
                     and compressor._family_dedupe_ok(layer_idx)
                 ):
+                    # EXP-26 FIX (Defect 8, the C1 (8,15) G_b=0 gap). The anchor pass
+                    # consumes the WHOLE batch as several micro-batches (forward+backward
+                    # interleaved per micro-batch). The old code overwrote both _family_M
+                    # and _family_Gb on EVERY micro-batch (last-write-wins). At step 8 the
+                    # LAST surviving G_b read EXACTLY 0.0 (N=951, correct shape, all-zero
+                    # grad) while the weight grads G_anchor from the SAME backward were
+                    # healthy — i.e. the grad hook fired but received a zero activation
+                    # grad from a recompute / loss-detached micro-batch pass under
+                    # use_reentrant=False grad-ckpt. Fix = make G_b LAST-NONZERO-wins: the
+                    # hook skips an all-zero contribution so a real micro-batch's grad is
+                    # never displaced by a zero one. M stays last-write (cheap, bounded —
+                    # NO family combines M and G_b row-wise, so M/G_b need not be from the
+                    # same micro-batch). Last-nonzero-wins (not cat) keeps memory bounded
+                    # to one micro-batch — catting the full anchor batch's tokens (~1M ×
+                    # 1536 × 14 boundaries) would OOM and the family V is a per-token
+                    # second moment whose RANKING is micro-batch-stable (the C1 screen
+                    # confirmed UC/OPP flat across ticks 10 and 15).
                     compressor._family_M[layer_idx] = M.detach().to(torch.float32)
                     # Capture G_b via a grad hook on the SAME in-graph tensor h whose
                     # reshape is M (M shares storage with h; the hook fires on h).
                     if h.requires_grad:
                         def _grad_hook(grad, _li=layer_idx, _c=compressor, _hs=int(hidden_size)):
                             try:
-                                _c._family_Gb[_li] = grad.detach().reshape(-1, _hs).to(torch.float32)
+                                g = grad.detach().reshape(-1, _hs).to(torch.float32)
+                                # Skip an all-zero contribution (a detached / recompute
+                                # pass): it carries no signal and must NOT displace the
+                                # real grad already stashed by another micro-batch. Real
+                                # micro-batches are ~99% nonzero (C1: 99.35%).
+                                if bool(torch.count_nonzero(g) == 0):
+                                    return None
+                                _c._family_Gb[_li] = g
                             except Exception:  # pragma: no cover - defensive
                                 pass
                             return None  # do NOT modify the gradient (dump-only)

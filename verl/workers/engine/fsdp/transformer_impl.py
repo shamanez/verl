@@ -1934,31 +1934,45 @@ class FSDPEngine(BaseEngine):
             self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
 
         # EMA-evolution log line. String discovery (ema_device/correction_mode)
-        # is logged once at build, never here.
-        if deltas:
-            mean_delta = sum(deltas.values()) / len(deltas)
-            max_delta = max(deltas.values())
-            print(
-                f"[comm_eff][EXP-12] anchor refresh step={step} fired backward "
-                f"(cadence={cadence} delay_K={delay_K}) targets={len(deltas)} "
-                f"||dM_anchor||_mean={mean_delta:.6e} ||dM_anchor||_max={max_delta:.6e} "
-                f"anchor_backwards={state.anchor_backwards} "
-                f"anchor_mask_applications={state.anchor_mask_applications} "
-                f"anchor_grad_corrected={state.anchor_grad_corrected} "
-                f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
-                f"anchor_batch_fraction={state.anchor_batch_fraction} "
-                f"anchor_backward_isolation_mode=clone "
-                # Anchor uses clean policy-gradient loss: ratio = 1, no clip,
-                # no old_log_probs.
-                f"anchor_loss=clean_pg anchor_ratio=1.0",
-                flush=True,
-            )
-        else:
-            print(
-                f"[comm_eff][EXP-12] anchor refresh step={step} produced NO target grads "
-                f"(targets matched=0); check target_substr / use_orig_params",
-                flush=True,
-            )
+        # is logged once at build, never here. EXP-26 FIX (Defect 7 / flag b):
+        # `deltas` is the MERGER's per-target EMA delta dict — populated ONLY when
+        # `spectral is not None` (the merger maintains M); see the `if spectral is
+        # not None: deltas = feed_anchor_grads_into_ema(...)` feed above. On a
+        # spectral-OFF arm (plain-PowerSGD / the C1 screen / the B-plain & B-dense
+        # arms: anchor-owns-Q, no merger) `deltas` is ALWAYS empty, so the bare
+        # `else` branch below printed the stale `[EXP-12] produced NO target grads
+        # (targets matched=0)` warning on EVERY anchor fire — a false alarm that
+        # cries wolf about MERGER coverage when there is no merger. The anchor's OWN
+        # success is logged elsewhere (the `[bcast] Q updated` line + the
+        # family-screen line + the anchor_backwards/anchor_q_updates counters), so we
+        # gate the WHOLE merger-EMA log block on `spectral is not None`. With a real
+        # merger present, an empty `deltas` is a genuine coverage bug and STILL
+        # surfaces the warning.
+        if spectral is not None:
+            if deltas:
+                mean_delta = sum(deltas.values()) / len(deltas)
+                max_delta = max(deltas.values())
+                print(
+                    f"[comm_eff][EXP-12] anchor refresh step={step} fired backward "
+                    f"(cadence={cadence} delay_K={delay_K}) targets={len(deltas)} "
+                    f"||dM_anchor||_mean={mean_delta:.6e} ||dM_anchor||_max={max_delta:.6e} "
+                    f"anchor_backwards={state.anchor_backwards} "
+                    f"anchor_mask_applications={state.anchor_mask_applications} "
+                    f"anchor_grad_corrected={state.anchor_grad_corrected} "
+                    f"anchor_optimizer_steps={state.anchor_optimizer_steps} "
+                    f"anchor_batch_fraction={state.anchor_batch_fraction} "
+                    f"anchor_backward_isolation_mode=clone "
+                    # Anchor uses clean policy-gradient loss: ratio = 1, no clip,
+                    # no old_log_probs.
+                    f"anchor_loss=clean_pg anchor_ratio=1.0",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[comm_eff][EXP-12] anchor refresh step={step} produced NO target grads "
+                    f"(targets matched=0); check target_substr / use_orig_params",
+                    flush=True,
+                )
 
     def _maybe_comm_eff_capture_g_dense(self, data, loss_function) -> None:
         """FSDP override: parallel UNCOMPRESSED G_dense capture (EXP-26 Step A).
