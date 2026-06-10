@@ -1,0 +1,29 @@
+{
+  "run_dir": "research/runs/EXP-26/audit_stage_optA/A1",
+  "captures_root": "research/runs/EXP-26/audit_stage_optA/A1/rank0",
+  "n_manifest_rows": 6424,
+  "roles_present": [
+    "A",
+    "A_hat",
+    "G_anchor",
+    "G_comp",
+    "G_dense",
+    "G_fresh_anchor",
+    "Q"
+  ],
+  "dense_reference": "G_fresh_anchor@delay_K=0 (Option A; G_dense clone retired \u2014 codec-ON contamination)",
+  "cos_Gdense_Gcomp_median": 0.00862703612074256,
+  "cos_Gdense_Gcorr_median": NaN,
+  "cos_Gdense_Gcomp_n": 14,
+  "cos_Gdense_Gcorr_n": 0,
+  "validity_cos_Gfresh_Gdense_median": -0.11352408304810524,
+  "validity_cos_Gfresh_Gdense_n": 14,
+  "Q_act_activation_capture_ratio_median": 0.9988900133396132,
+  "recon_rel_error_dump_fidelity_max_drift": 4.541804921437409e-05,
+  "Q_act_update_capture_ratio_median": NaN,
+  "Q_act_update_capture_n": 0,
+  "Q_act_off_principal_update_share_median": NaN,
+  "sign_agreement_delayK5_median": NaN,
+  "sign_agreement_delayK0_median": 0.49979808926582336,
+  "decision": "retire_sign_replacement(confirmed) + go_C_then_B(H1 FAILED: compression itself rotates the update \u2014 investigate rank/basis)"
+}

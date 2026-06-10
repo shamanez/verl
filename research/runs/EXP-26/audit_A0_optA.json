@@ -1,0 +1,28 @@
+{
+  "run_dir": "research/runs/EXP-26/audit_stage_optA/A0",
+  "captures_root": "research/runs/EXP-26/audit_stage_optA/A0/rank0",
+  "n_manifest_rows": 378,
+  "roles_present": [
+    "G_anchor",
+    "G_comp",
+    "G_corr",
+    "G_dense",
+    "G_fresh_anchor",
+    "M"
+  ],
+  "dense_reference": "G_fresh_anchor@delay_K=0 (Option A; G_dense clone retired \u2014 codec-ON contamination)",
+  "cos_Gdense_Gcomp_median": 0.9992592930793762,
+  "cos_Gdense_Gcorr_median": 0.9992592930793762,
+  "cos_Gdense_Gcomp_n": 14,
+  "cos_Gdense_Gcorr_n": 14,
+  "validity_cos_Gfresh_Gdense_median": 0.9848137199878693,
+  "validity_cos_Gfresh_Gdense_n": 14,
+  "Q_act_activation_capture_ratio_median": NaN,
+  "recon_rel_error_dump_fidelity_max_drift": NaN,
+  "Q_act_update_capture_ratio_median": NaN,
+  "Q_act_update_capture_n": 0,
+  "Q_act_off_principal_update_share_median": NaN,
+  "sign_agreement_delayK5_median": 0.9822106957435608,
+  "sign_agreement_delayK0_median": 0.9991899132728577,
+  "decision": "inconclusive(missing Q_act update-capture \u2014 check A/Q dumps)"
+}
