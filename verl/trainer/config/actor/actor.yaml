@@ -525,6 +525,19 @@ comm_eff:
     # struct-mode accepts actor_rollout_ref.actor.comm_eff.powersgd.q_basis=grad.
     q_basis: act
 
+    # EXP-26 Step C1 PASSIVE screen: families to PASSIVELY accumulate inside the
+    # anchor pass (off the live Q / fast path / optimizer) so ONE short run builds
+    # candidate bases for ALL families at once. Hydra list, e.g.
+    # [act,grad,adv,tail,hybrid,ticket]. Empty (default) => no passive accumulation
+    # (byte-identical). Declared here so struct-mode accepts the CLI list override.
+    q_basis_passive: []
+
+    # EXP-26 Step C1 hybrid family column split at FIXED rank r (act + grad == r).
+    # -1/-1 (default) => AUTO: act=ceil(r/2), grad=r-act (39 + 38 = 77 at r=77).
+    # Set BOTH explicitly (>=0, summing to r) to override. Declared for struct-mode.
+    hybrid_act_cols: -1
+    hybrid_grad_cols: -1
+
   # EXP-26 Step A: real-gradient geometry-audit tensor capture (inert by default
   # => byte-identical to the EXP-25 substrate). When enabled the comm-eff hooks
   # dump fp32 tensors (A/Â/Q, G_comp, G_corr, M/G_anchor, the parallel G_dense,
@@ -561,6 +574,12 @@ comm_eff:
     # Capture the delay_K=0 fresh-anchor grad as a MEASUREMENT probe for the
     # sign-agreement decomposition (detached/dump-only). false => off.
     capture_fresh_anchor: false
+
+    # EXP-26 Step C/B should-have: loss for the delay_K=0 fresh-anchor probe.
+    # "clean_pg" (default, ratio≡1 like the anchor refresh) | "ppo_clip" (the fast
+    # path's PPO ratio/clip loss — removes the loss-mismatch confound). Dump-only
+    # probe; never the optimizer. Declared here so struct-mode accepts the override.
+    fresh_anchor_loss: clean_pg
 
     # Dump precision. "fp32" (default, REQUIRED for the fidelity invariant) |
     # "bf16" (volume-saving diagnostic).
