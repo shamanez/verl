@@ -1,0 +1,171 @@
+<section class="tab-content" id="tab5">
+  <h2>Where We Are, What's Next, How to Move Forward</h2>
+
+  <p class="lede">
+    The program is one experiment away from a defensible parity claim at roughly 20&times; less inter-stage
+    communication. The best realistic communication-efficient result trains GSM8K to <span class="metric">val@50 0.7210</span>
+    against a parity bar of <span class="metric">0.7414</span> &mdash; short by just 2.0 points, on a monotone-upward
+    curve that had not converged. The committed next move (issue #27) is a single cheap, config-only run that damps the
+    one mechanism we know is dangerous and lets the curve keep climbing. My recommendation is to approve it now: it costs
+    under 30 GPU-hours, carries explicit pass/fail gates, and is the highest-information bet on the board. This tab states
+    where we honestly stand, what #27 will and will not settle, and the ranked decision tree beyond it.
+  </p>
+
+  <h3>Where we are</h3>
+  <p>
+    The goal (<code>research/.claude/GOAL.md</code>) is a communication-efficient pipeline-parallel GRPO trainer that
+    is <em>stable</em>, reaches <em>parity</em> with the dense control, demonstrates measured <em>savings</em>, and is
+    <em>reproducible</em> from one launcher. Two of those four are settled, one is within reach, and one is the open
+    question. Here is the scoreboard that frames everything &mdash; all numbers are val@50 GSM8K greedy on the LOCKED
+    realistic substrate (the anchor owns the rank-77 basis \(Q\), staleness <code>delay_K=5</code>, no clean step). The
+    dense reference is never re-run per operator directive; it is W&amp;B run <code>5e2jpho9</code>.
+  </p>
+
+  <table class="data">
+    <thead>
+      <tr><th>Configuration</th><th>val@50</th><th>vs. parity 0.7414</th><th>What it tells us</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>dense control (compression off)</td><td><span class="metric">0.7536</span></td><td>+0.0122</td><td>the bar; proven byte-identical to upstream verl</td></tr>
+      <tr><td>parity gate (floor + 0.05)</td><td><span class="metric">0.7414</span></td><td>&mdash;</td><td>&asymp; plain PowerSGD + fresh clean step (0.7415)</td></tr>
+      <tr class="highlight"><td><strong>ef_powersgd (decay 0.9 / clip 1.0)</strong></td><td><strong><span class="metric">0.7210</span></strong></td><td><strong>&minus;0.0204</strong></td><td><strong>best realistic comm-eff result to date</strong></td></tr>
+      <tr><td>signed_ema &alpha;=0.5 (EXP-25)</td><td>0.7066</td><td>&minus;0.0348</td><td>the falsified merger; ef beats it by +1.4</td></tr>
+      <tr><td>no-refresh frozen-\(Q\) floor</td><td>0.6914</td><td>&minus;0.0500</td><td>the floor the substrate must clear</td></tr>
+      <tr><td>plain codec on the realistic substrate</td><td>0.6437</td><td>&minus;0.0977</td><td>below the floor &mdash; a new worry (see below)</td></tr>
+      <tr><td>hybrid-\(Q\) (Step C)</td><td>0.3730</td><td>&minus;0.3684</td><td>geometry-winning basis anti-converts</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <strong>What is proven.</strong> The substrate is realistic and mechanically correct: the anchor is the only thing
+    that updates the projection basis, the fast path can only read it, the only full uncompressed pass lives inside the
+    anchor, and there is no hidden full-rank "clean step." Compression is real and large: the measured boundary-activation
+    traffic is a ratio of <span class="metric">0.0506</span>, about a <strong>19.8&times; reduction</strong>. And the
+    central thesis of EXP-26 holds &mdash; error-feedback closes most of the merger gap. Removing the sign term and
+    re-injecting the energy the projection dropped lifts the result +7.7 points over the plain codec on the same substrate
+    and preserves the update direction almost perfectly: \(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.956\) for
+    error-feedback versus 0.717 for the old sign-replacement merger.
+  </p>
+  <p>
+    <strong>What is falsified.</strong> Two ideas are dead, each on clean evidence. Sign-replacement is structurally
+    hopeless: even a perfectly fresh anchor agrees on the sign of the update only about half the time (0.500&ndash;0.523),
+    so no amount of fixing staleness rescues it. And the "tune the basis for update energy" idea is empirically falsified:
+    the basis that maximized GRPO update-energy capture (Step C's hybrid \(Q\)) <em>anti-converted</em> to val@50 0.3730,
+    because the vLLM rollouts run uncompressed &mdash; a basis that sacrifices activation fidelity for update energy
+    destroys train-versus-rollout consistency. Geometry wins do not convert when generation is uncompressed.
+  </p>
+
+  <div class="warn">
+    <strong>What is newly worrying.</strong> Three findings temper the optimism and should shape the next decisions.
+    <ul>
+      <li><strong>The stale-anchor \(Q\) refresh is itself a drag.</strong> Plain compression on the realistic substrate
+        (0.6437) lands <em>below</em> the frozen-\(Q\) floor (0.6914). The substrate's own basis-refresh mechanism
+        degrades training, and the merger is partly <em>compensating</em> for that drag rather than purely correcting
+        compression noise. This inverts EXP-25's "the merger is net-harmful" framing.</li>
+      <li><strong>Stochastic ignition at clip 1.0.</strong> Of two identical error-feedback runs, one fired the full
+        length-explosion fingerprint (response length pinned at 16384, entropy collapse) and ran out of memory at step
+        42; the other completed clean. The residual dose grows with anchor staleness (0.32 rising to 0.47), and ignition
+        risk is dose-correlated &mdash; a real, undamped hazard.</li>
+      <li><strong>Single-seed noise on close calls.</strong> The promoted run's mid-curve val swung between 0.6232 and
+        0.6740 at the same step across realizations &mdash; roughly 5 points. When a comparison is within 2&ndash;3 points,
+        one seed is not enough to call it.</li>
+    </ul>
+  </div>
+
+  <h3>What's next: the committed move (issue #27)</h3>
+  <p>
+    Issue #27 (<code>research/.claude/plans/27.md</code>, status <code>planned</code>, awaiting operator approval) is the
+    REVISE child of EXP-26. It changes three knobs and nothing else &mdash; the code is already merged to
+    <code>vast-ai-workload</code>, so this is config-only:
+  </p>
+  <ol>
+    <li><strong>Cap the residual dose</strong> &mdash; error-feedback clip 1.0 &rarr; 0.5. Ignition risk is
+      dose-correlated, and the dose climbs with staleness; halving the per-tick injection damps the stochastic
+      length-explosion while keeping the direction-preserving correction that bought +7.7 points.</li>
+    <li><strong>Forget faster</strong> &mdash; error-feedback decay 0.9 &rarr; 0.5, so the dropped-energy buffer cannot
+      accumulate into a large delayed kick as the basis goes stale.</li>
+    <li><strong>Run longer</strong> &mdash; 50 &rarr; 100 steps. The 0.674&rarr;0.721 curve was still climbing with
+      shrinking response lengths and no peak-then-crash; parity is only 2.0 points away on a monotone-up trajectory.</li>
+  </ol>
+  <p>
+    The gates are explicit (<code>research/runs/EXP-26/verdict.md</code> next_actions): <strong>PASS</strong> if best
+    val@{50,75,100} &ge; <span class="metric">0.7414</span>; <strong>STOP</strong> if best val &le;
+    <span class="metric">0.7210</span> (damping helped nothing) or ignition fires even at the damped settings;
+    <strong>REVISE</strong> (one final cycle) if it lands strictly between. One REVISE iteration remains on this lineage
+    after #27.
+  </p>
+
+  <h3>How to move forward: the decision tree beyond #27</h3>
+  <p>
+    The branch we take depends entirely on where #27 lands. Ranked by likelihood and payoff:
+  </p>
+  <ol>
+    <li>
+      <strong>If #27 PASSES (&ge; 0.7414).</strong> This is parity at &asymp;20&times; less boundary communication &mdash;
+      the M6 milestone claim is complete: stable, parity, measured savings, one launcher. The follow-through is to promote
+      the canonical launcher per the parent plan's rule (a human decision, not automatic), then consider
+      <em>secondary</em> claims around exploration/pass@k diversity (PowerSGD carries real, uncompressed-corroborated
+      policy diversity that has not yet converted to reward &mdash; see <code>runs/EXP-25/PATH_TO_SURPASS_DENSE.md</code>).
+      Scaling to other models or datasets is <em>out of the fixed control surface</em> and is an operator decision, not a
+      researcher one.
+    </li>
+    <li>
+      <strong>If #27 lands between 0.7210 and 0.7414.</strong> One final REVISE &mdash; the obvious single knob is clip
+      0.5 &rarr; 0.25, or decay-only damping &mdash; and then the lineage <em>stops by iteration budget</em>. The write-up
+      becomes: error-feedback is the right primitive, it closes the merger gap and preserves direction, but it asymptotes
+      a couple of points under parity on this substrate. That is an honest and publishable negative-leaning result.
+    </li>
+    <li>
+      <strong>If #27 is &le; 0.7210 or ignites.</strong> Damping the merger did not help, so the <em>substrate</em>
+      question becomes primary: <em>why does the stale-anchor \(Q\)-refresh underperform a frozen basis</em> (plain 0.6437
+      &lt; floor 0.6914)? Three candidate lineages, ranked by cost:
+      <ul>
+        <li><strong>(a) Cheapest untested combination &mdash; frozen-after-warmup \(Q\) plus error-feedback.</strong> The
+          arithmetic is suggestive: the frozen-\(Q\) floor is 0.6914 and error-feedback added +7.7 points over plain on
+          the refreshing substrate; if that gain transfers, 0.6914 + 0.077 already clears parity. This isolates the
+          basis-refresh drag from the merger and is the first thing to try.</li>
+        <li><strong>(b) Classical per-step error feedback.</strong> Accumulate the fast path's <em>own</em> compression
+          residual rather than the anchor-EMA proxy &mdash; closer to the Stich/Vogels theory the current merger
+          approximates.</li>
+        <li><strong>(c) Variance-controlled unbiased masking plus error feedback.</strong> The EXP-25 forward-primitive
+          recommendation: a zero-mean, variance-tunable perturbation as the forward codec, paired with error feedback on
+          the backward path.</li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    Explicitly out of scope until parity is in hand: chasing a <em>surpass-dense</em> edge (the surpass thesis is
+    hypothetical and rests on a conversion mechanism we have not demonstrated &mdash; see
+    <code>runs/EXP-25/SURPASS_DENSE_STRATEGY.md</code>), changing the GRPO objective, or relaxing any realism invariant.
+    Parity first; everything else is a secondary claim layered on top of it.
+  </p>
+
+  <h3>Risks and craft lessons worth carrying</h3>
+  <div class="warn">
+    <ul>
+      <li><strong>Budget is real.</strong> EXP-26 cost roughly <span class="metric">$316</span> of box time. Staging and
+        audit-gating (diagnose-then-spend) avoided a six-arm training sweep by screening basis candidates passively in a
+        single run &mdash; that discipline is what keeps the lineage affordable.</li>
+      <li><strong>Stochastic ignition argues for standing safeguards.</strong> The collapse-watch on
+        entropy/response-length and <code>expandable_segments</code> memory allocation should be defaults on every run,
+        not opt-ins; the parent's clip-1.0 OOM is the case study.</li>
+      <li><strong>Single seeds limit close calls.</strong> When a result is within 2&ndash;3 points of a gate, add seeds
+        or extend the horizon before calling it. #27's longer 100-step horizon partly addresses this for free.</li>
+    </ul>
+  </div>
+
+  <div class="callout">
+    <strong>Recommended immediate action.</strong> Approve issue #27 and dispatch it
+    (<code>gh issue edit 27 --remove-label status:planned --add-label status:approved</code>).
+    <ul>
+      <li><strong>Cost:</strong> one cell, &le; 30 GPU-hours, &asymp; 5&ndash;6 hours wall on 4&times;H200, config-only on
+        already-merged code &mdash; a small, bounded spend against a $1500 cap with $698 used.</li>
+      <li><strong>Evidence it produces:</strong> the full val trajectory at steps 50/75/100 for the damped merger, a
+        clean answer on whether damping removes the ignition hazard, the residual-dose and direction-preservation
+        trajectories, and the unchanged &asymp;0.05 comm ratio &mdash; i.e. a definitive PASS/REVISE/STOP on whether
+        error-feedback reaches parity at &asymp;20&times; savings.</li>
+    </ul>
+    This is the cheapest run that can complete the M6 milestone, and the gates make every outcome &mdash; including
+    failure &mdash; informative. Approve it.
+  </div>
+</section>
