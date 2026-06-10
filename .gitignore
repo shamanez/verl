@@ -140,3 +140,9 @@ research/runs/**/exp.bundle
 
 # large re-downloadable paper PDFs — keep the distilled notes, not the binary
 research/refs/*.pdf
+
+# EXP fp32 tensor captures (tens of GB; rsynced from boxes, never re-downloadable but
+# too large for git — preserved on disk + summarized in audit JSONs/reports)
+research/runs/*/captures/
+research/runs/*/metrics/onbox/
+research/runs/*/metrics/incoming.log
