@@ -18,12 +18,12 @@ for ((i=1; i<=MAX_POLLS; i++)); do
   # one SSH round-trip gathers everything
   OUT=$(ssh -i "$KEY" -o ConnectTimeout=15 -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new -p "$PORT" "root@$HOST" '
-    flags=""; for c in exp26_C2_hybrid exp26_B_plain exp26_B_dense exp26_B_ef; do
+    flags=""; for c in exp26_C2_hybrid exp26_B_plain exp26_B_dense exp26_B_ef exp26_B_ef_r2; do
       [[ -f /workspace/runs/EXP-26/$c.done.flag ]] && flags="$flags $c"; done
     echo "FLAGS:$flags"
-    [[ -f /workspace/runs/EXP-26/bef_chain.done.flag ]] && echo "CHAIN_DONE:yes"
-    tmux has-session -t exp-26-145_241_108_98 2>/dev/null && echo "TMUX:alive" || echo "TMUX:dead"
-    for c in exp26_C2_hybrid exp26_B_plain exp26_B_dense exp26_B_ef; do
+    [[ -f /workspace/runs/EXP-26/bef_r2.done.flag ]] && echo "CHAIN_DONE:yes"
+    tmux has-session -t exp-26-bef-waiter 2>/dev/null && echo "TMUX:alive" || echo "TMUX:dead"
+    for c in exp26_C2_hybrid exp26_B_plain exp26_B_dense exp26_B_ef exp26_B_ef_r2; do
       L=/workspace/verl/runs/$c/train.log
       if [[ -f $L && ! -f /workspace/runs/EXP-26/$c.done.flag ]]; then
         echo "ACTIVE:$c"
