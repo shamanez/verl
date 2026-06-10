@@ -860,7 +860,9 @@ class PowerSGDActivationCompressor:
         self._family_sketched_this_gen = {}
 
     # ---- EXP-26 Step C: per-family sketch construction (the heart of the screen) ----
-    def _compute_family_V(self, family: str, layer_idx: int) -> Optional[torch.Tensor]:
+    def _compute_family_V(
+        self, family: str, layer_idx: int, *, q_act_override: Optional[torch.Tensor] = None
+    ) -> Optional[torch.Tensor]:
         """Build the per-boundary sketch ``V_f`` (H×r, fp32) for ``family`` from the
         harvested ``M`` / ``G_b`` / advantage weight, BEFORE the DP all-reduce + orth.
 
@@ -868,6 +870,20 @@ class PowerSGDActivationCompressor:
         orthonormalizes), or ``None`` if the operands needed for this family are not
         present locally (the caller then contributes a zero sketch for collective
         symmetry). All math is fp32, off-graph (operands are already detached).
+
+        ``q_act_override`` (EXP-26 FIX, Defect 9): the act-reference basis the
+        act/adv probes and the tail/hybrid deflation use. The PASSIVE C1 screen ran
+        with ``q_basis=act`` LIVE, so ``self._basis`` WAS a warm act basis and the
+        screen's hybrid measured AC=0.9987 (forward-safe). In the LIVE hybrid/tail
+        arm ``self._basis`` is the EVOLVING family Q (hybrid/tail), so reading the
+        act-reference off it deflates against — and column-joins — a drifting,
+        non-act basis: the live probe showed recon_rel_error plateauing at 0.68
+        instead of the act band, because the "act columns" no longer captured the
+        top activation directions. The caller passes a freshly DP-synced warm act
+        basis (``orth(sync(self._sketch))``) here so the LIVE family construction
+        replicates EXACTLY what the screen ranked. ``None`` keeps the legacy
+        behaviour (read the act-reference off ``self._basis`` — correct for the
+        PASSIVE screen and for a live ``q_basis=act``).
 
         Constructions (H=hidden, r=rank, Q_act = the LIVE act basis, P = a fixed
         per-layer deterministic orthonormal PROBE used for randomized range-finding
@@ -893,7 +909,10 @@ class PowerSGDActivationCompressor:
         if H is None:
             return None
         r = self._effective_rank()
-        q = self._basis.get(layer_idx)
+        # Act-reference basis: a freshly-synced warm act basis when the caller
+        # supplies one (LIVE hybrid/tail arm), else the live basis (PASSIVE screen
+        # / live act). See q_act_override in the docstring (Defect 9).
+        q = q_act_override if q_act_override is not None else self._basis.get(layer_idx)
         if q is None:
             return None
         q = q.to(torch.float32)
@@ -976,7 +995,9 @@ class PowerSGDActivationCompressor:
             cache[layer_idx] = P
         return P
 
-    def _build_family_Q(self, family: str, layer_idx: int, V_pooled: torch.Tensor) -> torch.Tensor:
+    def _build_family_Q(
+        self, family: str, layer_idx: int, V_pooled: torch.Tensor, *, q_act_override: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Turn the (DP-pooled) family sketch ``V_pooled`` into the candidate basis
         ``Q_f`` (H×r, fp32, orthonormal columns). Pure — no collective.
 
@@ -985,6 +1006,11 @@ class PowerSGDActivationCompressor:
         * ``hybrid``: column-join ``Q_act[:, :hybrid_act_cols]`` with the deflated-
           grad principal ``orth(V_pooled)[:, :hybrid_grad_cols]`` and re-orth.
         * else (act/grad/adv/tail): ``orth(V_pooled)``.
+
+        ``q_act_override`` (Defect 9): the warm act basis whose first ``hybrid_act_cols``
+        columns seed the hybrid join. ``None`` reads it off ``self._basis`` (correct
+        for the PASSIVE screen / live act); the LIVE hybrid arm passes a freshly-synced
+        warm act basis so the join is act-anchored, not hybrid-self-referential.
         """
         H = int(self._hidden_size)
         r = self._effective_rank()
@@ -997,7 +1023,7 @@ class PowerSGDActivationCompressor:
             Q[top, torch.arange(k, device=V_pooled.device)] = 1.0
             return Q
         if family == "hybrid":
-            q_act = self._basis.get(layer_idx)
+            q_act = q_act_override if q_act_override is not None else self._basis.get(layer_idx)
             if q_act is None:
                 return orthonormalize(V_pooled.to(self.qr_dtype), eps=self.reortho_eps)
             q_act = q_act.to(torch.float32)
@@ -1138,13 +1164,42 @@ class PowerSGDActivationCompressor:
             if not is_act and not (self._family_M or self._family_Gb):
                 return False
 
+        # Defect 9: tail/hybrid need a WARM ACT basis as their act-reference (the
+        # deflation subspace + the hybrid act columns), NOT the evolving family Q in
+        # self._basis. The warm act basis is orth(sync(self._sketch)) — exactly the
+        # act-path construction, computed per boundary in the SAME fixed order so the
+        # extra DP all-reduce stays collective-symmetric. Falls back to self._basis
+        # only on the very first (cold) fire when no act sketch has accumulated yet.
+        needs_act_ref = live_family in ("tail", "hybrid")
+
         updated = False
         for layer_idx in self._boundary_for_update():
+            # Warm act-reference for tail/hybrid (one symmetric all-reduce/boundary).
+            q_act_warm = None
+            if needs_act_ref:
+                S = self._sketch.get(layer_idx, None)
+                if S is None and do_sync and self._hidden_size is not None:
+                    S = torch.zeros(
+                        int(self._hidden_size), self._effective_rank(),
+                        dtype=torch.float32, device=self._sketch_device(),
+                    )
+                if S is not None:
+                    Ssum = S.to(torch.float32)
+                    if do_sync:
+                        torch.distributed.all_reduce(Ssum, op=torch.distributed.ReduceOp.SUM, group=group)
+                    if float(Ssum.abs().sum().item()) > 0.0:
+                        q_act_warm = orthonormalize(Ssum.to(self.qr_dtype), eps=self.reortho_eps).to(torch.float32)
+                if q_act_warm is None:
+                    # Cold fire (no act sketch yet) — fall back to the live basis so
+                    # the construction is still defined (matches pre-fix behaviour
+                    # only for this single cold tick).
+                    q_act_warm = self._basis.get(layer_idx)
+
             if is_act:
                 V = self._sketch.get(layer_idx, None)
                 width = self._effective_rank()
             else:
-                V = self._compute_family_V(live_family, layer_idx)
+                V = self._compute_family_V(live_family, layer_idx, q_act_override=q_act_warm)
                 width = 1 if live_family == "ticket" else self._effective_rank()
             if V is None:
                 if do_sync and self._hidden_size is not None:
@@ -1161,7 +1216,7 @@ class PowerSGDActivationCompressor:
             if is_act:
                 q_new = orthonormalize(Vsum.to(self.qr_dtype), eps=self.reortho_eps)
             else:
-                q_new = self._build_family_Q(live_family, layer_idx, Vsum)
+                q_new = self._build_family_Q(live_family, layer_idx, Vsum, q_act_override=q_act_warm)
             self._basis[layer_idx] = q_new.to(device=self._sketch_device(), dtype=torch.float32)
             updated = True
 
