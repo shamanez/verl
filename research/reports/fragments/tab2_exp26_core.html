@@ -1,0 +1,183 @@
+<section class="tab-content" id="tab2">
+  <h2>EXP-26: The Core Idea &mdash; Measure the Geometry Before You Spend on the Next Guess</h2>
+
+  <p class="lede">
+    EXP-25 spent a full multi-arm training campaign to falsify one bad idea (the "signed_ema" merger).
+    EXP-26 refused to make the same trade: before committing any expensive training run, it ran a cheap
+    <em>geometry audit</em> on real gradients to decide <strong>which</strong> guess was worth the GPU-hours.
+    That single discipline &mdash; diagnose first, then spend &mdash; is the whole story of this experiment, and it
+    led to the best realistic communication-efficient result the program has produced (val@50 of 0.7210), still
+    2 points short of parity, with a precise reason why.
+  </p>
+
+  <h3>The setup, in one paragraph</h3>
+  <p>
+    The trainer compresses the activations that cross a pipeline-stage boundary by projecting each one onto a
+    shared rank-77 basis \(Q\) (the activation space is 1536-dimensional, so this is a 20&times; squeeze). Compression
+    loses information, so an <strong>anchor circuit</strong> runs alongside: every few optimizer ticks it does one
+    full, uncompressed forward/backward from a deliberately stale weight snapshot, uses that to refresh and own
+    \(Q\), and maintains a running average \(M\) of the anchor's true gradient. A <strong>merger</strong> then folds
+    \(M\) into the cheap compressed gradient \(G_{\text{comp}}\) before the optimizer sees it, producing the corrected
+    gradient \(G_{\text{corr}}\). EXP-25's merger replaced the <em>sign</em> of the compressed gradient with the sign
+    of \(M\); EXP-26 set out to understand exactly why that failed and what to try instead. The substrate wiring is
+    in <code>CODE_WALKTHROUGH.md</code> (the anchor "owns Q" rule, the merger math, and the ordering invariant).
+  </p>
+
+  <div class="callout">
+    <strong>The meta-idea.</strong> After an expensive falsification, do not "guess a merger and burn 50 GPU-hours."
+    Instead, dump the <em>real</em> tensors the question turns on &mdash; the activations, their reconstructions, the
+    basis \(Q\), the compressed gradient, the merger's output, and the anchor's gradient &mdash; in full fp32, from a
+    run that lasts only about 10 optimizer ticks, and let the <em>geometry</em> decide which expensive arm runs next.
+    The plan (<code>research/.claude/plans/26.md</code>) makes Step A a hard gate: Steps B/C/E do not launch until the
+    audit returns a machine-readable decision.
+  </div>
+
+  <h3>Step A: three questions, one cheap diagnostic</h3>
+  <p>
+    The audit (<code>research/runs/EXP-26/stepA_decision.md</code>) tested three hypotheses about <em>where</em>
+    EXP-25's deficit actually lived. Each one is a claim about angles and energy in gradient space, not about a
+    training curve &mdash; that is the point of measuring geometry.
+  </p>
+
+  <table class="data">
+    <thead>
+      <tr><th>Hypothesis</th><th>Claim</th><th>What Step A measured</th><th>Verdict</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>H1</strong></td>
+        <td>The merger corrupts the update <em>direction</em>; compression itself is harmless.</td>
+        <td>Angle between the merger's output and its own compressed input, \(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.717\) (about a 44&deg; rotation).</td>
+        <td><strong>Confirmed</strong> &mdash; the merger really does swing the update sideways.</td>
+      </tr>
+      <tr>
+        <td><strong>H2</strong></td>
+        <td>The activation basis \(Q\) captures the activations well but misses most of the GRPO <em>update</em> energy.</td>
+        <td>Activation capture <span class="metric">0.9985</span> vs. update-energy capture <span class="metric">0.318</span>; about 68% of the update energy lives outside \(Q\).</td>
+        <td><strong>True (caveated)</strong> &mdash; the basis content is implicated.</td>
+      </tr>
+      <tr>
+        <td><strong>H3</strong></td>
+        <td>The sign-replacement disagreement is structural (a coin-flip), not a staleness artifact.</td>
+        <td>Sign-agreement between \(M\) and \(G_{\text{comp}}\): 0.500 / 0.523 / 0.520 across delay settings 0 and 5.</td>
+        <td><strong>Confirmed</strong> &mdash; even a perfectly fresh anchor agrees on the sign only half the time.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Read together, the story is unambiguous. H3 says the sign term is <em>structurally</em> hopeless: a fresh anchor
+    disagrees on the sign of the update as often as a fair coin, so no amount of fixing staleness can rescue it. H1 says
+    the merger's actual harm is a directional rotation, and H2 says the basis itself leaves most of the real update
+    energy on the table. The emitted decision was <code>go_C_then_B</code> with <code>retire_sign_replacement(confirmed)</code>:
+    drop the sign term forever, and because the basis content is suspect, test a better basis (Step C) <em>before</em>
+    the new merger (Step B).
+  </p>
+
+  <div class="warn">
+    <strong>An honest caveat baked into the audit.</strong> The textbook discriminator &mdash; the angle between the
+    compressed update and a true dense update &mdash; turned out not to be cleanly measurable here. The anchor's
+    reference gradient comes from a clean policy-gradient loss, while the fast path's gradient comes from the clipped
+    PPO loss, and PowerSGD compresses the boundary <em>activation</em> gradient rather than the weight gradient. Those
+    two mismatches push the literal cosine toward zero for reasons that have nothing to do with compression. The team
+    documented this rather than papering over it, and switched to a <em>confound-free</em> discriminator,
+    \(\cos(G_{\text{comp}}, G_{\text{corr}})\), the merger versus its own input, which never references a dense gradient
+    (<code>research/runs/EXP-26/stepA_verdict.md</code>).
+  </div>
+
+  <h3>The staged sequence that followed</h3>
+  <p>
+    Everything after Step A was conditional on Step A. The flow below is the actual order of operations &mdash; note
+    that two of the four stages cost <em>no</em> extra training runs at all.
+  </p>
+
+  <ol class="flow">
+    <li>
+      <strong>Step A &mdash; geometry audit (about 10 ticks).</strong> Dump real fp32 tensors from three reference
+      configs (dense, plain compression, the old signed_ema merger) on identical prompts. Decide H1/H2/H3.
+      <em>Outcome:</em> <code>go_C_then_B</code> + retire sign-replacement.
+    </li>
+    <li>
+      <strong>Step C &mdash; basis-content sweep (one short run).</strong> Because H2 was open, six candidate "families"
+      for what \(Q\) <em>should</em> span were built <em>passively</em> inside a single run and scored against the same
+      captured reference gradients (<code>research/runs/EXP-26/STEP_C_SPEC.md</code>). The geometry winner ("hybrid")
+      then got one real training arm &mdash; and <strong>failed</strong>: val@50 of 0.3730. The basis that maximized
+      update-energy capture <em>anti-converted</em>, because the vLLM rollouts run uncompressed, so a basis that
+      sacrifices activation fidelity for update energy destroys train-vs-rollout consistency
+      (<code>research/runs/EXP-26/stepC_screen_report.md</code>). H2's strong form is dead.
+    </li>
+    <li>
+      <strong>Step B &mdash; the new merger.</strong> The successor "ef_powersgd" merger re-injects the energy the
+      projection <em>dropped</em>, with <strong>no sign term</strong> at all. Arms: error-feedback, plain compression,
+      and a dense reference. This produced the headline result.
+    </li>
+    <li>
+      <strong>Step E &mdash; measure the bytes (no extra runs).</strong> Byte counters wired into the Step B/C runs
+      measured the actual boundary traffic: a ratio of <span class="metric">0.0506</span>, roughly a 19.8&times;
+      reduction, read straight from the live training runs.
+    </li>
+  </ol>
+
+  <p>
+    The new merger's idea is worth stating plainly. Projecting onto the rank-77 basis throws away whatever component of
+    the gradient lives outside that subspace. Rather than guess at a correction, the error-feedback merger keeps a
+    running, clipped, detached buffer of exactly that dropped residual and adds it back next time, in the same direction
+    as the compressed update:
+  </p>
+  <p>
+    $$ e_t = \operatorname{clip}\!\big(\, \texttt{ef\_decay}\cdot e_{t-1} + (M - P_{G_{\text{comp}}}(M)),\ \ \texttt{ef\_clip}\cdot\lVert G_{\text{comp}}\rVert \big), \qquad G_{\text{corr}} = G_{\text{comp}} + e_t $$
+  </p>
+  <p>
+    Here \(M\) is the anchor's gradient average and \(P_{G_{\text{comp}}}(M)\) is the part of it already captured by the
+    compressed update, so \(M - P_{G_{\text{comp}}}(M)\) is the off-subspace energy the projection missed; \(e_t\)
+    accumulates that residual, clipped relative to the compressed gradient's norm and decayed by <code>ef_decay</code>.
+    Crucially there is no \(\operatorname{sign}(\cdot)\) anywhere &mdash; the correction adds energy in the existing
+    direction instead of flipping it. The limiting case (zero clip, zero decay) is bit-identical to plain compression,
+    which the code enforces as a test (<code>verl/workers/comm_eff/spectral_filter.py</code>).
+  </p>
+
+  <h3>The guardrails that made the numbers trustworthy</h3>
+  <p>
+    None of this would mean anything if the diagnostic quietly cheated. Two classes of gate bound every stage. The
+    <strong>realism guardrails</strong> kept the experiment honest about the decentralized target: the anchor is the
+    only thing that updates \(Q\) and the fast path can only read it; the only full uncompressed pass lives inside the
+    anchor; the anchor staleness is mandatory (never zero on the training path); and there is no "clean step" that
+    secretly transmits a full-rank gradient. The <strong>correctness gates</strong>, probed before any GPU-hours were
+    spent on a sweep, proved the instrumentation was inert: off-path parity (the capture hooks change no numbers), the
+    measurement-only probes never feed the optimizer (verified bit-for-bit on the optimizer state), and the dumped
+    tensors are genuinely fp32 (reconstruction error matched the logged scalar to within \(4.5\times10^{-5}\)). Every
+    one of these was a <em>hard</em> gate: a failure aborts before the expensive work.
+  </p>
+
+  <h3>One-screen outcome</h3>
+  <p>
+    The new merger (ef_powersgd) is the best realistic communication-efficient result the program has produced. It
+    preserves the update direction (\(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.9558\), versus the old merger's 0.717),
+    beats the falsified EXP-25 signed_ema by 1.4 points and the plain codec on the same realistic substrate by 7.7
+    points, with no deterministic collapse on the promoted run. But it lands at <span class="metric">val@50 0.7210</span>
+    against a parity target of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
+    verdict is <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+  </p>
+
+  <table class="data">
+    <thead>
+      <tr><th>Arm</th><th>Method</th><th>val@50</th><th>vs. parity 0.7414</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>dense reference</td><td>compression off</td><td>0.7536</td><td>+0.0122</td></tr>
+      <tr><td><strong>B_ef (promoted)</strong></td><td>ef_powersgd (direction-preserving)</td><td><strong>0.7210</strong></td><td>&minus;0.0204</td></tr>
+      <tr><td>EXP-25 reference</td><td>signed_ema (falsified)</td><td>0.7066</td><td>&minus;0.0348</td></tr>
+      <tr><td>B_plain</td><td>plain codec on the realistic substrate</td><td>0.6437</td><td>&minus;0.0977</td></tr>
+      <tr><td>C2_hybrid</td><td>geometry-winning basis (Step C)</td><td>0.3730</td><td>&minus;0.3684</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>What the staging bought.</strong> The audit retired a whole class of mergers (anything sign-based) on one
+    cheap run, screened six basis candidates in a single passive run instead of six training runs, and measured the
+    19.8&times; byte saving with zero additional spend. The one expensive failure &mdash; the hybrid basis arm &mdash;
+    was itself informative: it proved that a basis tuned for update-energy capture wrecks the uncompressed rollout path,
+    closing off H2 empirically. Tab 5 carries the strategic implications; the takeaway here is the method, which is to
+    let measured geometry, not intuition, choose where the GPU budget goes.
+  </div>
+</section>

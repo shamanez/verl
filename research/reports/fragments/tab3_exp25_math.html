@@ -1,0 +1,137 @@
+<section class="tab-content" id="tab3">
+  <h2>EXP-25: What We Achieved, and the Mathematics of the EMA-Sign Merger</h2>
+
+  <p class="lede">
+    EXP-25 has two stories. The first is a genuine win: it built and verified the realistic two-circuit substrate that every later experiment now runs on — a continuously-maintained, deliberately-stale, full-coverage uncompressed reference that drives the compression. The second is an honest falsification: the specific way EXP-25 chose to <em>use</em> that reference — borrowing its per-coordinate signs (the <em>signed_ema</em> merger) — cannot work, and we can now show exactly why with the actual measured numbers. This tab covers both: what was banked, and the small piece of mathematics that explains why stealing the anchor's signs is a coin-flip dressed up as a correction.
+  </p>
+
+  <h3>Part 1 — What EXP-25 actually achieved</h3>
+
+  <p>
+    The headline result is a STOP, but a STOP that left behind a working substrate and a sharp mechanistic picture. Four concrete things were banked.
+  </p>
+
+  <p>
+    <strong>1. The anchor circuit became the proven, realistic base.</strong> The slow uncompressed reference is no longer a wish — it was verified on-box. Its gradient covers all <strong>196 weight matrices</strong> of the network (every layer, not a sampled handful), it is averaged correctly across data-parallel ranks (a mean, not a sum — a subtle bug that would have inflated it fourfold was checked for and ruled out), and that averaged gradient is bit-identical across ranks. The basis \(Q\) used by the fast compressed path is computed <em>only</em> by the anchor and broadcast out, with the fast path verified fail-closed — it can read \(Q\) but never write it (<code>powersgd_basis_updates=0</code> throughout). This replaced the earlier, unrealistic "fresh clean step," which cheated by shipping a full uncompressed gradient on demand. The substrate is the durable contribution: every later experiment runs on it.
+  </p>
+
+  <p>
+    <strong>2. A clean, monotonic dose-response on the merger knob.</strong> The merger blends the fast gradient with the anchor's sign through one knob \(\alpha\); EXP-25 swept it across three byte-identical arms. The result is unambiguous and reproduced in Part 2's table: the more the stale sign is used, the worse training gets. There is no interior sweet spot.
+  </p>
+
+  <p>
+    <strong>3. The mechanism discovery — length-hacking, not low entropy, is the killer.</strong> When the merger drives training off a cliff, the symptom is not subtle. The model's answers explode in length toward the 16,000-token cap, while its <em>entropy</em> (a measure of how spread-out its next-token choices are, in nats — high means uncertain, low means confident) collapses toward zero. The instinct is to blame the entropy collapse. EXP-25 disproved that: the uncompressed dense control trains down to entropy <span class="metric">0.12</span> — <em>lower</em> than any surviving compressed arm — and stays healthy with bounded ~280-token answers. Low entropy is a confident solver, not a broken one. What actually destroys validation accuracy is the response-length runaway: the model discovers that emitting longer and longer text raises its odds of stumbling onto the answer string under the lenient reward, reward briefly rises, then the answers blow past usefulness and accuracy falls off a cliff.
+  </p>
+
+  <p>
+    <strong>4. A standing collapse watch.</strong> Because the failure is visible early — entropy halved by step 10, well before the run finishes — EXP-25 produced a reusable monitor applied to <em>every</em> run now: track entropy level and slope, response-length and truncation rate, and reward peak-then-degrade, and fire an alert the moment they co-occur. The collapse no longer has to be discovered the expensive way.
+  </p>
+
+  <div class="callout">
+    <strong>The KL guardrail diagnostic.</strong> To prove length-hacking is the proximate killer, EXP-25 re-ran the catastrophic \(\alpha=0\) arm with a small KL penalty added (a leash tying the policy to a fixed reference, which starves runaway non-stopping generations). The length explosion vanished — answers stayed at ~120 tokens, truncation stayed at zero — and the catastrophe (validation accuracy <span class="metric">0.354</span>) became a mild decline to <span class="metric">0.679</span>. The leash removed the <em>symptom</em>. But 0.679 is still <em>below</em> the no-help floor of 0.6914: the merger's underlying direction damage survives the guardrail. The brake stops the crash; it does not make the sign-borrowing helpful.
+  </div>
+
+  <h3>Part 2 — The mathematics of the EMA-sign bet</h3>
+
+  <p>
+    The merger combines the fast circuit's compressed gradient \(G_{\text{comp}}\) (its <em>magnitude</em> tells you how hard to push each weight) with the anchor's gradient average \(M\) (its <em>sign</em> tells you which way), one coordinate at a time, just before the optimizer:
+  </p>
+
+  $$ G_{\text{corr}} \;=\; \alpha\,G_{\text{comp}} \;+\; (1-\alpha)\,\lvert G_{\text{comp}}\rvert \odot \operatorname{sign}(M), $$
+
+  <p>
+    where \(\lvert G_{\text{comp}}\rvert\) is the per-coordinate absolute value (the magnitudes), \(\operatorname{sign}(M)\) is \(+1\) or \(-1\) per coordinate (the directions from the anchor), \(\odot\) is element-wise multiplication, and \(\alpha\in[0,1]\) is the mixing knob. \(M\) is an <em>exponential moving average</em> (EMA) of the stale anchor gradient — a running blend \(M_t = \beta M_{t-1} + (1-\beta)G_{\text{anchor}}\) with \(\beta=0.95\), so it remembers roughly the last twenty refreshes and smooths out noise.
+  </p>
+
+  <h3>Why it could plausibly work</h3>
+
+  <p>
+    The bet rests on a real and respectable idea from distributed optimization called <strong>signSGD</strong>: when many workers each compute a noisy gradient, you can transmit just the <em>sign</em> of each coordinate (one bit instead of a full number) and take a majority vote. This works surprisingly well because the sign of an averaged gradient is <em>scale-free</em> and robust — compression noise mostly corrupts magnitudes, not which way a weight should move, and sign-based methods with a majority vote have proven convergence under reasonable assumptions.
+  </p>
+
+  <p>
+    Apply that intuition here. The anchor's \(M\) is an averaged, clean, uncompressed gradient — exactly the kind of robust sign source signSGD wants. If the <em>direction</em> the true update wants to go is stable over the five-tick refresh window, then a slightly stale sign is still the <em>right</em> sign. The merger would then give the best of both worlds: keep the fast circuit's well-calibrated magnitudes (\(\lvert G_{\text{comp}}\rvert\)), and borrow trustworthy direction bits from the clean reference (\(\operatorname{sign}(M)\)). Superficially, this is exactly the seam where a stale clean reference should help a noisy fast one.
+  </p>
+
+  <h3>Why it cannot work — the falsification chain</h3>
+
+  <p>
+    The whole argument hinges on one assumption: that the anchor's sign and the fast gradient's sign usually <em>agree</em>. They do not. We measured it.
+  </p>
+
+  <p>
+    <strong>(a) Sign agreement is a coin-flip.</strong> The fraction of coordinates (weighted by gradient magnitude) on which \(\operatorname{sign}(M)\) agrees with \(\operatorname{sign}(G_{\text{comp}})\) was measured directly on real 32-bit tensors:
+  </p>
+
+  <table class="data">
+    <thead><tr><th>Reference for the sign</th><th>Staleness</th><th>Sign agreement with \(G_{\text{comp}}\)</th></tr></thead>
+    <tbody>
+      <tr><td>Anchor EMA \(M\) (plain PowerSGD arm)</td><td>delay = 0 (fresh)</td><td><span class="metric">0.500</span></td></tr>
+      <tr><td>Anchor EMA \(M\) (signed_ema arm)</td><td>delay = 0 (fresh)</td><td><span class="metric">0.523</span></td></tr>
+      <tr><td>Anchor EMA \(M\) (signed_ema arm)</td><td>delay = 5 (stale)</td><td><span class="metric">0.520</span></td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    All sit at roughly one-half — a coin-flip. Crucially this holds even at <strong>zero staleness</strong> (a perfectly fresh anchor gradient), which kills the obvious defense. The disagreement is <em>not</em> caused by the sign being out of date; it is structural. For about half the coordinates, the merger flips the sign of the update.
+  </p>
+
+  <p>
+    <strong>(b) Why it is structural.</strong> Two reasons, both about the gradients being different objects rather than stale copies of one object. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, and deeper, a near-orthogonality geometry. The true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates sitting near zero, where the sign is essentially decided by residual sampling noise. When you compare two independent noisy estimates of a quantity that is near zero on most coordinates, their per-coordinate signs agree about half the time — <em>even when the two gradients' overall directions are aligned</em>. This is the same geometry that makes two random high-dimensional vectors nearly orthogonal. The coin-flip is the expected signature, not an anomaly.
+  </p>
+
+  <p>
+    <strong>(c) The confound-free measurement of the damage.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
+  </p>
+
+  $$ \cos\!\big(G_{\text{comp}},\,G_{\text{corr}}\big) \;=\; 0.717 \quad\Longrightarrow\quad \theta = \arccos(0.717) \approx 44^{\circ}. $$
+
+  <p>
+    The merger rotates the already-compressed update by about <strong>44 degrees</strong> — nearly halfway to perpendicular. It is not a gentle correction; it is a large reorientation of the step the optimizer takes.
+  </p>
+
+  <p>
+    <strong>(d) A sign flip with preserved magnitude is a large perturbation — the \(\sqrt{2}\) factor.</strong> Here is the core derivation. On a coordinate \(i\) where the anchor sign agrees with the fast sign, the merger leaves it untouched: \(G_{\text{corr},i} = G_{\text{comp},i}\). On a coordinate where they <em>disagree</em>, write \(G_{\text{comp},i} = \lvert g_i\rvert\operatorname{sign}(G_{\text{comp},i})\) and \(\operatorname{sign}(M_i) = -\operatorname{sign}(G_{\text{comp},i})\). Then
+  </p>
+
+  $$ G_{\text{corr},i} = \alpha\,\lvert g_i\rvert\operatorname{sign}(G_{\text{comp},i}) + (1-\alpha)\,\lvert g_i\rvert\big(-\operatorname{sign}(G_{\text{comp},i})\big) = (2\alpha-1)\,G_{\text{comp},i}. $$
+
+  <p>
+    So the entire effect of the merger lives on the disagreeing coordinates, scaled by the factor \((2\alpha-1)\): at \(\alpha=0\) the coordinate is <em>fully reversed</em> at full magnitude (a step in exactly the wrong direction), at \(\alpha=0.5\) it is <em>zeroed</em>, and at \(\alpha=1\) the merger is off. Now measure the size of the perturbation at \(\alpha=0\): a disagreeing coordinate contributes \(G_{\text{corr},i}-G_{\text{comp},i} = -2G_{\text{comp},i}\), so
+  </p>
+
+  $$ \big\lVert G_{\text{corr}} - G_{\text{comp}}\big\rVert^2 = \sum_{\text{disagree}} 4\,g_i^2 = 4 f \,\lVert G_{\text{comp}}\rVert^2 \quad\Longrightarrow\quad \frac{\lVert G_{\text{corr}}-G_{\text{comp}}\rVert}{\lVert G_{\text{comp}}\rVert} = 2\sqrt{f}, $$
+
+  <p>
+    where \(f\) is the magnitude-weighted fraction of disagreeing coordinates. EXP-25 logged this relative-change quantity every step: its median is <span class="metric">1.416 \(\approx \sqrt{2}\)</span>. Inverting, \(2\sqrt{f}=\sqrt{2}\) gives \(f = \tfrac12\) — confirming, from a completely independent measurement during the actual run, that half the gradient's mass has its sign flipped at full magnitude every single step.
+  </p>
+
+  <p>
+    <strong>(e) The dose-response is exactly what this model predicts.</strong> If the sign term injects a wrong-direction perturbation on half the coordinates, then dialing it up (lowering \(\alpha\)) should monotonically worsen training — which is precisely what was observed:
+  </p>
+
+  <table class="data">
+    <thead><tr><th>\(\alpha\)</th><th>Effect on a disagreeing coordinate</th><th>val@50</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>0.0</td><td>\(-1.0\,\lvert G\rvert\) — full reversal</td><td><span class="metric">0.3541</span></td><td>catastrophic collapse</td></tr>
+      <tr><td>0.3</td><td>\(-0.4\,\lvert G\rvert\) — 40% reversal</td><td><span class="metric">0.6164</span></td><td>peak-then-crash</td></tr>
+      <tr><td>0.5</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7066</span></td><td>survives, but throws away half the gradient</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    The best arm sits at the <em>least-correction</em> edge of the swept range, and \(\alpha\to1\) (no sign term at all — plain PowerSGD) is predicted to be best of all. The correction's optimum is to be turned off. That is a verdict on the <em>primitive</em>, not a tuning miss.
+  </p>
+
+  <p>
+    <strong>(f) The sharpening spiral.</strong> The chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward.
+  </p>
+
+  <div class="warn">
+    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect.
+  </div>
+
+  <p>
+    <em>Sources:</em> <code>research/runs/EXP-25/verdict.md</code>, <code>research/runs/EXP-25/DEEP_FINDINGS.md</code>, <code>research/runs/EXP-25/COLLAPSE_GRADIENT_FLOW_ANALYSIS.md</code>, <code>research/runs/EXP-25/ENTROPY_COLLAPSE_FINDINGS.md</code>, <code>research/runs/EXP-26/stepA_decision.md</code>, <code>research/runs/EXP-26/verdict.md</code>, <code>research/diagnostics/ENTROPY_COLLAPSE_WATCH.md</code>, <code>research/runs/SUMMARY.md</code>.
+  </p>
+</section>
