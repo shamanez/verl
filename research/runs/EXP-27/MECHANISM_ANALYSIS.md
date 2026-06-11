@@ -849,3 +849,15 @@ outcome) is folded into §d.3 stage 2 and §g.4. New §i develops gradient quali
 research axis (bias/variance/tails decomposition, ranked standing telemetry, ranked
 direct-vs-symptom mitigations) — placed carefully so it does not contradict the watch-doc
 correction that grad-noisiness is NOT the ignition discriminator (plain falsifies it; §i.1).
+
+**2026-06-11 telemetry addendum (third revision).** Per the operator's follow-up, §i.2 was
+re-targeted at **predictive-by-step-~25**: new §i.2b specs the four cause-side probes —
+(a) within-group corr(advantage, length) + the token-mean length-drive D (zero cost, fires on
+seed steps), (b) merger length-coupling cos(F, u_len) with F = G_corr − G_comp from the existing
+capture machinery and u_len from a cadence-gated REINFORCE-on-length probe backward (the
+specificity + ETA discriminator E1 lacks; F-persistence is retro-computable TODAY from EXP-27's
+12 captured tick-pairs), (c) length-tail scalars p99/cap-counts (symptom-side sharpening,
+honestly labeled as such), (d) the carrier-presence estimator (earliest signal, ~s3) — each with
+what/why-it-leads/cost/@25 decision rule, a composite predict-ignite contract at s25, and the
+gap-mapping to comparator task-#6's E1 results (specificity, late-seeder coverage, ETA). This
+section is the seed spec for the successor issue's instrumentation cell.
