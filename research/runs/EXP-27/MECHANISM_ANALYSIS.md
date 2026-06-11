@@ -86,11 +86,13 @@ change almost nothing; (ii) at δ=0.5 the residual *saturates within ~2 ticks*
 (1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance (§7, P3).
 
 **The decisive log fact:** the per-step dose **decayed** over the run (per-sweep means ~0.19–0.30
-around steps 18–30 → 0.04–0.13 by steps 48–68; re-extracted from the 209 `[comm_eff][merger]` /
-`[EXP-7][spectral]` sweeps in the train log — ‖G‖ grew late while ‖M‖ did not). At the moment of
-ignition (steps 61–66) the forcing was at its run **minimum**. Ignition is not a dose event. This
-single observation already falsifies every "the residual kicked too hard" story and demands a
-mechanism where smallness of the per-step push is irrelevant.
+around steps 18–30 → 0.04–0.13 by steps 48–68; re-extracted from the `[EXP-7][spectral]`
+rel_change lines in the train log — ‖G‖ grew late while ‖M‖ did not. Caveat: Ray dedupes repeated
+worker lines, so per-step samples are partial, n≈14–28 of 392; the W&B `spectral/rel_change_mean`
+series shows the same shape, peak 0.189@s12 per verdict.md). Through the ignition window
+(steps 61–66) the forcing sat in the **lowest band of the entire run** (0.05–0.13). Ignition is
+not a dose event. This single observation already falsifies every "the residual kicked too hard"
+story and demands a mechanism where smallness of the per-step push is irrelevant.
 
 ---
 
@@ -164,6 +166,12 @@ M's, set by β=0.95/cadence — unchanged 26→27). Halving λ at fixed τ ⇒ ~
 same displacement ⇒ ignition ~29–42 → ~61–66. **Observed: delay ×~1.7–2, prevention: none, val
 gain: zero.** Exactly what the λτ-model predicts and exactly what a per-step certificate cannot
 see.
+
+The cross-arm data even makes the per-step angle point the **wrong way**: signed_ema α=0.5
+rotates its update by ~44° *every step* (cos 0.7165) and never ignites in 50 steps; ef rotates
+~17° (EXP-27: ≤11°) and ignites. Per-step rotation angle anti-correlates with ignition across
+arms, because what matters is not how far one step turns but whether the turning has a persistent
+exogenous component that integrates (§e).
 
 The Lyapunov-flavored version: a certificate needs a function V with V̇ < 0 along trajectories.
 Any reward-derived V satisfies V̇ ≈ 0 along reward-*flat* directions — and the forcing is, by F1,

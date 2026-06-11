@@ -326,6 +326,70 @@ the gradient cleanliness (not the low entropy) that prevents the spiral (§5).
 
 ---
 
+## 8. Addendum: carrier-vs-substrate attribution (plain vs ef-parent r2)
+
+**Question (task #5):** is the length-spiral a property of (ii) the bare comm-eff
+*substrate* (PowerSGD codec + stale-anchor refresh) — which every comm-eff arm shares —
+or (iii) specifically the *merger/carrier* (the spectral correction that folds
+M_anchor into the fast gradient)? The decisive control is **plain `u1v94opv`
+(`exp26_B_plain`)**, because its config differs from **ef-parent r2 `tilwe80t`
+(`exp26_B_ef_r2`)** in **exactly one knob**:
+
+| knob (from W&B config) | plain | ef_r2 | dense |
+|---|---|---|---|
+| `comm_eff.enabled` | True | True | — |
+| `compression_type` | powersgd | powersgd | — |
+| `powersgd.q_basis` | act | act | — |
+| `anchor.enabled` / cadence / delay_K | True / 5 / 5 | True / 5 / 5 | — |
+| `clean_cadence` | 0 | 0 | — |
+| **`spectral.enabled` (the merger)** | **False** | **True** | — |
+| `spectral.ef_clip` / `ef_decay` | 0 / 0 | 1 / 0.9 | — |
+
+So plain = **substrate only** (PowerSGD + stale anchor refresh, merger OFF); ef_r2 =
+substrate **+ merger**. Everything else identical. This isolates the merger.
+
+### Scorecard at the step 40–50 endpoint
+
+| run | merger? | entropy@end | len_mean@end | len_mean slope(41–50) | len_max range (back-half) | max consecutive 16384-pin | #16384 (41–50) | #clip (41–50) | grad_norm (mean/max, 40–50) | VERDICT |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **plain** (`u1v94opv`) | **NO** | 0.478 | 197 | **−1.46 (declining)** | **≤826, never spikes** | **1** (lone @s1) | **0** | **0** | 7.4 / 10.5 | **CLEAN — no carrier signature at all** |
+| **ef_r2** (`tilwe80t`) | YES | 0.396 | 146 | +0.80 (mild) | repeated 7817@32, 2020@35, 2648@38, 4061@47 | 1 (never clusters) | 0 (none ≥16384 in 41–50; spike was @27) | 0 | 9.3 / 13.5 | WATCH — carrier present (isolated long-tail spikes), first-passage-lucky |
+
+(Rows appended to `comparison_metrics/scorecard.csv`.)
+
+### Attribution verdict — implicates the MERGER (hypothesis iii), not the substrate
+
+**plain (merger OFF) shows ZERO long-tail emission**: its len/max never exceeds ~826 in
+the entire back half, len/mean is *declining* (slope −1.46), it has zero 16384 pins
+after step 1, and its entropy hasn't even collapsed (still 0.48–0.55 at the end — the
+*highest* of the comm-eff family). The PowerSGD codec + stale-anchor refresh substrate,
+by itself, produces a perfectly stable training curve.
+
+**ef_r2 (same substrate + merger ON) immediately reintroduces the carrier signature**:
+repeated isolated long-tail spikes (7817, 2020, 2648, 4061) that plain never produces.
+ef_r2 only survived because those spikes never landed *consecutively* (first-passage
+luck) — but the *emission* is present, and ef_r1 (full-dose merger) and exp27
+(damped merger) show that once they cluster, ignition follows.
+
+**Therefore the length-spiral is carrier-specific, not substrate-generic.** Turning on
+the spectral merger (folding the stale-anchor memory M into the fast gradient) is what
+injects the reward-flat "longer" force; the bare codec+anchor substrate does not. This
+matches mechanist-math's tangential-forcing mechanism: the carrier *is* the spectral
+correction term, and plain has no such term (`spectral.enabled=False` ⇒ no M folded in).
+
+**Caveat / honest limit:** plain's val is much lower (0.6437 vs ef_r2 0.7210) and its
+entropy is still high at step 50 — plain is a *weaker, less-converged* policy, so one
+could argue it simply hadn't entered the danger regime yet (it leaves the high-entropy
+window latest of all). But that cuts the same way: plain spends the *longest* in the
+high-entropy "seed-emitting" window and *still* emits no long-tail spikes, whereas ef_r2
+emits them despite being further along. The merger, not exposure-time-in-high-entropy,
+is the emission source. The clean falsification would be a "plain extended to 100 steps"
+run; absent that, plain@50 is strong but not airtight evidence. **What we can claim:
+with the merger OFF, the substrate produced no precursor in 50 steps; with the merger
+ON (ef_r2/ef_r1/exp27), every run emitted the carrier spikes.**
+
+---
+
 ## Files
 
 - `comparison_metrics/pull_wandb.py` — W&B fetch (scan_history, all 5 runs).

@@ -31,8 +31,12 @@ The EXP-27 3-run comparison (`runs/EXP-27/RUN_COMPARISON.md` +
 - **PRIMARY kill triggers are the length-spiral precursors** (these called
   EXP-27's ignition and retro-dict α0.5's near-miss):
   - **P1 — consecutive cap-pins:** `response_length/max` = cap (16384) on
-    **≥2 consecutive** steps (isolated single-step spikes recover; consecutive
-    pins did not, in any observed run). RED, kill-early candidate.
+    **≥2 consecutive** steps. Six-run evidence (RUN_COMPARISON.md §7: dense,
+    plain, ef_r2, α0.5, exp27, ef_r1): EVERY run touches 16384 at least once —
+    a lone spike is NOT diagnostic; max consecutive streak = 1 for all
+    survivors, 2 for α0.5 (censored mid-onset at step 50), 7 for both igniters.
+    **Operational kill rule: trip on the 2nd consecutive pin** — retro-dicts
+    exp27 at step 62 (actual kill ~66) and α0.5 at 48. RED, kill-early.
   - **P2 — mean slope:** trailing-10-step slope of `response_length/mean`
     > **+2 tok/step** sustained = YELLOW; combined with any pin = RED.
     (EXP-27 pre-ignition: +0.10/step; α0.5@47-50: **+5.92/step**; ignition:
