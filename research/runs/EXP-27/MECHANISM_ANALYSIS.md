@@ -75,24 +75,27 @@ cancellation across stale gradients; G_comp runs ~1.6–3 — EXP-25 §2.4), cal
 ρ = ‖comp‖/‖G‖ ≈ 0.05–0.10. Steady-state unclipped residual is geometric:
 ‖e‖ ≈ ρ/(1−δ)·‖G‖.
 
-| arm | δ | c (clip) | predicted ‖e‖/‖G‖ | observed dose |
+| arm | δ | c (clip) | predicted ‖e‖/‖G‖ | observed dose (W&B `rel_change_mean`) |
 |---|---|---|---|---|
-| parent ef (EXP-26) | 0.9 | 1.0 | ρ·10 ≈ 0.5–1.0 → clip-shaped | 0.30→0.47 climb, median 0.32 |
-| EXP-27 damped | 0.5 | 0.5 | ρ·2 ≈ 0.10–0.20 → **clip never binds** | 0.02–0.19, peak 0.189 |
+| ef r1 (EXP-26) | 0.9 | 1.0 | ρ·10 ≈ 0.5–1.0 → clip-shaped | median 0.200 over s18–27 |
+| ef r2 (EXP-26) | 0.9 | 1.0 | same | median 0.250 over s18–27; 0.30→0.47 climb across captured ticks |
+| EXP-27 damped | 0.5 | 0.5 | ρ·2 ≈ 0.10–0.20 → **clip rarely binds** | median **0.092** (s18–27) → **0.021** (s45–67); peak 0.189@s12 |
 
-Two consequences: (i) in EXP-27 the clip was **inert** (dose never reached 0.5·‖G‖) — the decay
-alone set the dose, so a further clip cut (0.5→0.25, the verdict's flagged optional probe) would
-change almost nothing; (ii) at δ=0.5 the residual *saturates within ~2 ticks*
-(1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance (§g, P3).
+(Dose source: comparator-runs' W&B pull, `RUN_COMPARISON.md` §7a — authoritative over my first
+local-log extraction, which Ray's line-dedup had biased toward the unique high-dose matrices,
+n≈14–28 of 392 per sweep, per-matrix max 0.41 vs true mean 0.092.)
 
-**The decisive log fact:** the per-step dose **decayed** over the run (per-sweep means ~0.19–0.30
-around steps 18–30 → 0.04–0.13 by steps 48–68; re-extracted from the `[EXP-7][spectral]`
-rel_change lines in the train log — ‖G‖ grew late while ‖M‖ did not. Caveat: Ray dedupes repeated
-worker lines, so per-step samples are partial, n≈14–28 of 392; the W&B `spectral/rel_change_mean`
-series shows the same shape, peak 0.189@s12 per verdict.md). Through the ignition window
-(steps 61–66) the forcing sat in the **lowest band of the entire run** (0.05–0.13). Ignition is
-not a dose event. This single observation already falsifies every "the residual kicked too hard"
-story and demands a mechanism where smallness of the per-step push is irrelevant.
+Two consequences: (i) in EXP-27 the clip was essentially **inert** (mean dose never approached
+0.5·‖G‖) — the decay alone set the dose, so a further clip cut (0.5→0.25, the verdict's flagged
+optional probe) would change almost nothing; (ii) at δ=0.5 the residual *saturates within ~2–3
+ticks* (1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance
+(§g, P3).
+
+**The decisive fact:** the per-step dose **decayed monotonically** over the run — 0.092 (s18–27)
+→ 0.021 (s45–67) — so through the ignition window (steps 61–66) the forcing sat at its run
+**minimum**, ~10× below the parent's igniting dose. Ignition is not a dose event. This single
+observation already falsifies every "the residual kicked too hard" story and demands a mechanism
+where smallness of the per-step push is irrelevant.
 
 ---
 
@@ -168,10 +171,11 @@ gain: zero.** Exactly what the λτ-model predicts and exactly what a per-step c
 see.
 
 The cross-arm data even makes the per-step angle point the **wrong way**: signed_ema α=0.5
-rotates its update by ~44° *every step* (cos 0.7165) and never ignites in 50 steps; ef rotates
-~17° (EXP-27: ≤11°) and ignites. Per-step rotation angle anti-correlates with ignition across
-arms, because what matters is not how far one step turns but whether the turning has a persistent
-exogenous component that integrates (§e).
+rotates its update by ~44° *every step* (cos 0.7165) and did not lock in within 50 steps (though
+its s50 state carries DANGER precursors — §e.2); ef rotates ~17° (EXP-27: ≤11°) and ignites
+outright. Per-step rotation angle does not order ignition across arms, because what matters is
+not how far one step turns but whether the turning has a persistent exogenous component that
+integrates (§e).
 
 The Lyapunov-flavored version: a certificate needs a function V with V̇ < 0 along trajectories.
 Any reward-derived V satisfies V̇ ≈ 0 along reward-*flat* directions — and the forcing is, by F1,
@@ -276,10 +280,13 @@ The merger enters this anatomy **twice**:
 
 - **Transport (the main role):** the persistent tangential force (F1+F2) moves the policy along
   the flat valley *during the healthy phase*, so by the time susceptibility arrives the policy
-  already sits near the long-mode region and emits long-tail seeds. Compare matched step ~50:
-  EXP-27's batch lmax hits 16384 (s45/53/59) while α=0.5 logged `clip_ratio = 0.000` at every
-  step (zero capped rollouts all run; its per-step *mean* length peaked at 288 and was
-  shrinking) — the ef policy's tail is qualitatively different *before* ignition.
+  already sits near the long-mode region and emits long-tail seeds. The W&B cross-check
+  (`RUN_COMPARISON.md` §7b/§8) shows the seed emission tracks the carrier exactly: **every**
+  M-fed arm emits isolated cap-pins before any lock-in (ef r2: 16384@27, 7817@32, 4061@47
+  despite finishing "clean"; α=0.5: 16384@{17,47,48} + 5806@50; EXP-27: s45/53/59; ef r1:
+  5782@12, pin@29), while **plain — the same substrate with the merger OFF — emits nothing**
+  (lmax ≤ 826 after s30, zero pins after the s1 warmup fluke) and dense has one warmup fluke
+  (s6) only. The carrier, not the codec substrate, is the emission source.
 - **Window-widening (the secondary role):** merger arms sharpen more slowly (entropy at s50:
   ef ≈ 0.40, α=0.5 0.371 vs dense 0.122) — they sit in the seed-emitting-but-susceptible window
   ~3× longer than dense, multiplying seed exposure.
@@ -299,19 +306,24 @@ systematic anti-descent component?):
 |---|---|---|---|---|---|
 | dense / psgd-only | 0 | no | no | stable | val 0.7536 / 0.7415, no ignition |
 | plain (B_plain) | 0 (substrate: stale-Q forward only) | no (grad path) | no | stable, but refresh drag | 0.6437, **no ignition** in 50 |
-| signed_ema α=0.5 | −G⊙1[sign(M)≠sign(G)] — a *veto-rectifier* on G (see §e.2) | **no additive** (suppresses fresh pushes; no energy of its own; cos = √½ ✓ measured 0.7165) | no | stable-ish; val cost from discarding ~half the gradient | 0.7066, no ignition in 50, clip 0.000, lengths shrinking |
+| signed_ema α=0.5 | −G⊙1[sign(M)≠sign(G)] — a *veto-rectifier* on G (see §e.2) | **yes, in expectation**: E[F_i] ≈ ½E\|G_i\|·sign(M_i) on coin-flip coords (per-step a contraction, cos = √½ ✓ measured 0.7165) | no (never reverses a determined coord) | delayed ignition (carrier ~½-strength) | no lock-in by 50, but **DANGER state @50**: consecutive 16384 pins s47–48, lmax 5806@50, len slope +5.9/step — censored mid-path |
 | signed_ema α=0.3 | (2α−1)·G on disagree = −0.4·G_disagree | **yes** (sign(M)-replacement reverses fresh energy) | **yes (−0.4)** | ignite, slower than α=0, reward crash | ignited s33, val 0.6164 |
 | signed_ema α=0 | −1.0·G_disagree | **yes** | **yes (−1.0)** | fast ignite + reward crash | ignited s30, entropy→0.06, len→8.6k, val 0.354 |
 | ef parent (c=1, δ=0.9) | clip(filter(M_⊥)) ≈ 0.32·‖G‖·M̂ | **yes (M̂ injected)** | no (⊥) | ignite, reward-preserving, timing stochastic | r1 ignited 29–42; r2 clean to 50 (first-passage) |
 | **ef damped (EXP-27)** | same, λ ≈ 0.02–0.19 | **yes (M̂ injected)** | no (⊥) | ignite **later** (λ halved, τ unchanged), reward-preserving | ignited 61–66, score 0.73–0.84 ✓ |
 
-The empirical law across all eight runs is exact: **ignition ⇔ F contains an *additive* persistent
-exogenous carrier** — a force component that fires with its own energy, independent of whether the
-fresh gradient pushes there (sign-*replacement* at α<0.5 reverses fresh energy onto stale signs;
-ef *injects* M̂ energy outright). Arms whose F can only suppress or pass fresh-gradient energy
-(α=0.5's veto, plain's nothing) never ignited. Dose sets the timing; reward-coupling of F sets
-whether reward crashes during ignition (α=0/0.3: anti-descent ⇒ crash) or is preserved (ef:
-orthogonal ⇒ score 0.73–0.84 — the EXP-27 signature, predicted by F1).
+The empirical law across all eight runs (sharpened by the comparator's W&B cross-check, which
+removed what had looked like an α=0.5 exception): **long-tail emission and ignition ⇔ E[F | M]
+contains a persistent exogenous carrier** — a nonzero expected force along stale-M directions.
+That covers sign-replacement (α<0.5: reverses fresh energy onto stale signs), M̂ injection (ef),
+*and* the α=0.5 veto-rectifier (whose per-step contraction still has expectation
+½E|G|⊙sign(M) on the coin-flip half — and whose run indeed shows the carrier's emission
+signature, §e.2). The two arms with E[F]=0 along any persistent direction — plain and
+dense/psgd-only — emit nothing and never ignite. Dose sets the timing (the comparator's numbers
+make it almost exactly linear: ef r1 dose 0.200 → lock-in s30; EXP-27 dose 0.092→0.021 → lock-in
+s61; ratio ≈ 2.2 vs 2.0); reward-coupling of F sets whether reward crashes during ignition
+(α=0/0.3: anti-descent ⇒ crash) or is preserved (ef: orthogonal ⇒ score 0.73–0.84 — the EXP-27
+signature, predicted by F1).
 
 ### e.1 Why α=0 exploded fast
 F has an O(‖G‖) anti-descent component on ~50% of gradient mass (the √2 fingerprint) — it
@@ -319,25 +331,27 @@ destroys the sign-cancellation regularizer (grad-norm 0.39→3.3–11), actively
 carries the M-direction. It drives its own susceptibility (entropy 5.7→0.47 by s30) and ignites
 the moment it gets there. Fast, deterministic, reward-crashing.
 
-### e.2 Why α=0.5 survived 50 steps — the veto-rectifier nuance (and the honest caveat)
-At the (2α−1)=0 knee, G_corr = G⊙1[agree]: the stale sign(M) only **vetoes or passes** the fresh
-per-coordinate push; F = −G⊙1[disagree] has no energy of its own (F_i = 0 whenever G_i = 0). It
-can never push the policy anywhere the fresh gradient was not already pushing, and the reward-flat
-direction receives no systematic fresh push — so the *additive-transport* mechanism of §b/§d is
-structurally absent, not merely damped. Per step it is a contraction (never ascent;
-cos = √(agree-energy/total) = √½ = 0.707, measured 0.7165 ✓).
+### e.2 α=0.5 — the veto-rectifier is a half-strength carrier, and the data agree
+At the (2α−1)=0 knee, G_corr = G⊙1[agree]: per step, the stale sign(M) only **vetoes or passes**
+the fresh per-coordinate push; F = −G⊙1[disagree] has no energy of its own (F_i = 0 whenever
+G_i = 0) and is never an ascent direction (cos = √(agree-energy/total) = √½ = 0.707, measured
+0.7165 ✓). That per-step contraction is why α=0.5 escaped the EXP-25 *reward-crash* fate.
 
-**Honest caveat (the second-order channel):** in *time average* the veto is not neutral. On
-near-zero-mean (coin-flip) coordinates, E[G_i·1(agree)] ≈ ½·E|G_i|·sign(M_i) ≠ 0 — rectifying a
-zero-mean fresh push through a persistent sign pattern produces a drift along sign(M), at half
-magnitude, energy-limited by the fresh |G_i|. This is a real persistent component; the reasons it
-plausibly does not ignite where ef does: (i) its function-space direction is the *sign pattern* of
-M diluted across the coin-flip set, not the coherent gradient-like object M̂ that lives in the
-policy-relevant subspace; (ii) it carries no energy where the fresh gradient is silent. Empirics
-at s50 corroborate: lengths 165–170 *shrinking*, `clip_ratio 0.000` all run (zero capped
-rollouts), val rising. But 50 steps is right-censored — this channel is the main residual
-uncertainty in prediction P1, and why P1 is 0.7 and not 0.9. Cost of the veto: ~half the gradient
-discarded ⇒ val 0.7066 < psgd-only 0.7415.
+But the veto is **not neutral in time average**. On near-zero-mean (coin-flip) coordinates —
+~50% of the gradient mass (the √2/coin-flip finding) — rectifying a zero-mean fresh push through
+a persistent sign pattern leaves E[G_corr,i] ≈ ½·E|G_i|·sign(M_i) ≠ 0: a half-magnitude sign-SGD
+drift along sign(M), i.e. a **persistent exogenous carrier in expectation**, energy-limited by
+the fresh |G_i| but pointed by the same ~50-step-memory M as the ef carrier.
+
+An earlier draft of this analysis claimed α=0.5's empirics were clean (a misread of the EXP-25
+table, whose `clip_ratio 0.000` was the s50 snapshot, not the run). The comparator's full W&B
+pull (`RUN_COMPARISON.md` §4/§7b) corrected this decisively: α=0.5 hits lmax=16384 at s17, s47,
+s48 (**consecutive** 47–48, the lock-in-onset signature), lmax 5806 still elevated at s50, and a
+trailing len-mean slope of **+5.9 tokens/step** over s41–50 — scored DANGER at s50, *worse than
+EXP-27 looked at its own s50* (EXP-27 locked in 11 steps later). α=0.5 was not stable; it was the
+same carrier trajectory at ~half strength, right-censored at 50 — consistent with the
+expectation math above, and removing the one apparent exception to the carrier law (§e table).
+Cost of the veto on top of that: ~half the gradient discarded ⇒ val 0.7066 < psgd-only 0.7415.
 
 ### e.3 Why EXP-27 ignited at ~61 with the dose in its lowest band
 λτ-model: λ halved (and the late-run dose actually *decayed* to 0.04–0.13 as ‖G‖ grew), τ (M's

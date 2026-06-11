@@ -400,6 +400,112 @@ ON (ef_r2/ef_r1/exp27), every run emitted the carrier spikes.**
 
 ---
 
+## 9. Early-warning gate @ step ≤30 (operator ask, task #6)
+
+**Question:** can we predict ignition susceptibility by step ~25–30 — *pretending we
+cannot see past step 30* — instead of waiting for the 50+-step mark? Retro-tested on all
+six runs over the visible window **[10, 30]** (steps ≤9 excluded as codec/optimizer
+warmup; see the warmup caveat below). Outcomes: igniters = ef_r1 (lock-in 30), exp27
+(lock-in 61), a0p5 (consecutive-pin onset 47–48); survivors-within-50 = dense, plain;
+ef_r2 = censored-survivor (finished 50 clean but emitted back-half spikes → scored BOTH
+ways). Full per-run numbers in `comparison_metrics/scorecard_early.csv`.
+
+### The decisive feasibility test: is exp27's ≤30 window clean? NO.
+
+This is the make-or-break question — exp27 ignited at step 61, so if its ≤30 window were
+clean, a ≤30 gate could never catch a late-seeding run. **It is not clean:** exp27 emits
+`len_max` = **3220 @ step 19** and **9764 @ step 23**, ~38 steps before lock-in. So the
+*carrier emission* (isolated long-tail spikes) is visible at ≤30 even when *ignition*
+(spike clustering) is 30+ steps away. The gate is feasible.
+
+### Per-run early signals (window [10,30])
+
+| run | outcome | #(len_max>2000) | #(>4000) | #(>8000) | p90 len_max | max len_max | len_mean slope@30 | grad_norm max | entropy slope |
+|---|---|---|---|---|---|---|---|---|---|
+| dense | SURVIVOR | **0** | 0 | 0 | 1147 | 1306 | +0.62 | 0.41 | −0.0073 |
+| plain | SURVIVOR | **0** | 0 | 0 | 1089 | 1217 | −3.19 | 6.65 | −0.0592 |
+| ef_r2 | CENSORED? | 1 | 1 | 1 | 1146 | 16384 | −3.41 | 6.43 | −0.0654 |
+| a0p5 | IGNITE | 2 | 2 | 1 | 1270 | 16384 | −7.19 | 26.0 | −0.0766 |
+| exp27 | IGNITE | 2 | 1 | 1 | 1296 | 9764 | −3.29 | 8.29 | −0.0603 |
+| ef_r1 | IGNITE | 3 | 3 | 2 | 5782 | 16384 | −0.41 | 11.83 | −0.0598 |
+
+### Best rule — long-tail spike-RATE gate
+
+> **RULE (early-warning, evaluate at step 30 over window [10,30]):**
+> **IF `response_length/max > 4000` on ≥1 step in [10,30] → flag UNSTABLE-LIKELY**
+> (extend-watch + arm the P1 2-consecutive-pin kill; do NOT yet hard-kill, since the
+> spike alone is not ignition). The threshold is robust anywhere in **2000–8000** —
+> all four emitters have a spike exceeding even 8000 in the window, all survivors stay
+> ≤1306 — so 4000 is a safe operating point well clear of both sides.
+
+**Retro confusion matrix** (6 runs):
+
+| ef_r2 treated as | TP | FP | TN | FN | sensitivity | specificity |
+|---|---|---|---|---|---|---|
+| IGNITE (it emitted) | 4 | 0 | 2 | 0 | **1.00** | **1.00** |
+| SURVIVOR (conservative) | 3 | 1 | 2 | 0 | **1.00** | 0.67 |
+
+Either way **sensitivity = 1.00** (catches all confirmed igniters, including exp27 at
+step ~23 — 38 steps early — and a0p5 at step 17). The lone "false positive" under the
+conservative scoring is ef_r2, which *did* emit a 16384 spike at step 27 and is itself a
+censored 50-step run — i.e. a defensible "extend-watch" flag, not a true miss. Within
+this 6-run sample the gate has **zero false negatives**.
+
+### What FAILED as an early signal (so the telemetry spec doesn't waste them)
+
+- **len/mean trailing-10 slope @ ≤30 — USELESS early.** Every comm-eff arm has a
+  *negative* slope at step 25/30 (−3 to −9; the policy is still *shortening*). The
+  len/mean *rise* is a post-ignition phenomenon only (exp27's slope is +0.10 at step 50,
+  +1.97 at 60, +50 in ignition). P2 (mean-slope) is a *confirmation/kill* signal, **not**
+  an early-warning one — do not expect it to fire before ~step 50.
+- **p90 of len_max — USELESS.** Spikes are too rare to move the 90th percentile in a
+  21-step window (all runs 1089–1296 except ef_r1). Use spike **count/rate**, not a
+  percentile of the level.
+- **entropy decline rate @ ≤30 (conditional, comm-eff only) — adds NOTHING.** All four
+  comm-eff arms have near-identical entropy slope (−0.059 to −0.077) regardless of
+  outcome; it does not separate igniters from survivors even *within* the merger class.
+  Confirms the §5 finding (entropy is a follower) extends to the *rate* at ≤30, not just
+  the level.
+- **grad_norm character @ ≤30 — weak/secondary.** `grad_norm max` does separate dense
+  (0.41) from everything else, and the igniter a0p5 is high (26.0), but plain (survivor,
+  6.65) and ef_r2 (6.43) overlap exp27 (8.29). A `grad_norm max > 15` sub-rule would
+  catch only a0p5 and miss exp27/ef_r1 — strictly dominated by the spike gate. Keep
+  grad_norm as a *cross-run health baseline* (which arm is nearest dense-quality
+  gradients), not an early trigger.
+
+### Honest limits of a ≤30-step gate
+
+1. **It catches carrier *emission*, not the *clustering* that actually ignites.** The
+   gate fires on the first isolated long-tail spike; clustering (the P1 kill condition)
+   can still be 30+ steps later (exp27) or never (ef_r2 survived 50). So the gate's
+   correct action is **extend-watch + arm P1**, not hard-kill — it raises suspicion
+   early, it does not call ignition early.
+2. **It cannot catch a run whose first spike lands after step 30.** None of our six do
+   (latest first-in-window emitter is ef_r2 at step 27), but with n=6 we cannot rule out
+   a slow-seeding arm that stays sub-2000 through step 30 and ignites later. For such a
+   run the gate would (wrongly) pass at 30; only the running P1/P2 monitor would catch
+   it later. The gate **shortens** the watch for the common case; it does not **replace**
+   the full-horizon monitor.
+3. **n = 6, classes 2-clean / 4-emitting (one censored).** Perfect separation on six
+   runs is encouraging but not statistically airtight. The gate's *floor* is solid (the
+   two true merger-OFF survivors emit nothing ≤30; every merger-ON arm emits), which is
+   the mechanistically expected pattern (§8) — but the operating threshold should be
+   revisited as more runs accrue.
+4. **Warmup exclusion is load-bearing.** dense emits one isolated 1306-max at step 6 and
+   plain a >2000 at step 1 — both in the ≤9 warmup zone the gate excludes (consistent
+   with ENTROPY_COLLAPSE_WATCH's codec-warmup ≤4 caveat). If the window were [1,30]
+   instead of [10,30], dense/plain would NOT cleanly pass. The window start matters; 10
+   is a safe choice (codec basis + optimizer have settled by then on these runs).
+
+**Bottom line for the operator:** YES — a step-≤30 gate is feasible and would have
+flagged all four merger arms (incl. the latest-igniting exp27, 38 steps early) with zero
+false negatives on this sample, using a single signal: **any `response_length/max>4000`
+in steps 10–30**. It buys ~20–35 steps of early warning for the common (early-seeding)
+case, with the honest caveat that it raises suspicion (extend-watch) rather than calling
+ignition, and cannot guarantee catching a hypothetical late-seeding run.
+
+---
+
 ## Files
 
 - `comparison_metrics/pull_wandb.py` — W&B fetch (scan_history, all 5 runs).
@@ -410,6 +516,8 @@ ON (ef_r2/ef_r1/exp27), every run emitted the carrier spikes.**
   (task #5): adds merger flag, max-consecutive-cap-pin, back-half len_max, grad_norm
   character; covers all six runs.
 - `comparison_metrics/ef_r1_c7fa7kjv.csv` — ef r1 (exp26_B_ef) full history (§7a).
+- `comparison_metrics/scorecard_early.csv` — ≤30-step early-warning signals, all 6 runs (§9).
+- `comparison_metrics/early_gate.py` — early-gate retro-test + confusion matrix (§9).
 - `comparison_metrics/analyze.py` — table/scorecard/slope generator (task #2).
 - `comparison_metrics/addendum_scorecard.py` — carrier-vs-substrate generator (task #5).
 - Ground truth for run 3: `runs/EXP-27/train_exp27_B_ef_damped.log`.
