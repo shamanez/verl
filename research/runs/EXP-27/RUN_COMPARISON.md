@@ -352,12 +352,22 @@ substrate **+ merger**. Everything else identical. This isolates the merger.
 
 | run | merger? | entropy@end | len_mean@end | len_mean slope(41–50) | len_max range (back-half) | max consecutive 16384-pin | #16384 (41–50) | #clip (41–50) | grad_norm (mean/max, 40–50) | VERDICT |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **plain** (`u1v94opv`) | **NO** | 0.478 | 197 | **−1.46 (declining)** | **≤826, never spikes** | **1** (lone @s1) | **0** | **0** | 7.4 / 10.5 | **CLEAN — no carrier signature at all** |
-| **ef_r2** (`tilwe80t`) | YES | 0.396 | 146 | +0.80 (mild) | repeated 7817@32, 2020@35, 2648@38, 4061@47 | 1 (never clusters) | 0 (none ≥16384 in 41–50; spike was @27) | 0 | 9.3 / 13.5 | WATCH — carrier present (isolated long-tail spikes), first-passage-lucky |
+| **plain** (`u1v94opv`) | **NO** | 0.478 | 197 | **−1.46 (declining)** | **≤1217 (no spike ≥4k), max ≤826 after s30** | **1** (lone @s1) | **0** | **0** | 7.4 / 10.5 | **CLEAN — no carrier signature at all** |
+| **ef_r2** (`tilwe80t`) | YES | 0.396 | 146 | +0.80 (mild) | repeated 7817@32, 2020@35, 2648@38, 4061@47 | 1 (never clusters) | 0 (none ≥16384 in 41–50; spikes were @27/32/35/38/47) | 0 | 9.3 / 13.5 | WATCH — carrier present (isolated long-tail spikes), first-passage-lucky |
 
-(Rows appended to `comparison_metrics/scorecard.csv`.)
+(Full attribution scorecard with these + the consecutive-pin and grad_norm columns:
+`comparison_metrics/scorecard_addendum.csv`; the original 5-run scorecard is
+`comparison_metrics/scorecard.csv`.)
 
 ### Attribution verdict — implicates the MERGER (hypothesis iii), not the substrate
+
+> **ONE-LINE ATTRIBUTION:** plain (anchor refresh, *NO* merger — M_anchor never folded
+> into the fast gradient) ends CLEAN (max consecutive cap-pin streak = 1, len/mean slope
+> −1.46 = no spiral), while *every* M_anchor-folding merger arm (ef_r2, a0p5, exp27,
+> ef_r1) shows the spiral signature ⇒ **within the 50-step censoring limit, the
+> MERGER/CARRIER is implicated, not the bare PowerSGD+anchor substrate.** Honest caveat:
+> plain is itself a *censored 50-step observation* (it never ran to 100), so this is
+> "clean within 50 steps," not "proven stable" — the airtight version is a plain@100 run.
 
 **plain (merger OFF) shows ZERO long-tail emission**: its len/max never exceeds ~826 in
 the entire back half, len/mean is *declining* (slope −1.46), it has zero 16384 pins
@@ -395,6 +405,11 @@ ON (ef_r2/ef_r1/exp27), every run emitted the carrier spikes.**
 - `comparison_metrics/pull_wandb.py` — W&B fetch (scan_history, all 5 runs).
 - `comparison_metrics/<label>.csv` — raw per-step history per run.
 - `comparison_metrics/aligned_<metric>.csv` — step×run aligned tables.
-- `comparison_metrics/scorecard.csv` — the precursor scorecard.
-- `comparison_metrics/analyze.py` — table/scorecard/slope generator.
+- `comparison_metrics/scorecard.csv` — the 5-run precursor scorecard (task #2).
+- `comparison_metrics/scorecard_addendum.csv` — carrier-vs-substrate scorecard
+  (task #5): adds merger flag, max-consecutive-cap-pin, back-half len_max, grad_norm
+  character; covers all six runs.
+- `comparison_metrics/ef_r1_c7fa7kjv.csv` — ef r1 (exp26_B_ef) full history (§7a).
+- `comparison_metrics/analyze.py` — table/scorecard/slope generator (task #2).
+- `comparison_metrics/addendum_scorecard.py` — carrier-vs-substrate generator (task #5).
 - Ground truth for run 3: `runs/EXP-27/train_exp27_B_ef_damped.log`.

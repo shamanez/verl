@@ -83,7 +83,7 @@ cancellation across stale gradients; G_comp runs ~1.6–3 — EXP-25 §2.4), cal
 Two consequences: (i) in EXP-27 the clip was **inert** (dose never reached 0.5·‖G‖) — the decay
 alone set the dose, so a further clip cut (0.5→0.25, the verdict's flagged optional probe) would
 change almost nothing; (ii) at δ=0.5 the residual *saturates within ~2 ticks*
-(1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance (§7, P3).
+(1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance (§g, P3).
 
 **The decisive log fact:** the per-step dose **decayed** over the run (per-sweep means ~0.19–0.30
 around steps 18–30 → 0.04–0.13 by steps 48–68; re-extracted from the `[EXP-7][spectral]`
@@ -130,7 +130,7 @@ is a *positive feedback path of old state into the input with a ~100-tick group 
 is a feedback loop around the **codec**; ours is a feedback loop around the **policy's own
 history**. The first is contractive; the second is a forcing term.
 
-One more disanalogy that matters for the fix (§7): for a *projector* codec with self-adjoint
+One more disanalogy that matters for the fix (§g): for a *projector* codec with self-adjoint
 P = QQᵀ, classic EF applied at the boundary is only nontrivial because Q **rotates** (refresh every
 5 ticks) — with a frozen P, `e ∈ range(I−P)` forever and `C(g+e) = C(g)`; with a rotating Q each
 refresh flushes the accumulated null-space residual into the new subspace. So a correct EF on this
@@ -179,7 +179,7 @@ Any reward-derived V satisfies V̇ ≈ 0 along reward-*flat* directions — and 
 reward-coupled tangential components are continually pulled back by the next fresh gradient, its
 reward-flat component is not — see (c)/(d)). No certificate over this surface exists without
 adding a potential on the flat directions (KL / entropy / length terms — precisely the LABELED
-guardrails, §7). Score staying 0.73–0.84 *through* ignition is this statement made empirical:
+guardrails, §g). Score staying 0.73–0.84 *through* ignition is this statement made empirical:
 the policy moved a long way along a reward level set.
 
 ---
@@ -232,17 +232,11 @@ score crashed to 0.32.)
 `loss_agg_mode=token-mean` (verl default; confirmed in actor.yaml, not overridden in
 resolved_params): the batch loss is `Σ_i Σ_{t≤T_i} ℓ_{i,t} / Σ_i T_i`, each token of sample i
 carrying the same group-normalized advantage A_i (GRPO), ratio≈1. So **sample i's weight in the
-update is ∝ T_i·A_i**. The batch is 128 prompts × n=8 = 1024 responses; at mean length ~175 the
-token pool is ~1.8e5. One 16384-token rollout is **9.1% of the entire batch's gradient mass**
-(fair share 0.098% ⇒ ~93× amplification); the ~6 capped rollouts at s61 (clip 0.006) carried
-~25–30% of the batch's token mass between them.
-
-`loss_agg_mode=token-mean` (verl default; confirmed in actor.yaml, not overridden in
-resolved_params): sample i's weight in the update is ∝ T_i·A_i. The batch is 128 prompts × n=8 =
-1024 responses; at mean length ~175 one 16384-token rollout carries **~8.4% of the entire batch's
-gradient mass** (16384 / (1023·175 + 16384); fair share 0.098% ⇒ ~86× amplification). At s61
-(clip 0.006 ⇒ ~6 capped rollouts, mean 267.9) the capped tail alone carried ~36% of the batch's
-token mass from 0.6% of its samples.
+update is ∝ T_i·A_i**. The batch is 128 prompts × n=8 = 1024 responses; at mean length ~175 one
+16384-token rollout carries **~8.4% of the entire batch's gradient mass**
+(16384 / (1023·175 + 16384); fair share 0.098% ⇒ ~86× amplification). At s61 (clip 0.006 ⇒ ~6
+capped rollouts, mean 267.9) the capped tail alone carried ~36% of the batch's token mass from
+0.6% of its samples.
 
 GRPO's group normalization adds the gate: A_i = (r_i − μ_g)/(σ_g+ε). In an all-correct or
 all-wrong group, A ≡ 0 — the group emits no learning signal. As the policy sharpens, within-group
@@ -283,8 +277,9 @@ The merger enters this anatomy **twice**:
 - **Transport (the main role):** the persistent tangential force (F1+F2) moves the policy along
   the flat valley *during the healthy phase*, so by the time susceptibility arrives the policy
   already sits near the long-mode region and emits long-tail seeds. Compare matched step ~50:
-  EXP-27 lmax hits 16384 (s45/53/59) vs α=0.5's **max length 288 over the whole batch** at s50
-  and dense's bounded ~600 — the ef policy's tail is qualitatively different *before* ignition.
+  EXP-27's batch lmax hits 16384 (s45/53/59) while α=0.5 logged `clip_ratio = 0.000` at every
+  step (zero capped rollouts all run; its per-step *mean* length peaked at 288 and was
+  shrinking) — the ef policy's tail is qualitatively different *before* ignition.
 - **Window-widening (the secondary role):** merger arms sharpen more slowly (entropy at s50:
   ef ≈ 0.40, α=0.5 0.371 vs dense 0.122) — they sit in the seed-emitting-but-susceptible window
   ~3× longer than dense, multiplying seed exposure.
@@ -300,20 +295,23 @@ Write every merger as `G_corr = G + F` and classify F by **(i) exogenous-carrier
 contain a direction *not* derived from the current G?) and **(ii) reward-coupling** (does F have a
 systematic anti-descent component?):
 
-| arm | F | carrier? | anti-descent? | predicted | observed |
+| arm | F | additive carrier? | anti-descent? | predicted | observed |
 |---|---|---|---|---|---|
 | dense / psgd-only | 0 | no | no | stable | val 0.7536 / 0.7415, no ignition |
 | plain (B_plain) | 0 (substrate: stale-Q forward only) | no (grad path) | no | stable, but refresh drag | 0.6437, **no ignition** in 50 |
-| signed_ema α=0.5 | −G⊙1[sign(M)≠sign(G)] — a negated *subvector of G* (mask) | **no** (contraction of current G; cos = √½ ✓ measured 0.7165) | no | stable; val cost from discarding ~half the gradient | 0.7066, no ignition in 50, lmax 288 |
-| signed_ema α=0.3 | (2α−1)·G on disagree = −0.4·G_disagree + carrier | yes (sign(M)) | **yes (−0.4)** | ignite, slower than α=0, reward crash | ignited s33, val 0.6164 |
-| signed_ema α=0 | −1.0·G_disagree + carrier | yes | **yes (−1.0)** | fast ignite + reward crash | ignited s30, entropy→0.06, len→8.6k, val 0.354 |
-| ef parent (c=1, δ=0.9) | clip(filter(M_⊥)) ≈ 0.32·‖G‖·M̂ | **yes (M)** | no (⊥) | ignite, reward-preserving, timing stochastic | r1 ignited 29–42; r2 clean to 50 (first-passage) |
-| **ef damped (EXP-27)** | same, λ ≈ 0.02–0.19 | **yes (M)** | no (⊥) | ignite **later** (λ halved, τ unchanged), reward-preserving | ignited 61–66, score 0.73–0.84 ✓ |
+| signed_ema α=0.5 | −G⊙1[sign(M)≠sign(G)] — a *veto-rectifier* on G (see §e.2) | **no additive** (suppresses fresh pushes; no energy of its own; cos = √½ ✓ measured 0.7165) | no | stable-ish; val cost from discarding ~half the gradient | 0.7066, no ignition in 50, clip 0.000, lengths shrinking |
+| signed_ema α=0.3 | (2α−1)·G on disagree = −0.4·G_disagree | **yes** (sign(M)-replacement reverses fresh energy) | **yes (−0.4)** | ignite, slower than α=0, reward crash | ignited s33, val 0.6164 |
+| signed_ema α=0 | −1.0·G_disagree | **yes** | **yes (−1.0)** | fast ignite + reward crash | ignited s30, entropy→0.06, len→8.6k, val 0.354 |
+| ef parent (c=1, δ=0.9) | clip(filter(M_⊥)) ≈ 0.32·‖G‖·M̂ | **yes (M̂ injected)** | no (⊥) | ignite, reward-preserving, timing stochastic | r1 ignited 29–42; r2 clean to 50 (first-passage) |
+| **ef damped (EXP-27)** | same, λ ≈ 0.02–0.19 | **yes (M̂ injected)** | no (⊥) | ignite **later** (λ halved, τ unchanged), reward-preserving | ignited 61–66, score 0.73–0.84 ✓ |
 
-The empirical law across all eight runs is exact: **ignition ⇔ F contains a persistent exogenous
-carrier** (sign(M) or M itself). Dose sets the timing; reward-coupling of F sets whether reward
-crashes during ignition (α=0/0.3: anti-descent ⇒ crash) or is preserved (ef: orthogonal ⇒
-score 0.73–0.84 — the EXP-27 signature, predicted by F1).
+The empirical law across all eight runs is exact: **ignition ⇔ F contains an *additive* persistent
+exogenous carrier** — a force component that fires with its own energy, independent of whether the
+fresh gradient pushes there (sign-*replacement* at α<0.5 reverses fresh energy onto stale signs;
+ef *injects* M̂ energy outright). Arms whose F can only suppress or pass fresh-gradient energy
+(α=0.5's veto, plain's nothing) never ignited. Dose sets the timing; reward-coupling of F sets
+whether reward crashes during ignition (α=0/0.3: anti-descent ⇒ crash) or is preserved (ef:
+orthogonal ⇒ score 0.73–0.84 — the EXP-27 signature, predicted by F1).
 
 ### e.1 Why α=0 exploded fast
 F has an O(‖G‖) anti-descent component on ~50% of gradient mass (the √2 fingerprint) — it
@@ -321,16 +319,27 @@ destroys the sign-cancellation regularizer (grad-norm 0.39→3.3–11), actively
 carries the M-direction. It drives its own susceptibility (entropy 5.7→0.47 by s30) and ignites
 the moment it gets there. Fast, deterministic, reward-crashing.
 
-### e.2 Why α=0.5 survived 50 steps
-At the (2α−1)=0 knee, F = −G⊙1[disagree] is a *masked current gradient*: no exogenous direction
-at all (the stale M only selects *which* coordinates pass). A subvector of G has ~zero component
-along reward-flat directions (flat ⊥ G by definition of flat), so the transport mechanism is
-**absent**, not merely damped. Cost: ~half the gradient discarded ⇒ val 0.7066 < psgd 0.7415.
-Residual risks are second-order (anisotropic progress from persistent stale coordinate-selection;
-the widened window §d.3). Its s50 state corroborates: lengths 165–170 *shrinking*, batch lmax
-288 — the seed faucet is closed.
+### e.2 Why α=0.5 survived 50 steps — the veto-rectifier nuance (and the honest caveat)
+At the (2α−1)=0 knee, G_corr = G⊙1[agree]: the stale sign(M) only **vetoes or passes** the fresh
+per-coordinate push; F = −G⊙1[disagree] has no energy of its own (F_i = 0 whenever G_i = 0). It
+can never push the policy anywhere the fresh gradient was not already pushing, and the reward-flat
+direction receives no systematic fresh push — so the *additive-transport* mechanism of §b/§d is
+structurally absent, not merely damped. Per step it is a contraction (never ascent;
+cos = √(agree-energy/total) = √½ = 0.707, measured 0.7165 ✓).
 
-### e.3 Why EXP-27 ignited at ~61 with the dose at its minimum
+**Honest caveat (the second-order channel):** in *time average* the veto is not neutral. On
+near-zero-mean (coin-flip) coordinates, E[G_i·1(agree)] ≈ ½·E|G_i|·sign(M_i) ≠ 0 — rectifying a
+zero-mean fresh push through a persistent sign pattern produces a drift along sign(M), at half
+magnitude, energy-limited by the fresh |G_i|. This is a real persistent component; the reasons it
+plausibly does not ignite where ef does: (i) its function-space direction is the *sign pattern* of
+M diluted across the coin-flip set, not the coherent gradient-like object M̂ that lives in the
+policy-relevant subspace; (ii) it carries no energy where the fresh gradient is silent. Empirics
+at s50 corroborate: lengths 165–170 *shrinking*, `clip_ratio 0.000` all run (zero capped
+rollouts), val rising. But 50 steps is right-censored — this channel is the main residual
+uncertainty in prediction P1, and why P1 is 0.7 and not 0.9. Cost of the veto: ~half the gradient
+discarded ⇒ val 0.7066 < psgd-only 0.7415.
+
+### e.3 Why EXP-27 ignited at ~61 with the dose in its lowest band
 λτ-model: λ halved (and the late-run dose actually *decayed* to 0.04–0.13 as ‖G‖ grew), τ (M's
 memory) unchanged ⇒ transport rate halved ⇒ time-to-basin ~×2 (29–42 → 61–66 ✓). The
 susceptibility stage is force-independent (healthy sharpening), so damping cannot push ignition
@@ -369,19 +378,24 @@ substrate — same GRPO/no-KL/16K surface, different codec — with no recorded 
 **Falsifiable discriminating predictions (pre-registered):**
 
 - **P1 — signed_ema α=0.5 @100** (same surface, 1wulaelw config, step_target 100):
-  NO ignition by s100. Specifically: batch lmax < ~2k at every step (no pinned-16384 step), no
-  length-mean creep ≥ +25% over its s40–50 running min, entropy lands 0.25–0.35, val@100 ≈
-  0.70–0.72 (the masked-gradient cost persists; it does not close parity).
-  **P(no ignition) ≈ 0.75.** (Residual 0.25: window-widening + anisotropic-selection second-order
-  effects + generic unknowns.)
+  NO ignition by s100. Specifically: `response_length/clip_ratio` stays ≈ 0 (no pinned-16384
+  step), no length-mean creep ≥ +25% over its s40–50 running min, entropy lands 0.25–0.35,
+  val@100 ≈ 0.70–0.72 (the masked-gradient cost persists; it does not close parity).
+  **P(no ignition) ≈ 0.7.** (Residual 0.3: the §e.2 rectified-drift channel + the widened
+  seed-window + generic unknowns. If it DOES ignite, the model predicts it does so via the same
+  P5 precursor sequence, with creep starting only after ~s60 — that outcome would *extend* the
+  carrier law to rectified carriers rather than refute it; a precursor-free ignition would
+  refute §d.3.)
 - **P2 — plain @100** (B_plain config): NO ignition by s100; val@100 0.65–0.70 (climbing from
   0.6437 but the refresh-alone drag keeps it at/below the floor band). **P(no ignition) ≈ 0.85.**
 - **P3 — ef-with-residual-reset** (damped settings + e_t←0 at every anchor refresh): **still
-  ignites**, ~s55–75. At δ=0.5, e saturates in ~2 ticks (1+δ+δ²+δ³ = 1.94/2.0) while resets come
-  every 5 ticks — the average dose drops only ~20%, and the carrier persistence lives in **M**,
-  which the reset does not touch. **P(still ignites by s80) ≈ 0.7.** If this arm does NOT ignite,
-  my model is wrong about where the persistence lives (it would be in e, not M) — that is the
-  cleanest single-run falsifier of this document.
+  ignites**, ~s55–75. At δ=0.5 the residual saturates geometrically — within a 5-tick reset cycle
+  e reaches (1−δ⁵)/(1−δ) = 1.94 of its 2.0 steady state, and the cycle-average dose is
+  (1/5)·Σ_{j=0..4}(1−δ^{j+1})/(1−δ) = 1.61 vs 2.0, i.e. resets shave only **~19%** of the average
+  dose — while the carrier persistence lives in **M**, which the reset does not touch.
+  **P(still ignites by s80) ≈ 0.7.** If this arm does NOT ignite, my model is wrong about where
+  the persistence lives (it would be in e, not M) — that is the cleanest single-run falsifier of
+  this document.
 - **P4 — outcome table:** if α=0.5@100 and plain@100 both stay clean while any ef@100 rerun
   ignites, H_carrier is confirmed and H_generic dead. If α=0.5 or plain ignite at ~s55–70 with the
   same precursor sequence (lmax spikes → length creep → catch), H_generic wins and the merger is
