@@ -43,12 +43,21 @@ The EXP-27 3-run comparison (`runs/EXP-27/RUN_COMPARISON.md` +
     +50-100/step.)
   - **P3 — the old T4 absolute:** mean > 2× first-10-step average — confirmed
     in EXP-27 (~509 crossed at step 66, after P1/P2 had fired ~5 steps earlier).
-- **Gradient quality is the cross-run discriminator** (probable upstream cause):
-  dense `actor/grad_norm` ≈ 0.35 clean/stable; comm-eff arms 3–7 noisy;
-  20–60 during ignition. Treat the grad_norm *trajectory* as a **run-health
-  baseline metric across arms** (which arm is closer to dense-quality
-  gradients), NOT as a within-run instantaneous trigger (it stayed O(1–16)
-  through EXP-25's collapse — the caveat below still holds within-run).
+- **The cross-run discriminator is MERGER-CARRIER PRESENCE, not gradient
+  noisiness** (corrected 2026-06-11 after the mechanist↔comparator
+  reconciliation; RUN_COMPARISON.md §5-revised + §8): plain (no merger) has the
+  SAME noisy grad_norm class as the merger arms (median 3.4/max 10.5 vs ef_r2's
+  4.9/13.5) yet emits zero spikes — so "noisy gradients cause it" is FALSIFIED.
+  Emission/ignition tracks exactly one thing: whether a persistent exogenous
+  carrier (the spectral merger folding stale `M` into the fast gradient) is
+  present. Dense's clean grad_norm ≈0.35 is a *consequence* of being
+  merger-free, not a cause. grad_norm remains a dense-vs-comm-eff health
+  *correlate* only — never a trigger (it stayed O(1–16) through EXP-25's
+  collapse) and never a susceptibility metric within comm-eff arms.
+- **Ignition is a JOINT (dose × sharpness) boundary, not an entropy line**
+  (§7c): high-dose ef_r1 ignited at entropy **0.83** (HIGH) then collapsed to
+  0.13; low-dose exp27 sharpened to ~0.34 first. Third independent
+  confirmation that entropy TRAILS ignition.
 - **50-step runs are CENSORED observations.** α0.5 "survived" 50 steps but was
   already in the early spiral (consecutive cap-pins at steps 47–48); EXP-27 was
   clean at 50 and ignited at ~61. A clean step-50 endpoint does NOT certify
