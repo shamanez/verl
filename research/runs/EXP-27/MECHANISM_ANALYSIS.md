@@ -16,6 +16,29 @@ length-hack basin, never *whether* it is reached. Per-step direction preservatio
 descent component and says nothing about the tangential one — i.e. nothing about closed-loop
 stability.
 
+**Two operator-confirmed findings (2026-06-11) this analysis is built around:**
+
+1. **Entropy is a FOLLOWER of the length spiral, not its trigger.** Dense (5e2jpho9) is the
+   *lowest*-entropy run of the cohort (0.12–0.16 from step 36) and the *most* stable; ef r1
+   ignited at entropy **0.83** (high) and only then collapsed to 0.13; EXP-27 sharpened to ~0.34
+   before its catch. Entropy-causes-explosion causality is falsified three independent ways. In
+   the mechanism below, entropy decline is the policy-sharpening component of the *healthy*
+   dynamics plus, at ignition, a compositional artifact of the long repetitive tail (§d.2/§d.3).
+   The standing watch is re-centered accordingly
+   (`research/diagnostics/ENTROPY_COLLAPSE_WATCH.md` §2026-06-11: kill triggers = consecutive
+   cap-pins / len-mean trailing slope / mean>2×, plus the E1 early gate; entropy demoted to
+   corroborator). Throughout this document, "watch P1/P2/P3/E1" refers to those triggers;
+   my pre-registered *predictions* are renamed PRED-1…6 to avoid collision.
+2. **The instability is NOT EF-specific — it is M_anchor-carrier-generic across both merger
+   families.** signed_ema α=0.5 + anchor, the EXP-25 "survivor", was on the same spiral at its
+   censored 50-step endpoint (consecutive 16384 cap-pins s47–48, len-mean slope +5.92/step;
+   P(ignite by 100) ≈ 55–70%, comparator). The mechanism predicts this naturally: nothing in
+   §a–§d uses any EF-specific property — only that the merged update has a nonzero *expected*
+   exogenous component along M's persistent direction, which sign-replacement (α<0.5), the
+   α=0.5 veto-rectifier (in expectation), and EF-injection all share in different functional
+   forms (§e). What discriminates family-specific vs carrier-generic vs substrate-generic is
+   laid out, with predictions, in §f.
+
 Provenance: all EXP-27 numbers re-extracted from
 `runs/EXP-27/train_exp27_B_ef_damped.log` (steps 1–68) + `runs/EXP-27/verdict.md`; parent/reference
 numbers from `runs/EXP-26/verdict.md`, `runs/EXP-26/stepA_decision.md`,
@@ -89,7 +112,7 @@ Two consequences: (i) in EXP-27 the clip was essentially **inert** (mean dose ne
 0.5·‖G‖) — the decay alone set the dose, so a further clip cut (0.5→0.25, the verdict's flagged
 optional probe) would change almost nothing; (ii) at δ=0.5 the residual *saturates within ~2–3
 ticks* (1+δ+δ² ≈ 1.75 of 2.0), which kills the "reset e_t on refresh" mitigation in advance
-(§g, P3).
+(§g, PRED-3).
 
 **The decisive fact:** the per-step dose **decayed monotonically** over the run — 0.092 (s18–27)
 → 0.021 (s45–67) — so through the ignition window (steps 61–66) the forcing sat at its run
@@ -262,19 +285,28 @@ cause (dense reaches 0.122 without any of this).
 
 ### d.3 Three-stage anatomy of the EXP-27 ignition (all from the train log)
 
-1. **Susceptibility (≈ s44–55).** Healthy sharpening brings entropy through ~0.48→0.33; group σ
-   shrinks; the policy is now "sticky" (an update on a sharp policy persists) and advantage mass
-   concentrates in mixed groups. This stage is driven by *learning itself* — it is
-   force-independent and unavoidable on this surface.
-2. **Seeding (s45, s53, s59).** Isolated `response_length/max = 16384` rollouts appear
-   (clip% ≈ 0.001 — single capped samples), with growing instability markers: length-mean creep
-   165 → 185–201 over s52–60, grad_norm spikes 21.6 (s57) / 43.7 (s59), erratic ppo_kl from s53.
-   Seeds at high entropy don't catch (s2 had a 16384 fluke at entropy 5.8 — no effect: diffuse
-   policy, large group σ, diluted token share).
-3. **Catch + ratchet (s61–68).** A seed lands in the susceptible regime; gnorm 58.9 (s61); len
-   mean 171→268→295→395→448→558→566→575; lmax pinned at 16384 for 8 consecutive steps; entropy
-   0.34→0.25→0.22→0.079; IS gap 0.62→0.40; **score 0.73–0.84 throughout** — reward-preserving,
-   mid-valley. Killed s68 (mem 123/143GB).
+1. **Susceptibility (≈ s44–55 at THIS dose).** Healthy sharpening brings entropy through
+   ~0.48→0.33; group σ shrinks; the policy is now "sticky" (an update on a sharp policy
+   persists) and advantage mass concentrates in mixed groups. This stage is driven by *learning
+   itself* — it is force-independent and unavoidable on this surface. (Note: susceptibility is a
+   joint (dose × sharpness) boundary, not an entropy line — at 2.2× the dose, ef r1 caught at
+   entropy 0.83; see §e.3. Entropy here indexes the *healthy* sharpening, it does not cause the
+   catch — finding #1.)
+2. **Seeding (emission from ~s19; cap-pins s45, s53, s59).** Long-tail emission starts well
+   inside the healthy phase — lmax 3220@s19, 9764@s23 (the watch's E1 early gate flags EXP-27
+   here, ~38 steps before lock-in; it flags α=0.5 at s17), then isolated
+   `response_length/max = 16384` rollouts at s45/53/59 (clip% ≈ 0.001 — single capped samples),
+   with growing instability markers: length-mean creep 165 → 185–201 over s52–60, grad_norm
+   spikes 21.6 (s57) / 43.7 (s59), erratic ppo_kl from s53. Each early spike *recovers*
+   (s59 201→171 at s60) — emission is necessary but not sufficient. Seeds at high entropy with
+   no transport history don't catch (s2 had a 16384 fluke at entropy 5.8 — no effect: diffuse
+   policy, large group σ, diluted token share; dense's s6 and plain's s1 warmup flukes likewise).
+3. **Catch + ratchet (s61–68).** A seed *fails to recover* — the watch-P1 signature (2nd
+   consecutive cap-pin, s61–62); gnorm 58.9 (s61); len mean 171→268→295→395→448→558→566→575;
+   lmax pinned at 16384 for 8 consecutive steps; IS gap 0.62→0.40; **score 0.73–0.84
+   throughout** — reward-preserving, mid-valley. Entropy 0.34→0.25→0.22→0.079 *follows* the
+   length curve down (the compositional effect of §d.2 plus self-sharpening on the long mode) —
+   it is the trailing edge of the spiral, never its leading edge. Killed s68 (mem 123/143GB).
 
 The merger enters this anatomy **twice**:
 
@@ -400,25 +432,25 @@ observation. (Weak prior evidence: the EXP-17 core diagnostic ran ~2 epochs ≈ 
 mask+clean@20 substrate — same GRPO/no-KL/16K surface, different codec — with no recorded length
 explosion.)
 
-**Falsifiable discriminating predictions (pre-registered).** P1 was REVISED after the
+**Falsifiable discriminating predictions (pre-registered).** PRED-1 was REVISED after the
 comparator's cross-check overturned my reading of α=0.5's endpoint (see §e.2); the original
 "no ignition, P≈0.7" is superseded — recorded here for honesty since the whole point of
 pre-registration is not to quietly rewrite it:
 
-- **P1 (revised) — signed_ema α=0.5 @100** (same surface, 1wulaelw config, step_target 100):
-  **DOES ignite by s100**, lock-in window ~s55–85, preceded by the P5 precursor sequence
+- **PRED-1 (revised) — signed_ema α=0.5 @100** (same surface, 1wulaelw config, step_target 100):
+  **DOES ignite by s100**, lock-in window ~s55–85, preceded by the PRED-5 precursor sequence
   (its s47–48 consecutive pins were the onset signature). **P(ignite by s100) ≈ 0.6** (comparator
   independently: 0.55–0.70). If it ignites: extends the carrier law to rectified carriers (the
   ½E|G|·sign(M) expectation term is sufficient). If it survives 100 clean (P≈0.4): the additive
   vs rectified distinction is load-bearing, and the carrier law narrows to *additive* carriers
   only — still excluding plain/dense either way. Whatever the outcome, val@100 stays 0.69–0.72
   (the veto cost does not close parity).
-- **P2 — plain @100** (B_plain config): NO ignition by s100 AND no long-tail emission (zero
+- **PRED-2 — plain @100** (B_plain config): NO ignition by s100 AND no long-tail emission (zero
   lmax ≥ 4k events after warmup); val@100 0.65–0.70 (climbing from 0.6437 but the refresh-alone
   drag keeps it at/below the floor band). **P(no ignition) ≈ 0.85.** This is now the single
   cleanest H_carrier/H_generic discriminator: plain is the substrate-only control with zero
   carrier and zero emission at 50.
-- **P3 — ef-with-residual-reset** (damped settings + e_t←0 at every anchor refresh): **still
+- **PRED-3 — ef-with-residual-reset** (damped settings + e_t←0 at every anchor refresh): **still
   ignites**, ~s55–75. At δ=0.5 the residual saturates geometrically — within a 5-tick reset cycle
   e reaches (1−δ⁵)/(1−δ) = 1.94 of its 2.0 steady state, and the cycle-average dose is
   (1/5)·Σ_{j=0..4}(1−δ^{j+1})/(1−δ) = 1.61 vs 2.0, i.e. resets shave only **~19%** of the average
@@ -426,14 +458,14 @@ pre-registration is not to quietly rewrite it:
   **P(still ignites by s80) ≈ 0.7.** If this arm does NOT ignite, my model is wrong about where
   the persistence lives (it would be in e, not M) — that is the cleanest single-run falsifier of
   this document.
-- **P4 — outcome table (the decisive pair is plain@100 vs any carrier arm @100):** if plain@100
+- **PRED-4 — outcome table (the decisive pair is plain@100 vs any carrier arm @100):** if plain@100
   stays emission-free while α=0.5@100 and/or an ef@100 rerun ignite, H_carrier is confirmed and
   H_generic dead (α=0.5 igniting is *consistent* with H_carrier under the rectified-carrier
   reading, §e.2 — it is plain that separates the hypotheses). If **plain** ignites at ~s55–70
   with the precursor sequence, H_generic wins and the merger is only an accelerant — in that
   case the *surface* (token-mean + no-brake + cap) must be fixed before any merger work
   continues.
-- **P5 — precursor universality:** every ignition on this surface is preceded by ≥2 lmax-pin
+- **PRED-5 — precursor universality:** every ignition on this surface is preceded by ≥2 lmax-pin
   events and a length-mean creep before the T4 (2×) trigger fires. **Already retro-confirmed on
   ef r1** (comparator §7a: isolated 5782@s12 → pin@29 fails to recover → sustained pins s30–42 →
   len creep 143→328 → entropy follows down — the identical anatomy at ~half the lag). If a
@@ -484,7 +516,7 @@ the core.
    formalize them as a standing tripwire in ENTROPY_COLLAPSE_WATCH (a "T8 seed watch":
    ≥2 isolated lmax=cap events within 15 steps + len-mean creep ⇒ snapshot + alert). Banks
    nothing for parity (val@50 0.7202 < 0.7414 regardless) but protects long-horizon runs.
-5. **Residual reset on refresh (cheap falsifier only).** Run it to test P3 — it is the
+5. **Residual reset on refresh (cheap falsifier only).** Run it to test PRED-3 — it is the
    discriminating experiment for *where the persistence lives* — but the math (§0, e-saturation
    in ~2 ticks vs 5-tick resets; carrier in M) says it will not prevent ignition. Do not sell it
    as a fix.
@@ -532,13 +564,13 @@ Four asks were sent to comparator-runs; their answers (`RUN_COMPARISON.md` §7�
   scorecard at s50. My other half held: ef r2 *does* emit late isolated spikes (16384@27,
   7817@32, 4061@47) despite finishing clean — first-passage-lucky, censored-not-safe (§e.4).
   Revisions: §e.2 rewritten (α=0.5 = half-strength rectified carrier, expectation math now
-  primary); §e table + carrier law restated over E[F|M]; P1 flipped to "ignites by 100, P≈0.6."
+  primary); §e table + carrier law restated over E[F|M]; PRED-1 flipped to "ignites by 100, P≈0.6."
 - **(B) entropy@s50 ordering — CONFIRMED.** dense crosses 0.4 at s1 and sits 0.12–0.16 from s36;
   carrier arms cross 0.4 only at s45–51; plain never (min 0.478). Merger arms sit in the
   seed-emitting window ~45–50 steps vs dense's ~1. Comparator's caveat accepted: window time is
   correlational — plain has the *longest* window and zero emission, so the window multiplies
   carrier-driven seeds, it does not create them.
-- **(C) r1 precursor sequence — CONFIRMED (P5 retro-check passes).** Identical anatomy at ~half
+- **(C) r1 precursor sequence — CONFIRMED (PRED-5 retro-check passes).** Identical anatomy at ~half
   the lag: isolated spike (5782@12) → pin fails to recover (s29–30, first clip>0) → sustained
   pins s30–42 → len creep 143→328 → entropy follows down (0.58@36 → 0.13@42) → score 0.73–0.78
   no-warning throughout. Dose-lag linearity: dose 0.200 vs 0.092 (2.17×), lock-in s30 vs s61

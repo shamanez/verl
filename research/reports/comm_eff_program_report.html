@@ -82,6 +82,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <button data-tab="tab3">EXP-25 · Results & the Sign Math</button>
   <button data-tab="tab4">EXP-26 · Math, Geometry & Papers</button>
   <button data-tab="tab5">Where We Are & What's Next</button>
+  <button data-tab="tab6">EXP-27 · Damped-EF Ignition</button>
 </div></nav>
 <main>
 <section class="tab-content" id="tab1">
@@ -1016,6 +1017,247 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     This is the cheapest run that can complete the M6 milestone, and the gates make every outcome &mdash; including
     failure &mdash; informative. Approve it.
   </div>
+</section>
+
+<section class="tab-content" id="tab6">
+  <h2>EXP-27: Damped-EF Ignition — Post-Mortem</h2>
+
+  <p class="lede">
+    EXP-27 damps the ef_powersgd residual (clip 1.0&rarr;0.5, decay 0.9&rarr;0.5) and runs for
+    100 steps. The dose was capped exactly as designed. The run ignited anyway at step&nbsp;61,
+    reached val@50&nbsp;=&nbsp;<span class="metric">0.7202</span> (below the 0.7210 falsify
+    floor), and was killed at step&nbsp;68. This tab records what happened, why, and what comes
+    next. Full analysis: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> +
+    <code>runs/EXP-27/RUN_COMPARISON.md</code>.
+  </p>
+
+  <h3>Run timeline: healthy phase &rarr; ignition lock-in</h3>
+
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Steps</th><th>Phase</th><th>entropy</th>
+        <th>len/mean</th><th>len/max</th><th>score</th><th>grad_norm</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1–44</td><td>Healthy</td><td>5.8 &rarr; 0.6</td><td>~250 &rarr; ~175</td><td>isolated spikes (s2, s45, s53)</td><td>0.71–0.80</td><td>~2–8</td></tr>
+      <tr><td>45–60</td><td>Susceptible — seeding</td><td>0.64 &rarr; 0.34</td><td>~165 &rarr; 171</td><td>16384 @ s45, s53, s59 (each recovers)</td><td>0.72–0.78</td><td>3–44</td></tr>
+      <tr class="hl"><td>61</td><td><strong>Lock-in</strong></td><td>0.253</td><td>268</td><td><strong>16384 — fails to recover</strong></td><td>0.829</td><td>58.9</td></tr>
+      <tr><td>62–67</td><td>Ratchet (reward-preserving)</td><td>0.26 &rarr; 0.08</td><td>225 &rarr; 566</td><td>16384 sustained (7 of 7 steps)</td><td>0.73–0.84</td><td>6–59</td></tr>
+      <tr><td>68</td><td>Killed (mem 123/143&nbsp;GB)</td><td>0.082</td><td>575</td><td>16384</td><td>0.760</td><td>40</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <strong>Score stayed 0.73–0.84 through the entire explosion</strong> — this is a
+    reward-preserving length-hack, not a reward collapse. The policy moved along a
+    reward-flat direction; entropy collapse was a <em>consequence</em>, not the cause.
+    Reward gave no warning; only the length precursors did.
+  </p>
+
+  <h3>Three-run comparison (dense / signed_ema &alpha;=0.5 / damped-EF)</h3>
+
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Run (W&amp;B id)</th><th>Steps run</th><th>entropy@50</th>
+        <th>len/mean@50</th><th>Max consecutive 16384-pins</th><th>best val</th>
+        <th>Ignition verdict</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>dense <code>5e2jpho9</code></td><td>50</td><td>0.135</td><td>193</td><td>1 (s6, warmup)</td><td><span class="metric">0.7536</span></td><td>STABLE — zero carrier signature</td></tr>
+      <tr><td>signed_ema &alpha;=0.5 <code>1wulaelw</code></td><td>50 (censored)</td><td>0.371</td><td>170</td><td><strong>2 (consecutive s47–48)</strong>, len 5806@50</td><td>0.7066</td><td>DANGER @50 — early spiral, P(ignite by s100)&nbsp;&asymp;&nbsp;0.6</td></tr>
+      <tr class="hl"><td>damped-EF EXP-27 <code>qa6sll3h</code></td><td>67 (killed)</td><td>0.401</td><td>166</td><td><strong>7 (s61–67)</strong></td><td>0.7202</td><td>EXPLODED s61 — same spiral, longer lag</td></tr>
+      <tr><td>ef parent r2 <code>tilwe80t</code></td><td>50</td><td>0.396</td><td>146</td><td>1 (isolated)</td><td>0.7210</td><td>FIRST-PASSAGE LUCKY (emitted spikes, survived)</td></tr>
+      <tr><td>plain <code>u1v94opv</code></td><td>50</td><td>0.478</td><td>197</td><td><strong>1 (s1, warmup)</strong></td><td>0.6437</td><td>STABLE — no carrier, zero emission after warmup</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Entropy-as-trigger falsified (&times;3).</strong> Dense is the
+    <em>lowest</em>-entropy run (0.12–0.16 from step 36) and the <em>most</em> stable.
+    ef&nbsp;r1 ignited at entropy&nbsp;<strong>0.83</strong> (HIGH) — and only then
+    collapsed to 0.13. The discriminator is <strong>merger-carrier presence</strong>, not
+    entropy level and not gradient noisiness. plain has the same noisy grad_norm class as
+    the merger arms (max 10.5 vs ef_r2's 13.5) with zero emission. Entropy is a follower;
+    grad_norm is a dense-vs-comm-eff correlate only. See
+    <code>diagnostics/ENTROPY_COLLAPSE_WATCH.md</code> §2026-06-11 re-centering.
+  </div>
+
+  <h3>Mechanism: not true error feedback — a persistent tangential carrier</h3>
+
+  <p>
+    The implemented update (per matrix, per tick) is
+    <code>G_corr = G_t + e_t</code> where
+    <code>e_t = δ·e_{t−1} + clip(comp_t)</code> and
+    <code>comp_t = M_t − ⟨G_t,M_t⟩/‖G_t‖² · G_t</code>.
+    Three structural facts determine everything:
+  </p>
+  <ol>
+    <li><strong>comp_t &perp; G_t exactly</strong> (by construction:
+      <code>spectral_filter.py:378–379</code>). Every injected force is tangential —
+      it neither helps nor hurts descent, but pushes <em>sideways</em>.</li>
+    <li><strong>M has ~50-global-step memory</strong> (\(\beta=0.95\), refresh every
+      2.5 global steps). The tangential push points in a direction that is effectively
+      constant over the run length.</li>
+    <li><strong>The projection is nearly vacuous</strong>: \(\cos(G_{\text{anchor}},
+      G_{\text{comp}}) \approx 0.01\)–\(0.06\) (Step-A, EXP-26), so
+      <code>comp_t &asymp; M</code> — this is direct injection of the stale EMA, not
+      residual correction.</li>
+  </ol>
+  <p>
+    A persistent tangential force on a reward-flat "correct-but-longer" manifold integrates
+    <strong>linearly</strong> over time: \(\|\Sigma e_t\| \sim \lambda \cdot T \cdot \|G\|\).
+    There is no telescoping cancellation (unlike classic Stich/Karimireddy error feedback),
+    so the cumulative transport grows with run length.
+    Dose magnitude controls only the <strong>lag</strong>, not whether ignition occurs.
+  </p>
+
+  <div class="warn">
+    <strong>Damping = delay, not prevention.</strong> EF dose ratio ef&nbsp;r1/EXP-27
+    = <strong>0.200/0.092 = 2.17&times;</strong>; lock-in step ratio
+    = <strong>s30/s61 = 2.03&times;</strong> — near-exactly linear. EXP-27 ignited at
+    its dose <em>minimum</em> (~0.02, steps 45–67). Cutting clip/decay further would
+    extend the lag further but cannot prevent transport along the reward-flat direction.
+    Every per-step health metric (cos(G,G+e) &ge; 0.982, score 0.73–0.84) was correct
+    and certifies only the descent component — it says nothing about the tangential one.
+    Full derivation: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> §§(a)–(h).
+  </div>
+
+  <h3>Carrier vs substrate: the single-knob isolate</h3>
+
+  <p>
+    plain (<code>u1v94opv</code>) differs from ef&nbsp;r2 (<code>tilwe80t</code>) in
+    exactly <strong>one knob</strong>: <code>spectral.enabled</code> (False vs True).
+    Same PowerSGD codec, same stale-anchor refresh, same locked surface.
+  </p>
+  <ul>
+    <li><strong>plain (merger OFF):</strong> len/mean slope &minus;1.46/step, len/max never
+      exceeds 826 after s30, zero 16384 pins after warmup, entropy stable at 0.48–0.55.
+      <strong>Zero carrier signature.</strong></li>
+    <li><strong>ef&nbsp;r2 (merger ON):</strong> repeated long-tail spikes (16384@s27,
+      7817@s32, 4061@s47) that plain never produces. First-passage-lucky (spikes never
+      clustered consecutively in 50 steps) — but the emission is present.</li>
+  </ul>
+  <p>
+    The PowerSGD+anchor substrate is stable on its own. The merger/carrier is what injects
+    the reward-flat force. Honest caveat: plain is a 50-step censored observation;
+    the airtight version requires a plain@100 run (Prediction P2 below).
+  </p>
+
+  <h3>Two-layer monitor (from now on, all runs)</h3>
+
+  <p>
+    Based on 6-run retro-validation (dense, plain, ef&nbsp;r2, &alpha;0.5, exp27, ef&nbsp;r1);
+    full spec at <code>diagnostics/ENTROPY_COLLAPSE_WATCH.md</code> §2026-06-11.
+  </p>
+  <table class="data">
+    <thead><tr><th>Layer</th><th>Rule</th><th>Action</th><th>Retro sens./spec.</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>E1 — early gate</strong> (steps 10–30)</td>
+        <td>any <code>response_length/max</code> &gt; 4000 in window [10,30]
+          (exclude warmup ≤9)</td>
+        <td>flag UNSTABLE-LIKELY; extend watch; arm P1</td>
+        <td>1.00 / 1.00 (flags exp27 @s23, &alpha;0.5 @s17 — both 30+ steps early)</td>
+      </tr>
+      <tr>
+        <td><strong>P1 — kill trigger</strong> (any step)</td>
+        <td><code>response_length/max</code> = cap on ≥2 <em>consecutive</em> steps</td>
+        <td>kill immediately (RED)</td>
+        <td>retro-dicts exp27@s62 (actual kill ~s66); &alpha;0.5@s48</td>
+      </tr>
+      <tr>
+        <td><strong>P2 — confirmation</strong> (trailing 10)</td>
+        <td><code>response_length/mean</code> slope &gt;+2 tok/step</td>
+        <td>YELLOW alone; RED combined with any pin</td>
+        <td>&alpha;0.5@50: +5.92/step; exp27 post-60: +50–100/step</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    <strong>Entropy triggers demoted.</strong> T1/T2/T3 (entropy-abs/slope/early-drop)
+    are now <em>corroborators</em> only — never alert on entropy alone.
+    T1-RED fires on dense (0.122) which is the most stable run.
+  </p>
+
+  <h3>Falsifiable predictions for next runs</h3>
+
+  <table class="data">
+    <thead><tr><th>Prediction</th><th>Condition</th><th>P (this analysis)</th><th>What it discriminates</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>P1 — &alpha;=0.5@100</strong></td>
+        <td>Ignites by s100, lock-in ~s55–85</td>
+        <td>&asymp; 0.6</td>
+        <td>Extends carrier law to rectified carriers; if survives (P&asymp;0.4): additive-only carrier distinction</td>
+      </tr>
+      <tr>
+        <td><strong>P2 — plain@100</strong></td>
+        <td>NO ignition, zero lmax≥4k after warmup; val 0.65–0.70</td>
+        <td>&asymp; 0.85 no-ignition</td>
+        <td><strong>Decisive H_carrier vs H_generic discriminator</strong></td>
+      </tr>
+      <tr>
+        <td><strong>P3 — EF residual-reset</strong></td>
+        <td>Still ignites (~s55–75) despite e_t←0 at each anchor refresh</td>
+        <td>&asymp; 0.70</td>
+        <td>Persistence lives in M, not e — if does NOT ignite, model is wrong</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>What&rsquo;s next: decision tree</h3>
+
+  <div class="win">
+    <strong>Top fix (core-eligible): rebuild EF as true error feedback on the codec&rsquo;s
+    own dropped residual.</strong>
+    At the boundary, the upstream stage keeps
+    <code>e &larr; (dL/dÂ + e) − C(dL/dÂ + e)</code> sender-local
+    (zero extra communication — memory never crosses the boundary). Telescoping then
+    gives cumulative-applied = cumulative-true ± bounded residual — no exogenous carrier,
+    no O(T) integral. Predicted: P(no ignition) &asymp; 0.85; P(val &ge; 0.7414) &asymp; 0.3.
+    This retires M from the fast path (anchor keeps Q-ownership only).
+  </div>
+
+  <ol>
+    <li>
+      <strong>Retire the M-fed merger class.</strong> Eight arms (dense/psgd-only, plain,
+      ef&nbsp;r1, ef&nbsp;r2, EXP-27, &alpha;=0/0.3/0.5) complete a dose-response over
+      {sign-carrier, M-carrier, rectified-carrier, none}: every carrier arm either ignited or
+      shows DANGER censored at 50; both no-carrier arms are emission-free.
+      The best carrier result (0.7210) &lt; psgd-only&rsquo;s own 0.7415 — there is no interior
+      optimum to tune toward.
+    </li>
+    <li>
+      <strong>Labeled guardrail arms (objective changes — not the core):</strong>
+      (a) KL to reference — proven to close the length channel but sub-parity (0.6793);
+      (b) length-normalized aggregation (<code>loss_agg_mode=seq-mean-token-mean</code>) —
+      collapses the ~93&times; tail amplification to 1&times;, cheapest single-knob
+      ratchet-breaker; (c) entropy floor — stretches stage-1 susceptibility, weakest option.
+      Run only as labeled control-surface-change arms.
+    </li>
+    <li>
+      <strong>H_carrier/H_generic discriminator (plain@100)</strong> should be run before
+      any new merger lineage, since if plain ignites at ~s55–70 the
+      <em>surface</em> must be fixed first.
+    </li>
+  </ol>
+
+  <p>
+    For the successor issue number and the next-step plan, see issue&nbsp;#27 closing
+    comment and <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> §(g).
+  </p>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> (mechanist-math) ·
+    <code>runs/EXP-27/RUN_COMPARISON.md</code> (comparator-runs) ·
+    <code>runs/EXP-27/verdict.md</code> · <code>runs/EXP-27/train_exp27_B_ef_damped.log</code> ·
+    W&amp;B runs <code>qa6sll3h</code> / <code>1wulaelw</code> / <code>5e2jpho9</code>.
+    Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.
+  </footer>
 </section>
 </main>
 <footer>Generated by the comm-eff-retrospective agent team (5 members). Sources: research/runs/EXP-25/,

@@ -22,6 +22,7 @@ TABS = [
     ("tab3", "EXP-25 · Results & the Sign Math"),
     ("tab4", "EXP-26 · Math, Geometry & Papers"),
     ("tab5", "Where We Are & What's Next"),
+    ("tab6", "EXP-27 · Damped-EF Ignition"),
 ]
 
 SHELL = """<!DOCTYPE html>

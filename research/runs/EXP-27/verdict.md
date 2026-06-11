@@ -129,3 +129,38 @@ three: ef_clip 1.0->0.5, ef_decay 0.9->0.5, step_target 50->100. The locked subs
   0.7210. I flag it for the operator only as a low-prior optional future issue, NOT a
   recommended next step. The likely productive direction lives elsewhere (the
   conversion-spine thesis: training/eval diversity, not merger-dose tuning).
+
+## Post-mortem (team analysis)
+
+Full analysis in `runs/EXP-27/MECHANISM_ANALYSIS.md` (mechanist-math) and
+`runs/EXP-27/RUN_COMPARISON.md` (comparator-runs, W&B cross-check on 6 runs).
+
+**Headline mechanism (MECHANISM_ANALYSIS.md §(h)):** the implemented ef_powersgd is not
+true error feedback — it is a persistent tangential forcing loop. `comp_t ⊥ G_t` by
+construction (`spectral_filter.py:378-379`); M has ~50-global-step memory; and the
+projection is nearly vacuous (cos(G_anchor,G_comp) ≈ 0.01–0.06), making the injected
+force effectively a direct, norm-clipped copy of the stale anchor EMA. A persistent
+tangential force on the reward-flat "correct-but-longer" direction integrates linearly
+(‖Σ e_t‖ ~ λ·T·‖G‖) with no telescoping cancellation. Dose sets only the **lag**:
+ef r1 dose 0.200 → lock-in s30; EXP-27 dose 0.092→0.021 → lock-in s61 (ratio 2.03 vs
+dose ratio 2.17 — near-exactly linear). EXP-27 ignited at its dose **minimum**.
+
+**Entropy-as-trigger falsified ×3** (RUN_COMPARISON.md §7c): dense is the lowest-entropy
+run (0.12–0.16 from s36) and most stable; ef r1 ignited at entropy 0.83 (HIGH) then
+collapsed; entropy is a follower of the length spiral, not its trigger. The discriminator
+is merger-carrier presence, not entropy level or gradient noisiness (plain has the same
+noisy grad_norm class as the merger arms with zero emission — RUN_COMPARISON.md §8).
+Monitor triggers updated in `diagnostics/ENTROPY_COLLAPSE_WATCH.md` §2026-06-11:
+P1/P2/P3 (length spiral) are now the primary kill triggers; T1–T3 (entropy) are
+demoted to corroborators. E1 early gate (any len/max>4000 in steps [10,30]) flags
+UNSTABLE-LIKELY with zero false negatives on 6 retro-validated runs.
+
+**α=0.5@100 open question (P1 revised):** signed_ema α=0.5 was already in the early
+spiral at its 50-step endpoint (consecutive 16384 pins at s47–48, len/mean slope
++5.92/step, len/max 5806@50 — scored DANGER, worse than EXP-27 looked at its own s50).
+P(ignite by s100) ≈ 0.60 (agreed independently by mechanist-math and comparator-runs).
+The α=0.5 "stable at 50" framing is a censoring artifact; see MECHANISM_ANALYSIS.md §e.2.
+
+**Top fix:** rebuild EF as true error feedback on the codec's own dropped residual
+(sender-local, zero extra comm, telescoping identity restores bounded-lag correction with
+no exogenous carrier). See MECHANISM_ANALYSIS.md §(g) item 1.
