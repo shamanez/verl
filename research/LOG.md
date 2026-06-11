@@ -1,5 +1,15 @@
 # Research Log (newest first)
 
+## EXP-27 · 2026-06-11T04:25:00+00:00 · M6 · STOP
+EXP-26.1: REVISE child of EXP-26 — damped ef_powersgd (clip 0.5, decay 0.5) to 100 steps
+
+- hypothesis: On the locked substrate (Qwen2.5-1.5B-Instruct GSM8K vanilla GRPO no-KL/no-entropy, PowerSGD r=77, anchor owns Q, cadence=5, delay_K=5, clean_cadence=0, q_basis=act), damping the ef_powersgd merger to ef_clip=0.5/ef_decay=0.5 run to 100 steps closes the parent's 2.0-pt gap to parity (best val >= 0.7414) with NO length/clip ignition; halving clip+decay caps the residual dose while keeping the direction-preserving correction (parent cos=0.9558) that gained +7.7 pts over plain.
+- result: FALSIFIED on BOTH predicate STOP clauses. Damping capped the EF dose (rel_change 0.02-0.19 vs parent 0.30-0.47) and direction was preserved in the healthy phase — yet the arm still ignited at step ~66 (resp_len/mean 171→575 crossing the 509 alarm, max pinned 16384 for steps 61-68, entropy 0.34→0.079) and gained nothing (val@25=0.7134, best val@50=0.7202 <= falsify floor 0.7210). Damping only delayed ignition (~20 steps) without preventing it; the length-explosion is not driven by EF dose magnitude. ef_powersgd lineage terminates (revise cycle 2 of 3); EXP-26's REVISE findings stand as the M6 record. WandB: qa6sll3h.
+- key metrics: val@25=0.7134, best val=0.7202@step50 (target>=0.7414; falsify floor<=0.7210 — STOP both ways); EF residual dose peak ~0.189 (capped vs parent 0.47); comm bytes_ratio 0.0505 (~19.8x); resp_len/mean at ignition step66=557.6; entropy at ignition step66=0.079; score during ignition 0.73-0.84 (length-hack, not reward collapse); max_memory_allocated_gb=123.3/~143 (OOM-imminent at kill); 0 NaN/inf
+- cell killed at step ~66-68 on confirmed LENGTH_EXPLOSION rescue trigger; val@75/val@100 not measured; EARLY_KILL_LENGTH_EXPLOSION marker written
+- run dir: runs/EXP-27/
+- verdict: runs/EXP-27/verdict.md
+
 ## EXP-26 · 2026-06-10T11:08:00+10:00 · M6 · PASS-STAGE-A (Step-A diagnostic gate only; Steps B/C/E pending)
 EXP-26: Diagnose the SFT→GRPO merger mismatch with a real-gradient geometry audit, then test direction-preserving, RLVR-native compression — #25 follow-up
 
