@@ -612,6 +612,28 @@ nearly-orthogonal components here:
 
 ### i.2 Standing telemetry to instrument (ranked by information/cost)
 
+**Design target (operator addendum 2026-06-11): predictive by step ~25.** EXP-27's operational
+scorecard at step 50 said CLEAN (lock-in came at 61), so a symptom-side gate cannot accelerate
+the research loop — by the time length statistics move, the only action left is the kill. The
+comparator's task-#6 retro-test defines exactly the gap the cause-side instrumentation must
+cover: the symptom-side E1 gate (lmax > 4000 in steps 10–30) achieves sensitivity 1.00 / zero
+false negatives on n=6 (flags EXP-27 at s19–23, α=0.5 at s17), but (1) its **specificity** is
+unknown — emission ≠ ignition (ef r2 emitted and survived its censored 50); (2) it cannot catch
+a seeder whose first spike lands after s30; (3) it gives no **ETA** — it detects sparks, not the
+drive. The §i.2b probes close those gaps by measuring the *force* (is the update pushing/
+rewarding length THIS step) rather than the *displacement* (did lengths already move). The
+layers chain causally, each leading the next:
+
+```
+carrier present       (i.2b-d:  ‖mean(F)‖/‖G‖        — fires ~s3, pure cause, pre-rollout)
+ → aimed at length    (i.2b-b:  cos(F, u_len)         — s10–25, the transport direction)
+  → rewarded now      (i.2b-a:  within-group corr(A,T) — fires on the seed/drive steps)
+   → tail fattening   (i.2b-c + watch-E1:  p99 / cap-counts — s17–23 observed)
+    → cluster/lock-in (watch-P1 consecutive pins       — the kill, s48–62 observed)
+```
+
+#### i.2a Upstream quality metrics (substrate + carrier)
+
 1. **Token-mass concentration (ratchet-gain telemetry).** Per step, from already-logged lengths:
    participation ratio `PR = (Σ T_i)² / (N·Σ T_i²)` and top-1%-of-samples token share. Directly
    measures the §d.2 amplification as it happens (s61: ~36% from 0.6% of samples). Zero cost, no
@@ -642,6 +664,75 @@ nearly-orthogonal components here:
    Catches concentration events that norm alone hides (and is robust to grad_clip's
    norm-flattening).
 
+#### i.2b Predictive-by-step-~25 cause-side probes (the instrumentation-cell spec)
+
+Each probe: what it measures / why it LEADS the symptom / cost / decision rule at ~s25.
+Threshold honesty up front: probes (a) and (b) cannot be retro-calibrated — W&B holds only
+aggregates, not per-sample (A_i, T_i) pairs or u_len — so the numeric thresholds below are
+pre-registered *directions* with provisional values, to be banded on the instrumentation cell's
+first runs (self-baseline over steps 5–15, plus plain as the no-carrier reference; same
+run-relative pattern E1 uses). Probe (c) and the i.2a metrics calibrate retroactively today.
+
+- **(a) Per-batch advantage–length coupling — "is the length-hack being rewarded THIS step."**
+  *What:* within-group Pearson `corr(A_i, T_i)` averaged over the 128 groups (within-group kills
+  the prompt-difficulty confound: hard prompts are both longer and lower-reward, biasing a
+  pooled corr), plus the token-mean **length-drive** `D = Σ_i A_i·(T_i − T̄_g)` summed over
+  groups — D is, up to η and curvature, the loss's own push on expected length under token-mean
+  weighting (the §d.2 rectifier as a per-step scalar). *Why it leads:* it measures the FORCE at
+  the exact step a long+correct deviant draws positive advantage — the seed-catch is visible in
+  (a) on the step it happens, before any length statistic shifts (transport raises the
+  *propensity* for positive corr during the healthy phase). *Cost:* zero — A_i and T_i are
+  in-memory in the trainer's batch dict; two scalars per step. *Decision @25:* trailing-10 mean
+  of within-group corr > **+0.10**, or ≥2 steps in s10–25 with corr > **+0.20**, or D > 2× its
+  s5–15 band ⇒ length-hack being rewarded ⇒ UNSTABLE-LIKELY (cause-side confirmation of any E1
+  flag; without an E1 flag it covers the late-seeder gap).
+- **(b) Merger length-coupling — "is the carrier aimed at the basin."** *What:* per-target
+  `cos(F_t, u_len)` where `F_t = G_corr − G_comp` (the injected term: e_t for ef,
+  (1−α)(|G|·sign(M)−G) for signed_ema — both already materialized at correction time, and both
+  recoverable OFFLINE from the existing capture dumps as the G_corr−G_comp difference), and
+  `u_len` = a length-direction proxy. Honest proxy choice: the lm_head EOS-row trick does not
+  reach the 196 targeted matrices, so u_len must be measured — a cadence-gated, measurement-only
+  REINFORCE-on-length backward `u_len ∝ ∇_θ Σ_i (T_i − T̄_g)·log π(y_i)` on the anchor clone
+  (same machinery as the anchor/fresh-anchor probes, never feeds the optimizer; one extra
+  backward per K steps). *Why it leads:* this is the mechanism's core quantity ⟨F, flat-dir⟩
+  (§b/§d) — the transport force's alignment with length — measurable from M-warm (~s3) onward,
+  long before displacement accumulates; it is also the **specificity** discriminator E1 lacks
+  (persistent positive coupling = doomed; near-zero/oscillating = emitted-but-lucky, the ef-r2
+  case). *Cost:* online scalar dot-products per target (trivial) + the u_len probe backward per
+  K steps; a coarse version (cos against the *last* u_len) costs nothing between probes.
+  *Decision @25:* mean over s10–25 of cos(F, u_len) > 0 with |t| > 2 (or sustained > +0.05) ⇒
+  carrier aimed at length ⇒ predict-ignite; λ·τ·⟨F̂,û⟩ gives the ETA ordering (r1 ≈ 2× EXP-27's
+  rate ✓). *Free today:* F_t persistence cos(F_t, F_{t'}) is computable offline NOW from
+  EXP-27's 12 captured G_comp/G_corr tick-pairs — a zero-GPU retro-check of the persistence
+  claim (flagged for the successor issue's first analysis task).
+- **(c) Response-length tail telemetry — cheap symptom-side sharpening.** *What:* per-step
+  scalars `p99(T)`, `p99.9(T)`, `count(T > 0.5·cap)` (= count > 8192), `count(T = cap)`. *Why
+  it (partially) leads:* the tail moves ~40 steps before the mean (EXP-27: 3220@s19/9764@s23 vs
+  mean-creep at s52) and p99 over 1024 samples is a far steadier order statistic than the
+  single-sample max E1 keys on. Honest placement: this is still displacement-side — it inherits
+  E1's emission≠ignition limit and adds robustness, not causality; its job is to firm up the
+  E1 flag and time-stamp the seeding stage. *Cost:* zero (length vector is in-memory). *Decision
+  @25:* p99 > 2× its s5–15 median on ≥2 steps in s10–30, or any `count(T > 8192) ≥ 2` in one
+  batch ⇒ UNSTABLE-LIKELY (arms watch-P1, per E1 protocol).
+- **(d) Gradient-SNR / carrier-presence (the i.2a #2–#3 metrics with their @25 rule).** *What:*
+  micro-batch SNR + cancellation ratio (#2) and the carrier estimator ‖mean₁₀(F)‖/mean₁₀(‖G‖) +
+  cos(F_t, F_{t−τ}) (#3). *Why it leads:* the carrier estimator is the earliest possible signal
+  in the whole chain — it detects the *cause itself* from the first warm-M correction (~s3),
+  before the policy has moved at all; SNR/cancellation track the substrate's variance axis
+  (window width, val-gap risk) rather than ignition. *Cost:* cheap hooks (see i.2a). *Decision
+  @25:* ‖mean₁₀(F)‖/mean₁₀(‖G‖) > **0.02** sustained ⇒ carrier present (risk class; true for
+  every current merger arm — this light being ON is what makes gates (a)–(b) mandatory);
+  cancellation ratio drifting > 2× above the plain reference band ⇒ variance regression,
+  investigate before extending the horizon.
+
+**Composite decision rule at step ~25 (the loop-acceleration contract):** carrier present (d) AND
+aimed-at-length (b) ⇒ **predict-ignite** — checkpoint now, arm watch-P1 at heightened cadence,
+and do not buy compute past s50 without a mitigation arm; add rewarded-now (a) or tail (c/E1) ⇒
+high confidence, treat s25 val as the run's terminal science. None of (a)–(c) firing with (d)'s
+carrier light on ⇒ proceed to s50 but re-evaluate the composite every 5 steps. All four probes
+are measurement-only (no optimizer effect, no realism-invariant touched); together they seed the
+instrumentation cell of the successor issue.
+
 ### i.3 Mitigations that target gradient quality DIRECTLY (vs symptom guardrails), ranked
 
 Symptom guardrails (KL, entropy floor, length caps) leave the estimator broken and tilt the
@@ -652,7 +743,7 @@ landscape instead; these act on the estimator itself:
    killer in one move. Also the decisive experiment for the §g.2 bind (signal-content vs
    accidental-momentum reading of the +7.7).
 2. **Diagnose-then-fix the substrate inflation (variance axis — diagnostic first,
-   core-eligible).** Instrument i.2 metrics 2+4 on plain vs psgd-only vs dense for ~20 steps:
+   core-eligible).** Instrument i.2a metrics 2+4 on plain vs psgd-only vs dense for ~20 steps:
    is the 4–20× inflation (and B_plain's below-floor val) PPO-clip ratio drift post-warm,
    stale-Q forward error, or destroyed micro-batch cancellation? Whichever it is points at its
    own fix (e.g. Q-refresh cadence/warm-start if stale-Q; recompute-path consistency if ratio
