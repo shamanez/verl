@@ -125,6 +125,11 @@
 
   <p>
     <strong>(f) The sharpening spiral.</strong> The chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward.
+    <em>[2026-06-11 refinement (EXP-27 post-mortem): the general ordering is now established as
+    <strong>length-first</strong> — the spiral ignites and entropy collapse <em>trails</em> it (ef&nbsp;r1
+    ignited at entropy 0.83, then collapsed; the boundary is joint dose&times;sharpness, not an entropy
+    line). The α=0 narrative above remains valid as the extreme-dose case where both move almost together.
+    See the EXP-27 tab.]</em>
   </p>
 
   <div class="warn">

@@ -260,6 +260,14 @@
     residual (clip 1.0&rarr;0.5, decay 0.9&rarr;0.5) and extends to 100 steps — capping the
     dropped-energy kick that correlates with the ignition while keeping the direction-preserving
     correction that bought +7.7 points.
+    <br><br>
+    <strong>OUTCOME (2026-06-11, EXP-27 — supersedes the framing above):</strong> the damped
+    iteration ran and <strong>ignited anyway</strong> (lock-in step 61, killed 68, val@50 0.7202
+    &le; the 0.7210 floor &rarr; STOP). The "dose-correlated risk" reading is <em>falsified</em>:
+    dose sets only the <em>lag</em>, near-linearly (dose ratio 2.17&times; &harr; lock-in ratio
+    2.03&times;), and EXP-27 ignited at its dose <em>minimum</em>. The mechanism is a persistent
+    <em>tangential</em> stale-EMA carrier — the implemented update is not true error feedback at
+    all. Full post-mortem: the <strong>EXP-27 tab</strong>.
   </div>
 
   <h3>6. The papers we read and used</h3>

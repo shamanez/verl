@@ -11,6 +11,22 @@
     where we honestly stand, what #27 will and will not settle, and the ranked decision tree beyond it.
   </p>
 
+  <div class="warn">
+    <strong>OUTCOME (2026-06-11) — #27 has since RUN and STOPPED; this tab is preserved as the
+    pre-EXP-27 strategy snapshot.</strong> The damped run hit the STOP gate on <em>both</em>
+    clauses: best val 0.7202 &le; 0.7210 <em>and</em> length-explosion ignition at the damped
+    settings (lock-in step 61, killed 68). Decision-tree <strong>branch 3 fired</strong> — and the
+    post-mortem sharpened it: the spiral is <em>not</em> the substrate's fault (the single-knob
+    plain-vs-ef contrast shows plain clean on the identical substrate; the <em>merger carrier</em>
+    is the killer), "ignition risk is dose-correlated" below is <em>falsified</em> (dose sets only
+    the lag, near-linearly — EXP-27 ignited at its dose minimum), and within branch 3 the
+    mechanism-backed winner is exactly option <strong>(b) classical per-step error feedback</strong>
+    (true EF on the codec's own dropped residual — no exogenous carrier, telescoping bound), with a
+    <strong>plain@100</strong> run as the carrier-vs-substrate discriminator. Full post-mortem,
+    corrected monitoring rules (E1/P1; entropy demoted to follower), and predictions: the
+    <strong>EXP-27 tab</strong>; successor issue linked from #27's closing comment.
+  </div>
+
   <h3>Where we are</h3>
   <p>
     The goal (<code>research/.claude/GOAL.md</code>) is a communication-efficient pipeline-parallel GRPO trainer that
@@ -65,7 +81,10 @@
       <li><strong>Stochastic ignition at clip 1.0.</strong> Of two identical error-feedback runs, one fired the full
         length-explosion fingerprint (response length pinned at 16384, entropy collapse) and ran out of memory at step
         42; the other completed clean. The residual dose grows with anchor staleness (0.32 rising to 0.47), and ignition
-        risk is dose-correlated &mdash; a real, undamped hazard.</li>
+        risk is dose-correlated &mdash; a real, undamped hazard.
+        <em>[2026-06-11 correction: EXP-27 falsified the dose-correlation reading — dose sets the ignition
+        <strong>lag</strong>, not the risk (near-linear: 2.17&times; dose &harr; 2.03&times; lock-in step); the
+        "clean" r2 realization was first-passage luck (it emitted spikes too). See the EXP-27 tab.]</em></li>
       <li><strong>Single-seed noise on close calls.</strong> The promoted run's mid-curve val swung between 0.6232 and
         0.6740 at the same step across realizations &mdash; roughly 5 points. When a comparison is within 2&ndash;3 points,
         one seed is not enough to call it.</li>
@@ -146,9 +165,11 @@
       <li><strong>Budget is real.</strong> EXP-26 cost roughly <span class="metric">$316</span> of box time. Staging and
         audit-gating (diagnose-then-spend) avoided a six-arm training sweep by screening basis candidates passively in a
         single run &mdash; that discipline is what keeps the lineage affordable.</li>
-      <li><strong>Stochastic ignition argues for standing safeguards.</strong> The collapse-watch on
-        entropy/response-length and <code>expandable_segments</code> memory allocation should be defaults on every run,
-        not opt-ins; the parent's clip-1.0 OOM is the case study.</li>
+      <li><strong>Stochastic ignition argues for standing safeguards.</strong> The collapse-watch and
+        <code>expandable_segments</code> memory allocation should be defaults on every run,
+        not opt-ins; the parent's clip-1.0 OOM is the case study. <em>[2026-06-11: the watch is now the
+        two-layer length-spiral monitor — E1 early gate (len/max &gt; 4000 in steps 10&ndash;30) + P1 kill
+        (2 consecutive cap-pins); entropy triggers are demoted to corroborators. See the EXP-27 tab.]</em></li>
       <li><strong>Single seeds limit close calls.</strong> When a result is within 2&ndash;3 points of a gate, add seeds
         or extend the horizon before calling it. #27's longer 100-step horizon partly addresses this for free.</li>
     </ul>

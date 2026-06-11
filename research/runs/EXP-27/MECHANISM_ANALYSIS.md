@@ -390,13 +390,14 @@ Cost of the veto on top of that: ~half the gradient discarded ⇒ val 0.7066 < p
 memory) unchanged ⇒ transport rate ~halved ⇒ time-to-basin ~×2. Observed: lock-in s30 (r1) →
 s61 (EXP-27) — **ratio 2.03 vs dose ratio 2.17, almost exactly linear** (comparator §7a). The
 catch threshold is a *joint* (dose × policy-sharpness) boundary, not a fixed entropy line: at
-dose 0.20, r1 caught while entropy was still high (lock-in s29–30, entropy ~0.85–0.9 on the
-sibling's schedule); at dose 0.02–0.09, EXP-27's catch needed the policy much sharper (entropy
-0.25–0.34 at s61). Damping therefore cannot push ignition past the horizon — it slides the catch
-along the boundary toward later/sharper, and because the run was *extended* to 100 steps to
-chase parity, the slower transport still had time to complete. Damping the dose is a
-time-dilation of the same trajectory, which is why it also bought zero val: the healthy-phase
-information content is the same.
+dose 0.20, r1 caught while entropy was still **0.83** — high — and entropy collapsed only
+afterwards, 0.58@36 → 0.13@42 (measured, watch doc §2026-06-11 — the third independent
+entropy-trails-ignition confirmation); at dose 0.02–0.09, EXP-27's catch needed the policy much
+sharper (entropy 0.25–0.34 at s61). Damping therefore cannot push ignition past the horizon —
+it slides the catch along the boundary toward later/sharper, and because the run was *extended*
+to 100 steps to chase parity, the slower transport still had time to complete. Damping the dose
+is a time-dilation of the same trajectory, which is why it also bought zero val: the
+healthy-phase information content is the same.
 
 ### e.4 r1 vs r2 stochasticity
 Time-to-catch = drift to the (dose × sharpness) boundary + first-passage of a seed catching
@@ -409,26 +410,36 @@ landed consecutively before the 50-step censor (`RUN_COMPARISON.md` §7b: "first
 
 ---
 
-## (f) B_plain's no-ignition: merger-as-carrier vs substrate-generic-past-60
+## (f) Attribution: merger-family-specific vs M_anchor-carrier-generic vs substrate-generic
 
-Two hypotheses for EXP-27's late ignition:
+Three candidate scopes for the instability (the operator's discrimination ask), narrowest first:
 
-- **H_carrier (mine):** ignition requires the persistent exogenous carrier; plain/dense are safe
-  at *any* horizon on this surface (up to the slow √T diffusion floor); α=0.5 carries the
-  half-strength rectified carrier (§e.2) and is *not* safe.
-- **H_generic:** any run on this surface (no KL/entropy, 16K cap, token-mean) ignites once past
-  ~step 55–65; EXP-27 just ran long enough to see it, and the 50-step controls are all censored.
+- **H_family — EF-mechanism-specific** (the additive e_t loop is the defect; signed_ema at the
+  α=0.5 knee is safe): **ALREADY FALSIFIED on existing data.** α=0.5 — the other merger family,
+  no additive residual, no e_t state — shows the same spiral signature at its censored endpoint
+  (consecutive cap-pins s47–48, len slope +5.92/step, DANGER scorecard; P(ignite by 100) ≈
+  55–70%), and its anatomy is the same emission→cluster sequence as ef r1/EXP-27. Both families
+  share exactly one object: the stale anchor EMA **M** folded into the fast gradient. The
+  mechanism never used an EF-specific property (§a–§d need only a persistent E[F|M] ≠ 0; §e
+  derives that term for every family member, including α=0.5's rectified ½E|G|·sign(M)).
+- **H_carrier — M_anchor-carrier-generic (mine):** any merger with a persistent expected
+  exogenous component along M ignites, with dose-proportional lag; plain/dense (no carrier) are
+  safe at *any* horizon on this surface (up to the slow √T diffusion floor).
+- **H_substrate — substrate/surface-generic:** any run on this surface (no KL/entropy, 16K cap,
+  token-mean) ignites once past ~step 55–65; EXP-27 just ran long enough to see it, and the
+  50-step no-carrier controls are all censored.
 
-Evidence against H_generic, now strong: (i) ef r1 locked in at s29–30 — *inside* the window where
-plain, psgd-only, and dense were all clean — so the merger demonstrably ignites where the
-substrate does not; (ii) the comparator's single-knob isolate (`RUN_COMPARISON.md` §8): plain
-differs from ef r2 in EXACTLY `spectral.enabled`, and plain shows **zero long-tail emission**
-(lmax ≤ 826 after s30, len slope −1.46, zero pins) while ef r2 — same substrate + merger —
-emits repeatedly (16384@27, 7817@32, 4061@47); (iii) plain spends the *longest* time of any arm
-in the high-entropy seed window (entropy never below 0.478) and still emits nothing, so
-"exposure time" doesn't produce seeds — the carrier does. Remaining honest limit: every
-no-carrier run is right-censored at 50, so H_generic past s50 is unfalsified by direct
-observation. (Weak prior evidence: the EXP-17 core diagnostic ran ~2 epochs ≈ 110+ steps on the
+Evidence for H_carrier over H_substrate, now strong: (i) ef r1 locked in at s29–30 — *inside*
+the window where plain, psgd-only, and dense were all clean — so the merger demonstrably ignites
+where the substrate does not; (ii) the comparator's single-knob isolate (`RUN_COMPARISON.md`
+§8): plain differs from ef r2 in EXACTLY `spectral.enabled`, and plain shows **zero long-tail
+emission** (lmax ≤ 826 after s30, len slope −1.46, zero pins after warmup) while ef r2 — same
+substrate + merger — emits repeatedly (16384@27, 7817@32, 4061@47); (iii) plain spends the
+*longest* time of any arm in the high-entropy seed window (entropy never below 0.478) and still
+emits nothing, so "exposure time" doesn't produce seeds — the carrier does. Remaining honest
+limit: every no-carrier run is right-censored at 50, so H_substrate past s50 is unfalsified by
+direct observation — plain@100 (PRED-2) is the discriminator the comparator's addendum also
+calls for. (Weak prior evidence: the EXP-17 core diagnostic ran ~2 epochs ≈ 110+ steps on the
 mask+clean@20 substrate — same GRPO/no-KL/16K surface, different codec — with no recorded length
 explosion.)
 
@@ -448,7 +459,7 @@ pre-registration is not to quietly rewrite it:
 - **PRED-2 — plain @100** (B_plain config): NO ignition by s100 AND no long-tail emission (zero
   lmax ≥ 4k events after warmup); val@100 0.65–0.70 (climbing from 0.6437 but the refresh-alone
   drag keeps it at/below the floor band). **P(no ignition) ≈ 0.85.** This is now the single
-  cleanest H_carrier/H_generic discriminator: plain is the substrate-only control with zero
+  cleanest H_carrier/H_substrate discriminator: plain is the substrate-only control with zero
   carrier and zero emission at 50.
 - **PRED-3 — ef-with-residual-reset** (damped settings + e_t←0 at every anchor refresh): **still
   ignites**, ~s55–75. At δ=0.5 the residual saturates geometrically — within a 5-tick reset cycle
@@ -458,18 +469,29 @@ pre-registration is not to quietly rewrite it:
   **P(still ignites by s80) ≈ 0.7.** If this arm does NOT ignite, my model is wrong about where
   the persistence lives (it would be in e, not M) — that is the cleanest single-run falsifier of
   this document.
-- **PRED-4 — outcome table (the decisive pair is plain@100 vs any carrier arm @100):** if plain@100
-  stays emission-free while α=0.5@100 and/or an ef@100 rerun ignite, H_carrier is confirmed and
-  H_generic dead (α=0.5 igniting is *consistent* with H_carrier under the rectified-carrier
-  reading, §e.2 — it is plain that separates the hypotheses). If **plain** ignites at ~s55–70
-  with the precursor sequence, H_generic wins and the merger is only an accelerant — in that
-  case the *surface* (token-mean + no-brake + cap) must be fixed before any merger work
-  continues.
+- **PRED-4 — outcome table (the decisive pair is plain@100 vs any carrier arm @100):** if
+  plain@100 stays emission-free while α=0.5@100 and/or an ef@100 rerun ignite, H_carrier is
+  confirmed and H_substrate dead (α=0.5 igniting is *consistent* with H_carrier under the
+  rectified-carrier reading, §e.2 — it is plain that separates the hypotheses; H_family is
+  already dead either way). If **plain** ignites at ~s55–70 with the precursor sequence,
+  H_substrate wins and the merger is only an accelerant — in that case the *surface*
+  (token-mean + no-brake + cap) must be fixed before any merger work continues.
 - **PRED-5 — precursor universality:** every ignition on this surface is preceded by ≥2 lmax-pin
-  events and a length-mean creep before the T4 (2×) trigger fires. **Already retro-confirmed on
-  ef r1** (comparator §7a: isolated 5782@s12 → pin@29 fails to recover → sustained pins s30–42 →
-  len creep 143→328 → entropy follows down — the identical anatomy at ~half the lag). If a
-  future ignition ever occurs *without* these, the seeding stage of §d.3 is wrong.
+  events and a length-mean creep before the watch-P3 (2×) trigger fires. **Already
+  retro-confirmed on ef r1** (comparator §7a: isolated 5782@s12 → pin@29 fails to recover →
+  sustained pins s30–42 → len creep 143→328 → entropy follows down — the identical anatomy at
+  ~half the lag). If a future ignition ever occurs *without* these, the seeding stage of §d.3
+  is wrong.
+- **PRED-6 — carrier-content control (discriminates "any persistent direction" vs "stale
+  GRADIENT direction"):** run the ef formula with M replaced by a **frozen norm-matched random
+  matrix** per target (a merger-axis variant, allowed — the merger is the variable axis; no
+  locked invariant touched). H_carrier-as-written predicts ignition with the same anatomy
+  (the manifold rectifies *any* persistent exogenous direction, §b/§d) — **P(ignite by s100) ≈
+  0.55**, weaker-than-M because a random direction has less overlap with the policy-relevant
+  subspace than a real stale gradient. If it does NOT ignite, the stale-*gradient* content of M
+  is load-bearing (transport needs policy-shaped directions), sharpening the theory and raising
+  the value of carrier-content (not just carrier-magnitude) fixes. Either outcome is
+  informative; cheap (50–100 steps, one arm).
 
 ---
 
@@ -490,32 +512,45 @@ the core.
    energy, EXP-25 §8.1's parity ceiling applies). P(no ignition) ≈ 0.85; P(val ≥ 0.7414) ≈ 0.3.
    This is also the variant the task names "(G_full_anchor − P_Q·G_full_anchor)" done *right*:
    built from the CURRENT step's own dropped component, not from a stale different-loss EMA.
-2. **Retire the M-fed merger class (strategic).** The cross-arm table (§e) is a completed
-   dose-response over the class {sign-carrier, M-carrier, rectified carrier, none}: every
-   carrier arm either locked in (α=0/0.3, ef r1, EXP-27) or shows the emission/DANGER signature
-   censored at 50 (ef r2, α=0.5); both no-carrier arms are emission-free; and the best carrier
-   arm (0.7210) < psgd-only's own 0.7415. There is no interior optimum to tune toward — same
-   shape of conclusion as EXP-25's α-monotonicity, one level up. Consistent with the standing
-   conversion-spine memo: the productive axis is elsewhere (training/eval diversity), not
-   merger-dose tuning.
+2. **Retire the M-fed merger class — but mind the program bind.** The cross-arm table (§e) is a
+   completed dose-response over the class {sign-carrier, M-carrier, rectified carrier, none}:
+   every carrier arm either locked in (α=0/0.3, ef r1, EXP-27) or shows the emission/DANGER
+   signature censored at 50 (ef r2, α=0.5); both no-carrier arms are emission-free; and the best
+   carrier arm (0.7210) < psgd-only's own 0.7415. There is no interior optimum to tune toward —
+   same shape of conclusion as EXP-25's α-monotonicity, one level up. **The bind:** the merger
+   cannot simply be dropped on the locked substrate, because plain (no merger) sits BELOW the
+   no-refresh floor (0.6437 < 0.6914) — the merger was buying +7.7 pts of val *while* carrying
+   the spiral (EXP-26 finding 2: it partly compensates the substrate's stale-refresh drag). The
+   successor must therefore deliver the rescue WITHOUT the carrier — which is exactly what
+   true-EF (#1) is shaped to test: it re-supplies dropped signal content with zero persistent
+   exogenous direction. If the +7.7 was M's *signal content* (off-Q gradient information),
+   true-EF keeps it; if it was M's *persistence* (an accidental momentum), true-EF loses it and
+   the substrate-drag question (§i) becomes the front. Either result decides the next move.
 3. **LABELED guardrail arms (objective changes — never the core):**
    - **KL to reference (proven):** the EXP-25 KL probe closed the length channel outright
      (len 294→120, clip 0.000 for 50 steps, no crash) — it adds the missing potential on the flat
      direction (V̇ < 0 along length). Cost: sub-parity val (0.6793) at coef 0.001 — a brake, not a
      fix for the carrier bias.
    - **Length-normalized aggregation** (`loss_agg_mode=seq-mean-token-mean` or
-     advantage/length normalization): sample weight becomes ∝ A_i instead of T_i·A_i ⇒ the ~93×
+     advantage/length normalization): sample weight becomes ∝ A_i instead of T_i·A_i ⇒ the ~86×
      tail amplification (§d.2) collapses to 1× ⇒ the ratchet's loop gain < 1 ⇒ a caught seed
      cannot self-reinforce. The cheapest *single-knob* change that breaks the basin's interior
      dynamics (it leaves the flat direction flat but removes the rectifier). Run only as a
      labeled arm: it changes the estimator the entire program is normalized on.
    - **Entropy floor (entropy_coeff > 0):** delays susceptibility (holds σ_g up). Weakest of the
      three — it stretches stage 1 but leaves transport + rectifier intact.
-4. **Early-stop / checkpoint-at-peak science (measurement, not a fix).** The precursors give
-   ~8–15 steps of warning (lmax-pinned events, length-mean creep, gnorm spikes, erratic ppo_kl) —
-   formalize them as a standing tripwire in ENTROPY_COLLAPSE_WATCH (a "T8 seed watch":
-   ≥2 isolated lmax=cap events within 15 steps + len-mean creep ⇒ snapshot + alert). Banks
-   nothing for parity (val@50 0.7202 < 0.7414 regardless) but protects long-horizon runs.
+4. **Early-stop / checkpoint-at-peak science (measurement, not a fix) — NOW STANDING.** The
+   precursor sequence gives two layers of warning, and the watch doc has been re-centered on
+   exactly them (`ENTROPY_COLLAPSE_WATCH.md` §2026-06-11, retro-validated on all 6 runs):
+   **E1** (any lmax > 4000 in steps 10–30 ⇒ UNSTABLE-LIKELY, suspicion-only — flags EXP-27 via
+   its s19–23 emission ~38 steps pre-ignition, and α=0.5 at s17) arms **watch-P1** (2nd
+   consecutive cap-pin ⇒ kill — retro-dicts EXP-27 at s62 vs the actual ~s66 kill, and α=0.5 at
+   s48), with **watch-P2** (len-mean slope > +2/step) and **watch-P3** (mean > 2×) as
+   co-triggers; entropy demoted to corroborator (finding #1). Note what *failed* retro-testing
+   as early signals (do not gate on them): entropy decline rate (identical −0.06…−0.08/step
+   across all merger arms regardless of outcome), len-mean slope at ≤30, p90(lmax), grad-norm
+   spikes. Banks nothing for parity (val@50 0.7202 < 0.7414 regardless) but protects every
+   long-horizon run from now on.
 5. **Residual reset on refresh (cheap falsifier only).** Run it to test PRED-3 — it is the
    discriminating experiment for *where the persistence lives* — but the math (§0, e-saturation
    in ~2 ticks vs 5-tick resets; carrier in M) says it will not prevent ignition. Do not sell it
@@ -526,29 +561,144 @@ the core.
 
 ---
 
+## (i) Gradient quality — the upstream axis (operator directive 2026-06-11)
+
+### i.1 The facts, placed honestly in the causal chain
+
+The grad-norm ladder: dense ≈ **0.35** flat and clean; psgd-only ≈ 1.6; plain 3.4 median /
+10.5 max; merger arms 3–7 healthy; **20–60 in the ignition window**. Two different phenomena
+live in that ladder and must not be conflated:
+
+- **The substrate inflation (4–20× dense, shared by ALL comm-eff arms).** This is NOT the
+  ignition discriminator — the watch-doc correction is explicit and the controls prove it:
+  plain carries the same noisy gradient class as the merger arms (median 3.4/max 10.5 vs ef
+  r2's 4.9/13.5) yet emits zero spikes, and psgd-only (1.6) ties dense at 0.7415. Within
+  comm-eff arms, grad-norm character does not separate exploders from survivors; carrier
+  presence does (§f). Dense's clean 0.35 is a *consequence* of being merger-free and
+  codec-free, not a protective cause.
+- **The ignition-window spikes (20–60).** These are the *catch signature*, not a cause: one
+  capped rollout is ~36% of the batch's token mass (§d.2), so the batch gradient it produces is
+  huge. They are downstream of the spiral. (Note `grad_clip` then caps the applied update's
+  norm, so what survives into Adam is the spike's *direction* — norm-centric telemetry
+  systematically understates what these events do.)
+
+So where IS gradient quality causally upstream? Three places, none of them "noise causes
+ignition":
+
+1. **The val gap and the substrate drag.** Comm-eff arms run 4–20× the gradient norm at (by
+   construction) no more signal — i.e. a much lower SNR estimator — and every comm-eff arm
+   lands 3.3–4.7 pts below dense; plain lands below the no-refresh floor outright (0.6437 <
+   0.6914). The B_plain-below-floor mystery (what exactly does the stale-Q refresh do to the
+   gradient?) is an unanswered gradient-quality question, and it is the program's binding
+   constraint (§g.2).
+2. **The susceptibility window.** Low-SNR gradients sharpen the policy more slowly (entropy
+   crosses 0.4 at s45–51 for comm-eff arms vs s1 for dense) — the arms sit in the
+   seed-emitting-while-sticky window ~45–50 steps instead of ~1. Gradient quality sets the
+   *width of the window* in which a carrier can catch; the carrier still has to do the catching
+   (plain: widest window, zero emission).
+3. **The ratchet gain.** Token-mean makes the gradient estimator heavy-tailed *by construction*
+   (per-sample weight ∝ T_i) — the ~86× tail amplification is a property of the estimator, not
+   of the policy. This is the gradient-quality defect that converts one caught seed into a
+   runaway.
+
+That yields the organizing decomposition for the research axis — gradient quality has three
+nearly-orthogonal components here:
+
+| component | what it is | what it causes | who has it |
+|---|---|---|---|
+| **bias / persistence** | E[F\|M] ≠ 0 along a slow direction | ignition (transport) | merger arms only |
+| **variance / SNR** | 4–20× norm at fixed signal | val gap; wide susceptibility window; plain<floor | all comm-eff arms |
+| **heavy tails** | per-sample weight ∝ T_i (token-mean) | ratchet gain ≫1 once seeded | every arm incl. dense (latent) |
+
+### i.2 Standing telemetry to instrument (ranked by information/cost)
+
+1. **Token-mass concentration (ratchet-gain telemetry).** Per step, from already-logged lengths:
+   participation ratio `PR = (Σ T_i)² / (N·Σ T_i²)` and top-1%-of-samples token share. Directly
+   measures the §d.2 amplification as it happens (s61: ~36% from 0.6% of samples). Zero cost, no
+   new hooks — the highest-value missing number. Complements watch-E1/P1 (which see the rollout
+   side; this sees the *gradient-weight* side).
+2. **Micro-batch SNR + sign-cancellation ratio (the implicit-regularizer gauge).** Per target,
+   across the gradient-accumulation micro-batches within a tick: `SNR = ‖ḡ‖² / Var_mb(g)` and
+   the cancellation ratio `‖Σ_mb g‖ / Σ_mb ‖g_mb‖`. EXP-25 §3b identified destroyed
+   sign-cancellation as the step-size regularizer; this makes it a logged per-step quantity and
+   gives the dense-vs-comm-eff SNR gap a number (run one dense probe for the reference band).
+   Cheap hooks at accumulation boundaries.
+3. **Direction-persistence pair — the loop gain λ·τ as telemetry.** Per target:
+   `cos(G_t, G_{t−1})` (fresh-gradient correlation time) and, on merger arms,
+   `cos(F_t, F_{t−τ})` for τ ∈ {1, 5, 25} ticks plus the running mean **‖mean₁₀(F)‖/mean₁₀(‖G‖)**
+   (the E[F] carrier estimator). The carrier law (§e) becomes directly monitorable: this metric
+   would have shown α=0.5's rectified drift and ef's M̂ injection on day one, and λ·τ — the
+   quantity that actually predicts time-to-ignition — becomes a dashboard number instead of a
+   post-mortem reconstruction.
+4. **cos to a dense-reference probe under the SAME loss (the never-logged EXP-20 criterion).**
+   Cadence-gated (every K steps) measurement-only fresh full backward with
+   `fresh_anchor_loss=ppo_clip` (the capture machinery already supports it; the stepA lesson:
+   a clean-PG reference makes the cosine meaningless). Settles per-step how much signal the
+   codec+merger path loses, and is the validity anchor for metrics 2–3. Cost: one extra full
+   backward per K steps, measurement-only (no realism violation — probes never feed the
+   optimizer).
+5. **Heavy-tail indicators on the gradient itself.** Per target: kurtosis of coordinate values,
+   top-0.1%-coordinate share of squared mass; across targets: max/median grad-norm ratio.
+   Catches concentration events that norm alone hides (and is robust to grad_clip's
+   norm-flattening).
+
+### i.3 Mitigations that target gradient quality DIRECTLY (vs symptom guardrails), ranked
+
+Symptom guardrails (KL, entropy floor, length caps) leave the estimator broken and tilt the
+landscape instead; these act on the estimator itself:
+
+1. **True-EF (bias axis — core-eligible).** §g.1. Removes the only nonzero E[F] persistence and
+   re-supplies the codec's dropped signal with bounded lag — the bias-axis fix and the carrier
+   killer in one move. Also the decisive experiment for the §g.2 bind (signal-content vs
+   accidental-momentum reading of the +7.7).
+2. **Diagnose-then-fix the substrate inflation (variance axis — diagnostic first,
+   core-eligible).** Instrument i.2 metrics 2+4 on plain vs psgd-only vs dense for ~20 steps:
+   is the 4–20× inflation (and B_plain's below-floor val) PPO-clip ratio drift post-warm,
+   stale-Q forward error, or destroyed micro-batch cancellation? Whichever it is points at its
+   own fix (e.g. Q-refresh cadence/warm-start if stale-Q; recompute-path consistency if ratio
+   drift). This is the cheapest experiment that addresses the program's binding constraint
+   (plain < floor) and it is pure measurement on existing arms.
+3. **Length-normalized aggregation (tails axis — LABELED estimator arm).** seq-mean-token-mean
+   sets per-sample weight ∝ A_i, collapsing the ~86× tail amplification to 1× ⇒ ratchet gain
+   < 1 even with a carrier present (§g.3). It is an *estimator* change, not a reward change —
+   but it re-weights the objective the whole program is normalized on, so it stays a labeled
+   arm, never silent. (Worth one labeled run paired with a carrier arm: if carrier+seq-mean
+   does NOT ignite, the ratchet — not the transport — is confirmed as the irreversibility
+   step.)
+4. **Optimizer-side tail robustness (Adam β2/eps, per-coordinate update clipping) — LABELED,
+   low priority.** Changes the locked optimizer surface for at most a second-order gain; only
+   if 1–3 leave residual instability.
+
+---
+
 ## (h) THE CORE IDEA
 
-The implemented ef_powersgd is not error feedback; it is a **persistent tangential forcing loop**.
-By construction (comp_t ⊥ G_comp, with the projection nearly vacuous because M ⊥ G_comp anyway),
-every step injects a small force that neither helps nor hurts the current descent direction — it
-pushes *sideways*, in a direction set by an EMA whose memory (~50 global steps) makes it
-effectively constant over the run. On GSM8K under the locked surface (length-agnostic reward,
-no KL/entropy, 16K cap, token-mean GRPO), the policy's reward landscape has exactly one unbounded
-flat direction — *make correct answers longer* — and motion along it draws zero restoring force
-from the fresh gradient, while the token-mean loss stands ready to amplify any long-and-correct
-deviant by ~10–90× its fair gradient share. Persistent sideways forcing on a manifold with one
-unopposed flat direction is rectified into net transport along that direction (every other
-component gets pulled back; the flat one integrates linearly, ~λ·T). So the run looks healthy by
-every per-step metric — score is *blind* to level-set motion, the cosine *certifies only* the
-descent component, entropy tracks the healthy profile — right up until the transported policy
-enters the susceptible regime (sharp, low group-variance) while still emitting long-tail seeds,
-one seed catches, and the token-mean ratchet finishes the job reward-preservingly
-(score 0.73–0.84 through ignition). Dose magnitude divides the transport rate and nothing else:
-cutting it ~2.2× stretched time-to-lock-in almost exactly linearly (s30 → s61) at zero val gain,
-and the run ignited with the forcing at its run-minimum. The only real exits are to remove the
-carrier (true EF on the
-codec's own per-step dropped residual — telescoping, no O(T) integral), or to tilt the flat
-direction with an explicitly-labeled potential (KL / length-normalized aggregation). Tuning λ
+The implemented ef_powersgd is not error feedback; it is a **persistent tangential forcing loop**
+— and the forcing object is not EF-specific, it is the **anchor EMA M itself**, which every
+merger family folds into the fast gradient in a different functional form (sign-replacement,
+veto-rectification, additive injection) with the same expected effect: a nonzero persistent
+exogenous component along M's ~50-global-step-memory direction. By construction (comp_t ⊥
+G_comp, with the projection nearly vacuous because M ⊥ G_comp anyway), the ef variant injects
+this force exactly *sideways* — it neither helps nor hurts the current descent direction. On
+GSM8K under the locked surface (length-agnostic reward, no KL/entropy, 16K cap, token-mean
+GRPO), the policy's reward landscape has exactly one unbounded flat direction — *make correct
+answers longer* — and motion along it draws zero restoring force from the fresh gradient, while
+the token-mean loss stands ready to amplify any long-and-correct deviant by ~10–90× its fair
+gradient share. Persistent sideways forcing on a manifold with one unopposed flat direction is
+rectified into net transport along that direction (every other component gets pulled back; the
+flat one integrates linearly, ~λ·T). So the run looks healthy by every per-step metric — score
+is *blind* to level-set motion, the cosine *certifies only* the descent component, and entropy
+is a **follower**, not a trigger (dense trains lower-entropy than every comm-eff arm and never
+ignites; ef r1 ignited at entropy 0.83 and only then collapsed) — right up until the
+transported policy is sharp enough *at its dose* for a long-tail seed to catch, and the
+token-mean ratchet finishes the job reward-preservingly (score 0.73–0.84 through ignition).
+Dose magnitude divides the transport rate and nothing else: cutting it ~2.2× stretched
+time-to-lock-in almost exactly linearly (s30 → s61) at zero val gain, and the run ignited with
+the forcing at its run-minimum. The exits, in order: remove the carrier while keeping its
+signal content (true EF on the codec's own per-step dropped residual — telescoping, no O(T)
+integral; simultaneously the test of whether the merger's +7.7-over-plain was signal content or
+accidental momentum, §g.2), fix the estimator's heavy tail (length-normalized aggregation,
+labeled), or tilt the flat direction with an explicitly-labeled potential (KL). Tuning λ
 (clip/decay/reset) only buys time inside the same trajectory — falsified twice, now with the
 mechanism that says why.
 
@@ -591,3 +741,20 @@ their `rel_change_mean` numbers. Net effect of the cross-check: two of my claims
 (α=0.5 endpoint state; early-dose magnitude), both revised; the core mechanism (carrier →
 tangential transport → seed → token-mean ratchet; dose = lag only) survived every test and came
 out sharper.
+
+**2026-06-11 operator-directive rebuild (second revision).** Per the operator's confirmation of
+the comparator's challenge, this document was restructured around the two load-bearing findings
+(intro): entropy-as-follower (finding #1 — woven through §d.3, §e.3, §h; watch-doc re-centering
+adopted in §g.4, and my prediction tags renamed PRED-1…6 to avoid colliding with the watch's
+P1/P2/P3/E1 triggers) and carrier-generality across both merger families (finding #2 — §f
+restructured into the three-way H_family / H_carrier / H_substrate discrimination, with H_family
+retro-falsified and PRED-6 added as the carrier-content control). The open question from my
+first cross-check message — ef r1's entropy at lock-in — is answered by the comparator's pull:
+**0.83** (high), now cited in §e.3 as the third entropy-trails-ignition confirmation. The
+comparator's task-#6 retro-test of the E1 early gate (lmax > 4000 in steps 10–30; sensitivity
+1.00, zero false negatives on n=6; flags EXP-27 at s19–23 and α=0.5 at s17; entropy decline rate
+FAILED as an early signal — identical −0.06…−0.08/step across all merger arms regardless of
+outcome) is folded into §d.3 stage 2 and §g.4. New §i develops gradient quality as the upstream
+research axis (bias/variance/tails decomposition, ranked standing telemetry, ranked
+direct-vs-symptom mitigations) — placed carefully so it does not contradict the watch-doc
+correction that grad-noisiness is NOT the ignition discriminator (plain falsifies it; §i.1).
