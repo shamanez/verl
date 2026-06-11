@@ -219,14 +219,22 @@ no recovery problem). Dense is simultaneously the *lowest-entropy* and the *most
 stable* run.
 
 This proves the trigger is not "entropy got low." The trigger is a **positive-feedback
-length spiral** that the comm-eff runs are susceptible to and dense is not. Candidate
-distinguishing factor (for mechanist-math): dense has tiny, clean gradients
-(grad_norm ~0.35); the comm-eff runs carry **persistently large, noisy boundary
-gradients (grad_norm 3–7 when healthy, 20–60 in ignition)** from the
-compression/EF/merger path. A length-favouring direction in that noisy gradient, once
-it pins a few samples at max length, gets amplified by GRPO's advantage normalization
-(longer correct answers keep nonzero reward → reinforced) with no dense full-rank step
-to flush it. Dense's clean gradient never lets the spiral start.
+length spiral** that some arms are susceptible to and dense is not.
+
+**Correction (2026-06-11, conceded to mechanist-math): the distinguishing factor is NOT
+gradient size/noisiness — it is merger-carrier presence (defer to §8).** An earlier
+draft of this section proposed that dense's tiny clean gradients (grad_norm ~0.35) vs the
+comm-eff arms' large noisy gradients (3–7 healthy, 20–60 igniting) were the immunizing
+factor. **§8 falsifies that:** plain (no merger, SURVIVOR, zero emission) has grad_norm
+median 3.4 / endpoint-mean 7.4 / max 10.5 — the *same noisy-boundary class* as ef_r2
+(carrier, full-run median 4.9 / mean 9.3 / max 13.5, which DID emit four long-tail
+spikes). plain is if anything slightly *less* noisy than ef_r2 yet emits nothing.
+EXP-25's psgd-only control (grad_norm median ~1.6, no merger) was likewise clean (0.7415).
+So gradient size/noisiness does **not** separate exploders from survivors;
+**merger-carrier presence does** (§8). Dense's small clean grad is a *consequence* of
+being merger-free and converged, not an independent immunizing mechanism. The operative
+statement is §8's: the spectral merger (folding stale M into the fast gradient) is the
+length-spiral carrier; the bare codec+anchor substrate (plain) is not.
 
 ---
 
@@ -321,8 +329,18 @@ never (min 0.478)**. So the merger/ef arms sit in the high-entropy (>0.4)
 "seed-emitting" window for ~45-50 steps; dense leaves it at step 1. entropy@50: dense
 0.135 (@48), a0p5 0.371, ef_r2 0.396, exp27 0.401, plain 0.478. Confirms mechanist's
 "merger arms sit in the high-entropy window ~3× longer than dense" — but note this is
-*correlation*: dense's low entropy co-occurs with its clean small gradient, and it is
-the gradient cleanliness (not the low entropy) that prevents the spiral (§5).
+*correlation*: the spiral-preventing factor is merger-absence (§8), not entropy and not
+gradient size (§5 correction). dense's low entropy and small grad are both *consequences*
+of being merger-free and converged.
+
+**Ignition is NOT gated by a fixed entropy level — it's a joint (dose × sharpness)
+boundary** (mechanist-math, confirmed from ef_r1): ef_r1 (full dose ~0.20) reached
+**lock-in at steps 29–30 while entropy was still 0.83–0.81** (high), then entropy
+*collapsed* 0.81→0.13 over steps 30–42 (a consequence of the spiral, not its gate). By
+contrast low-dose exp27 (dose 0.02–0.09) did not ignite until entropy had sharpened to
+~0.34 at step ~61. So higher dose ignites at higher entropy; lower dose needs more
+sharpening first. This is a clean second confirmation that entropy is a follower/co-variate
+(§5), not the trigger — ef_r1 ignited *before* its entropy collapsed.
 
 ---
 

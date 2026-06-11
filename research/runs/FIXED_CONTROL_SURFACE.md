@@ -29,7 +29,7 @@ once, here, and read it off for every launch.
 | **rollout.gpu_memory_utilization** | **0.4** | |
 | **max_prompt_length** | **1024** | |
 | **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
-| **ppo_max_token_len_per_gpu** | **36864** | (+ log_prob / ref variants) |
+| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25); raise back to 36864 only on anchor-OFF reference ablations |
 | **total_training_steps** | **50 → 100** | start at 50; extend to 100 once 50 trains cleanly |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
 | **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
@@ -75,6 +75,33 @@ they can differ between runs without breaking comparability:
   0/25/50/75/100 at 100 steps). The per-step **train** reward (`critic/score/mean`,
   logged every step regardless of `test_freq`) is the fine-grained signal between
   validations.
+
+## Diagnostics policy — production runs ship with capture OFF (operator directive, 2026-06-11)
+
+Diagnostic instrumentation that **holds tensors in memory** is an OOM hazard and is
+risk-tiered. Provenance: EXP-26 B-ef **r1** OOM'd at step ~42 inside the anchor backward
+with `capture_fresh_anchor=true` co-resident; the **r2** re-run with captures off (plus
+`expandable_segments`) completed cleanly. Tiers:
+
+1. **Scalar telemetry — always-on safe.** Norms, cosines, byte counters, residual-dose
+   `rel_change`, corr-style watch metrics: negligible memory, log them on every run.
+2. **Bounded tensor captures — only when the plan's success criteria require them.**
+   `capture.enabled=true` MUST come with the bounds: `max_ticks` (≈10–12), `min_tick`
+   (post-warm window), `stratified_targets`, `rank0_only=true`, fp32-dump-then-free.
+   The plan must name which criterion consumes the captures; otherwise OFF.
+3. **Extra-backward probes — NEVER on a production arm.** `capture_g_dense` and
+   `capture_fresh_anchor` each add a parallel full backward + held fp32 tensors (the r1
+   OOM). They run only on **dedicated short diagnostic runs** whose val number is NOT a
+   deliverable (e.g. a 5–10-step geometry probe), never on the arm that produces the
+   comparison val.
+
+A **production arm** = any run whose val/score lands in a verdict, SUMMARY, or
+comparison table. Default posture for production: `COMM_EFF_CAPTURE_ENABLED=false`
+(the launcher default) — flipping it on requires the tier-2 justification in the plan.
+Standing OOM guards on EVERY run regardless of tier:
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (standard since the r1 OOM),
+`spectral.ema_device=cpu` (keeps the ~6 GB fp32 M/EF state off-GPU), and the
+18432 actor token budget above while the anchor is on.
 
 ## How to launch on this surface
 

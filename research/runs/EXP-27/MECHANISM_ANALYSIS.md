@@ -459,11 +459,13 @@ the core.
    This is also the variant the task names "(G_full_anchor − P_Q·G_full_anchor)" done *right*:
    built from the CURRENT step's own dropped component, not from a stale different-loss EMA.
 2. **Retire the M-fed merger class (strategic).** The cross-arm table (§e) is a completed
-   dose-response over the class {sign-carrier, M-carrier, contraction, none}: every carrier arm
-   ignites, every non-carrier arm is clean, and the best carrier arm (0.7210) < psgd-only's own
-   0.7415. There is no interior optimum to tune toward — same shape of conclusion as EXP-25's
-   α-monotonicity, one level up. Consistent with the standing conversion-spine memo: the
-   productive axis is elsewhere (training/eval diversity), not merger-dose tuning.
+   dose-response over the class {sign-carrier, M-carrier, rectified carrier, none}: every
+   carrier arm either locked in (α=0/0.3, ef r1, EXP-27) or shows the emission/DANGER signature
+   censored at 50 (ef r2, α=0.5); both no-carrier arms are emission-free; and the best carrier
+   arm (0.7210) < psgd-only's own 0.7415. There is no interior optimum to tune toward — same
+   shape of conclusion as EXP-25's α-monotonicity, one level up. Consistent with the standing
+   conversion-spine memo: the productive axis is elsewhere (training/eval diversity), not
+   merger-dose tuning.
 3. **LABELED guardrail arms (objective changes — never the core):**
    - **KL to reference (proven):** the EXP-25 KL probe closed the length channel outright
      (len 294→120, clip 0.000 for 50 steps, no crash) — it adds the missing potential on the flat
@@ -520,12 +522,40 @@ mechanism that says why.
 
 ---
 
-## 8. Cross-check ledger (comparator-runs)
+## 8. Cross-check ledger (comparator-runs) — RESOLVED
 
-Sent to comparator-runs for verification against W&B (their task #2 curves): (A) batch
-lmax curves s35–50 for 1wulaelw / tilwe80t / 5e2jpho9 / u1v94opv — prediction: no 16384 spikes in
-the non-carrier arms; r2 *may* show them (would confirm censored-not-safe, §e.4); (B) entropy@s50
-ordering (ef ≈ α0.5 ≈ 0.37–0.40 ≫ dense 0.12); (C) r1's precursor sequence before its 29–42
-ignition (P5 retro-check); (D) any contradiction with the tangential-forcing / dose-sets-lag-only
-/ α=0.5-has-no-carrier claims. This section to be updated when they reply; their findings at the
-time of writing (3-run comparison, task #2) did not contradict (i)–(iii).
+Four asks were sent to comparator-runs; their answers (`RUN_COMPARISON.md` §7–8,
+`comparison_metrics/*.csv`) and the resulting revisions to this document:
+
+- **(A) lmax curves — prediction PARTLY WRONG, document revised.** I predicted α=0.5's lmax
+  "stays < ~1k": FALSE — α=0.5 pins 16384 at s17/47/48 (consecutive 47–48) + 5806@s50, DANGER
+  scorecard at s50. My other half held: ef r2 *does* emit late isolated spikes (16384@27,
+  7817@32, 4061@47) despite finishing clean — first-passage-lucky, censored-not-safe (§e.4).
+  Revisions: §e.2 rewritten (α=0.5 = half-strength rectified carrier, expectation math now
+  primary); §e table + carrier law restated over E[F|M]; P1 flipped to "ignites by 100, P≈0.6."
+- **(B) entropy@s50 ordering — CONFIRMED.** dense crosses 0.4 at s1 and sits 0.12–0.16 from s36;
+  carrier arms cross 0.4 only at s45–51; plain never (min 0.478). Merger arms sit in the
+  seed-emitting window ~45–50 steps vs dense's ~1. Comparator's caveat accepted: window time is
+  correlational — plain has the *longest* window and zero emission, so the window multiplies
+  carrier-driven seeds, it does not create them.
+- **(C) r1 precursor sequence — CONFIRMED (P5 retro-check passes).** Identical anatomy at ~half
+  the lag: isolated spike (5782@12) → pin fails to recover (s29–30, first clip>0) → sustained
+  pins s30–42 → len creep 143→328 → entropy follows down (0.58@36 → 0.13@42) → score 0.73–0.78
+  no-warning throughout. Dose-lag linearity: dose 0.200 vs 0.092 (2.17×), lock-in s30 vs s61
+  (2.03×).
+- **(D) contradictions —** (i) tangential-forcing: not contradicted; strengthened by the §8
+  single-knob isolate (plain = ef r2 minus `spectral.enabled`, zero emission). (ii)
+  dose-sets-lag-only: confirmed, now near-exactly linear. (iii) α=0.5-has-no-carrier:
+  **contradicted and withdrawn** — replaced by the rectified-carrier expectation math (§e.2),
+  which the comparator's data independently demanded. Their counter-candidate in their §5
+  ("noisy large gradients = the susceptibility factor") is contradicted by their own §8: plain's
+  grad_norm (mean 7.4/max 10.5) is in the same class as ef r2's (9.3/13.5) with zero emission,
+  and EXP-25's psgd-only (grad_norm ~1.6, no merger) was clean at 0.7415 — gradient
+  size/noisiness does not separate exploders from survivors; carrier presence does.
+
+Also corrected via (their) W&B pull: my early-dose extraction from the local log was biased high
+by Ray line-dedup (kept the unique high-dose matrices, n≈14–28 of 392); §0's dose table now uses
+their `rel_change_mean` numbers. Net effect of the cross-check: two of my claims were wrong
+(α=0.5 endpoint state; early-dose magnitude), both revised; the core mechanism (carrier →
+tangential transport → seed → token-mean ratchet; dose = lag only) survived every test and came
+out sharper.
