@@ -176,3 +176,12 @@ STUCK: EXP-26 — parallel uncompressed G_dense backward broken on codec-ON path
 [2026-06-11T07:58:06+10:00] [analyst #26] verdict=REVISE (TERMINAL; ef_powersgd best realistic comm-eff val@50=0.7210, direction-preserving cos(G_comp,G_corr)=0.956 vs signed_ema 0.717, +7.7pt over plain 0.6437, but PARITY 0.7414 MISSED by 2.0pt; StepC falsified hybrid-Q anti-converts 0.373; B_plain<floor 0.6914; r1-ignition alarm at ef_clip=1.0; next_actions ef_clip 1.0->0.5, ef_decay 0.9->0.5, step_target 50->100; comm bytes_ratio 0.0506 ~19.8x)
 [2026-06-11T11:24:50+10:00] [operator-review] Approved EXP-27 plan after review (status:planned -> status:approved); closed parent issue #26 as completed with status:done. EXP-27 is READY_TO_RUN on next orchestrator tick.
 [2026-06-11T12:00:07+10:00] [orchestrator→runner #27] EXP-27 launched on WARM operator box 40493729 (4×H200, 46.243.55.155:40569, dph=13.49) — single cell exp27_B_ef_damped: damped ef_powersgd (ef_clip=0.5 ef_decay=0.5) 100 steps val@25. Provisioning BYPASSED per operator (no vast-provision). Pre-run banner GREEN (ef_decay=0.5 ef_clip=0.5 q_basis=act anchor owns_q cadence5/delayK5 clean0 powersgd r77 sync_basis; capture ON g_dense=false fresh_anchor=false). tmux exp-27-46_243_55_155. Ledger RUNNING. Monitor dispatched.
+
+## EXP-27 monitor snapshot (2026-06-11T02:28Z, ~27 min into run)
+- Status: RUNNING, step 13/100 completed, no errors
+- Score at step 13: 0.396 (strong upward trajectory)
+- Response length: ~259 mean / 808 max (no length explosion)
+- All standing watches clear (OOM, length, GPU stall, realism invariants)
+- WandB: qa6sll3h running, historyLineCount=12
+- First val at step 25 expected at ~02:52Z; run completes ~08:00Z
+[2026-06-11T12:30:36+10:00] [monitor #27] HEALTHY @ step 13/100: score 0.138→0.396 monotonic; ef dose capped ~0.10-0.19 (parent 0.30→0.47 — damping works); NO length-explosion (mean~259 vs alarm 509), NO OOM (peak 105-106/143.7 GiB), NO stall; owns-Q invariant held (powersgd_basis_updates=0); comm ratio 0.0505; entropy 5.67→1.96 plateauing (healthy: rising score + flat length, NOT EXP-25 collapse). WandB qa6sll3h. Re-dispatching monitor to cover step-25 val + the parent's step 29-42 ignition window. done ETA ~05:30-08:00Z.
