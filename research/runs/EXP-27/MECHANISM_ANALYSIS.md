@@ -353,23 +353,27 @@ same carrier trajectory at ~half strength, right-censored at 50 — consistent w
 expectation math above, and removing the one apparent exception to the carrier law (§e table).
 Cost of the veto on top of that: ~half the gradient discarded ⇒ val 0.7066 < psgd-only 0.7415.
 
-### e.3 Why EXP-27 ignited at ~61 with the dose in its lowest band
-λτ-model: λ halved (and the late-run dose actually *decayed* to 0.04–0.13 as ‖G‖ grew), τ (M's
-memory) unchanged ⇒ transport rate halved ⇒ time-to-basin ~×2 (29–42 → 61–66 ✓). The
-susceptibility stage is force-independent (healthy sharpening), so damping cannot push ignition
-past it — only stretch the seeding lag. And because the run was *extended* to 100 steps to chase
-parity, the slower transport still had time to complete. Damping the dose is a time-dilation of
-the same trajectory, which is why it also bought zero val: the healthy-phase information content
-is the same.
+### e.3 Why EXP-27 ignited at ~61 with the dose at its run minimum
+λτ-model: λ cut to ~0.46× (W&B dose 0.092 vs r1's 0.200, decaying further to 0.021), τ (M's
+memory) unchanged ⇒ transport rate ~halved ⇒ time-to-basin ~×2. Observed: lock-in s30 (r1) →
+s61 (EXP-27) — **ratio 2.03 vs dose ratio 2.17, almost exactly linear** (comparator §7a). The
+catch threshold is a *joint* (dose × policy-sharpness) boundary, not a fixed entropy line: at
+dose 0.20, r1 caught while entropy was still high (lock-in s29–30, entropy ~0.85–0.9 on the
+sibling's schedule); at dose 0.02–0.09, EXP-27's catch needed the policy much sharper (entropy
+0.25–0.34 at s61). Damping therefore cannot push ignition past the horizon — it slides the catch
+along the boundary toward later/sharper, and because the run was *extended* to 100 steps to
+chase parity, the slower transport still had time to complete. Damping the dose is a
+time-dilation of the same trajectory, which is why it also bought zero val: the healthy-phase
+information content is the same.
 
 ### e.4 r1 vs r2 stochasticity
-Time-to-catch = susceptibility (deterministic-ish, ~s25–30 at clip 1.0 given the EMA-inflated
-early dose) + first-passage of a seed catching (Poisson-ish: a long+correct deviant in a mixed
-low-σ group). Near the critical regime the catch is fluctuation-dominated ⇒ realization-dependent:
-r1 caught at 29–42; r2's seeds missed within the 50-step window. EXP-27 (single realization,
-lower λ) caught at 61. Nothing about r2 was mechanistically safer — it was censored by the
-50-step horizon. (Comparator check, §8: whether r2 shows late lmax spikes / length creep at
-s40–50 would confirm it sat in the same pre-ignition state.)
+Time-to-catch = drift to the (dose × sharpness) boundary + first-passage of a seed catching
+(Poisson-ish: a long+correct deviant in a mixed low-σ group). Near the boundary the catch is
+fluctuation-dominated ⇒ realization-dependent: r1 caught at 29–30; r2's seeds missed within the
+50-step window. EXP-27 (single realization, lower λ) caught at 61. Nothing about r2 was
+mechanistically safer — **confirmed by the comparator**: r2 emits the same isolated long-tail
+spikes (16384@27, 7817@32, 2648@38, 4061@47) that plain never produces; its pins simply never
+landed consecutively before the 50-step censor (`RUN_COMPARISON.md` §7b: "first-passage-lucky").
 
 ---
 
@@ -377,31 +381,43 @@ s40–50 would confirm it sat in the same pre-ignition state.)
 
 Two hypotheses for EXP-27's late ignition:
 
-- **H_carrier (mine):** ignition requires the persistent exogenous carrier; plain/α=0.5/dense are
-  safe at *any* horizon on this surface (up to the slow √T diffusion floor).
+- **H_carrier (mine):** ignition requires the persistent exogenous carrier; plain/dense are safe
+  at *any* horizon on this surface (up to the slow √T diffusion floor); α=0.5 carries the
+  half-strength rectified carrier (§e.2) and is *not* safe.
 - **H_generic:** any run on this surface (no KL/entropy, 16K cap, token-mean) ignites once past
   ~step 55–65; EXP-27 just ran long enough to see it, and the 50-step controls are all censored.
 
-Evidence already against H_generic: ef r1 ignited at 29–42 — *inside* the window where plain,
-α=0.5, psgd-only, and dense were all clean. So the merger demonstrably ignites where the substrate
-does not. But EXP-27's own ignition at 61–66 is past every control's horizon, so H_generic cannot
-be excluded *for the late regime* by existing data — every no-carrier run is right-censored at 50.
-(Weak prior evidence: the EXP-17 core diagnostic ran ~2 epochs ≈ 110+ steps on the mask+clean@20
-substrate — same GRPO/no-KL/16K surface, different codec — with no recorded length explosion.)
+Evidence against H_generic, now strong: (i) ef r1 locked in at s29–30 — *inside* the window where
+plain, psgd-only, and dense were all clean — so the merger demonstrably ignites where the
+substrate does not; (ii) the comparator's single-knob isolate (`RUN_COMPARISON.md` §8): plain
+differs from ef r2 in EXACTLY `spectral.enabled`, and plain shows **zero long-tail emission**
+(lmax ≤ 826 after s30, len slope −1.46, zero pins) while ef r2 — same substrate + merger —
+emits repeatedly (16384@27, 7817@32, 4061@47); (iii) plain spends the *longest* time of any arm
+in the high-entropy seed window (entropy never below 0.478) and still emits nothing, so
+"exposure time" doesn't produce seeds — the carrier does. Remaining honest limit: every
+no-carrier run is right-censored at 50, so H_generic past s50 is unfalsified by direct
+observation. (Weak prior evidence: the EXP-17 core diagnostic ran ~2 epochs ≈ 110+ steps on the
+mask+clean@20 substrate — same GRPO/no-KL/16K surface, different codec — with no recorded length
+explosion.)
 
-**Falsifiable discriminating predictions (pre-registered):**
+**Falsifiable discriminating predictions (pre-registered).** P1 was REVISED after the
+comparator's cross-check overturned my reading of α=0.5's endpoint (see §e.2); the original
+"no ignition, P≈0.7" is superseded — recorded here for honesty since the whole point of
+pre-registration is not to quietly rewrite it:
 
-- **P1 — signed_ema α=0.5 @100** (same surface, 1wulaelw config, step_target 100):
-  NO ignition by s100. Specifically: `response_length/clip_ratio` stays ≈ 0 (no pinned-16384
-  step), no length-mean creep ≥ +25% over its s40–50 running min, entropy lands 0.25–0.35,
-  val@100 ≈ 0.70–0.72 (the masked-gradient cost persists; it does not close parity).
-  **P(no ignition) ≈ 0.7.** (Residual 0.3: the §e.2 rectified-drift channel + the widened
-  seed-window + generic unknowns. If it DOES ignite, the model predicts it does so via the same
-  P5 precursor sequence, with creep starting only after ~s60 — that outcome would *extend* the
-  carrier law to rectified carriers rather than refute it; a precursor-free ignition would
-  refute §d.3.)
-- **P2 — plain @100** (B_plain config): NO ignition by s100; val@100 0.65–0.70 (climbing from
-  0.6437 but the refresh-alone drag keeps it at/below the floor band). **P(no ignition) ≈ 0.85.**
+- **P1 (revised) — signed_ema α=0.5 @100** (same surface, 1wulaelw config, step_target 100):
+  **DOES ignite by s100**, lock-in window ~s55–85, preceded by the P5 precursor sequence
+  (its s47–48 consecutive pins were the onset signature). **P(ignite by s100) ≈ 0.6** (comparator
+  independently: 0.55–0.70). If it ignites: extends the carrier law to rectified carriers (the
+  ½E|G|·sign(M) expectation term is sufficient). If it survives 100 clean (P≈0.4): the additive
+  vs rectified distinction is load-bearing, and the carrier law narrows to *additive* carriers
+  only — still excluding plain/dense either way. Whatever the outcome, val@100 stays 0.69–0.72
+  (the veto cost does not close parity).
+- **P2 — plain @100** (B_plain config): NO ignition by s100 AND no long-tail emission (zero
+  lmax ≥ 4k events after warmup); val@100 0.65–0.70 (climbing from 0.6437 but the refresh-alone
+  drag keeps it at/below the floor band). **P(no ignition) ≈ 0.85.** This is now the single
+  cleanest H_carrier/H_generic discriminator: plain is the substrate-only control with zero
+  carrier and zero emission at 50.
 - **P3 — ef-with-residual-reset** (damped settings + e_t←0 at every anchor refresh): **still
   ignites**, ~s55–75. At δ=0.5 the residual saturates geometrically — within a 5-tick reset cycle
   e reaches (1−δ⁵)/(1−δ) = 1.94 of its 2.0 steady state, and the cycle-average dose is
@@ -410,15 +426,18 @@ substrate — same GRPO/no-KL/16K surface, different codec — with no recorded 
   **P(still ignites by s80) ≈ 0.7.** If this arm does NOT ignite, my model is wrong about where
   the persistence lives (it would be in e, not M) — that is the cleanest single-run falsifier of
   this document.
-- **P4 — outcome table:** if α=0.5@100 and plain@100 both stay clean while any ef@100 rerun
-  ignites, H_carrier is confirmed and H_generic dead. If α=0.5 or plain ignite at ~s55–70 with the
-  same precursor sequence (lmax spikes → length creep → catch), H_generic wins and the merger is
-  only an accelerant — in that case the *surface* (token-mean + no-brake + cap) must be fixed
-  before any merger work continues.
-- **P5 — precursor universality (retroactively checkable on r1):** every ignition on this surface
-  is preceded by ≥2 isolated lmax=16384 events and a length-mean creep ≥15% above its running min
-  for ≥5 steps before the T4 (2×) trigger fires. If an ignition ever occurs *without* these, the
-  seeding stage of §d.3 is wrong.
+- **P4 — outcome table (the decisive pair is plain@100 vs any carrier arm @100):** if plain@100
+  stays emission-free while α=0.5@100 and/or an ef@100 rerun ignite, H_carrier is confirmed and
+  H_generic dead (α=0.5 igniting is *consistent* with H_carrier under the rectified-carrier
+  reading, §e.2 — it is plain that separates the hypotheses). If **plain** ignites at ~s55–70
+  with the precursor sequence, H_generic wins and the merger is only an accelerant — in that
+  case the *surface* (token-mean + no-brake + cap) must be fixed before any merger work
+  continues.
+- **P5 — precursor universality:** every ignition on this surface is preceded by ≥2 lmax-pin
+  events and a length-mean creep before the T4 (2×) trigger fires. **Already retro-confirmed on
+  ef r1** (comparator §7a: isolated 5782@s12 → pin@29 fails to recover → sustained pins s30–42 →
+  len creep 143→328 → entropy follows down — the identical anatomy at ~half the lag). If a
+  future ignition ever occurs *without* these, the seeding stage of §d.3 is wrong.
 
 ---
 
@@ -491,8 +510,9 @@ descent component, entropy tracks the healthy profile — right up until the tra
 enters the susceptible regime (sharp, low group-variance) while still emitting long-tail seeds,
 one seed catches, and the token-mean ratchet finishes the job reward-preservingly
 (score 0.73–0.84 through ignition). Dose magnitude divides the transport rate and nothing else:
-halving it doubled time-to-ignition (29–42 → 61–66) at zero val gain, and the run ignited with
-the forcing at its run-minimum. The only real exits are to remove the carrier (true EF on the
+cutting it ~2.2× stretched time-to-lock-in almost exactly linearly (s30 → s61) at zero val gain,
+and the run ignited with the forcing at its run-minimum. The only real exits are to remove the
+carrier (true EF on the
 codec's own per-step dropped residual — telescoping, no O(T) integral), or to tilt the flat
 direction with an explicitly-labeled potential (KL / length-normalized aggregation). Tuning λ
 (clip/decay/reset) only buys time inside the same trajectory — falsified twice, now with the

@@ -54,12 +54,29 @@ The EXP-27 3-run comparison (`runs/EXP-27/RUN_COMPARISON.md` +
   clean at 50 and ignited at ~61. A clean step-50 endpoint does NOT certify
   stability (GOAL.md criterion 1 needs a longer horizon).
 
+**E1 — EARLY GATE @ steps 10–30 (suspicion, not kill; RUN_COMPARISON.md §9,
+retro-validated on 6 runs, zero false negatives):**
+**any `response_length/max` > 4000 in steps [10, 30] ⇒ flag UNSTABLE-LIKELY**
+— action = extend-watch + arm P1 at heightened cadence, NOT hard-kill (the
+gate detects carrier *emission*, which precedes ignition *clustering* by up to
+~38 steps: exp27 emitted 3220@s19 + 9764@s23, ignited s61; α0.5 flagged @s17).
+Threshold robust 2000–8000 (survivors never exceed ~1300 after warmup).
+EXCLUDE warmup steps ≤9 (dense + plain each spike once there, benign). Honest
+limits: cannot catch a seeder whose first spike lands >s30 (none observed in
+n=6, latest s27, but n is small); emission ≠ certain ignition (ef_r2 emitted
+and survived its censored 50). Early signals that FAILED retro-testing — do
+not gate on them: len/mean slope (kill-time signal, negative for all comm-eff
+≤30), entropy decline rate (identical −0.06..−0.08 across ALL merger arms
+regardless of outcome — entropy fails as an early signal too), p90(len/max),
+grad_norm spikes (dominated by the spike gate). Two-layer monitor from now on:
+**E1 early gate (suspicion @≤30) + P1 consecutive-pin (kill, any step).**
+
 **Trigger precedence from now on:** P1/P2/P3 (length spiral) are the RED
-kill-early triggers. T1–T3 (entropy) and T6 (IS gap) are demoted to
-**corroborators** — meaningful only WITH a P-trigger; never alert on entropy
-alone. T5 (reward peak-then-degrade) unchanged but note EXP-27 ignited with
-score still 0.73–0.84 (reward-preserving length-hack) — do not wait for reward
-to fall.
+kill-early triggers; E1 is the ≤30-step suspicion gate that arms them. T1–T3
+(entropy) and T6 (IS gap) are demoted to **corroborators** — meaningful only
+WITH a P-trigger; never alert on entropy alone. T5 (reward peak-then-degrade)
+unchanged but note EXP-27 ignited with score still 0.73–0.84
+(reward-preserving length-hack) — do not wait for reward to fall.
 
 ---
 
