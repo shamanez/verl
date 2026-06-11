@@ -16,6 +16,49 @@ in EXP-25), so you never need to wait for the run to finish to call it.
 
 ---
 
+## ⚠️ 2026-06-11 RE-CENTERING (EXP-27 post-mortem — READ THIS FIRST)
+
+The EXP-27 3-run comparison (`runs/EXP-27/RUN_COMPARISON.md` +
+`comparison_metrics/scorecard.csv`; dense `5e2jpho9` vs signed_ema α0.5
+`1wulaelw` vs damped-ef `qa6sll3h`) **falsified entropy-as-trigger**:
+
+- **Entropy is a FOLLOWER of the length spiral, not its cause.** Dense is the
+  *lowest*-entropy run of the three (0.12–0.16 from step 36) and the *most*
+  stable. **T1-RED (`entropy<0.3`) fires on the healthiest run we have** — an
+  absolute-entropy trigger is invalid on its own. (This sharpens the EXP-25
+  finding "length-hack, not low entropy, is the killer" —
+  `runs/EXP-25/COLLAPSE_GRADIENT_FLOW_ANALYSIS.md` — into the operational rule.)
+- **PRIMARY kill triggers are the length-spiral precursors** (these called
+  EXP-27's ignition and retro-dict α0.5's near-miss):
+  - **P1 — consecutive cap-pins:** `response_length/max` = cap (16384) on
+    **≥2 consecutive** steps (isolated single-step spikes recover; consecutive
+    pins did not, in any observed run). RED, kill-early candidate.
+  - **P2 — mean slope:** trailing-10-step slope of `response_length/mean`
+    > **+2 tok/step** sustained = YELLOW; combined with any pin = RED.
+    (EXP-27 pre-ignition: +0.10/step; α0.5@47-50: **+5.92/step**; ignition:
+    +50-100/step.)
+  - **P3 — the old T4 absolute:** mean > 2× first-10-step average — confirmed
+    in EXP-27 (~509 crossed at step 66, after P1/P2 had fired ~5 steps earlier).
+- **Gradient quality is the cross-run discriminator** (probable upstream cause):
+  dense `actor/grad_norm` ≈ 0.35 clean/stable; comm-eff arms 3–7 noisy;
+  20–60 during ignition. Treat the grad_norm *trajectory* as a **run-health
+  baseline metric across arms** (which arm is closer to dense-quality
+  gradients), NOT as a within-run instantaneous trigger (it stayed O(1–16)
+  through EXP-25's collapse — the caveat below still holds within-run).
+- **50-step runs are CENSORED observations.** α0.5 "survived" 50 steps but was
+  already in the early spiral (consecutive cap-pins at steps 47–48); EXP-27 was
+  clean at 50 and ignited at ~61. A clean step-50 endpoint does NOT certify
+  stability (GOAL.md criterion 1 needs a longer horizon).
+
+**Trigger precedence from now on:** P1/P2/P3 (length spiral) are the RED
+kill-early triggers. T1–T3 (entropy) and T6 (IS gap) are demoted to
+**corroborators** — meaningful only WITH a P-trigger; never alert on entropy
+alone. T5 (reward peak-then-degrade) unchanged but note EXP-27 ignited with
+score still 0.73–0.84 (reward-preserving length-hack) — do not wait for reward
+to fall.
+
+---
+
 ## Metrics to watch every run (the 6 core signals)
 
 Pull these per training step. WandB keys (and the matching `train.log` field names):

@@ -258,6 +258,74 @@ fallback — at step 50 it already looked worse than the run we killed for explo
 
 ---
 
+## 7. Cross-run ef-class evidence (added for mechanist-math, task #1)
+
+mechanist-math's mechanism: the implemented "EF" injects a force ~orthogonal to the
+fresh gradient (measured cos(G_comp,G_corr)=0.956), so it transports the policy along
+reward-flat "correct-but-longer" directions; **dose sets the LAG to ignition, not
+whether**. Two cross-run pulls test this.
+
+### 7a. ef r1 (`c7fa7kjv` = exp26_B_ef, full-dose) — IDENTICAL precursor sequence, ignites EARLIER
+
+42 steps. Lock-in at **step 29-30** (vs exp27's 61). Exact same anatomy:
+
+| phase | ef_r1 (c7fa7kjv) | exp27 (qa6sll3h, damped) |
+|---|---|---|
+| isolated early spike (recovers) | 5782 @ s12 | 16384 @ s2,45,53 (recover) |
+| lock-in onset (pin fails to recover) | **s29→30** (13347→16384, first clip>0) | **s61** |
+| sustained 16384 from | s30 (30-36, 38-42) | s61 |
+| len/mean creep follows | flat ~160 to s37, then 143→203→222→301→328 | flat ~170 to s60, then 268→395→558→566 |
+| entropy follows DOWN | 0.58@36 → 0.16@41 → 0.13@42 | 0.34@60 → 0.08@66 |
+| score during ignition | 0.73–0.78 (no warning) | 0.73–0.84 (no warning) |
+| grad_norm spikes | 22.9@31, 33.4@39 | 23@64, 40@67 |
+
+**This is the strongest single confirmation:** ef r1 (full dose) ignited at ~30; exp27
+(damped clip 0.5/decay 0.5, ~half the dose) ignited at ~61. Damping roughly **doubled
+the lag (30→61) but did not prevent ignition** — exactly "dose sets lag, not whether."
+
+**Dose magnitude correction (cross-check of mechanist's numbers):** from W&B,
+`spectral_rel_change_mean` median over s18-27 = **ef_r1 0.200, ef_r2 0.250, exp27
+0.092**. mechanist's quoted exp27 "0.19-0.30 @ s20-25" actually matches the *ef parents*,
+not exp27 — exp27's damping had already cut the dose to ~0.09 (≈half) from early on.
+exp27 dose decays 0.092 (s18-27) → 0.021 (s45-67); ignition s61-66 is near the dose
+**minimum**, confirming ignition is not a dose spike. (Direction of mechanist's claim
+holds; the absolute s20 number was a run mix-up.)
+
+### 7b. Spike-clustering taxonomy across all six runs — the real discriminator
+
+Every run hits len/max=16384 at least once. What separates exploders from survivors is
+whether the pins ever become **consecutive**:
+
+| run | dose class | 16384-pin steps | max consecutive run | outcome by its last step |
+|---|---|---|---|---|
+| dense | none | {6} | 1 | STABLE (50) |
+| plain | none (no codec force) | {1} | 1 | STABLE (50) |
+| ef_r2 | full, lucky | {5, 27} + 4061@47 | 1 | STABLE (50) — *late isolated spike present* |
+| **a0p5** | signed-EMA δ0.5 | {17, **47, 48**} + 5806@50 | **2** | killed @50 (DANGER, pre-ignition) |
+| **exp27** | EF damped 0.5 | {2,45,53,59, **61..67**} | **7** | EXPLODED (lock-in 61) |
+| **ef_r1** | EF full | {12(=5782),29, **30..36, 38..42**} | **7** | EXPLODED (lock-in 30) |
+
+**Mechanist Ask-A result, partly contradicting his prediction:** he predicted α0.5 max
+"stays <~1k". It does NOT — α0.5 hits 16384 at s17,47,48 and 5806 at 50. So α0.5 emits
+the same long-tail spikes as the ef class; it is **not** spike-free. ef_r2 confirms his
+other prediction: it *does* show late isolated spikes (4061@47, 16384@27) despite
+finishing clean — drift-toward-long-tail is an ef-class property and **r2 was
+first-passage-lucky** (its spikes never landed consecutively). a0p5's consecutive 47-48
+pair is the only thing separating it from a confirmed exploder — it is the *onset* of
+the clustering, caught one step before lock-in.
+
+### 7c. Ask-B (entropy regime) — confirmed
+
+`entropy` first crosses below 0.4 at: **dense s1, a0p5 s45, ef_r2 s50, exp27 s51, plain
+never (min 0.478)**. So the merger/ef arms sit in the high-entropy (>0.4)
+"seed-emitting" window for ~45-50 steps; dense leaves it at step 1. entropy@50: dense
+0.135 (@48), a0p5 0.371, ef_r2 0.396, exp27 0.401, plain 0.478. Confirms mechanist's
+"merger arms sit in the high-entropy window ~3× longer than dense" — but note this is
+*correlation*: dense's low entropy co-occurs with its clean small gradient, and it is
+the gradient cleanliness (not the low entropy) that prevents the spiral (§5).
+
+---
+
 ## Files
 
 - `comparison_metrics/pull_wandb.py` — W&B fetch (scan_history, all 5 runs).
