@@ -237,6 +237,13 @@ token pool is ~1.8e5. One 16384-token rollout is **9.1% of the entire batch's gr
 (fair share 0.098% ⇒ ~93× amplification); the ~6 capped rollouts at s61 (clip 0.006) carried
 ~25–30% of the batch's token mass between them.
 
+`loss_agg_mode=token-mean` (verl default; confirmed in actor.yaml, not overridden in
+resolved_params): sample i's weight in the update is ∝ T_i·A_i. The batch is 128 prompts × n=8 =
+1024 responses; at mean length ~175 one 16384-token rollout carries **~8.4% of the entire batch's
+gradient mass** (16384 / (1023·175 + 16384); fair share 0.098% ⇒ ~86× amplification). At s61
+(clip 0.006 ⇒ ~6 capped rollouts, mean 267.9) the capped tail alone carried ~36% of the batch's
+token mass from 0.6% of its samples.
+
 GRPO's group normalization adds the gate: A_i = (r_i − μ_g)/(σ_g+ε). In an all-correct or
 all-wrong group, A ≡ 0 — the group emits no learning signal. As the policy sharpens, within-group
 σ collapses for the "easy" groups and the surviving advantage mass concentrates in *mixed* groups
