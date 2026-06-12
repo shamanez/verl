@@ -622,7 +622,11 @@ class CommEffState:
                 f"[geometry-probe] armed: geometry_enabled={probe_on} delayed_ef={delayed_ef_on} "
                 f"fast_grad_ring(maxlen={self.fast_grad_ring._maxlen}, delay_K={_ring_delay_K}, "
                 f"cadence={_ring_cadence}) "
-                f"lag_buffer={'maxlen=' + str(self.grad_lag_buffer.max_lag) if self.grad_lag_buffer else None} "
+                # NB `is not None`, not truthiness: GradLagBuffer defines __len__,
+                # so an EMPTY (just-armed) buffer is falsy and the build print
+                # would lie "None" while the buffer exists (observed on the
+                # EXP-30 first launch; functional paths all use `is None`).
+                f"lag_buffer={('maxlen=' + str(self.grad_lag_buffer.max_lag)) if self.grad_lag_buffer is not None else None} "
                 f"out_dir={getattr(probe_cfg, 'out_dir', '') if probe_cfg is not None else ''} "
                 f"rank0_only={getattr(probe_cfg, 'rank0_only', True) if probe_cfg is not None else True}",
                 flush=True,
