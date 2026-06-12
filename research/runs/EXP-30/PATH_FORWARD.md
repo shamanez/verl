@@ -67,6 +67,12 @@ stability result is censored (EXP-27 ignited at ~61); ext100 is running precisel
 
 **No new training cell launches until ext100 returns.**
 
+> **OUTCOME (2026-06-13): branch (i)/(ii) hybrid.** Emission-free through 100 (de-censored for seed 0;
+> two isolated 1/1024-rollout cap-pins at steps 94/99 — benign, no P1/P2/P3). Val: 0.7536@50 (= dense
+> ceiling) → 0.7475@75 (> parity) → 0.7400@100 (mild decay, > floor). Next per tree: R1 honest-bytes +
+> R3 plain@100 (the decay comparator) + R4 Q-rotation telemetry (decay-diagnosis); R2 seed replicate
+> still the binding statistical fix. B1 paper run (operator-directed) completes the operator row.
+
 ## 5. Ranked program (decision-value per GPU-hr; strategist + critic merged)
 
 1. **R1 — honest-bytes accounting** (≈0 GPU-hr, laptop): count anchor-circuit traffic

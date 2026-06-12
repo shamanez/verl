@@ -123,3 +123,37 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 - Stability claims in this verdict are 50-step CENSORED statistics (EXP-27 lesson) — de-censoring via the
   operator-authorized 100-step B2 extension is the immediate next measurement.
 - Step-A val (0.244@20) is a probe diagnostic, NOT a deliverable — never quote it as science.
+
+---
+
+## Addendum (2026-06-13): ext100 de-censoring outcome + B1 paper run
+
+**ext100 (`exp30_B2_ext100`, W&B `b59ncque`) — operator-authorized 100-step extension of B2, identical
+settings.** Outcome: **de-censored for seed 0 — no ignition through step 100.**
+
+- Traversed the EXP-27 ignition band (51–66) cleanly; the registered forecast (no ignition through ~61)
+  held; the P(ignite 61–100) ≈ 20–35% event did NOT occur.
+- Vals: 0.7278@25 / **0.7536@50 (= the dense ceiling value)** / 0.7475@75 / 0.7400@100. Mild late decay
+  past step 50; @75 still above the 0.7414 parity bar, @100 slightly below it but well above the 0.7210
+  floor. No 100-step dense reference exists (dense never re-run) — plain@100 (#28 Cell B) is the right
+  comparator for whether the decay is mechanism-specific or substrate/epoch-generic.
+- Emission, reported honestly: steps 10–93 fully clean; two **isolated single-rollout cap-pins** at
+  steps 94 and 99 (clip_ratio exactly 1/1024 each; len/mean flat 190–227 with zero slope; entropy
+  1.3–1.8 healthy; max reverts to ≤1413 immediately). No P1 (non-consecutive), no P2/P3. Same benign
+  signature as B2's pre-injection step-2 pin — consistent with the stochastic outlier-rollout base rate
+  (3 single-rollout pins in ~150 observed steps across cells), NOT the ignition mechanism (EXP-27's
+  signature was mean climbing 171→575 with entropy → 0.08).
+- Health: max_mem 30.75 GB (ceiling 30.77 — note: 100-step headroom is ~zero; future ≥100-step cells
+  should re-derive the ceiling), bytes_ratio 0.0505, 40 anchor fires, coldM 0, `delta_ratio` settled
+  ≈ 1.001 (perfectly bounded, declining all run).
+- Stability claims now censored at 100 steps instead of 50 for seed 0 (the honest restatement).
+
+**B1 blend-on-valid-M paper run (operator-directed, post-verdict):** queued/in-flight on a fresh box —
+completes the controlled combination-operator row (same valid anchor signal, blend η=0.3 vs residual
+λ=1). GATE-B1's measured prediction: inert (~0.64–0.70, no conversion). Outcome will be appended here.
+
+**Incident note:** box i_40697545 was auto-destroyed by the teardown hook (`no-heartbeat-30min`) minutes
+after ext100 completed — the EXP-30-EXT ledger row's heartbeat path (`runs/EXP-30-EXT/metrics/`) never
+existed because metrics sync to `runs/EXP-30/`. Zero science lost (artifacts pulled pre-teardown); the
+initial B1 launch died in init and was re-provisioned. Lesson recorded: extension rows must reuse the
+run-dir ID or materialize their heartbeat path.
