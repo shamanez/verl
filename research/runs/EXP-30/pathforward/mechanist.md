@@ -340,6 +340,15 @@ val numbers (0.7528, 0.7536 dense) are a *KL-regularized* GRPO ladder, not the l
 the GOAL doc. I am flagging it as a known-and-controlled deviation for the validity review to confirm
 it is template-wide and not an EXP-30 artifact; it does not change any F1–F5 mechanism conclusion.
 
+> **RESOLVED (team-lead, 2026-06-13, ground-truth check):** FALSE ALARM. The `use_kl_loss=True` token is
+> an early launcher-template echo; the same command line carries a LATER `use_kl_loss=False` override and
+> Hydra is last-wins. Decisive evidence: the trainer's runtime config dump in the same log prints
+> `'use_kl_loss': False`, and both cells' `resolved_params.txt` record `use_kl_loss=False`,
+> `use_kl_in_reward=False`, `entropy_coeff=0` (the `kl_loss_coef=0.001` is a dead knob behind the False
+> gate). The val ladder IS literally-vanilla no-KL/no-entropy GRPO per GOAL. The critic's independent
+> read agreed. Lesson: resolved_params.txt / the runtime dump is the only authority for launch knobs —
+> never the set -x command echo.
+
 ## 7. Summary for the team
 
 - **F1 confirmed and sharpened:** on identical (batch, θ), cos(G_anc_rep, G_comp_ring) = +0.007 pooled
