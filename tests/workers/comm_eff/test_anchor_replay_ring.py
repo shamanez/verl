@@ -379,3 +379,46 @@ def test_canary_target_choice_is_deterministic():
     c2 = snapshot_canary(snap, target_substrs=("q_proj", "o_proj"))
     assert list(c1.keys()) == list(c2.keys()) == sorted(c1.keys())
     assert c1 == c2
+
+
+# =========================================================================== #
+# 6. Relevance probe: loaded weights vs the trajectories' stored log-probs
+# =========================================================================== #
+replay_relevance_stats = _anchor.replay_relevance_stats
+
+
+def test_relevance_stats_zero_for_generator_weights():
+    """Same weights => same log-probs => MAD exactly 0 (the paired case)."""
+    lp = torch.tensor([[-0.5, -1.2, -0.1], [-2.0, -0.3, -0.9]])
+    mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    s, c = replay_relevance_stats(lp, lp.clone(), mask)
+    assert s == 0.0 and c == 3
+
+
+def test_relevance_stats_masked_mean_abs_diff_exact():
+    lp = torch.tensor([[-0.5, -1.0, -3.0]])
+    ref = torch.tensor([[-0.7, -1.5, -9.0]])  # diffs 0.2, 0.5, 6.0
+    mask = torch.tensor([[1, 1, 0]])          # padded position excluded
+    s, c = replay_relevance_stats(lp, ref, mask)
+    assert c == 2
+    assert abs(s - 0.7) < 1e-6  # 0.2 + 0.5; the 6.0 at the masked slot ignored
+
+
+def test_relevance_stats_discriminates_drifted_weights():
+    """Re-scoring with DRIFTED weights yields a strictly larger MAD than with
+    the true generator weights — the probe is discriminative, not vacuous."""
+    torch.manual_seed(0)
+    gen = _Tiny(d=8)
+    x = torch.randn(4, 8)
+    with torch.no_grad():
+        ref_lp = torch.log_softmax(gen.o_proj(gen.q_proj(x)), dim=-1)
+    drifted = _Tiny(d=8)
+    with torch.no_grad():
+        for (n, p), (_n2, p2) in zip(gen.named_parameters(), drifted.named_parameters()):
+            p2.copy_(p + 0.01 * torch.randn_like(p))  # ~K optimizer ticks of drift
+        drift_lp = torch.log_softmax(drifted.o_proj(drifted.q_proj(x)), dim=-1)
+    mask = torch.ones(4, 8)
+    s_paired, c = replay_relevance_stats(ref_lp, ref_lp, mask)
+    s_drift, _ = replay_relevance_stats(drift_lp, ref_lp, mask)
+    assert s_paired == 0.0
+    assert s_drift > 0.0 and c == 32

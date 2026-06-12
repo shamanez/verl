@@ -1234,6 +1234,39 @@ class FSDPEngine(BaseEngine):
             )
         return partial(anchor_pg_loss, config=config)
 
+    def _wrap_anchor_loss_with_replay_relevance(self, anchor_loss_function, acc):
+        """EXP-29 relevance probe: re-score the replayed trajectories with the
+        LOADED snapshot weights and accumulate ``|logπ_loaded − logπ_reference|``
+        against the log-probs STORED WITH the batch (``rollout_log_probs`` —
+        vLLM at the generator weights — preferred; ``old_log_probs`` fallback).
+
+        Detached, fp32, scalar-only, replay-mode-only: rides the anchor forward
+        the pass already runs, so it adds no extra backward, never touches the
+        loss/optimizer/EMA, and the legacy path never constructs it. A probe
+        failure logs a WARN and returns the loss untouched — the diagnostic
+        must never kill the anchor pass.
+        """
+        from verl.workers.comm_eff.anchor import replay_relevance_stats
+        from verl.workers.utils.padding import no_padding_2_padding
+
+        def wrapped(model_output, data, dp_group=None):
+            loss, metrics = anchor_loss_function(model_output=model_output, data=data, dp_group=dp_group)
+            try:
+                keys = set(data.keys())
+                ref_key = "rollout_log_probs" if "rollout_log_probs" in keys else (
+                    "old_log_probs" if "old_log_probs" in keys else None
+                )
+                if ref_key is not None:
+                    lp = no_padding_2_padding(model_output["log_probs"], data)
+                    sel = data.select("response_mask", ref_key).to_padded_tensor()
+                    s, c = replay_relevance_stats(lp, sel[ref_key], sel["response_mask"])
+                    acc.append((ref_key, s, c))
+            except Exception as exc:  # pragma: no cover - diagnostic must never kill the pass
+                print(f"[comm_eff][stale-replay][relevance] WARN probe skipped: {exc!r}", flush=True)
+            return loss, metrics
+
+        return wrapped
+
     def _maybe_comm_eff_anchor_refresh(self, data, loss_function) -> None:
         """FSDP anchor-circuit refresh: unmasked K-stale GRPO-actor-loss
         fwd/bwd -> RAW G_anchor -> spectral anchor EMA, NO optimizer step.
@@ -1545,6 +1578,9 @@ class FSDPEngine(BaseEngine):
             anchor_data = data.copy() if hasattr(data, "copy") else data
 
         anchor_grads = {}
+        # EXP-29 relevance-probe accumulator: per-micro-batch (ref_key, sum, count)
+        # of |logπ_loaded − logπ_stored| over response tokens. Replay-mode-only.
+        _relevance_acc = []
         # The anchor's loss.backward() MUST NOT
         # trigger the live FSDP1 module's `_post_backward_hook` (which would
         # call `_check_grad_to_accumulate(flat_param._saved_grad_shard.shape)`
@@ -1696,6 +1732,14 @@ class FSDPEngine(BaseEngine):
             # is anchor-pass-only. We bind the SAME actor config the fast path
             # uses (read off the partial) so agg_loss normalizes identically.
             anchor_loss_function = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+            # EXP-29 relevance probe (replay mode only): re-score the replayed
+            # trajectories with the loaded stale weights against the log-probs
+            # stored WITH them — flat-not-growing across fires proves the
+            # loaded weights are the batch's generator. Detached/scalar-only.
+            if replay_mode:
+                anchor_loss_function = self._wrap_anchor_loss_with_replay_relevance(
+                    anchor_loss_function, _relevance_acc
+                )
             self._forward_backward_batch_inner(anchor_data, anchor_loss_function, forward_only=False)
 
             # Read G_anchor RAW per target (NO correct_matrix) off
@@ -1771,6 +1815,21 @@ class FSDPEngine(BaseEngine):
             "comm_eff anchor pass took an optimizer step (anchor_optimizer_steps "
             "must stay 0; snapshot is OFF the optimizer's param group)."
         )
+
+        # EXP-29 relevance verdict for THIS fire: loaded-weights re-score vs the
+        # log-probs stored with the replayed trajectories. Greppable evidence
+        # line; the analyst checks it stays FLAT (not growing) across fires.
+        if replay_mode and _relevance_acc:
+            _ref_key = _relevance_acc[0][0]
+            _rel_cnt = sum(c for _k, _s, c in _relevance_acc)
+            _rel_mad = sum(s for _k, s, _c in _relevance_acc) / max(_rel_cnt, 1)
+            print(
+                f"[comm_eff][stale-replay][relevance] step={step} ref={_ref_key} "
+                f"logp_mad={_rel_mad:.6f} tokens={_rel_cnt} "
+                f"(clean fwd at LOADED stale weights vs {_ref_key} stored WITH the replayed "
+                f"trajectories; flat-not-growing across fires => weights == the batch's generator)",
+                flush=True,
+            )
 
         # EXP-25 (R1, FIX 7): COVERAGE SET-EQUALITY — the anchor M must cover EVERY
         # matrix the merger corrects (set-equal, NOT 4 / NOT boundary-only). Build

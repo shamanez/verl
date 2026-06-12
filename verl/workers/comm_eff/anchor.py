@@ -82,6 +82,7 @@ __all__ = [
     "capture_anchor_tensors",
     "clone_batch_for_replay",
     "maybe_build_replay_ring",
+    "replay_relevance_stats",
     "snapshot_canary",
     "verify_canary_on_module",
 ]
@@ -507,6 +508,25 @@ class AnchorReplayRing:
     @property
     def snapshot_steps(self) -> list:
         return list(self._snapshots.keys())
+
+
+def replay_relevance_stats(log_probs: torch.Tensor, ref_log_probs: torch.Tensor, response_mask: torch.Tensor):
+    """Masked ``(sum, count)`` of ``|logπ_loaded − logπ_reference|`` over response tokens.
+
+    EXP-29 relevance probe: the replayed batch STORES the log-probs its
+    trajectories were generated/scored with (``rollout_log_probs`` from vLLM at
+    the generator weights; ``old_log_probs`` from the recompute at the same
+    weights). The anchor's clean forward at the LOADED snapshot weights
+    re-scores the same tokens — if the loaded weights are truly the batch's
+    generator, the masked mean abs diff sits at the engine-noise floor and
+    stays FLAT across fires; a broken pairing drifts with policy updates and
+    GROWS. Pure detached arithmetic — fp32, no grad, no collective; the caller
+    aggregates the (sum, count) pairs across micro-batches.
+    """
+    mask = response_mask.to(torch.bool)
+    diff = (log_probs.detach().to(torch.float32) - ref_log_probs.detach().to(torch.float32)).abs()
+    sel = diff[mask]
+    return float(sel.sum().item()), int(mask.sum().item())
 
 
 def maybe_build_replay_ring(state, anchor_cfg, delay_K: int, cadence: int = 1) -> Optional[AnchorReplayRing]:
