@@ -49,6 +49,17 @@ _REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _stub_parent_packages():
+    # Prefer the REAL package when the host has the full dep chain: collection-
+    # order independence. (test_anchor_queue.py's stub relies on
+    # test_activation_mask.py importing real verl first — alphabetical luck; a
+    # cherry-picked run starting with THIS file must not poison sys.modules
+    # with empty-__path__ stubs that break later `verl.utils.*` imports.)
+    try:
+        import verl.workers.comm_eff  # noqa: F401
+
+        return
+    except Exception:
+        pass
     for pkg in ("verl", "verl.workers", "verl.workers.comm_eff"):
         if pkg not in sys.modules:
             m = types.ModuleType(pkg)
