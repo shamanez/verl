@@ -108,6 +108,36 @@ class TestCommEffConfigDefaults(unittest.TestCase):
         config = omega_conf_to_dataclass(cfg)
         self.assertFalse(config.comm_eff.enabled)
 
+    def test_yaml_plain_override_anchor_replay_knobs(self):
+        """EXP-29: the replay knobs are declared in the YAML struct, so a PLAIN
+        (no `+`) CLI override composes. This is the dataclass<->YAML drift gate
+        the first EXP-29 launch failed on (`Key 'replay_paired_batch' is not in
+        struct`) — a new dataclass field MUST be mirrored in actor.yaml or every
+        launcher override of it dies in Hydra validation before main."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.anchor.replay_paired_batch=true",
+                    "comm_eff.anchor.snapshot_device=cpu",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertTrue(config.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config.comm_eff.anchor.snapshot_device, "cpu")
+        # And the YAML defaults still mirror the dataclass defaults (off path).
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg_default = compose(
+                config_name="dp_actor", overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128"]
+            )
+        config_default = omega_conf_to_dataclass(cfg_default)
+        self.assertFalse(config_default.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config_default.comm_eff.anchor.snapshot_device, "gpu")
+
 
 class TestCommEffConfigSchema(unittest.TestCase):
     """The structured schema must reject unknown comm_eff.* keys."""

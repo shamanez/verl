@@ -387,6 +387,20 @@ comm_eff:
     # CommEffAnchorConfig.owns_q (default false => byte-identical to EXP-20).
     owns_q: false
 
+    # EXP-29: pair the anchor's stale weights with the batch those SAME weights
+    # generated (per-tick CPU batch ring + one generator snapshot per global
+    # step, replayed at fire time). Declared here so Hydra struct-mode accepts
+    # actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch=<bool>;
+    # mirrors CommEffAnchorConfig.replay_paired_batch (default false =>
+    # byte-identical legacy behaviour: current batch at stale weights, no ring).
+    replay_paired_batch: false
+
+    # EXP-29: where the anchor weight snapshots live between ticks — "gpu"
+    # (default, today's exact behaviour) or "cpu" (delay_K+1 full bf16
+    # snapshots move off HBM; byte-preserving round trip, numerics-neutral).
+    # Mirrors CommEffAnchorConfig.snapshot_device.
+    snapshot_device: gpu
+
   # Spectral-correction sub-config (inert while enabled=false). Applies an
   # anchor-guided correction to the fast-path gradient after actor backward /
   # FSDP grad reduction and before optimizer.step() / grad clipping. Live
