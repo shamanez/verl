@@ -12,4 +12,4 @@
 2026-06-12T18:29:10+10:00 · running=[] · analyzing=[] · logging=[] · blocked=[]
 
 ## Budget
-box i_40676027 HELD WARM per operator (outside auto-teardown — accrues cost until operator tears down or reuses)
+no live Vast instances (i_40676027 destroyed 2026-06-12, verified via API)
