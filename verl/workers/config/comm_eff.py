@@ -35,6 +35,7 @@ __all__ = [
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
     "CommEffCaptureConfig",
+    "CommEffProbeConfig",
     "CommEffConfig",
 ]
 
@@ -283,6 +284,17 @@ class CommEffSpectralConfig(BaseConfig):
     # plain-PowerSGD limiting case). A typical live value is ~1.0 (the re-injected
     # residual may not exceed the compressed gradient's own norm). Must be >= 0.
     ef_clip: float = 0.0
+    # ---- EXP-30 B2: K-delayed exact codec residual (correction_mode="delayed_ef") ----
+    # G_corr(t) = G_comp(t) + delayed_ef_lambda * (M_rep − G_comp_ring(t−K)), where
+    # M_rep is the β_anc=0 anchor EMA (= the latest fire's generator-consistent
+    # G_anc_rep, EXP-29 paired replay) and G_comp_ring(t−K) is the fast compressed
+    # gradient stored at the identical (batch, θ) tick by the fire-aware
+    # FastGradRing. δ refreshes at anchor fires and is HELD between them (the
+    # telescoping per-tick injection). 0.0 (default — the OFF/legacy posture) ⇒
+    # G_corr == G_comp EXACTLY (the limiting-case-identity invariant); the B2
+    # cell sets 1.0 explicitly. Must be >= 0. Unused unless
+    # correction_mode=delayed_ef.
+    delayed_ef_lambda: float = 0.0
 
 
 @dataclass
@@ -504,6 +516,56 @@ class CommEffCaptureConfig(BaseConfig):
 
 
 @dataclass
+class CommEffProbeConfig(BaseConfig):
+    """EXP-30 Step-A geometry probe (M-validity discriminator) — OFF by default.
+
+    **Telemetry-only by contract.** When ``geometry_enabled=true`` the harness
+    measures, at every anchor fire on the EXP-29 paired-replay substrate, the
+    m1–m7 geometry of the generator-consistent anchor gradient ``G_anc_rep``
+    against (a) the old-style generator-MISMATCHED anchor gradient ``G_anc_old``
+    (a second telemetry backward on the SAME stale-loaded clone with the CURRENT
+    batch), (b) the live fast compressed gradient ``G_comp(t)``, (c) the
+    fire-aware ring entry ``G_comp_ring(t−K)`` (m5 codec error), (d) its own lag
+    history (m4), and (e) the previous fire's ``M_rep`` (m6 persistence). One
+    JSON line per fire is appended to ``<out_dir>/stepA_fires.jsonl`` with the
+    plan's verbatim field names, plus a ``[geometry-probe]`` train-log line.
+    Nothing is ever fed to the optimizer, the EMA, the sketch V, or Q
+    (``anchor_grad_corrected`` stays 0 — the probe invariant).
+
+    Hard config invariants (validated in ``CommEffConfig.__post_init__``):
+    requires ``anchor.enabled`` + ``anchor.replay_paired_batch`` (G_anc_rep IS
+    the replay gradient), and the merger must be inert
+    (``spectral.correction_mode="none"`` when spectral is enabled) so the
+    measured ``G_comp`` is the raw codec output, never a merged gradient.
+
+    Args:
+        geometry_enabled (bool): Master probe switch. ``false`` (default) is a
+            strict no-op — no ring, no lag buffer, no extra backward, no I/O.
+        out_dir (str): Directory for ``stepA_fires.jsonl`` (+ the per-target
+            sidecar). Empty (default) resolves to ``./geometry_probe`` at build.
+        rank0_only (bool): Stage/compute/write on DP rank 0 only (default). The
+            inputs are DP-identical by construction (the anchor grads are
+            all-reduced(MEAN); the FSDP-summoned fast grads are the DP-mean), so
+            rank 0 suffices; other ranks still run the symmetric collectives
+            (the dual backward + DP-reduce) but skip storage and I/O. ``false``
+            writes rank-suffixed files (debug only).
+        m4_lags (int): Lag depth j=1..m4_lags for the m4 autocorrelation.
+            Default 5; bounded to [1, 5] so the CPU lag buffer respects the
+            plan's ≤6-entry bound (max_lag stored + the in-flight current).
+        per_target_sidecar (bool): Also append the per-target scalar map (the
+            196-matrix arrays behind each median) to
+            ``<out_dir>/stepA_fires_targets.jsonl``. Scalars only — a few tens
+            of KB per fire, not a tensor dump. Default true.
+    """
+
+    geometry_enabled: bool = False
+    out_dir: str = ""
+    rank0_only: bool = True
+    m4_lags: int = 5
+    per_target_sidecar: bool = True
+
+
+@dataclass
 class CommEffConfig(BaseConfig):
     """Top-level config for the communication-efficient compression method.
 
@@ -574,6 +636,9 @@ class CommEffConfig(BaseConfig):
     # EXP-26 Step A diagnostic tensor capture. OFF by default ⇒ no numerical side
     # effect (byte-identical to the EXP-25 substrate).
     capture: CommEffCaptureConfig = field(default_factory=CommEffCaptureConfig)
+    # EXP-30 Step A geometry probe (telemetry-only M-validity discriminator).
+    # OFF by default ⇒ no ring/buffer/backward/I-O (off-path parity).
+    probe: CommEffProbeConfig = field(default_factory=CommEffProbeConfig)
     clean_cadence: int = 0
 
     def __post_init__(self):
@@ -637,10 +702,10 @@ class CommEffConfig(BaseConfig):
         # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")
-        if self.spectral.correction_mode not in ("inject", "blend", "signed_ema", "ef_powersgd"):
+        if self.spectral.correction_mode not in ("none", "inject", "blend", "signed_ema", "ef_powersgd", "delayed_ef"):
             raise ValueError(
                 f"comm_eff.spectral.correction_mode must be one of "
-                f"(inject, blend, signed_ema, ef_powersgd); "
+                f"(none, inject, blend, signed_ema, ef_powersgd, delayed_ef); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if self.spectral.inject_gamma < 0.0:
@@ -669,6 +734,62 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.ef_clip must be >= 0; got {self.spectral.ef_clip}"
             )
+        # EXP-30 B2: the delayed_ef residual weight. >= 0; 0.0 (default) is the
+        # exact-identity limiting case. Validated unconditionally so a typo is
+        # loud even on a non-delayed_ef run that forwards it.
+        if self.spectral.delayed_ef_lambda < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}"
+            )
+        # EXP-30 B2: delayed_ef merges the VALID (generator-consistent) M_rep by
+        # definition — running it on the legacy generator-mismatched feed would
+        # re-test the retired object (the falsified #23/#25/#26/#27 dose-response).
+        # Fail loud at config time, not silently mid-run.
+        if self.spectral.enabled and self.spectral.correction_mode == "delayed_ef":
+            if not (self.anchor.enabled and self.anchor.replay_paired_batch):
+                raise ValueError(
+                    "comm_eff.spectral.correction_mode=delayed_ef requires the EXP-29 "
+                    "generator-consistent anchor feed: comm_eff.anchor.enabled=true AND "
+                    "comm_eff.anchor.replay_paired_batch=true (the valid-M premise; "
+                    f"got enabled={self.anchor.enabled}, replay_paired_batch={self.anchor.replay_paired_batch})."
+                )
+        # EXP-30 Step A: geometry-probe knobs. geometry_enabled is a strict bool
+        # (a YAML "False" string would silently arm a 2nd backward per fire);
+        # rank0_only / per_target_sidecar likewise; m4_lags in [1, 5] (the plan's
+        # ≤6-entry lag-buffer bound).
+        for _bname in ("geometry_enabled", "rank0_only", "per_target_sidecar"):
+            _bval = getattr(self.probe, _bname)
+            if not isinstance(_bval, bool):
+                raise ValueError(
+                    f"comm_eff.probe.{_bname} must be a bool; got {type(_bval).__name__} ({_bval!r})"
+                )
+        if not 1 <= self.probe.m4_lags <= 5:
+            raise ValueError(
+                f"comm_eff.probe.m4_lags must be in [1, 5] (lag buffer <=6-entry bound); "
+                f"got {self.probe.m4_lags}"
+            )
+        if self.probe.geometry_enabled:
+            # The probe measures the EXP-29 replay substrate — G_anc_rep IS the
+            # paired-replay gradient. Without replay there is nothing valid to
+            # measure (m1 would silently equal m2).
+            if not (self.anchor.enabled and self.anchor.replay_paired_batch):
+                raise ValueError(
+                    "comm_eff.probe.geometry_enabled=true requires comm_eff.anchor.enabled=true "
+                    "AND comm_eff.anchor.replay_paired_batch=true (G_anc_rep is the EXP-29 "
+                    "paired-replay gradient; without replay the probe would measure the retired "
+                    f"generator-mismatched feed). Got enabled={self.anchor.enabled}, "
+                    f"replay_paired_batch={self.anchor.replay_paired_batch}."
+                )
+            # The probe's G_comp must be the RAW codec output — an active merger
+            # would rewrite the live grads before the end-of-batch extraction and
+            # silently corrupt m1/m2/m4/m5. Step A runs correction INERT.
+            if self.spectral.enabled and self.spectral.correction_mode != "none":
+                raise ValueError(
+                    "comm_eff.probe.geometry_enabled=true requires an INERT merger: set "
+                    "comm_eff.spectral.correction_mode=none (Step A measures the raw G_comp; "
+                    f"an active merger would corrupt it). Got correction_mode="
+                    f"{self.spectral.correction_mode!r}."
+                )
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
         if self.clean_cadence < 0:

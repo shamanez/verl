@@ -305,6 +305,205 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         self.assertEqual(config2.comm_eff.powersgd.rank, 102)
 
 
+class TestCommEffExp30Knobs(unittest.TestCase):
+    """EXP-30: geometry-probe + delayed_ef knobs — defaults OFF/legacy, the
+    dataclass<->actor.yaml drift gate, and the cross-field validation rules."""
+
+    def test_defaults_off_legacy(self):
+        """Every EXP-30 knob defaults OFF/legacy (off-path parity)."""
+        from verl.workers.config import CommEffProbeConfig
+
+        cfg = CommEffConfig()
+        self.assertIsInstance(cfg.probe, CommEffProbeConfig)
+        self.assertFalse(cfg.probe.geometry_enabled)
+        self.assertEqual(cfg.probe.out_dir, "")
+        self.assertTrue(cfg.probe.rank0_only)
+        self.assertEqual(cfg.probe.m4_lags, 5)
+        self.assertTrue(cfg.probe.per_target_sidecar)
+        # delayed_ef: λ=0 (the exact-identity limiting case) + legacy mode.
+        self.assertEqual(cfg.spectral.delayed_ef_lambda, 0.0)
+        self.assertEqual(cfg.spectral.correction_mode, "signed_ema")
+
+    def test_correction_mode_enum_extended(self):
+        """'none' and 'delayed_ef' are accepted; typos stay loud."""
+        from verl.workers.config import CommEffAnchorConfig, CommEffSpectralConfig
+
+        for ok in ("none", "inject", "blend", "signed_ema", "ef_powersgd"):
+            cfg = CommEffConfig(spectral=CommEffSpectralConfig(correction_mode=ok))
+            self.assertEqual(cfg.spectral.correction_mode, ok)
+        # delayed_ef requires the valid-M premise (replay) when spectral is on.
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=True),
+            spectral=CommEffSpectralConfig(enabled=True, correction_mode="delayed_ef"),
+        )
+        self.assertEqual(cfg.spectral.correction_mode, "delayed_ef")
+        with self.assertRaises(ValueError):
+            CommEffConfig(spectral=CommEffSpectralConfig(correction_mode="delayed_EF"))
+        with self.assertRaises(ValueError):
+            CommEffConfig(spectral=CommEffSpectralConfig(correction_mode="None"))
+
+    def test_delayed_ef_requires_replay(self):
+        """delayed_ef on the legacy (generator-mismatched) feed would re-test the
+        retired object — must fail loud at config time."""
+        from verl.workers.config import CommEffAnchorConfig, CommEffSpectralConfig
+
+        with self.assertRaises(ValueError):
+            CommEffConfig(
+                anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=False),
+                spectral=CommEffSpectralConfig(enabled=True, correction_mode="delayed_ef"),
+            )
+        with self.assertRaises(ValueError):
+            CommEffConfig(
+                anchor=CommEffAnchorConfig(enabled=False, replay_paired_batch=True),
+                spectral=CommEffSpectralConfig(enabled=True, correction_mode="delayed_ef"),
+            )
+
+    def test_delayed_ef_lambda_validated(self):
+        from verl.workers.config import CommEffSpectralConfig
+
+        with self.assertRaises(ValueError):
+            CommEffConfig(spectral=CommEffSpectralConfig(delayed_ef_lambda=-0.1))
+
+    def test_probe_requires_replay_and_inert_merger(self):
+        """The Step-A posture is validated as a unit: probe needs the EXP-29
+        replay substrate AND an inert merger (correction_mode=none)."""
+        from verl.workers.config import (
+            CommEffAnchorConfig,
+            CommEffProbeConfig,
+            CommEffSpectralConfig,
+        )
+
+        # The sanctioned Step-A shape parses.
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=True, snapshot_device="cpu"),
+            spectral=CommEffSpectralConfig(enabled=True, correction_mode="none", beta_anc=0.0),
+            probe=CommEffProbeConfig(geometry_enabled=True, out_dir="/tmp/probe"),
+        )
+        self.assertTrue(cfg.probe.geometry_enabled)
+        # No replay ⇒ loud.
+        with self.assertRaises(ValueError):
+            CommEffConfig(
+                anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=False),
+                spectral=CommEffSpectralConfig(enabled=True, correction_mode="none"),
+                probe=CommEffProbeConfig(geometry_enabled=True),
+            )
+        # Anchor off ⇒ loud.
+        with self.assertRaises(ValueError):
+            CommEffConfig(
+                anchor=CommEffAnchorConfig(enabled=False, replay_paired_batch=True),
+                spectral=CommEffSpectralConfig(enabled=True, correction_mode="none"),
+                probe=CommEffProbeConfig(geometry_enabled=True),
+            )
+        # ACTIVE merger under the probe ⇒ loud (G_comp would be corrupted).
+        for live_mode in ("signed_ema", "blend", "ef_powersgd"):
+            with self.assertRaises(ValueError):
+                CommEffConfig(
+                    anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=True),
+                    spectral=CommEffSpectralConfig(enabled=True, correction_mode=live_mode),
+                    probe=CommEffProbeConfig(geometry_enabled=True),
+                )
+        # Spectral fully OFF + probe is fine (no merger to corrupt G_comp).
+        cfg2 = CommEffConfig(
+            anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=True),
+            spectral=CommEffSpectralConfig(enabled=False, correction_mode="signed_ema"),
+            probe=CommEffProbeConfig(geometry_enabled=True),
+        )
+        self.assertTrue(cfg2.probe.geometry_enabled)
+
+    def test_probe_knob_validation(self):
+        from verl.workers.config import CommEffProbeConfig
+
+        # Strict bools (the YAML "False"-string trap).
+        with self.assertRaises(ValueError):
+            CommEffConfig(probe=CommEffProbeConfig(geometry_enabled="False"))
+        with self.assertRaises(ValueError):
+            CommEffConfig(probe=CommEffProbeConfig(rank0_only=1))
+        with self.assertRaises(ValueError):
+            CommEffConfig(probe=CommEffProbeConfig(per_target_sidecar="true"))
+        # m4_lags bounded to [1, 5] (the ≤6-entry lag-buffer plan bound).
+        with self.assertRaises(ValueError):
+            CommEffConfig(probe=CommEffProbeConfig(m4_lags=0))
+        with self.assertRaises(ValueError):
+            CommEffConfig(probe=CommEffProbeConfig(m4_lags=6))
+
+    def test_probe_rejects_unknown_key(self):
+        with self.assertRaises(Exception):
+            omega_conf_to_dataclass(
+                {"probe": {"geometry_enabld": True}}, dataclass_type=CommEffConfig
+            )
+
+    def test_yaml_plain_override_exp30_knobs(self):
+        """The dataclass<->actor.yaml drift gate for EXP-30 (the EXP-29
+        first-launch killer): every new knob composes as a PLAIN override
+        through the actor YAML, and the YAML defaults mirror the dataclass."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.anchor.enabled=true",
+                    "comm_eff.anchor.replay_paired_batch=true",
+                    "comm_eff.anchor.snapshot_device=cpu",
+                    "comm_eff.spectral.enabled=true",
+                    "comm_eff.spectral.correction_mode=none",
+                    "comm_eff.spectral.beta_anc=0.0",
+                    "comm_eff.spectral.delayed_ef_lambda=1.0",
+                    "comm_eff.probe.geometry_enabled=true",
+                    "comm_eff.probe.out_dir=/workspace/runs/EXP-30/metrics",
+                    "comm_eff.probe.rank0_only=true",
+                    "comm_eff.probe.m4_lags=5",
+                    "comm_eff.probe.per_target_sidecar=true",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertTrue(config.comm_eff.probe.geometry_enabled)
+        self.assertEqual(config.comm_eff.probe.out_dir, "/workspace/runs/EXP-30/metrics")
+        self.assertEqual(config.comm_eff.probe.m4_lags, 5)
+        self.assertEqual(config.comm_eff.spectral.correction_mode, "none")
+        self.assertEqual(config.comm_eff.spectral.beta_anc, 0.0)
+        self.assertEqual(config.comm_eff.spectral.delayed_ef_lambda, 1.0)
+        # And the YAML defaults still mirror the dataclass defaults (off path).
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg_default = compose(
+                config_name="dp_actor", overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128"]
+            )
+        config_default = omega_conf_to_dataclass(cfg_default)
+        self.assertFalse(config_default.comm_eff.probe.geometry_enabled)
+        self.assertEqual(config_default.comm_eff.probe.out_dir, "")
+        self.assertTrue(config_default.comm_eff.probe.rank0_only)
+        self.assertEqual(config_default.comm_eff.probe.m4_lags, 5)
+        self.assertTrue(config_default.comm_eff.probe.per_target_sidecar)
+        self.assertEqual(config_default.comm_eff.spectral.delayed_ef_lambda, 0.0)
+        self.assertEqual(config_default.comm_eff.spectral.correction_mode, "signed_ema")
+
+    def test_yaml_delayed_ef_b2_shape_composes(self):
+        """The (gated) B2 cell's exact override set composes — pre-validated now
+        so a future GATE-B2-open dispatch cannot die in Hydra."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.anchor.enabled=true",
+                    "comm_eff.anchor.replay_paired_batch=true",
+                    "comm_eff.spectral.enabled=true",
+                    "comm_eff.spectral.correction_mode=delayed_ef",
+                    "comm_eff.spectral.delayed_ef_lambda=1.0",
+                    "comm_eff.spectral.beta_anc=0.0",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertEqual(config.comm_eff.spectral.correction_mode, "delayed_ef")
+        self.assertEqual(config.comm_eff.spectral.delayed_ef_lambda, 1.0)
+        self.assertEqual(config.comm_eff.spectral.beta_anc, 0.0)
+
+
 class TestCommEffStateInert(unittest.TestCase):
     """The disabled state must be a strict no-op (the parity-check invariant)."""
 

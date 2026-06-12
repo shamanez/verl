@@ -51,6 +51,7 @@ with no distributed runtime.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import torch
 
@@ -113,21 +114,30 @@ class SpectralFilter:
         signed_ema_alpha: float = 0.0,
         ef_decay: float = 0.0,
         ef_clip: float = 0.0,
+        delayed_ef_lambda: float = 0.0,
     ):
         self.beta_anc = float(beta_anc)
         # Storage layer default: gpu. Validation happens in
         # CommEffConfig.__post_init__ so by the time the
         # filter is built the values are known-good — assert defensively anyway.
         assert ema_device in ("gpu", "cpu"), ema_device
-        self.ema_device = str(ema_device)
         # Correction mode (the anchor combiner the fast-path grad uses):
+        # "none" (EXP-30 Step A) = INERT — the M EMA is still maintained
+        # (β_anc=0 ⇒ M_rep = latest paired G_anc_rep) but NO correction is ever
+        # applied or written back; the optimizer consumes the raw G_comp;
         # "inject" = additive injection of the scale-matched anchor complement;
         # "blend" = convex blend toward the scale-matched anchor;
         # "signed_ema" (EXP-25/R3) = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M);
         # "ef_powersgd" (EXP-26 Step B) = direction-preserving error-feedback,
-        # G_corr = G_comp + clipped-residual, NO sign term.
+        # G_corr = G_comp + clipped-residual, NO sign term;
+        # "delayed_ef" (EXP-30 B2) = K-delayed exact codec residual,
+        # G_corr = G_comp + lambda*(M_rep - G_comp_ring(t-K)), delta refreshed at
+        # anchor fires and HELD between them.
         # Validated in CommEffConfig.__post_init__; assert defensively here too.
-        assert correction_mode in ("inject", "blend", "signed_ema", "ef_powersgd"), correction_mode
+        self.ema_device = str(ema_device)
+        assert correction_mode in ("none", "inject", "blend", "signed_ema", "ef_powersgd", "delayed_ef"), (
+            correction_mode
+        )
         self.correction_mode = str(correction_mode)
         self.inject_gamma = float(inject_gamma)
         self.blend_eta = float(blend_eta)
@@ -137,6 +147,20 @@ class SpectralFilter:
         # reduces to plain PowerSGD (G_corr == G_comp) — the limiting-case identity.
         self.ef_decay = float(ef_decay)
         self.ef_clip = float(ef_clip)
+        # EXP-30 B2: the delayed_ef residual weight λ. 0.0 (default, OFF/legacy
+        # posture) ⇒ delayed_ef_matrix returns G_comp EXACTLY (the limiting-case
+        # identity invariant); the B2 cell sets λ=1.0 explicitly.
+        self.delayed_ef_lambda = float(delayed_ef_lambda)
+        # EXP-30 B2: per-target HELD residual δ (detached fp32, EMA-storage
+        # device). Refreshed when a fire-aligned ring entry exists (the anchor
+        # just refreshed M_rep AND G_comp_ring(t−K) is the exact pair), HELD on
+        # the in-between ticks, shape-keyed reset. β_anc=0 keeps zero EMA memory
+        # in M itself; the hold is the cadence-window transport, not a carrier.
+        self._delayed_ef_delta: dict[str, torch.Tensor] = {}
+        # Per-step counters (reset by the engine loop): how many targets
+        # REFRESHED δ this step vs reused the held one vs fell back cold.
+        self.delayed_ef_refreshed = 0
+        self.delayed_ef_held = 0
         # EXP-25 (R3): per-step count of matrices whose M was cold (||M||<=eps) so
         # the merger no-op'd to G_noisy (the silent grad-zeroing guard). Reset by
         # the engine each grad-correction step before the loop.
@@ -409,6 +433,86 @@ class SpectralFilter:
         g_corr = gm + e_t
         return g_corr.to(g_mask.dtype)
 
+    def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor, ring_grad: Optional[torch.Tensor] = None):
+        """EXP-30 B2: K-delayed EXACT codec residual (the anchor-feasible EF analogue).
+
+        ::
+
+            δ(t)      = M_rep(t) − G_comp_ring(t−K)     # codec error on IDENTICAL (batch, θ)
+            G_corr(t) = G_comp(t) + λ·δ                  # δ refreshed at fires, HELD between
+
+        ``M_rep`` is the anchor EMA at ``β_anc=0`` — exactly the latest fire's
+        generator-consistent ``G_anc_rep`` (the EXP-29 paired replay gradient).
+        ``ring_grad`` is the fast COMPRESSED gradient stored at tick ``t−K`` by
+        the fire-aware :class:`~verl.workers.comm_eff.state.FastGradRing` — the
+        SAME (batch, θ) pair the anchor just replayed, so δ is the codec's
+        weight-gradient error, not a batch effect. When ``ring_grad`` is given
+        (a fire-aligned tick) δ is REFRESHED and persisted; on the in-between
+        ticks the HELD δ is re-applied (the telescoping
+        ``Σ_t G_corr ≈ Σ_t G_full(t−K) + drift`` needs the per-tick injection).
+
+        **Limiting-case identity (Correctness invariant).** ``λ == 0`` returns
+        ``g_comp`` EXACTLY (the same tensor object — bitwise; no fp32 round
+        trip), so ``delayed_ef`` at λ=0 is plain PowerSGD.
+
+        **Scale contract (the #25 mean-vs-sum trap).** ``M_rep`` is fed from the
+        DP-MEAN-reduced anchor gradient and ``ring_grad`` from the FSDP-mean
+        fast gradient under the same ``agg_loss`` normalization; this method
+        applies no rescaling, so δ is well-scaled iff both feeds honor that —
+        pinned by the scale-consistency unit test.
+
+        Cold guards (never a silent grad change): unwarmed M, a missing/
+        mismatched ring entry with no held δ, or a shape change ⇒ return
+        ``g_comp`` unchanged and count ``merger_coldM_fallbacks``; a shape
+        change also drops the stale held δ.
+        """
+        lam = float(self.delayed_ef_lambda)
+        if lam == 0.0:
+            return g_comp  # EXACT identity — the λ=0 limiting case (bitwise).
+        name = _canon(name)
+        self.ensure_anchor(name, g_comp)
+        anc = self.anchor_on(name, g_comp.device).to(torch.float32)
+        gm = g_comp.to(torch.float32)
+        eps = 1e-12
+
+        # Shape-aware held-δ carry: a logical-shape change drops the stale δ
+        # (counted) BEFORE any other guard — no cross-shape leak, ever.
+        held = self._delayed_ef_delta.get(name)
+        if held is not None and tuple(held.shape) != tuple(gm.shape):
+            held = None
+            self._delayed_ef_delta.pop(name, None)
+            self.residual_reset_on_shape_mismatch += 1
+
+        anc_norm = torch.linalg.norm(anc)
+        if anc_norm <= eps or tuple(anc.shape) != tuple(gm.shape):
+            # COLD M (or a stored M whose logical shape no longer matches the
+            # target) → G_comp unchanged; drop any held δ so a later warm step
+            # starts clean.
+            self.merger_coldM_fallbacks += 1
+            self._delayed_ef_delta.pop(name, None)
+            return g_comp
+
+        if ring_grad is not None and tuple(ring_grad.shape) == tuple(gm.shape):
+            # Fire-aligned tick: REFRESH δ from the exact (batch, θ) pair.
+            rg = ring_grad.detach().to(g_comp.device, torch.float32)
+            delta = (anc - rg).detach()
+            store_dev = self._ema_storage_device(g_comp.device)
+            stored = delta.to(store_dev)
+            if store_dev.type == "cpu" and g_comp.device.type == "cuda":
+                stored = stored.pin_memory()
+            self._delayed_ef_delta[name] = stored
+            self.delayed_ef_refreshed += 1
+        elif held is not None:
+            delta = held.to(g_comp.device, torch.float32)
+            self.delayed_ef_held += 1
+        else:
+            # No exact pair yet (pre-first-fire warmup) → no-op, never invent δ.
+            self.merger_coldM_fallbacks += 1
+            return g_comp
+
+        g_corr = gm + lam * delta
+        return g_corr.to(g_comp.dtype)
+
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
 
@@ -458,6 +562,14 @@ def apply_spectral_correction_to_params(
 
     Returns the number of matrices corrected.
     """
+    # EXP-30 Step A: correction_mode="none" is INERT by contract — no per-target
+    # walk, no writeback, no counter bump; the optimizer consumes the raw
+    # gradients untouched. (The engine hook also early-returns before the FSDP
+    # summon for this mode; handling it here keeps the CPU-testable core safe
+    # for any direct caller.)
+    if getattr(spectral, "correction_mode", "signed_ema") == "none":
+        return 0
+
     instrumented = bool(state.fsdp_grad_repr)  # log discovery only once
     corrected = 0
     # EXP-25 (R3): reset the per-step cold-M fallback counter before the loop so
@@ -468,6 +580,31 @@ def apply_spectral_correction_to_params(
     # EXP-26 Step B: reset the per-step ef_powersgd residual-reset counter so the
     # [comm_eff][merger] line + metrics report THIS step's shape-mismatch resets.
     spectral.residual_reset_on_shape_mismatch = 0
+    # EXP-30 B2: per-step delayed_ef refresh/hold counters + the fire-aware ring
+    # context, resolved ONCE before the loop. The ring lives on the state (built
+    # by CommEffState.build when correction_mode=delayed_ef); the current tick is
+    # the anchor's per-train_batch counter (the cadence/staleness clock). The
+    # exact ``t − delay_K`` entry exists only on fire-aligned ticks — those are
+    # the δ-refresh ticks; in between, delayed_ef_matrix re-applies the held δ.
+    # The loop also COLLECTS this tick's RAW pre-correction G_comp for the ring
+    # when the tick is retained, and pushes AFTER the walk (a same-tick get can
+    # never see its own push).
+    spectral.delayed_ef_refreshed = 0
+    spectral.delayed_ef_held = 0
+    _ring = None
+    _ring_entry_grads = None
+    _ring_push: dict = {}
+    _ring_push_norms: dict = {}
+    _tick = 0
+    _delay_K = 0
+    if getattr(spectral, "correction_mode", "signed_ema") == "delayed_ef":
+        _ring = getattr(state, "fast_grad_ring", None)
+        _tick = int(getattr(state, "anchor_step", 0) or 0)
+        if _ring is not None:
+            _anc_cfg = getattr(getattr(state, "config", None), "anchor", None)
+            _delay_K = int(getattr(_anc_cfg, "delay_K", _ring.delay_K)) if _anc_cfg is not None else _ring.delay_K
+            _entry = _ring.get(_tick - _delay_K)
+            _ring_entry_grads = _entry[0] if _entry is not None else None
     # EXP-26 Step A: optional capture writer + the UNIFIED (gs, tick) key, threaded
     # from the engine. None ⇒ no dump (the byte-identical path). The optimizer tick
     # is state.capture_tick() — the SINGLE per-train_batch tick stamped at the start
@@ -518,10 +655,24 @@ def apply_spectral_correction_to_params(
             g_proj = spectral.signed_ema_matrix(name, full)
         elif _mode == "ef_powersgd":
             g_proj = spectral.ef_powersgd_matrix(name, full)
+        elif _mode == "delayed_ef":
+            # EXP-30 B2: collect this tick's RAW pre-correction G_comp for the
+            # fire-aware ring BEFORE correcting (the ring must hold the codec's
+            # output, never the merged gradient), then apply the K-delayed
+            # residual. CPU fp32 storage — the zero-GPU-growth invariant.
+            if _ring is not None and _ring.tick_retained(_tick):
+                # copy=True is LOAD-BEARING: on an already-CPU/fp32 grad,
+                # .to("cpu", fp32) is a no-op alias and the in-place writeback
+                # below would silently mutate the stored ring entry.
+                _raw = full.detach().to(device="cpu", dtype=torch.float32, copy=True)
+                _ring_push[_canon(name)] = _raw
+                _ring_push_norms[_canon(name)] = float(torch.linalg.norm(_raw).item())
+            _rg = _ring_entry_grads.get(_canon(name)) if _ring_entry_grads is not None else None
+            g_proj = spectral.delayed_ef_matrix(name, full, ring_grad=_rg)
         else:
             raise ValueError(
                 f"comm_eff spectral correction_mode={_mode!r} is not supported; "
-                "expected one of (inject, blend, signed_ema, ef_powersgd)"
+                "expected one of (none, inject, blend, signed_ema, ef_powersgd, delayed_ef)"
             )
         # EXP-26 Step A: dump G_corr (post-merger, pre-Adam — what the optimizer
         # will consume after writeback), detached/fp32.
@@ -576,6 +727,43 @@ def apply_spectral_correction_to_params(
             f"ef_clip={spectral.ef_clip} corrected={corrected} merger_coldM_fallbacks={cold} "
             f"residual_reset_on_shape_mismatch={resets} "
             f"(ef_decay==ef_clip==0 ⇒ G_corr==G_comp, the plain-PowerSGD limiting case)",
+            flush=True,
+        )
+    elif _mode == "delayed_ef":
+        # EXP-30 B2: push this tick's collected RAW G_comp into the fire-aware
+        # ring (post-walk, so the same-tick get never saw it), then surface the
+        # per-step refresh/hold/fallback counts + the per-fire B2 tier-1 scalar
+        # ||δ||/||G_comp_ring|| (median over refreshed targets) so the analyst
+        # can grep "bounded, batch-refreshed, no monotone climb".
+        if _ring is not None and _ring_push:
+            _ring.push(_tick, _ring_push, _ring_push_norms)
+        if _ring is not None and _ring_entry_grads is not None:
+            _ring.pop(_tick - _delay_K)  # consumed entry — fires advance, never re-requested
+        cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
+        refreshed = int(getattr(spectral, "delayed_ef_refreshed", 0))
+        held = int(getattr(spectral, "delayed_ef_held", 0))
+        if hasattr(state, "merger_coldM_fallbacks"):
+            state.merger_coldM_fallbacks = cold
+        _ratio_line = ""
+        if refreshed and _ring_entry_grads is not None:
+            import statistics as _st
+
+            _ratios = []
+            for _n, _d in spectral._delayed_ef_delta.items():
+                _g = _ring_entry_grads.get(_n)
+                if _g is None:
+                    continue
+                _gn = float(torch.linalg.norm(_g.to(torch.float32)).item())
+                if _gn > 1e-12:
+                    _ratios.append(float(torch.linalg.norm(_d.to(torch.float32)).item()) / _gn)
+            if _ratios:
+                _ratio_line = f" delta_ratio_median={_st.median(_ratios):.6f}"
+        print(
+            f"[comm_eff][EXP-30][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
+            f"corrected={corrected} refreshed={refreshed} held={held} "
+            f"merger_coldM_fallbacks={cold} ring_entries={len(_ring) if _ring is not None else 0}"
+            f"{_ratio_line} "
+            f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between)",
             flush=True,
         )
 
