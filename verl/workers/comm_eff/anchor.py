@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "AnchorStalenessQueue",
+    "AnchorReplayRing",
     "snapshot_named_params",
     "extract_target_grads",
     "feed_anchor_grads_into_ema",
@@ -79,6 +80,11 @@ __all__ = [
     "build_anchor_module",
     "assert_anchor_module_isolated",
     "capture_anchor_tensors",
+    "clone_batch_for_replay",
+    "maybe_build_replay_ring",
+    "replay_relevance_stats",
+    "snapshot_canary",
+    "verify_canary_on_module",
 ]
 
 
@@ -256,6 +262,290 @@ class AnchorStalenessQueue:
     @property
     def steps(self) -> list:
         return list(self._snapshots.keys())
+
+
+def _clone_tensor_for_replay(t: torch.Tensor, device=None) -> torch.Tensor:
+    """Detached deep clone of one batch leaf, NJT (jagged) safe.
+
+    The fast clone path is ``detach().clone()`` (the production NJT hot path).
+    If a torch version mishandles clone/device-move on a jagged leaf, fall back
+    to decomposing ``(values, offsets, _ragged_idx)`` and rebuilding via
+    ``torch.nested.nested_tensor_from_jagged`` — the same API
+    ``verl.utils.tensordict_utils.nested_tensor_from_tensor_list`` uses.
+    """
+    if getattr(t, "is_nested", False):
+        try:
+            out = t.detach().clone()
+            if device is not None:
+                out = out.to(device)
+            return out
+        except Exception:
+            values = t.values().detach().clone()
+            offsets = t.offsets().detach().clone()
+            if device is not None:
+                values = values.to(device)
+                offsets = offsets.to(device)
+            nt = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
+            try:
+                nt._ragged_idx = t._ragged_idx
+            except AttributeError:
+                pass
+            return nt
+    out = t.detach().clone()
+    if device is not None:
+        out = out.to(device)
+    return out
+
+
+def clone_batch_for_replay(data, device=None):
+    """Deep clone of a train_batch TensorDict for the anchor replay ring.
+
+    A deep clone at STORE time is required: ``_forward_backward_batch_inner``
+    mutates the live batch in place (``tu.assign_non_tensor``), and the masked
+    fast path consumes the same TensorDict right after the anchor hook. The
+    clone (a) shallow-copies the key->value mapping (so later key assignment on
+    the live batch never touches the stored copy) and (b) deep-clones every
+    tensor leaf, detached, optionally moved to ``device`` (``"cpu"`` keeps the
+    ring off HBM). Non-tensor entries ride along by reference — they are
+    replaced (not mutated) by ``assign_non_tensor``, so the mapping copy
+    isolates them.
+    """
+    out = data.copy() if hasattr(data, "copy") else copy.copy(data)
+    for key in list(out.keys()):
+        val = out.get(key)
+        if isinstance(val, torch.Tensor):
+            out[key] = _clone_tensor_for_replay(val, device=device)
+    return out
+
+
+def snapshot_canary(snapshot: dict, target_substrs=None, n: int = 2) -> dict:
+    """Record fp32-on-CPU ``(norm, sum)`` fingerprints of ``n`` canary matrices.
+
+    Deterministic target choice: the first and last sorted 2D names matching
+    ``target_substrs`` (falling back to all keys if none match). Both record
+    and verify cast ``bf16 -> cpu -> fp32`` (an exact widening) and reduce on
+    CPU, so an unchanged byte payload reproduces the values BITWISE — the
+    value-level staleness check for the CPU-resident snapshot ring.
+    """
+    names = sorted(
+        k
+        for k, v in snapshot.items()
+        if getattr(v, "dim", None) is not None
+        and v.dim() == 2
+        and (target_substrs is None or any(s in k for s in target_substrs))
+    )
+    if not names:
+        names = sorted(snapshot.keys())
+    picked = [names[0]]
+    if len(names) > 1 and n > 1:
+        picked.append(names[-1])
+    out = {}
+    for name in picked:
+        t = snapshot[name].detach().to("cpu", torch.float32)
+        out[name] = (float(torch.linalg.norm(t).item()), float(t.sum().item()))
+    return out
+
+
+def verify_canary_on_module(module: torch.nn.Module, canary: dict, canon: Optional[Callable] = None):
+    """Recompute the canary off ``module``'s params; bitwise-match the record.
+
+    Returns ``(ok, results)`` where ``results`` maps each canary name to the
+    recomputed ``(norm, sum)`` (or ``(None, None)`` if the param is missing).
+    The caller hard-asserts ``ok`` — a mismatch means the clone did NOT receive
+    the recorded historical weights (storage corruption, a lossy device round
+    trip, or a load that silently skipped the param).
+    """
+    canon = canon or (lambda s: s)
+    params = {canon(p_name): p for p_name, p in module.named_parameters()}
+    results = {}
+    ok = True
+    for name, (ref_norm, ref_sum) in canary.items():
+        p = params.get(canon(name))
+        if p is None:
+            results[name] = (None, None)
+            ok = False
+            continue
+        t = p.detach().to("cpu", torch.float32)
+        got = (float(torch.linalg.norm(t).item()), float(t.sum().item()))
+        results[name] = got
+        if got != (float(ref_norm), float(ref_sum)):
+            ok = False
+    return ok, results
+
+
+class AnchorReplayRing:
+    """Paired ``(batch, generator-weights)`` replay ring for the anchor refresh.
+
+    EXP-29: the anchor's stale weights must be paired with the trajectories
+    those SAME weights generated. A snapshot taken at the FIRST ``train_batch``
+    tick of global step ``G`` (before any optimizer tick of ``G``) is exactly
+    the weights vLLM held when it generated step ``G``'s rollouts; per-tick
+    batch clones then give exact ``(batch[t-K], gen_snapshot)`` pairs, warmup
+    included. Data staleness is ``delay_K`` ticks post-warmup; realized WEIGHT
+    staleness alternates ``K``/``K+1`` ticks by construction (the snapshot sits
+    at the first tick of the batch's global step) and is reported so the engine
+    can log it.
+
+    **Fire-aware retention (operator requirement — bounded as a function of
+    cadence x staleness).** The anchor only FIRES on ticks ``t ≡ 0 (mod
+    cadence)`` and a fire at ``t`` only ever consumes tick ``t − delay_K``, so
+    the ONLY ticks worth storing satisfy ``tick ≡ (−delay_K) mod cadence``
+    (:meth:`tick_retained`). Everything else is rejected at push time — the
+    engine also skips the deep clone for those ticks. Bounds, asserted on every
+    push so a regression blows up loudly instead of leaking RAM:
+
+      * batches:   ``delay_K // cadence + 1`` entries (== ``delay_K + 1`` at
+        cadence=1; 2 at the locked cadence=5/delay_K=5);
+      * snapshots: one per global step still referenced by a retained batch,
+        plus the current (newest) gs awaiting its batches — ``maxlen + 1``.
+
+    Holds ``tick -> (batch_clone, gs)`` and ``gs -> (snapshot, canary,
+    push_tick)`` (``push_snapshot`` is idempotent per ``gs``). Pure container —
+    no collectives, no RNG, CPU-testable.
+    """
+
+    def __init__(self, delay_K: int, cadence: int = 1):
+        assert delay_K >= 0, f"delay_K must be >= 0, got {delay_K}"
+        self.delay_K = int(delay_K)
+        self.cadence = max(1, int(cadence))
+        # Fire ticks are multiples of cadence; a fire at t requests t - delay_K,
+        # so only ticks of this residue class can ever be replayed.
+        self._keep_residue = (-self.delay_K) % self.cadence
+        self._maxlen = self.delay_K // self.cadence + 1
+        self._batches: "OrderedDict[int, tuple]" = OrderedDict()
+        self._snapshots: "OrderedDict[int, tuple]" = OrderedDict()
+
+    def tick_retained(self, tick: int) -> bool:
+        """True iff a future anchor fire can ever request ``tick``'s batch.
+
+        The engine consults this BEFORE deep-cloning the batch, so non-replayable
+        ticks cost neither the clone nor ring space.
+        """
+        return (int(tick) % self.cadence) == self._keep_residue
+
+    def has_snapshot(self, gs: int) -> bool:
+        return int(gs) in self._snapshots
+
+    def push_snapshot(self, gs: int, snapshot: dict, canary: Optional[dict] = None, tick: int = -1) -> bool:
+        """Record the generator snapshot for global step ``gs`` (first-tick wins).
+
+        Returns True iff this call stored the snapshot (False = ``gs`` already
+        had one — the caller is on a later tick of the same global step). A new
+        gs beginning also evicts OLDER gs snapshots no retained batch references
+        (their batches can never arrive again — gs is monotonic).
+        """
+        gs = int(gs)
+        if gs in self._snapshots:
+            return False
+        live_gs = {g for (_b, g) in self._batches.values()}
+        for g in [g for g in self._snapshots if g < gs and g not in live_gs]:
+            del self._snapshots[g]
+        self._snapshots[gs] = (snapshot, dict(canary or {}), int(tick))
+        assert len(self._snapshots) <= self._maxlen + 1, (
+            f"AnchorReplayRing snapshot retention blew its bound: "
+            f"{len(self._snapshots)} > maxlen+1={self._maxlen + 1} "
+            f"(delay_K={self.delay_K} cadence={self.cadence}) — eviction regressed."
+        )
+        return True
+
+    def push_batch(self, tick: int, batch, gs: int) -> bool:
+        """Record this tick's deep-cloned batch, paired with its generator gs.
+
+        Returns False (storing nothing) for a tick no future fire can request —
+        the cadence-filtered retention. The caller should pre-check
+        :meth:`tick_retained` to also skip the deep-clone cost.
+        """
+        if not self.tick_retained(tick):
+            return False
+        gs = int(gs)
+        assert gs in self._snapshots, (
+            f"AnchorReplayRing.push_batch(tick={tick}, gs={gs}) before push_snapshot for that gs — "
+            "the generator snapshot must be recorded at the FIRST tick of the global step."
+        )
+        self._batches[int(tick)] = (batch, gs)
+        while len(self._batches) > self._maxlen:
+            self._batches.popitem(last=False)
+        # Evict snapshots no retained batch references (bounded memory). The
+        # newest gs is always kept — later ticks of it may still be retained.
+        live_gs = {g for (_b, g) in self._batches.values()}
+        newest_gs = max(self._snapshots) if self._snapshots else None
+        for g in [g for g in self._snapshots if g not in live_gs and g != newest_gs]:
+            del self._snapshots[g]
+        assert len(self._batches) <= self._maxlen, (
+            f"AnchorReplayRing batch retention blew its bound: {len(self._batches)} > "
+            f"maxlen={self._maxlen} (delay_K={self.delay_K} cadence={self.cadence})."
+        )
+        return True
+
+    def get_replay(self, tick: int, delay_K: Optional[int] = None):
+        """Return ``(used_tick, batch, gs, snapshot, canary, snap_tick, warmup_fallback)``.
+
+        Post-warmup (``tick > delay_K``) the ``tick - delay_K`` batch MUST be
+        retained (push runs every tick; the ring keeps ``delay_K + 1``); during
+        warmup we fall back to the OLDEST retained batch — its pairing with its
+        own generator snapshot stays exact (warmup included). ``None`` only if
+        the ring is empty.
+        """
+        if not self._batches:
+            return None
+        k = self.delay_K if delay_K is None else int(delay_K)
+        req = int(tick) - k
+        if req in self._batches:
+            used, fallback = req, False
+        else:
+            used, fallback = next(iter(self._batches)), True
+        batch, gs = self._batches[used]
+        snapshot, canary, snap_tick = self._snapshots[gs]
+        return used, batch, gs, snapshot, canary, snap_tick, fallback
+
+    def __len__(self) -> int:
+        return len(self._batches)
+
+    @property
+    def batch_ticks(self) -> list:
+        return list(self._batches.keys())
+
+    @property
+    def snapshot_steps(self) -> list:
+        return list(self._snapshots.keys())
+
+
+def replay_relevance_stats(log_probs: torch.Tensor, ref_log_probs: torch.Tensor, response_mask: torch.Tensor):
+    """Masked ``(sum, count)`` of ``|logπ_loaded − logπ_reference|`` over response tokens.
+
+    EXP-29 relevance probe: the replayed batch STORES the log-probs its
+    trajectories were generated/scored with (``rollout_log_probs`` from vLLM at
+    the generator weights; ``old_log_probs`` from the recompute at the same
+    weights). The anchor's clean forward at the LOADED snapshot weights
+    re-scores the same tokens — if the loaded weights are truly the batch's
+    generator, the masked mean abs diff sits at the engine-noise floor and
+    stays FLAT across fires; a broken pairing drifts with policy updates and
+    GROWS. Pure detached arithmetic — fp32, no grad, no collective; the caller
+    aggregates the (sum, count) pairs across micro-batches.
+    """
+    mask = response_mask.to(torch.bool)
+    diff = (log_probs.detach().to(torch.float32) - ref_log_probs.detach().to(torch.float32)).abs()
+    sel = diff[mask]
+    return float(sel.sum().item()), int(mask.sum().item())
+
+
+def maybe_build_replay_ring(state, anchor_cfg, delay_K: int, cadence: int = 1) -> Optional[AnchorReplayRing]:
+    """Build (once, on the state) and return the replay ring iff
+    ``anchor.replay_paired_batch`` is true; return ``None`` otherwise.
+
+    ``cadence`` is the anchor fire cadence — it keys the ring's fire-aware
+    retention (only ticks a future fire can request are stored). The OFF path
+    constructs NOTHING (no ring, no buffers) — the flag-OFF parity invariant,
+    CPU-testable: ``maybe_build_replay_ring(state, cfg_off, K) is None`` and
+    leaves no ``_anchor_replay_ring`` attribute behind.
+    """
+    if not bool(getattr(anchor_cfg, "replay_paired_batch", False)):
+        return None
+    ring = getattr(state, "_anchor_replay_ring", None)
+    if ring is None:
+        ring = AnchorReplayRing(delay_K=delay_K, cadence=cadence)
+        setattr(state, "_anchor_replay_ring", ring)
+    return ring
 
 
 def snapshot_named_params(

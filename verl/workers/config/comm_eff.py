@@ -125,12 +125,31 @@ class CommEffAnchorConfig(BaseConfig):
             the gradient-EMA ``M`` to every DP rank each refresh. ``false``
             (default) keeps the EXP-20 fast-owns-Q behaviour byte-identical
             (Prime Directive). Gated by ``anchor.enabled`` + the powersgd codec.
+        replay_paired_batch (bool): EXP-29 on-policy replay. When ``true`` the
+            anchor pairs its ``delay_K``-stale weights with the BATCH those same
+            weights generated: every ``train_batch`` tick deep-clones the batch
+            into a ring (CPU-resident), ONE generator-weight snapshot is taken
+            per global step (at its first tick — exactly the weights vLLM
+            generated that step's rollouts from), and at fire time the anchor
+            replays ``(batch[t-delay_K], gen_snapshot)`` instead of (current
+            batch, t-delay_K weights). ``false`` (default) keeps the legacy
+            behaviour byte-identical: the anchor forwards the CURRENT tick's
+            batch at the stale weights, and no replay ring is constructed.
+        snapshot_device (str): Where the anchor weight snapshots live between
+            ticks — ``"gpu"`` (default, faithful: detached clones stay on each
+            param's device, today's exact behaviour) or ``"cpu"`` (memory-lean:
+            the ``delay_K+1`` full bf16 snapshots move off HBM; the clone load
+            casts back via ``.to(p.device, p.dtype)``, a byte-preserving round
+            trip — numerics-neutral). Applies to BOTH the legacy staleness
+            queue and the EXP-29 replay ring. Validated against {gpu, cpu}.
     """
 
     enabled: bool = False
     cadence: int = 20
     delay_K: int = 20
     owns_q: bool = False
+    replay_paired_batch: bool = False
+    snapshot_device: str = "gpu"
 
 
 @dataclass
@@ -599,6 +618,22 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
         if self.anchor.delay_K < 0:
             raise ValueError(f"comm_eff.anchor.delay_K must be >= 0; got {self.anchor.delay_K}")
+        # EXP-29: on-policy replay flag is a strict bool (a YAML "False" string or
+        # a numeric override must be loud, not a silent truthy surprise that turns
+        # the replay ring on/off by accident — same rationale as mask_recompute).
+        if not isinstance(self.anchor.replay_paired_batch, bool):
+            raise ValueError(
+                f"comm_eff.anchor.replay_paired_batch must be a bool; got "
+                f"{type(self.anchor.replay_paired_batch).__name__} ({self.anchor.replay_paired_batch!r})"
+            )
+        # EXP-29: snapshot storage enum (mirrors spectral.ema_device). "gpu" is
+        # the byte-identical legacy default; "cpu" moves the delay_K+1 full
+        # snapshots off HBM (numerics-neutral byte-preserving round trip).
+        if self.anchor.snapshot_device not in ("gpu", "cpu"):
+            raise ValueError(
+                f"comm_eff.anchor.snapshot_device must be one of (gpu, cpu); "
+                f"got {self.anchor.snapshot_device!r}"
+            )
         # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}")

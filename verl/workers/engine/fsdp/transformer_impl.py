@@ -1234,6 +1234,39 @@ class FSDPEngine(BaseEngine):
             )
         return partial(anchor_pg_loss, config=config)
 
+    def _wrap_anchor_loss_with_replay_relevance(self, anchor_loss_function, acc):
+        """EXP-29 relevance probe: re-score the replayed trajectories with the
+        LOADED snapshot weights and accumulate ``|logπ_loaded − logπ_reference|``
+        against the log-probs STORED WITH the batch (``rollout_log_probs`` —
+        vLLM at the generator weights — preferred; ``old_log_probs`` fallback).
+
+        Detached, fp32, scalar-only, replay-mode-only: rides the anchor forward
+        the pass already runs, so it adds no extra backward, never touches the
+        loss/optimizer/EMA, and the legacy path never constructs it. A probe
+        failure logs a WARN and returns the loss untouched — the diagnostic
+        must never kill the anchor pass.
+        """
+        from verl.workers.comm_eff.anchor import replay_relevance_stats
+        from verl.workers.utils.padding import no_padding_2_padding
+
+        def wrapped(model_output, data, dp_group=None):
+            loss, metrics = anchor_loss_function(model_output=model_output, data=data, dp_group=dp_group)
+            try:
+                keys = set(data.keys())
+                ref_key = "rollout_log_probs" if "rollout_log_probs" in keys else (
+                    "old_log_probs" if "old_log_probs" in keys else None
+                )
+                if ref_key is not None:
+                    lp = no_padding_2_padding(model_output["log_probs"], data)
+                    sel = data.select("response_mask", ref_key).to_padded_tensor()
+                    s, c = replay_relevance_stats(lp, sel[ref_key], sel["response_mask"])
+                    acc.append((ref_key, s, c))
+            except Exception as exc:  # pragma: no cover - diagnostic must never kill the pass
+                print(f"[comm_eff][stale-replay][relevance] WARN probe skipped: {exc!r}", flush=True)
+            return loss, metrics
+
+        return wrapped
+
     def _maybe_comm_eff_anchor_refresh(self, data, loss_function) -> None:
         """FSDP anchor-circuit refresh: unmasked K-stale GRPO-actor-loss
         fwd/bwd -> RAW G_anchor -> spectral anchor EMA, NO optimizer step.
@@ -1297,9 +1330,13 @@ class FSDPEngine(BaseEngine):
             anchor_should_fire,
             assert_anchor_module_isolated,
             build_anchor_module,
+            clone_batch_for_replay,
             extract_target_grads,
             feed_anchor_grads_into_ema,
+            maybe_build_replay_ring,
+            snapshot_canary,
             snapshot_named_params,
+            verify_canary_on_module,
         )
         # Canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
         # anchor clone matches the live module's per-layer-wrapped snapshot keys.
@@ -1321,13 +1358,25 @@ class FSDPEngine(BaseEngine):
         if getattr(state, "_capture_writer", None) is not None and hasattr(state, "current_optimizer_tick"):
             object.__setattr__(state, "_capture_tick", state.current_optimizer_tick())
 
+        # EXP-29: on-policy replay mode + snapshot storage device. Both default
+        # to the legacy behaviour (replay off, snapshots on-device) so the OFF
+        # path is byte-identical. snapshot_device=cpu moves the delay_K+1 full
+        # bf16 snapshots off HBM in BOTH modes (numerics-neutral: the clone load
+        # casts back via .to(p.device, p.dtype), a byte-preserving round trip).
+        replay_mode = bool(getattr(anchor_cfg, "replay_paired_batch", False))
+        _snap_device_str = str(getattr(anchor_cfg, "snapshot_device", "gpu"))
+        _snap_dev = torch.device("cpu") if _snap_device_str == "cpu" else None
+
         # Lazily build the staleness queue on the state (survives across steps).
         # CommEffState is a plain class with a __dict__, so a direct setattr is
-        # correct; it is the single object shared with the worker.
+        # correct; it is the single object shared with the worker. In replay
+        # mode the legacy per-tick queue is never built (the per-global-step
+        # generator ring replaces it — maybe_build_replay_ring below).
         queue = getattr(state, "_anchor_queue", None)
-        if queue is None:
+        if queue is None and not replay_mode:
             queue = AnchorStalenessQueue(delay_K=delay_K)
             setattr(state, "_anchor_queue", queue)
+        ring = maybe_build_replay_ring(state, anchor_cfg, delay_K, cadence=cadence)
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
@@ -1366,52 +1415,145 @@ class FSDPEngine(BaseEngine):
                 return FSDP.summon_full_params(self.module, with_grads=True, writeback=True)
             return nullcontext()
 
-        with _summon_ctx():
-            cur_snapshot = snapshot_named_params(
-                _inner_named_params(), target_substrs=None, device=None, detach=True
-            )
-        queue.push(step, cur_snapshot)
+        if replay_mode:
+            # EXP-29: ONE generator snapshot per GLOBAL STEP, taken at its first
+            # train_batch tick (before any optimizer tick of this global step) —
+            # exactly the weights vLLM held when it generated this step's
+            # rollouts. The gs boundary is detected as "the ring has no snapshot
+            # for this gs yet" (engine_workers stamps _comm_eff_global_step
+            # before the mini-batch loop, so every tick of a global step sees
+            # the same gs). The push-time canary (fp32-on-CPU norm+sum of 2
+            # target matrices) is verified BITWISE off the clone at fire time.
+            _gs_now = int(getattr(self, "_comm_eff_global_step", 0))
+            if not ring.has_snapshot(_gs_now):
+                with _summon_ctx():
+                    gen_snapshot = snapshot_named_params(
+                        _inner_named_params(), target_substrs=None, device=_snap_dev, detach=True
+                    )
+                _push_canary = snapshot_canary(gen_snapshot, target_substrs=target_substrs)
+                ring.push_snapshot(_gs_now, gen_snapshot, canary=_push_canary, tick=step)
+                print(
+                    f"[comm_eff][stale-replay] snapshot_push gs={_gs_now} tick={step} "
+                    f"device={_snap_device_str} snapshots_retained={len(ring.snapshot_steps)} "
+                    f"canary_targets={sorted(_push_canary.keys())}",
+                    flush=True,
+                )
+            # Deep-clone THIS tick's batch into the ring (CPU — ~0 HBM; the
+            # batch TensorDict is already CPU-resident at train_batch time).
+            # Deep clone at store time is REQUIRED: _forward_backward_batch_inner
+            # mutates the live batch in place right after this hook returns.
+            # Fire-aware retention: only ticks a future fire can request
+            # (tick ≡ −delay_K mod cadence) are cloned + stored at all.
+            if ring.tick_retained(step):
+                ring.push_batch(step, clone_batch_for_replay(data, device=torch.device("cpu")), _gs_now)
+        else:
+            with _summon_ctx():
+                cur_snapshot = snapshot_named_params(
+                    _inner_named_params(), target_substrs=None, device=_snap_dev, detach=True
+                )
+            queue.push(step, cur_snapshot)
+            # Legacy mode with CPU-resident snapshots: record the push-time
+            # canary so the fire-time load is value-verified (bounded dict,
+            # same retention as the queue). The default gpu path records
+            # nothing — byte-identical to today.
+            if _snap_dev is not None:
+                from collections import OrderedDict as _ODict
+
+                _canaries = getattr(state, "_anchor_canary_by_tick", None)
+                if _canaries is None:
+                    _canaries = _ODict()
+                    setattr(state, "_anchor_canary_by_tick", _canaries)
+                _canaries[step] = snapshot_canary(cur_snapshot, target_substrs=target_substrs)
+                while len(_canaries) > delay_K + 1:
+                    _canaries.popitem(last=False)
 
         if not anchor_should_fire(step, cadence, True):
             return
 
-        # --- fetch the t-K stale snapshot to forward from ----------------------
-        stale = queue.get_stale(step, delay_K)
-        if stale is None:  # pragma: no cover - queue always has >=1 after push
-            return
-
-        # EXP-25 (point 3): log the ACTUAL stale snapshot step used + realized delay.
-        # get_stale() falls back to the OLDEST retained snapshot while warming up
-        # (step < delay_K — the t-delay_K snapshot has not been taken yet), so the
-        # first refresh can be near-current; that is finite/expected. Post-warmup
-        # (step >= delay_K) push-runs-every-step + queue maxlen=delay_K+1 guarantee
-        # t-delay_K is still retained, so the realized delay MUST equal delay_K —
-        # hard-assert it so a silently-too-fresh anchor cannot pass unnoticed. (This
-        # mirrors get_stale's own fallback logic via the public .steps property.)
-        _req_step = int(step) - int(delay_K)
-        _avail_steps = queue.steps
-        _used_step = _req_step if _req_step in _avail_steps else (_avail_steps[0] if _avail_steps else int(step))
-        _realized_delay = int(step) - _used_step
-        print(
-            f"[comm_eff][EXP-25][stale] step={step} delay_K={delay_K} requested_step={_req_step} "
-            f"used_step={_used_step} realized_delay={_realized_delay} "
-            f"warmup_fallback={_used_step != _req_step}",
-            flush=True,
-        )
-        # 1-based steps (no step 0): the t-delay_K snapshot only becomes available
-        # at step == delay_K + 1 (at step == delay_K the request is step 0, which
-        # never existed). So the post-warmup guarantee holds for step > delay_K,
-        # NOT step >= delay_K — the latter hard-asserts one step too early and
-        # crashes the FIRST eligible step (delay_K=1 -> step 1; delay_K=5 -> step
-        # 5). (EXP-25 id-0 hotfix.)
-        if int(step) > int(delay_K):
-            assert _used_step == _req_step, (
-                f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
-                f"snapshot step={_req_step} (delay_K={delay_K}) but used step={_used_step} "
-                f"(realized_delay={_realized_delay}). push runs every step + the queue retains "
-                f"delay_K+1 snapshots, so t-delay_K MUST be available once step>=delay_K; a "
-                f"mismatch means the snapshot was evicted or the push cadence changed."
+        # --- fetch the stale (weights, batch) to forward from -------------------
+        _fire_canary = None  # push-time canary to verify off the clone (replay / cpu-snapshot modes)
+        _replay_batch = None
+        if replay_mode:
+            # EXP-29: replay the PAIRED (batch[t-delay_K], generator-snapshot).
+            _rep = ring.get_replay(step, delay_K)
+            if _rep is None:  # pragma: no cover - ring always has >=1 after push
+                return
+            _used_step, _replay_batch, _batch_gs, stale, _fire_canary, _snap_tick, _warm_fb = _rep
+            # By construction the snapshot is fetched under the BATCH's gs key
+            # (push_batch asserts the snapshot exists for that gs), so
+            # batch_gs == snapshot_gs always; the load-bearing runtime checks are
+            # the exact data staleness and the weights-never-fresher-than-K bound.
+            _data_delay = int(step) - int(_used_step)
+            _realized_weight_delay = int(step) - int(_snap_tick)
+            print(
+                f"[comm_eff][stale-replay] step={step} delay_K={delay_K} used_tick={_used_step} "
+                f"batch_gs={_batch_gs} snapshot_gs={_batch_gs} snapshot_tick={_snap_tick} "
+                f"data_delay={_data_delay} realized_step_delay={_realized_weight_delay} "
+                f"warmup_fallback={_warm_fb} "
+                f"ring_batches={len(ring)} ring_snapshots={len(ring.snapshot_steps)}",
+                flush=True,
             )
+            # 1-based ticks: the t-delay_K batch only exists for step > delay_K
+            # (same off-by-one as the legacy queue's EXP-25 id-0 hotfix).
+            if int(step) > int(delay_K):
+                assert (not _warm_fb) and _used_step == int(step) - int(delay_K), (
+                    f"comm_eff stale-replay: post-warmup step={step} must replay the exact "
+                    f"t-delay_K batch (expected tick {int(step) - int(delay_K)}, got {_used_step}, "
+                    f"warmup_fallback={_warm_fb}). push_batch runs every tick + the ring retains "
+                    f"delay_K+1 batches, so the paired batch MUST be available — a mismatch means "
+                    f"eviction broke or the push cadence changed."
+                )
+                # The generator snapshot sits at the FIRST tick of the batch's
+                # global step, so the realized weight staleness is >= delay_K
+                # (K or K+1 on the 2-tick-per-step substrate) — the anchor's
+                # weights are never FRESHER than the contract.
+                assert _realized_weight_delay >= int(delay_K), (
+                    f"comm_eff stale-replay: realized weight staleness {_realized_weight_delay} < "
+                    f"delay_K={delay_K} at step={step} (snapshot_tick={_snap_tick}) — the generator "
+                    f"snapshot is too fresh; the gs-boundary detection mis-keyed the snapshot."
+                )
+            state.anchor_replay_fires += 1
+        else:
+            stale = queue.get_stale(step, delay_K)
+            if stale is None:  # pragma: no cover - queue always has >=1 after push
+                return
+
+            # EXP-25 (point 3): log the ACTUAL stale snapshot step used + realized delay.
+            # get_stale() falls back to the OLDEST retained snapshot while warming up
+            # (step < delay_K — the t-delay_K snapshot has not been taken yet), so the
+            # first refresh can be near-current; that is finite/expected. Post-warmup
+            # (step >= delay_K) push-runs-every-step + queue maxlen=delay_K+1 guarantee
+            # t-delay_K is still retained, so the realized delay MUST equal delay_K —
+            # hard-assert it so a silently-too-fresh anchor cannot pass unnoticed. (This
+            # mirrors get_stale's own fallback logic via the public .steps property.)
+            _req_step = int(step) - int(delay_K)
+            _avail_steps = queue.steps
+            _used_step = _req_step if _req_step in _avail_steps else (_avail_steps[0] if _avail_steps else int(step))
+            _realized_delay = int(step) - _used_step
+            print(
+                f"[comm_eff][EXP-25][stale] step={step} delay_K={delay_K} requested_step={_req_step} "
+                f"used_step={_used_step} realized_delay={_realized_delay} "
+                f"warmup_fallback={_used_step != _req_step}",
+                flush=True,
+            )
+            # 1-based steps (no step 0): the t-delay_K snapshot only becomes available
+            # at step == delay_K + 1 (at step == delay_K the request is step 0, which
+            # never existed). So the post-warmup guarantee holds for step > delay_K,
+            # NOT step >= delay_K — the latter hard-asserts one step too early and
+            # crashes the FIRST eligible step (delay_K=1 -> step 1; delay_K=5 -> step
+            # 5). (EXP-25 id-0 hotfix.)
+            if int(step) > int(delay_K):
+                assert _used_step == _req_step, (
+                    f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
+                    f"snapshot step={_req_step} (delay_K={delay_K}) but used step={_used_step} "
+                    f"(realized_delay={_realized_delay}). push runs every step + the queue retains "
+                    f"delay_K+1 snapshots, so t-delay_K MUST be available once step>=delay_K; a "
+                    f"mismatch means the snapshot was evicted or the push cadence changed."
+                )
+            # CPU-resident legacy snapshots: pull the push-time canary recorded
+            # for the snapshot tick actually used (verified off the clone below).
+            if _snap_dev is not None:
+                _fire_canary = getattr(state, "_anchor_canary_by_tick", {}).get(_used_step)
 
         # Ensure masking is off for the anchor pass and the path
         # tag is NOT "train" (the mask hook requires both to fire). We measure
@@ -1425,10 +1567,20 @@ class FSDPEngine(BaseEngine):
         opt_steps_before = int(getattr(state, "anchor_optimizer_steps", 0))
 
         # Shallow-copy the batch so the anchor fwd/bwd never mutates the
-        # TensorDict the masked fast path reuses immediately after.
-        anchor_data = data.copy() if hasattr(data, "copy") else data
+        # TensorDict the masked fast path reuses immediately after. EXP-29
+        # replay mode consumes the RING's stored t-delay_K batch instead of the
+        # current tick's batch (shallow copy again: the inner loop's in-place
+        # non-tensor stamps must never mutate the stored clone, which a warmup
+        # fallback may replay twice).
+        if replay_mode:
+            anchor_data = _replay_batch.copy() if hasattr(_replay_batch, "copy") else _replay_batch
+        else:
+            anchor_data = data.copy() if hasattr(data, "copy") else data
 
         anchor_grads = {}
+        # EXP-29 relevance-probe accumulator: per-micro-batch (ref_key, sum, count)
+        # of |logπ_loaded − logπ_stored| over response tokens. Replay-mode-only.
+        _relevance_acc = []
         # The anchor's loss.backward() MUST NOT
         # trigger the live FSDP1 module's `_post_backward_hook` (which would
         # call `_check_grad_to_accumulate(flat_param._saved_grad_shard.shape)`
@@ -1512,6 +1664,32 @@ class FSDPEngine(BaseEngine):
                 f"mismatch means the _canon key normalization regressed."
             )
 
+            # EXP-29 value-level staleness canary: the clone must now hold
+            # EXACTLY the historical weights recorded at PUSH time. Both record
+            # and verify reduce in fp32 ON CPU (bf16->cpu->device is a
+            # byte-preserving round trip), so the match is bitwise. Scalar-only
+            # and always-on in replay / cpu-snapshot modes (diagnostics policy:
+            # this is not capture machinery). A mismatch = the loaded clone is
+            # NOT the recorded snapshot — hard fail.
+            if _fire_canary:
+                _can_ok, _can_got = verify_canary_on_module(anchor_module, _fire_canary, canon=_canon)
+                print(
+                    f"[comm_eff][anchor-canary] step={step} match={_can_ok} "
+                    + " ".join(
+                        f"{n}: push(norm={_fire_canary[n][0]!r},sum={_fire_canary[n][1]!r}) "
+                        f"clone(norm={_can_got[n][0]!r},sum={_can_got[n][1]!r})"
+                        for n in sorted(_fire_canary.keys())
+                    ),
+                    flush=True,
+                )
+                assert _can_ok, (
+                    f"comm_eff anchor-canary MISMATCH at step={step}: the clone's loaded weights "
+                    f"differ from the values recorded at snapshot-push time "
+                    f"(push={_fire_canary} clone={_can_got}). The bf16 snapshot round trip must be "
+                    f"byte-preserving — a mismatch means storage corruption, a lossy device cast, "
+                    f"or a mis-keyed snapshot."
+                )
+
             # Swap `self.module` to point at the clone for the duration of
             # _forward_backward_batch_inner — that method calls self.module(...)
             # inside forward_step. After the anchor backward, restore.
@@ -1554,6 +1732,14 @@ class FSDPEngine(BaseEngine):
             # is anchor-pass-only. We bind the SAME actor config the fast path
             # uses (read off the partial) so agg_loss normalizes identically.
             anchor_loss_function = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+            # EXP-29 relevance probe (replay mode only): re-score the replayed
+            # trajectories with the loaded stale weights against the log-probs
+            # stored WITH them — flat-not-growing across fires proves the
+            # loaded weights are the batch's generator. Detached/scalar-only.
+            if replay_mode:
+                anchor_loss_function = self._wrap_anchor_loss_with_replay_relevance(
+                    anchor_loss_function, _relevance_acc
+                )
             self._forward_backward_batch_inner(anchor_data, anchor_loss_function, forward_only=False)
 
             # Read G_anchor RAW per target (NO correct_matrix) off
@@ -1629,6 +1815,21 @@ class FSDPEngine(BaseEngine):
             "comm_eff anchor pass took an optimizer step (anchor_optimizer_steps "
             "must stay 0; snapshot is OFF the optimizer's param group)."
         )
+
+        # EXP-29 relevance verdict for THIS fire: loaded-weights re-score vs the
+        # log-probs stored with the replayed trajectories. Greppable evidence
+        # line; the analyst checks it stays FLAT (not growing) across fires.
+        if replay_mode and _relevance_acc:
+            _ref_key = _relevance_acc[0][0]
+            _rel_cnt = sum(c for _k, _s, c in _relevance_acc)
+            _rel_mad = sum(s for _k, s, _c in _relevance_acc) / max(_rel_cnt, 1)
+            print(
+                f"[comm_eff][stale-replay][relevance] step={step} ref={_ref_key} "
+                f"logp_mad={_rel_mad:.6f} tokens={_rel_cnt} "
+                f"(clean fwd at LOADED stale weights vs {_ref_key} stored WITH the replayed "
+                f"trajectories; flat-not-growing across fires => weights == the batch's generator)",
+                flush=True,
+            )
 
         # EXP-25 (R1, FIX 7): COVERAGE SET-EQUALITY — the anchor M must cover EVERY
         # matrix the merger corrects (set-equal, NOT 4 / NOT boundary-only). Build

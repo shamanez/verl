@@ -108,6 +108,36 @@ class TestCommEffConfigDefaults(unittest.TestCase):
         config = omega_conf_to_dataclass(cfg)
         self.assertFalse(config.comm_eff.enabled)
 
+    def test_yaml_plain_override_anchor_replay_knobs(self):
+        """EXP-29: the replay knobs are declared in the YAML struct, so a PLAIN
+        (no `+`) CLI override composes. This is the dataclass<->YAML drift gate
+        the first EXP-29 launch failed on (`Key 'replay_paired_batch' is not in
+        struct`) — a new dataclass field MUST be mirrored in actor.yaml or every
+        launcher override of it dies in Hydra validation before main."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    "comm_eff.anchor.replay_paired_batch=true",
+                    "comm_eff.anchor.snapshot_device=cpu",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertTrue(config.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config.comm_eff.anchor.snapshot_device, "cpu")
+        # And the YAML defaults still mirror the dataclass defaults (off path).
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg_default = compose(
+                config_name="dp_actor", overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128"]
+            )
+        config_default = omega_conf_to_dataclass(cfg_default)
+        self.assertFalse(config_default.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config_default.comm_eff.anchor.snapshot_device, "gpu")
+
 
 class TestCommEffConfigSchema(unittest.TestCase):
     """The structured schema must reject unknown comm_eff.* keys."""
@@ -144,6 +174,36 @@ class TestCommEffConfigSchema(unittest.TestCase):
             CommEffConfig(spectral=CommEffSpectralConfig(signed_ema_alpha=1.5))
         with self.assertRaises(ValueError):
             CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
+
+    def test_anchor_replay_knob_defaults(self):
+        """EXP-29 knobs default OFF / gpu — the byte-identical legacy path."""
+        cfg = CommEffConfig()
+        self.assertFalse(cfg.anchor.replay_paired_batch)
+        self.assertEqual(cfg.anchor.snapshot_device, "gpu")
+
+    def test_anchor_replay_knob_validation(self):
+        """replay_paired_batch is a strict bool; snapshot_device is a closed enum."""
+        # Valid settings construct fine.
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(replay_paired_batch=True, snapshot_device="cpu")
+        )
+        self.assertTrue(cfg.anchor.replay_paired_batch)
+        self.assertEqual(cfg.anchor.snapshot_device, "cpu")
+        # A YAML "False" string (truthy!) must be loud, not a silent enable.
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(replay_paired_batch="False"))
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(replay_paired_batch=1))
+        # Typo'd device is a loud error, not a fall-through to gpu.
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(snapshot_device="hbm"))
+
+    def test_anchor_replay_rejects_unknown_key(self):
+        """The structured schema still rejects a typo'd replay key."""
+        with self.assertRaises(Exception):
+            omega_conf_to_dataclass(
+                {"anchor": {"replay_paired_batches": True}}, dataclass_type=CommEffConfig
+            )
 
 
 class TestCommEffPowerSGDConfig(unittest.TestCase):

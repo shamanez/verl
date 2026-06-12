@@ -273,6 +273,11 @@ class CommEffState:
         # anchor refresh that built candidate Q_f for the q_basis_passive families).
         # 0 unless the screen is configured; lets the probe confirm the screen fired.
         self.family_screen_builds = 0
+        # EXP-29: cumulative count of anchor refreshes that replayed a PAIRED
+        # (batch[t-delay_K], generator-snapshot) instead of the current batch.
+        # 0 unless anchor.replay_paired_batch=true; post-warmup it advances once
+        # per anchor fire, so the probe can prove every fire went through replay.
+        self.anchor_replay_fires = 0
         # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
         # the anchor / merger / projection hooks can all reach it via the state).
         # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
@@ -769,6 +774,9 @@ class CommEffState:
             "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
             # EXP-26 Step C1: cumulative passive family-screen builds.
             "comm_eff/family_screen_builds": self.family_screen_builds,
+            # EXP-29: cumulative paired-replay anchor fires (0 unless
+            # anchor.replay_paired_batch=true).
+            "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
         }
 
 

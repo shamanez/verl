@@ -206,3 +206,44 @@ def test_fast_path_ppo_loss_DOES_depend_on_old_log_probs():
         "fast-path PPO grad did not change with old_log_probs — the ratio "
         "corruption premise (C1/C2/C3) is not reproduced; check the toy."
     )
+
+
+def test_anchor_pg_loss_round_trips_through_replay_clone(_identity_extract):
+    """EXP-29: anchor_pg_loss on a replay-ring batch clone is BYTE-identical to
+    the loss on the original batch.
+
+    The replay ring stores ``clone_batch_for_replay(data, device=cpu)`` and the
+    anchor later consumes the clone instead of the live batch. The clone must
+    be value-transparent: same loss scalar, same gradient, bit for bit — the
+    deep clone changes WHICH batch the anchor sees (the t-K one), never the
+    numerics of how a given batch is consumed.
+    """
+    from verl.workers.comm_eff.anchor import anchor_pg_loss, clone_batch_for_replay
+
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    old_log_probs = torch.tensor([[5.0, -5.0]])
+
+    def _loss_grad(data):
+        lp = torch.tensor([[0.3, -0.7]], requires_grad=True)
+        mo = {"log_probs": lp}
+        loss, _ = anchor_pg_loss(_Cfg(), mo, data)
+        loss.backward()
+        return loss.detach().clone(), lp.grad.clone()
+
+    _mo, data = _make_batch(
+        torch.tensor([[0.3, -0.7]], requires_grad=True), advantages, response_mask, old_log_probs
+    )
+    cloned = clone_batch_for_replay(data, device=torch.device("cpu"))
+
+    loss_orig, grad_orig = _loss_grad(data)
+    loss_clone, grad_clone = _loss_grad(cloned)
+    torch.testing.assert_close(loss_orig, loss_clone, rtol=0, atol=0)
+    torch.testing.assert_close(grad_orig, grad_clone, rtol=0, atol=0)
+
+    # Mutating the ORIGINAL batch after cloning (what the fast path does in
+    # place) must not change what the clone computes.
+    data["advantages"].mul_(-3.0)
+    loss_clone2, grad_clone2 = _loss_grad(cloned)
+    torch.testing.assert_close(loss_clone, loss_clone2, rtol=0, atol=0)
+    torch.testing.assert_close(grad_clone, grad_clone2, rtol=0, atol=0)
