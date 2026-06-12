@@ -198,3 +198,5 @@ Steps 15→33 observed. Val@25=0.7134 (above floor 0.6914, below PASS bar 0.7414
 [2026-06-12T17:09:48+10:00] [exp29] GPU suite 187 passed on box; smoke launched in tmux exp-29-46_243_55_134 on i_40676027 (operator box); branch exp/29-anchor-onpolicy-replay@d311904
 [2026-06-12T18:29:10+10:00] [exp29] PASS: 25/25 steps, all gates green (canary 20/20, pairing exact, mem 30.77<57.9, val@25 0.7005, relevance flat); PR #16 MERGED d26176b44; exp/29 branch deleted (remote+local+worktree); box i_40676027 held warm
 [2026-06-12T18:31:57+10:00] [exp29] instance 40676027 DESTROYED (operator-ordered); vastai show instances = 0 live; ledger TORN_DOWN
+[2026-06-12T20:29:29+10:00] [research-planner #30] plan written
+[2026-06-12T20:30:53+10:00] [triage] dispatched 1 planner (issue #30), 0 issues already planned; amendment dispatched (theory primer + combination-operator openness) per operator follow-up
