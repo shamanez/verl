@@ -201,3 +201,4 @@ Steps 15→33 observed. Val@25=0.7134 (above floor 0.6914, below PASS bar 0.7414
 [2026-06-12T20:29:29+10:00] [research-planner #30] plan written
 [2026-06-12T20:30:53+10:00] [triage] dispatched 1 planner (issue #30), 0 issues already planned; amendment dispatched (theory primer + combination-operator openness) per operator follow-up
 [2026-06-12T20:39:50+10:00] [research-planner #30] plan amended (operator: §Pre-execution framing — combination-operator openness + theory primer; nothing pre-registered changed); issue plan comment refreshed in place
+[2026-06-12T21:09:09+10:00] [triage] #30 flipped status:approved by operator; plan comment stubbed (47.7KB->1.7KB); planner contract+playbook now mandate stub comments
