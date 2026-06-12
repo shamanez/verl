@@ -385,21 +385,42 @@ class AnchorReplayRing:
     at the first tick of the batch's global step) and is reported so the engine
     can log it.
 
-    Holds:
-      * ``tick -> (batch_clone, gs)`` — bounded to ``delay_K + 1`` entries;
-      * ``gs -> (snapshot, canary, push_tick)`` — one snapshot per global step
-        (``push_snapshot`` is idempotent per ``gs``); snapshots are evicted as
-        soon as no retained batch references them.
+    **Fire-aware retention (operator requirement — bounded as a function of
+    cadence x staleness).** The anchor only FIRES on ticks ``t ≡ 0 (mod
+    cadence)`` and a fire at ``t`` only ever consumes tick ``t − delay_K``, so
+    the ONLY ticks worth storing satisfy ``tick ≡ (−delay_K) mod cadence``
+    (:meth:`tick_retained`). Everything else is rejected at push time — the
+    engine also skips the deep clone for those ticks. Bounds, asserted on every
+    push so a regression blows up loudly instead of leaking RAM:
 
-    Pure container — no collectives, no RNG, CPU-testable.
+      * batches:   ``delay_K // cadence + 1`` entries (== ``delay_K + 1`` at
+        cadence=1; 2 at the locked cadence=5/delay_K=5);
+      * snapshots: one per global step still referenced by a retained batch,
+        plus the current (newest) gs awaiting its batches — ``maxlen + 1``.
+
+    Holds ``tick -> (batch_clone, gs)`` and ``gs -> (snapshot, canary,
+    push_tick)`` (``push_snapshot`` is idempotent per ``gs``). Pure container —
+    no collectives, no RNG, CPU-testable.
     """
 
-    def __init__(self, delay_K: int):
+    def __init__(self, delay_K: int, cadence: int = 1):
         assert delay_K >= 0, f"delay_K must be >= 0, got {delay_K}"
         self.delay_K = int(delay_K)
-        self._maxlen = self.delay_K + 1
+        self.cadence = max(1, int(cadence))
+        # Fire ticks are multiples of cadence; a fire at t requests t - delay_K,
+        # so only ticks of this residue class can ever be replayed.
+        self._keep_residue = (-self.delay_K) % self.cadence
+        self._maxlen = self.delay_K // self.cadence + 1
         self._batches: "OrderedDict[int, tuple]" = OrderedDict()
         self._snapshots: "OrderedDict[int, tuple]" = OrderedDict()
+
+    def tick_retained(self, tick: int) -> bool:
+        """True iff a future anchor fire can ever request ``tick``'s batch.
+
+        The engine consults this BEFORE deep-cloning the batch, so non-replayable
+        ticks cost neither the clone nor ring space.
+        """
+        return (int(tick) % self.cadence) == self._keep_residue
 
     def has_snapshot(self, gs: int) -> bool:
         return int(gs) in self._snapshots
@@ -408,16 +429,33 @@ class AnchorReplayRing:
         """Record the generator snapshot for global step ``gs`` (first-tick wins).
 
         Returns True iff this call stored the snapshot (False = ``gs`` already
-        had one — the caller is on a later tick of the same global step).
+        had one — the caller is on a later tick of the same global step). A new
+        gs beginning also evicts OLDER gs snapshots no retained batch references
+        (their batches can never arrive again — gs is monotonic).
         """
         gs = int(gs)
         if gs in self._snapshots:
             return False
+        live_gs = {g for (_b, g) in self._batches.values()}
+        for g in [g for g in self._snapshots if g < gs and g not in live_gs]:
+            del self._snapshots[g]
         self._snapshots[gs] = (snapshot, dict(canary or {}), int(tick))
+        assert len(self._snapshots) <= self._maxlen + 1, (
+            f"AnchorReplayRing snapshot retention blew its bound: "
+            f"{len(self._snapshots)} > maxlen+1={self._maxlen + 1} "
+            f"(delay_K={self.delay_K} cadence={self.cadence}) — eviction regressed."
+        )
         return True
 
-    def push_batch(self, tick: int, batch, gs: int) -> None:
-        """Record this tick's deep-cloned batch, paired with its generator gs."""
+    def push_batch(self, tick: int, batch, gs: int) -> bool:
+        """Record this tick's deep-cloned batch, paired with its generator gs.
+
+        Returns False (storing nothing) for a tick no future fire can request —
+        the cadence-filtered retention. The caller should pre-check
+        :meth:`tick_retained` to also skip the deep-clone cost.
+        """
+        if not self.tick_retained(tick):
+            return False
         gs = int(gs)
         assert gs in self._snapshots, (
             f"AnchorReplayRing.push_batch(tick={tick}, gs={gs}) before push_snapshot for that gs — "
@@ -426,10 +464,17 @@ class AnchorReplayRing:
         self._batches[int(tick)] = (batch, gs)
         while len(self._batches) > self._maxlen:
             self._batches.popitem(last=False)
-        # Evict snapshots no retained batch references (bounded memory).
+        # Evict snapshots no retained batch references (bounded memory). The
+        # newest gs is always kept — later ticks of it may still be retained.
         live_gs = {g for (_b, g) in self._batches.values()}
-        for g in [g for g in self._snapshots if g not in live_gs]:
+        newest_gs = max(self._snapshots) if self._snapshots else None
+        for g in [g for g in self._snapshots if g not in live_gs and g != newest_gs]:
             del self._snapshots[g]
+        assert len(self._batches) <= self._maxlen, (
+            f"AnchorReplayRing batch retention blew its bound: {len(self._batches)} > "
+            f"maxlen={self._maxlen} (delay_K={self.delay_K} cadence={self.cadence})."
+        )
+        return True
 
     def get_replay(self, tick: int, delay_K: Optional[int] = None):
         """Return ``(used_tick, batch, gs, snapshot, canary, snap_tick, warmup_fallback)``.
@@ -464,19 +509,21 @@ class AnchorReplayRing:
         return list(self._snapshots.keys())
 
 
-def maybe_build_replay_ring(state, anchor_cfg, delay_K: int) -> Optional[AnchorReplayRing]:
+def maybe_build_replay_ring(state, anchor_cfg, delay_K: int, cadence: int = 1) -> Optional[AnchorReplayRing]:
     """Build (once, on the state) and return the replay ring iff
     ``anchor.replay_paired_batch`` is true; return ``None`` otherwise.
 
-    The OFF path constructs NOTHING (no ring, no buffers) — the flag-OFF parity
-    invariant, CPU-testable: ``maybe_build_replay_ring(state, cfg_off, K) is
-    None`` and leaves no ``_anchor_replay_ring`` attribute behind.
+    ``cadence`` is the anchor fire cadence — it keys the ring's fire-aware
+    retention (only ticks a future fire can request are stored). The OFF path
+    constructs NOTHING (no ring, no buffers) — the flag-OFF parity invariant,
+    CPU-testable: ``maybe_build_replay_ring(state, cfg_off, K) is None`` and
+    leaves no ``_anchor_replay_ring`` attribute behind.
     """
     if not bool(getattr(anchor_cfg, "replay_paired_batch", False)):
         return None
     ring = getattr(state, "_anchor_replay_ring", None)
     if ring is None:
-        ring = AnchorReplayRing(delay_K=delay_K)
+        ring = AnchorReplayRing(delay_K=delay_K, cadence=cadence)
         setattr(state, "_anchor_replay_ring", ring)
     return ring
 

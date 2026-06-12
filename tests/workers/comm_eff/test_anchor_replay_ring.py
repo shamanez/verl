@@ -187,6 +187,79 @@ def test_push_batch_requires_snapshot():
 
 
 # =========================================================================== #
+# 2b. Fire-aware retention (operator requirement: bound = f(cadence, staleness))
+# =========================================================================== #
+def test_cadence_filter_retains_only_replayable_ticks():
+    """cadence=5, delay_K=5: fires at 5,10,15,... request ticks 0,5,10,... — only
+    ticks ≡ 0 (mod 5) are stored; everything else is rejected at push time."""
+    K, C = 5, 5
+    ring = AnchorReplayRing(delay_K=K, cadence=C)
+    assert ring._maxlen == 2  # delay_K // cadence + 1
+    stored = []
+    for tau in range(1, 16):
+        gs = (tau - 1) // 2 + 1
+        if not ring.has_snapshot(gs):
+            ring.push_snapshot(gs, {"w": torch.tensor(float(tau))}, tick=tau)
+        if ring.push_batch(tau, {"batch_tick": tau}, gs):
+            stored.append(tau)
+    assert stored == [5, 10, 15]
+    assert ring.batch_ticks == [10, 15]  # maxlen 2 — tick 5 evicted after 15
+    # Snapshots: only the gs of retained batches (gs 5 for tick 10, gs 8 for 15).
+    assert set(ring.snapshot_steps) == {5, 8}
+
+
+def test_cadence_filter_exact_pairing_at_fires():
+    K, C = 5, 5
+    ring = AnchorReplayRing(delay_K=K, cadence=C)
+    for tau in range(1, 16):
+        gs = (tau - 1) // 2 + 1
+        if not ring.has_snapshot(gs):
+            ring.push_snapshot(gs, {"w": torch.tensor(float(tau))}, tick=tau)
+        ring.push_batch(tau, {"batch_tick": tau}, gs)
+        if tau == 5:
+            # Warmup fire: falls back to tick 5's own batch, exactly paired
+            # with ITS generator snapshot (gs 3 @ tick 5).
+            used, b, gs_got, _s, _c, snap_tick, fb = ring.get_replay(5, K)
+            assert fb and used == 5 and gs_got == 3 and snap_tick == 5
+        if tau == 10:
+            used, b, gs_got, _s, _c, snap_tick, fb = ring.get_replay(10, K)
+            assert not fb and used == 5 and b["batch_tick"] == 5
+            assert gs_got == 3 and snap_tick == 5 and 10 - snap_tick == K
+        if tau == 15:
+            used, b, gs_got, _s, _c, snap_tick, fb = ring.get_replay(15, K)
+            assert not fb and used == 10 and b["batch_tick"] == 10
+            assert gs_got == 5 and snap_tick == 9 and 15 - snap_tick == K + 1
+
+
+def test_cadence_filter_bounds_hold_over_long_run():
+    """The 'nothing blows up' guard: bounds hold over hundreds of ticks for
+    several (delay_K, cadence, ticks_per_gs) shapes."""
+    for K, C, tpg in [(5, 5, 2), (5, 1, 2), (7, 5, 2), (2, 5, 1), (5, 2, 3)]:
+        ring = AnchorReplayRing(delay_K=K, cadence=C)
+        for tau in range(1, 301):
+            gs = (tau - 1) // tpg + 1
+            if not ring.has_snapshot(gs):
+                ring.push_snapshot(gs, {"w": torch.tensor(float(tau))}, tick=tau)
+            ring.push_batch(tau, {"batch_tick": tau}, gs)
+            assert len(ring) <= K // C + 1
+            assert len(ring.snapshot_steps) <= K // C + 2
+            # Post-warmup fires must always find their exact pair.
+            if tau % C == 0 and tau > K:
+                used, _b, _g, _s, _c, snap_tick, fb = ring.get_replay(tau, K)
+                assert not fb and used == tau - K, (K, C, tpg, tau, used, fb)
+                assert tau - snap_tick >= K
+
+
+def test_cadence_one_retains_every_tick():
+    ring = AnchorReplayRing(delay_K=3, cadence=1)
+    for tau in (1, 2, 3):
+        ring.push_snapshot(tau, {"w": torch.tensor(float(tau))}, tick=tau)
+        assert ring.tick_retained(tau)
+        assert ring.push_batch(tau, {"batch_tick": tau}, tau) is True
+    assert ring.batch_ticks == [1, 2, 3]
+
+
+# =========================================================================== #
 # 3. Flag-OFF parity (the CPU-testable half of the off-path-parity hard gate)
 # =========================================================================== #
 def test_flag_off_builds_no_ring():

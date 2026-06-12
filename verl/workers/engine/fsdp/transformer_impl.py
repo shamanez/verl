@@ -1343,7 +1343,7 @@ class FSDPEngine(BaseEngine):
         if queue is None and not replay_mode:
             queue = AnchorStalenessQueue(delay_K=delay_K)
             setattr(state, "_anchor_queue", queue)
-        ring = maybe_build_replay_ring(state, anchor_cfg, delay_K)
+        ring = maybe_build_replay_ring(state, anchor_cfg, delay_K, cadence=cadence)
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
@@ -1409,7 +1409,10 @@ class FSDPEngine(BaseEngine):
             # batch TensorDict is already CPU-resident at train_batch time).
             # Deep clone at store time is REQUIRED: _forward_backward_batch_inner
             # mutates the live batch in place right after this hook returns.
-            ring.push_batch(step, clone_batch_for_replay(data, device=torch.device("cpu")), _gs_now)
+            # Fire-aware retention: only ticks a future fire can request
+            # (tick ≡ −delay_K mod cadence) are cloned + stored at all.
+            if ring.tick_retained(step):
+                ring.push_batch(step, clone_batch_for_replay(data, device=torch.device("cpu")), _gs_now)
         else:
             with _summon_ctx():
                 cur_snapshot = snapshot_named_params(
@@ -1453,7 +1456,8 @@ class FSDPEngine(BaseEngine):
                 f"[comm_eff][stale-replay] step={step} delay_K={delay_K} used_tick={_used_step} "
                 f"batch_gs={_batch_gs} snapshot_gs={_batch_gs} snapshot_tick={_snap_tick} "
                 f"data_delay={_data_delay} realized_step_delay={_realized_weight_delay} "
-                f"warmup_fallback={_warm_fb}",
+                f"warmup_fallback={_warm_fb} "
+                f"ring_batches={len(ring)} ring_snapshots={len(ring.snapshot_steps)}",
                 flush=True,
             )
             # 1-based ticks: the t-delay_K batch only exists for step > delay_K
