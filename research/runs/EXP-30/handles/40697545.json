@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "instance_id": 40697545,
+  "ssh_host": "46.243.55.134",
+  "ssh_port": 40338,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -p 40338 root@46.243.55.134 -L 8080:localhost:8080",
+  "ssh_proxy_alt": "ssh5.vast.ai:17544",
+  "gpu_name": "H200",
+  "num_gpus": 4,
+  "gpu_ram": 143771,
+  "dph_total": 13.9678,
+  "geolocation": "Germany",
+  "operator_provided": true,
+  "note": "OPERATOR BOX OVERRIDE (2026-06-12): supplied running by the operator, superseding the plan's provision-FRESH note. Do NOT provision a replacement; do NOT teardown without operator confirmation. Direct route uses the LEGACY key ~/.ssh/vast_ai (operator-pinned); the project-standard key ~/.ssh/vast_ai_name.pub was appended to authorized_keys (EXP-27/29 precedent) and verified, so sync-metrics/training-log-monitor (which pass -i ~/.ssh/vast_ai_name) reach it too. Box state at registration: 4xH200 idle, /workspace/verl @ vast-ai-workload 75ea5ae, RAM 1.5TB, /workspace 200G free.",
+  "chosen_tier_idx": -1,
+  "chosen_tier_query": "operator-provided 4xH200 (no vast-provision call; gpu_filter_chain not walked)"
+}

@@ -1,15 +1,16 @@
-# Research Status — 2026-06-12T18:29:10+10:00
+# Research Status — 2026-06-12T22:25:00+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 29 | Anchor on-policy replay (paired batch + CPU snapshots + fire-aware retention + relevance probe) | DONE | 1×4H200 (i_40676027, operator box, HELD WARM) | PASS | PR #16 merged d26176b44; branch deleted; val@25 0.7005; max_mem 30.77; all gates green |
+| 30 | Generator-consistent M geometry gate + gated B1/B2 (valid-M merge re-test) | RUNNING (monitor active) | 1×4H200 (i_40697545, operator box, do-NOT-teardown) | — | Step A geometry probe live (tmux exp-30-46_243_55_134), 20 steps, fires 1–2 green; branch exp/30-valid-m-geometry@c56c13bbf; B1/B2 gated behind stepA_gate.md |
+| 29 | Anchor on-policy replay (paired batch + CPU snapshots + fire-aware retention + relevance probe) | DONE | — (box destroyed) | PASS | PR #16 merged d26176b44; substrate donor for EXP-30 |
 | 27 | Damped ef_powersgd merger | DONE | — | STOP | lineage closed |
 | 26 | EF PowerSGD + Q families | DONE | — | REVISE | ef 0.7210 best realistic, M6 record stands |
 
 ## Last tick
-2026-06-12T18:29:10+10:00 · running=[] · analyzing=[] · logging=[] · blocked=[]
+2026-06-12T22:25:00+10:00 · running=[30] · analyzing=[] · logging=[] · blocked=[]
 
 ## Budget
-no live Vast instances (i_40676027 destroyed 2026-06-12, verified via API)
+$13.97/hr live (i_40697545, 4×H200, operator-provided) · EXP-30 cap 24 GPU-hr (≈6 box-hr) · Step A ETA ~25 min from 22:18
