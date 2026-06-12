@@ -1,5 +1,15 @@
 # Research Log (newest first)
 
+## EXP-29 · 2026-06-12T18:35:00+10:00 · M6 · PASS
+EXP-29: Anchor on-policy replay — pair the anchor's stale weights with the trajectories those weights generated (+ CPU-resident snapshots, fire-aware ring retention, value-level relevance verification)
+
+- hypothesis: With anchor.replay_paired_batch=true + anchor.snapshot_device=cpu on the locked EXP-27 substrate (powersgd r77 sync_basis, anchor owns_q cadence=5 delay_K=5, clean=0, ef_powersgd clip/decay 0.5), a 25-step smoke (a) passes every correctness invariant, (b) keeps perf/max_memory_allocated_gb < 57.9 with step time within +1.5s of EXP-27, (c) reaches val@25 >= 0.60 with bytes_ratio ~0.0505.
+- result: PASS on ALL gates. Canary 20/20 match=True bitwise (push fp32 norm+sum == clone recompute through bf16->cpu->device); 9/9 post-warmup fires exact (used_tick==step-5, batch_gs==snapshot_gs, realized weight delay alternates K/K+1 as derived); isolation unchanged (loads 20/20, coverage set-equal, anchor_optimizer_steps=0, mask delta 0); max_mem 30.77 GB << 57.9 (the ~18.6 GB legacy GPU snapshot ring eliminated); mean step 84.8s vs EXP-27 110.5s (FASTER — one per-gs snapshot replaces per-tick GPU clone); bytes_ratio 0.0504-0.0505; val@25 0.7005 (>=0.60 gate; EXP-27 ref 0.7134 — replay changes the science, not-broken gate only); no E1 (steps 10-25 len/max 1126). Operator scope additions both green: fire-aware retention (only ticks = -delay_K mod cadence stored; ring_batches<=2/ring_snapshots<=2 asserted+observed) and the relevance probe (per-fire masked mean |logp(loaded weights) - rollout_log_probs stored with the replayed trajectories| = 0.0083-0.0105 FLAT across 10 fires incl. 9 distinct snapshots => loaded weights ARE the trajectories' generator at the value level; codec-affected old-vs-rollout ~0.61-0.84 for contrast). 3 iterations on the branch: impl d311904 -> actor.yaml Hydra-struct hotfix 933e79a (first launch died on dataclass<->YAML drift; drift test added) -> fire-aware retention c512128 -> relevance probe 67acf37. Suites at final commit: CPU 195 passed, GPU-box 195 passed. WandB: eyguqjh4.
+- key metrics: val@25=0.7005; max_memory_allocated_gb=30.77 (gate <57.9); mean step 84.8s (gate <=112.0); bytes_ratio 0.0504-0.0505; canary 20/20; anchor_replay_fires=10=anchor_backwards=anchor_q_updates; relevance MAD 0.0083-0.0105 flat; 0 OOM/NaN/AssertionError
+- PASS = mechanism correct + memory-clean; NO parity/surpass claim (25 steps cannot). Science of self-consistent M -> successor on 50-100 steps with controls.
+- code: PR #16 MERGED to vast-ai-workload (d26176b44); branch exp/29-anchor-onpolicy-replay deleted (remote+local+worktree)
+- run dir: runs/EXP-29/ · verdict: runs/EXP-29/verdict.md · box i_40676027 HELD WARM (operator-provided; outside auto-teardown)
+
 ## EXP-27 · 2026-06-11T04:25:00+00:00 · M6 · STOP
 EXP-26.1: REVISE child of EXP-26 — damped ef_powersgd (clip 0.5, decay 0.5) to 100 steps
 
