@@ -41,6 +41,7 @@ they start at 0 and increment per fired op.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:  # avoid an import cycle at runtime; only needed for type hints
@@ -50,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CommEffState",
+    "FastGradRing",
+    "GradLagBuffer",
     "maybe_build_comm_eff_state",
     "comm_eff_metrics",
     "resolve_compression_type",
@@ -152,6 +155,130 @@ def resolve_compression_type(config: Any) -> str:
     if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
         return "prf_mask"
     return "dense"
+
+
+class FastGradRing:
+    """EXP-30: fire-aware ring of the fast compressed per-target gradients
+    ``G_comp(t)`` — the c512128 retention pattern relocated from the anchor's
+    batch replay ring to WEIGHT-GRADIENT storage.
+
+    A fire at tick ``t`` only ever consumes tick ``t − delay_K``, and fires sit
+    at ``t ≡ 0 (mod cadence)``, so the ONLY ticks worth storing satisfy
+    ``tick ≡ (−delay_K) mod cadence`` (:meth:`tick_retained`) — at the locked
+    cadence=5 / delay_K=5 substrate that is the fire ticks themselves, bounding
+    the ring at ``delay_K // cadence + 1 = 2`` entries. Everything else is
+    rejected at push time (the caller also pre-checks :meth:`tick_retained` so
+    non-replayable ticks never pay the D2H either).
+
+    Entries are ``tick -> (grads, norms)`` where ``grads`` is
+    ``{canon_name: CPU tensor}`` (fp32, detached) and ``norms`` is the matching
+    ``{canon_name: float}`` Frobenius norms (computed on-device at extraction so
+    the CPU consumer never re-reduces 5 GB just for a denominator). Consumers:
+    Step A's m5 within-pair codec error ``δ(t) = G_anc_rep(t) − G_comp_ring(t−K)``
+    and the B2 ``delayed_ef`` merger's fire-time residual refresh. Pure
+    container — no collectives, no RNG, CPU-testable. CPU residency is ASSERTED
+    on push (the zero-GPU-memory-growth invariant).
+    """
+
+    def __init__(self, delay_K: int, cadence: int = 1):
+        assert delay_K >= 0, f"delay_K must be >= 0, got {delay_K}"
+        self.delay_K = int(delay_K)
+        self.cadence = max(1, int(cadence))
+        self._keep_residue = (-self.delay_K) % self.cadence
+        self._maxlen = self.delay_K // self.cadence + 1
+        self._entries: "OrderedDict[int, tuple]" = OrderedDict()
+
+    def tick_retained(self, tick: int) -> bool:
+        """True iff a future fire (or the B2 residual refresh) can request ``tick``."""
+        return (int(tick) % self.cadence) == self._keep_residue
+
+    def push(self, tick: int, grads: dict, norms: Optional[dict] = None) -> bool:
+        """Store ``tick``'s per-target G_comp dict. Returns False (storing
+        nothing) for a non-retained or duplicate tick. Asserts CPU residency
+        and the ≤ ``delay_K // cadence + 1`` entry bound on every push."""
+        tick = int(tick)
+        if not self.tick_retained(tick) or tick in self._entries:
+            return False
+        for _name, _t in grads.items():
+            assert getattr(_t, "device", None) is not None and _t.device.type == "cpu", (
+                f"FastGradRing.push(tick={tick}) received a non-CPU tensor for {_name!r} "
+                f"({_t.device}) — the ring must be CPU-resident (zero-GPU-growth invariant)."
+            )
+            break  # one representative check per push is enough (single extraction site)
+        self._entries[tick] = (grads, dict(norms or {}))
+        while len(self._entries) > self._maxlen:
+            self._entries.popitem(last=False)
+        assert len(self._entries) <= self._maxlen, (
+            f"FastGradRing blew its bound: {len(self._entries)} > maxlen={self._maxlen} "
+            f"(delay_K={self.delay_K} cadence={self.cadence}) — eviction regressed."
+        )
+        return True
+
+    def get(self, tick: int) -> Optional[tuple]:
+        """Exact-tick lookup → ``(grads, norms)`` or None. NO fallback: the m5 /
+        delayed_ef pairing must be the exact ``t − delay_K`` entry or nothing
+        (a near-miss substitute would silently corrupt the within-pair math)."""
+        return self._entries.get(int(tick))
+
+    def pop(self, tick: int) -> None:
+        """Drop a consumed entry (fires advance monotonically; ``t − delay_K``
+        can never be requested again). Keeps steady-state at ~1 entry."""
+        self._entries.pop(int(tick), None)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def ticks(self) -> list:
+        return list(self._entries.keys())
+
+
+class GradLagBuffer:
+    """EXP-30: rolling buffer of the last ``max_lag`` ticks of per-target
+    ``G_comp`` for the m4 lag-autocorrelation ``cos(G_comp(t), G_comp(t−j))``,
+    j=1..max_lag.
+
+    Bounded at ``max_lag`` stored entries (default 5) + the in-flight current
+    tick the engine holds during the fire computation = the plan's ≤6-entry
+    bound. Pushed EVERY tick (every tick is within ``max_lag`` of some fire at
+    the locked cadence=5, so fire-aware filtering saves nothing here); entries
+    older than ``max_lag`` roll off automatically — the post-fire "free" is the
+    natural eviction. Same ``(grads, norms)`` entry shape + CPU-residency assert
+    as :class:`FastGradRing`. Pure container, CPU-testable.
+    """
+
+    def __init__(self, max_lag: int = 5):
+        assert 1 <= int(max_lag) <= 5, f"max_lag must be in [1, 5] (≤6-entry plan bound), got {max_lag}"
+        self.max_lag = int(max_lag)
+        self._entries: "OrderedDict[int, tuple]" = OrderedDict()
+
+    def push(self, tick: int, grads: dict, norms: Optional[dict] = None) -> bool:
+        tick = int(tick)
+        if tick in self._entries:
+            return False
+        for _name, _t in grads.items():
+            assert getattr(_t, "device", None) is not None and _t.device.type == "cpu", (
+                f"GradLagBuffer.push(tick={tick}) received a non-CPU tensor for {_name!r} "
+                f"({_t.device}) — the lag buffer must be CPU-resident (zero-GPU-growth invariant)."
+            )
+            break
+        self._entries[tick] = (grads, dict(norms or {}))
+        while len(self._entries) > self.max_lag:
+            self._entries.popitem(last=False)
+        assert len(self._entries) <= self.max_lag, (
+            f"GradLagBuffer blew its bound: {len(self._entries)} > max_lag={self.max_lag}."
+        )
+        return True
+
+    def get(self, tick: int) -> Optional[tuple]:
+        return self._entries.get(int(tick))
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def ticks(self) -> list:
+        return list(self._entries.keys())
 
 
 class CommEffState:
@@ -278,6 +405,26 @@ class CommEffState:
         # 0 unless anchor.replay_paired_batch=true; post-warmup it advances once
         # per anchor fire, so the probe can prove every fire went through replay.
         self.anchor_replay_fires = 0
+        # EXP-30 Step A geometry probe. ALL None / 0 unless probe.geometry_enabled
+        # (off-path parity: the OFF path builds no ring, no buffer, no stash).
+        #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
+        #                         ALSO built (probe-independent) when the B2
+        #                         delayed_ef merger is selected — it feeds δ.
+        #   grad_lag_buffer     — GradLagBuffer for m4 (≤5 stored + in-flight ≤6).
+        #   geometry_probe_fires— cumulative fires with a complete m1–m7 record.
+        #   _probe_fire_stash   — per-fire dict set by the anchor refresh
+        #                         (G_anc_rep/G_anc_old CPU fp32 + norms + m7
+        #                         stats + replay metadata + loss_mismatch),
+        #                         consumed + freed by the end-of-batch hook.
+        #   _probe_prev_rep     — previous fire's (grads, norms) of G_anc_rep
+        #                         (CPU fp32) for m6 = cos(M_rep(t), M_rep(t−5));
+        #                         exactly M_rep at β_anc=0 (1-entry retention).
+        self.fast_grad_ring = None
+        self.grad_lag_buffer = None
+        self.geometry_probe_fires = 0
+        self._probe_fire_stash = None
+        self._probe_prev_rep = None
+        self._probe_prev_rep_tick = -1
         # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
         # the anchor / merger / projection hooks can all reach it via the state).
         # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
@@ -426,6 +573,8 @@ class CommEffState:
                 # EXP-26 Step B: error-feedback residual knobs (ef_powersgd).
                 ef_decay=float(getattr(spec_cfg, "ef_decay", 0.0)),
                 ef_clip=float(getattr(spec_cfg, "ef_clip", 0.0)),
+                # EXP-30 B2: K-delayed exact codec residual weight (delayed_ef).
+                delayed_ef_lambda=float(getattr(spec_cfg, "delayed_ef_lambda", 0.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "
@@ -449,6 +598,37 @@ class CommEffState:
                 f"signed_ema_alpha={self.spectral.signed_ema_alpha} "
                 f"ef_decay={self.spectral.ef_decay} ef_clip={self.spectral.ef_clip} "
                 f"anchor_backward_isolation_mode={isolation_mode}",
+                flush=True,
+            )
+
+        # EXP-30: fire-aware fast-grad ring + m4 lag buffer. The ring is built
+        # when EITHER the Step-A geometry probe is on (m5 needs G_comp_ring(t−K))
+        # OR the B2 delayed_ef merger is selected (δ refresh needs the same
+        # entry); the lag buffer is probe-only (m4). The OFF path constructs
+        # NOTHING — flag-OFF parity (both attributes stay None, no allocation).
+        anc_cfg_rings = getattr(self.config, "anchor", None)
+        probe_cfg = getattr(self.config, "probe", None)
+        probe_on = bool(getattr(probe_cfg, "geometry_enabled", False)) if probe_cfg is not None else False
+        delayed_ef_on = (
+            spec_enabled and str(getattr(spec_cfg, "correction_mode", "signed_ema")) == "delayed_ef"
+        )
+        if (probe_on or delayed_ef_on) and anc_cfg_rings is not None:
+            _ring_delay_K = int(getattr(anc_cfg_rings, "delay_K", 0))
+            _ring_cadence = int(getattr(anc_cfg_rings, "cadence", 1))
+            self.fast_grad_ring = FastGradRing(delay_K=_ring_delay_K, cadence=_ring_cadence)
+            if probe_on:
+                self.grad_lag_buffer = GradLagBuffer(max_lag=int(getattr(probe_cfg, "m4_lags", 5)))
+            print(
+                f"[geometry-probe] armed: geometry_enabled={probe_on} delayed_ef={delayed_ef_on} "
+                f"fast_grad_ring(maxlen={self.fast_grad_ring._maxlen}, delay_K={_ring_delay_K}, "
+                f"cadence={_ring_cadence}) "
+                # NB `is not None`, not truthiness: GradLagBuffer defines __len__,
+                # so an EMPTY (just-armed) buffer is falsy and the build print
+                # would lie "None" while the buffer exists (observed on the
+                # EXP-30 first launch; functional paths all use `is None`).
+                f"lag_buffer={('maxlen=' + str(self.grad_lag_buffer.max_lag)) if self.grad_lag_buffer is not None else None} "
+                f"out_dir={getattr(probe_cfg, 'out_dir', '') if probe_cfg is not None else ''} "
+                f"rank0_only={getattr(probe_cfg, 'rank0_only', True) if probe_cfg is not None else True}",
                 flush=True,
             )
 
@@ -777,6 +957,9 @@ class CommEffState:
             # EXP-29: cumulative paired-replay anchor fires (0 unless
             # anchor.replay_paired_batch=true).
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
+            # EXP-30: cumulative Step-A geometry-probe fires with a complete
+            # m1–m7 record written (0 unless probe.geometry_enabled).
+            "comm_eff/geometry_probe_fires": self.geometry_probe_fires,
         }
 
 

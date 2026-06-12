@@ -445,6 +445,12 @@ comm_eff:
     # "ef_powersgd" (EXP-26 Step B) = direction-PRESERVING error-feedback: re-add
     # the dropped off-subspace residual to G_comp with NO sign term (keeps
     # G_comp's direction/sign; reduces to plain PowerSGD at ef_decay=ef_clip=0).
+    # "none" (EXP-30 Step A) = INERT: M is still maintained from the anchor feed
+    # but NO correction is applied or written back — the optimizer consumes the
+    # raw G_comp (the geometry-probe posture).
+    # "delayed_ef" (EXP-30 B2) = K-delayed exact codec residual:
+    # G_corr = G_comp + delayed_ef_lambda*(M_rep − G_comp_ring(t−K)), δ refreshed
+    # at anchor fires and held between.
     # Declared here so Hydra's struct-mode merge accepts
     # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=ef_powersgd.
     correction_mode: signed_ema
@@ -472,6 +478,14 @@ comm_eff:
     # ablation). Declared here so Hydra struct-mode accepts the CLI overrides.
     ef_decay: 0.0
     ef_clip: 0.0
+
+    # EXP-30 B2 (correction_mode=delayed_ef): the K-delayed exact codec-residual
+    # weight λ in G_corr = G_comp + λ*(M_rep − G_comp_ring(t−K)). 0.0 (default,
+    # the OFF/legacy posture) ⇒ G_corr == G_comp EXACTLY (the limiting-case
+    # identity invariant); the B2 cell sets 1.0 explicitly. >= 0. Unused unless
+    # correction_mode=delayed_ef. Declared here so Hydra struct-mode accepts
+    # actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda=<float>.
+    delayed_ef_lambda: 0.0
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
@@ -610,6 +624,39 @@ comm_eff:
     # PRE-warm ticks so H2 (Q activation/update-capture) reads cold-Q values. Set
     # just above the first anchor refresh for POST-warm captures. 0 = from start.
     min_tick: 0
+
+  # EXP-30 Step A: geometry probe (telemetry-only M-validity discriminator).
+  # OFF by default => strict no-op (no ring, no lag buffer, no extra backward,
+  # no I/O — off-path parity). When geometry_enabled the harness measures, at
+  # every anchor fire on the EXP-29 paired-replay substrate, the m1–m7 geometry
+  # (replay-vs-old anchor cosines, fast-grad lag autocorrelation, within-pair
+  # codec error, M_rep persistence, stable-rank/top-1%-mass) and appends one
+  # JSON line per fire to <out_dir>/stepA_fires.jsonl + a [geometry-probe]
+  # train-log line. Probes NEVER feed the optimizer (anchor_grad_corrected
+  # stays 0). Requires anchor.enabled + anchor.replay_paired_batch and an INERT
+  # merger (spectral.correction_mode=none) — validated in the dataclass.
+  probe:
+
+    # Target dataclass for this configuration
+    _target_: verl.workers.config.CommEffProbeConfig
+
+    # Master probe switch. false (default) => strict no-op.
+    geometry_enabled: false
+
+    # Directory for stepA_fires.jsonl (+ per-target sidecar). Empty => resolved
+    # to ./geometry_probe at build. The launcher pins an absolute run-dir path.
+    out_dir: ""
+
+    # Stage/compute/write on DP rank 0 only (default; inputs are DP-identical).
+    # false => rank-suffixed files (debug only).
+    rank0_only: true
+
+    # m4 lag depth j=1..m4_lags. [1, 5] (the <=6-entry CPU lag-buffer bound).
+    m4_lags: 5
+
+    # Also append the per-target scalar arrays behind each matrix-median to
+    # stepA_fires_targets.jsonl (scalars only, ~KBs per fire).
+    per_target_sidecar: true
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

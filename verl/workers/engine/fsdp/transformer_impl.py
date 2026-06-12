@@ -1886,6 +1886,37 @@ class FSDPEngine(BaseEngine):
         # anchor_batch_fraction: this implementation consumes the WHOLE batch.
         state.anchor_batch_fraction = 1.0
 
+        # EXP-30 Step A geometry probe: at every fire, run the SECOND telemetry
+        # backward (G_anc_old = clean PG on the CURRENT batch at the SAME stale
+        # generator θ still loaded in the clone — the generator-MISMATCHED feed,
+        # measured not merged) and stage both DP-reduced anchor gradients on CPU
+        # for the end-of-batch m1–m7 computation. Telemetry-only: nothing here
+        # feeds the EMA, V, Q, or the optimizer; anchor_grad_corrected stays 0.
+        # Strict no-op unless comm_eff.probe.geometry_enabled.
+        _probe_cfg = getattr(state.config, "probe", None)
+        if _probe_cfg is not None and bool(getattr(_probe_cfg, "geometry_enabled", False)):
+            if not replay_mode:
+                raise RuntimeError(
+                    "comm_eff geometry probe fired without replay_paired_batch — the config "
+                    "validation requires the EXP-29 paired-replay substrate (G_anc_rep is the "
+                    "replay gradient). This indicates config drift; refusing to measure."
+                )
+            self._comm_eff_geometry_probe_fire_stash(
+                state=state,
+                data=data,
+                loss_function=loss_function,
+                step=step,
+                anchor_grads=anchor_grads,
+                target_substrs=target_substrs,
+                max_targets=max_targets,
+                warmup_fallback=bool(_warm_fb),
+                used_tick=int(_used_step),
+                batch_gs=int(_batch_gs),
+                realized_weight_delay=int(_realized_weight_delay),
+                fire_canary=_fire_canary,
+                relevance_acc=_relevance_acc,
+            )
+
         # EXP-26 Step A: dump the K-stale G_anchor (DP-reduced) AND the post-feed
         # anchor EMA M per target — both detached/fp32, dump-only (the writer
         # detaches+clones, so this NEVER feeds the optimizer/EMA). The optimizer
@@ -2174,6 +2205,354 @@ class FSDPEngine(BaseEngine):
                     f"(targets matched=0); check target_substr / use_orig_params",
                     flush=True,
                 )
+
+    def _comm_eff_geometry_probe_fire_stash(
+        self,
+        *,
+        state,
+        data,
+        loss_function,
+        step,
+        anchor_grads,
+        target_substrs,
+        max_targets,
+        warmup_fallback,
+        used_tick,
+        batch_gs,
+        realized_weight_delay,
+        fire_canary,
+        relevance_acc,
+    ) -> None:
+        """EXP-30 Step A: the dual-backward fire stash (G_anc_old + CPU staging).
+
+        Called from ``_maybe_comm_eff_anchor_refresh`` at every anchor fire when
+        ``comm_eff.probe.geometry_enabled``. The cached anchor clone STILL holds
+        the K-stale generator snapshot (nothing reloads it between the replay
+        backward and here — re-verified bitwise against the push-time canary),
+        so a second clean-PG backward on the CURRENT tick's batch yields
+        ``G_anc_old(t) = ∇[−A·logπ](batch_t; θ_{t−K})`` — the generator-
+        MISMATCHED anchor feed every prior merger consumed, now measured at the
+        SAME θ as the valid ``G_anc_rep`` (m3 then isolates the pure batch
+        effect at fixed θ).
+
+        Telemetry-only invariants enforced here: the probe backward runs on the
+        isolated clone (off the optimizer's param group), is DP-MEAN-reduced
+        with the SAME ``_dp_all_reduce_anchor_grads`` as G_anc_rep (the m5/m2
+        scale contract), fires zero mask hooks, takes zero optimizer steps, and
+        is never fed to the EMA/V/Q. Storage is rank0-only (the inputs are
+        DP-identical); the collectives (backward + all-reduce) run on ALL ranks
+        symmetrically — the rank gate is storage/IO only (deadlock-safe).
+        """
+        from verl.workers.comm_eff.anchor import (
+            anchor_pg_loss,
+            extract_target_grads,
+            grad_summary_stats,
+            verify_canary_on_module,
+        )
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        probe_cfg = getattr(state.config, "probe", None)
+        clone = getattr(self, "_anchor_module_cache", None)
+        if clone is None:
+            raise RuntimeError(
+                "comm_eff geometry probe: anchor clone cache missing at fire time — "
+                "the anchor refresh must have built it before the stash runs."
+            )
+
+        # The clone must STILL hold the recorded generator snapshot (bitwise).
+        if fire_canary:
+            _ok, _got = verify_canary_on_module(clone, fire_canary, canon=_canon)
+            assert _ok, (
+                f"comm_eff geometry probe: clone canary MISMATCH before the G_anc_old "
+                f"backward at tick={step} (push={fire_canary} clone={_got}) — the clone no "
+                "longer holds the replay snapshot; G_anc_old would be evaluated at the wrong θ."
+            )
+
+        _opt_before = int(getattr(state, "anchor_optimizer_steps", 0))
+        _mask_before = int(getattr(state, "mask_applications", 0))
+        prev_mask_active = getattr(state, "mask_active", False)
+        prev_path_tag = getattr(state, "path_tag", None)
+        state.mask_active = False
+        if hasattr(state, "set_path_tag"):
+            state.set_path_tag(None)
+
+        _swap = None
+        old_grads = {}
+        try:
+            # Zero any grads left by the replay backward so G_anc_old never
+            # accumulates on top of G_anc_rep.
+            for _p in clone.parameters():
+                if _p.grad is not None:
+                    _p.grad = None
+            _swap = self.module
+            self.module = clone
+            # NO powersgd.register here — the sketch V must stay the replay
+            # harvest; the probe backward is hook-free on the plain clone.
+            _old_data = data.copy() if hasattr(data, "copy") else data
+            _old_lossf = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
+            self._forward_backward_batch_inner(_old_data, _old_lossf, forward_only=False)
+
+            def _full_grad_of(grad):
+                return grad, {"grad_container_type": type(grad).__name__}
+
+            old_grads = extract_target_grads(
+                clone.named_parameters(),
+                target_substrs=target_substrs,
+                max_targets=max_targets,
+                full_grad_of=_full_grad_of,
+            )
+            # IDENTICAL DP reduction (MEAN) as G_anc_rep — the #25 mean-vs-sum
+            # scale contract for m2/m3 (and transitively m5's δ pairing).
+            old_grads = self._dp_all_reduce_anchor_grads(old_grads)
+        finally:
+            if _swap is not None:
+                self.module = _swap
+            try:
+                for _p in clone.parameters():
+                    if _p.grad is not None:
+                        _p.grad = None
+            except Exception:  # pragma: no cover - defensive
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            state.mask_active = prev_mask_active
+            if hasattr(state, "set_path_tag"):
+                state.set_path_tag(prev_path_tag)
+
+        # PROBE_LEAKS falsifiers: zero optimizer steps, zero mask fires.
+        assert int(getattr(state, "anchor_optimizer_steps", 0)) == _opt_before, (
+            "comm_eff geometry probe: the G_anc_old telemetry backward changed "
+            "anchor_optimizer_steps — probes must never feed the optimizer."
+        )
+        _mask_delta = int(getattr(state, "mask_applications", 0)) - _mask_before
+        assert _mask_delta == 0, (
+            f"comm_eff geometry probe: the G_anc_old backward fired {_mask_delta} mask "
+            "hooks — the probe pass must run unmasked (GUARD 5)."
+        )
+
+        # Storage/IO rank gate (collectives above already ran on every rank).
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if bool(getattr(probe_cfg, "rank0_only", True)) and _rank != 0:
+            return
+
+        # Stage both anchor gradients CPU/fp32 with on-device norms; m7 stats on
+        # the VALID gradient are computed HERE on GPU (power iteration + topk are
+        # cheap on-device, prohibitive on CPU at 196×multi-GB scale).
+        rep_cpu, rep_norms, rep_stats = {}, {}, {}
+        for _name, _g in anchor_grads.items():
+            _cn = _canon(_name)
+            _g32 = _g.detach().to(torch.float32)
+            rep_norms[_cn] = float(torch.linalg.norm(_g32).item())
+            rep_stats[_cn] = grad_summary_stats(_g32)
+            # copy=True: never alias a live tensor into the stash (an aliased
+            # store would be silently mutated by later in-place ops).
+            rep_cpu[_cn] = _g32.to(device="cpu", copy=True)
+        old_cpu, old_norms = {}, {}
+        for _name, _g in old_grads.items():
+            _cn = _canon(_name)
+            _g32 = _g.detach().to(torch.float32)
+            old_norms[_cn] = float(torch.linalg.norm(_g32).item())
+            old_cpu[_cn] = _g32.to(device="cpu", copy=True)
+
+        # Per-fire loss-mismatch (the EXP-29 relevance probe statistic on THIS
+        # fire's replay forward) — the GATE-B2 second clause input.
+        _lm = None
+        if relevance_acc:
+            _cnt = sum(c for _k, _s, c in relevance_acc)
+            if _cnt > 0:
+                _lm = sum(s for _k, s, _c in relevance_acc) / _cnt
+
+        state._probe_fire_stash = {
+            "tick": int(step),
+            "warmup_fallback": bool(warmup_fallback),
+            "used_tick": int(used_tick),
+            "batch_gs": int(batch_gs),
+            "realized_weight_delay": int(realized_weight_delay),
+            "rep": rep_cpu,
+            "rep_norms": rep_norms,
+            "rep_stats": rep_stats,
+            "old": old_cpu,
+            "old_norms": old_norms,
+            "loss_mismatch_nats": _lm,
+        }
+        print(
+            f"[geometry-probe] fire_stash tick={step} targets={len(rep_cpu)} "
+            f"old_targets={len(old_cpu)} warmup_fallback={warmup_fallback} "
+            f"used_tick={used_tick} batch_gs={batch_gs} "
+            f"realized_weight_delay={realized_weight_delay} "
+            f"loss_mismatch_nats={_lm if _lm is not None else 'n/a'} "
+            f"(G_anc_rep + G_anc_old staged CPU/fp32; m1–m7 computed end-of-batch)",
+            flush=True,
+        )
+
+    def _maybe_comm_eff_geometry_probe(self) -> None:
+        """EXP-30 Step A: end-of-batch geometry measurement (FSDP override).
+
+        Runs in ``BaseEngine.train_batch`` AFTER the backward + grad-correction
+        hook and BEFORE ``optimizer_step`` — the point where the fast compressed
+        per-target gradient ``G_comp(t)`` is final (post-FSDP-reduce, pre-clip;
+        with the Step-A merger pinned to ``correction_mode=none`` the grads are
+        the RAW codec output by construction — enforced at config validation).
+
+        Per tick: extract ``G_comp`` (full 2D, DP-mean — identical on every
+        rank), stage CPU/fp32 with on-device norms, push into the m4 lag buffer
+        and (fire-aligned ticks only) the fire-aware ring. At fire ticks,
+        consume the refresh's stash (G_anc_rep / G_anc_old) and emit the
+        complete m1–m7 record: one JSON line to ``probe.out_dir`` +
+        the ``[geometry-probe]`` train-log line. All storage/math/IO is
+        rank0-only; the FSDP1 summon (a collective) is entered on EVERY rank.
+
+        Strict no-op unless ``comm_eff.probe.geometry_enabled``.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        probe_cfg = getattr(getattr(state, "config", None), "probe", None)
+        if probe_cfg is None or not bool(getattr(probe_cfg, "geometry_enabled", False)):
+            return
+        ring = getattr(state, "fast_grad_ring", None)
+        lag = getattr(state, "grad_lag_buffer", None)
+        if ring is None or lag is None:  # pragma: no cover - build() always arms both
+            return
+
+        import os as _os
+
+        from verl.workers.comm_eff.anchor import anchor_should_fire, append_jsonl, geometry_fire_record
+        from verl.workers.comm_eff.spectral_filter import _canon
+
+        anchor_cfg = getattr(state.config, "anchor", None)
+        spec_cfg = getattr(state.config, "spectral", None)
+        target_substrs = self._comm_eff_target_names(spec_cfg)
+        max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
+        cadence = int(getattr(anchor_cfg, "cadence", 1)) if anchor_cfg is not None else 1
+        delay_K = int(getattr(anchor_cfg, "delay_K", 0)) if anchor_cfg is not None else 0
+        anchor_enabled = bool(getattr(anchor_cfg, "enabled", False)) if anchor_cfg is not None else False
+        m4_lags = int(getattr(probe_cfg, "m4_lags", 5))
+        tick = int(getattr(state, "anchor_step", 0) or 0)
+
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        rank0_only = bool(getattr(probe_cfg, "rank0_only", True))
+        is_writer = (_rank == 0) or (not rank0_only)
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+
+        def _summon_ctx():
+            if module_is_fsdp1:
+                use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
+                if not use_orig:
+                    raise RuntimeError(
+                        "comm_eff geometry probe under FSDP1 requires "
+                        "actor_rollout_ref.actor.fsdp_config.use_orig_params=true "
+                        "(summon_full_params(with_grads=True) needs it)."
+                    )
+                return FSDP.summon_full_params(self.module, with_grads=True, writeback=False)
+            return nullcontext()
+
+        g_comp, g_norms = {}, {}
+        with _summon_ctx():  # COLLECTIVE — entered on EVERY rank (deadlock-safe)
+            if is_writer:
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                _count = 0
+                for _name, _p in inner.named_parameters():
+                    _grad = getattr(_p, "grad", None)
+                    if _grad is None:
+                        continue
+                    if not any(s in _name for s in target_substrs):
+                        continue
+                    if max_targets >= 0 and _count >= max_targets:
+                        break
+                    _full = _grad.full_tensor() if isinstance(_grad, DTensor) else _grad
+                    if _full.dim() != 2:
+                        continue
+                    _g32 = _full.detach().to(torch.float32)
+                    _cn = _canon(_name)
+                    g_norms[_cn] = float(torch.linalg.norm(_g32).item())
+                    # copy=True: the optimizer's grad clip mutates grads in
+                    # place AFTER this hook — an aliased store (already-CPU/fp32
+                    # grads) would silently corrupt the ring/lag entries.
+                    g_comp[_cn] = _g32.to(device="cpu", copy=True)
+                    _count += 1
+        if not is_writer:
+            return
+
+        fire = anchor_should_fire(tick, cadence, anchor_enabled)
+        if fire:
+            stash = getattr(state, "_probe_fire_stash", None)
+            assert stash is not None and int(stash["tick"]) == tick, (
+                f"comm_eff geometry probe: anchor fired at tick={tick} but the fire stash is "
+                f"{'missing' if stash is None else 'stale (tick=' + str(stash['tick']) + ')'} — "
+                "the refresh-side dual backward did not run; the m1–m7 record would be incomplete."
+            )
+            ring_tick = tick - delay_K
+            ring_entry = ring.get(ring_tick)
+            lag_entries = {tick - j: lag.get(tick - j) for j in range(1, m4_lags + 1)}
+            record, per_target = geometry_fire_record(
+                step=int(getattr(state, "global_step", -1) or -1),
+                tick=tick,
+                warmup_fallback=bool(stash["warmup_fallback"]),
+                fire_index=int(state.geometry_probe_fires) + 1,
+                g_comp=g_comp,
+                g_comp_norms=g_norms,
+                rep=stash["rep"],
+                rep_norms=stash["rep_norms"],
+                old=stash["old"],
+                old_norms=stash["old_norms"],
+                rep_stats=stash["rep_stats"],
+                lag_entries=lag_entries,
+                ring_entry=ring_entry,
+                ring_tick=ring_tick,
+                prev_rep=getattr(state, "_probe_prev_rep", None),
+                loss_mismatch_nats=stash["loss_mismatch_nats"],
+                used_tick=int(stash["used_tick"]),
+                batch_gs=int(stash["batch_gs"]),
+                realized_weight_delay=int(stash["realized_weight_delay"]),
+                m4_lags=m4_lags,
+            )
+            out_dir = str(getattr(probe_cfg, "out_dir", "") or "") or "./geometry_probe"
+            _suffix = "" if _rank == 0 else f"_rank{_rank}"
+            append_jsonl(_os.path.join(out_dir, f"stepA_fires{_suffix}.jsonl"), record)
+            if bool(getattr(probe_cfg, "per_target_sidecar", True)):
+                append_jsonl(
+                    _os.path.join(out_dir, f"stepA_fires_targets{_suffix}.jsonl"),
+                    {"step": record["step"], "tick": tick, "fire_index": record["fire_index"], "targets": per_target},
+                )
+            state.geometry_probe_fires += 1
+
+            def _f(v):
+                return "null" if v is None else f"{v:.6f}"
+
+            _m4_str = " ".join(f"m4_j{j}={_f(record.get(f'm4_j{j}'))}" for j in range(1, m4_lags + 1))
+            print(
+                f"[geometry-probe] fire={record['fire_index']} step={record['step']} tick={tick} "
+                f"warmup_fallback={record['warmup_fallback']} n_targets={record['n_targets']} "
+                f"m1={_f(record['m1_matrix_median'])} m2={_f(record['m2_matrix_median'])} "
+                f"m3={_f(record['m3_matrix_median'])} {_m4_str} "
+                f"m5_ratio={_f(record['m5_ratio_matrix_median'])} m5_cos={_f(record['m5_cos_matrix_median'])} "
+                f"m6={_f(record['m6_matrix_median'])} "
+                f"m7_sr={_f(record['m7_stable_rank_median'])} m7_top1={_f(record['m7_top1pct_mass_median'])} "
+                f"loss_mismatch_nats={_f(record['loss_mismatch_nats'])} "
+                f"used_tick={record['used_tick']} batch_gs={record['batch_gs']} "
+                f"realized_weight_delay={record['realized_weight_delay']} "
+                f"ring_entries={len(ring)} lag_entries={len(lag)}",
+                flush=True,
+            )
+            # Free consumed structures (the per-fire memory contract): the ring
+            # entry can never be requested again; the stash rotates into the m6
+            # prev-fire slot (1-entry retention).
+            ring.pop(ring_tick)
+            state._probe_prev_rep = (stash["rep"], stash["rep_norms"])
+            state._probe_prev_rep_tick = tick
+            state._probe_fire_stash = None
+
+        # Pushes AFTER the fire computation: a fire at t consumes t−K / lags
+        # t−1..t−m4_lags, never tick t itself. The same CPU dict is shared by
+        # ring and lag (references, no double copy); eviction frees naturally.
+        if ring.tick_retained(tick):
+            ring.push(tick, g_comp, g_norms)
+        lag.push(tick, g_comp, g_norms)
 
     def _maybe_comm_eff_capture_g_dense(self, data, loss_function) -> None:
         """FSDP override: parallel UNCOMPRESSED G_dense capture (EXP-26 Step A).
@@ -2474,6 +2853,21 @@ class FSDPEngine(BaseEngine):
         # train_batch. Dense/disabled runs never advance this counter.
         state.spectral_step += 1
         if not state.should_run_spectral_correction():
+            return
+
+        # EXP-30 Step A: correction_mode="none" is INERT — no summon, no
+        # per-target walk, no writeback; the optimizer consumes the raw G_comp.
+        # spectral_step still advanced above (capture_tick consistency), and the
+        # anchor M-EMA feed (β_anc=0 ⇒ M_rep) keeps running in the refresh hook.
+        if str(getattr(spectral, "correction_mode", "signed_ema")) == "none":
+            if not getattr(self, "_comm_eff_none_mode_logged", False):
+                print(
+                    "[comm_eff][EXP-30][merger] correction_mode=none — INERT "
+                    "(no correction applied/written back; optimizer consumes raw G_comp; "
+                    "M maintained for telemetry only)",
+                    flush=True,
+                )
+                self._comm_eff_none_mode_logged = True
             return
 
         spec_cfg = getattr(state.config, "spectral", None)

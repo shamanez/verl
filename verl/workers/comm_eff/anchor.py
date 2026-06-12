@@ -85,6 +85,14 @@ __all__ = [
     "replay_relevance_stats",
     "snapshot_canary",
     "verify_canary_on_module",
+    # EXP-30 Step-A geometry probe (pure, CPU-testable)
+    "grad_summary_stats",
+    "paired_cosine",
+    "cos_over_targets",
+    "delta_stats_over_targets",
+    "matrix_median",
+    "geometry_fire_record",
+    "append_jsonl",
 ]
 
 
@@ -826,6 +834,262 @@ def capture_anchor_tensors(
         ):
             n += 1
     return n
+
+
+# --------------------------------------------------------------------------- #
+# EXP-30 Step-A geometry probe — pure math (no engine/FSDP/distributed deps).
+#
+# The probe's invariant: everything below is TELEMETRY-ONLY. Nothing here is
+# ever written back into a gradient, an EMA, the sketch V, Q, or the optimizer
+# (probes_never_feed_optimizer). All inputs arrive detached; all math is fp32.
+# --------------------------------------------------------------------------- #
+
+_PROBE_EPS = 1e-12
+
+
+def grad_summary_stats(t: torch.Tensor, *, top_frac: float = 0.01, power_iters: int = 24) -> dict:
+    """m7 per-target stats of a 2D gradient: Frobenius norm, top singular value
+    (deterministic power iteration — no RNG, reproducible), stable rank
+    ``‖G‖_F²/‖G‖₂²``, and top-``top_frac`` coordinate ENERGY mass (the fraction
+    of Σg² carried by the largest-|g| 1% of coordinates — the standard top-k
+    sparsity statistic; the never-measured "RLVR grads are sparse" claim).
+
+    Runs on whatever device ``t`` lives on (the engine calls it on GPU at stash
+    time so the heavy reductions never hit the CPU); returns plain floats.
+    Zero matrix → ``{fro: 0, sigma1: 0, stable_rank: 0, top1pct_mass: 0}``.
+    """
+    a = t.detach().to(torch.float32)
+    assert a.dim() == 2, f"grad_summary_stats expects a 2D matrix, got shape {tuple(a.shape)}"
+    fro = float(torch.linalg.norm(a).item())
+    if fro <= _PROBE_EPS:
+        return {"fro": 0.0, "sigma1": 0.0, "stable_rank": 0.0, "top1pct_mass": 0.0}
+    # Deterministic power iteration on AᵀA for σ1 (seedless: a normalized ones
+    # vector cannot be orthogonal to the top singular subspace of a real-world
+    # gradient; 24 iterations puts σ1 within ~1% for decaying spectra).
+    n = a.shape[1]
+    v = torch.full((n,), 1.0 / (n ** 0.5), dtype=torch.float32, device=a.device)
+    sigma1 = 0.0
+    for _ in range(max(1, int(power_iters))):
+        u = a @ v
+        u_norm = torch.linalg.norm(u)
+        if float(u_norm.item()) <= _PROBE_EPS:
+            break
+        w = a.T @ (u / u_norm)
+        w_norm = torch.linalg.norm(w)
+        sigma1 = float(w_norm.item())
+        if sigma1 <= _PROBE_EPS:
+            break
+        v = w / w_norm
+    sigma1 = max(sigma1, _PROBE_EPS)
+    stable_rank = (fro * fro) / (sigma1 * sigma1)
+    flat = a.reshape(-1)
+    k = max(1, int(round(float(top_frac) * flat.numel())))
+    topk = torch.topk(flat.abs(), k, sorted=False).values
+    top_mass = float((topk * topk).sum().item()) / (fro * fro)
+    return {"fro": fro, "sigma1": sigma1, "stable_rank": float(stable_rank), "top1pct_mass": float(top_mass)}
+
+
+def paired_cosine(a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] = None,
+                  norm_b: Optional[float] = None) -> Optional[float]:
+    """fp32 cosine between two same-shape tensors; cached norms avoid re-reducing
+    multi-GB CPU tensors per pairing. Returns ``None`` (excluded from medians,
+    counted by the caller) when either side is numerically zero — a cosine with
+    the zero vector is undefined, and silently emitting 0.0 would bias the gate
+    statistic."""
+    af = a.detach().to(torch.float32).reshape(-1)
+    bf = b.detach().to(torch.float32).reshape(-1)
+    assert af.numel() == bf.numel(), (
+        f"paired_cosine shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}"
+    )
+    na = float(torch.linalg.norm(af).item()) if norm_a is None else float(norm_a)
+    nb = float(torch.linalg.norm(bf).item()) if norm_b is None else float(norm_b)
+    if na <= _PROBE_EPS or nb <= _PROBE_EPS:
+        return None
+    return float(torch.dot(af, bf).item()) / (na * nb)
+
+
+def cos_over_targets(a: dict, b: dict, *, norms_a: Optional[dict] = None,
+                     norms_b: Optional[dict] = None) -> dict:
+    """Per-target cosines over the INTERSECTION of two ``{name: tensor}`` maps
+    (keys are canonical names; on the healthy path the sets are identical — the
+    caller asserts coverage). ``None`` cosines (zero vectors) are kept so the
+    caller can count exclusions."""
+    norms_a = norms_a or {}
+    norms_b = norms_b or {}
+    out = {}
+    for name in sorted(set(a.keys()) & set(b.keys())):
+        out[name] = paired_cosine(a[name], b[name], norm_a=norms_a.get(name), norm_b=norms_b.get(name))
+    return out
+
+
+def delta_stats_over_targets(rep: dict, ring: dict, *, ring_norms: Optional[dict] = None) -> tuple:
+    """m5 within-pair codec error per target: ``δ = G_anc_rep(t) − G_comp_ring(t−K)``
+    on IDENTICAL (batch, θ). Returns ``(ratio, cos)`` dicts where
+    ``ratio[name] = ‖δ‖/‖G_comp_ring‖`` (the GATE-B2 denominator is the paired
+    RING entry per the plan's operationalization) and ``cos[name] =
+    cos(δ, G_comp_ring)``.
+
+    SCALE CONTRACT (the #25 mean-vs-sum trap): both inputs MUST already be
+    DP-MEAN-reduced under the SAME loss normalization — the engine feeds the
+    ``_dp_all_reduce_anchor_grads`` (MEAN) anchor gradient and the FSDP-mean
+    fast gradient, both normalized by the same ``agg_loss`` global_batch_info.
+    This function applies NO rescaling of its own (pure linearity), which is
+    exactly what the scale-consistency unit test pins: feeding a SUM-reduced
+    side inflates the ratio by the world size.
+    """
+    ring_norms = ring_norms or {}
+    ratios: dict = {}
+    coses: dict = {}
+    for name in sorted(set(rep.keys()) & set(ring.keys())):
+        r = rep[name].detach().to(torch.float32)
+        g = ring[name].detach().to(torch.float32)
+        assert r.shape == g.shape, f"delta_stats shape mismatch for {name}: {r.shape} vs {g.shape}"
+        ng = ring_norms.get(name)
+        ng = float(torch.linalg.norm(g).item()) if ng is None else float(ng)
+        delta = r - g
+        nd = float(torch.linalg.norm(delta).item())
+        if ng <= _PROBE_EPS:
+            ratios[name] = None
+            coses[name] = None
+            continue
+        ratios[name] = nd / ng
+        if nd <= _PROBE_EPS:
+            coses[name] = None
+        else:
+            coses[name] = float(torch.dot(delta.reshape(-1), g.reshape(-1)).item()) / (nd * ng)
+    return ratios, coses
+
+
+def matrix_median(values) -> Optional[float]:
+    """Median over the per-target scalars of ONE fire (the plan's "matrix-median"
+    operationalization: median over the 196 per-matrix values), skipping
+    ``None`` entries. Returns ``None`` when nothing is left."""
+    import statistics
+
+    vals = [v for v in (values.values() if isinstance(values, dict) else values) if v is not None]
+    if not vals:
+        return None
+    return float(statistics.median(vals))
+
+
+def geometry_fire_record(
+    *,
+    step: int,
+    tick: int,
+    warmup_fallback: bool,
+    fire_index: int,
+    g_comp: dict,
+    g_comp_norms: dict,
+    rep: dict,
+    rep_norms: dict,
+    old: dict,
+    old_norms: dict,
+    rep_stats: dict,
+    lag_entries: dict,
+    ring_entry: Optional[tuple],
+    ring_tick: Optional[int],
+    prev_rep: Optional[tuple],
+    loss_mismatch_nats: Optional[float],
+    used_tick: int,
+    batch_gs: int,
+    realized_weight_delay: int,
+    m4_lags: int = 5,
+) -> tuple:
+    """Assemble ONE fire's m1–m7 record (the stepA_fires.jsonl line) plus the
+    per-target sidecar map. Pure CPU fp32 math over already-detached maps.
+
+    Field names are the plan's verbatim log/artifact contract:
+    ``step, tick, warmup_fallback, m1_matrix_median, m2_matrix_median,
+    m3_matrix_median, m4_j1..m4_j{m4_lags}, m5_ratio_matrix_median,
+    m5_cos_matrix_median, m6_matrix_median, m7_stable_rank_median,
+    m7_top1pct_mass_median, loss_mismatch_nats`` (+ provenance extras).
+    Missing structures (warmup: no ring entry / no prev fire / short lag
+    history) yield ``None`` (JSON null) — gates only read post-warmup fires.
+    """
+    # m1/m2/m3 — the H_validity / H_decorr discriminator triple.
+    m1 = cos_over_targets(g_comp, rep, norms_a=g_comp_norms, norms_b=rep_norms)
+    m2 = cos_over_targets(g_comp, old, norms_a=g_comp_norms, norms_b=old_norms)
+    m3 = cos_over_targets(rep, old, norms_a=rep_norms, norms_b=old_norms)
+    # m4 — fast-gradient lag autocorrelation, j=1..m4_lags.
+    m4_medians = {}
+    for j in range(1, int(m4_lags) + 1):
+        entry = lag_entries.get(int(tick) - j)
+        if entry is None:
+            m4_medians[j] = None
+            continue
+        lag_grads, lag_norms = entry
+        m4_medians[j] = matrix_median(
+            cos_over_targets(g_comp, lag_grads, norms_a=g_comp_norms, norms_b=lag_norms)
+        )
+    # m5 — within-pair codec error vs the exact t−K ring entry.
+    if ring_entry is not None:
+        ring_grads, ring_norms = ring_entry
+        m5_ratio, m5_cos = delta_stats_over_targets(rep, ring_grads, ring_norms=ring_norms)
+    else:
+        m5_ratio, m5_cos = {}, {}
+    # m6 — M_rep cross-fire persistence (β_anc=0 ⇒ M_rep == G_anc_rep per fire).
+    if prev_rep is not None:
+        prev_grads, prev_norms = prev_rep
+        m6 = cos_over_targets(rep, prev_grads, norms_a=rep_norms, norms_b=prev_norms)
+    else:
+        m6 = {}
+    # m7 — team-premise stats on the VALID gradient (computed at stash time).
+    m7_sr = {n: s.get("stable_rank") for n, s in rep_stats.items()}
+    m7_top = {n: s.get("top1pct_mass") for n, s in rep_stats.items()}
+
+    record = {
+        "step": int(step),
+        "tick": int(tick),
+        "warmup_fallback": bool(warmup_fallback),
+        "m1_matrix_median": matrix_median(m1),
+        "m2_matrix_median": matrix_median(m2),
+        "m3_matrix_median": matrix_median(m3),
+        "m5_ratio_matrix_median": matrix_median(m5_ratio) if m5_ratio else None,
+        "m5_cos_matrix_median": matrix_median(m5_cos) if m5_cos else None,
+        "m6_matrix_median": matrix_median(m6) if m6 else None,
+        "m7_stable_rank_median": matrix_median(m7_sr),
+        "m7_top1pct_mass_median": matrix_median(m7_top),
+        "loss_mismatch_nats": loss_mismatch_nats,
+        "n_targets": len(m1),
+        "fire_index": int(fire_index),
+        "used_tick": int(used_tick),
+        "batch_gs": int(batch_gs),
+        "realized_weight_delay": int(realized_weight_delay),
+        "ring_tick_consumed": int(ring_tick) if (ring_entry is not None and ring_tick is not None) else None,
+    }
+    for j in range(1, int(m4_lags) + 1):
+        record[f"m4_j{j}"] = m4_medians.get(j)
+
+    per_target = {
+        name: {
+            "m1": m1.get(name),
+            "m2": m2.get(name),
+            "m3": m3.get(name),
+            "m5_ratio": m5_ratio.get(name),
+            "m5_cos": m5_cos.get(name),
+            "m6": m6.get(name),
+            "m7_stable_rank": m7_sr.get(name),
+            "m7_top1pct_mass": m7_top.get(name),
+            "g_comp_norm": g_comp_norms.get(name),
+            "rep_norm": rep_norms.get(name),
+            "old_norm": old_norms.get(name),
+        }
+        for name in sorted(m1.keys())
+    }
+    return record, per_target
+
+
+def append_jsonl(path: str, obj: dict) -> None:
+    """Append one JSON object as a line to ``path`` (parent dirs created).
+    fsync'd so a box death right after a fire still leaves the line on disk."""
+    import json
+    import os
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(obj) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def feed_anchor_grads_into_ema(grads: dict, spectral, *, state=None) -> dict:

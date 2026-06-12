@@ -172,6 +172,25 @@ class BaseEngine:
         # Enabled path: backends OVERRIDE this method (see
         # FSDPEngine._maybe_comm_eff_capture_g_dense for the clone-no-hook impl).
 
+    def _maybe_comm_eff_geometry_probe(self) -> None:
+        """EXP-30 Step-A geometry-probe hook point (strict no-op when disabled).
+
+        Sits AFTER the grad-correction hook and BEFORE ``optimizer_step`` — the
+        point where the fast compressed per-target gradient ``G_comp(t)`` is
+        final. The FSDP backend override extracts it per tick (CPU staging into
+        the m4 lag buffer + the fire-aware ring) and, at anchor fires, emits the
+        complete m1–m7 record. Telemetry-only: never touches gradients, the
+        optimizer, the EMA, V, or Q. When comm_eff (or the probe flag) is
+        disabled this returns immediately — the base implementation is a no-op
+        even when a state is attached, so a backend without the override leaves
+        the train path byte-identical.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        # Enabled path: backends OVERRIDE this method (see
+        # FSDPEngine._maybe_comm_eff_geometry_probe).
+
     def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
         """
         Perform a training step on a batch of data.
@@ -200,6 +219,11 @@ class BaseEngine:
         # backward and before the optimizer step, so it would correct grads in
         # place; disabled => grads are untouched.
         self._maybe_comm_eff_grad_correction()
+        # EXP-30 Step A: geometry probe — per-tick G_comp staging + per-fire
+        # m1–m7 record, AFTER correction (inert on Step A by config contract)
+        # and BEFORE the optimizer step. Telemetry-only; strict no-op unless
+        # comm_eff.probe.geometry_enabled.
+        self._maybe_comm_eff_geometry_probe()
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
