@@ -27,7 +27,8 @@ Canonical project facts (working dir, gh-default repo, secrets, vast template, b
    Read .claude/plans/TEMPLATE.md for the plan structure.
    Run: gh issue view <NUMBER> --json title,body,labels,url
    Write the plan to .claude/plans/<NUMBER>.md, label the issue status:planned,
-   and post the plan as an issue comment via gh issue comment <NUMBER> --body-file .claude/plans/<NUMBER>.md.
+   and post a SHORT STUB comment (link to the plan file + cell list + budget — NEVER
+   the full plan body; large comments blow agent context windows on thread re-reads).
    Append one line to PROGRESS.md and stop.
    ```
 

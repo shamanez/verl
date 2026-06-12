@@ -62,14 +62,20 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 
 7. After writing the file:
    - Add label `status:planned` via `gh issue edit <NUMBER> --add-label status:planned`.
-   - Post the full plan as an issue comment: `gh issue comment <NUMBER> --body-file .claude/plans/<NUMBER>.md`.
+   - Post a **stub** comment, NOT the full plan (full plan bodies — 30–70 KB — blow agent
+     context windows every time the issue thread is re-read; operator directive 2026-06-12).
+     The stub is ≤ ~20 lines: a link to the canonical plan file
+     (`research/.claude/plans/<NUMBER>.md` on `vast-ai-workload`, permalinked at the pushed
+     commit if available, branch path otherwise), the cell list with one line each, the
+     gate/sequencing logic in one sentence, the success bar, and the compute budget. All
+     thresholds and math stay in the plan file only — link, don't restate.
 
 8. Append one line to `PROGRESS.md`:
    ```bash
    echo "[$(date -Iseconds)] [research-planner #<N>] plan written" >> PROGRESS.md
    ```
 
-9. **Tell the operator how to review the plan** in the issue comment you post. After the plan markdown, append this operator-facing footer:
+9. **Tell the operator how to review the plan** in the stub comment you post. After the stub, append this operator-facing footer:
 
    ```markdown
    ---
@@ -78,7 +84,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    The orchestrator will NOT auto-launch this plan. Before flipping
    `status:planned → status:approved`:
 
-   1. Read the plan above; check that `## Success criteria` are
+   1. Read the canonical plan file linked above; check that `## Success criteria` are
       machine-checkable, `## Compute budget` is sane, and (if
       `code_change: true`) `target_modules:` is confined to research-allowed
       paths.
