@@ -145,6 +145,36 @@ class TestCommEffConfigSchema(unittest.TestCase):
         with self.assertRaises(ValueError):
             CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
 
+    def test_anchor_replay_knob_defaults(self):
+        """EXP-29 knobs default OFF / gpu — the byte-identical legacy path."""
+        cfg = CommEffConfig()
+        self.assertFalse(cfg.anchor.replay_paired_batch)
+        self.assertEqual(cfg.anchor.snapshot_device, "gpu")
+
+    def test_anchor_replay_knob_validation(self):
+        """replay_paired_batch is a strict bool; snapshot_device is a closed enum."""
+        # Valid settings construct fine.
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(replay_paired_batch=True, snapshot_device="cpu")
+        )
+        self.assertTrue(cfg.anchor.replay_paired_batch)
+        self.assertEqual(cfg.anchor.snapshot_device, "cpu")
+        # A YAML "False" string (truthy!) must be loud, not a silent enable.
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(replay_paired_batch="False"))
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(replay_paired_batch=1))
+        # Typo'd device is a loud error, not a fall-through to gpu.
+        with self.assertRaises(ValueError):
+            CommEffConfig(anchor=CommEffAnchorConfig(snapshot_device="hbm"))
+
+    def test_anchor_replay_rejects_unknown_key(self):
+        """The structured schema still rejects a typo'd replay key."""
+        with self.assertRaises(Exception):
+            omega_conf_to_dataclass(
+                {"anchor": {"replay_paired_batches": True}}, dataclass_type=CommEffConfig
+            )
+
 
 class TestCommEffPowerSGDConfig(unittest.TestCase):
     """The compression_type enum and powersgd block must be registered and validated."""
