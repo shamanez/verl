@@ -195,3 +195,4 @@ Steps 15→33 observed. Val@25=0.7134 (above floor 0.6914, below PASS bar 0.7414
 [2026-06-11T14:26:12+10:00] [analyst #27] verdict=STOP
 [2026-06-11T14:29:13+10:00] [log-writer #27] logged verdict=STOP milestone=M6
 [2026-06-11T15:19:32+10:00] [issue-author #27] closed #27 (COMPLETED, status:stop→status:done; post-mortem comment 4677420446) — successor #28 created research:claim (TRUE codec-residual EF @100 + plain@100 no-carrier control + conditional labeled seq-mean guardrail; synthesized from MECHANISM_ANALYSIS.md + RUN_COMPARISON.md, GOAL-criteria-mapped), awaiting triage
+[2026-06-12T17:09:48+10:00] [exp29] GPU suite 187 passed on box; smoke launched in tmux exp-29-46_243_55_134 on i_40676027 (operator box); branch exp/29-anchor-onpolicy-replay@d311904
