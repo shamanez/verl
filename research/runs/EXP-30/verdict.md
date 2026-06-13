@@ -1,5 +1,13 @@
 # EXP-30 Verdict
 
+## TL;DR (current hyperparameters, val@50)
+
+- **Dense baseline (same code/config): ~0.78** (rerun `73ntu76u` 0.7839; band 0.75–0.78, ±0.024/draw).
+- **Best comm-efficient (B2, residual codec): 0.7528** → **−0.031 (≈96% of dense) = near-parity, not yet established.**
+- Controls: plain PowerSGD+Q, no merge (C2) **0.6300** → the merger is worth **+0.123**; blend (B1) 0.7422; frozen-Q (C3) pending.
+- Stability: emission-free through 100 steps (seed 0). Honest comm savings ~4× (fast-path number 19.8× excludes anchor traffic).
+- Next: **establish parity (seed replicates), then attempt to surpass** — see issue #31 / `beat_dense/`.
+
 **VERDICT: PASS**
 
 - plan: `.claude/plans/30.md` · issue #30 · milestone M6 · code_change: true (branch `exp/30-valid-m-geometry@c56c13bbf`)
