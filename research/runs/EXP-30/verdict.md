@@ -32,7 +32,8 @@
       no P1 (the only 16384 pin in the whole run is a single pre-injection rollout at step 2, 1/1024,
       non-consecutive, outside the window). Step-50 state: len/mean 203.9, len/max 784, clip_ratio 0.
 - [x] B2 val: 0.0864@0 / 0.7036@25 / **0.7528@50** ⇒ best val@50 = **0.7528 > 0.7210** floor.
-      **Parity aspiration 0.7414: REACHED** (dense ceiling 0.7536 missed by 0.0008).
+      **Parity: NEAR, not established** — reaches the old-dense 0.7536 (−0.0008) but is −0.031 below the
+      same-code same-config dense rerun 0.7839 (≈96% of dense). See §Bars correction; seed replicates binding.
 - [x] bytes_ratio in band every cell (A: 0.0504; B2: 0.05052) — codec untouched, GOAL-3
 - [x] controlled-variables: resolved_params diff A→B2 exactly {correction_mode none→delayed_ef, probe
       flag/posture, total_training_steps 20→50, experiment_name}; substrate byte-identical; merger hygiene
@@ -61,7 +62,8 @@ instead of re-learned for ~10.
 **Q3 — is the codec's weight-gradient error recoverable by a K-delayed exact residual? YES — the headline.**
 m5 said the residual is identifiable (loss-mismatch ≤ 0.0103 ≈ EXP-29's relevance band, so δ is codec error,
 not objective mismatch) and bounded (med ratio 1.0528). Cell B2 (`G_corr = G_comp + δ`, λ=1, β_anc=0)
-converted: **0.7528 vs the 0.7210 best-realistic floor (+0.0318), past 0.7414 parity, 0.0008 under dense** —
+converted: **0.7528 vs the 0.7210 best-realistic floor (+0.0318); near-parity — reaches old-dense 0.7536 but
+−0.031 below the same-config current-code dense 0.7839 (≈96%, see §Bars correction)** —
 emission-free, with the per-fire `delta_ratio` bounded and *declining* (1.37 → 1.03 over the run, no
 monotone climb). δ lifecycle behaved exactly as designed: cold-fallback (= plain PowerSGD) ticks 1–9,
 first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fallbacks=0` post-warmup;
@@ -102,17 +104,35 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
   one experiment: closed B1 cheaply (saved a doomed cell), opened B2 with quantified priors (m5), and the
   probe perturbed nothing (canary bitwise, step-time and bytes gates green).
 
-## Bars (W&B read-only constants)
+## Bars (val@50) — DENSE BASELINE CORRECTED 2026-06-13 (read this; supersedes the old single 0.7536)
 
-| reference | val@50 | B2 relative |
-|---|---|---|
-| dense ceiling `5e2jpho9` | 0.7536 | −0.0008 |
-| A0 fresh-clean@5 `oquyeic3` | 0.7415 | +0.0113 |
-| parity bar | 0.7414 | **reached** |
-| ef r2 floor `tilwe80t` | 0.7210 | +0.0318 |
-| signed_ema α0.5 `1wulaelw` | 0.7066 | +0.0462 |
-| no-refresh floor (EXP-23 A1) | 0.6914 | +0.0614 |
-| plain-on-substrate `u1v94opv` | 0.6437 | +0.1091 (single-knob read: the δ-correction is the only delta, modulo the replay knob postdating that run) |
+> **Dense baseline correction (operator-directed solidity pass).** The long-standing "dense ceiling
+> 0.7536" (`5e2jpho9`) was run on OLD code. EXP-30 added a **same-code, same-hyperparameter** dense
+> rerun (`exp30_dense_rerun` `73ntu76u`, current code, identical static-batch config to every comm-eff
+> cell — proof: all comm_eff counters 0): **val@50 = 0.7839**. So the apples-to-apples dense baseline for
+> these cells is **0.7839**, and the dense val@50 is best read as a **band ≈ 0.75–0.78** across two single
+> draws (rollout nondeterminism ≈ ±0.024/draw, measured: B2 0.7036@25 vs ext100 0.7278@25 same config).
+> **Consequence for B2:** against the same-config dense (0.7839), B2 (0.7528) is **−0.031 (≈96% of dense)** —
+> i.e. **near-parity, NOT "parity reached."** Parity-vs-dense is NOT established at single seed; the binding
+> fix is seed replicates of BOTH B2 and dense. The earlier "parity REACHED" was against the lower old draw.
+
+| reference | val@50 | run | B2 (0.7528) relative |
+|---|---|---|---|
+| **dense — current code, same config (APPLES-TO-APPLES)** | **0.7839** | `73ntu76u` | **−0.0311 (≈96%)** |
+| dense — old code (historical) | 0.7536 | `5e2jpho9` | −0.0008 |
+| A0 fresh-clean@5 | 0.7415 | `oquyeic3` | +0.0113 |
+| parity bar (old-dense-derived) | 0.7414 | — | near (not established) |
+| **blend merger (B1, same config)** | **0.7422** | (B1) | residual leads by +0.0106 |
+| ef r2 floor | 0.7210 | `tilwe80t` | +0.0318 |
+| signed_ema α0.5 | 0.7066 | `1wulaelw` | +0.0462 |
+| no-refresh floor (EXP-23 A1) | 0.6914 | — | +0.0614 |
+| **plain PowerSGD+Q, NO merge (C2, same config — clean 1-knob)** | **0.6300** | `k6nmcuyd` | +0.1228 (merge-value) |
+| plain-on-substrate (old) | 0.6437 | `u1v94opv` | +0.1091 |
+
+**Merge-value** (correction vs no-correction, same config) = B2 0.7528 − C2 0.6300 = **+0.123**; B1 0.7422 − C2 = +0.112.
+**Q-update-value** = C2 0.6300 − C3 frozen-Q (pending). **Hyperparameters are FIXED across all six cells**
+(batch 128 / mini 64 / lr 1e-6 / n=8 / resp 16384 / seed 0 / `ppo_max_token_len_per_gpu=18432` actor /
+`micro_batch=1` / `use_dynamic_bsz=False`) — the only varying knob is the codec/merger, so every delta above is one-knob.
 
 ## Disposition
 

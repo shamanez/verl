@@ -29,7 +29,7 @@ once, here, and read it off for every launch.
 | **rollout.gpu_memory_utilization** | **0.4** | |
 | **max_prompt_length** | **1024** | |
 | **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
-| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25); raise back to 36864 only on anchor-OFF reference ablations |
+| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25). **NON-BINDING under static batching**: with `ppo_micro_batch_size_per_gpu=1` + `use_dynamic_bsz=False`, each micro-batch is exactly 1 sequence (≤16384+prompt ≈ 16.6K < 18432), so this cap NEVER triggers and does NOT affect the result — 18432 vs 36864 is mathematically identical here. **Keep 18432 on EXP-30-style comparison cells INCLUDING the dense reference** so the dense baseline is apples-to-apples (only the codec/merger varies); raising to 36864 on an anchor-OFF ablation is allowed but then it is NOT one-knob vs the comm-eff cells |
 | **total_training_steps** | **50 → 100** | start at 50; extend to 100 once 50 trains cleanly |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
 | **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
@@ -65,6 +65,15 @@ PowerSGD residual (#24) is the next candidate.
 **Reference codecs (NOT the base; ablation only):** the dense control
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
 (`mask.p`; cannot anchor-own-`Q`, so run it with `anchor.owns_q=false`).
+
+**☆ DENSE BASELINE (val@50) — CORRECTED 2026-06-13.** The dense "ceiling" is **run-variance-dominated**;
+report it as a **band ≈ 0.75–0.78**, not a single point (rollout nondeterminism ≈ ±0.024/draw even at
+seed 0). Two draws on record: **current-code, same-static-batch-config rerun `exp30_dense_rerun`
+(`73ntu76u`) = 0.7839** — the APPLES-TO-APPLES baseline for any EXP-30-config comm-eff cell (proof: all
+comm_eff counters 0) — and the old-code `5e2jpho9` = 0.7536 (historical). Always compare a comm-eff cell
+to a dense run sharing its code + hyperparameters; the current-code rerun confirmed our EXP-29/30 merges
+did **not** regress dense (≥ old). Dense is **never re-run for production**, but an apples-to-apples dense
+control alongside a comm-eff sweep is sanctioned and was operator-directed in EXP-30.
 
 ## Measurement knobs (NOT control variables — may vary freely)
 

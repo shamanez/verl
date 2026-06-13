@@ -13,10 +13,14 @@ residual, λ=1, β_anc=0 on the EXP-29 paired-replay substrate) reached best val
 0.7210 realistic floor, with zero post-warmup emission — while the geometry gate retired the entire
 blend-on-valid-M class for ~4 GPU-hr without spending a training cell. The honest statistical read
 (critic T2): 0.7528 clears the pre-registered floor rule at the point-estimate level (~1.9σ as a
-difference of proportions), but at val SE ≈ 0.0119 it is **statistically indistinguishable from dense
-0.7536** (−0.0008 ≈ one flipped problem) — so the claim is "parity point-estimate reached,
-parity-vs-dense neither established nor refuted at n=1 seed," not "parity proven." The 50-step
-stability result is censored (EXP-27 ignited at ~61); ext100 is running precisely to clear that band.
+difference of proportions). **DENSE BASELINE CORRECTED 2026-06-13:** the apples-to-apples dense is now
+the same-code, same-hyperparameter rerun `exp30_dense_rerun` (`73ntu76u`) = **0.7839** (old `5e2jpho9`
+0.7536 was old code); the dense val@50 is a **band ≈ 0.75–0.78** (rollout nondeterminism ≈ ±0.024/draw).
+Against the same-config dense (0.7839), B2 is **−0.031 (≈96% of dense)** — so the honest claim is
+**"near-parity, NOT established"**: B2 reaches the old-dense draw but sits ~3 pts below the current-code
+draw, within ~1.3 nondeterminism-σ. Parity-vs-dense is unresolved at n=1 seed; the binding fix is seed
+replicates of BOTH B2 and dense (R2/R3). The 50-step stability result is censored (EXP-27 ignited at ~61);
+ext100 cleared that band for seed 0.
 
 ## 2. What we now know (mechanism — numbers recomputed, not inherited)
 
