@@ -1,12 +1,20 @@
 # EXP-30 Verdict
 
-## TL;DR (current hyperparameters, val@50)
+## TL;DR (current hyperparameters, val@50) — FINAL six-run decomposition
 
-- **Dense baseline (same code/config): ~0.78** (rerun `73ntu76u` 0.7839; band 0.75–0.78, ±0.024/draw).
-- **Best comm-efficient (B2, residual codec): 0.7528** → **−0.031 (≈96% of dense) = near-parity, not yet established.**
-- Controls: plain PowerSGD+Q, no merge (C2) **0.6300** → the merger is worth **+0.123**; blend (B1) 0.7422; frozen-Q (C3) pending.
-- Stability: emission-free through 100 steps (seed 0). Honest comm savings ~4× (fast-path number 19.8× excludes anchor traffic).
-- Next: **establish parity (seed replicates), then attempt to surpass** — see issue #31 / `beat_dense/`.
+| run | what it isolates | val@50 | Δ vs prev |
+|---|---|---|---|
+| dense, same code+config (`73ntu76u`) | learning ceiling (apples-to-apples) | **0.7839** | — |
+| dense, old code (`5e2jpho9`) | historical ceiling | 0.7536 | — |
+| **B2 — δ-residual merger** (`u9okvgzz`) | **best comm-efficient** | **0.7528** | +0.123 over C2 (merger) |
+| B1 — blend merger | blend vs residual | 0.7422 | +0.112 over C2 |
+| C2 — PowerSGD + Q-updated, **no merge** (`k6nmcuyd`) | substrate floor | 0.6300 | **+0.34–0.54 over C3 (Q-update)** |
+| C3 — PowerSGD, **Q FROZEN**, no merge (`djy4tog1`, killed@25) | Q-update value | **0.0925@25** (no learning) | — |
+
+- **Dense (same config) ≈ 0.78** (band 0.75–0.78, ±0.024/draw). **Best comm-eff B2 = 0.7528 ≈ 96% of dense → near-parity, NOT established** (≈1.3σ; seed replicates binding).
+- **Component decomposition (what makes it work):** the **power-iteration Q-update is the dominant lever (+~0.5)** — freeze it (C3) and the codec passes noise, val stays at baseline 0.09; the **δ-residual merger adds +0.123** on top of plain (C2 0.6300 → B2 0.7528).
+- Stability: B2 emission-free through 100 steps (seed 0). Honest comm savings **~4×** (fast-path 19.8× excludes anchor traffic).
+- **Next: establish parity (seed replicates), then attempt to surpass** — issue #31 / `beat_dense/`.
 
 **VERDICT: PASS**
 
