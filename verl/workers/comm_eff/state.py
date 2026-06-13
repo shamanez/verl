@@ -575,14 +575,6 @@ class CommEffState:
                 ef_clip=float(getattr(spec_cfg, "ef_clip", 0.0)),
                 # EXP-30 B2: K-delayed exact codec residual weight (delayed_ef).
                 delayed_ef_lambda=float(getattr(spec_cfg, "delayed_ef_lambda", 0.0)),
-                # EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (OFF by
-                # default; r_sb=0 ⇒ the exact B2 path). base_seed = the locked
-                # codec seed (powersgd.seed, identical on every DP rank) so the
-                # per-target randomized SVD that builds δ_subbasis is bit-identical
-                # across ranks (the multi-rank-agreement invariant).
-                delta_subbasis_rank=int(getattr(spec_cfg, "delta_subbasis_rank", 0)),
-                delta_subbasis_family=str(getattr(spec_cfg, "delta_subbasis_family", "tail")),
-                base_seed=int(getattr(getattr(self.config, "powersgd", None), "seed", 0) or 0),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "
