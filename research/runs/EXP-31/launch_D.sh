@@ -24,6 +24,29 @@ else
   echo "FATAL: $BUNDLE missing — cannot apply Cell D code" >&2; exit 3
 fi
 echo "=== Cell D code: $(git log --oneline -1) (branch $(git rev-parse --abbrev-ref HEAD)) ==="
+
+# Hydra struct-mode gate: actor.yaml must DECLARE the EXP-31 sub-basis fields or the
+# CLI overrides (delta_subbasis_rank=2 ...) are rejected ("not in struct"). The branch
+# added them to the dataclass (CommEffSpectralConfig) but not to the YAML struct.
+# Replicate the delayed_ef_lambda precedent (actor.yaml:488). Idempotent; survives the
+# reset --hard above because it runs AFTER the checkout, on the fresh tree, every launch.
+python3 - <<'PYEOF'
+import re
+f = "/workspace/verl/verl/trainer/config/actor/actor.yaml"
+s = open(f).read()
+if "delta_subbasis_rank" not in s:
+    s2 = re.sub(
+        r"(?m)^([ \t]*)delayed_ef_lambda:.*$",
+        lambda m: m.group(0) + "\n" + m.group(1) + "delta_subbasis_rank: 0\n"
+                  + m.group(1) + "delta_subbasis_family: tail\n" + m.group(1) + "r_delta: 0",
+        s, count=1)
+    assert s2 != s, "FATAL: delayed_ef_lambda anchor not found in actor.yaml — cannot patch struct"
+    open(f, "w").write(s2)
+    print("actor.yaml: EXP-31 sub-basis fields inserted (struct-mode gate)")
+else:
+    print("actor.yaml: sub-basis fields already present")
+PYEOF
+
 python3 -c "import verl" 2>/dev/null \
   || uv pip install --no-deps -e . > /workspace/pip.log 2>&1 \
   || pip install --no-deps -e . >> /workspace/pip.log 2>&1
