@@ -295,6 +295,35 @@ class CommEffSpectralConfig(BaseConfig):
     # cell sets 1.0 explicitly. Must be >= 0. Unused unless
     # correction_mode=delayed_ef.
     delayed_ef_lambda: float = 0.0
+    # ---- EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (delayed_ef) ----
+    # When delta_subbasis_rank (r_sb) > 0, the delayed_ef merger ADDS a rank-r_sb
+    # low-rank reconstruction of the source S into its correction term:
+    #
+    #   δ_subbasis = rank_{r_sb}(S)                       # seeded randomized SVD
+    #   G_corr(t)  = G_comp(t) + λ·(δ_B2 + δ_subbasis)    # forward Q UNCHANGED
+    #
+    # delta_subbasis_family selects S: "tail" (default) ⇒ S = δ_B2 (the
+    # act-deflated stale weight gradient = the off-act-principal direction the
+    # codec structurally drops); "grad" ⇒ S = M_rep (the raw stale anchor
+    # gradient). The sub-basis enters ONLY the correction δ — the forward/recon
+    # codec Q is untouched, so the EXP-26 Step-C dead route is avoided BY
+    # CONSTRUCTION. r_sb = 0 (default, OFF) SKIPS the sub-basis branch entirely ⇒
+    # G_corr == B2's G_corr bitwise (off-path-parity invariant). The randomized
+    # SVD is per-target seeded so δ_subbasis is bit-identical across DP ranks
+    # (δ_B2 / M_rep are already DP-mean identical). Must be >= 0. Unused unless
+    # correction_mode=delayed_ef.
+    delta_subbasis_rank: int = 0
+    # The sub-basis source family: "tail" (act-deflated grad, the default) or
+    # "grad" (raw stale anchor gradient, the REVISE fallback). Validated to
+    # {tail, grad}.
+    delta_subbasis_family: str = "tail"
+    # ---- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ----
+    # r_delta > 0 compresses the correction δ to r_delta columns BEFORE injection
+    # (the Cell C residual-codec savings cell; forward/recon act-Q untouched).
+    # 0 (default, OFF) = δ is injected uncompressed (the B2 / Cell D path). Wired
+    # here for config completeness; the Cell C codec is a SEPARATE later change.
+    # Must be >= 0. Unused unless correction_mode=delayed_ef.
+    r_delta: int = 0
 
 
 @dataclass
@@ -740,6 +769,24 @@ class CommEffConfig(BaseConfig):
         if self.spectral.delayed_ef_lambda < 0.0:
             raise ValueError(
                 f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}"
+            )
+        # EXP-31 Cell D: the additive stale-anchor sub-basis rank. >= 0; 0
+        # (default) is OFF (the exact B2 path). Validated unconditionally so a
+        # typo is loud even on a non-delayed_ef run that forwards it.
+        if self.spectral.delta_subbasis_rank < 0:
+            raise ValueError(
+                f"comm_eff.spectral.delta_subbasis_rank must be >= 0; got {self.spectral.delta_subbasis_rank}"
+            )
+        if self.spectral.delta_subbasis_family not in ("tail", "grad"):
+            raise ValueError(
+                "comm_eff.spectral.delta_subbasis_family must be one of (tail, grad); "
+                f"got {self.spectral.delta_subbasis_family!r}"
+            )
+        # EXP-31 Cell C: the correction-δ compression rank. >= 0; 0 (default) is
+        # OFF (uncompressed δ = the B2 / Cell D path).
+        if self.spectral.r_delta < 0:
+            raise ValueError(
+                f"comm_eff.spectral.r_delta must be >= 0; got {self.spectral.r_delta}"
             )
         # EXP-30 B2: delayed_ef merges the VALID (generator-consistent) M_rep by
         # definition — running it on the legacy generator-mismatched feed would

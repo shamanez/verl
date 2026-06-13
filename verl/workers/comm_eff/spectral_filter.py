@@ -115,6 +115,9 @@ class SpectralFilter:
         ef_decay: float = 0.0,
         ef_clip: float = 0.0,
         delayed_ef_lambda: float = 0.0,
+        delta_subbasis_rank: int = 0,
+        delta_subbasis_family: str = "tail",
+        base_seed: int = 0,
     ):
         self.beta_anc = float(beta_anc)
         # Storage layer default: gpu. Validation happens in
@@ -151,6 +154,29 @@ class SpectralFilter:
         # posture) ⇒ delayed_ef_matrix returns G_comp EXACTLY (the limiting-case
         # identity invariant); the B2 cell sets λ=1.0 explicitly.
         self.delayed_ef_lambda = float(delayed_ef_lambda)
+        # EXP-31 Cell D: additive stale-anchor rank-r sub-basis folded into the
+        # delayed_ef correction term. ``delta_subbasis_rank`` r_sb > 0 enables the
+        # NEW additive term ``δ_subbasis = rank_{r_sb}(S)`` where the source S is
+        # the act-deflated stale weight-gradient (``family="tail"``, S = δ_B2) or
+        # the raw stale anchor gradient (``family="grad"``, S = M_rep). r_sb = 0
+        # (default) SKIPS the sub-basis branch entirely (the rank-0 path is the
+        # EXACT B2 path, bitwise — Correctness invariant "off-path parity"). The
+        # sub-basis enters ONLY the correction δ (the forward codec Q is never
+        # read/written here ⇒ Step-C avoidance by construction). Validated in
+        # CommEffConfig.__post_init__; assert defensively here too.
+        self.delta_subbasis_rank = int(delta_subbasis_rank)
+        assert self.delta_subbasis_rank >= 0, self.delta_subbasis_rank
+        assert delta_subbasis_family in ("tail", "grad"), delta_subbasis_family
+        self.delta_subbasis_family = str(delta_subbasis_family)
+        # EXP-31 Cell D: base seed for the per-target randomized SVD generator.
+        # The low-rank sub-basis is built with ``torch.svd_lowrank`` (randomized),
+        # whose result depends on a random projection. δ_B2 / M_rep are already
+        # DP-MEAN-identical across ranks, so to keep δ_subbasis BIT-IDENTICAL
+        # across DP ranks the random projection MUST be seeded deterministically
+        # (same on every rank). We mix this base_seed with a per-target salt
+        # derived from the target name (see ``_subbasis_seed``) so each target
+        # gets its own reproducible generator while staying cross-rank identical.
+        self.base_seed = int(base_seed)
         # EXP-30 B2: per-target HELD residual δ (detached fp32, EMA-storage
         # device). Refreshed when a fire-aligned ring entry exists (the anchor
         # just refreshed M_rep AND G_comp_ring(t−K) is the exact pair), HELD on
@@ -161,6 +187,14 @@ class SpectralFilter:
         # REFRESHED δ this step vs reused the held one vs fell back cold.
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
+        # EXP-31 Cell D: per-step counters (reset by the engine loop): how many
+        # targets had the additive sub-basis APPLIED vs SKIPPED because the
+        # randomized SVD was degenerate (zero/NaN source, r_sb > min-dim, etc.).
+        self.delayed_ef_subbasis_applied = 0
+        self.delayed_ef_subbasis_skipped = 0
+        # EXP-31 Cell D: per-fire ‖δ_subbasis‖/‖δ_B2‖ ratios collected this step
+        # (so the engine loop can log the median on the existing delayed_ef line).
+        self._subbasis_energy_ratios: list[float] = []
         # EXP-25 (R3): per-step count of matrices whose M was cold (||M||<=eps) so
         # the merger no-op'd to G_noisy (the silent grad-zeroing guard). Reset by
         # the engine each grad-correction step before the loop.
@@ -433,6 +467,85 @@ class SpectralFilter:
         g_corr = gm + e_t
         return g_corr.to(g_mask.dtype)
 
+    # ------------------------------------------------------------------ #
+    # EXP-31 Cell D: additive stale-anchor sub-basis (weight-gradient tail)
+    # ------------------------------------------------------------------ #
+    def _subbasis_seed(self, name: str) -> int:
+        """Deterministic per-target seed for the randomized SVD generator.
+
+        Mixes ``self.base_seed`` with a stable per-target salt derived from the
+        canonical target name so (a) every target gets its OWN reproducible
+        generator and (b) the seed is a pure function of (base_seed, name) — it
+        contains NO rank-local / device-local state — so it is IDENTICAL on every
+        DP rank. Because the source ``S`` (δ_B2 or M_rep) is already DP-MEAN
+        identical across ranks, a rank-invariant seed makes ``torch.svd_lowrank``
+        return bit-identical columns on every rank (the multi-rank-agreement
+        invariant). The salt is a stable non-cryptographic hash of the canonical
+        name (Python's ``hash`` is salted per-process, so we roll our own FNV-1a
+        over the UTF-8 bytes to stay reproducible across processes/ranks).
+        """
+        salt = 0x811C9DC5  # FNV-1a 32-bit offset basis
+        for b in _canon(name).encode("utf-8"):
+            salt = ((salt ^ b) * 0x01000193) & 0xFFFFFFFF
+        return (int(self.base_seed) * 1_000_003 + salt) & 0x7FFFFFFF
+
+    def _subbasis_delta(self, name: str, source: torch.Tensor, r: int) -> Optional[torch.Tensor]:
+        """Rank-``r`` reconstruction of ``source`` via a seeded randomized SVD.
+
+        Returns ``U[:, :r] diag(s[:r]) V[:, :r]ᵀ`` (fp32, detached, on
+        ``source``'s device, ``source``'s shape) — the dominant rank-``r``
+        direction of the source, which for ``family="tail"`` (source = δ_B2 =
+        the act-deflated stale weight gradient) is exactly the off-act-principal
+        direction the activation codec structurally drops, and for
+        ``family="grad"`` (source = M_rep) is the raw stale-anchor top-``r``.
+
+        Determinism: the randomized projection uses a per-target
+        :func:`torch.Generator` seeded by :meth:`_subbasis_seed`, so the columns
+        are bit-identical across DP ranks (the source is already DP-mean
+        identical). ``niter=2`` matches the act-basis block-power-iteration depth.
+
+        Shape-guarded: returns ``None`` (the caller counts a SKIP and folds in
+        the plain B2 δ unchanged) when the source is degenerate — non-finite,
+        ~zero-norm, fewer than ``r`` usable directions (``r > min(shape)``), or
+        not 2D — so a pathological target never injects garbage or raises.
+        """
+        if r <= 0:
+            return None
+        S = source.detach().to(torch.float32)
+        if S.dim() != 2:
+            return None
+        m, n = S.shape
+        q = min(int(r), m, n)
+        if q <= 0:
+            return None
+        s_norm = torch.linalg.norm(S)
+        if not torch.isfinite(s_norm) or float(s_norm.item()) <= 1e-12:
+            return None
+        # Seeded randomized SVD. ``torch.svd_lowrank`` draws an internal random
+        # (n × q) projection from the GLOBAL RNG (it has no ``generator`` arg), so
+        # determinism + cross-rank agreement is achieved by seeding the global RNG
+        # with a rank-INVARIANT per-target seed. To leave NO global side effect on
+        # the surrounding training RNG stream we save/restore the RNG state around
+        # the call (``torch.random.fork_rng`` covers CPU + the input device). The
+        # seed is a pure function of (base_seed, canonical-name) ⇒ identical on
+        # every DP rank; the source S is already DP-mean identical ⇒ the columns
+        # are bit-identical across ranks (the multi-rank-agreement invariant).
+        seed = self._subbasis_seed(name)
+        try:
+            _devices = [S.device] if S.device.type == "cuda" else []
+            with torch.random.fork_rng(devices=_devices, enabled=True):
+                torch.manual_seed(seed)
+                if S.device.type == "cuda":
+                    torch.cuda.manual_seed_all(seed)
+                U, s, V = torch.svd_lowrank(S, q=q, niter=2)
+        except Exception:  # numerically degenerate sketch → skip, never raise
+            return None
+        if not (torch.isfinite(U).all() and torch.isfinite(s).all() and torch.isfinite(V).all()):
+            return None
+        # U[:, :q] diag(s[:q]) V[:, :q]ᵀ — the rank-q reconstruction of S.
+        recon = (U[:, :q] * s[:q].unsqueeze(0)) @ V[:, :q].transpose(-2, -1)
+        return recon.detach().to(source.device, torch.float32)
+
     def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor, ring_grad: Optional[torch.Tensor] = None):
         """EXP-30 B2: K-delayed EXACT codec residual (the anchor-feasible EF analogue).
 
@@ -440,6 +553,23 @@ class SpectralFilter:
 
             δ(t)      = M_rep(t) − G_comp_ring(t−K)     # codec error on IDENTICAL (batch, θ)
             G_corr(t) = G_comp(t) + λ·δ                  # δ refreshed at fires, HELD between
+
+        **EXP-31 Cell D: additive stale-anchor sub-basis.** When
+        ``delta_subbasis_rank`` (r_sb) > 0, a rank-r_sb low-rank reconstruction of
+        the source S is ADDED to the correction term::
+
+            δ_subbasis = rank_{r_sb}(S)                   # seeded randomized SVD
+            G_corr(t)  = G_comp(t) + λ·(δ + δ_subbasis)   # forward Q UNCHANGED
+
+        ``family="tail"`` (default) takes ``S = δ`` (the act-deflated stale weight
+        gradient = the off-act-principal direction the codec drops);
+        ``family="grad"`` takes ``S = M_rep`` (the raw stale anchor gradient). The
+        sub-basis enters ONLY this correction term — the forward/recon codec Q is
+        never read or written here, so Step-C is avoided by construction. r_sb = 0
+        (default) SKIPS the sub-basis branch ENTIRELY ⇒ ``G_corr = G_comp + λ·δ``
+        bitwise (off-path parity). δ_subbasis is built from δ / M_rep (both
+        DP-mean) via a per-target SEEDED randomized SVD, so it is bit-identical
+        across DP ranks (determinism / multi-rank-agreement invariant).
 
         ``M_rep`` is the anchor EMA at ``β_anc=0`` — exactly the latest fire's
         generator-consistent ``G_anc_rep`` (the EXP-29 paired replay gradient).
@@ -510,7 +640,33 @@ class SpectralFilter:
             self.merger_coldM_fallbacks += 1
             return g_comp
 
-        g_corr = gm + lam * delta
+        # EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis. When OFF
+        # (delta_subbasis_rank == 0) this branch is SKIPPED ENTIRELY (not
+        # computed-then-zeroed) so ``correction == delta`` is the EXACT B2 path
+        # (off-path-parity, bitwise). When ON, the source S is the act-deflated
+        # stale weight gradient δ (family="tail") — the off-act-principal
+        # direction the codec misses — or the raw stale anchor gradient M_rep
+        # (family="grad"); δ_subbasis = rank_{r_sb}(S) is added to δ. The forward
+        # codec Q is never touched ⇒ Step-C avoidance by construction.
+        if self.delta_subbasis_rank > 0:
+            source = delta if self.delta_subbasis_family == "tail" else anc
+            delta_sb = self._subbasis_delta(name, source, self.delta_subbasis_rank)
+            if delta_sb is not None:
+                correction = delta + delta_sb
+                self.delayed_ef_subbasis_applied += 1
+                _dn = float(torch.linalg.norm(delta).item())
+                if _dn > 1e-12:
+                    self._subbasis_energy_ratios.append(
+                        float(torch.linalg.norm(delta_sb).item()) / _dn
+                    )
+            else:
+                # Degenerate source → fall back to the plain B2 δ (never garbage).
+                correction = delta
+                self.delayed_ef_subbasis_skipped += 1
+        else:
+            correction = delta
+
+        g_corr = gm + lam * correction
         return g_corr.to(g_comp.dtype)
 
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
@@ -591,6 +747,12 @@ def apply_spectral_correction_to_params(
     # never see its own push).
     spectral.delayed_ef_refreshed = 0
     spectral.delayed_ef_held = 0
+    # EXP-31 Cell D: reset the per-step additive-sub-basis counters + the per-fire
+    # energy-ratio accumulator so the [comm_eff][EXP-30][delayed_ef] line reports
+    # THIS step's sub-basis activity. All zero on the OFF path (rank 0).
+    spectral.delayed_ef_subbasis_applied = 0
+    spectral.delayed_ef_subbasis_skipped = 0
+    spectral._subbasis_energy_ratios = []
     _ring = None
     _ring_entry_grads = None
     _ring_push: dict = {}
@@ -758,12 +920,28 @@ def apply_spectral_correction_to_params(
                     _ratios.append(float(torch.linalg.norm(_d.to(torch.float32)).item()) / _gn)
             if _ratios:
                 _ratio_line = f" delta_ratio_median={_st.median(_ratios):.6f}"
+        # EXP-31 Cell D: surface the additive-sub-basis activity. applied/skipped
+        # count per-target sub-basis folds; subbasis_energy_ratio (median
+        # ‖δ_subbasis‖/‖δ_B2‖ over applied targets) is the headline geometry
+        # scalar. All zero / absent on the OFF path (delta_subbasis_rank=0), so the
+        # B2 line is unchanged in spirit (the extra fields read 0 / nan).
+        import statistics as _st2
+
+        _sb_applied = int(getattr(spectral, "delayed_ef_subbasis_applied", 0))
+        _sb_skipped = int(getattr(spectral, "delayed_ef_subbasis_skipped", 0))
+        _sb_ratios = list(getattr(spectral, "_subbasis_energy_ratios", []) or [])
+        _sb_ratio_med = _st2.median(_sb_ratios) if _sb_ratios else float("nan")
         print(
             f"[comm_eff][EXP-30][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
             f"corrected={corrected} refreshed={refreshed} held={held} "
             f"merger_coldM_fallbacks={cold} ring_entries={len(_ring) if _ring is not None else 0}"
             f"{_ratio_line} "
-            f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between)",
+            f"subbasis_rank={getattr(spectral, 'delta_subbasis_rank', 0)} "
+            f"subbasis_family={getattr(spectral, 'delta_subbasis_family', 'tail')} "
+            f"subbasis_applied={_sb_applied} subbasis_skipped={_sb_skipped} "
+            f"subbasis_energy_ratio={_sb_ratio_med:.6f} "
+            f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between; "
+            f"subbasis_rank==0 ⇒ correction==delta exactly = B2)",
             flush=True,
         )
 
