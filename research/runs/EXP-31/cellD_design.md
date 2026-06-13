@@ -56,3 +56,9 @@ This realization is **more faithful in effect** (it amplifies the weight-update 
 
 ## Run
 Cell D production = Cell A's B2 config + `COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK=2 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY=tail`, 50 steps, test_freq=25, seed 0. Headline: best val@50 ≥ 0.79; certified by Cell F (seed-mean − dense-mean > 0.020).
+
+**MANDATORY on EVERY launch on this box (controlled variable, env-failure fix):** carry the Hydra override
+`+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=true`. Cell A attempt-1 crashed without it
+(vLLM custom_all_reduce CUDA-IPC failure under the mp executor). NCCL all-reduce is mathematically identical for
+greedy mean@1, and every comparison arm (A, D, C, **and Cell F's dense rerun + B2 seeds**) carries it, so the
+band-vs-band comparison stays apples-to-apples. Model Cell D/C/F launchers on `runs/EXP-31/launch_A.sh` (which has it).

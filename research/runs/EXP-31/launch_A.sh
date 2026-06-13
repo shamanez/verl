@@ -43,11 +43,18 @@ mkdir -p /workspace/runs/EXP-31/metrics
 # Liveness + sync-metrics contract: /workspace/train.log IS the live cell log.
 ln -sf "$LOG" /workspace/train.log
 
+# ENV-FAILURE FIX (2026-06-13, attempt-1 crash): vLLM custom all-reduce failed at
+# custom_all_reduce.cuh:455 'invalid argument' during EngineCore init (CUDA IPC
+# handle registration under the mp executor — blocked in this container despite
+# healthy NVLink/NV6). Force NCCL all-reduce instead: mathematically identical,
+# greedy mean@1 val unaffected. This override is a CONTROLLED VARIABLE for the
+# whole plan — Cell D / C / F (incl. the dense rerun + B2 seeds) MUST carry it too.
 RC=0
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch=true \
   actor_rollout_ref.actor.comm_eff.anchor.snapshot_device=cpu \
   actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda=1.0 \
-  actor_rollout_ref.actor.comm_eff.probe.geometry_enabled=false || RC=$?
+  actor_rollout_ref.actor.comm_eff.probe.geometry_enabled=false \
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=true || RC=$?
 echo "$(date -Iseconds) A done rc=$RC" > /workspace/runs/EXP-31/done_A.flag
 exit "$RC"
