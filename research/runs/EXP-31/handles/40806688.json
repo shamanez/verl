@@ -1,0 +1,16 @@
+{
+  "instance_id": "40806688",
+  "ssh_host": "104.202.252.41",
+  "ssh_port": 20234,
+  "public_ipaddr": "104.202.252.41",
+  "gpu_name": "H200",
+  "num_gpus": 4,
+  "gpu_ram": 143771,
+  "dph_total": 14.270833333333334,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 20234 root@104.202.252.41 -L 8080:localhost:8080",
+  "schema_version": "1",
+  "reused": false,
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true",
+  "note": "OPERATOR-PROVIDED box for EXP-31 (strict directive: use THIS instance, do NOT provision). Operator SSH route: ssh -i ~/.ssh/vast_ai -p 20234 root@104.202.252.41. Legacy key ~/.ssh/vast_ai (operator-offered) AND project-standard ~/.ssh/vast_ai_name (appended to box authorized_keys by orchestrator so monitor + sync-metrics work) are BOTH accepted. Vast proxy route also valid: ssh7.vast.ai:16688. verl on vast-ai-workload@7d132ca (delayed_ef + replay substrate present)."
+}

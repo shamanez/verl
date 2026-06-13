@@ -1,23 +1,21 @@
-# Research Status — 2026-06-13T17:05:00+10:00
+# Research Status — 2026-06-13 (EXP-31 surpass-dense drive)
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 31 | Surpass the dense baseline (beat-dense program from B2) | PLAN_READY (research:claim) | — | — | hand-off for next session; `runs/EXP-30/beat_dense/` + issue body |
-| 30 | Generator-consistent M geometry gate + B1/B2 + controls | **DONE / CLOSED** | torn down (i_40765004) | **PASS** | B2 0.7528 (≈96% dense); 6-run decomposition; PR #17 merged; #31 successor |
-| 29 | Anchor on-policy replay | DONE | — | PASS | PR #16 merged; substrate donor |
-| 27 | Damped ef_powersgd merger | DONE | — | STOP | lineage closed |
-| 26 | EF PowerSGD + Q families | DONE | — | REVISE | ef 0.7210, M6 record |
+| 31 | Surpass dense via stale-anchor sub-basis merger | RUNNING (Cell A) + Cell D code in flight | 1×4H200 (i_40806688, OPERATOR box) | — | Cell A = B2-reproduce substrate control, monitored; Cell D merger being implemented on exp/31 (CPU); geometry done (r_sb=2) |
+| 28 | EXP-28 TRUE error-feedback successor | PLAN_READY? (kind:experiment, no status label) | — | — | not approved; out of scope this drive |
 
-## EXP-30 final result (current hyperparameters, val@50)
-dense same-config **0.7839** (band 0.75–0.78) · **B2 δ-residual 0.7528** (≈96%, near-parity not established) · B1 blend 0.7422 · C2 plain+Q no-merge 0.6300 · C3 frozen-Q 0.0925@25 (killed, no learning). **Q-update = dominant lever (+~0.5); merger +0.123.** Honest savings ~4×.
-
-## Canonical EXP-30 docs
-`verdict.md` (record + 6-run decomposition) · `beat_dense/{program,feasibility}.md` (#31 hand-off) · `stepA_gate.md`. Intermediate team syntheses deleted (git history).
+## EXP-31 cell progress
+- **Cell A (B2 reproduce)** — RUNNING on operator box 40806688 (4×H200). tmux `exp-31-104_202_252_41`, ledger row EXP-31 owns heartbeat. 15/15 controlled-variable assertions PASS (delayed_ef λ=1, β_anc=0, r=77 act, cadence=delay_K=5, clean=0, replay, snapshot cpu, seed 0, 50 steps, test_freq=25). In vLLM-init window. **monitor-cellA** active (bg).
+- **ANALYSIS (geometry sizing)** — DONE. `runs/EXP-31/geometry_sizing.md`: stable-rank 1.93 (53.6% ≤2) → r_sb=2; off-principal energy 0.682 (F1 reproduced); honest-byte denom 3.70×; Cell C r_δ=16 then 8 (only beats 3.70× if compressed δ REPLACES full-rank anchor-M traffic).
+- **Cell D (headline merger)** — code being implemented on `exp/31-subbasis-merger` (CPU/worktree, parallel). Design locked in `runs/EXP-31/cellD_design.md`: δ_subbasis = rank-r_sb SVD of δ_B2 (tail) added additively into delayed_ef; weight-gradient realization (per-target, forward Q untouched ⇒ Step-C avoidance automatic; rank-0 = B2 bitwise). **runner-cellD-impl** active (bg).
+- **Cell C (savings)** — pending (blocked on Cell A; optional).
+- **Cell F (certification)** — pending (blocked on Cell A + Cell D production).
 
 ## Last tick
-2026-06-13T17:05:00+10:00 · running=[] · closed=[30] · planned=[31] · blocked=[]
+2026-06-13 · running=[31 Cell A] · implementing=[31 Cell D] · analyzing=[] · blocked=[31 Cell C/F]
 
 ## Budget
-**0 live instances** (all torn down, API-verified). EXP-30 complete.
+$/hr now: $14.27 (1× operator 4×H200) · max_gpu_hr cap 96 · OPERATOR BOX — no teardown without operator confirmation.
