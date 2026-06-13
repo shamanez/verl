@@ -8,7 +8,7 @@ All EXP-31 rows below run on the operator box 40806688 with `disable_custom_all_
 | — | **dense (TARGET)** | comm-eff OFF | — | **0.7839**¹ | +0.044 | — |
 | **1 (best comm-eff)** | **B2 / Cell A** | delayed_ef λ=1, β_anc=0, r=77 act, anchor owns Q, cadence=delay_K=5, **NO sub-basis** | 0.6937 | **0.7400** | — | −0.044 |
 | 3 | Cell D r2 | B2 + rank-2 `tail` sub-basis, **constant γ=1** | **0.7293** | 0.6983 | −0.042 | −0.086 |
-| ? | Cell D γ-decay50 | B2 + rank-2 `tail`, **γ decays 1→0** over 50 steps | 0.6854 | **PENDING** (~18:45 UTC) | ? | ? |
+| 2 | Cell D γ-decay50 | B2 + rank-2 `tail`, **γ decays 1→0** over 50 steps | 0.6854 | **0.7210** | −0.019 (~parity within noise) | −0.063 |
 
 ¹ dense 0.7839 was measured on a prior box/config; Cell F re-pins the dense band on THIS config.
 
