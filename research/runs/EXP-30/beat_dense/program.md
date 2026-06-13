@@ -1,5 +1,11 @@
 # Beat-Dense Program — a ranked, executable path from B2 to SURPASS
 
+> **⚠️ OPERATOR CORRECTIONS (2026-06-13) — these override the body below; read issue #31 for the authoritative framing:**
+> 1. **`delay_K` and `cadence` stay = 5 (LOCKED substrate).** STEP 1 "shorter delay_K {3,2}" is **RETRACTED** — it violates the fixed control surface. Improvement must come from the **basis / Q-management / codec** axis, not substrate timing.
+> 2. **The 3× seed-replicate parity confirmation runs LAST**, not first — it only confirms the current state (~20 GPU-hr); spend early GPU-hr on quick (<few-hr) theory-backed tests that could *improve* the method, and certify with replicas at the end.
+> 3. **This doc is INPUT for the planner, not a prescription.** The planner mines the full experiment history (W&B + LOG.md + SUMMARY.md, EXP-16→30) and designs the cells; the mandate is **surpass dense (0.7839) by ≥5% over B2 — a MUST**.
+
+
 > **What this is.** A ranked, pre-registered, executable program whose objective is to **surpass the
 > dense control** starting from the current best comm-efficient GRPO solution (**B2**). It is written
 > to become the *plan* section of a hand-off GitHub issue: the operator picks it up in a new session,
