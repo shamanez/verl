@@ -102,11 +102,13 @@ Parity (**point-estimate near, statistically unestablished**), Savings (fast-pat
      *true* parity — a parity promise, not a surpass one.
    - **Partial residual λ<1** — **demoted from a surpass bet to (at most) one damping-robustness point.**
      [feas §4a] is decisive: λ<1 re-admits the **biased, near-orthogonal codec artifact** (not zero-mean
-     exploration noise — §2 row 1 falsified that class), so it "loses less slowly" and is *dominated by
-     shorter-K*. λ>1 is **forbidden** (over-subtraction → raises the carrier → ignition).
+     exploration noise — the "compression-noise-as-regularizer" class §3 lists as BLOCKED), so it "loses
+     less slowly" and is *dominated by shorter-K*. λ>1 is **forbidden** (over-subtraction → carrier → ignition).
 
-So the ranking is: **STEP 0 (parity, gating) → the surpass bets in decreasing P(surpass)·(1/cost) →
-the defend/measure cells folded in where they share a box or a denominator.** The two zero-GPU
+So the ranking is: **STEP 0 (parity, gating) → STEP 1 the cheap on-mechanism parity-defense → STEP 2/3
+the savings surpass and the most-likely (secondary) pass@k win → STEP 4 the one gated ~10–18%
+greedy-surpass bet → STEP 5 the optional damping point** — i.e. the highest *real* decision-value per
+GPU-hr first, the aspirational greedy-surpass bet placed where its odds and cost put it. The two zero-GPU
 can't-be-wasted items (honest-bytes, Q-telemetry) ride **alongside** STEP 0 (they need no GPU and gate
 the expensive surpass cells), exactly as the path-forward docs rank them — I keep them, I just stop
 calling them the headline, because they cannot themselves produce a surpass.
