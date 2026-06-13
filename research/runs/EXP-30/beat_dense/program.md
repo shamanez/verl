@@ -13,9 +13,9 @@
 > So **STEP 0 = seed-replicate BOTH B2 and dense** (apples-to-apples, operator-sanctioned). Everything
 > labeled "beat dense" is gated behind STEP 0 returning two pinned, separated (or overlapping) bands.
 >
-> **Sources (quoted, not re-derived):** `runs/EXP-30/verdict.md` (incl. ext100 + Bars-correction
-> addendum), `runs/EXP-30/PATH_FORWARD.md`, `runs/EXP-30/final_synthesis/{forward_checks.md,
-> best_solution_verdict.md}`, `runs/EXP-30/pathforward/{mechanist,critic,strategist}.md`,
+> **Sources (quoted, not re-derived):** `runs/EXP-30/verdict.md` (canonical record incl. TL;DR, findings
+> F1–F5, ext100 + Bars-correction addendum — the intermediate team syntheses PATH_FORWARD/pathforward/
+> final_synthesis were consolidated into verdict.md + this file and deleted 2026-06-13, see git history),
 > `runs/EXP-30/resolved_params_B2.txt`, `runs/EXP-30/train_dense_rerun.log` (dense@50 = 0.7839 confirmed
 > from the log), `runs/EXP-30/metrics/{stepA_fires.jsonl, B2_delta_per_fire.jsonl,
 > ext100_delta_per_fire.jsonl}`, `.claude/GOAL.md`. The deep theoretical feasibility of each surpass
@@ -67,7 +67,7 @@ Parity (**point-estimate near, statistically unestablished**), Savings (fast-pat
 **surpass dense.** That reorders the work, because:
 
 1. **You cannot claim "surpass" against a number you have not established.** The path-forward docs
-   (`forward_checks.md`, `pathforward/strategist.md`) correctly rank the *can't-be-wasted* measurements
+   (the prior forward-check syntheses, now folded into verdict.md) correctly rank the *can't-be-wasted* measurements
    (honest-bytes, Q-telemetry) at the top **for the "close done" objective**. For the **surpass**
    objective those are necessary but not sufficient: a surpass claim is a *difference of two bands*, and
    right now **neither band is pinned** (dense is two single draws 0.7567/0.7839 spanning a 0.024-σ band;

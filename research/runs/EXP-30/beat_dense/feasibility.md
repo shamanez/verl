@@ -4,10 +4,10 @@
 > **Question:** starting from the current best comm-eff solution (B2), can the method beat — not just
 > match — the dense baseline at GSM8K val@50 greedy mean@1? Honest priors, grounded in this program's
 > largely-falsified surpass history.
-> **Sources (read, not invented):** `runs/EXP-30/{verdict.md, PATH_FORWARD.md,
-> final_synthesis/{best_solution_verdict,forward_checks}.md, pathforward/{mechanist,critic,strategist}.md,
-> PROGRESS.md}`, `LOG.md`, `runs/SUMMARY.md`, `.claude/GOAL.md`, dense-rerun log (`73ntu76u`), and the
-> surpass-dense memory lineage (`surpass-dense-conversion-spine`, `exp25-collapse-gradient-flow`).
+> **Sources (read, not invented):** `runs/EXP-30/verdict.md` (canonical record + findings F1–F5;
+> the intermediate team syntheses PATH_FORWARD/pathforward/final_synthesis were consolidated into it and
+> deleted 2026-06-13 — see git history), `LOG.md`, `runs/SUMMARY.md`, `.claude/GOAL.md`, dense-rerun log
+> (`73ntu76u`), and the surpass-dense memory lineage (`surpass-dense-conversion-spine`, `exp25-collapse-gradient-flow`).
 > **Read-only** except this file. Every number is quoted/recomputed from those artifacts.
 
 ---
