@@ -28,7 +28,8 @@ python3 -c "import verl" 2>/dev/null \
   || uv pip install --no-deps -e . > /workspace/pip.log 2>&1 \
   || pip install --no-deps -e . >> /workspace/pip.log 2>&1
 # Fail fast if the sub-basis knob is not in the resolved config schema (wrong code).
-python3 -c "from verl.workers.config.comm_eff import SpectralConfig; assert hasattr(SpectralConfig(), 'delta_subbasis_rank'), 'delta_subbasis_rank missing'; print('Cell D knobs present')"
+# (class-level hasattr — no instantiation, robust to required fields; class is CommEffSpectralConfig)
+python3 -c "from verl.workers.config.comm_eff import CommEffSpectralConfig as _C; assert hasattr(_C, 'delta_subbasis_rank'), 'delta_subbasis_rank missing — wrong code checked out'; print('Cell D knobs present')"
 
 # --- B2 substrate knobs (IDENTICAL to Cell A / resolved_params_B2.txt) ---
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # standing OOM guard
