@@ -1,5 +1,13 @@
 # Research Log (newest first)
 
+## EXP-31 · 2026-06-14T00:00:00+10:00 · M6 · PARITY (operator-accepted)
+Surpass the dense baseline with a stale-anchor-gradient merger (PowerSGD-locked comm-eff GRPO)
+
+- hypothesis: A rank-2 off-principal direction harvested from the stale anchor gradient and routed additively into the K-delayed correction term (forward Q untouched) lifts greedy val@50 strictly above the dense control.
+- result: PARITY, not greedy-surpass. The most important finding is a dense-reference reframe: the dense bar on THIS config is 0.7506, not 0.7839 (the 0.7839 was a different box). Best comm-eff arm (B2/Cell A, delayed_ef λ=1, r=77 act) = 0.7400 vs dense-here 0.7506 — gap 0.011, within ±0.024 eval noise = statistical PARITY. Comm-efficient GRPO already matches dense at ~5% gradient-comm cost. The rank-2 tail sub-basis (88-90% off-principal energy captured) accelerates early learning (+0.036 at step 25 for r2 arm) but does NOT convert to a greedy surpass: constant full weight over-amplifies near convergence and regresses (r2: 0.7293@25 → 0.6983@50); γ-decay fixes the regression (0.7210@50) but also tempers the early gain, ending at parity-below-B2. hold25-decay25 val@50 lost to a Vast-side box stop (~23:13 UTC, box not destroyed). Seed bands (dense×3, B2×3) deferred — box stopped and would not restart; single-draw parity claim is qualitatively robust (all comm-eff draws 0.72–0.74 vs dense 0.75). Branch exp/31-subbasis-merger available (pushed, unmerged — no surpass justified promotion).
+- run dir: runs/EXP-31/
+- verdict: runs/EXP-31/verdict.md
+
 ## EXP-30 · 2026-06-13T01:40:00+10:00 · M6 · PASS
 EXP-30: generator-consistent M (EXP-29 paired replay, β_anc=0) — geometry-gated re-test of linear merging + K-delayed codec residual
 

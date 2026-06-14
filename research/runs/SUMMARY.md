@@ -42,6 +42,8 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | EXP-20 | M6 | PowerSGD r=77 (byte-matched) + fresh clean@5 — the prior comm-eff PASS | 0.7415 | W&B `oquyeic3` |
 | EXP-23 | M6 | PowerSGD r=77, **no** re-anchor (the floor); inject/blend stale-anchor mergers (STOP) | 0.6914 (floor) | W&B; erratum `a46fd0191` |
 | **EXP-25** | M6 | **Anchor circuit default** — full-coverage DP-reduced stale `M` (R1) + anchor-owns-`Q` (R2) + signed_ema merger (R3), α swept | **0.7066** (best, α=0.5) — **STOP** | code on `vast-ai-workload`; issue #25 |
+| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS** | PR #17 merged `ca5f4b002`; verdict `runs/EXP-30/verdict.md` |
+| **EXP-31** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
 
 ## EXP-25 — what we learned (issue #25, VERDICT = STOP)
 
@@ -70,6 +72,33 @@ gradient-correction primitive**.
 Scientific detail (do not duplicate elsewhere): `runs/EXP-25/verdict.md`,
 `COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`, `DEEP_FINDINGS.md`,
 `ENTROPY_COLLAPSE_FINDINGS.md` (kept under `runs/EXP-25/` as the deep writeups).
+
+
+## EXP-31 — the parity result (issue #31, VERDICT = PARITY, operator-accepted 2026-06-14)
+
+**The key finding: comm-efficient GRPO already matches dense at ~5% gradient-comm cost.**
+
+The most important result is a **dense-reference reframe**: the dense bar on THIS config
+(same box, same code, same `disable_custom_all_reduce`, seed 0) is **0.7506**, not 0.7839.
+The 0.7839 was a high draw on a different box. Re-running dense apples-to-apples gives:
+
+- dense-here: 0.7506 (val@50, single draw, ±0.024 noise)
+- B2 / best comm-eff (delayed_ef λ=1, r=77 act, cadence=delay_K=5): **0.7400**
+- Gap: 0.011 — inside the ±0.024 eval noise = **statistical PARITY at ~5% comm cost**
+
+The "0.044 gap to dense" EXP-31 was designed to close was a wrong-reference artifact.
+
+**What the rank-2 sub-basis proved (and did not):**
+- Mechanically correct: captures 88-90% of the off-principal energy; CPU suite 213 tests green; rank-0/weight-0 = bitwise-B2.
+- Accelerates early learning: r2 arm +0.036 vs B2 at step 25 (0.7293 vs 0.6937).
+- Does NOT convert to a greedy surpass: constant weight over-amplifies near convergence (r2 regresses 0.7293→0.6983@50); γ-decay fixes regression (0.7210@50) but tempers early gain; every variant clustered at ~0.70–0.74, none cleared the dense band.
+- Mechanistic conclusion: the sub-basis speeds the path to the optimum but does not find a better optimum. Surpass requires a different mechanism.
+
+**Caveats:** single-draw vals (±0.024); seed bands deferred (box 40806688 stopped Vast-side,
+hold25-decay25 val@50 on disk but unsynced). Full detail: `runs/EXP-31/verdict.md`.
+
+**Code:** branch `exp/31-subbasis-merger` pushed, unmerged. No PR / no launcher promotion
+(`promote_launcher_as=none`; PARITY is not a PASS in the mandate terms).
 
 ## Frontier — the merger primitive
 
