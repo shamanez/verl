@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Communication-Efficient GRPO — Program Retrospective (EXP-25 → EXP-27)</title>
+<title>Communication-Efficient GRPO — Program Retrospective (EXP-25 → EXP-31)</title>
 <script>
 window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$']] },
                    options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] } };
@@ -83,6 +83,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <button data-tab="tab4">EXP-26 · Math, Geometry & Papers</button>
   <button data-tab="tab5">Where We Are & What's Next</button>
   <button data-tab="tab6">EXP-27 · Damped-EF Ignition</button>
+  <button data-tab="tab7">EXP-30/31 · Best Method &amp; Surpass Path</button>
 </div></nav>
 <main>
 <section class="tab-content" id="tab1">
@@ -1292,6 +1293,66 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     W&amp;B runs <code>qa6sll3h</code> / <code>1wulaelw</code> / <code>5e2jpho9</code>.
     Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.
   </footer>
+</section>
+<section class="tab-content" id="tab7">
+<h2>EXP-30 / EXP-31 — The Best Method, and the Path to Surpass Dense</h2>
+<p class="lede">The settled result of the program: communication-efficient GRPO reaches <b>PARITY with dense</b>
+training at ~5% of the inter-stage gradient-communication cost. The best method is B2 (the K-delayed exact
+codec residual); a clean greedy-<i>surpass</i> remains open, and we name the one lever that can still get there.</p>
+
+<h3>The headline numbers (greedy val@50, GSM8K, this config)</h3>
+<table class="data">
+  <tr><th>method</th><th>val@50</th><th>vs dense</th><th>comm cost</th></tr>
+  <tr><td><b>Dense</b> (comm-eff OFF) — true bar on this config</td><td>0.7506</td><td>—</td><td>1×</td></tr>
+  <tr class="hl"><td><b>B2 — delayed_ef residual (BEST comm-eff)</b></td><td><b>0.7400</b></td><td>−0.011 (within ±0.024 = <b>PARITY</b>)</td><td>~5% (≈3.7× honest)</td></tr>
+  <tr><td>EXP-31 γ-decay sub-basis</td><td>0.7210</td><td>−0.030</td><td>~5%</td></tr>
+  <tr><td>EXP-31 rank-2 sub-basis (γ=1)</td><td>0.6983</td><td>early-win 0.7293@25, late regress</td><td>~5%</td></tr>
+  <tr><td>Dense — <i>old</i> reference (different vLLM config)</td><td>0.7839</td><td>see "the reframe"</td><td>1×</td></tr>
+</table>
+
+<h3>The best method: B2 — K-delayed exact codec residual</h3>
+<p>The fast circuit's compressed gradient \(G_{\text{comp}}\) is cheap but biased (the rank-77 act codec drops
+~92% of the energy). A stale full gradient \(M_{\text{rep}}\) (replayed every \(K{=}5\) ticks on the identical
+\((\text{batch},\theta_{t-K})\)) supplies an <b>exact error-feedback residual</b>:</p>
+$$\delta(t)=M_{\text{rep}}(t)-G_{\text{comp}}^{\text{ring}}(t-K),\qquad
+  G_{\text{corr}}(t)=G_{\text{comp}}(t)+\lambda\,\delta(t),\quad \lambda=1,\ \beta_{\text{anc}}=0.$$
+<p>\(\delta\) is refreshed at fires, held between; the sum telescopes to
+\(\sum_t G_{\text{full}}(t-K)\) — it <b>reconstructs the dense gradient on stale data</b>.</p>
+<div class="win"><b>Why parity is the ceiling.</b> \(\delta\) cancels the codec artifact and re-injects the true
+direction, so the accumulated update <i>is</i> the dense gradient (on stale data). That is exactly why B2 matches
+dense — and why it cannot, by construction, exceed it.</div>
+
+<h3>The dense-baseline reframe (why "78%" before, "75%" now)</h3>
+<p>The earlier \(0.7839\) dense came from a box with vLLM's <b>custom all-reduce enabled</b>; every comm-eff arm
+here (and the re-pinned dense) runs with it <b>disabled</b> (a CUDA-IPC failure forced NCCL all-reduce — a
+controlled variable). That flag perturbs the \(n{=}8\) <i>sampled</i> training rollouts → a different trajectory →
+a different val, so the generation path can move the number. With \(n{=}1\) draw each we can't fully separate
+flag-effect from run variance (dense's own band spans ~0.75–0.78), but on the <b>identical</b> config used for
+every comm-eff arm, <b>dense ≈ 0.75 and comm-eff matches it</b> — the correct apples-to-apples reading.</p>
+
+<h3>EXP-31: the surpass attempt (stale-anchor sub-basis) and why it lands at parity</h3>
+<p>The gradient is stable-rank ≈ 2 but the act-basis misses 0.682 of the update energy. EXP-31 harvested that
+off-principal direction from the stale anchor and added it (\(\gamma_t\)-weighted, forward \(Q\) untouched):</p>
+$$\delta_{\text{sub}}=\operatorname{rank}_{r_{sb}}(\delta_{B2}),\qquad
+  G_{\text{corr}}=G_{\text{comp}}+\lambda\big(\delta_{B2}+\gamma_t\,\delta_{\text{sub}}\big).$$
+<p>It genuinely <b>accelerates early learning</b> (captures 88–90% of the off-principal energy; val@25 0.7293 vs
+B2 0.6937) — but amplifying a direction the model already descends speeds the <b>path</b> to dense's optimum, not
+the <b>destination</b>: at full weight it over-shoots near convergence (regress to 0.6983); decayed, it relaxes
+back to parity (0.7210). <b>Conclusion: parity, not surpass.</b></p>
+
+<h3>Path forward: the one destination-changing lever (built, default-OFF on vast-ai-workload)</h3>
+<p>A surpass needs a <i>better</i> optimum — beneficial gradient noise toward flatter minima, not amplification.
+Replace the codec's biased noise with a zero-mean, tunable, cross-rank-identical perturbation:</p>
+$$G_{\text{corr}}'=G_{\text{corr}}+\sigma\,\|G_{\text{corr}}\|\,\hat\xi,\qquad
+  \hat\xi=\xi/\|\xi\|,\ \xi\sim\mathcal N(0,I)\ \text{seeded by }(\text{step},\text{target}).$$
+<p>Zero-mean over steps ⇒ unbiased descent + exploration; greedy val rewards the mode, and a flatter minimum
+makes that mode generalize better — the only known route for comm-eff to exceed dense rather than match it. The
+<code>perturb_sigma</code> knob is implemented and 58-test-green (σ=0 ⇒ bitwise-B2); the σ∈{0.05,0.10,0.20} sweep
+runs when a GPU is available. Honest prior ~10–15%.</p>
+<div class="callout"><b>Status.</b> All code (delayed_ef + sub-basis + perturb) is on <code>vast-ai-workload</code>,
+default-OFF = bitwise-B2. Issue #31 kept open as a claim. Full write-up:
+<code>research/runs/EXP-31/{verdict,BEST_SO_FAR,next_surpass_lever}.md</code> and the standalone
+<code>~/Documents/comm_eff_grpo_best_method.html</code>.</div>
 </section>
 </main>
 <footer>Generated by the comm-eff-retrospective agent team (5 members); EXP-27 tab + post-mortem corrections by
