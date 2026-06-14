@@ -295,6 +295,74 @@ class CommEffSpectralConfig(BaseConfig):
     # cell sets 1.0 explicitly. Must be >= 0. Unused unless
     # correction_mode=delayed_ef.
     delayed_ef_lambda: float = 0.0
+    # ---- EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (delayed_ef) ----
+    # When delta_subbasis_rank (r_sb) > 0, the delayed_ef merger ADDS a rank-r_sb
+    # low-rank reconstruction of the source S into its correction term:
+    #
+    #   δ_subbasis = rank_{r_sb}(S)                       # seeded randomized SVD
+    #   G_corr(t)  = G_comp(t) + λ·(δ_B2 + δ_subbasis)    # forward Q UNCHANGED
+    #
+    # delta_subbasis_family selects S: "tail" (default) ⇒ S = δ_B2 (the
+    # act-deflated stale weight gradient = the off-act-principal direction the
+    # codec structurally drops); "grad" ⇒ S = M_rep (the raw stale anchor
+    # gradient). The sub-basis enters ONLY the correction δ — the forward/recon
+    # codec Q is untouched, so the EXP-26 Step-C dead route is avoided BY
+    # CONSTRUCTION. r_sb = 0 (default, OFF) SKIPS the sub-basis branch entirely ⇒
+    # G_corr == B2's G_corr bitwise (off-path-parity invariant). The randomized
+    # SVD is per-target seeded so δ_subbasis is bit-identical across DP ranks
+    # (δ_B2 / M_rep are already DP-mean identical). Must be >= 0. Unused unless
+    # correction_mode=delayed_ef.
+    delta_subbasis_rank: int = 0
+    # The sub-basis source family: "tail" (act-deflated grad, the default) or
+    # "grad" (raw stale anchor gradient, the REVISE fallback). Validated to
+    # {tail, grad}.
+    delta_subbasis_family: str = "tail"
+    # ---- EXP-31 Cell D γ-knob: sub-basis WEIGHT + linear DECAY ----------------
+    # The over-amplification fix. The Cell D r_sb=2 tail tail (γ=1, full weight)
+    # BEAT B2 at step 25 (+0.036) but REGRESSED step 25→50 (−0.031): the constant
+    # full-weight sub-basis accelerates early learning but OVER-AMPLIFIES near
+    # convergence. ``delta_subbasis_weight`` (γ) scales the ADDITIVE δ_subbasis term
+    # and ``delta_subbasis_decay_steps`` (D) linearly DECAYS it to 0 over training,
+    # optionally AFTER a HOLD of ``delta_subbasis_hold_steps`` (H) steps at full
+    # weight (see that field for the shelf-then-ramp schedule):
+    #
+    #   γ_t          = delta_subbasis_weight * decay_factor
+    #   decay_factor = 1.0                              if D <= 0   (constant γ = weight)
+    #                = 1.0                              if D > 0 and step < H (HOLD)
+    #                = max(0, 1 - (step - H) / D)       else        (linear 1→0, clamped)
+    #   G_corr(t)    = G_comp(t) + λ·(δ_B2 + γ_t·δ_subbasis)
+    #
+    # weight=1.0, decay_steps=0 (DEFAULTS) ⇒ γ_t == 1.0 always ⇒ EXACTLY the
+    # current Cell D behaviour (no regression in the OFF/legacy posture). weight=0
+    # ⇒ γ_t==0 ⇒ G_corr == B2's G_corr (δ_subbasis contributes nothing). The
+    # decay knob is a SCALAR on the (already deterministic, DP-mean) δ_subbasis —
+    # no new RNG, the seeded SVD is untouched. Both validated unconditionally so a
+    # typo is loud even on a non-delayed_ef / rank-0 run that forwards them.
+    delta_subbasis_weight: float = 1.0
+    delta_subbasis_decay_steps: int = 0
+    # EXP-31 hold-then-decay schedule: ``delta_subbasis_hold_steps`` (H) is the
+    # number of steps γ HOLDS at full ``weight`` before the linear decay (over D
+    # steps) begins. Targeted fix to preserve r2's early lead (the HOLD shelf) AND
+    # finish clean (the decay ramp). The decay factor becomes a shelf-then-ramp:
+    #
+    #   decay_factor = 1.0                              if D <= 0          (constant)
+    #                = 1.0                              if D > 0, step < H (HOLD shelf)
+    #                = max(0, 1 - (step - H) / D)       otherwise          (linear ramp)
+    #
+    # hold_steps=0 (DEFAULT) ⇒ ``step < 0`` is never true ⇒ the shelf is empty ⇒
+    # the formula reduces to the existing ``max(0, 1 - step/D)`` linear-from-0
+    # decay EXACTLY (bitwise). hold_steps=25, decay_steps=25 ⇒ γ=weight for steps
+    # 0..24 then linear weight→0 over steps 25..50. Only meaningful when D > 0.
+    # A pure scalar — no RNG, the seeded SVD is untouched. Must be >= 0; validated
+    # unconditionally so a typo is loud even on a non-delayed_ef / rank-0 run.
+    delta_subbasis_hold_steps: int = 0
+    # ---- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ----
+    # r_delta > 0 compresses the correction δ to r_delta columns BEFORE injection
+    # (the Cell C residual-codec savings cell; forward/recon act-Q untouched).
+    # 0 (default, OFF) = δ is injected uncompressed (the B2 / Cell D path). Wired
+    # here for config completeness; the Cell C codec is a SEPARATE later change.
+    # Must be >= 0. Unused unless correction_mode=delayed_ef.
+    r_delta: int = 0
 
 
 @dataclass
@@ -740,6 +808,44 @@ class CommEffConfig(BaseConfig):
         if self.spectral.delayed_ef_lambda < 0.0:
             raise ValueError(
                 f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}"
+            )
+        # EXP-31 Cell D: the additive stale-anchor sub-basis rank. >= 0; 0
+        # (default) is OFF (the exact B2 path). Validated unconditionally so a
+        # typo is loud even on a non-delayed_ef run that forwards it.
+        if self.spectral.delta_subbasis_rank < 0:
+            raise ValueError(
+                f"comm_eff.spectral.delta_subbasis_rank must be >= 0; got {self.spectral.delta_subbasis_rank}"
+            )
+        if self.spectral.delta_subbasis_family not in ("tail", "grad"):
+            raise ValueError(
+                "comm_eff.spectral.delta_subbasis_family must be one of (tail, grad); "
+                f"got {self.spectral.delta_subbasis_family!r}"
+            )
+        # EXP-31 Cell D γ-knob: the sub-basis WEIGHT γ (>= 0; 1.0 default = current
+        # Cell D, 0 = B2) and its linear-DECAY horizon (>= 0; 0 default = constant
+        # γ). Validated unconditionally so a typo is loud even on a non-delayed_ef /
+        # rank-0 run that forwards them.
+        if self.spectral.delta_subbasis_weight < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.delta_subbasis_weight must be >= 0; got {self.spectral.delta_subbasis_weight}"
+            )
+        if self.spectral.delta_subbasis_decay_steps < 0:
+            raise ValueError(
+                "comm_eff.spectral.delta_subbasis_decay_steps must be >= 0; "
+                f"got {self.spectral.delta_subbasis_decay_steps}"
+            )
+        # EXP-31 hold-then-decay: the HOLD horizon H (>= 0; 0 default = the existing
+        # linear-from-0 decay, bitwise). Only meaningful when decay_steps > 0.
+        if self.spectral.delta_subbasis_hold_steps < 0:
+            raise ValueError(
+                "comm_eff.spectral.delta_subbasis_hold_steps must be >= 0; "
+                f"got {self.spectral.delta_subbasis_hold_steps}"
+            )
+        # EXP-31 Cell C: the correction-δ compression rank. >= 0; 0 (default) is
+        # OFF (uncompressed δ = the B2 / Cell D path).
+        if self.spectral.r_delta < 0:
+            raise ValueError(
+                f"comm_eff.spectral.r_delta must be >= 0; got {self.spectral.r_delta}"
             )
         # EXP-30 B2: delayed_ef merges the VALID (generator-consistent) M_rep by
         # definition — running it on the legacy generator-mismatched feed would

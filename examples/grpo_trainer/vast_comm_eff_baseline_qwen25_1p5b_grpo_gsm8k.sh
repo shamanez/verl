@@ -298,6 +298,32 @@ COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.5}"
 # norm cap as a fraction of ||G_comp||) and optionally ef_decay in [0,1).
 COMM_EFF_SPECTRAL_EF_DECAY="${COMM_EFF_SPECTRAL_EF_DECAY:-0.0}"
 COMM_EFF_SPECTRAL_EF_CLIP="${COMM_EFF_SPECTRAL_EF_CLIP:-0.0}"
+# --- EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (delayed_ef) ---
+# delta_subbasis_rank > 0 ADDS rank_{r_sb}(S) into the delayed_ef correction term
+# (S = the act-deflated stale weight gradient δ when family=tail, the default; or
+# the raw stale anchor gradient M_rep when family=grad). The forward codec Q is
+# untouched (Step-C avoided by construction). 0 (default, OFF) ⇒ the merger is the
+# EXACT B2 path (off-path parity — preserves every existing run incl. Cell A).
+# Cell D production: COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK=2 (family=tail).
+COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK:-0}"
+COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY:-tail}"  # tail | grad
+# EXP-31 Cell D γ-knob (over-amplification fix): the sub-basis WEIGHT γ + a HOLD-
+# then-DECAY schedule. γ holds at full WEIGHT for HOLD_STEPS, THEN decays linearly
+# over DECAY_STEPS: γ_t = WEIGHT*(1 if step<HOLD_STEPS else max(0, 1 -
+# (step-HOLD_STEPS)/DECAY_STEPS)) (constant WEIGHT when DECAY_STEPS=0). WEIGHT=1.0 +
+# DECAY_STEPS=0 (defaults) = the EXACT current Cell D behaviour (γ_t≡1); WEIGHT=0 ⇒
+# B2; HOLD_STEPS=0 (default) = the existing linear-from-step-0 decay (bitwise).
+# γ-decay-over-full-run: WEIGHT=1.0 DECAY_STEPS=50 HOLD_STEPS=0. Hold-then-decay
+# (preserve r2's early lead AND finish clean): WEIGHT=1.0 HOLD_STEPS=25 DECAY_STEPS=25.
+# Constant half-dose: WEIGHT=0.5 DECAY_STEPS=0. (active iff mode=delayed_ef + rank>0).
+COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT:-1.0}"
+COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS:-0}"
+COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS:-0}"
+# --- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ---
+# r_delta > 0 compresses the correction δ to r_delta columns before injection
+# (the Cell C residual-codec savings cell; a SEPARATE later code change). 0
+# (default, OFF) ⇒ δ injected uncompressed (the B2 / Cell D path).
+COMM_EFF_SPECTRAL_R_DELTA="${COMM_EFF_SPECTRAL_R_DELTA:-0}"
 # --- EXP-26 Step C: Q-basis FAMILY (content of orth(V) at FIXED rank) ---
 # "act" (default) = the EXP-25 activation-energy basis (byte-identical substrate).
 # RLVR-native families {grad,adv,tail,hybrid,ticket} are IMPLEMENTED (EXP-26 Step
@@ -387,6 +413,8 @@ cat <<EOF
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
   ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
+  subbasis (EXP-31 D):  delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA  (active iff mode=delayed_ef; rank=0 => correction==delta = B2)
+  subbasis γ-knob:      delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS  (γ_t=weight*(1 if step<hold_steps else max(0,1-(step-hold_steps)/decay_steps)); weight=1+decay_steps=0 => γ≡1 = current Cell D; weight=0 => B2; hold_steps=0 => linear-from-0 decay)
   q_basis (EXP-26):    live=$COMM_EFF_POWERSGD_Q_BASIS  passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE  hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)  (act=byte-identical; C1 screen: live act + passive families)
   capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
@@ -503,6 +531,12 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.hybrid_grad_cols="$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS" \
   actor_rollout_ref.actor.comm_eff.spectral.ef_decay="$COMM_EFF_SPECTRAL_EF_DECAY" \
   actor_rollout_ref.actor.comm_eff.spectral.ef_clip="$COMM_EFF_SPECTRAL_EF_CLIP" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_rank="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_family="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_weight="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_decay_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_hold_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS" \
+  actor_rollout_ref.actor.comm_eff.spectral.r_delta="$COMM_EFF_SPECTRAL_R_DELTA" \
   actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
   actor_rollout_ref.actor.comm_eff.capture.capture_dir="$COMM_EFF_CAPTURE_DIR" \
   actor_rollout_ref.actor.comm_eff.capture.max_ticks="$COMM_EFF_CAPTURE_MAX_TICKS" \

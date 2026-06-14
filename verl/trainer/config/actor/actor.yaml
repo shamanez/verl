@@ -486,6 +486,37 @@ comm_eff:
     # correction_mode=delayed_ef. Declared here so Hydra struct-mode accepts
     # actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda=<float>.
     delayed_ef_lambda: 0.0
+
+    # EXP-31 Cell D (correction_mode=delayed_ef): additive stale-anchor rank-r_sb
+    # sub-basis folded into the delayed_ef correction term. delta_subbasis_rank
+    # (r_sb) > 0 ADDS rank_{r_sb}(S) — S = the act-deflated stale weight gradient δ
+    # (delta_subbasis_family=tail, default) or the raw stale anchor gradient M_rep
+    # (=grad) — scaled by the weight γ_t, into the correction. 0 (default, OFF)
+    # SKIPS the sub-basis branch ⇒ correction == δ_B2 bitwise (= B2). The forward
+    # codec Q is untouched (Step-C avoided by construction). r_delta > 0 (Cell C, a
+    # SEPARATE later codec change) compresses the correction δ; 0 = uncompressed.
+    # Declared here (replicating the delayed_ef_lambda precedent) so Hydra
+    # struct-mode accepts the plain CLI overrides
+    # actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_*=<...>.
+    delta_subbasis_rank: 0
+    delta_subbasis_family: tail
+    r_delta: 0
+
+    # EXP-31 Cell D γ-knob (the over-amplification fix): the sub-basis WEIGHT γ, its
+    # linear-DECAY horizon, and an optional HOLD before the decay starts. γ holds at
+    # full weight for delta_subbasis_hold_steps (H), THEN decays:
+    # γ_t = delta_subbasis_weight · (1 if step<H else max(0, 1 −
+    # (step−H)/delta_subbasis_decay_steps)) (or the constant weight when
+    # decay_steps=0), applied as G_corr = G_comp + λ·(δ_B2 + γ_t·δ_subbasis).
+    # weight=1.0, decay_steps=0 (defaults) ⇒ γ_t == 1.0 always = the EXACT current
+    # Cell D behaviour; weight=0 ⇒ γ_t == 0 ⇒ correction == δ_B2 (= B2);
+    # hold_steps=0 (default) ⇒ the existing linear-from-step-0 decay (bitwise).
+    # hold_steps=25, decay_steps=25 ⇒ γ=weight for steps 0–24 then linear→0 over
+    # steps 25–50. γ_t is a scalar (no new RNG; the seeded δ_subbasis SVD is
+    # untouched). All >= 0.
+    delta_subbasis_weight: 1.0
+    delta_subbasis_decay_steps: 0
+    delta_subbasis_hold_steps: 0
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
