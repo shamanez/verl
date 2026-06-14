@@ -591,6 +591,12 @@ class CommEffState:
                 # THEN decays (0 default ⇒ the existing linear-from-0 schedule).
                 delta_subbasis_hold_steps=int(getattr(spec_cfg, "delta_subbasis_hold_steps", 0)),
                 base_seed=int(getattr(getattr(self.config, "powersgd", None), "seed", 0) or 0),
+                # EXP-31 surpass lever: zero-mean tunable cross-rank-identical
+                # perturbation (σ=0 default ⇒ the exact delayed_ef / B2 path). The
+                # config-must-mirror-dataclass gotcha — without threading these here
+                # the CLI/yaml σ never reaches the filter and the lever is dead.
+                perturb_sigma=float(getattr(spec_cfg, "perturb_sigma", 0.0)),
+                perturb_seed=int(getattr(spec_cfg, "perturb_seed", 0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "

@@ -319,6 +319,16 @@ COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMI
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT:-1.0}"
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS:-0}"
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS:-0}"
+# --- EXP-31 surpass lever: zero-mean tunable cross-rank-identical perturbation ---
+# perturb_sigma > 0 ADDS σ·‖G_corr‖·ξ (ξ a unit Gaussian seeded by (perturb_seed,
+# target, step) — identical on every DP rank, fresh per step ⇒ zero-mean) AFTER the
+# delayed_ef correction term: SGLD/SAM-style beneficial noise → flatter minima →
+# potentially beats dense on greedy val. 0.0 (default, OFF) ⇒ G_corr is the EXACT
+# delayed_ef / Cell-D path (composes with DELTA_SUBBASIS_RANK=0 ⇒ bitwise-B2). Local,
+# ZERO added communication. The surpass sweep: COMM_EFF_SPECTRAL_PERTURB_SIGMA in
+# {0.05, 0.10, 0.20} on the B2 substrate (active iff mode=delayed_ef).
+COMM_EFF_SPECTRAL_PERTURB_SIGMA="${COMM_EFF_SPECTRAL_PERTURB_SIGMA:-0.0}"
+COMM_EFF_SPECTRAL_PERTURB_SEED="${COMM_EFF_SPECTRAL_PERTURB_SEED:-0}"
 # --- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ---
 # r_delta > 0 compresses the correction δ to r_delta columns before injection
 # (the Cell C residual-codec savings cell; a SEPARATE later code change). 0
@@ -415,6 +425,7 @@ cat <<EOF
   ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
   subbasis (EXP-31 D):  delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA  (active iff mode=delayed_ef; rank=0 => correction==delta = B2)
   subbasis γ-knob:      delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS  (γ_t=weight*(1 if step<hold_steps else max(0,1-(step-hold_steps)/decay_steps)); weight=1+decay_steps=0 => γ≡1 = current Cell D; weight=0 => B2; hold_steps=0 => linear-from-0 decay)
+  perturb (EXP-31):     perturb_sigma=$COMM_EFF_SPECTRAL_PERTURB_SIGMA perturb_seed=$COMM_EFF_SPECTRAL_PERTURB_SEED  (active iff mode=delayed_ef; σ=0 => g_corr unperturbed = B2/Cell-D; σ>0 adds σ·‖g_corr‖·unit-ξ, ξ seeded by (seed,target,step) => cross-rank identical, zero-mean over steps)
   q_basis (EXP-26):    live=$COMM_EFF_POWERSGD_Q_BASIS  passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE  hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)  (act=byte-identical; C1 screen: live act + passive families)
   capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
@@ -537,6 +548,8 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_decay_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS" \
   actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_hold_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS" \
   actor_rollout_ref.actor.comm_eff.spectral.r_delta="$COMM_EFF_SPECTRAL_R_DELTA" \
+  actor_rollout_ref.actor.comm_eff.spectral.perturb_sigma="$COMM_EFF_SPECTRAL_PERTURB_SIGMA" \
+  actor_rollout_ref.actor.comm_eff.spectral.perturb_seed="$COMM_EFF_SPECTRAL_PERTURB_SEED" \
   actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
   actor_rollout_ref.actor.comm_eff.capture.capture_dir="$COMM_EFF_CAPTURE_DIR" \
   actor_rollout_ref.actor.comm_eff.capture.max_ticks="$COMM_EFF_CAPTURE_MAX_TICKS" \

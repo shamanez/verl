@@ -517,6 +517,22 @@ comm_eff:
     delta_subbasis_weight: 1.0
     delta_subbasis_decay_steps: 0
     delta_subbasis_hold_steps: 0
+
+    # EXP-31 surpass lever (correction_mode=delayed_ef): a zero-mean, tunable,
+    # cross-rank-IDENTICAL gradient perturbation added AFTER the delayed_ef
+    # correction (SGLD / SAM-style beneficial noise → flatter minima → potentially
+    # beats dense on greedy val). G_corr ← G_corr + perturb_sigma·‖G_corr‖·ξ where
+    # ξ is a unit isotropic Gaussian seeded by (perturb_seed, target, step) — same
+    # on every DP rank, fresh per step (zero-mean over training). perturb_sigma=0.0
+    # (default, OFF) ⇒ G_corr is the EXACT delayed_ef / Cell-D path bitwise
+    # (composes with delta_subbasis_rank=0 ⇒ bitwise-B2). Local, ZERO added comm.
+    # Declared here (replicating the delayed_ef_lambda precedent) so Hydra struct-
+    # mode ACCEPTS the plain CLI overrides
+    # actor_rollout_ref.actor.comm_eff.spectral.perturb_sigma=<float> /
+    # .perturb_seed=<int> (REQUIRED — a missing struct key is rejected, not added).
+    # perturb_sigma >= 0.
+    perturb_sigma: 0.0
+    perturb_seed: 0
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M

@@ -121,6 +121,8 @@ class SpectralFilter:
         delta_subbasis_decay_steps: int = 0,
         delta_subbasis_hold_steps: int = 0,
         base_seed: int = 0,
+        perturb_sigma: float = 0.0,
+        perturb_seed: int = 0,
     ):
         self.beta_anc = float(beta_anc)
         # Storage layer default: gpu. Validation happens in
@@ -206,6 +208,24 @@ class SpectralFilter:
         # derived from the target name (see ``_subbasis_seed``) so each target
         # gets its own reproducible generator while staying cross-rank identical.
         self.base_seed = int(base_seed)
+        # EXP-31 surpass lever: zero-mean, σ-scaled, cross-rank-identical gradient
+        # perturbation added AFTER the delayed_ef correction term. ``perturb_sigma``
+        # σ = 0.0 (default, OFF) ⇒ the perturbation branch is SKIPPED entirely ⇒
+        # ``delayed_ef_matrix`` returns the EXACT delayed_ef / Cell-D g_corr bitwise
+        # (off-path parity; composes with rank-0 ⇒ bitwise-B2). The noise direction
+        # ξ is drawn from a per-(perturb_seed, target, current_step) seed that is a
+        # pure function of those three — NO rank/device-local state — so every DP
+        # rank draws the SAME ξ (the multi-rank-agreement invariant; else the ranks
+        # would descend in DIFFERENT directions and diverge). Fresh per step ⇒
+        # zero-mean over training. σ relative to ‖g_corr‖ ⇒ scale-free / tunable.
+        # Validated in CommEffConfig.__post_init__; assert defensively here too.
+        self.perturb_sigma = float(perturb_sigma)
+        assert self.perturb_sigma >= 0.0, self.perturb_sigma
+        self.perturb_seed = int(perturb_seed)
+        # EXP-31 surpass lever: per-step count of targets the perturbation was
+        # APPLIED to (reset by the engine loop where the other delayed_ef counters
+        # reset). 0 on the OFF path (σ=0) and on cold/skip ticks.
+        self.delayed_ef_perturb_applied = 0
         # EXP-30 B2: per-target HELD residual δ (detached fp32, EMA-storage
         # device). Refreshed when a fire-aligned ring entry exists (the anchor
         # just refreshed M_rep AND G_comp_ring(t−K) is the exact pair), HELD on
@@ -575,6 +595,68 @@ class SpectralFilter:
         recon = (U[:, :q] * s[:q].unsqueeze(0)) @ V[:, :q].transpose(-2, -1)
         return recon.detach().to(source.device, torch.float32)
 
+    def _perturb_seed(self, name: str) -> int:
+        """Deterministic per-(target, step) seed for the perturbation generator.
+
+        Mixes ``self.perturb_seed`` with a stable per-target salt (the SAME FNV-1a
+        hash of the canonical target name that :meth:`_subbasis_seed` uses) and the
+        current TRAINING step ``self.current_step``. The result is a pure function
+        of ``(perturb_seed, canonical-name, current_step)`` — it contains NO
+        rank-local / device-local state — so it is IDENTICAL on every DP rank, which
+        makes the drawn ξ bit-identical across ranks (the multi-rank-agreement
+        invariant: a per-rank ξ would push the ranks in different directions and
+        diverge). It is FRESH every step (``current_step`` advances) so the
+        perturbation is zero-mean over training, not a fixed bias. We roll our own
+        FNV-1a salt (Python's ``hash`` is per-process salted) for cross-process /
+        cross-rank reproducibility.
+        """
+        salt = 0x811C9DC5  # FNV-1a 32-bit offset basis
+        for b in _canon(name).encode("utf-8"):
+            salt = ((salt ^ b) * 0x01000193) & 0xFFFFFFFF
+        # Mix perturb_seed, the per-target salt, and the step into one 31-bit seed.
+        # The step term uses a large odd multiplier so consecutive steps land in
+        # well-separated regions of the generator's state space.
+        mixed = (int(self.perturb_seed) * 1_000_003 + salt + int(self.current_step) * 2_654_435_761) & 0x7FFFFFFF
+        return mixed
+
+    def _apply_perturbation(self, name: str, g: torch.Tensor) -> torch.Tensor:
+        """EXP-31 surpass lever: add zero-mean, σ-scaled, cross-rank-identical noise.
+
+        ``g_corr ← g_corr + σ·‖g_corr‖·ξ`` where ξ is a UNIT-normalized isotropic
+        Gaussian drawn from a per-(perturb_seed, target, step) seed (so the
+        perturbation magnitude is exactly ``σ·‖g_corr‖`` and the DIRECTION is
+        cross-rank identical). ``g`` is already detached (it is built from detached
+        ``G_comp`` + ``M_rep`` + ring), so the perturbation adds NO autograd history.
+
+        Guards (return ``g`` UNCHANGED, never a silent garbage grad): a non-finite
+        ‖g‖, a ~zero-norm ‖g‖ (≤ 1e-12 ⇒ nothing to scale against), or a degenerate
+        ξ with ‖ξ‖ == 0. ξ is generated on CPU (a ``torch.Generator('cpu')`` is the
+        portable, rank-deterministic source — CUDA generators are device-local and
+        would NOT agree across ranks), then moved to ``g``'s device/dtype. Counts
+        ``delayed_ef_perturb_applied`` on a successful application.
+        """
+        sigma = self.perturb_sigma
+        if sigma <= 0.0:
+            return g
+        gnorm = torch.linalg.norm(g.to(torch.float32))
+        if not torch.isfinite(gnorm) or float(gnorm.item()) <= 1e-12:
+            return g  # nothing to scale against → no-op (never a silent garbage grad)
+        seed = self._perturb_seed(name)
+        # CPU generator: device-INDEPENDENT + rank-deterministic. A CUDA generator
+        # is device-local, so two ranks on different GPUs would draw DIFFERENT ξ and
+        # diverge — the CPU draw guarantees the cross-rank-identical direction.
+        gen = torch.Generator(device="cpu").manual_seed(int(seed))
+        xi = torch.randn(g.shape, generator=gen, dtype=torch.float32, device="cpu")
+        xi_norm = torch.linalg.norm(xi)
+        if not torch.isfinite(xi_norm) or float(xi_norm.item()) <= 0.0:
+            return g  # degenerate draw → no-op
+        xi = xi / xi_norm  # unit direction
+        # Move ξ to g's device/dtype; scale by σ·‖g‖. The perturbation magnitude is
+        # ‖σ·‖g‖·ξ‖ = σ·‖g‖ (ξ is unit) — exactly the spec's scale contract.
+        perturbation = (sigma * gnorm.to(g.device)) * xi.to(g.device, g.dtype)
+        self.delayed_ef_perturb_applied += 1
+        return g + perturbation
+
     def _subbasis_gamma(self) -> float:
         """EXP-31 Cell D γ-knob: the sub-basis weight γ_t at ``self.current_step``.
 
@@ -747,6 +829,14 @@ class SpectralFilter:
             correction = delta
 
         g_corr = gm + lam * correction
+        # EXP-31 surpass lever: add the zero-mean σ-scaled cross-rank-identical
+        # perturbation. σ=0 (default) ⇒ _apply_perturbation returns g_corr UNCHANGED
+        # (the guard is checked twice — here for the no-call fast path and inside the
+        # helper — so the OFF path is the EXACT delayed_ef / Cell-D / B2 g_corr,
+        # bitwise). When σ>0 the perturbation is ‖σ·‖g_corr‖·ξ‖ in a unit direction
+        # ξ seeded by (perturb_seed, target, step) ⇒ identical on every DP rank.
+        if self.perturb_sigma > 0.0:
+            g_corr = self._apply_perturbation(name, g_corr)
         return g_corr.to(g_comp.dtype)
 
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
@@ -833,6 +923,10 @@ def apply_spectral_correction_to_params(
     spectral.delayed_ef_subbasis_applied = 0
     spectral.delayed_ef_subbasis_skipped = 0
     spectral._subbasis_energy_ratios = []
+    # EXP-31 surpass lever: reset the per-step perturbation-applied counter so the
+    # [comm_eff][EXP-30][delayed_ef] line reports THIS step's perturbation activity.
+    # 0 on the OFF path (perturb_sigma=0) and on cold/skip ticks.
+    spectral.delayed_ef_perturb_applied = 0
     # EXP-31 Cell D γ-knob: stamp THIS step onto the filter so the sub-basis decay
     # schedule (``_subbasis_gamma``) reads the current training step. Cleanly wired
     # from state.global_step (the same counter the capture key uses below). Defaults
@@ -1022,6 +1116,11 @@ def apply_spectral_correction_to_params(
         # the linear decay over delta_subbasis_decay_steps). 1.0 on the OFF default
         # (weight=1, decay_steps=0); 0.0 ⇒ the sub-basis branch was skipped = B2.
         _sb_gamma = spectral._subbasis_gamma() if getattr(spectral, "delta_subbasis_rank", 0) > 0 else 0.0
+        # EXP-31 surpass lever: the zero-mean perturbation σ + how many targets it
+        # was applied to THIS step. σ=0 (OFF) ⇒ perturb_applied==0 (the line reads
+        # exactly like B2/Cell-D; the perturbation never fired).
+        _pt_sigma = float(getattr(spectral, "perturb_sigma", 0.0))
+        _pt_applied = int(getattr(spectral, "delayed_ef_perturb_applied", 0))
         print(
             f"[comm_eff][EXP-30][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
             f"corrected={corrected} refreshed={refreshed} held={held} "
@@ -1036,8 +1135,11 @@ def apply_spectral_correction_to_params(
             f"subbasis_gamma={_sb_gamma:.6f} "
             f"subbasis_applied={_sb_applied} subbasis_skipped={_sb_skipped} "
             f"subbasis_energy_ratio={_sb_ratio_med:.6f} "
+            f"perturb_sigma={_pt_sigma} perturb_seed={getattr(spectral, 'perturb_seed', 0)} "
+            f"perturb_applied={_pt_applied} "
             f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between; "
-            f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly = B2)",
+            f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly = B2; "
+            f"perturb_sigma==0 ⇒ g_corr unperturbed = B2/Cell-D)",
             flush=True,
         )
 

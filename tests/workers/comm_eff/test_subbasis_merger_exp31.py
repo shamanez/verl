@@ -39,6 +39,22 @@ covered here (all CPU, no GPU, no torch.distributed):
   -Q state on the filter and the fact that rank-0 is byte-identical to B2 (the
   forward path is provably untouched). The full forward-Q-checksum gate is the
   on-box probe (needs a GPU).
+
+EXP-31 surpass lever (``perturb_sigma`` — zero-mean tunable cross-rank-identical
+gradient perturbation) Correctness invariants covered here:
+
+* **off-path parity (hard):** ``perturb_sigma=0`` SKIPS the perturbation branch ⇒
+  ``delayed_ef_matrix`` returns the EXACT un-perturbed g_corr (``torch.equal``);
+  composed with ``delta_subbasis_rank=0`` it is bitwise-B2.
+* **perturbation magnitude:** with σ>0, ``‖g_corr_perturbed − g_corr‖ ≈ σ·‖g_corr‖``
+  (ξ is unit-normalized so the injected norm is exactly σ·‖g_corr‖).
+* **determinism / cross-rank identity (hard):** two filters with the same
+  (perturb_seed, current_step, name) produce the SAME perturbed g_corr (the DP
+  consistency guarantee — else ranks descend in different directions and diverge).
+* **zero-mean over steps:** averaging the perturbation across many ``current_step``
+  values ⇒ ‖mean‖ ≪ σ·‖g‖ (it is zero-mean noise, not a bias).
+* **guards:** a non-finite / ~zero-norm g_corr ⇒ the perturbation is a no-op
+  (returned unchanged), never a silent garbage gradient.
 """
 
 import importlib.util
@@ -77,7 +93,17 @@ SpectralFilter = _sf.SpectralFilter
 _NAME = "layers.0.q_proj.weight"
 
 
-def _mk_filter(rank=0, family="tail", lam=1.0, base_seed=0, weight=1.0, decay_steps=0, hold_steps=0):
+def _mk_filter(
+    rank=0,
+    family="tail",
+    lam=1.0,
+    base_seed=0,
+    weight=1.0,
+    decay_steps=0,
+    hold_steps=0,
+    perturb_sigma=0.0,
+    perturb_seed=0,
+):
     return SpectralFilter(
         beta_anc=0.0,
         correction_mode="delayed_ef",
@@ -89,6 +115,8 @@ def _mk_filter(rank=0, family="tail", lam=1.0, base_seed=0, weight=1.0, decay_st
         delta_subbasis_decay_steps=decay_steps,
         delta_subbasis_hold_steps=hold_steps,
         base_seed=base_seed,
+        perturb_sigma=perturb_sigma,
+        perturb_seed=perturb_seed,
     )
 
 
@@ -606,6 +634,269 @@ def test_hold_steps_scales_with_weight():
 def test_gamma_negative_hold_steps_rejected():
     with pytest.raises(AssertionError):
         _mk_filter(rank=2, hold_steps=-3)
+
+
+# --------------------------------------------------------------------------- #
+# EXP-31 surpass lever — zero-mean tunable cross-rank-identical perturbation.
+# --------------------------------------------------------------------------- #
+def _unperturbed_g_corr(name, m_rep, ring, g, *, rank=0, family="tail", base_seed=0):
+    """The g_corr a σ=0 filter (same delayed_ef config) produces — the reference."""
+    f = _mk_filter(rank=rank, family=family, base_seed=base_seed, perturb_sigma=0.0)
+    return _warm_and_fire(f, name, m_rep.clone(), ring.clone(), g.clone())
+
+
+def test_perturb_sigma_zero_is_bitwise_b2():
+    """perturb_sigma=0 + rank=0 ⇒ the perturbation branch is SKIPPED ⇒ bitwise B2."""
+    torch.manual_seed(50)
+    m_rep, ring, g = torch.randn(6, 5), torch.randn(6, 5), torch.randn(6, 5)
+    f_off = _mk_filter(rank=0, perturb_sigma=0.0, perturb_seed=7)
+    f_b2 = SpectralFilter(  # legacy B2 filter — NO perturb/sub-basis kwargs at all
+        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu"
+    )
+    out_off = _warm_and_fire(f_off, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    out_b2 = _warm_and_fire(f_b2, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    assert torch.equal(out_off, out_b2), (
+        "perturb_sigma=0 (rank 0) must be BITWISE identical to the legacy B2 merger"
+    )
+    # The perturbation never fired.
+    assert f_off.delayed_ef_perturb_applied == 0
+
+
+def test_perturb_sigma_zero_is_bitwise_cellD():
+    """perturb_sigma=0 with the sub-basis ON ⇒ EXACT Cell-D path (perturb is a no-op).
+
+    A filter that names perturb_sigma=0 must be byte-identical to the OLD Cell-D
+    constructor that never names the perturb knobs at all — the lever is a pure
+    extension with a no-op default, even on the sub-basis path.
+    """
+    torch.manual_seed(51)
+    m_rep, ring, g = torch.randn(8, 6), torch.randn(8, 6), torch.randn(8, 6)
+    f_old = SpectralFilter(  # OLD Cell-D constructor: rank=2, NO perturb kwargs.
+        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0,
+        ema_device="cpu", delta_subbasis_rank=2, delta_subbasis_family="tail", base_seed=0,
+    )
+    f_new = _mk_filter(rank=2, family="tail", base_seed=0, perturb_sigma=0.0)
+    out_old = _warm_and_fire(f_old, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    out_new = _warm_and_fire(f_new, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    assert torch.equal(out_old, out_new), (
+        "perturb_sigma=0 must reproduce the pre-perturb Cell-D path BITWISE"
+    )
+    assert f_new.delayed_ef_perturb_applied == 0
+
+
+def test_perturb_lambda_zero_identity_with_perturb_on():
+    """λ=0 returns the g_comp OBJECT even with σ>0 (the λ=0 early-return is FIRST)."""
+    f = _mk_filter(rank=0, lam=0.0, perturb_sigma=0.2)
+    g = torch.randn(5, 5)
+    out = f.delayed_ef_matrix(_NAME, g, ring_grad=torch.randn(5, 5))
+    assert out is g, "λ=0 must return G_comp EXACTLY (same object) even with σ>0"
+    assert f.delayed_ef_perturb_applied == 0, "λ=0 early-return precedes the perturbation"
+
+
+@pytest.mark.parametrize("sigma", [0.05, 0.10, 0.20])
+def test_perturb_magnitude_is_sigma_times_gcorr_norm(sigma):
+    """‖g_corr_perturbed − g_corr‖ ≈ σ·‖g_corr‖ (ξ is unit-normalized)."""
+    torch.manual_seed(52)
+    m_rep, ring, g = torch.randn(16, 12), torch.randn(16, 12), torch.randn(16, 12)
+    base = _unperturbed_g_corr(_NAME, m_rep, ring, g)  # the σ=0 reference g_corr
+    f = _mk_filter(rank=0, perturb_sigma=sigma, perturb_seed=3)
+    out = _warm_and_fire(f, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    base_norm = torch.linalg.norm(base.to(torch.float32)).item()
+    delta_norm = torch.linalg.norm((out - base).to(torch.float32)).item()
+    expected = sigma * base_norm
+    # ξ is exactly unit-normalized ⇒ the injected norm is σ·‖g_corr‖ to fp32 tol.
+    assert abs(delta_norm - expected) / (expected + 1e-12) < 1e-4, (
+        f"σ={sigma}: ‖perturbation‖={delta_norm:.6g} must equal σ·‖g_corr‖={expected:.6g}"
+    )
+    assert f.delayed_ef_perturb_applied == 1
+
+
+def test_perturb_cross_rank_identity():
+    """Same (perturb_seed, current_step, name) ⇒ bit-identical perturbed g_corr.
+
+    The DP-consistency guarantee: ξ is seeded by a pure function of (perturb_seed,
+    canonical-name, current_step) with NO rank/device-local state, so two filters
+    standing in for two DP ranks (fed the same DP-mean inputs) draw the SAME ξ and
+    produce a bit-identical perturbed g_corr. A per-rank ξ would diverge the ranks.
+    """
+    torch.manual_seed(53)
+    m_rep, ring, g = torch.randn(10, 7), torch.randn(10, 7), torch.randn(10, 7)
+    rank0 = _mk_filter(rank=0, perturb_sigma=0.1, perturb_seed=11)
+    rank1 = _mk_filter(rank=0, perturb_sigma=0.1, perturb_seed=11)
+    # Same step on both "ranks" (the engine sets current_step from global_step).
+    rank0.current_step = 4
+    rank1.current_step = 4
+    rank0.update_anchor(_NAME, m_rep.clone())
+    rank1.update_anchor(_NAME, m_rep.clone())
+    out0 = rank0.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+    out1 = rank1.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+    assert torch.equal(out0, out1), "cross-rank perturbed g_corr must agree bit-for-bit"
+
+
+def test_perturb_cross_rank_identity_with_subbasis_on():
+    """Cross-rank identity also holds when the sub-basis is ON (both terms DP-mean)."""
+    torch.manual_seed(54)
+    m_rep, ring, g = torch.randn(12, 9), torch.randn(12, 9), torch.randn(12, 9)
+    r0 = _mk_filter(rank=3, family="tail", perturb_sigma=0.15, perturb_seed=2, base_seed=0)
+    r1 = _mk_filter(rank=3, family="tail", perturb_sigma=0.15, perturb_seed=2, base_seed=0)
+    r0.current_step = r1.current_step = 9
+    r0.update_anchor(_NAME, m_rep.clone())
+    r1.update_anchor(_NAME, m_rep.clone())
+    out0 = r0.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+    out1 = r1.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+    assert torch.equal(out0, out1), "cross-rank identity must hold with the sub-basis ON"
+
+
+def test_perturb_different_steps_give_different_noise():
+    """A fresh seed per step ⇒ the perturbation DIFFERS across steps (not a fixed bias)."""
+    torch.manual_seed(55)
+    m_rep, ring, g = torch.randn(10, 8), torch.randn(10, 8), torch.randn(10, 8)
+    base = _unperturbed_g_corr(_NAME, m_rep, ring, g)
+
+    def _pert_at_step(step):
+        f = _mk_filter(rank=0, perturb_sigma=0.1, perturb_seed=0)
+        f.current_step = step
+        f.update_anchor(_NAME, m_rep.clone())
+        out = f.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+        return (out - base).to(torch.float32)
+
+    p1, p2 = _pert_at_step(1), _pert_at_step(2)
+    assert not torch.allclose(p1, p2, atol=1e-6), (
+        "consecutive steps must draw DIFFERENT ξ (fresh-per-step ⇒ zero-mean noise)"
+    )
+
+
+def test_perturb_different_seeds_give_different_noise():
+    """Different perturb_seed at the SAME step ⇒ different ξ (the seed is load-bearing)."""
+    torch.manual_seed(56)
+    m_rep, ring, g = torch.randn(10, 8), torch.randn(10, 8), torch.randn(10, 8)
+    base = _unperturbed_g_corr(_NAME, m_rep, ring, g)
+
+    def _pert_with_seed(seed):
+        f = _mk_filter(rank=0, perturb_sigma=0.1, perturb_seed=seed)
+        f.current_step = 3
+        f.update_anchor(_NAME, m_rep.clone())
+        return (f.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone()) - base).to(torch.float32)
+
+    assert not torch.allclose(_pert_with_seed(0), _pert_with_seed(99), atol=1e-6)
+
+
+def test_perturb_zero_mean_over_steps():
+    """Averaging the perturbation across many steps ⇒ ‖mean‖ ≪ σ·‖g_corr‖ (zero-mean).
+
+    Each step's perturbation has norm exactly σ·‖g_corr‖ but a fresh isotropic
+    direction; the Monte-Carlo mean of N independent unit directions has norm
+    ~1/√N, so the mean perturbation norm is ~σ·‖g_corr‖/√N ≪ σ·‖g_corr‖. We assert
+    the mean is a small fraction of a single-step perturbation (well under 30% at
+    N=200 — the 1/√N decay) to prove the noise is unbiased, not a drift.
+    """
+    torch.manual_seed(57)
+    m_rep, ring, g = torch.randn(12, 10), torch.randn(12, 10), torch.randn(12, 10)
+    sigma = 0.1
+    base = _unperturbed_g_corr(_NAME, m_rep, ring, g)
+    base_norm = torch.linalg.norm(base.to(torch.float32)).item()
+    single_step_norm = sigma * base_norm  # every step's perturbation has this norm
+
+    N = 200
+    acc = torch.zeros_like(base, dtype=torch.float32)
+    for step in range(N):
+        f = _mk_filter(rank=0, perturb_sigma=sigma, perturb_seed=0)
+        f.current_step = step
+        f.update_anchor(_NAME, m_rep.clone())
+        out = f.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
+        acc += (out - base).to(torch.float32)
+    mean_norm = torch.linalg.norm(acc / N).item()
+    # 1/√N law: mean_norm ≈ single_step_norm/√N ≈ single_step_norm·0.071 at N=200.
+    # Assert it is < 30% of a single step (a loose bound that still proves unbiased).
+    assert mean_norm < 0.30 * single_step_norm, (
+        f"mean perturbation norm {mean_norm:.6g} must be ≪ a single step "
+        f"{single_step_norm:.6g} (zero-mean over steps); got ratio "
+        f"{mean_norm / (single_step_norm + 1e-12):.3f}"
+    )
+
+
+def test_apply_perturbation_zero_norm_g_unchanged():
+    """A ~zero-norm g ⇒ _apply_perturbation returns it UNCHANGED (no garbage grad)."""
+    f = _mk_filter(rank=0, perturb_sigma=0.2)
+    z = torch.zeros(5, 5)
+    out = f._apply_perturbation(_NAME, z)
+    assert torch.equal(out, z), "zero-norm g must be returned unchanged"
+    assert f.delayed_ef_perturb_applied == 0, "no application counted for a no-op"
+
+
+def test_apply_perturbation_nonfinite_g_unchanged():
+    """A non-finite g ⇒ _apply_perturbation returns it UNCHANGED (guarded)."""
+    f = _mk_filter(rank=0, perturb_sigma=0.2)
+    bad = torch.full((4, 4), float("nan"))
+    out = f._apply_perturbation(_NAME, bad)
+    assert out is bad, "non-finite g must be returned unchanged (same object)"
+    assert f.delayed_ef_perturb_applied == 0
+    inf = torch.full((4, 4), float("inf"))
+    out2 = f._apply_perturbation(_NAME, inf)
+    assert out2 is inf
+    assert f.delayed_ef_perturb_applied == 0
+
+
+def test_apply_perturbation_sigma_zero_returns_same_object():
+    """σ=0 ⇒ _apply_perturbation is a strict no-op (same object, no count)."""
+    f = _mk_filter(rank=0, perturb_sigma=0.0)
+    g = torch.randn(5, 5)
+    out = f._apply_perturbation(_NAME, g)
+    assert out is g, "σ=0 must return the SAME g object (strict no-op)"
+    assert f.delayed_ef_perturb_applied == 0
+
+
+def test_apply_perturbation_output_detached_and_dtype_preserved():
+    """The perturbed g_corr is detached and keeps g's dtype (g is already detached)."""
+    f = _mk_filter(rank=0, perturb_sigma=0.1)
+    f.current_step = 1
+    g = torch.randn(6, 6, dtype=torch.float32)
+    out = f._apply_perturbation(_NAME, g)
+    assert not out.requires_grad, "perturbed g_corr must carry no autograd history"
+    assert out.dtype == g.dtype
+    assert out.shape == g.shape
+
+
+def test_perturb_seed_is_per_target_step_and_reproducible():
+    """_perturb_seed is FSDP-wrap invariant, per-target, per-step, reproducible."""
+    f = _mk_filter(rank=0, perturb_sigma=0.1, perturb_seed=5)
+    f.current_step = 7
+    s_a = f._perturb_seed("layers.0.q_proj.weight")
+    s_b = f._perturb_seed("layers.5.down_proj.weight")
+    assert s_a != s_b, "different targets ⇒ different perturbation seeds"
+    # FSDP infix canonicalized away ⇒ wrap-invariant (cross-rank, same param).
+    assert s_a == f._perturb_seed("layers.0._fsdp_wrapped_module.q_proj.weight")
+    # Reproducible across calls at the same step.
+    assert s_a == f._perturb_seed("layers.0.q_proj.weight")
+    # Different step ⇒ different seed (freshness).
+    f.current_step = 8
+    assert s_a != f._perturb_seed("layers.0.q_proj.weight")
+
+
+def test_perturb_negative_sigma_rejected():
+    """perturb_sigma < 0 is asserted in the filter ctor (mirrors config validation)."""
+    with pytest.raises(AssertionError):
+        _mk_filter(rank=0, perturb_sigma=-0.1)
+
+
+def test_perturb_composes_with_subbasis_additively():
+    """σ>0 on the sub-basis path adds σ·‖g_corr‖ noise ON TOP of the Cell-D g_corr.
+
+    The perturbation is applied to the FULL g_corr (= G_comp + λ(δ_B2 + δ_subbasis)),
+    so ‖perturbed − Cell-D-g_corr‖ ≈ σ·‖Cell-D-g_corr‖ — the lever composes with the
+    sub-basis, it does not replace it.
+    """
+    torch.manual_seed(58)
+    m_rep, ring, g = torch.randn(14, 10), torch.randn(14, 10), torch.randn(14, 10)
+    sigma = 0.1
+    base = _unperturbed_g_corr(_NAME, m_rep, ring, g, rank=2, family="tail")
+    f = _mk_filter(rank=2, family="tail", perturb_sigma=sigma, perturb_seed=1)
+    out = _warm_and_fire(f, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    base_norm = torch.linalg.norm(base.to(torch.float32)).item()
+    delta_norm = torch.linalg.norm((out - base).to(torch.float32)).item()
+    assert abs(delta_norm - sigma * base_norm) / (sigma * base_norm + 1e-12) < 1e-4
+    assert f.delayed_ef_subbasis_applied == 1, "the sub-basis still fired (compose, not replace)"
+    assert f.delayed_ef_perturb_applied == 1
 
 
 if __name__ == "__main__":

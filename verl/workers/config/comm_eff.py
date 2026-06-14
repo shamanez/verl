@@ -363,6 +363,29 @@ class CommEffSpectralConfig(BaseConfig):
     # here for config completeness; the Cell C codec is a SEPARATE later change.
     # Must be >= 0. Unused unless correction_mode=delayed_ef.
     r_delta: int = 0
+    # ---- EXP-31 surpass lever: zero-mean tunable gradient perturbation ----------
+    # The destination-changing (vs path-speeding) lever. AFTER the delayed_ef
+    # correction term (``g_corr = G_comp + λ·(δ_B2 + γ_t·δ_subbasis)``) a zero-mean,
+    # σ-scaled, cross-rank-IDENTICAL noise is added to bias SGD toward FLATTER
+    # minima (SGLD / SAM-style beneficial noise → a better-generalizing greedy
+    # mode → potentially beats dense on greedy val):
+    #
+    #   ξ          = randn(g_corr.shape, gen=seed(perturb_seed, target, step))  # cross-rank-identical
+    #   ξ          = ξ / ‖ξ‖                                                     # unit
+    #   g_corr     = g_corr + perturb_sigma · ‖g_corr‖ · ξ                       # ‖perturbation‖ = σ·‖g_corr‖
+    #
+    # perturb_sigma = 0.0 (default, OFF) ⇒ the perturbation branch is SKIPPED
+    # ENTIRELY ⇒ ``g_corr`` is the EXACT delayed_ef / Cell-D path bitwise
+    # (off-path parity; composes with rank-0 ⇒ bitwise-B2). The seed is a pure
+    # function of (perturb_seed, canonical-target-name, current_step) with NO
+    # rank/device-local state, so every DP rank draws the SAME ξ (the
+    # multi-rank-agreement invariant — else ranks diverge). Fresh per step ⇒
+    # zero-mean over training ⇒ E[update] unchanged + exploration. Local, ZERO
+    # added communication (the comm-eff substrate is untouched). σ relative to
+    # ‖g_corr‖ ⇒ scale-free / tunable. Both must be >= 0 / int; validated
+    # unconditionally so a typo is loud even on a non-delayed_ef / σ=0 run.
+    perturb_sigma: float = 0.0
+    perturb_seed: int = 0
 
 
 @dataclass
@@ -846,6 +869,14 @@ class CommEffConfig(BaseConfig):
         if self.spectral.r_delta < 0:
             raise ValueError(
                 f"comm_eff.spectral.r_delta must be >= 0; got {self.spectral.r_delta}"
+            )
+        # EXP-31 surpass lever: the zero-mean perturbation magnitude σ (>= 0; 0.0
+        # default = OFF ⇒ the exact delayed_ef / B2 path) and its seed (the
+        # cross-rank-identical RNG salt). Validated unconditionally so a typo is
+        # loud even on a non-delayed_ef / σ=0 run that forwards them.
+        if self.spectral.perturb_sigma < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.perturb_sigma must be >= 0; got {self.spectral.perturb_sigma}"
             )
         # EXP-30 B2: delayed_ef merges the VALID (generator-consistent) M_rep by
         # definition — running it on the legacy generator-mismatched feed would
