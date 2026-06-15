@@ -11,7 +11,10 @@ perturbing (L4) / de-noising (L1) a stale estimate of dense.** Full: `runs/EXP-3
 GPU killed, box clean+idle (operator teardown). All WandB synced.
 
 **Box:** 46.243.55.155:40276 (i_41048644, 4×H200, operator's separate Vast acct ⇒ operator teardown).
-**Branches:** `vast-ai-workload` (Cell A, L4 — perturb already wired) + `exp/31-anchor-usage-levers @1d9077d` (L2, L3 — verified, 262 tests pass, on origin).
+**Branches (FINAL 2026-06-16):** ALL code consolidated into `vast-ai-workload` (L4 perturb + L2 δ-momentum
++ L3 adaptive-dose all merged @ origin tip `5d23179a5`; verified, 262 tests pass). **`exp/31` branch DELETED
+(local + origin) — only `main` + `vast-ai-workload` remain.** Box i_41048644 → operator may stop/destroy
+(all WandB synced incl. recovered val@25 for L2_mom05/L3_ratio_k10). Next session resumes from `vast-ai-workload`.
 **Goal:** greedy GSM8K val `mean@1` → 0.80 (surpass; dense band ~0.75–0.78). Single draws ±0.024.
 
 ## Reference — B2_live (this box/config, seed 0, disable_custom_all_reduce)
