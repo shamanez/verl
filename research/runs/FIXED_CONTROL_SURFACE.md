@@ -118,33 +118,41 @@ Standing OOM guards on EVERY run regardless of tier:
 
 ## How to launch on this surface
 
-One canonical launcher (`examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`)
-— its `${VAR:-default}` defaults ARE the anchor base + the core surface (batch, lr, rollout
-shape, contexts, objective, the substrate above). A bare comm-eff launch is the base; you
-override only the run length + the axis you're varying:
+**THE canonical launcher every cell runs on top of is
+`examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`** (plan #31 §"THE BASELINE
+SCRIPT"). It is self-contained: it pins the **entire B2 substrate explicitly** (delayed_ef λ=1, β_anc=0,
+PowerSGD r=77, anchor on + owns `Q`, cadence=delay_K=5, clean=0, replay, the OOM guards) and then execs
+the generic `vast_comm_eff_baseline_*.sh` engine — so a **bare run reproduces B2 = the SOTA comm-eff floor
+= EXP-31 Cell A** (no knobs to set). Do **not** invoke the generic `vast_comm_eff_baseline_*.sh` directly:
+its `${VAR:-default}` defaults are *where the values live* (and the ground truth of any run is its
+`resolved_params.txt`), but the b2_sota wrapper is the audited entry point and keeps every arm
+one-knob-from-B2. You override only the run length + the ONE axis you're varying (an anchor-usage lever —
+all default OFF ⇒ bitwise B2):
 
 ```bash
-# the anchor base, 50 steps, validation every 25 (nothing else to set):
-TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=ce_anchor_base_50s \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+# B2 = the SOTA comm-eff base = EXP-31 Cell A — a BARE run, 50 steps, val every 25 (nothing else to set):
+TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
+  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
 
-# the SOTA comm-eff base (B2 = delayed_ef λ=1) — exact knobs in runs/EXP-31/B2_baseline/resolved_params_B2.txt:
-COMM_EFF_SPECTRAL_CORRECTION_MODE=delayed_ef COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA=1.0 \
-COMM_EFF_SPECTRAL_BETA_ANC=0.0 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH=true \
-  TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
-
-# the issue-#31 variable axis = anchor-gradient USAGE on top of B2 (e.g. the built perturbation lever):
+# the issue-#31 variable axis = anchor-gradient USAGE on top of B2 (e.g. the built L4 perturbation lever):
 COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh   # all 4-lever knobs default OFF = bitwise B2
+  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh   # all 4 levers OFF = bitwise B2
 
-# dense reference: same launch with COMM_EFF_ENABLED=false.
+# if the box hits the vLLM CUDA-IPC init crash, opt in (greedy-val-neutral controlled var):
+DISABLE_CUSTOM_ALL_REDUCE=true TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
+  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
+
+# dense reference (band ≈ 0.75–0.78) — one-knob OFF, shares the comm-eff code path (NOT via b2_sota,
+# which force-enables comm-eff): set the master switch on the GENERIC launcher.
+COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=dense_ref \
+  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
-Pass `TOTAL_TRAINING_STEPS` (50, then 100) + `TEST_FREQ=25` per launch. The substrate
-defaults (anchor on, owns `Q`, PowerSGD r=77, **delayed_ef merger (B2)**, no clean step) are baked
-into the launcher — do **not** re-type them; the ground truth of any run is its
-`resolved_params.txt` (the SOTA = `runs/EXP-31/B2_baseline/resolved_params_B2.txt`).
+Pass `TOTAL_TRAINING_STEPS` (50, then 100 for an extended winner) + `TEST_FREQ=25` per launch. The full B2
+substrate is baked into the b2_sota launcher — do **not** re-type it; the ground truth of any run is its
+`resolved_params.txt` (the SOTA = `runs/EXP-31/B2_baseline/resolved_params_B2.txt`). The four anchor-usage
+levers + their exact knobs are enumerated in `.claude/plans/31.md` (L4 perturbation already wired;
+L2 δ-momentum / L3 adaptive-dose / L1 control-variate add merger code on `exp/31-*`).
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).
