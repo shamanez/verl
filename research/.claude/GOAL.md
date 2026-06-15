@@ -44,15 +44,24 @@ codec**. The full result + why + what's next, and all the numbers, live in
   **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
   is mechanically **proven** (EXP-25 R1+R2 probe gates green). Judge on **val/score,
   not grad_norm**. Do not relitigate the substrate.
-- **Honest result** — the substrate is realistic + correct, but the current
-  `signed_ema` **merger** (how `M` corrects the fast gradient) is **falsified**: it
-  does not match plain PowerSGD, so we do **not** beat dense (EXP-25, STOP). This is a
-  good base to *start from*, not a finished result.
-- **Frontier** — the single open axis is the **gradient-correction merger primitive**.
-  `signed_ema` (sign-replacement) is the wrong primitive; the next candidate is
-  **error-feedback on the PowerSGD residual** (issue #24). This is RL — no recipe to
-  copy — so the correction is found **empirically**: propose a merger, run it, compare
-  the training curve to dense, refine. Target: match the dense curve within ≤50 steps.
+- **Settled result (the current SOTA)** — the merger question is answered:
+  `signed_ema` (sign-replacement) was falsified (EXP-25, STOP), but **error-feedback on the
+  PowerSGD residual WON** — the **`delayed_ef` merger (B2)**, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0,
+  reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
+  the comm-eff SOTA; its exact settings are `runs/EXP-30/resolved_params_B2.txt`. **Goals 1–3 (stable /
+  parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**
+- **Frontier (issue #31)** — the single open axis is now **how the stale anchor `M` is USED to BEAT
+  dense, not just match it.** B2 caps at parity because it reconstructs the dense gradient on stale data;
+  a first amplification lever (sub-basis) confirmed parity is the amplification ceiling. The active
+  program is a **4-lever tournament** — perturbation / δ-momentum / adaptive-dose / control-variate — all
+  changing only anchor-gradient *usage* (codec/Q/batch/generation **locked**), target **val@50 ≈ 0.80**.
+  This is RL with no recipe — found **empirically**: propose a usage, run it, take early val@25/@50
+  decisions, refine. Authoritative plan: `.claude/plans/31.md`.
+- **Async-realism constraint (drives the levers)** — the substrate's fixed `delay_K=5` lock-step is a
+  *simulation*; the real target is a single **SLOW** anchor node serving a fast **SWARM** over the
+  network ⇒ the anchor is **always lagging, never leads**. Admissible levers use it as a *lagging*
+  reference, tolerate **variable staleness**, and stay **cross-rank-identical**. (⇒ no delay-compensation
+  / anchor-lead.) The **two-circuit** structure is mandatory — it is the practical-future-use point.
 
 ## Why the anchor (the motivating logic)
 
@@ -63,9 +72,9 @@ full-rank clean step is **not communication-efficient** (full-H transfer) and, o
 real decentralized-PP link, would itself be stale. The anchor circuit is the realistic
 realization of that idea: a **low-frequency, stale, full-gradient reference**
 maintained continuously and folded into the fast compressed gradient — and it also
-owns the projection basis `Q`. The open question is no longer *whether* a correction
-helps but **which merger** converts the anchor into a dense-matching update;
-sign-replacement (`signed_ema`) does not (see `SUMMARY.md`).
+owns the projection basis `Q`. The merger that converts the anchor into a **dense-matching** update is
+settled — `delayed_ef` (error-feedback on the codec residual); the open question is now **how to use the
+anchor to SURPASS dense** (issue #31). See `SUMMARY.md`.
 
 ## Why code changes are in scope
 

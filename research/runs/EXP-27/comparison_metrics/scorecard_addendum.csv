@@ -1,7 +1,0 @@
-run,merger_on,entropy@end,len_mean@end,len_mean_slope_41_50,len_max@end,len_max_backhalf_max,max_consec_cap_pin,n_cap_pins_41_50,n_clip_41_50,grad_norm_mean_40_50,grad_norm_max_40_50,verdict
-dense,no,,,-0.009,,1228,1,0,0,0.34,0.37,CLEAN (no carrier signature)
-plain,"NO (substrate only: powersgd+anchor, spectral.enabled=False)",0.4782,197.0,-1.46,,1217,1,0,0,7.44,10.49,CLEAN (no carrier signature)
-ef_r2,"YES (spectral.enabled=True, ef_clip=1 decay=0.9)",0.3962,145.7,0.801,,7817,1,0,0,9.32,13.48,WATCH (carrier present: isolated long-tail spikes)
-a0p5,YES (signed_ema delta=0.5),0.3707,170.4,5.92,5806,16384,2,2,2,8.79,46.21,DANGER (carrier clustering / rising len)
-exp27,YES (ef damped clip=0.5 decay=0.5),0.4007,165.8,0.096,594,16384,7,1,1,7.05,11.44,DANGER (carrier clustering / rising len)
-ef_r1,YES (ef full),0.1326,328.0,,16384,16384,7,2,2,19.34,24.49,DANGER (carrier clustering / rising len)

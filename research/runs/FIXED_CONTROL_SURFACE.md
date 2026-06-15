@@ -56,11 +56,15 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 | `anchor.owns_q` | `true` | the anchor is the ONLY thing that updates `Q` |
 | `anchor.cadence` / `delay_K` | `5` / `5` | refresh + staleness, in optimizer ticks |
 | `clean_cadence` | `0` | DEAD — the anchor replaced the periodic dense step |
+| `spectral.correction_mode` | `delayed_ef` | **the SOTA merger (B2)** — K-delayed codec residual / error-feedback, `λ=1`, `β_anc=0` |
+| `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` (EXP-29) — part of the B2 substrate |
+| vLLM `disable_custom_all_reduce` | `true` | **required** for the box to init (CUDA-IPC under the mp executor); greedy-val-neutral → a controlled var, not a knob |
 
-**The variable axis — the merger** (`spectral.correction_mode` + its weight, e.g.
-`signed_ema_alpha`): the research axis going forward. `signed_ema` is wired but
-**falsified** (net-harmful — result + why in `SUMMARY.md`); error-feedback on the
-PowerSGD residual (#24) is the next candidate.
+**The variable axis — how the anchor `M` is USED** (issue #31). The *merger primitive* is settled:
+`signed_ema` falsified (net-harmful, EXP-25), **`delayed_ef` (B2) WON and is the SOTA** (parity with
+dense — `SUMMARY.md`). The open axis is now the **anchor-gradient-usage levers** on top of B2 — a 4-lever
+tournament (perturbation / δ-momentum / adaptive-dose / control-variate), target val@50 → 0.80, all with
+the codec/Q/batch/generation locked. Authoritative: `.claude/plans/31.md`.
 
 **Reference codecs (NOT the base; ablation only):** the dense control
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
@@ -124,17 +128,23 @@ override only the run length + the axis you're varying:
 TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=ce_anchor_base_50s \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
-# sweep the merger axis:
-COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.7 EXPERIMENT_NAME=ce_a0p7 \
+# the SOTA comm-eff base (B2 = delayed_ef λ=1) — exact knobs in runs/EXP-30/resolved_params_B2.txt:
+COMM_EFF_SPECTRAL_CORRECTION_MODE=delayed_ef COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA=1.0 \
+COMM_EFF_SPECTRAL_BETA_ANC=0.0 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH=true \
+  TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+
+# the issue-#31 variable axis = anchor-gradient USAGE on top of B2 (e.g. the built perturbation lever):
+COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
+  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh   # all 4-lever knobs default OFF = bitwise B2
 
 # dense reference: same launch with COMM_EFF_ENABLED=false.
 ```
 
 Pass `TOTAL_TRAINING_STEPS` (50, then 100) + `TEST_FREQ=25` per launch. The substrate
-defaults (anchor on, owns `Q`, PowerSGD r=77, signed_ema merger, no clean step) are baked
+defaults (anchor on, owns `Q`, PowerSGD r=77, **delayed_ef merger (B2)**, no clean step) are baked
 into the launcher — do **not** re-type them; the ground truth of any run is its
-`resolved_params.txt`.
+`resolved_params.txt` (the SOTA = `runs/EXP-30/resolved_params_B2.txt`).
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).

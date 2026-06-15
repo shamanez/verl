@@ -10,6 +10,26 @@ lasting record is **here + git history + W&B + the merged code**.
 > here for outcomes — they do **not** restate these numbers. Keep it that way:
 > duplicated results drift into contradiction.
 
+## ⭐ CURRENT STATE OF THE ART — start here
+
+**SOTA comm-eff method = `B2` — `delayed_ef`** (K-delayed exact codec-residual = error-feedback),
+`G_corr = G_comp + λ·δ`, **λ=1, β_anc=0**.
+
+- **Result:** greedy GSM8K **val@50 ≈ 0.74–0.75 = PARITY with dense** (band 0.75–0.78) at ~5%
+  fast-path gradient-comm cost (~4× honest amortized). W&B B2 `u9okvgzz` 0.7528; reproduce/ext draws
+  0.7400–0.7536.
+- **The exact SOTA settings are the ground truth in** [`runs/EXP-30/resolved_params_B2.txt`](EXP-30/resolved_params_B2.txt)
+  **+** [`runs/EXP-30/launch_B2.sh`](EXP-30/launch_B2.sh) — the substrate **every new arm holds fixed**.
+- **Locked substrate:** PowerSGD **r=77** act codec · anchor **owns Q** · **cadence=delay_K=5** ·
+  **clean_cadence=0** · **replay_paired_batch=true** · snapshot_device=cpu · batch128/mini64/lr1e-6/n8/
+  resp16384/seed0 · **disable_custom_all_reduce=true** (required for the box to init; greedy-val-neutral).
+- **Active frontier (issue #31):** push B2 → **0.80** by changing ONLY *how the stale anchor gradient is
+  USED* — the **4-lever tournament** (perturbation / δ-momentum / adaptive-dose / control-variate) under
+  the async single-slow-anchor constraint. Authoritative plan: [`.claude/plans/31.md`](../.claude/plans/31.md).
+
+Everything below B2 in the table (EXP-20/23/25/26/27/29) is **superseded history**, folded into this file
+(detailed run dirs de-bloated 2026-06-15; full detail in git history + W&B + the merged code).
+
 ## The settled communication-efficient base (as of issue #25, 2026-06-09)
 
 The comm-eff training base is the **anchor circuit on a PowerSGD codec**. Two
@@ -42,7 +62,10 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | EXP-20 | M6 | PowerSGD r=77 (byte-matched) + fresh clean@5 — the prior comm-eff PASS | 0.7415 | W&B `oquyeic3` |
 | EXP-23 | M6 | PowerSGD r=77, **no** re-anchor (the floor); inject/blend stale-anchor mergers (STOP) | 0.6914 (floor) | W&B; erratum `a46fd0191` |
 | **EXP-25** | M6 | **Anchor circuit default** — full-coverage DP-reduced stale `M` (R1) + anchor-owns-`Q` (R2) + signed_ema merger (R3), α swept | **0.7066** (best, α=0.5) — **STOP** | code on `vast-ai-workload`; issue #25 |
-| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS** | PR #17 merged `ca5f4b002`; verdict `runs/EXP-30/verdict.md` |
+| EXP-26 | M6 | Real-gradient geometry audit + ef_powersgd merger; Step-C (gradient-tuned forward Q) **falsified** by recon collapse | 0.7210 (ef best) — REVISE→closed | folded here; W&B pruned; LOG.md |
+| EXP-27 | M6 | Damped ef_powersgd (clip/decay 0.5) to 100 steps — ignition test | 0.7202 (**ignited @~66**, length-explosion) — STOP | folded here; W&B `qa6sll3h`; LOG.md |
+| EXP-29 | M6 | On-policy anchor **replay** (`replay_paired_batch` + `snapshot_device` knobs) — the valid-M infra B2 uses | infra PASS (no val bar) | merged PR #16 `d26176b44`; now part of the B2 substrate |
+| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict `runs/EXP-30/verdict.md` |
 | **EXP-31** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
 
 ## EXP-25 — what we learned (issue #25, VERDICT = STOP)
@@ -69,9 +92,9 @@ honest reading: this is a **good research base to start from** — the realistic
 circuit is wired and proven — and the open question narrows to the **merger /
 gradient-correction primitive**.
 
-Scientific detail (do not duplicate elsewhere): `runs/EXP-25/verdict.md`,
-`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`, `DEEP_FINDINGS.md`,
-`ENTROPY_COLLAPSE_FINDINGS.md` (kept under `runs/EXP-25/` as the deep writeups).
+Scientific detail: the EXP-25 deep writeups (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`,
+`DEEP_FINDINGS.md`, `ENTROPY_COLLAPSE_FINDINGS.md`) were de-bloated 2026-06-15 — their essence is
+the paragraph above + the memory entries; the full text is in git history.
 
 
 ## EXP-31 — the parity result (issue #31, VERDICT = PARITY, operator-accepted 2026-06-14)
@@ -100,15 +123,23 @@ hold25-decay25 val@50 on disk but unsynced). Full detail: `runs/EXP-31/verdict.m
 **Code:** branch `exp/31-subbasis-merger` pushed, unmerged. No PR / no launcher promotion
 (`promote_launcher_as=none`; PARITY is not a PASS in the mandate terms).
 
-## Frontier — the merger primitive
+## Frontier — how the stale anchor gradient is USED (issue #31)
 
-The substrate (anchor on + owns `Q` + PowerSGD r=77) is **held fixed**; the single
-research axis going forward is **how the stale anchor `M` corrects the fast
-compressed gradient**. `signed_ema` is falsified (sign-replacement is the defect).
-The next candidate is **error-feedback on the PowerSGD residual** (issue #24, which
-was gated on #25 — the STOP is the signal to redesign the primitive before #24
-spends compute). A standing watch on entropy / response-length / IS-gap applies to
-every run (`research/diagnostics/ENTROPY_COLLAPSE_WATCH.md`).
+The substrate (anchor on + owns `Q` + PowerSGD r=77) is **held fixed**; the single research axis is
+**how the stale anchor `M` is folded into the fast compressed update**. The lineage settled it:
+`signed_ema` falsified (sign-replacement is the defect, EXP-25) → **error-feedback on the PowerSGD
+residual WON** and is the SOTA (delayed_ef = B2, EXP-30, parity with dense) — issue #24's premise,
+realized. The open question is no longer *whether* a residual correction helps but **how to use the
+anchor to BEAT dense, not just match it.**
+
+The current program (issue #31) is a **4-lever tournament**, all changing only anchor-gradient *usage*
+(codec/Q/batch/generation locked): **L4 perturbation** (zero-mean regularization), **L2 δ-momentum**
+(accumulate the persistently-missed correction), **L3 adaptive dose** (trust the anchor more on
+disagreement), **L1 control-variate** (cancel sampling variance, SVRG/SARAH). **Async-realism filter:**
+the anchor is a single **SLOW** node serving a fast **SWARM** ⇒ always lagging, never leads — admissible
+levers use it as a *lagging* reference, tolerate variable staleness, and stay cross-rank-identical.
+Authoritative plan + thresholds: [`.claude/plans/31.md`](../.claude/plans/31.md). A standing watch on
+entropy / response-length / IS-gap applies to every run (`research/diagnostics/ENTROPY_COLLAPSE_WATCH.md`).
 
 ## "Done" means
 

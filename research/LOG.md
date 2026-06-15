@@ -1,5 +1,10 @@
 # Research Log (newest first)
 
+> **De-bloat note (2026-06-15):** run dirs for **EXP-29 and earlier** (EXP-25/26/27/29) were removed to
+> reclaim ~63 GB; their record is folded into `runs/SUMMARY.md` + memory + git history + W&B. The
+> `run dir:` / `verdict:` pointers in those entries below are **historical** (dirs no longer on disk).
+> The SOTA is **B2** (`runs/EXP-30/resolved_params_B2.txt`); EXP-30 + EXP-31 dirs are retained.
+
 ## EXP-31 · 2026-06-14T00:00:00+10:00 · M6 · PARITY (operator-accepted)
 Surpass the dense baseline with a stale-anchor-gradient merger (PowerSGD-locked comm-eff GRPO)
 
@@ -7,6 +12,7 @@ Surpass the dense baseline with a stale-anchor-gradient merger (PowerSGD-locked 
 - result: PARITY, not greedy-surpass. The most important finding is a dense-reference reframe: the dense bar on THIS config is 0.7506, not 0.7839 (the 0.7839 was a different box). Best comm-eff arm (B2/Cell A, delayed_ef λ=1, r=77 act) = 0.7400 vs dense-here 0.7506 — gap 0.011, within ±0.024 eval noise = statistical PARITY. Comm-efficient GRPO already matches dense at ~5% gradient-comm cost. The rank-2 tail sub-basis (88-90% off-principal energy captured) accelerates early learning (+0.036 at step 25 for r2 arm) but does NOT convert to a greedy surpass: constant full weight over-amplifies near convergence and regresses (r2: 0.7293@25 → 0.6983@50); γ-decay fixes the regression (0.7210@50) but also tempers the early gain, ending at parity-below-B2. hold25-decay25 val@50 lost to a Vast-side box stop (~23:13 UTC, box not destroyed). Seed bands (dense×3, B2×3) deferred — box stopped and would not restart; single-draw parity claim is qualitatively robust (all comm-eff draws 0.72–0.74 vs dense 0.75). Branch exp/31-subbasis-merger available (pushed, unmerged — no surpass justified promotion).
 - run dir: runs/EXP-31/
 - verdict: runs/EXP-31/verdict.md
+- reframe (2026-06-15, operator): the sub-basis (amplification) bet is FROZEN as a parity-only null; B2 stands as the frozen comm-eff SOTA. Issue #31 re-scoped to an OPEN-ENDED **4-lever anchor-gradient-usage tournament** (L4 perturbation [already built] / L2 δ-momentum / L3 adaptive-dose / L1 control-variate), target val@50 → 0.80, dose λ/β_anc now tunable, EXP-27 ignition trip-wires back on. Async-realism constraint: anchor = single SLOW node serving a fast SWARM ⇒ always lagging, never leads (delay-compensation ruled out). Plan `.claude/plans/31.md` rewritten; awaiting `status:approved`.
 
 ## EXP-30 · 2026-06-13T01:40:00+10:00 · M6 · PASS
 EXP-30: generator-consistent M (EXP-29 paired replay, β_anc=0) — geometry-gated re-test of linear merging + K-delayed codec residual
