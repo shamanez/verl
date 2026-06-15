@@ -26,17 +26,23 @@ bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no i
 - **val@50:** EXTEND_TO_100 if `> B2_live@50 + 0.024`; BANK if within ±0.024; KILL if `< B2_live@50 − 0.024`.
 - **ignition trip-wires** (dose/buffer cells L2/L3): P1 ≥2 consec cap-pins; P2 len-mean slope>0 sustained; P3 len-mean>2× early; E1 len/max>4k @steps 10–30.
 
-## Cells
+## Cells (handoff 2026-06-16 — L2/L3/L1 remaining; code MERGED to vast-ai-workload)
 | cell | config | val@25 | val@50 | decision |
 |---|---|---|---|---|
-| A_b2_reproduce | bitwise B2 | **0.7202** | running | REFERENCE |
-| L4_perturb_s001 | σ=0.01 | | | queued (chain) |
-| L4_perturb_s003 | σ=0.03 | | | queued (chain) |
-| L2_mom05 | μ=0.5 age_decay | | | pending (exp/31) |
-| L2_mom09 | μ=0.9 age_decay | | | pending (exp/31) |
-| L3_cos_k05 / k10 | cos κ=0.5/1.0 cap2 | | | pending (exp/31) |
-| L3_ratio_k05 / k10 | ratio κ=0.5/1.0 cap2 | | | pending (exp/31) |
-| L1 | recenter/svrg (gated) | | | deferred |
+| A_b2_reproduce | bitwise B2 | 0.7202 | **0.7354** | ✅ REFERENCE (WandB fy920fty) |
+| L4_perturb_s001 | σ=0.01 | 0.7157 | — (stopped@34) | ✅ BANKED NULL — parity within noise; isotropic = regularization control, not anchor-usage (WandB cvu8jw1n partial) |
+| L4_perturb_s003 | σ=0.03 | — | — | SKIPPED (more isotropic noise ⇒ ≤ σ=0.01) |
+| L2_mom09 | μ=0.9 age_decay | | | ⏳ NEXT (code on vast-ai-workload) |
+| L2_mom05 | μ=0.5 age_decay | | | pending |
+| L3_ratio_k10 / k05 | ratio κ=1.0/0.5 cap2 | | | pending |
+| L3_cos_k10 / k05 | cos κ=1.0/0.5 cap2 | | | pending |
+| L1 | recenter/svrg (gated) | | | deferred — needs code (transformer_impl.py) |
+
+**Handoff (2026-06-16):** current run STOPPED + box CLEANED per operator. L2/L3 code merged into
+`vast-ai-workload` @ 36d7f60c1 (exp/31 branch deleted, worktree removed). Box 46.243.55.155:40276 idle +
+clean on that HEAD, GPU 0%. A fresh `/goal` session (same prompt) resumes: launch L2 → L3 → L1 per
+§HANDOFF STATE in `.claude/plans/31.md`. WandB current (Cell A + L4 synced). Final analyst verdict +
+promotion pending after L2/L3/L1.
 
 ## Launch commands (each = B2 wrapper + one env override)
 - L4: `COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.01 EXPERIMENT_NAME=L4_perturb_s001 ... bash <b2_sota>` (vast-ai-workload)
