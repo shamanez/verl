@@ -34,8 +34,9 @@ bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no i
 | L4_perturb_s003 | σ=0.03 | — | — | SKIPPED (more isotropic noise ⇒ ≤ σ=0.01) |
 | L2_mom09 | μ=0.9 age_decay | **0.5701** | — (killed@26) | ❌ KILL — −0.15 below B2_live@25 (0.7202), far outside ±0.024. Code verified GO ⇒ TRUSTWORTHY null: heavy μ=0.9 over-smooths the held correction ⇒ lags the fast-changing early correction, slows convergence. Healthy (reward→0.51, len 276→150↓, no ignition). WandB ybemd5ux |
 | L2_mom05 | μ=0.5 age_decay | **0.7089** | — (killed@25) | ⏸ PARITY/KILL — −0.011 vs B2_live@25 (within ±0.024), NOT an improvement. Healthy (reward→0.69, len flat ~215). Lighter μ tracks B2 ⇒ **L2 lever CLOSED: NULL for surpass** (μ=0.9 regresses −0.15, μ=0.5 = parity). mem 30.72 (=ceiling) |
-| L3_ratio_k10 | ratio κ=1.0 cap2 | | | 🟢 RUNNING (launched 2026-06-16) |
-| L3_ratio_k05 / cos | per gate | | | pending |
+| L3_ratio_k10 | ratio κ=1.0 cap2 | **0.7119** | — (killed@25) | ⏸ PARITY/KILL — −0.008 vs B2_live@25 (within ±0.024). Healthy (reward→0.695, len flat ~212, no ignition). Max modulation = neutral. mem 45.97 (adaptive-λ temporaries, no OOM) |
+| L3_cos_k10 | cos κ=1.0 cap2 | | | 🟢 RUNNING (launched 2026-06-16) — 2nd agreement metric |
+| L3 κ=0.5 (ratio/cos) | — | — | — | SKIP (low-info: κ=1.0 max modulation already = parity ⇒ milder κ lands between that and B2 = parity; κ=0 IS B2) |
 | L3_cos_k10 / k05 | cos κ=1.0/0.5 cap2 | | | pending |
 | L1 | recenter/svrg (gated) | | | deferred — needs code (transformer_impl.py) |
 
