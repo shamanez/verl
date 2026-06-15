@@ -11,3 +11,4 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 (delay-compensation ruled out). Housekeeping: `runs/` de-bloated 64G→16M; old plans removed (only `31.md`
 + `TEMPLATE.md`); plan `.claude/plans/31.md` rewritten + labeled `status:planned`.
 **AWAITING operator `status:approved`** → provision a box → Cell A (B2 reproduce) → L4 → L2/L3/L1.
+[2026-06-15T22:10:51+10:00] [orchestrator/goal] EXP-31 tournament START on operator box 46.243.55.155:40276 (i_41048644, 4xH200, separate Vast acct=operator teardown). Cell A (A_b2_reproduce) LAUNCHED tmux exp-31-46_243_55_155: bitwise B2 verified (delayed_ef λ=1 β_anc=0 r=77 anchor c5/dK5/owns_q/replay, KL off, dynbsz off, 18432, dcar=true, 50 steps/val@25). GPUs busy 45-62%. Monitor(bg)+heartbeat alive. L2+L3 code-build runner(bg) on exp/31-anchor-usage-levers. Tournament: A->L4(σ.01/.03,env-only)->L2->L3->L1(gated). Target greedy val 0.80.
