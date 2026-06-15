@@ -9,7 +9,10 @@
 |---|---|---|
 | val@0 (untrained) | 0.0910 | A_b2_reproduce |
 | **B2_live@25** | **0.7202** | WandB fy920fty |
-| B2_live@50 | _TBD (Cell A → ~45min)_ | |
+| **B2_live@50** | **0.7354** | WandB fy920fty (Cell A DONE) |
+
+Dense-this-box = 0.7506 (prior verdict) ⇒ B2 at parity (gap 0.015 < ±0.024). SURPASS target 0.80.
+val@50 gate: EXTEND>0.7594 · BANK 0.7114–0.7594 · KILL<0.7114. val@25 gate: KILL<0.690.
 
 bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no ignition.
 
