@@ -336,6 +336,28 @@ COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_
 # {0.05, 0.10, 0.20} on the B2 substrate (active iff mode=delayed_ef).
 COMM_EFF_SPECTRAL_PERTURB_SIGMA="${COMM_EFF_SPECTRAL_PERTURB_SIGMA:-0.0}"
 COMM_EFF_SPECTRAL_PERTURB_SEED="${COMM_EFF_SPECTRAL_PERTURB_SEED:-0}"
+# --- EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1) ---
+# delta_momentum_mu > 0 keeps a fading running EMA of the correction δ (accumulated
+# ONLY at refresh ticks: m ← μ·m + (1−μ)·δ, gain EXACTLY 1) so the persistently-
+# missed direction becomes a steady push; the held buffer is the correction between
+# fires (faded by μ**age when AGE_DECAY ⇒ → 0 if fires stop). 0.0 (default, OFF) ⇒
+# correction == δ bitwise (= B2; composes with DELTA_SUBBASIS_RANK=0 + σ=0 ⇒
+# bitwise-B2). The L2 sweep: COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU in {0.5, 0.9}
+# (active iff mode=delayed_ef). AGE_DECAY=true is the async staleness-degrade.
+COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU:-0.0}"
+COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY:-false}"  # true|false
+# --- EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate) ---
+# The constant λ in g_corr = G_comp + λ·δ becomes a per-target, per-tick λ_t =
+# clamp(λ + κ·(c̄ − c_t), 0, LAMBDA_CAP) where c_t is the agreement (cos(G_comp,M_rep)
+# for MODE=cos, ‖δ‖/‖G_comp‖ for MODE=ratio) and c̄ its running median ⇒ E[λ_t]≈λ
+# (MEAN-1 centered — only the step-to-step DEVIATION is the lever; the naive
+# 1+κ(1−cos) is forbidden, it pins at constant 1+κ under this system's cos≈0).
+# MODE=off (default) OR KAPPA=0.0 ⇒ λ_t ≡ DELAYED_EF_LAMBDA (constant) ⇒ bitwise B2.
+# The L3 sweep: MODE in {cos, ratio}, KAPPA in {0.5, 1.0}, LAMBDA_CAP=2.0 (active
+# iff mode=delayed_ef).
+COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE:-off}"  # off|cos|ratio
+COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA:-0.0}"
+COMM_EFF_SPECTRAL_LAMBDA_CAP="${COMM_EFF_SPECTRAL_LAMBDA_CAP:-2.0}"
 # --- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ---
 # r_delta > 0 compresses the correction δ to r_delta columns before injection
 # (the Cell C residual-codec savings cell; a SEPARATE later code change). 0
@@ -433,6 +455,8 @@ cat <<EOF
   subbasis (EXP-31 D):  delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA  (active iff mode=delayed_ef; rank=0 => correction==delta = B2)
   subbasis γ-knob:      delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS  (γ_t=weight*(1 if step<hold_steps else max(0,1-(step-hold_steps)/decay_steps)); weight=1+decay_steps=0 => γ≡1 = current Cell D; weight=0 => B2; hold_steps=0 => linear-from-0 decay)
   perturb (EXP-31):     perturb_sigma=$COMM_EFF_SPECTRAL_PERTURB_SIGMA perturb_seed=$COMM_EFF_SPECTRAL_PERTURB_SEED  (active iff mode=delayed_ef; σ=0 => g_corr unperturbed = B2/Cell-D; σ>0 adds σ·‖g_corr‖·unit-ξ, ξ seeded by (seed,target,step) => cross-rank identical, zero-mean over steps)
+  L2 δ-momentum (EXP-31): delta_momentum_mu=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU age_decay=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY  (active iff mode=delayed_ef; μ=0 => correction==δ = B2; μ>0 => normalized-EMA m←μm+(1-μ)δ at refresh ticks, gain EXACTLY 1; age_decay fades held correction by μ**age => async staleness-degrade)
+  L3 adaptive-λ (EXP-31): adaptive_lambda_mode=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE kappa=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA lambda_cap=$COMM_EFF_SPECTRAL_LAMBDA_CAP  (active iff mode=delayed_ef; off|κ=0 => λ_t≡delayed_ef_lambda = B2; else λ_t=clamp(λ+κ(c̄-c_t),0,cap), c_t=cos|ratio agreement, c̄=running median => MEAN-1 centered, E[λ_t]≈λ)
   q_basis (EXP-26):    live=$COMM_EFF_POWERSGD_Q_BASIS  passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE  hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)  (act=byte-identical; C1 screen: live act + passive families)
   capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
@@ -559,6 +583,11 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.r_delta="$COMM_EFF_SPECTRAL_R_DELTA" \
   actor_rollout_ref.actor.comm_eff.spectral.perturb_sigma="$COMM_EFF_SPECTRAL_PERTURB_SIGMA" \
   actor_rollout_ref.actor.comm_eff.spectral.perturb_seed="$COMM_EFF_SPECTRAL_PERTURB_SEED" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_momentum_mu="$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU" \
+  actor_rollout_ref.actor.comm_eff.spectral.delta_momentum_age_decay="$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY" \
+  actor_rollout_ref.actor.comm_eff.spectral.adaptive_lambda_mode="$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE" \
+  actor_rollout_ref.actor.comm_eff.spectral.adaptive_lambda_kappa="$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA" \
+  actor_rollout_ref.actor.comm_eff.spectral.lambda_cap="$COMM_EFF_SPECTRAL_LAMBDA_CAP" \
   actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
   actor_rollout_ref.actor.comm_eff.capture.capture_dir="$COMM_EFF_CAPTURE_DIR" \
   actor_rollout_ref.actor.comm_eff.capture.max_ticks="$COMM_EFF_CAPTURE_MAX_TICKS" \

@@ -534,6 +534,46 @@ comm_eff:
     # perturb_sigma >= 0.
     perturb_sigma: 0.0
     perturb_seed: 0
+
+    # EXP-31 L2 (correction_mode=delayed_ef): δ-MOMENTUM (NORMALIZED EMA, stationary
+    # gain EXACTLY 1). The codec drops the same kind of signal each fire; a fading
+    # running EMA of the correction δ — accumulated ONLY at refresh ticks (δ is HELD
+    # between fires) — turns the persistently-missed direction into a steady push.
+    #   REFRESH: m ← μ·m + (1−μ)·δ   (first fire: m=δ);  correction = m
+    #   HELD:    correction = m       (faded by μ**age when age_decay ⇒ → 0 if fires stop)
+    # NORMALIZED ⇒ stationary gain EXACTLY 1 (a re-weighting, NOT the forbidden naive
+    # m←μ·m+δ gain-10× ignition dead-end). delta_momentum_mu=0.0 (default, OFF) ⇒
+    # correction == δ bitwise (= B2; composes with delta_subbasis_rank=0 + σ=0 ⇒
+    # bitwise-B2). delta_momentum_age_decay (default false) is the async staleness-
+    # degrade. The buffer is the DP-mean δ ⇒ cross-rank identical. Declared here
+    # (replicating the delayed_ef_lambda precedent) so Hydra struct-mode ACCEPTS
+    # actor_rollout_ref.actor.comm_eff.spectral.delta_momentum_mu=<float> /
+    # .delta_momentum_age_decay=<bool> (REQUIRED — a missing struct key is rejected,
+    # not added). μ ∈ [0, 1); age_decay a strict bool.
+    delta_momentum_mu: 0.0
+    delta_momentum_age_decay: false
+
+    # EXP-31 L3 (correction_mode=delayed_ef): ADAPTIVE-DOSE (MEAN-1 CENTERED gate).
+    # The constant λ in g_corr = G_comp + λ·δ is replaced by a per-target, per-tick
+    # λ_t that leans MORE on the correction where the cheap gradient disagrees with
+    # the trusted M_rep — but only via the step-to-step DEVIATION:
+    #   c_t = cos(G_comp,M_rep) [mode=cos] OR ‖δ‖/‖G_comp‖ [mode=ratio]   # RAW δ
+    #   c̄   = running MEDIAN of c_t over the last 64 ticks
+    #   λ_t = clamp(delayed_ef_lambda + adaptive_lambda_kappa·(c̄ − c_t), 0, lambda_cap)
+    # MEAN-1 CENTERED ⇒ E[λ_t] ≈ delayed_ef_lambda (the naive 1+κ(1−cos) is FORBIDDEN:
+    # cos≈0 here ⇒ it would pin at a constant 1+κ = a disguised constant-λ>1 ignition
+    # dead-end). adaptive_lambda_mode=off (default) OR adaptive_lambda_kappa=0.0 ⇒
+    # λ_t ≡ delayed_ef_lambda (constant) ⇒ bitwise B2. lambda_cap bounds the RAW λ
+    # (variable-staleness safety). c_t/c̄/λ_t are built from the DP-mean G_comp +
+    # M_rep ⇒ cross-rank identical. Declared here so Hydra struct-mode ACCEPTS
+    # actor_rollout_ref.actor.comm_eff.spectral.adaptive_lambda_mode=<off|cos|ratio> /
+    # .adaptive_lambda_kappa=<float> / .lambda_cap=<float> (REQUIRED — a missing
+    # struct key is rejected). mode ∈ {off,cos,ratio}; κ ≥ 0; lambda_cap ≥ 0.
+    # NOTE: "off" is QUOTED — bare off is YAML-1.1 boolean False (OmegaConf), which
+    # the str-enum validation would reject.
+    adaptive_lambda_mode: "off"
+    adaptive_lambda_kappa: 0.0
+    lambda_cap: 2.0
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
