@@ -386,6 +386,60 @@ class CommEffSpectralConfig(BaseConfig):
     # unconditionally so a typo is loud even on a non-delayed_ef / σ=0 run.
     perturb_sigma: float = 0.0
     perturb_seed: int = 0
+    # ---- EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1) -------
+    # The "build up the corrections" lever. The codec drops the SAME kind of signal
+    # each fire; a fading running EMA of the per-target correction δ turns the
+    # persistently-missed direction into a strong steady push. The buffer is updated
+    # ONLY at REFRESH ticks (δ is HELD between anchor fires in delayed_ef_matrix —
+    # accumulating every tick would re-add the same δ ~5× = the forbidden constant-
+    # λ>1 amplification dead-end):
+    #
+    #   REFRESH: m ← μ·m + (1−μ)·δ      (first fire: m = δ.clone());  correction = m
+    #   HELD:    correction = m         (the held buffer; with age_decay below it is
+    #                                    scaled by μ**(step − last_refresh_step) so a
+    #                                    long hold fades the APPLIED correction → 0)
+    #
+    # NORMALIZED EMA — mandatory: the stationary gain of m←μ·m+(1−μ)·δ is EXACTLY 1
+    # (constant δ ⇒ m→δ), a RE-WEIGHTING not a louder copy. The naive m←μ·m+δ has
+    # stationary gain 1/(1−μ) (μ=0.9 ⇒ 10× dose) = the constant-λ>1 ignition dead-
+    # end, FORBIDDEN. delta_momentum_mu = 0.0 (default, OFF) ⇒ the momentum branch is
+    # SKIPPED ENTIRELY ⇒ correction == δ bitwise (off-path parity; composes with
+    # rank-0 + σ=0 ⇒ bitwise-B2). delta_momentum_age_decay (default False) is the
+    # async staleness-degrade: when fires arrive late/irregularly the held correction
+    # fades by its actual age so the buffer decays to 0 (G_corr → G_comp) when fires
+    # stop. The buffer is built from the DP-mean δ (cross-rank identical), lives on
+    # the EMA storage device (CPU fp32 detached), shape-keyed reset. μ ∈ [0, 1);
+    # age_decay strict bool. Validated unconditionally so a typo is loud even on a
+    # non-delayed_ef / μ=0 run that forwards them.
+    delta_momentum_mu: float = 0.0
+    delta_momentum_age_decay: bool = False
+    # ---- EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate) ------------------------
+    # The "trust the slow node adaptively" lever. Some steps the cheap gradient
+    # agrees with the trusted correction (compression did fine), others it disagrees
+    # badly (compression dropped a lot). Lean MORE on the correction when they
+    # disagree — but only via the step-to-step DEVIATION from the typical agreement,
+    # never a constant offset. The constant λ in the final g_corr = G_comp + λ·δ is
+    # replaced by a per-target, per-tick λ_t:
+    #
+    #   c_t = cos(G_comp, M_rep)  [mode=cos]   OR   ‖δ‖/‖G_comp‖  [mode=ratio]   # RAW δ
+    #   c̄   = running MEDIAN of c_t over a bounded per-target history (last 64)
+    #   λ_t = clamp(delayed_ef_lambda + κ·(c̄ − c_t), 0.0, lambda_cap)
+    #   g_corr = G_comp + λ_t·correction
+    #
+    # MEAN-1 CENTERED — mandatory: E[λ_t] ≈ delayed_ef_lambda (=1) because c̄≈median(c_t),
+    # so ONLY the deviation (c̄ − c_t) is the lever. The naive λ_t = 1 + κ(1 − cos) is
+    # FORBIDDEN: this system has cos(G_comp,M)≈0, so it would pin at a constant 1+κ =
+    # a disguised constant-λ>1 ignition dead-end. adaptive_lambda_mode = "off"
+    # (default) OR adaptive_lambda_kappa = 0.0 ⇒ λ_t ≡ delayed_ef_lambda (constant) ⇒
+    # bitwise B2. lambda_cap bounds the RAW λ so a stale/garbage M can't spike the
+    # dose (variable-staleness safety; the ignition trip-wires are the behavioral
+    # backstop). c_t / c̄ / λ_t are built from the DP-mean G_comp + M_rep (cross-rank
+    # identical) — the per-target history deque carries NO rank-local state. mode ∈
+    # {off, cos, ratio}; κ ≥ 0; lambda_cap ≥ 0. Validated unconditionally so a typo
+    # is loud even on a non-delayed_ef / off run that forwards them.
+    adaptive_lambda_mode: str = "off"
+    adaptive_lambda_kappa: float = 0.0
+    lambda_cap: float = 2.0
 
 
 @dataclass
@@ -877,6 +931,42 @@ class CommEffConfig(BaseConfig):
         if self.spectral.perturb_sigma < 0.0:
             raise ValueError(
                 f"comm_eff.spectral.perturb_sigma must be >= 0; got {self.spectral.perturb_sigma}"
+            )
+        # EXP-31 L2: δ-momentum. delta_momentum_mu is the NORMALIZED-EMA decay μ in
+        # [0, 1) (μ=0.0 default = OFF; the stationary gain is EXACTLY 1 for any μ in
+        # range; μ=1 would never forget so it is excluded, mirroring ef_decay).
+        # delta_momentum_age_decay is a strict bool (a YAML "False" string would
+        # silently flip the staleness-degrade behaviour — same rationale as
+        # mask_recompute). Validated unconditionally so a typo is loud even on a
+        # non-delayed_ef / μ=0 run that forwards them.
+        if not 0.0 <= self.spectral.delta_momentum_mu < 1.0:
+            raise ValueError(
+                f"comm_eff.spectral.delta_momentum_mu must be in [0, 1); got {self.spectral.delta_momentum_mu}"
+            )
+        if not isinstance(self.spectral.delta_momentum_age_decay, bool):
+            raise ValueError(
+                f"comm_eff.spectral.delta_momentum_age_decay must be a bool; got "
+                f"{type(self.spectral.delta_momentum_age_decay).__name__} "
+                f"({self.spectral.delta_momentum_age_decay!r})"
+            )
+        # EXP-31 L3: adaptive dose. adaptive_lambda_mode is the closed enum
+        # {off, cos, ratio} (a typo must be loud, not a silent fall-through to off);
+        # adaptive_lambda_kappa is the gate gain κ >= 0 (0 default = OFF ⇒ λ_t≡λ);
+        # lambda_cap is the RAW-λ upper bound >= 0 (the variable-staleness safety
+        # clamp). Validated unconditionally so a typo is loud even on a
+        # non-delayed_ef / off run that forwards them.
+        if self.spectral.adaptive_lambda_mode not in ("off", "cos", "ratio"):
+            raise ValueError(
+                "comm_eff.spectral.adaptive_lambda_mode must be one of (off, cos, ratio); "
+                f"got {self.spectral.adaptive_lambda_mode!r}"
+            )
+        if self.spectral.adaptive_lambda_kappa < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.adaptive_lambda_kappa must be >= 0; got {self.spectral.adaptive_lambda_kappa}"
+            )
+        if self.spectral.lambda_cap < 0.0:
+            raise ValueError(
+                f"comm_eff.spectral.lambda_cap must be >= 0; got {self.spectral.lambda_cap}"
             )
         # EXP-30 B2: delayed_ef merges the VALID (generator-consistent) M_rep by
         # definition — running it on the legacy generator-mismatched feed would

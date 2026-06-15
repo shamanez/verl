@@ -597,6 +597,21 @@ class CommEffState:
                 # the CLI/yaml σ never reaches the filter and the lever is dead.
                 perturb_sigma=float(getattr(spec_cfg, "perturb_sigma", 0.0)),
                 perturb_seed=int(getattr(spec_cfg, "perturb_seed", 0)),
+                # EXP-31 L2: δ-momentum (NORMALIZED EMA, stationary gain EXACTLY 1).
+                # μ=0 default ⇒ correction == δ bitwise (= B2). The buffer is built
+                # from the DP-mean δ ⇒ cross-rank identical. age_decay fades the held
+                # correction by age (async staleness-degrade). The config-must-mirror-
+                # dataclass gotcha — without threading these here the CLI/yaml μ never
+                # reaches the filter and the lever is dead.
+                delta_momentum_mu=float(getattr(spec_cfg, "delta_momentum_mu", 0.0)),
+                delta_momentum_age_decay=bool(getattr(spec_cfg, "delta_momentum_age_decay", False)),
+                # EXP-31 L3: adaptive dose (MEAN-1 CENTERED gate). mode=off/κ=0
+                # default ⇒ λ_t ≡ delayed_ef_lambda (= B2). λ_t = clamp(λ + κ·(c̄ − c_t),
+                # 0, lambda_cap), built from the DP-mean gm + M_rep ⇒ cross-rank
+                # identical. Same mirror-or-it-is-dead gotcha as above.
+                adaptive_lambda_mode=str(getattr(spec_cfg, "adaptive_lambda_mode", "off")),
+                adaptive_lambda_kappa=float(getattr(spec_cfg, "adaptive_lambda_kappa", 0.0)),
+                lambda_cap=float(getattr(spec_cfg, "lambda_cap", 2.0)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "

@@ -51,6 +51,7 @@ with no distributed runtime.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import Optional
 
 import torch
@@ -123,6 +124,11 @@ class SpectralFilter:
         base_seed: int = 0,
         perturb_sigma: float = 0.0,
         perturb_seed: int = 0,
+        delta_momentum_mu: float = 0.0,
+        delta_momentum_age_decay: bool = False,
+        adaptive_lambda_mode: str = "off",
+        adaptive_lambda_kappa: float = 0.0,
+        lambda_cap: float = 2.0,
     ):
         self.beta_anc = float(beta_anc)
         # Storage layer default: gpu. Validation happens in
@@ -226,6 +232,53 @@ class SpectralFilter:
         # APPLIED to (reset by the engine loop where the other delayed_ef counters
         # reset). 0 on the OFF path (σ=0) and on cold/skip ticks.
         self.delayed_ef_perturb_applied = 0
+        # EXP-31 L2 δ-momentum (NORMALIZED EMA, stationary gain EXACTLY 1). μ=0.0
+        # (default, OFF) ⇒ the momentum branch is SKIPPED entirely ⇒ correction == δ
+        # bitwise (off-path parity). The normalized recurrence m ← μ·m + (1−μ)·δ has
+        # stationary gain 1 (constant δ ⇒ m→δ) — a re-weighting, NOT the forbidden
+        # naive m←μ·m+δ (gain 1/(1−μ)=10× ignition dead-end). age_decay fades the
+        # APPLIED held correction by μ**age so it → 0 when fires stop (async
+        # staleness-degrade). Validated in CommEffConfig.__post_init__; assert
+        # defensively here too.
+        self.delta_momentum_mu = float(delta_momentum_mu)
+        assert 0.0 <= self.delta_momentum_mu < 1.0, self.delta_momentum_mu
+        assert isinstance(delta_momentum_age_decay, bool), delta_momentum_age_decay
+        self.delta_momentum_age_decay = bool(delta_momentum_age_decay)
+        # Per-target δ-momentum EMA buffer m (detached fp32, EMA-storage device,
+        # shape-keyed reset — mirrors _delayed_ef_delta). Built from the DP-mean δ ⇒
+        # cross-rank identical. Empty (and untouched) on the OFF path.
+        self._delta_momentum: dict[str, torch.Tensor] = {}
+        # Per-target last REFRESH step (the optimizer/training step at which m was
+        # last accumulated), used by age_decay to fade the held correction by the
+        # number of ticks since the last fire. Pure scalar bookkeeping, cross-rank
+        # identical (current_step is DP-identical).
+        self._delta_momentum_last_step: dict[str, int] = {}
+        # Per-step count of targets the momentum buffer was applied to (reset by the
+        # engine loop). 0 on the OFF path (μ=0).
+        self.delayed_ef_momentum_applied = 0
+        # EXP-31 L3 adaptive dose (MEAN-1 CENTERED gate). mode="off" OR κ=0.0
+        # (defaults) ⇒ λ_t ≡ delayed_ef_lambda (constant) ⇒ bitwise B2. λ_t =
+        # clamp(λ + κ·(c̄ − c_t), 0, lambda_cap) where c̄ is the running median of the
+        # per-target agreement c_t over a bounded history ⇒ E[λ_t]≈λ (mean-1
+        # centered). c_t / c̄ / λ_t are built from the DP-mean G_comp + M_rep ⇒
+        # cross-rank identical. Validated in CommEffConfig.__post_init__; assert
+        # defensively here too.
+        assert adaptive_lambda_mode in ("off", "cos", "ratio"), adaptive_lambda_mode
+        self.adaptive_lambda_mode = str(adaptive_lambda_mode)
+        self.adaptive_lambda_kappa = float(adaptive_lambda_kappa)
+        assert self.adaptive_lambda_kappa >= 0.0, self.adaptive_lambda_kappa
+        self.lambda_cap = float(lambda_cap)
+        assert self.lambda_cap >= 0.0, self.lambda_cap
+        # Per-target bounded agreement history (last 64 c_t) for the running median
+        # c̄. A deque of plain Python floats (no tensor, no rank-local state) keyed by
+        # canonical target name. Empty (and untouched) on the OFF path.
+        self._adaptive_lambda_hist: dict[str, "deque[float]"] = {}
+        # The fixed history bound (last N c_t feeding the median c̄).
+        self._adaptive_lambda_hist_len = 64
+        # Per-step sum + count of the applied λ_t (reset by the engine loop) so the
+        # engine can log the mean λ_t. 0 on the OFF path (λ_t≡λ, branch not taken).
+        self.delayed_ef_adaptive_lambda_applied = 0
+        self._adaptive_lambda_sum = 0.0
         # EXP-30 B2: per-target HELD residual δ (detached fp32, EMA-storage
         # device). Refreshed when a fire-aligned ring entry exists (the anchor
         # just refreshed M_rep AND G_comp_ring(t−K) is the exact pair), HELD on
@@ -694,6 +747,157 @@ class SpectralFilter:
             decay_factor = 0.0
         return float(w) * decay_factor
 
+    # ------------------------------------------------------------------ #
+    # EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1)
+    # ------------------------------------------------------------------ #
+    def _apply_delta_momentum(self, name: str, delta: torch.Tensor, refreshed: bool) -> torch.Tensor:
+        """Return the correction after the normalized-EMA δ-momentum transform.
+
+        OFF-GUARD (critical): ``delta_momentum_mu == 0.0`` ⇒ the momentum branch is
+        SKIPPED ENTIRELY — ``delta`` is returned UNCHANGED (the same object) and NO
+        buffer is touched, so the correction is bitwise-identical to B2 (off-path
+        parity). ``name`` is assumed ALREADY canonicalized by the caller.
+
+        NORMALIZED EMA (stationary gain EXACTLY 1):
+
+        * REFRESH tick (``refreshed=True`` — a fire-aligned tick where δ was just
+          recomputed from the exact (batch, θ) pair): accumulate
+          ``m ← μ·m + (1−μ)·δ`` (first fire for this target: ``m = δ.clone()``), then
+          the correction is ``m``. The stationary gain of this recurrence is EXACTLY
+          1 (a constant δ stream drives ``m → δ``), a re-weighting — NOT the forbidden
+          naive ``m ← μ·m + δ`` (gain ``1/(1−μ)`` = the constant-λ>1 ignition dead-end).
+          The accumulation happens ONLY at refresh ticks (δ is HELD between fires in
+          :meth:`delayed_ef_matrix`; accumulating every tick would re-add the same δ
+          ~5× — explicitly forbidden by the plan).
+        * HELD tick (``refreshed=False``): the correction is the HELD buffer ``m``
+          (NOT re-accumulated). With ``delta_momentum_age_decay`` the APPLIED
+          correction is scaled by ``μ ** (current_step − last_refresh_step)`` so a
+          long hold fades it → 0 (the async staleness-degrade requirement); the
+          STORED buffer ``m`` is left unchanged.
+
+        The buffer ``m`` is built from the DP-mean ``delta`` (cross-rank identical),
+        detached fp32, on the EMA storage device, shape-keyed reset (mirrors the
+        held-δ shape guard: a logical-shape change drops the stale buffer + the
+        last-step bookkeeping). If, on a HELD tick, no buffer exists yet (the first
+        fire has not happened for this target) the plain ``delta`` is returned so the
+        correction is never silently invented.
+
+        Returns the correction tensor (fp32, on ``delta``'s device).
+        """
+        mu = self.delta_momentum_mu
+        if mu == 0.0:
+            return delta  # OFF: bitwise-B2 correction, no buffer touched.
+
+        # Shape-keyed reset (mirror the held-δ guard): a logical-shape change drops
+        # the stale buffer + its last-refresh bookkeeping so nothing cross-shape leaks.
+        m = self._delta_momentum.get(name)
+        if m is not None and tuple(m.shape) != tuple(delta.shape):
+            m = None
+            self._delta_momentum.pop(name, None)
+            self._delta_momentum_last_step.pop(name, None)
+
+        store_dev = self._ema_storage_device(delta.device)
+
+        if refreshed:
+            # Accumulate ONLY at refresh ticks (δ is HELD between fires). Normalized
+            # EMA ⇒ stationary gain EXACTLY 1.
+            if m is None:
+                m_new = delta.detach().to(torch.float32).clone()
+            else:
+                m_dev = m.to(delta.device, torch.float32)
+                m_new = mu * m_dev + (1.0 - mu) * delta.detach().to(torch.float32)
+            stored = m_new.detach().to(store_dev)
+            if store_dev.type == "cpu" and delta.device.type == "cuda":
+                stored = stored.pin_memory()
+            self._delta_momentum[name] = stored
+            self._delta_momentum_last_step[name] = int(self.current_step)
+            self.delayed_ef_momentum_applied += 1
+            return m_new
+
+        # HELD tick: use the held buffer (do NOT re-accumulate). No buffer yet ⇒
+        # fall back to the plain δ (never invent a correction).
+        if m is None:
+            return delta
+        correction = m.to(delta.device, torch.float32)
+        if self.delta_momentum_age_decay:
+            last = self._delta_momentum_last_step.get(name, int(self.current_step))
+            age = int(self.current_step) - int(last)
+            if age < 0:
+                age = 0
+            # APPLIED-only scaling: the stored buffer is unchanged; only this tick's
+            # injected correction fades by μ**age so a long hold → 0 (async degrade).
+            correction = correction * (mu ** age)
+        self.delayed_ef_momentum_applied += 1
+        return correction
+
+    # ------------------------------------------------------------------ #
+    # EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate)
+    # ------------------------------------------------------------------ #
+    def _adaptive_lambda(self, name: str, gm: torch.Tensor, anc: torch.Tensor, delta_raw: torch.Tensor) -> float:
+        """Return the per-target, per-tick dose ``λ_t`` (MEAN-1 CENTERED gate).
+
+        OFF-GUARD (critical): ``adaptive_lambda_mode == "off"`` OR
+        ``adaptive_lambda_kappa == 0.0`` ⇒ ``λ_t = self.delayed_ef_lambda`` (the
+        constant B2 dose) and NO history is touched, so the final ``g_corr`` is
+        bitwise-identical to B2. ``name`` is assumed ALREADY canonicalized.
+
+        When ON::
+
+            c_t = cos(gm, anc)        [mode=cos]   OR   ‖delta_raw‖/‖gm‖  [mode=ratio]
+            c̄   = running MEDIAN of c_t over the last ``_adaptive_lambda_hist_len`` ticks
+            λ_t = clamp(self.delayed_ef_lambda + κ·(c̄ − c_t), 0.0, lambda_cap)
+
+        MEAN-1 CENTERED: because ``c̄`` is the median of the very ``c_t`` stream, the
+        deviation ``(c̄ − c_t)`` is centered at ~0 ⇒ ``E[λ_t] ≈ delayed_ef_lambda``
+        (=1). Only the step-to-step DEVIATION is the lever — NOT the forbidden naive
+        ``1 + κ(1 − cos)`` which, under this system's ``cos≈0`` geometry, would pin at
+        a constant ``1+κ`` (a disguised constant-λ>1 ignition dead-end).
+
+        ``c_t`` uses the RAW δ (captured BEFORE the L2 momentum transform). The
+        history deque carries plain Python floats (no tensor / no rank-local state);
+        ``gm`` (FSDP DP-mean) and ``anc`` (all-reduced-mean M_rep) are DP-identical ⇒
+        ``c_t`` / ``c̄`` / ``λ_t`` are bit-identical across ranks. The current tick's
+        ``c_t`` is appended to the history AND included in the median (so the very
+        first tick has ``c̄ = c_t`` ⇒ deviation 0 ⇒ ``λ_t = delayed_ef_lambda``).
+        """
+        lam = float(self.delayed_ef_lambda)
+        if self.adaptive_lambda_mode == "off" or self.adaptive_lambda_kappa == 0.0:
+            return lam  # OFF: constant B2 dose, no history touched.
+
+        eps = 1e-12
+        if self.adaptive_lambda_mode == "cos":
+            gm_norm = torch.linalg.norm(gm)
+            anc_norm = torch.linalg.norm(anc)
+            c_t = float(((gm * anc).sum() / (gm_norm * anc_norm + eps)).item())
+        else:  # "ratio": ‖delta‖/‖gm‖
+            gm_norm = torch.linalg.norm(gm)
+            d_norm = torch.linalg.norm(delta_raw)
+            c_t = float((d_norm / (gm_norm + eps)).item())
+        if not (c_t == c_t):  # NaN guard (non-finite agreement ⇒ fall back to B2 dose)
+            return lam
+
+        hist = self._adaptive_lambda_hist.get(name)
+        if hist is None:
+            hist = deque(maxlen=self._adaptive_lambda_hist_len)
+            self._adaptive_lambda_hist[name] = hist
+        hist.append(c_t)
+        # Running median c̄ over the bounded history (includes the current c_t).
+        vals = sorted(hist)
+        nlen = len(vals)
+        mid = nlen // 2
+        c_bar = vals[mid] if (nlen % 2 == 1) else 0.5 * (vals[mid - 1] + vals[mid])
+
+        lam_t = lam + self.adaptive_lambda_kappa * (c_bar - c_t)
+        # Bounded RAW dose (variable-staleness safety): a stale/garbage M can't spike
+        # λ_t beyond lambda_cap; the floor 0 forbids a sign-flipping negative dose.
+        if lam_t < 0.0:
+            lam_t = 0.0
+        elif lam_t > self.lambda_cap:
+            lam_t = self.lambda_cap
+        self.delayed_ef_adaptive_lambda_applied += 1
+        self._adaptive_lambda_sum += float(lam_t)
+        return float(lam_t)
+
     def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor, ring_grad: Optional[torch.Tensor] = None):
         """EXP-30 B2: K-delayed EXACT codec residual (the anchor-feasible EF analogue).
 
@@ -787,13 +991,32 @@ class SpectralFilter:
                 stored = stored.pin_memory()
             self._delayed_ef_delta[name] = stored
             self.delayed_ef_refreshed += 1
+            refreshed = True
         elif held is not None:
             delta = held.to(g_comp.device, torch.float32)
             self.delayed_ef_held += 1
+            refreshed = False
         else:
             # No exact pair yet (pre-first-fire warmup) → no-op, never invent δ.
             self.merger_coldM_fallbacks += 1
             return g_comp
+
+        # EXP-31 L3 (adaptive dose) reads the RAW δ (BEFORE the L2 momentum transform)
+        # for its agreement metric c_t = ‖δ‖/‖gm‖, so capture it here; cos-mode reads
+        # gm/anc directly. λ_t is computed AFTER the correction is finalized, but the
+        # raw δ it depends on is this fire's exact codec residual, not the momentum
+        # buffer. (When L3 is OFF the helper returns the constant B2 dose, no-op.)
+        delta_raw = delta
+
+        # EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1). When OFF
+        # (delta_momentum_mu == 0.0) the helper returns ``delta`` UNCHANGED (the same
+        # object) and touches NO buffer ⇒ the correction is bitwise-B2 (off-path
+        # parity). When ON, the per-target buffer m ← μ·m + (1−μ)·δ is accumulated
+        # ONLY at refresh ticks (δ is HELD between fires) and the held buffer (faded
+        # by age when age_decay) is the correction on the in-between ticks. The buffer
+        # is the DP-mean δ ⇒ cross-rank identical. The rest of the function (sub-basis
+        # branch + g_corr) then uses this transformed ``delta``.
+        delta = self._apply_delta_momentum(name, delta, refreshed)
 
         # EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (γ-weighted).
         # When OFF (delta_subbasis_rank == 0) OR the weight γ_t == 0 this branch is
@@ -828,7 +1051,15 @@ class SpectralFilter:
             # rank-0 OR γ_t==0 ⇒ the EXACT B2 correction (bitwise; no SVD computed).
             correction = delta
 
-        g_corr = gm + lam * correction
+        # EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate). The constant ``lam`` is
+        # replaced by a per-target, per-tick λ_t = clamp(λ + κ·(c̄ − c_t), 0, cap)
+        # built from the agreement c_t (cos(gm,anc) or ‖δ_raw‖/‖gm‖) and its running
+        # median c̄ ⇒ E[λ_t]≈λ (mean-1 centered). When OFF (mode="off" OR κ=0) the
+        # helper returns the constant ``self.delayed_ef_lambda`` and touches NO
+        # history ⇒ λ_t == lam ⇒ g_corr is bitwise-B2. c_t/c̄/λ_t are built from the
+        # DP-mean gm + anc ⇒ cross-rank identical.
+        lam_t = self._adaptive_lambda(name, gm, anc, delta_raw)
+        g_corr = gm + lam_t * correction
         # EXP-31 surpass lever: add the zero-mean σ-scaled cross-rank-identical
         # perturbation. σ=0 (default) ⇒ _apply_perturbation returns g_corr UNCHANGED
         # (the guard is checked twice — here for the no-call fast path and inside the
@@ -927,6 +1158,12 @@ def apply_spectral_correction_to_params(
     # [comm_eff][EXP-30][delayed_ef] line reports THIS step's perturbation activity.
     # 0 on the OFF path (perturb_sigma=0) and on cold/skip ticks.
     spectral.delayed_ef_perturb_applied = 0
+    # EXP-31 L2/L3: reset the per-step δ-momentum + adaptive-λ telemetry so the
+    # [comm_eff][EXP-30][delayed_ef] line reports THIS step's lever activity. All
+    # zero on the OFF paths (delta_momentum_mu=0 / adaptive_lambda_mode=off|κ=0).
+    spectral.delayed_ef_momentum_applied = 0
+    spectral.delayed_ef_adaptive_lambda_applied = 0
+    spectral._adaptive_lambda_sum = 0.0
     # EXP-31 Cell D γ-knob: stamp THIS step onto the filter so the sub-basis decay
     # schedule (``_subbasis_gamma``) reads the current training step. Cleanly wired
     # from state.global_step (the same counter the capture key uses below). Defaults
