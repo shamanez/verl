@@ -32,7 +32,7 @@ bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no i
 | A_b2_reproduce | bitwise B2 | 0.7202 | **0.7354** | ✅ REFERENCE (WandB fy920fty) |
 | L4_perturb_s001 | σ=0.01 | 0.7157 | — (stopped@34) | ✅ BANKED NULL — parity within noise; isotropic = regularization control, not anchor-usage (WandB cvu8jw1n partial) |
 | L4_perturb_s003 | σ=0.03 | — | — | SKIPPED (more isotropic noise ⇒ ≤ σ=0.01) |
-| L2_mom09 | μ=0.9 age_decay | | | ⏳ NEXT (code on vast-ai-workload) |
+| L2_mom09 | μ=0.9 age_decay | | | 🟢 RUNNING (WandB ybemd5ux, launched 2026-06-16) — healthy @step4: bytes 0.0504, recon 0.0224, grad_norm 2.11, no ignition |
 | L2_mom05 | μ=0.5 age_decay | | | pending |
 | L3_ratio_k10 / k05 | ratio κ=1.0/0.5 cap2 | | | pending |
 | L3_cos_k10 / k05 | cos κ=1.0/0.5 cap2 | | | pending |
@@ -43,6 +43,16 @@ bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no i
 clean on that HEAD, GPU 0%. A fresh `/goal` session (same prompt) resumes: launch L2 → L3 → L1 per
 §HANDOFF STATE in `.claude/plans/31.md`. WandB current (Cell A + L4 synced). Final analyst verdict +
 promotion pending after L2/L3/L1.
+
+## Code verification (2026-06-16, adversarial 8-agent workflow vs plan math) — GO/GO
+- **L2 GO:** gain-1 normalized EMA `m←μm+(1−μ)δ` (fixed pt m*=δ, NOT 10×), accumulate ONLY at refresh
+  ticks (`if refreshed:` ⟺ anchor-fire t%5==0 via cadence/delay_K arithmetic), age-decay→G_comp,
+  cross-rank deterministic, off-path parity bitwise. `spectral_filter.py:753-831`.
+- **L3 GO:** mean-1 centered gate `λ_t=λ+κ(c̄−c_t)`, c̄=running median (NOT forbidden `1+κ(1−cos)`),
+  ratio=‖δ‖/‖gm‖ from `delta_raw` captured before L2 transform, clamp[0,cap], off-path parity.
+  `spectral_filter.py:836-899`.
+- **No critical defect; nothing invalidates a null.** A NULL on L2/L3 is a TRUSTWORTHY null (the lever
+  faithfully did what the plan intends). ⇒ interpret tournament results at face value.
 
 ## Launch commands (each = B2 wrapper + one env override)
 - L4: `COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.01 EXPERIMENT_NAME=L4_perturb_s001 ... bash <b2_sota>` (vast-ai-workload)
