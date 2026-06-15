@@ -60,9 +60,9 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 | `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` (EXP-29) — part of the B2 substrate |
 | vLLM `disable_custom_all_reduce` | `true` | **required** for the box to init (CUDA-IPC under the mp executor); greedy-val-neutral → a controlled var, not a knob |
 
-**The variable axis — how the anchor `M` is USED** (issue #31). The *merger primitive* is settled:
-`signed_ema` falsified (net-harmful, EXP-25), **`delayed_ef` (B2) WON and is the SOTA** (parity with
-dense — `SUMMARY.md`). The open axis is now the **anchor-gradient-usage levers** on top of B2 — a 4-lever
+**The variable axis — how the anchor `M` is USED** (issue #31). The *merger primitive* is settled —
+**`delayed_ef` (B2) is the SOTA** (error-feedback on the codec residual; parity with dense —
+`SUMMARY.md`). The open axis is now the **anchor-gradient-usage levers** on top of B2 — a 4-lever
 tournament (perturbation / δ-momentum / adaptive-dose / control-variate), target val@50 → 0.80, all with
 the codec/Q/batch/generation locked. Authoritative: `.claude/plans/31.md`.
 

@@ -69,32 +69,37 @@ should not be re-enabled.
 ## 3. Anchor circuit + merger — the MANDATORY base (issue #25)
 
 > These default OFF in the Hydra dataclass (byte-identity) but are **ON in the launcher
-> base**: the anchor is mandatory and is the only thing that updates `Q`
-> (`anchor.owns_q=true`); the `signed_ema` merger folds `M` into the fast gradient. The
-> merger is the open **research axis** (`signed_ema` is falsified — see `SUMMARY.md`).
+> base = B2** (the comm-eff SOTA): the anchor is mandatory and is the only thing that
+> updates `Q` (`anchor.owns_q=true`); the `delayed_ef` merger folds the stale anchor
+> gradient `M` into the fast gradient as the K-delayed exact codec residual
+> `G_corr = G_comp + λ·(M_rep − G_comp_ring)`, `λ=1`, `β_anc=0`. The open **research axis**
+> (issue #31) is HOW the anchor gradient is USED. Ground truth:
+> `research/runs/EXP-31/B2_baseline/resolved_params_B2.txt`.
 
 
 | env | hydra | default | how to change |
 |---|---|---|---|
 | `COMM_EFF_ANCHOR_ENABLED` | `anchor.enabled` | `false` | turn on the anchor EMA. |
 | `COMM_EFF_ANCHOR_CADENCE` | `anchor.cadence` | `1` | refresh the anchor every Nth step (fires on multiples only — verified: `step=2,4,6,…` for cadence 2). |
-| `COMM_EFF_ANCHOR_DELAY_K` | `anchor.delay_K` | `20` | use a K-step-stale snapshot. **For short runs set it to the cadence (e.g. `2`)** — a `delay_K=20` snapshot never materializes in a ≤20-step run. |
+| `COMM_EFF_ANCHOR_DELAY_K` | `anchor.delay_K` | `20` (launcher base `5`) | use a K-step-stale snapshot. **For short runs set it to the cadence (e.g. `2`)** — a `delay_K=20` snapshot never materializes in a ≤20-step run. |
+| `COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH` | `anchor.replay_paired_batch` | `false` (launcher base `true`) | replay the SAME (batch, θ) the fast circuit saw so δ is the codec error, not a batch effect (B2). |
+| `COMM_EFF_ANCHOR_SNAPSHOT_DEVICE` | `anchor.snapshot_device` | `gpu` (launcher base `cpu`) | where the stale weight snapshot lives (`cpu` = OOM guard). |
 | `COMM_EFF_SPECTRAL_ENABLED` | `spectral.enabled` | `false` | turn on anchor-guided grad correction. |
 | `COMM_EFF_SPECTRAL_CADENCE` | `spectral.cadence` | `1` | apply correction only every Nth step via `state.should_run_spectral_correction()`. `1` = every step = strict no-op when disabled. Set **equal to `anchor.cadence`** so corrections use a freshly-refreshed anchor EMA. |
 | `COMM_EFF_SPECTRAL_BETA_ANC` | `spectral.beta_anc` | `0.9` | anchor EMA decay. |
 | `COMM_EFF_SPECTRAL_EMA_DEVICE` | `spectral.ema_device` | `gpu` | `cpu` to offload the EMA (saves GPU memory; slower). |
 | `COMM_EFF_SPECTRAL_MAX_TARGETS` | `spectral.max_targets` | `-1` | how many 2D weight targets to correct per firing. `-1` = no cap = full coverage of all 196 projection matrices the merger corrects; caps BOTH anchor extraction AND the merger. |
-| `COMM_EFF_SPECTRAL_CORRECTION_MODE` | `spectral.correction_mode` | `signed_ema` | anchor combiner. `signed_ema` (EXP-25/R3): `α·G_noisy + (1−α)·\|G_noisy\|·sign(M)`. `inject`: add the scale-matched anchor complement. `blend`: convex blend toward the scale-matched anchor. |
-| `COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA` | `spectral.signed_ema_alpha` | `0.0` | the signed_ema merger weight α. `0` = pure `\|G_noisy\|·sign(M)`; `1` = `G_noisy` unchanged. THE swept axis. Active iff `correction_mode=signed_ema`. |
+| `COMM_EFF_SPECTRAL_CORRECTION_MODE` | `spectral.correction_mode` | `delayed_ef` (launcher base) | anchor combiner. `delayed_ef` (the SOTA = B2): `G_comp + λ·(M_rep − G_comp_ring)`, the K-delayed exact codec residual. `inject`/`blend`: alternate combiners (reference only). |
+| `COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA` | `spectral.delayed_ef_lambda` | `1.0` (launcher base) | delayed_ef dose. `1` = B2; `0` = `G_comp` bitwise (= plain PowerSGD, the merger-off limiting case). |
 | `COMM_EFF_SPECTRAL_INJECT_GAMMA` | `spectral.inject_gamma` | `1.0` | injection strength for `correction_mode=inject`; unused otherwise. |
 | `COMM_EFF_SPECTRAL_BLEND_ETA` | `spectral.blend_eta` | `0.5` | convex-blend weight for `correction_mode=blend`; unused otherwise. |
 
-> **Note (EXP-25):** the old SVD/Tikhonov/two-sided-projection "reweight" correction +
-> its seeded-anchor cache were **removed** (EXP-21 proved that projection operator inert
-> here, `G_filt`≈0). The live merger is `signed_ema` — magnitude from the fast compressed
-> grad, sign from the stale anchor EMA `M`. It is **ON in the base** but **falsified** as a
-> learning improvement (net-harmful vs plain PowerSGD; see `SUMMARY.md`) — the merger
-> primitive is the open research axis, not a settled win.
+> **Note:** the live merger is `delayed_ef` (B2) — it reconstructs the codec's
+> weight-gradient error from the K-delayed stale anchor and reaches **PARITY with dense at
+> ~5% gradient-comm cost** (see `SUMMARY.md`). The forward codec basis stays `act` (a
+> gradient-tuned `Q` anti-converts — do not change it). The open axis (issue #31) is HOW
+> the stale anchor gradient is USED to push past parity — NOT the codec, `Q`, batch, or
+> generation side.
 
 ## 4. Throughput / memory (not comm_eff fields, but you will need these)
 

@@ -44,9 +44,8 @@ codec**. The full result + why + what's next, and all the numbers, live in
   **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
   is mechanically **proven** (EXP-25 R1+R2 probe gates green). Judge on **val/score,
   not grad_norm**. Do not relitigate the substrate.
-- **Settled result (the current SOTA)** — the merger question is answered:
-  `signed_ema` (sign-replacement) was falsified (EXP-25, STOP), but **error-feedback on the
-  PowerSGD residual WON** — the **`delayed_ef` merger (B2)**, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0,
+- **Settled result (the current SOTA)** — the merger question is answered: the **`delayed_ef`
+  merger (B2)** — error-feedback on the PowerSGD codec residual, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0 —
   reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
   the comm-eff SOTA; its exact settings are `runs/EXP-31/B2_baseline/resolved_params_B2.txt`. **Goals 1–3 (stable /
   parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**

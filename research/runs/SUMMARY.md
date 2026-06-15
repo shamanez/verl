@@ -62,7 +62,7 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | **baseline** | M1 | Dense GRPO, Qwen2.5-1.5B-Instruct, GSM8K — verl unmodified (the control = comm-eff OFF) | **0.7536** (the bar) | W&B `5e2jpho9` |
 | EXP-20 | M6 | PowerSGD r=77 (byte-matched) + fresh clean@5 — the prior comm-eff PASS | 0.7415 | W&B `oquyeic3` |
 | EXP-23 | M6 | PowerSGD r=77, **no** re-anchor (the floor); inject/blend stale-anchor mergers (STOP) | 0.6914 (floor) | W&B; erratum `a46fd0191` |
-| **EXP-25** | M6 | **Anchor circuit default** — full-coverage DP-reduced stale `M` (R1) + anchor-owns-`Q` (R2) + signed_ema merger (R3), α swept | **0.7066** (best, α=0.5) — **STOP** | code on `vast-ai-workload`; issue #25 |
+| **EXP-25** | M6 | **Anchor circuit default** — full-coverage DP-reduced stale `M` (R1) + anchor-owns-`Q` (R2) + sign-replacement merger (R3), α swept | **0.7066** (best, α=0.5) — **STOP** | code on `vast-ai-workload`; issue #25 |
 | EXP-26 | M6 | Real-gradient geometry audit + ef_powersgd merger; Step-C (gradient-tuned forward Q) **falsified** by recon collapse | 0.7210 (ef best) — REVISE→closed | folded here; W&B pruned; LOG.md |
 | EXP-27 | M6 | Damped ef_powersgd (clip/decay 0.5) to 100 steps — ignition test | 0.7202 (**ignited @~66**, length-explosion) — STOP | folded here; W&B `qa6sll3h`; LOG.md |
 | EXP-29 | M6 | On-policy anchor **replay** (`replay_paired_batch` + `snapshot_device` knobs) — the valid-M infra B2 uses | infra PASS (no val bar) | merged PR #16 `d26176b44`; now part of the B2 substrate |
@@ -75,7 +75,7 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 correct-scale `M`) and R2 (anchor-owns-`Q`, fast net never writes `Q`) both passed
 their on-box probe gates — the anchor circuit is mechanically correct and is the
 **realistic** setting (continuously-maintained stale anchor, no clean step). But
-R3, the `signed_ema` merger `G = α·G_noisy + (1−α)·|G_noisy|·sign(M)`, **does not
+R3, the **sign-replacement** merger `G = α·G_noisy + (1−α)·|G_noisy|·sign(M)`, **does not
 beat — or even match — plain PowerSGD**:
 
 - Dose-response is **monotonic and net-harmful**: α=0.5 → 0.7066, α=0.3 → 0.6164,
@@ -127,10 +127,9 @@ hold25-decay25 val@50 on disk but unsynced). Full detail: `runs/EXP-31/verdict.m
 ## Frontier — how the stale anchor gradient is USED (issue #31)
 
 The substrate (anchor on + owns `Q` + PowerSGD r=77) is **held fixed**; the single research axis is
-**how the stale anchor `M` is folded into the fast compressed update**. The lineage settled it:
-`signed_ema` falsified (sign-replacement is the defect, EXP-25) → **error-feedback on the PowerSGD
-residual WON** and is the SOTA (delayed_ef = B2, EXP-30, parity with dense) — issue #24's premise,
-realized. The open question is no longer *whether* a residual correction helps but **how to use the
+**how the stale anchor `M` is folded into the fast compressed update**. The merger question is settled:
+**error-feedback on the PowerSGD codec residual (delayed_ef = B2) is the SOTA** (EXP-30, parity with
+dense). The open question is no longer *whether* a residual correction helps but **how to use the
 anchor to BEAT dense, not just match it.**
 
 The current program (issue #31) is a **4-lever tournament**, all changing only anchor-gradient *usage*

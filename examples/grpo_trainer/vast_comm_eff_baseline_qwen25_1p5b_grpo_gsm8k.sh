@@ -21,31 +21,32 @@
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
 #   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
 #   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
-#   merger ................. COMM_EFF_SPECTRAL_ENABLED (true)     signed_ema fold of M into G
-#   merger weight alpha .... COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (0.5)
+#   merger (SOTA = B2) ..... COMM_EFF_SPECTRAL_CORRECTION_MODE (delayed_ef)  K-delayed codec-residual fold of M into G
+#   merger dose lambda ..... COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA (1.0)        G_corr = G_comp + lambda*(M_rep - G_comp_ring)
 #   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)    DEAD — the anchor replaced it
 #   legacy mask ............ COMM_EFF_MASK_ENABLED     (false)    prf_mask codec, reference only
 #
-# THE BASE in one line: PowerSGD r=77 + a continuously-maintained, delay_K=5
-# stale, full-coverage (196 matrices, DP-reduced) anchor gradient EMA M,
-# refreshed every 5 ticks from a no-hook isolated clone; the anchor OWNS the
-# PowerSGD basis Q (computes Q<-orth(V) from its stale-forward activations and
-# broadcasts it — the fast circuit is a read-only consumer, fail-closed from
-# ever writing Q); the signed_ema merger folds M into the fast gradient as
-# G = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M). These exact values are the
-# EXP-25 ground truth (runs/EXP-25/resolved_params.txt, alpha=0.5 arm).
+# THE BASE in one line (= B2, the comm-eff SOTA): PowerSGD r=77 + a continuously-
+# maintained, delay_K=5 stale, full-coverage (196 matrices, DP-reduced) anchor
+# gradient M, refreshed every 5 ticks from a no-hook isolated clone; the anchor
+# OWNS the PowerSGD basis Q (computes Q<-orth(V) from its stale-forward
+# activations and broadcasts it — the fast circuit is a read-only consumer,
+# fail-closed from ever writing Q); the delayed_ef merger folds M into the fast
+# gradient as the K-delayed EXACT codec residual G_corr = G_comp + lambda*delta,
+# delta = M_rep - G_comp_ring, lambda=1, beta_anc=0. These exact values are the B2
+# ground truth (research/runs/EXP-31/B2_baseline/resolved_params_B2.txt).
 #
-# WHY this base + the honest result (do NOT restate numbers here — they live in
+# WHY this base + the result (do NOT restate numbers here — they live in
 # research/runs/SUMMARY.md): the anchor is the REALISTIC decentralized-PP
 # setting — a continuously-maintained stale anchor replaces the old clean_cadence
 # periodic-dense-step crutch, which was unrealizable (full-H transfer + itself
 # stale on a slow link). The circuit is mechanically PROVEN (R1 full-coverage
-# DP-reduced M + R2 anchor-owns-Q probe gates green). The signed_ema MERGER,
-# however, is FALSIFIED — net-harmful vs plain PowerSGD (#25 verdict STOP). So
-# the substrate is the settled base and the MERGER (correction_mode + its
-# weights) is the open research axis you sweep from here; the substrate is held
-# fixed. Grad_norm is a SYMPTOM not the disease (Adam is scale-invariant + verl
-# grad-clips); judge on val/critic-score, not grad_norm.
+# DP-reduced M + R2 anchor-owns-Q probe gates green), and the delayed_ef merger
+# recovers the codec's weight-gradient error from the stale anchor to reach
+# PARITY with dense at ~5% gradient-comm cost. The substrate is held FIXED; the
+# OPEN research axis (issue #31) is HOW the stale anchor gradient is USED — the
+# anchor-usage levers below. Grad_norm is a SYMPTOM not the disease (Adam is
+# scale-invariant + verl grad-clips); judge on val/critic-score, not grad_norm.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -65,9 +66,11 @@
 # is the EXP-25 footprint. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
 # a reference-only ablation) frees the clone and you can raise it back to 36864.
 #
-# Ablation examples (the substrate is held fixed; the MERGER is the axis):
-#   # sweep the merger weight (the research axis):
-#   COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.7 EXPERIMENT_NAME=ce_a0p7 bash <thisfile>
+# Examples (the substrate is held FIXED; the axis = how the anchor gradient is used):
+#   # the B2 SOTA base is the DEFAULT here — a bare launch reproduces it. For a
+#   # clean, named, self-contained B2 baseline, use vast_comm_eff_b2_sota_*.sh.
+#   # an issue-#31 anchor-usage lever ON TOP of B2 (e.g. the zero-mean perturbation):
+#   COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb bash <thisfile>
 #   # dense control via the same launcher (master switch off => byte-identical):
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
 #   # legacy prf_mask codec (reference only — NOT the base; cannot anchor-own-Q):
@@ -221,9 +224,9 @@ REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}
 
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method — hydra knob surface (see header).
-#    Every circuit is an independent env toggle. Defaults = the ANCHOR-CIRCUIT
-#    base (PowerSGD r=77 + anchor on + anchor-owns-Q + signed_ema merger; the
-#    EXP-25 ground truth, runs/EXP-25/resolved_params.txt). Field names mirror
+#    Every circuit is an independent env toggle. Defaults = the comm-eff SOTA
+#    base B2 (PowerSGD r=77 + anchor on + anchor-owns-Q + delayed_ef merger λ=1;
+#    ground truth research/runs/EXP-31/B2_baseline/). Field names mirror
 #    verl/trainer/config/actor/actor.yaml exactly — do NOT reference a knob
 #    absent from that schema (Hydra struct-mode rejects unknown keys regardless
 #    of enabled flags; that bit us on clean_cadence).
@@ -266,12 +269,17 @@ COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-5}"
 # Q + M every refresh). Set false only for the reference-only fast-owns-Q
 # ablation. Active iff COMM_EFF_COMPRESSION_TYPE=powersgd AND anchor enabled.
 COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
-# --- anchor-guided gradient correction = the MERGER (ON in the base; EXP-25/R3).
-#     The merger is the open RESEARCH AXIS — signed_ema is falsified (why + the
-#     numbers: research/runs/SUMMARY.md); sweep correction_mode + its weights from
-#     here. The combiners consult only the anchor-gradient EMA M_anchor. ---
+# valid on-policy anchor M (EXP-29; part of the locked B2 base): replay the SAME
+# (batch, theta) the fast circuit saw so delta is the codec's weight-grad error,
+# not a batch effect; snapshot the stale weights to CPU (OOM guard).
+COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
+COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
+# --- anchor-guided gradient correction = the MERGER (ON in the base = B2). It
+#     folds the stale anchor gradient M into the fast compressed update; the open
+#     RESEARCH AXIS (issue #31) is HOW that is done. The combiners consult only
+#     the anchor-gradient M_anchor. ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
-COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.95}"       # M EMA decay (matches the SL reference)
+COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"        # anchor EMA decay; 0 = use the latest fire's M (B2)
 # Correction cadence in optimizer ticks. 1 = fire every tick (the merger must
 # fire every fast step).
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
@@ -280,16 +288,15 @@ COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload
 # 196 projection matrices the merger corrects (a >=0 cap silently drops merger
 # targets — diagnostic throttle only).
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
-# EXP-25 (R3): merger MODE. signed_ema (default) = the live merger; inject/blend
-# remain as alternate combiners. Validated in verl/workers/config/comm_eff.py,
-# read into the SpectralFilter in verl/workers/comm_eff/state.py.
-COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"  # signed_ema | inject | blend
+# merger MODE = the SOTA (B2): delayed_ef (default) = K-delayed EXACT codec residual
+# G_corr = G_comp + lambda*(M_rep - G_comp_ring). Validated in
+# verl/workers/config/comm_eff.py; applied in verl/workers/comm_eff/spectral_filter.py.
+COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-delayed_ef}"
+# delayed_ef dose lambda: 1.0 (default) = B2; 0.0 = G_comp bitwise (= plain
+# PowerSGD, the merger-off limiting case).
+COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
 COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # force when correction_mode=inject
 COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # weight when correction_mode=blend
-# EXP-25 (R3): signed_ema merger weight alpha in G=alpha*G_noisy+(1-alpha)*|G_noisy|*sign(M).
-# alpha=0 = pure sign-merger (collapses); alpha=1 = G_noisy unchanged (= no merge).
-# 0.5 (default) = the EXP-25 best / resolved-config arm. THE swept research axis.
-COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.5}"
 # --- EXP-26 Step B: ef_powersgd merger (direction-PRESERVING error-feedback) ---
 # Select with COMM_EFF_SPECTRAL_CORRECTION_MODE=ef_powersgd. Re-adds the dropped
 # off-subspace residual to G_comp with NO sign term (keeps G_comp's direction).
@@ -419,9 +426,9 @@ cat <<EOF
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
-  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q
+  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA
+  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA  (B2 = delayed_ef lambda=1)
   ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
   subbasis (EXP-31 D):  delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA  (active iff mode=delayed_ef; rank=0 => correction==delta = B2)
   subbasis γ-knob:      delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS  (γ_t=weight*(1 if step<hold_steps else max(0,1-(step-hold_steps)/decay_steps)); weight=1+decay_steps=0 => γ≡1 = current Cell D; weight=0 => B2; hold_steps=0 => linear-from-0 decay)
@@ -518,15 +525,17 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
   actor_rollout_ref.actor.comm_eff.anchor.owns_q="$COMM_EFF_ANCHOR_OWNS_Q" \
+  actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch="$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH" \
+  actor_rollout_ref.actor.comm_eff.anchor.snapshot_device="$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.spectral.beta_anc="$COMM_EFF_SPECTRAL_BETA_ANC" \
   actor_rollout_ref.actor.comm_eff.spectral.ema_device="$COMM_EFF_SPECTRAL_EMA_DEVICE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
   actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
   actor_rollout_ref.actor.comm_eff.spectral.correction_mode="$COMM_EFF_SPECTRAL_CORRECTION_MODE" \
+  actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda="$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" \
   actor_rollout_ref.actor.comm_eff.spectral.inject_gamma="$COMM_EFF_SPECTRAL_INJECT_GAMMA" \
   actor_rollout_ref.actor.comm_eff.spectral.blend_eta="$COMM_EFF_SPECTRAL_BLEND_ETA" \
-  actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha="$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA" \
   actor_rollout_ref.actor.comm_eff.powersgd.rank="$COMM_EFF_POWERSGD_RANK" \
   actor_rollout_ref.actor.comm_eff.powersgd.seed="$COMM_EFF_POWERSGD_SEED" \
   actor_rollout_ref.actor.comm_eff.powersgd.pp_size="$COMM_EFF_POWERSGD_PP_SIZE" \

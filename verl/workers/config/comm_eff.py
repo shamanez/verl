@@ -198,12 +198,12 @@ class CommEffSpectralConfig(BaseConfig):
             inside the refresh/correct call and moved back). ``M_anchor`` is
             touched only at refresh, so CPU offload costs one H2D/D2H per refresh,
             not per mini-batch. Validated against {gpu, cpu}.
-        correction_mode (str): The anchor combiner the fast-path grad uses —
-            ``"signed_ema"`` (default, EXP-25/R3:
-            ``alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M_anchor)``), ``"inject"``
-            (additive scale-matched anchor complement) or ``"blend"``
-            (``(1-eta)*G_mask + eta*scale*M_anchor``). Validated against
-            {inject, blend, signed_ema}.
+        correction_mode (str): The anchor combiner the fast-path grad uses.
+            ``"none"`` (default) = no correction. The comm-eff SOTA is
+            ``"delayed_ef"`` (B2: ``G_comp + lambda*(M_rep - G_comp_ring)``), set
+            explicitly by the launcher. ``"inject"``/``"blend"`` are alternate
+            combiners. Validated against
+            {none, inject, blend, signed_ema, ef_powersgd, delayed_ef}.
         inject_gamma (float): Injection strength for
             ``correction_mode="inject"``; unused otherwise. Must be ``>= 0``.
         blend_eta (float): Convex-blend weight for ``correction_mode="blend"``;
@@ -246,12 +246,12 @@ class CommEffSpectralConfig(BaseConfig):
     max_targets: int = -1
     # EMA storage default: keep tensors on GPU.
     ema_device: str = "gpu"
-    # Correction mode (anchor combiner). "signed_ema" (EXP-25/R3) uses the SL
-    # signed-EMA merger G_corr=alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M).
-    # "inject" adds a scale-matched anchor-EMA complement. "blend" uses
-    # G_corr=(1-eta)*G_mask + eta*scale*M_anchor. "ef_powersgd" (EXP-26 Step B) is
-    # the direction-PRESERVING error-feedback merger (NO sign term).
-    correction_mode: str = "signed_ema"
+    # Correction mode (anchor combiner). "none" (default) = no correction; the
+    # comm-eff SOTA is "delayed_ef" (B2: G_corr=G_comp+lambda*(M_rep-G_comp_ring)),
+    # set explicitly by the launcher. "inject"/"blend" are alternate combiners;
+    # "ef_powersgd" is the direction-preserving error-feedback merger; "signed_ema"
+    # is the legacy sign-replacement merger (a still-supported but unused mode).
+    correction_mode: str = "none"
     # Injection strength for correction_mode="inject"; unused otherwise.
     inject_gamma: float = 1.0
     # Convex-blend weight for correction_mode="blend"; validated to [0, 1].

@@ -404,9 +404,9 @@ comm_eff:
   # Spectral-correction sub-config (inert while enabled=false). Applies an
   # anchor-guided correction to the fast-path gradient after actor backward /
   # FSDP grad reduction and before optimizer.step() / grad clipping. Live
-  # mergers (see correction_mode below): signed_ema (default), inject, blend.
-  # The old SVD -> Tikhonov -> two-sided-projection path was removed in EXP-25
-  # (the signed_ema merger needs only sign(M_anchor), no SVD).
+  # mergers (see correction_mode below): none (default), delayed_ef (the SOTA = B2),
+  # inject, blend, ef_powersgd, signed_ema (legacy). The old SVD -> Tikhonov ->
+  # two-sided-projection path was removed in EXP-25.
   spectral:
 
     # Target dataclass for this configuration
@@ -437,23 +437,24 @@ comm_eff:
     ema_device: gpu
 
     # Correction mode (anchor combiner the fast-path grad uses).
-    # "signed_ema" (EXP-25/R3, default) = the SL signed-EMA merger
-    # G_corr=signed_ema_alpha*G_noisy + (1-signed_ema_alpha)*|G_noisy|*sign(M).
+    # "signed_ema" (EXP-25/R3, legacy — still supported but unused) = the SL
+    # signed-EMA merger G_corr=signed_ema_alpha*G_noisy + (1-signed_ema_alpha)*|G_noisy|*sign(M).
     # "inject" = ADD the scale-matched complement of the stale anchor EMA
     # M_anchor. "blend" = REPLACE via convex blend
     # G_corr=(1-blend_eta)*G_mask + blend_eta*scale*M_anchor.
     # "ef_powersgd" (EXP-26 Step B) = direction-PRESERVING error-feedback: re-add
     # the dropped off-subspace residual to G_comp with NO sign term (keeps
     # G_comp's direction/sign; reduces to plain PowerSGD at ef_decay=ef_clip=0).
-    # "none" (EXP-30 Step A) = INERT: M is still maintained from the anchor feed
-    # but NO correction is applied or written back — the optimizer consumes the
-    # raw G_comp (the geometry-probe posture).
+    # "none" (DEFAULT; EXP-30 Step A) = INERT: M is still maintained from the
+    # anchor feed but NO correction is applied or written back — the optimizer
+    # consumes the raw G_comp (the geometry-probe posture). The SOTA delayed_ef is
+    # set explicitly by the launcher; the bare default applies no merger.
     # "delayed_ef" (EXP-30 B2) = K-delayed exact codec residual:
     # G_corr = G_comp + delayed_ef_lambda*(M_rep − G_comp_ring(t−K)), δ refreshed
     # at anchor fires and held between.
     # Declared here so Hydra's struct-mode merge accepts
     # actor_rollout_ref.actor.comm_eff.spectral.correction_mode=ef_powersgd.
-    correction_mode: signed_ema
+    correction_mode: none
 
     # Injection strength for correction_mode="inject" (force along the stale
     # true-gradient direction, scale-matched to ||G_mask||). Unused otherwise. >= 0.

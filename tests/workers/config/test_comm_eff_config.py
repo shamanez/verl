@@ -320,9 +320,11 @@ class TestCommEffExp30Knobs(unittest.TestCase):
         self.assertTrue(cfg.probe.rank0_only)
         self.assertEqual(cfg.probe.m4_lags, 5)
         self.assertTrue(cfg.probe.per_target_sidecar)
-        # delayed_ef: λ=0 (the exact-identity limiting case) + legacy mode.
+        # delayed_ef λ=0 = the exact-identity limiting case; the DEFAULT merger is
+        # the inert "none" (the SOTA delayed_ef is set explicitly by the launcher,
+        # not the dataclass default).
         self.assertEqual(cfg.spectral.delayed_ef_lambda, 0.0)
-        self.assertEqual(cfg.spectral.correction_mode, "signed_ema")
+        self.assertEqual(cfg.spectral.correction_mode, "none")
 
     def test_correction_mode_enum_extended(self):
         """'none' and 'delayed_ef' are accepted; typos stay loud."""
@@ -477,7 +479,9 @@ class TestCommEffExp30Knobs(unittest.TestCase):
         self.assertEqual(config_default.comm_eff.probe.m4_lags, 5)
         self.assertTrue(config_default.comm_eff.probe.per_target_sidecar)
         self.assertEqual(config_default.comm_eff.spectral.delayed_ef_lambda, 0.0)
-        self.assertEqual(config_default.comm_eff.spectral.correction_mode, "signed_ema")
+        # Default merger is the inert "none" (the SOTA delayed_ef is set explicitly
+        # by the launcher); the YAML default mirrors the dataclass default.
+        self.assertEqual(config_default.comm_eff.spectral.correction_mode, "none")
 
     def test_yaml_delayed_ef_b2_shape_composes(self):
         """The (gated) B2 cell's exact override set composes — pre-validated now
