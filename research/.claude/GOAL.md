@@ -48,7 +48,7 @@ codec**. The full result + why + what's next, and all the numbers, live in
   `signed_ema` (sign-replacement) was falsified (EXP-25, STOP), but **error-feedback on the
   PowerSGD residual WON** — the **`delayed_ef` merger (B2)**, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0,
   reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
-  the comm-eff SOTA; its exact settings are `runs/EXP-30/resolved_params_B2.txt`. **Goals 1–3 (stable /
+  the comm-eff SOTA; its exact settings are `runs/EXP-31/B2_baseline/resolved_params_B2.txt`. **Goals 1–3 (stable /
   parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**
 - **Frontier (issue #31)** — the single open axis is now **how the stale anchor `M` is USED to BEAT
   dense, not just match it.** B2 caps at parity because it reconstructs the dense gradient on stale data;

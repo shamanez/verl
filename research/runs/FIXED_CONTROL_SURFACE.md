@@ -128,7 +128,7 @@ override only the run length + the axis you're varying:
 TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=ce_anchor_base_50s \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 
-# the SOTA comm-eff base (B2 = delayed_ef λ=1) — exact knobs in runs/EXP-30/resolved_params_B2.txt:
+# the SOTA comm-eff base (B2 = delayed_ef λ=1) — exact knobs in runs/EXP-31/B2_baseline/resolved_params_B2.txt:
 COMM_EFF_SPECTRAL_CORRECTION_MODE=delayed_ef COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA=1.0 \
 COMM_EFF_SPECTRAL_BETA_ANC=0.0 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH=true \
   TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
@@ -144,7 +144,7 @@ COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
 Pass `TOTAL_TRAINING_STEPS` (50, then 100) + `TEST_FREQ=25` per launch. The substrate
 defaults (anchor on, owns `Q`, PowerSGD r=77, **delayed_ef merger (B2)**, no clean step) are baked
 into the launcher — do **not** re-type them; the ground truth of any run is its
-`resolved_params.txt` (the SOTA = `runs/EXP-30/resolved_params_B2.txt`).
+`resolved_params.txt` (the SOTA = `runs/EXP-31/B2_baseline/resolved_params_B2.txt`).
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).

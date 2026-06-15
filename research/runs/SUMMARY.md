@@ -18,8 +18,9 @@ lasting record is **here + git history + W&B + the merged code**.
 - **Result:** greedy GSM8K **val@50 ≈ 0.74–0.75 = PARITY with dense** (band 0.75–0.78) at ~5%
   fast-path gradient-comm cost (~4× honest amortized). W&B B2 `u9okvgzz` 0.7528; reproduce/ext draws
   0.7400–0.7536.
-- **The exact SOTA settings are the ground truth in** [`runs/EXP-30/resolved_params_B2.txt`](EXP-30/resolved_params_B2.txt)
-  **+** [`runs/EXP-30/launch_B2.sh`](EXP-30/launch_B2.sh) — the substrate **every new arm holds fixed**.
+- **The exact SOTA settings are the ground truth in** [`runs/EXP-31/B2_baseline/resolved_params_B2.txt`](EXP-31/B2_baseline/resolved_params_B2.txt)
+  **+** [`runs/EXP-31/B2_baseline/launch_B2.sh`](EXP-31/B2_baseline/launch_B2.sh) — the substrate **every new arm holds fixed**
+  (migrated from EXP-30, now deleted; see `runs/EXP-31/B2_baseline/README.md`).
 - **Locked substrate:** PowerSGD **r=77** act codec · anchor **owns Q** · **cadence=delay_K=5** ·
   **clean_cadence=0** · **replay_paired_batch=true** · snapshot_device=cpu · batch128/mini64/lr1e-6/n8/
   resp16384/seed0 · **disable_custom_all_reduce=true** (required for the box to init; greedy-val-neutral).
@@ -65,7 +66,7 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | EXP-26 | M6 | Real-gradient geometry audit + ef_powersgd merger; Step-C (gradient-tuned forward Q) **falsified** by recon collapse | 0.7210 (ef best) — REVISE→closed | folded here; W&B pruned; LOG.md |
 | EXP-27 | M6 | Damped ef_powersgd (clip/decay 0.5) to 100 steps — ignition test | 0.7202 (**ignited @~66**, length-explosion) — STOP | folded here; W&B `qa6sll3h`; LOG.md |
 | EXP-29 | M6 | On-policy anchor **replay** (`replay_paired_batch` + `snapshot_device` knobs) — the valid-M infra B2 uses | infra PASS (no val bar) | merged PR #16 `d26176b44`; now part of the B2 substrate |
-| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict `runs/EXP-30/verdict.md` |
+| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict + B2 ground truth migrated to `runs/EXP-31/B2_baseline/` |
 | **EXP-31** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
 
 ## EXP-25 — what we learned (issue #25, VERDICT = STOP)

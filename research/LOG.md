@@ -1,9 +1,11 @@
 # Research Log (newest first)
 
-> **De-bloat note (2026-06-15):** run dirs for **EXP-29 and earlier** (EXP-25/26/27/29) were removed to
-> reclaim ~63 GB; their record is folded into `runs/SUMMARY.md` + memory + git history + W&B. The
+> **De-bloat note (2026-06-15):** run dirs for **EXP-30 and earlier** (EXP-25/26/27/29/30) were removed
+> (~64 GB reclaimed); their record is folded into `runs/SUMMARY.md` + memory + git history + W&B. The
 > `run dir:` / `verdict:` pointers in those entries below are **historical** (dirs no longer on disk).
-> The SOTA is **B2** (`runs/EXP-30/resolved_params_B2.txt`); EXP-30 + EXP-31 dirs are retained.
+> The SOTA = **B2**, whose ground truth was migrated to **`runs/EXP-31/B2_baseline/`**
+> (`resolved_params_B2.txt` + `launch_B2.sh` + `verdict.md` + `beat_dense/` + `metrics/`). Only the active
+> **EXP-31** dir is retained.
 
 ## EXP-31 · 2026-06-14T00:00:00+10:00 · M6 · PARITY (operator-accepted)
 Surpass the dense baseline with a stale-anchor-gradient merger (PowerSGD-locked comm-eff GRPO)
@@ -24,7 +26,7 @@ EXP-30: generator-consistent M (EXP-29 paired replay, β_anc=0) — geometry-gat
 - CONTROL DECOMPOSITION (operator-directed, current hyperparameters, val@50): dense same-config rerun (73ntu76u) 0.7839 [band 0.75-0.78, dense-old 0.7536] · B2 δ-residual 0.7528 (≈96% dense, near-parity NOT established) · B1 blend 0.7422 · C2 plain PowerSGD+Q-updated no-merge (k6nmcuyd) 0.6300 · C3 PowerSGD Q-FROZEN no-merge (djy4tog1, killed@25 no-improvement) 0.0925. ⇒ power-iteration Q-update is the DOMINANT lever (+~0.5: C2 0.6300 vs C3 0.0925 frozen-random-Q = no learning); δ-residual merger +0.123 (B2−C2). All 6 cells one-knob (token cap 18432 non-binding under micro_batch=1/static-batch). Hand-off issue #31 = surpass-dense program from B2 (P(greedy surpass)~10%; parity-first). Box 40765004 TORN DOWN (strict, on done). Intermediate team docs consolidated into verdict.md + beat_dense/ (deleted; git history).
 - follow-up DONE: operator-authorized 100-step B2 extension (exp30_B2_ext100, W&B b59ncque) DE-CENSORED stability for seed 0 — emission-free through 100 incl the EXP-27 band 51-66 (two isolated 1/1024 cap-pins @94/99, benign, no P1/P2/P3); vals 0.7278@25 / 0.7536@50 (= dense ceiling) / 0.7475@75 / 0.7400@100 (mild late decay; plain@100 = the right comparator). B1 blend-on-valid-M paper run (operator-directed) on a fresh box completes the operator-ablation row. Incident: teardown hook reaped i_40697545 post-ext100 (heartbeat-path row-naming bug; zero science lost)
 - code: PR shamanez/verl#17 MERGED to vast-ai-workload (ca5f4b002); branch exp/30-valid-m-geometry deleted (remote+local+worktree)
-- run dir: runs/EXP-30/ · verdict: runs/EXP-30/verdict.md · gate: runs/EXP-30/stepA_gate.md · box i_40697545 RUNNING ext100 (operator box)
+- run dir: removed (de-bloated 2026-06-15) — B2 ground truth migrated to `runs/EXP-31/B2_baseline/` (resolved_params_B2.txt + launch_B2.sh + verdict.md + beat_dense + metrics); box i_40697545 torn down
 
 ## EXP-29 · 2026-06-12T18:35:00+10:00 · M6 · PASS
 EXP-29: Anchor on-policy replay — pair the anchor's stale weights with the trajectories those weights generated (+ CPU-resident snapshots, fire-aware ring retention, value-level relevance verification)
