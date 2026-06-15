@@ -1,5 +1,15 @@
 # EXP-31 anchor-usage tournament — live state (orchestrator tracking)
 
+## ⛳ FINAL VERDICT (2026-06-16): **STOP — all 4 anchor-usage levers NULL for surpass**
+None cleared B2_live@25=0.7202 at val@25: L4 perturb 0.7157 · L2 μ0.9 **0.5701** (regress) / μ0.5 0.7089 ·
+L3 ratio κ1.0 0.7119 / cos κ1.0 0.7134 — all parity-or-below (within/below ±0.024). L1 SKIPPED (gate
+fails: cov(G_comp,M)≈0 from F1 + no L2/L3 signal). L3 κ0.5 SKIPPED (monotone-by-cap: bounded between
+κ1.0-parity and B2). Code verified GO ⇒ trustworthy nulls. Process criteria PASS (off-path parity,
+bytes_ratio==B2, B2 reproduced); HEADLINE surpass FAILS. **Mechanism: B2 caps at parity because δ
+reconstructs dense-on-stale-data — you can't exceed dense by reweighting (L3) / accumulating (L2) /
+perturbing (L4) / de-noising (L1) a stale estimate of dense.** Full: `runs/EXP-31/verdict.md`.
+GPU killed, box clean+idle (operator teardown). All WandB synced.
+
 **Box:** 46.243.55.155:40276 (i_41048644, 4×H200, operator's separate Vast acct ⇒ operator teardown).
 **Branches:** `vast-ai-workload` (Cell A, L4 — perturb already wired) + `exp/31-anchor-usage-levers @1d9077d` (L2, L3 — verified, 262 tests pass, on origin).
 **Goal:** greedy GSM8K val `mean@1` → 0.80 (surpass; dense band ~0.75–0.78). Single draws ±0.024.
@@ -35,7 +45,7 @@ bytes_ratio 0.0505 ✓ · recon_rel_error 0.0278 ✓ · anchor fires ✓ · no i
 | L2_mom09 | μ=0.9 age_decay | **0.5701** | — (killed@26) | ❌ KILL — −0.15 below B2_live@25 (0.7202), far outside ±0.024. Code verified GO ⇒ TRUSTWORTHY null: heavy μ=0.9 over-smooths the held correction ⇒ lags the fast-changing early correction, slows convergence. Healthy (reward→0.51, len 276→150↓, no ignition). WandB ybemd5ux |
 | L2_mom05 | μ=0.5 age_decay | **0.7089** | — (killed@25) | ⏸ PARITY/KILL — −0.011 vs B2_live@25 (within ±0.024), NOT an improvement. Healthy (reward→0.69, len flat ~215). Lighter μ tracks B2 ⇒ **L2 lever CLOSED: NULL for surpass** (μ=0.9 regresses −0.15, μ=0.5 = parity). mem 30.72 (=ceiling) |
 | L3_ratio_k10 | ratio κ=1.0 cap2 | **0.7119** | — (killed@25) | ⏸ PARITY/KILL — −0.008 vs B2_live@25 (within ±0.024). Healthy (reward→0.695, len flat ~212, no ignition). Max modulation = neutral. mem 45.97 (adaptive-λ temporaries, no OOM) |
-| L3_cos_k10 | cos κ=1.0 cap2 | | | 🟢 RUNNING (launched 2026-06-16) — 2nd agreement metric |
+| L3_cos_k10 | cos κ=1.0 cap2 | **0.7134** | — (killed@25) | ⏸ PARITY/KILL — −0.007 vs B2_live@25 (within ±0.024). Healthy (reward→0.756, len↓~181, no ignition). 2nd agreement metric also parity ⇒ **L3 lever CLOSED: NULL**. WandB wmpmmdj1 |
 | L3 κ=0.5 (ratio/cos) | — | — | — | SKIP (low-info: κ=1.0 max modulation already = parity ⇒ milder κ lands between that and B2 = parity; κ=0 IS B2) |
 | L3_cos_k10 / k05 | cos κ=1.0/0.5 cap2 | | | pending |
 | L1 | recenter/svrg (gated) | | | deferred — needs code (transformer_impl.py) |

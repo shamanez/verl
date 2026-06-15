@@ -24,9 +24,10 @@ lasting record is **here + git history + W&B + the merged code**.
 - **Locked substrate:** PowerSGD **r=77** act codec · anchor **owns Q** · **cadence=delay_K=5** ·
   **clean_cadence=0** · **replay_paired_batch=true** · snapshot_device=cpu · batch128/mini64/lr1e-6/n8/
   resp16384/seed0 · **disable_custom_all_reduce=true** (required for the box to init; greedy-val-neutral).
-- **Active frontier (issue #31):** push B2 → **0.80** by changing ONLY *how the stale anchor gradient is
-  USED* — the **4-lever tournament** (perturbation / δ-momentum / adaptive-dose / control-variate) under
-  the async single-slow-anchor constraint. Authoritative plan: [`.claude/plans/31.md`](../.claude/plans/31.md).
+- **Current frontier status (2026-06-16):** The 4-lever anchor-usage tournament (EXP-31, issue #31)
+  is **CLOSED — VERDICT STOP**. All four admissible levers (L4 perturbation, L2 δ-momentum, L3 adaptive
+  dose, L1 control-variate) are NULL. No nameable non-blocked knob with a credible path to ≥0.78 remains
+  on the anchor-usage axis. See §EXP-31 tournament below.
 
 Everything below B2 in the table (EXP-20/23/25/26/27/29) is **superseded history**, folded into this file
 (detailed run dirs de-bloated 2026-06-15; full detail in git history + W&B + the merged code).
@@ -67,7 +68,8 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | EXP-27 | M6 | Damped ef_powersgd (clip/decay 0.5) to 100 steps — ignition test | 0.7202 (**ignited @~66**, length-explosion) — STOP | folded here; W&B `qa6sll3h`; LOG.md |
 | EXP-29 | M6 | On-policy anchor **replay** (`replay_paired_batch` + `snapshot_device` knobs) — the valid-M infra B2 uses | infra PASS (no val bar) | merged PR #16 `d26176b44`; now part of the B2 substrate |
 | **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict + B2 ground truth migrated to `runs/EXP-31/B2_baseline/` |
-| **EXP-31** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
+| **EXP-31 (sub-basis)** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
+| **EXP-31 (tournament)** | M6 | 4-lever anchor-usage tournament (L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate) on B2 substrate | **NULL across all levers** — **STOP** | box i_41048644 4×H200; W&B fy920fty/ybemd5ux/knlzxh2x/kzohyuod/wmpmmdj1; verdict `runs/EXP-31/verdict.md` |
 
 ## EXP-25 — what we learned (issue #25, VERDICT = STOP)
 
@@ -124,22 +126,33 @@ hold25-decay25 val@50 on disk but unsynced). Full detail: `runs/EXP-31/verdict.m
 **Code:** branch `exp/31-subbasis-merger` pushed, unmerged. No PR / no launcher promotion
 (`promote_launcher_as=none`; PARITY is not a PASS in the mandate terms).
 
-## Frontier — how the stale anchor gradient is USED (issue #31)
+## EXP-31 — the tournament result (issue #31, VERDICT = STOP, 2026-06-16)
 
-The substrate (anchor on + owns `Q` + PowerSGD r=77) is **held fixed**; the single research axis is
-**how the stale anchor `M` is folded into the fast compressed update**. The merger question is settled:
-**error-feedback on the PowerSGD codec residual (delayed_ef = B2) is the SOTA** (EXP-30, parity with
-dense). The open question is no longer *whether* a residual correction helps but **how to use the
-anchor to BEAT dense, not just match it.**
+**The anchor-usage axis is exhausted on the locked B2 substrate.** All four admissible levers — the
+complete set of ways to *use* the stale anchor gradient `M` without changing the codec, Q, batch, or
+generation — are NULL.
 
-The current program (issue #31) is a **4-lever tournament**, all changing only anchor-gradient *usage*
-(codec/Q/batch/generation locked): **L4 perturbation** (zero-mean regularization), **L2 δ-momentum**
-(accumulate the persistently-missed correction), **L3 adaptive dose** (trust the anchor more on
-disagreement), **L1 control-variate** (cancel sampling variance, SVRG/SARAH). **Async-realism filter:**
-the anchor is a single **SLOW** node serving a fast **SWARM** ⇒ always lagging, never leads — admissible
-levers use it as a *lagging* reference, tolerate variable staleness, and stay cross-rank-identical.
-Authoritative plan + thresholds: [`.claude/plans/31.md`](../.claude/plans/31.md). A standing watch on
-entropy / response-length / IS-gap applies to every run (`research/diagnostics/ENTROPY_COLLAPSE_WATCH.md`).
+**Reference:** B2_live (Cell A reproduced, box i_41048644 4×H200, seed 0): val@25=0.7202 / val@50=0.7354.
+Dense-this-box=0.7506 (band 0.75–0.78). Eval noise ±0.024.
+
+**Lever results (all val@25, greedy GSM8K):**
+
+| Lever | Config | val@25 | verdict |
+|---|---|---|---|
+| L4 perturbation | σ=0.01 isotropic noise on δ | 0.7157 | NULL (parity) |
+| L2 δ-momentum | μ=0.9 EMA accumulation | 0.5701 | REGRESS (−0.15, over-smoothed) |
+| L2 δ-momentum | μ=0.5 EMA accumulation | 0.7089 | NULL (parity) |
+| L3 adaptive dose | ratio κ=1.0 cap | 0.7119 | NULL (parity) |
+| L3 adaptive dose | cos κ=1.0 cap | 0.7134 | NULL (parity) |
+| L1 control-variate | — | SKIPPED | gate F1 fails: cov(G_comp,M)≈0 |
+
+**4 process criteria PASS:** off-path parity bitwise, bytes_ratio∈[0.0504,0.0506]=B2, B2 reproduced the band,
+no ignition/OOM/divergence. Code verified GO (adversarial 8-agent workflow — every null is a trustworthy null).
+
+**Mechanistic close:** B2 caps at parity because δ reconstructs the *dense gradient on stale data*. You
+cannot exceed dense by reweighting (L3), accumulating (L2), perturbing (L4), or de-noising (L1) a stale
+estimate of dense. To surpass, a signal dense genuinely lacks is required; no admissible lever on the
+anchor-usage axis provides it. Full detail: `runs/EXP-31/verdict.md`.
 
 ## "Done" means
 

@@ -7,6 +7,15 @@
 > (`resolved_params_B2.txt` + `launch_B2.sh` + `verdict.md` + `beat_dense/` + `metrics/`). Only the active
 > **EXP-31** dir is retained.
 
+## EXP-31 · 2026-06-16T04:20:00+10:00 · M6 · STOP (tournament phase)
+4-lever anchor-signal-usage tournament — L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate
+
+- hypothesis: At least one anchor-usage lever (L4 isotropic perturbation, L2 δ-momentum accumulation, L3 adaptive dose, L1 control-variate de-noising) lifts greedy val@50 above B2_live (0.7354) toward ≥0.78, on the locked B2 substrate (delayed_ef λ=1, PowerSGD r=77, anchor cadence/delay_K=5, replay, seed 0, 4×H200 i_41048644).
+- result: STOP. All four levers are NULL — none clear B2_live beyond ±0.024 noise. B2_live (Cell A, reproduced): val@25=0.7202 / val@50=0.7354; dense-this-box=0.7506 (band 0.75–0.78). L4 σ=0.01: 0.7157 (parity). L2 μ=0.9: 0.5701 (REGRESS −0.15, over-smoothed); μ=0.5: 0.7089 (parity). L3 ratio κ=1.0: 0.7119 / cos κ=1.0: 0.7134 (both parity). L1: SKIPPED — gate F1 fails (cov(G_comp,M)≈0 ⇒ control variate has nothing to cancel; no L2/L3 surpass signal to gate on). 4 process criteria PASS (off-path parity bitwise, bytes_ratio∈[0.0504,0.0506]=B2, no ignition/OOM/divergence). Code verified GO (adversarial 8-agent workflow). Mechanistic takeaway: B2 caps at parity because δ reconstructs the dense gradient on stale data — you cannot beat dense by reweighting (L3), accumulating (L2), perturbing (L4), or de-noising (L1) a stale estimate of dense. To surpass, the anchor must provide signal dense genuinely lacks; no admissible lever does.
+- WandB: B2_live fy920fty · L2_mom09 ybemd5ux · L2_mom05 knlzxh2x · L3_ratio_k10 kzohyuod · L3_cos_k10 wmpmmdj1 (project shamanework-pl/verl_compression_research)
+- run dir: runs/EXP-31/
+- verdict: runs/EXP-31/verdict.md
+
 ## EXP-31 · 2026-06-14T00:00:00+10:00 · M6 · PARITY (operator-accepted)
 Surpass the dense baseline with a stale-anchor-gradient merger (PowerSGD-locked comm-eff GRPO)
 

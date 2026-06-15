@@ -15,3 +15,5 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 
 [2026-06-15T12:17:00Z] [training-log-monitor/EXP-31/A_b2_reproduce] TIMEOUT at step 8/50 (healthy). val@0=0.0910, bytes_ratio=0.0504, anchor fires at steps 3+5+8 (5-tick cadence confirmed), resp_len/mean~280 (no explosion), grad_norm settling 480->0.79->2.32->1.28->2.55 (anchor-step spikes expected), reward 0.12->0.33->0.19->0.28 (GRPO fluctuation normal), WandB running historyLines=8. val@25 expected ~12:46 UTC. No errors. RECOMMENDATION: continue.
 [2026-06-16T00:15:11+10:00] [orchestrator/goal] EXP-31: Cell A DONE B2_live val 0.0910/0.7202/0.7354 (WandB fy920fty). Full autonomous pipeline ARMED: chain1 A->L4(.01 running)->L4(.03); chain2 waits CHAIN_L4_DONE then checkout exp/31@1d9077d (FETCH_HEAD SHA-asserted) -> L2(mu.9/.5 age_decay) + L3(ratio/cos x kappa .5/1.0 cap2) = 8 lever cells, zero GPU idle. Gate vs B2_live@50=0.7354: EXTEND>.7594/BANK .7114-.7594/KILL<.7114. Monitor on L4_s001. Operator: autonomous, no questions, GPU always busy.
+[2026-06-16T04:19:46+10:00] [analyst #31] verdict=STOP
+[2026-06-16T04:25:57+10:00] [log-writer #31] logged verdict=STOP milestone=M6
