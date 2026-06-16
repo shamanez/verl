@@ -17,7 +17,7 @@
 - Hypothesis: β=0 weakly optimal (freshness > averaging). Falsified iff any C1/C2/C3 val@50 ≥ C0 + 0.024.
 
 ## Last tick
-2026-06-16T18:52:39+10:00 · running=[33 C0@25/55 val@25=0.714 reproduces-B2] · analyzing=[] · logging=[] · blocked=[] · monitor window-2 all-green
+2026-06-16T19:23:35+10:00 · running=[33 C0@38/55 healthy] · analyzing=[] · logging=[] · blocked=[] · awaiting C0 val@50 ~09:50Z
 
 ## Budget
 EXP-33 max_gpu_hr=96 (hard cap); ~31.5 GPU-hr projected (4 full cells + C4@30); operator box (op pays/destroys).
