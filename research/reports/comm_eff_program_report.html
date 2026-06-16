@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Communication-Efficient GRPO — Program Retrospective (EXP-25 → EXP-31)</title>
+<title>Communication-Efficient GRPO — Program Retrospective (EXP-25 → EXP-32)</title>
 <script>
 window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$']] },
                    options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] } };
@@ -71,10 +71,12 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 <header class="page">
   <div class="wrap">
     <h1>Communication-Efficient GRPO — Program Retrospective</h1>
-    <p class="sub">EXP-25 → EXP-31 on the shamanez/verl fork · Qwen2.5-1.5B-Instruct + GSM8K ·
+    <p class="sub">EXP-25 → EXP-32 on the shamanez/verl fork · Qwen2.5-1.5B-Instruct + GSM8K ·
     fast compressed circuit + stale anchor circuit (rank-77 PowerSGD boundary compression, ≈19.8× less
-    boundary traffic) · SOTA = the EXP-30 δ-residual merger at <b>dense parity</b>; anchor-usage axis
-    exhausted (EXP-31 STOP) · 2026-06-16</p>
+    boundary traffic) · <b>default / SOTA = error feedback</b> (the EXP-30 δ-residual merger,
+    <code>delayed_ef</code> λ=1) at <b>dense parity</b> · the enabler was making the anchor honest (#29
+    on-policy replay) and keeping only the freshest policy gradient (<b>β_anc=0</b>) · the sign method
+    now learns (stable, near-parity) on the corrected circuit but is dominated · 2026-06-16</p>
   </div>
 </header>
 <nav class="tabs"><div class="wrap">
@@ -93,7 +95,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <h2>EXP-25: The Core Idea — Two Circuits for Training a Language Model Over a Slow Link</h2>
 
   <p class="lede">
-    This project asks whether you can train a reasoning model with reinforcement learning while compressing the data that flows between machines, and still match an uncompressed run. EXP-25 built the realistic "anchor circuit" that does the compressing — a fast compressed path running every step, plus a slow, deliberately-out-of-date uncompressed reference that steers it — and then tested one specific way of folding the two together. That fold (the <em>signed_ema</em> merger) was a bet, and EXP-25 was designed to confirm or kill it.
+    This project asks whether you can train a reasoning model with reinforcement learning while compressing the data that flows between machines, and still match an uncompressed run. EXP-25 built the realistic "anchor circuit" that does the compressing — a fast compressed path running every step, plus a slow, deliberately-out-of-date uncompressed reference that steers it — and then tested one specific way of folding the two together. That fold (the <em>signed_ema</em> merger) was a bet, and EXP-25 was designed to confirm or kill it. On the circuit as it stood in EXP-25 it looked killed; but a later fix to <em>how the anchor computes its gradient</em> (EXP-29) revived it — on the corrected circuit the same sign merger trains stably to near-parity. The full arc is in the later tabs; this one lays out the design and the original bet.
   </p>
 
   <h3>The problem: training is bottlenecked on communication, not compute</h3>
@@ -175,41 +177,71 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <thead><tr><th>Reference</th><th>GSM8K val accuracy</th><th>Meaning</th></tr></thead>
     <tbody>
       <tr><td>Dense control (no compression)</td><td><span class="metric">0.7536</span></td><td>the bar to match — full-traffic training</td></tr>
-      <tr><td>PowerSGD r=77 + fresh clean step</td><td><span class="metric">0.7415</span></td><td>the old (unrealistic) comm-eff PASS</td></tr>
-      <tr><td>PowerSGD r=77, no refresh</td><td><span class="metric">0.6914</span></td><td>the floor — compression with no help at all</td></tr>
+      <tr><td>PowerSGD r=77 + fresh clean step</td><td><span class="metric">0.7415</span></td><td>the old (unrealistic) clean-step config</td></tr>
+      <tr><td>PowerSGD r=77, frozen basis</td><td><span class="metric">0.6914</span></td><td>the early frozen-basis floor</td></tr>
     </tbody>
   </table>
 
   <p>
-    The bet succeeds only if the best \(\alpha\) arm clears <strong>floor + 0.05 = 0.7414</strong> (matching the old clean-step PASS). It is <strong>falsified</strong> — automatic STOP — if the best arm lands at or below <strong>floor + 0.02 = 0.7114</strong>, meaning the anchor-default merger is no better than doing nothing. In short: did stealing the anchor's signs convert the compressed gradient into a dense-quality update, or not?
+    EXP-25's pass/fail line was set against the old clean-step number (clear <strong>floor + 0.05 = 0.7414</strong> to pass; STOP at or below <strong>0.7114</strong>). Read with hindsight, those targets were anchored to the wrong floor — see the caveat below. The substantive question was the same either way: did stealing the anchor's signs convert the compressed gradient into a dense-quality update, or not?
   </p>
 
   <div class="warn">
-    <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the test of that gamble, and the outcome (and the mechanism behind it) is the subject of the later tabs.
+    <strong>[2026-06-16] The floor these targets used was wrong.</strong> The <span class="metric">0.7415</span>
+    above is not a realistic no-help baseline — it is an old config that still took a <em>fresh</em>, full-rank
+    clean step (the very full-\(H\) transfer the project is trying to avoid), and the <span class="metric">0.6914</span>
+    is an early frozen-basis number. The genuine realistic floor — plain PowerSGD running on the same stale
+    anchor circuit with <em>no</em> merger at all (arm C2, WandB <code>k6nmcuyd</code>) — is
+    <span class="metric">0.6300</span>. Against that honest floor the picture is very different from what
+    EXP-25 concluded: see the corrected verdict in the EXP-25 math tab.
+  </div>
+
+  <div class="warn">
+    <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the first test of that gamble; the outcome <em>as measured here</em> (and the mechanism behind it) is the subject of the later tabs. A crucial twist: the verdict below was reached on a circuit that, as later discovered, fed the anchor the wrong data — once that was fixed, the same merger behaved very differently, so read EXP-25's STOP as conditional on the circuit of the time.
   </div>
 
   <div class="callout">
     <strong>[2026-06-16] Where this led.</strong> The two-circuit substrate introduced here is now
-    permanent, and three things happened on top of it. <strong>EXP-29</strong> fixed a confound in how the
-    anchor used <em>trajectories</em> — it had been grading the current policy's data with stale weights
-    (see the EXP-29 tab). <strong>EXP-30</strong> built the &delta;-residual merger that finally reached
-    <strong>dense parity</strong> at ~5% communication cost — the current SOTA. <strong>EXP-31</strong>
-    confirmed that parity against an apples-to-apples dense rerun and showed the anchor-usage axis cannot
-    surpass dense (STOP). The signed_ema bet tested in this tab is falsified — but the substrate it proved
-    is what carried the program to parity.
+    permanent, and several things happened on top of it. <strong>EXP-29</strong> fixed a confound in how the
+    anchor computed its gradient — it had been grading the <em>current</em> policy's data with stale weights,
+    an off-policy "wrong-trajectory" gradient; the fix has the anchor grade the trajectories its own stale
+    weights generated, making its signal a valid policy gradient (see the EXP-29 tab). On that corrected
+    circuit the signed_ema merger of <em>this</em> tab was re-run (<strong>EXP-32</strong>) and it
+    <strong>now works</strong>: stable, no length-hack ignition, validation
+    <span class="metric">0.7271</span> at step 50 — near parity. So the sign bet is no longer falsified; it is
+    <em>works-but-dominated</em>. <strong>EXP-30</strong> built the &delta;-residual merger (error feedback)
+    that reached <strong>dense parity</strong> (~0.75) at ~5% communication cost and remains the
+    <strong>default / best</strong> method; <strong>EXP-31</strong> confirmed that parity against an
+    apples-to-apples dense rerun and showed the anchor-usage axis cannot surpass dense (STOP). The substrate
+    this tab proved is what carried the whole program there.
   </div>
 </section>
 
 <section class="tab-content" id="tab2">
   <h2>EXP-26: The Core Idea &mdash; Measure the Geometry Before You Spend on the Next Guess</h2>
 
+  <div class="warn">
+    <strong>Read this first &mdash; what survived and what was superseded.</strong> EXP-26's
+    <em>method</em> (diagnose the geometry before spending GPU-hours) and its Step-C falsification
+    (a gradient-energy basis anti-converts) both stand. But two of its headline <em>conclusions</em>
+    were later overturned by the #29 anchor-circuit fix: (1) its &ldquo;best result&rdquo; of
+    <span class="metric">0.7210</span> was beaten by error feedback (EXP-30 <code>delayed_ef</code>,
+    now the default, at dense parity ~0.75); and (2) its verdict that the <em>sign</em> term is
+    &ldquo;structurally hopeless, drop it forever&rdquo; was wrong &mdash; once the anchor's gradient was
+    made honest (#29), the sign method (<code>signed_ema</code>) learned and reached a stable
+    <span class="metric">0.7271</span> (EXP-32). The sign-disagreement measurement below was real; the
+    inference that it killed the method was a consequence of the off-policy anchor, not the sign term.
+    Caveats are inline; see the EXP-29 / EXP-30 / EXP-32 tabs.
+  </div>
+
   <p class="lede">
-    EXP-25 spent a full multi-arm training campaign to falsify one bad idea (the "signed_ema" merger).
-    EXP-26 refused to make the same trade: before committing any expensive training run, it ran a cheap
-    <em>geometry audit</em> on real gradients to decide <strong>which</strong> guess was worth the GPU-hours.
-    That single discipline &mdash; diagnose first, then spend &mdash; is the whole story of this experiment, and it
-    led to the best realistic communication-efficient result the program has produced (val@50 of 0.7210), still
-    2 points short of parity, with a precise reason why.
+    EXP-25 spent a full multi-arm training campaign on the "signed_ema" merger and (under the then-current
+    off-policy anchor) concluded it failed. EXP-26 refused to make the same trade: before committing any
+    expensive training run, it ran a cheap <em>geometry audit</em> on real gradients to decide
+    <strong>which</strong> guess was worth the GPU-hours. That single discipline &mdash; diagnose first, then
+    spend &mdash; is the durable contribution of this experiment, and at the time it produced the best
+    realistic communication-efficient result the program had (val@50 of 0.7210). <em>[Superseded &mdash; see
+    the box above; the current best is error feedback, EXP-30.]</em>
   </p>
 
   <h3>The setup, in one paragraph</h3>
@@ -262,19 +294,32 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
         <td><strong>H3</strong></td>
         <td>The sign-replacement disagreement is structural (a coin-flip), not a staleness artifact.</td>
         <td>Sign-agreement between \(M\) and \(G_{\text{comp}}\): 0.500 / 0.523 / 0.520 across delay settings 0 and 5.</td>
-        <td><strong>Confirmed</strong> &mdash; even a perfectly fresh anchor agrees on the sign only half the time.</td>
+        <td><strong>Measurement holds, inference superseded</strong> &mdash; the ~50% agreement is real, but it was measured against the off-policy <em>invalid-M</em> anchor; on the corrected circuit the sign method <em>learns</em> (EXP-32, 0.7271). Half-agreement does not kill it.</td>
       </tr>
     </tbody>
   </table>
 
   <p>
-    Read together, the story is unambiguous. H3 says the sign term is <em>structurally</em> hopeless: a fresh anchor
-    disagrees on the sign of the update as often as a fair coin, so no amount of fixing staleness can rescue it. H1 says
-    the merger's actual harm is a directional rotation, and H2 says the basis itself leaves most of the real update
-    energy on the table. The emitted decision was <code>go_C_then_B</code> with <code>retire_sign_replacement(confirmed)</code>:
-    drop the sign term forever, and because the basis content is suspect, test a better basis (Step C) <em>before</em>
-    the new merger (Step B).
+    Read together, the story <em>at the time</em> looked unambiguous. H3 appeared to say the sign term was
+    <em>structurally</em> hopeless: a fresh anchor disagreed on the sign of the update as often as a fair coin,
+    so &mdash; the reasoning went &mdash; no amount of fixing staleness could rescue it. H1 says the merger's
+    actual harm is a directional rotation, and H2 says the basis itself leaves most of the real update energy
+    on the table. The emitted decision was <code>go_C_then_B</code> with
+    <code>retire_sign_replacement(confirmed)</code>: drop the sign term, and because the basis content is
+    suspect, test a better basis (Step C) <em>before</em> the new merger (Step B).
   </p>
+  <div class="warn">
+    <strong>Where the H3 conclusion went wrong (post-#29).</strong> &ldquo;Retire the sign term forever&rdquo;
+    did not survive. The coin-flip agreement was measured against the <em>off-policy</em> anchor &mdash; an
+    \(M\) computed by forwarding the current batch through stale weights, i.e. a wrong-trajectory gradient.
+    The fix was not to fix <em>staleness</em> (H3 correctly ruled that out) but to fix the anchor's
+    <em>data</em>: #29's on-policy replay makes the anchor grade the trajectories its own stale weights
+    generated, so \(M\) is a valid stale-policy gradient. On that corrected circuit the sign method
+    (<code>signed_ema</code> \(\alpha=0.5\), \(\beta_{\text{anc}}=0\)) is stable and near-parity
+    (<span class="metric">0.7271</span>, EXP-32). So H3's <em>diagnosis of the symptom</em> was right, but its
+    <em>verdict on the method</em> was an artifact of the off-policy confound. (The Step C / Step B ordering it
+    drove was still sound; the basis result below stands on its own.)
+  </div>
 
   <div class="warn">
     <strong>An honest caveat baked into the audit.</strong> The textbook discriminator &mdash; the angle between the
@@ -353,12 +398,15 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 
   <h3>One-screen outcome</h3>
   <p>
-    The new merger (ef_powersgd) is the best realistic communication-efficient result the program has produced. It
+    At the time, the new merger (ef_powersgd) was the best realistic communication-efficient result the program had. It
     preserves the update direction (\(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.9558\), versus the old merger's 0.717),
-    beats the falsified EXP-25 signed_ema by 1.4 points and the plain codec on the same realistic substrate by 7.7
-    points, with no deterministic collapse on the promoted run. But it lands at <span class="metric">val@50 0.7210</span>
-    against a parity target of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
-    verdict is <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+    beat the then-failing EXP-25 signed_ema by 1.4 points and the plain codec on the same realistic substrate by 7.7
+    points, with no deterministic collapse on the promoted run. But it landed at <span class="metric">val@50 0.7210</span>
+    against the in-box dense draw of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
+    verdict was <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+    <em>(Reference note: that 0.7414 was a single dense draw used here as the bar; the parity question was later
+    settled against the dense <strong>band</strong> 0.75&ndash;0.78, with the realistic no-merger floor at
+    <span class="metric">0.6300</span>, not 0.7414.)</em>
     <em>[2026-06-16 update: superseded. Issue #27's damped error-feedback ignited anyway (EXP-27, STOP).
     The error-feedback idea was then rebuilt on the codec's <strong>own exact residual</strong> &mdash;
     EXP-30's &delta;-residual merger, <code>delayed_ef</code> &lambda;=1 &mdash; which reached dense parity
@@ -367,12 +415,12 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 
   <table class="data">
     <thead>
-      <tr><th>Arm</th><th>Method</th><th>val@50</th><th>vs. parity 0.7414</th></tr>
+      <tr><th>Arm</th><th>Method</th><th>val@50</th><th>vs. in-box dense 0.7414 (historical bar)</th></tr>
     </thead>
     <tbody>
       <tr><td>dense reference</td><td>compression off</td><td>0.7536</td><td>+0.0122</td></tr>
       <tr><td><strong>B_ef (promoted)</strong></td><td>ef_powersgd (direction-preserving)</td><td><strong>0.7210</strong></td><td>&minus;0.0204</td></tr>
-      <tr><td>EXP-25 reference</td><td>signed_ema (falsified)</td><td>0.7066</td><td>&minus;0.0348</td></tr>
+      <tr><td>EXP-25 reference</td><td>signed_ema (then-failing; later learns &mdash; see EXP-32)</td><td>0.7066</td><td>&minus;0.0348</td></tr>
       <tr><td>B_plain</td><td>plain codec on the realistic substrate</td><td>0.6437</td><td>&minus;0.0977</td></tr>
       <tr><td>C2_hybrid</td><td>geometry-winning basis (Step C)</td><td>0.3730</td><td>&minus;0.3684</td></tr>
     </tbody>
@@ -392,13 +440,26 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <h2>EXP-25: What We Achieved, and the Mathematics of the EMA-Sign Merger</h2>
 
   <p class="lede">
-    EXP-25 has two stories. The first is a genuine win: it built and verified the realistic two-circuit substrate that every later experiment now runs on — a continuously-maintained, deliberately-stale, full-coverage uncompressed reference that drives the compression. The second is an honest falsification: the specific way EXP-25 chose to <em>use</em> that reference — borrowing its per-coordinate signs (the <em>signed_ema</em> merger) — cannot work, and we can now show exactly why with the actual measured numbers. This tab covers both: what was banked, and the small piece of mathematics that explains why stealing the anchor's signs is a coin-flip dressed up as a correction.
+    EXP-25 has two stories. The first is a genuine win: it built and verified the realistic two-circuit substrate that every later experiment now runs on — a continuously-maintained, deliberately-stale, full-coverage uncompressed reference that drives the compression. The second was read at the time as a falsification: the specific way EXP-25 chose to <em>use</em> that reference — borrowing its per-coordinate signs (the <em>signed_ema</em> merger) — appeared not to work, and the mathematics below shows exactly why <em>on the circuit as it then stood</em>. That qualifier turned out to matter. A later fix (EXP-29) changed how the anchor computes its gradient, and on the corrected circuit the very same merger trains stably to near-parity (<span class="metric">0.7271</span>, EXP-32). So the honest reading today is not "cannot work" but <strong>works-but-dominated</strong>: the sign merger is fine, just beaten by error feedback (the default method). This tab keeps the original analysis — it correctly diagnoses the <em>old</em> circuit — and threads through, at each step, what the #29 fix changed.
   </p>
+
+  <div class="win">
+    <strong>[2026-06-16] Headline correction.</strong> The strong claim this tab originally made — that the
+    sign merger is <em>net-harmful at every \(\alpha\)</em> — was an artifact of a broken circuit, not a
+    property of the merger. It rested on (i) a wrong floor (<span class="metric">0.7415</span>, an old
+    fresh-clean-step config) and (ii) an anchor that graded the current policy's trajectories with stale
+    weights, producing an off-policy "wrong-trajectory" sign source. Fix the floor to the real one
+    (<span class="metric">0.6300</span>, plain PowerSGD on the stale anchor, no merger) and fix the anchor's
+    data (EXP-29), and signed_ema at \(\alpha=0.5\) trains stably to <span class="metric">0.7271</span> — well
+    above the floor and within striking distance of dense (~0.75). It is <strong>dominated</strong> by error
+    feedback (delayed_ef, ~0.74, the default), not harmful. Read the falsification chain below as a correct
+    post-mortem of the <em>pre-#29</em> circuit, now superseded.
+  </div>
 
   <h3>Part 1 — What EXP-25 actually achieved</h3>
 
   <p>
-    The headline result is a STOP, but a STOP that left behind a working substrate and a sharp mechanistic picture. Four concrete things were banked.
+    The headline at the time was a STOP, but a STOP that left behind a working substrate and a sharp mechanistic picture — and that, with hindsight, was a verdict on a broken circuit rather than on the merger (see the headline correction above). Four concrete things were banked.
   </p>
 
   <p>
@@ -406,11 +467,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </p>
 
   <p>
-    <strong>2. A clean, monotonic dose-response on the merger knob.</strong> The merger blends the fast gradient with the anchor's sign through one knob \(\alpha\); EXP-25 swept it across three byte-identical arms. The result is unambiguous and reproduced in Part 2's table: the more the stale sign is used, the worse training gets. There is no interior sweet spot.
+    <strong>2. A clean, monotonic dose-response on the merger knob (on the EXP-25 circuit).</strong> The merger blends the fast gradient with the anchor's sign through one knob \(\alpha\); EXP-25 swept it across three byte-identical arms. The result was unambiguous and is reproduced in Part 2's table: on that circuit, the more the stale sign was used, the worse training got, with no interior sweet spot. The later correction — once the anchor's gradient was fixed — is that this monotone-downward shape was a property of the <em>confounded sign source</em>, not the knob; at \(\alpha=0.5\) the corrected circuit reaches 0.7271 (Part 2, (e)).
   </p>
 
   <p>
-    <strong>3. The mechanism discovery — length-hacking, not low entropy, is the killer.</strong> When the merger drives training off a cliff, the symptom is not subtle. The model's answers explode in length toward the 16,000-token cap, while its <em>entropy</em> (a measure of how spread-out its next-token choices are, in nats — high means uncertain, low means confident) collapses toward zero. The instinct is to blame the entropy collapse. EXP-25 disproved that: the uncompressed dense control trains down to entropy <span class="metric">0.12</span> — <em>lower</em> than any surviving compressed arm — and stays healthy with bounded ~280-token answers. Low entropy is a confident solver, not a broken one. What actually destroys validation accuracy is the response-length runaway: the model discovers that emitting longer and longer text raises its odds of stumbling onto the answer string under the lenient reward, reward briefly rises, then the answers blow past usefulness and accuracy falls off a cliff.
+    <strong>3. The mechanism discovery — length-hacking, not low entropy, is the killer.</strong> When the merger drove training off a cliff (the pre-#29 low-\(\alpha\) arms), the symptom was not subtle. The model's answers explode in length toward the 16,000-token cap, while its <em>entropy</em> (a measure of how spread-out its next-token choices are, in nats — high means uncertain, low means confident) collapses toward zero. The instinct is to blame the entropy collapse. EXP-25 disproved that: the uncompressed dense control trains down to entropy <span class="metric">0.12</span> — <em>lower</em> than any surviving compressed arm — and stays healthy with bounded ~280-token answers. Low entropy is a confident solver, not a broken one. What actually destroys validation accuracy is the response-length runaway: the model discovers that emitting longer and longer text raises its odds of stumbling onto the answer string under the lenient reward, reward briefly rises, then the answers blow past usefulness and accuracy falls off a cliff.
   </p>
 
   <p>
@@ -418,7 +479,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </p>
 
   <div class="callout">
-    <strong>The KL guardrail diagnostic.</strong> To prove length-hacking is the proximate killer, EXP-25 re-ran the catastrophic \(\alpha=0\) arm with a small KL penalty added (a leash tying the policy to a fixed reference, which starves runaway non-stopping generations). The length explosion vanished — answers stayed at ~120 tokens, truncation stayed at zero — and the catastrophe (validation accuracy <span class="metric">0.354</span>) became a mild decline to <span class="metric">0.679</span>. The leash removed the <em>symptom</em>. But 0.679 is still <em>below</em> the no-help floor of 0.6914: the merger's underlying direction damage survives the guardrail. The brake stops the crash; it does not make the sign-borrowing helpful.
+    <strong>The KL guardrail diagnostic.</strong> To prove length-hacking is the proximate killer, EXP-25 re-ran the catastrophic \(\alpha=0\) arm with a small KL penalty added (a leash tying the policy to a fixed reference, which starves runaway non-stopping generations). The length explosion vanished — answers stayed at ~120 tokens, truncation stayed at zero — and the catastrophe (validation accuracy <span class="metric">0.354</span>) became a mild decline to <span class="metric">0.679</span>. This pins length-hacking as the proximate mechanism of the \(\alpha=0\) collapse, which is the durable point. The original tab went further — reading 0.679 as "below the floor, so the sign damage survives the brake" — but that read used the wrong floor and the pre-#29 circuit; on the corrected circuit \(\alpha=0.5\) needs no leash at all and reaches 0.7271. So treat this as a clean diagnosis of the <em>old</em> \(\alpha=0\) failure, not as evidence the sign primitive is intrinsically harmful.
   </div>
 
   <h3>Part 2 — The mathematics of the EMA-sign bet</h3>
@@ -430,7 +491,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   $$ G_{\text{corr}} \;=\; \alpha\,G_{\text{comp}} \;+\; (1-\alpha)\,\lvert G_{\text{comp}}\rvert \odot \operatorname{sign}(M), $$
 
   <p>
-    where \(\lvert G_{\text{comp}}\rvert\) is the per-coordinate absolute value (the magnitudes), \(\operatorname{sign}(M)\) is \(+1\) or \(-1\) per coordinate (the directions from the anchor), \(\odot\) is element-wise multiplication, and \(\alpha\in[0,1]\) is the mixing knob. \(M\) is an <em>exponential moving average</em> (EMA) of the stale anchor gradient — a running blend \(M_t = \beta M_{t-1} + (1-\beta)G_{\text{anchor}}\) with \(\beta=0.95\), so it remembers roughly the last twenty refreshes and smooths out noise.
+    where \(\lvert G_{\text{comp}}\rvert\) is the per-coordinate absolute value (the magnitudes), \(\operatorname{sign}(M)\) is \(+1\) or \(-1\) per coordinate (the directions from the anchor), \(\odot\) is element-wise multiplication, and \(\alpha\in[0,1]\) is the mixing knob. \(M\) is an <em>exponential moving average</em> (EMA) of the stale anchor gradient — a running blend \(M_t = \beta M_{t-1} + (1-\beta)G_{\text{anchor}}\). EXP-25 ran this with \(\beta=0.95\), smoothing over roughly the last twenty refreshes. That choice turns out to matter more than the sign rule: because RL policy gradients are valid only at the policy that produced them, accumulating old ones (\(\beta>0\)) folds in stale, off-policy directions, whereas using only the <em>freshest</em> anchor gradient (\(\beta_{\text{anc}}=0\), \(M=G_{\text{anchor}}\)) is what the corrected-circuit result relies on. That distinction is developed in the anchor tab; here we analyze the merger geometry EXP-25 actually measured.
   </p>
 
   <h3>Why it could plausibly work</h3>
@@ -443,10 +504,10 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     Apply that intuition here. The anchor's \(M\) is an averaged, clean, uncompressed gradient — exactly the kind of robust sign source signSGD wants. If the <em>direction</em> the true update wants to go is stable over the five-tick refresh window, then a slightly stale sign is still the <em>right</em> sign. The merger would then give the best of both worlds: keep the fast circuit's well-calibrated magnitudes (\(\lvert G_{\text{comp}}\rvert\)), and borrow trustworthy direction bits from the clean reference (\(\operatorname{sign}(M)\)). Superficially, this is exactly the seam where a stale clean reference should help a noisy fast one.
   </p>
 
-  <h3>Why it cannot work — the falsification chain</h3>
+  <h3>Why it didn't work on the old circuit — the falsification chain</h3>
 
   <p>
-    The whole argument hinges on one assumption: that the anchor's sign and the fast gradient's sign usually <em>agree</em>. They do not. We measured it.
+    The whole argument hinges on one assumption: that the anchor's sign and the fast gradient's sign usually <em>agree</em>. On the EXP-25 circuit they did not, and we measured it. (Hold onto <em>why</em> they disagreed — that turns out to be the fixable part, addressed at the end of this section.)
   </p>
 
   <p>
@@ -463,34 +524,39 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </table>
 
   <p>
-    All sit at roughly one-half — a coin-flip. Crucially this holds even at <strong>zero staleness</strong> (a perfectly fresh anchor gradient), which kills the obvious defense. The disagreement is <em>not</em> caused by the sign being out of date; it is structural. For about half the coordinates, the merger flips the sign of the update.
+    All sit at roughly one-half — a coin-flip — and (the original tab's key point) this holds even at <strong>zero staleness</strong>, so the disagreement is not merely the sign being out of date. On the EXP-25 circuit, for about half the coordinates the merger flips the sign of the update. The original tab read this as "structural, therefore unfixable." That was half right: it is not caused by <em>staleness</em>, but it <em>was</em> caused by something fixable — the anchor was computing its gradient on the wrong data (next paragraph), so its sign was a biased estimate to begin with. These numbers describe the <em>pre-#29</em> anchor.
   </p>
 
   <p>
-    <strong>(b) Why it is structural.</strong> Two reasons, both about the gradients being different objects rather than stale copies of one object. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, and deeper, a near-orthogonality geometry. The true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates sitting near zero, where the sign is essentially decided by residual sampling noise. When you compare two independent noisy estimates of a quantity that is near zero on most coordinates, their per-coordinate signs agree about half the time — <em>even when the two gradients' overall directions are aligned</em>. This is the same geometry that makes two random high-dimensional vectors nearly orthogonal. The coin-flip is the expected signature, not an anomaly.
+    <strong>(b) Why the signs disagreed — and which part was fixable.</strong> Three reasons, of increasing importance. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, a near-orthogonality geometry: the true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates near zero, where the sign is decided by residual sampling noise; comparing two independent noisy estimates of a near-zero quantity, their per-coordinate signs agree about half the time even when overall directions are aligned (the same geometry that makes random high-dimensional vectors nearly orthogonal). These two are real and partly irreducible. <strong>But the dominant, fixable cause was a third one the original tab missed: the anchor was grading the <em>wrong trajectories.</em></strong> It ran its clean backward pass at the stale weights but on the trajectories the <em>current</em> policy had generated — an off-policy mismatch, so its gradient was a biased estimate of "the wrong distribution at the wrong weights." Its sign was not a trustworthy clean reference; it was a confounded one. EXP-29 fixed exactly this (the anchor now grades the trajectories its own stale weights generated, an honest stale-policy gradient), and the merger's behavior changed — see the end of this section. So the coin-flip was the expected signature <em>of a broken sign source</em>, not proof the sign primitive is doomed.
   </p>
 
   <div class="callout">
-    <strong>[2026-06-16] A third issue — the trajectory confound — and what survived it.</strong> There was
-    a further problem with the anchor \(M\) measured here, found later by a code review: it computed its
-    gradient at the stale weights but on the <em>current</em> policy's trajectories (a stale-weights &times;
-    current-batch mismatch, since the anchor was fed the current tick's batch). <strong>EXP-29</strong>
-    fixed this with on-policy replay — the anchor now grades the trajectories its own stale weights
-    generated (see the EXP-29 tab). The important part for <em>this</em> tab: <strong>EXP-30 re-measured
-    sign-agreement on the corrected, generator-consistent anchor and found it just as orthogonal</strong>
-    (\(\cos \approx 0\)). So the coin-flip above is genuinely structural — not an artifact of the confound.
-    The fix unlocked the <em>residual</em> route to SOTA (EXP-30) without un-falsifying the
-    <em>sign-replacement</em> route analyzed here; both readings stand together.
+    <strong>[2026-06-16] The trajectory confound, the fix, and what actually changed.</strong> The third
+    issue in (b) — the anchor grading the current policy's trajectories at stale weights — was found later by
+    a code review and fixed in <strong>EXP-29</strong> with on-policy replay (the anchor grades the
+    trajectories its own stale weights generated; see the EXP-29 tab). Two things follow, and they are easy
+    to conflate, so be precise. (1) At the raw <em>gradient-vector</em> level, the corrected anchor is still
+    nearly orthogonal to the clipped fast gradient (\(\cos \approx 0\)) — the loss-mismatch and cancellation
+    geometry of (b) are partly irreducible. That is <em>why error feedback, not sign-replacement, became the
+    SOTA route</em> (EXP-30): feeding back the codec's own dropped residual is a near-aligned correction,
+    whereas the anchor's sign is not. (2) But signed_ema is no longer a coin-flip <em>dressed as a
+    correction that hurts</em>: with the sign source now a valid stale-policy gradient, running the merger at
+    \(\alpha=0.5\) on the corrected circuit (<strong>EXP-32</strong>) trains stably to
+    <span class="metric">0.7271</span> — no ignition, well above the real 0.6300 floor, near dense. The old
+    "net-harmful at every \(\alpha\)" verdict does not survive the fix; "<em>dominated by error feedback</em>"
+    does. The residual route to SOTA and the now-working-but-dominated sign route are both consequences of the
+    same fix.
   </div>
 
   <p>
-    <strong>(c) The confound-free measurement of the damage.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
+    <strong>(c) How hard the merger reorients the step.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
   </p>
 
   $$ \cos\!\big(G_{\text{comp}},\,G_{\text{corr}}\big) \;=\; 0.717 \quad\Longrightarrow\quad \theta = \arccos(0.717) \approx 44^{\circ}. $$
 
   <p>
-    The merger rotates the already-compressed update by about <strong>44 degrees</strong> — nearly halfway to perpendicular. It is not a gentle correction; it is a large reorientation of the step the optimizer takes.
+    The merger rotates the already-compressed update by about <strong>44 degrees</strong> — nearly halfway to perpendicular. This is a <em>large</em> reorientation, not a gentle nudge. On the pre-#29 circuit, where the sign source was biased, a 44° turn toward a confounded direction was damage. On the corrected circuit it is a 44° turn toward a <em>valid</em> stale-policy direction, and the run survives it (0.7271). The magnitude of the rotation is a property of \(\alpha=0.5\); whether it helps or hurts depends entirely on what it is rotating <em>toward</em> — which is exactly what #29 fixed.
   </p>
 
   <p>
@@ -506,28 +572,29 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   $$ \big\lVert G_{\text{corr}} - G_{\text{comp}}\big\rVert^2 = \sum_{\text{disagree}} 4\,g_i^2 = 4 f \,\lVert G_{\text{comp}}\rVert^2 \quad\Longrightarrow\quad \frac{\lVert G_{\text{corr}}-G_{\text{comp}}\rVert}{\lVert G_{\text{comp}}\rVert} = 2\sqrt{f}, $$
 
   <p>
-    where \(f\) is the magnitude-weighted fraction of disagreeing coordinates. EXP-25 logged this relative-change quantity every step: its median is <span class="metric">1.416 \(\approx \sqrt{2}\)</span>. Inverting, \(2\sqrt{f}=\sqrt{2}\) gives \(f = \tfrac12\) — confirming, from a completely independent measurement during the actual run, that half the gradient's mass has its sign flipped at full magnitude every single step.
+    where \(f\) is the magnitude-weighted fraction of disagreeing coordinates. EXP-25 logged this relative-change quantity every step: its median is <span class="metric">1.416 \(\approx \sqrt{2}\)</span>. Inverting, \(2\sqrt{f}=\sqrt{2}\) gives \(f = \tfrac12\) — confirming, from a completely independent measurement during the actual run, that half the gradient's mass had its sign flipped at full magnitude every step <em>on that circuit</em>. The algebra \(G_{\text{corr},i}=(2\alpha-1)G_{\text{comp},i}\) is exact and circuit-independent; what changed with #29 is the <em>meaning</em> of a flip. When the anchor's sign comes from a biased off-policy gradient, flipping toward it is a step in the wrong direction; when it comes from a valid stale-policy gradient, the flips land on coordinates where the clean reference genuinely disagrees with the compressed estimate, and following it is informative rather than destructive. Same \(\sqrt 2\), opposite consequence.
   </p>
 
   <p>
-    <strong>(e) The dose-response is exactly what this model predicts.</strong> If the sign term injects a wrong-direction perturbation on half the coordinates, then dialing it up (lowering \(\alpha\)) should monotonically worsen training — which is precisely what was observed:
+    <strong>(e) The dose-response on the old circuit — and how it moved after #29.</strong> On the pre-#29 circuit, where the sign source was a biased off-policy gradient, the model in (d) predicts that dialing the sign term up (lowering \(\alpha\)) injects a wrong-direction perturbation on half the coordinates and should monotonically worsen training — which is precisely what was observed (top three rows). The corrected circuit (EXP-32, bottom row) tells the rest of the story:
   </p>
 
   <table class="data">
-    <thead><tr><th>\(\alpha\)</th><th>Effect on a disagreeing coordinate</th><th>val@50</th><th>Outcome</th></tr></thead>
+    <thead><tr><th>\(\alpha\)</th><th>Circuit</th><th>Effect on a disagreeing coordinate</th><th>val@50</th><th>Outcome</th></tr></thead>
     <tbody>
-      <tr><td>0.0</td><td>\(-1.0\,\lvert G\rvert\) — full reversal</td><td><span class="metric">0.3541</span></td><td>catastrophic collapse</td></tr>
-      <tr><td>0.3</td><td>\(-0.4\,\lvert G\rvert\) — 40% reversal</td><td><span class="metric">0.6164</span></td><td>peak-then-crash</td></tr>
-      <tr><td>0.5</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7066</span></td><td>survives, but throws away half the gradient</td></tr>
+      <tr><td>0.0</td><td>pre-#29</td><td>\(-1.0\,\lvert G\rvert\) — full reversal</td><td><span class="metric">0.3541</span></td><td>catastrophic collapse</td></tr>
+      <tr><td>0.3</td><td>pre-#29</td><td>\(-0.4\,\lvert G\rvert\) — 40% reversal</td><td><span class="metric">0.6164</span></td><td>peak-then-crash</td></tr>
+      <tr><td>0.5</td><td>pre-#29</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7066</span></td><td>survives (on broken data)</td></tr>
+      <tr class="hl"><td>0.5</td><td>corrected (#29)</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7271</span></td><td>stable, near parity, no ignition</td></tr>
     </tbody>
   </table>
 
   <p>
-    The best arm sits at the <em>least-correction</em> edge of the swept range, and \(\alpha\to1\) (no sign term at all — plain PowerSGD) is predicted to be best of all. The correction's optimum is to be turned off. That is a verdict on the <em>primitive</em>, not a tuning miss.
+    Two readings, both true. <em>Within the pre-#29 circuit</em>, the dose-response is monotone and the least-correction edge wins — a clean verdict that the sign term, fed a confounded reference, only hurts. <em>Across the fix</em>, the same \(\alpha=0.5\) merger climbs from 0.7066 to <span class="metric">0.7271</span> once the anchor computes a valid gradient: the verdict was on the <em>circuit</em>, not on the primitive. What remains true is the comparison to the alternative — error feedback reaches dense parity (~0.75) where signed_ema reaches ~0.73, so the sign route is <strong>dominated, not dead</strong>. We did not re-sweep \(\alpha<0.5\) on the corrected circuit; the load-bearing point is that the catastrophic-at-every-dose claim was an artifact, and at the sensible operating point the merger now works.
   </p>
 
   <p>
-    <strong>(f) The sharpening spiral.</strong> The chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward.
+    <strong>(f) The sharpening spiral (the pre-#29, low-\(\alpha\) extreme).</strong> On the old circuit at small \(\alpha\) the chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward. <strong>This is the failure mode #29 defused at the operating point:</strong> with a valid sign source, the corrected-circuit \(\alpha=0.5\) run shows none of it — bounded length, no ignition, val 0.7271. The spiral was the signature of pushing hard toward a <em>wrong</em> direction, not of the sign primitive as such.
     <em>[2026-06-11 refinement (EXP-27 post-mortem): the general ordering is now established as
     <strong>length-first</strong> — the spiral ignites and entropy collapse <em>trails</em> it (ef&nbsp;r1
     ignited at entropy 0.83, then collapsed; the boundary is joint dose&times;sharpness, not an entropy
@@ -536,7 +603,21 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </p>
 
   <div class="warn">
-    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect. <em>[2026-06-16: that error-feedback line was itself later rebuilt on the codec's <strong>own exact</strong> residual (EXP-30's &delta;-residual merger) and reached dense parity, ~0.75 — the 0.7210 here is superseded; see the EXP-30 tab.]</em>
+    <strong>The realistic-floor correction (this is the number that moved the verdict).</strong> EXP-25's
+    "net-harmful at every \(\alpha\)" verdict was scored against a <em>fresh, clean</em> reference
+    (\(0.7415\), an old config that took a full-rank clean step). That was the wrong yardstick. The honest
+    realistic floor is plain PowerSGD on the same stale-anchor substrate with <em>no</em> merger — arm C2,
+    val@50 <span class="metric">0.6300</span> (WandB <code>k6nmcuyd</code>); an earlier EXP-26 run of the same
+    no-merger config read <span class="metric">0.6437</span>, both well <em>below</em> signed_ema's 0.7066.
+    Measured against 0.6300, even the pre-#29 signed_ema at \(\alpha=0.5\) was <strong>net-helpful</strong>
+    (+0.077), not harmful — it was partially <em>rescuing</em> a substrate whose stale-anchor basis refresh is
+    itself a drag. So two pre-#29 claims fall together: "net-harmful at every \(\alpha\)" (it cleared the real
+    floor) and the 0.7415 baseline it was judged against. What survives is the <em>relative</em> ranking:
+    error feedback — feed back the codec's own exact dropped residual instead of borrowing a sign — reached
+    <strong>dense parity (~0.75)</strong> with the rotation cut to about 17 degrees (EXP-30's
+    &delta;-residual merger; an earlier residual variant read 0.7210). Sign-replacement reaches ~0.73 on the
+    corrected circuit. The verdict, stated correctly: signed_ema <strong>works and helps</strong>, but is
+    <strong>dominated by error feedback</strong>, which is the default. See the EXP-30 tab.
   </div>
 
   <p>
@@ -554,9 +635,13 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     captures, and why a basis can hold 99.85% of the <em>picture</em> a layer sends yet only
     31.8% of the <em>learning signal</em>. Then the three things we tested on that geometry —
     a new basis content (Step&nbsp;C), error-feedback (Step&nbsp;B) — and what they taught us.
-    The headline: the issue lands at <span class="metric">REVISE</span>, with the best
-    realistic comm-efficient result to date (val@50 <span class="metric">0.7210</span>) two
-    points short of parity, and one clean, decisive falsification along the way.
+    At the time the issue landed at <span class="metric">REVISE</span> (val@50
+    <span class="metric">0.7210</span>, two points short of the in-box dense draw), with one clean,
+    decisive basis falsification along the way. <em>[Two conclusions here were later overturned by the
+    #29 anchor fix: 0.7210 was beaten by error feedback (EXP-30, the current default, at dense parity
+    ~0.75), and the &ldquo;the sign term is structurally hopeless&rdquo; reading was an artifact of the
+    off-policy anchor — on the corrected circuit the sign method learns (EXP-32, 0.7271). The geometry
+    primer and the Step-C falsification below stand; the sign verdict is caveated inline.]</em>
   </p>
 
   <h3>1. The geometry primer — subspaces as camera angles</h3>
@@ -658,8 +743,12 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <em>operand mismatch</em>: PowerSGD compresses the <em>activation</em> gradient, not the
     <em>weight</em> gradient, so \(G_{\text{comp}}\) is simply not \(Q Q^{\top} G_{\text{weight}}\).
     Both push the naive cosine toward zero independent of direction (the measured
-    \(\cos(G_{\text{fresh}}, G_{\text{comp}})=0.010\) is an artifact — plain PowerSGD r77 ties
-    dense at 0.7415, so it cannot truly be orthogonal to dense).
+    \(\cos(G_{\text{fresh}}, G_{\text{comp}})=0.010\) is an artifact — plain PowerSGD r77 trains to a
+    usable accuracy, so it cannot truly be orthogonal to dense).
+    <em>(The original draft cited 0.7415 here as the PowerSGD-only number; that was an old clean-step
+    config, not the realistic substrate. On the realistic anchor substrate the no-merger floor is
+    <span class="metric">0.6300</span> — still well clear of zero, so the &ldquo;not orthogonal&rdquo;
+    point holds.)</em>
   </p>
   <p>
     The fix was to pivot to <strong>confound-free discriminators</strong> that never reference
@@ -679,12 +768,24 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     </tbody>
   </table>
   <p>
-    The coin-flip sign agreement at <em>zero</em> staleness is the kill shot for the EXP-25
-    merger: it proves the sign disagreement is <strong>structural</strong>, not a symptom of a
-    stale anchor you could fix by refreshing more often. That routed us to a sign-free
-    successor (Step&nbsp;B), and the 68% off-principal miss routed us to test the basis content
-    first (Step&nbsp;C).
+    The coin-flip sign agreement at <em>zero</em> staleness <em>looked like</em> the kill shot for the
+    EXP-25 merger: it shows the sign disagreement is <strong>structural</strong>, not a symptom of a
+    stale anchor you could fix by refreshing more often. That routed us to a sign-free successor
+    (Step&nbsp;B), and the 68% off-principal miss routed us to test the basis content first (Step&nbsp;C).
   </p>
+  <div class="warn">
+    <strong>Post-#29 correction.</strong> The structural-disagreement <em>measurement</em> stands, but it
+    did <strong>not</strong> kill sign-replacement. The agreement was measured against the <em>off-policy
+    invalid-M</em> anchor (an \(M\) formed by forwarding the current batch through stale weights — a
+    wrong-trajectory gradient), so a near-50% sign agreement is what you'd expect from a <em>mismatched</em>
+    reference, not proof the sign term is useless. The variable Step&nbsp;A held fixed was anchor
+    <em>staleness</em> (correctly ruled out); the variable it could not see was the anchor's <em>data
+    validity</em>. #29's on-policy replay fixed the data, and on that corrected circuit
+    <code>signed_ema</code> (\(\alpha=0.5\), \(\beta_{\text{anc}}=0\)) is stable and near-parity
+    (<span class="metric">0.7271</span>, EXP-32). So the routing to Step&nbsp;B/C was a reasonable call at
+    the time, but &ldquo;the sign term is dead&rdquo; was an artifact of the off-policy confound, not a
+    geometric necessity. See the EXP-29 / EXP-32 tabs.
+  </div>
 
   <h3>4. Step C — the Q-content mathematics, and a beautiful falsification</h3>
   <p>
@@ -793,9 +894,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     the update. The residual dose \(\lVert G_{\text{corr}}-G_{\text{comp}}\rVert/\lVert G_{\text{comp}}\rVert\)
     sat at a median 0.32, rising to 0.47 as the basis went stale (a real, growing correction,
     not a no-op). The outcome: <strong>val@50 0.7210</strong>, the best realistic
-    comm-efficient result to date — +1.4 points over the falsified EXP-25 signed_ema, +7.7
-    points over plain PowerSGD on the same realistic substrate, with no deterministic collapse
-    on the promoted run, and a measured ~19.8&times; communication reduction.
+    comm-efficient result <em>at the time</em> — +1.4 points over the then-failing EXP-25 signed_ema
+    (which later learns, 0.7271; see EXP-32), +7.7 points over plain PowerSGD on the same realistic
+    substrate, with no deterministic collapse on the promoted run, and a measured ~19.8&times;
+    communication reduction. <em>(Superseded as the best result by error feedback, EXP-30 — see the
+    resolution box below.)</em>
   </p>
   <div class="warn">
     <strong>The catch.</strong> Parity is 0.7414; we landed 2.0 points short — hence
@@ -906,11 +1009,20 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <p class="lede">
     EXP-27 damps the ef_powersgd residual (clip 1.0&rarr;0.5, decay 0.9&rarr;0.5) and runs for
     100 steps. The dose was capped exactly as designed. The run ignited anyway at step&nbsp;61,
-    reached val@50&nbsp;=&nbsp;<span class="metric">0.7202</span> (below the 0.7210 falsify
-    floor), and was killed at step&nbsp;68. This tab records what happened, why, and what comes
-    next. Full analysis: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> +
-    <code>runs/EXP-27/RUN_COMPARISON.md</code>.
+    reached val@50&nbsp;=&nbsp;<span class="metric">0.7202</span>, and was killed at step&nbsp;68.
+    This tab records what happened, why, and what came next. Full analysis:
+    <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> + <code>runs/EXP-27/RUN_COMPARISON.md</code>.
   </p>
+  <div class="callout">
+    <strong>Read this tab through two later corrections.</strong> (1) EXP-27 ran on the
+    <em>pre-#29 anchor circuit</em>, so its \(M\) was the off-policy &ldquo;wrong-trajectory&rdquo;
+    gradient (current batch scored by stale weights, no importance correction) &mdash; see the EXP-29 tab.
+    (2) It ran at the configured default \(\beta_{\text{anc}} = 0.95\), a <em>long</em> anchor-EMA memory.
+    Both turned out to be exactly the ingredients of the carrier identified below, and both were removed in
+    the SOTA configuration (valid \(M\) via on-policy replay, and \(\beta_{\text{anc}} = 0\)). The
+    diagnosis here was correct; the later fixes <em>act on the very mechanism it isolated</em>. Where a
+    pre-#29 claim is now superseded, it is flagged inline.
+  </div>
 
   <h3>Run timeline: healthy phase &rarr; ignition lock-in</h3>
 
@@ -949,7 +1061,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     </thead>
     <tbody>
       <tr><td>dense <code>5e2jpho9</code></td><td>50</td><td>0.135</td><td>193</td><td>1 (s6, warmup)</td><td><span class="metric">0.7536</span></td><td>STABLE — zero carrier signature</td></tr>
-      <tr><td>signed_ema &alpha;=0.5 <code>1wulaelw</code></td><td>50 (censored)</td><td>0.371</td><td>170</td><td><strong>2 (consecutive s47–48)</strong>, len 5806@50</td><td>0.7066</td><td>DANGER @50 — early spiral, P(ignite by s100)&nbsp;&asymp;&nbsp;0.6</td></tr>
+      <tr><td>signed_ema &alpha;=0.5 <code>1wulaelw</code> <em>(invalid&#8209;M)</em></td><td>50 (censored)</td><td>0.371</td><td>170</td><td><strong>2 (consecutive s47–48)</strong>, len 5806@50</td><td>0.7066</td><td>DANGER @50 on the <em>pre&#8209;#29</em> circuit — <strong>superseded</strong>: re&#8209;run on valid&#8209;M (EXP&#8209;32 <code>cwz1hu5p</code>) is STABLE, 0.7271@50, no ignition</td></tr>
       <tr class="hl"><td>damped-EF EXP-27 <code>qa6sll3h</code></td><td>67 (killed)</td><td>0.401</td><td>166</td><td><strong>7 (s61–67)</strong></td><td>0.7202</td><td>EXPLODED s61 — same spiral, longer lag</td></tr>
       <tr><td>ef parent r2 <code>tilwe80t</code></td><td>50</td><td>0.396</td><td>146</td><td>1 (isolated)</td><td>0.7210</td><td>FIRST-PASSAGE LUCKY (emitted spikes, survived)</td></tr>
       <tr><td>plain <code>u1v94opv</code></td><td>50</td><td>0.478</td><td>197</td><td><strong>1 (s1, warmup)</strong></td><td>0.6437</td><td>STABLE — no carrier, zero emission after warmup</td></tr>
@@ -980,9 +1092,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <li><strong>comp_t &perp; G_t exactly</strong> (by construction:
       <code>spectral_filter.py:378–379</code>). Every injected force is tangential —
       it neither helps nor hurts descent, but pushes <em>sideways</em>.</li>
-    <li><strong>M has ~50-global-step memory</strong> (\(\beta=0.95\), refresh every
+    <li><strong>M has ~50-global-step memory</strong> (\(\beta_{\text{anc}}=0.95\), refresh every
       2.5 global steps). The tangential push points in a direction that is effectively
-      constant over the run length.</li>
+      constant over the run length. <em>(This is the load-bearing term: the SOTA later sets
+      \(\beta_{\text{anc}}=0\), collapsing this memory to a single fire &mdash; see the box below
+      and the EXP-29 tab.)</em></li>
     <li><strong>The projection is nearly vacuous</strong>: \(\cos(G_{\text{anchor}},
       G_{\text{comp}}) \approx 0.01\)–\(0.06\) (Step-A, EXP-26), so
       <code>comp_t &asymp; M</code> — this is direct injection of the stale EMA, not
@@ -1005,6 +1119,30 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     Every per-step health metric (cos(G,G+e) &ge; 0.982, score 0.73–0.84) was correct
     and certifies only the descent component — it says nothing about the tangential one.
     Full derivation: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> §§(a)–(h).
+  </div>
+
+  <div class="win">
+    <strong>What the later corrections did to this carrier.</strong> Both ingredients of the persistent
+    tangential force were removed by the SOTA configuration, and for principled reasons:
+    <ul>
+      <li><strong>Valid \(M\) (EXP-29, &ldquo;politeness off&rdquo;).</strong> The carrier was injecting
+        \(M\), and that \(M\) was the <em>off-policy</em> wrong-trajectory gradient (current batch scored
+        by stale weights). On-policy replay makes \(M\) an honest stale-policy gradient &mdash; the right
+        object to reason about &mdash; and let EXP-30 measure a <em>clean</em> codec residual to feed back
+        instead of the stale EMA itself.</li>
+      <li><strong>\(\beta_{\text{anc}} = 0\) (the headline).</strong> Structural fact&nbsp;2 above &mdash;
+        the near-constant direction integrated over the run &mdash; exists <em>only because</em>
+        \(\beta_{\text{anc}}=0.95\) gives \(M\) a ~50-step memory. At \(\beta_{\text{anc}}=0\), \(M\) is the
+        freshest anchor gradient alone, refreshed wholesale every fire, so there is no persistent
+        accumulated direction left to integrate. The RL reason this is also the <em>statistically correct</em>
+        choice &mdash; policy gradients are non-stationary, so averaging old (off-policy) ones with
+        \(\beta>0\) folds in stale biased directions &mdash; is exactly the reason the carrier was harmful.
+        The non-stationarity insight and the ignition cure are the <em>same</em> fact.</li>
+    </ul>
+    Consequently EXP-30's true error feedback (endogenous residual, valid \(M\), \(\beta_{\text{anc}}=0\),
+    \(\lambda=1\)) ran <strong>emission-free through 100 steps to dense parity (~0.75)</strong> &mdash; see
+    the decision-tree box below and the EXP-30/EXP-31 tabs. The diagnosis on this tab was right; the fix
+    operated on precisely the mechanism it named.
   </div>
 
   <h3>Carrier vs substrate: the single-knob isolate</h3>
@@ -1073,7 +1211,10 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
         <td><strong>P1 — &alpha;=0.5@100</strong></td>
         <td>Ignites by s100, lock-in ~s55–85</td>
         <td>&asymp; 0.6</td>
-        <td>Extends carrier law to rectified carriers; if survives (P&asymp;0.4): additive-only carrier distinction</td>
+        <td><strong>Superseded by #29.</strong> That P&asymp;0.6 was for the <em>invalid-M</em> carrier.
+          On the corrected (valid-M) circuit, EXP-32 (<code>cwz1hu5p</code>) ran signed_ema &alpha;=0.5
+          <strong>STABLE to 0.7271@50, no ignition</strong> — the carrier's ignition was an artifact of
+          the off-policy \(M\) (and \(\beta_{\text{anc}}=0.95\) memory), not intrinsic to the sign merger.</td>
       </tr>
       <tr>
         <td><strong>P2 — plain@100</strong></td>
@@ -1113,12 +1254,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 
   <ol>
     <li>
-      <strong>Retire the M-fed merger class.</strong> Eight arms (dense/psgd-only, plain,
-      ef&nbsp;r1, ef&nbsp;r2, EXP-27, &alpha;=0/0.3/0.5) complete a dose-response over
-      {sign-carrier, M-carrier, rectified-carrier, none}: every carrier arm either ignited or
-      shows DANGER censored at 50; both no-carrier arms are emission-free.
-      The best carrier result (0.7210) &lt; psgd-only&rsquo;s own 0.7415 — there is no interior
-      optimum to tune toward.
+      <strong>Retire the <em>directly-injected-M</em> carrier class.</strong> Eight arms
+      (dense/psgd-only, plain, ef&nbsp;r1, ef&nbsp;r2, EXP-27, &alpha;=0/0.3/0.5) complete a dose-response
+      over {sign-carrier, M-carrier, rectified-carrier, none}: every carrier arm either ignited or
+      shows DANGER censored at 50; both no-carrier arms are emission-free. There is no interior optimum
+      to tune toward <em>on the direct-carrier knob</em> (caveats below).
     </li>
     <li>
       <strong>Labeled guardrail arms (objective changes — not the core):</strong>
@@ -1134,6 +1274,20 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
       <em>surface</em> must be fixed first.
     </li>
   </ol>
+
+  <div class="warn">
+    <strong>Two corrections to the &ldquo;retire&rdquo; verdict, from later work.</strong>
+    <strong>(i) Wrong floor.</strong> The comparison baseline above is the old clean-step number
+    <span class="metric">0.7415</span>; the realistic no-merger floor on this anchor substrate is
+    <span class="metric">0.6300</span> (C2, <code>k6nmcuyd</code>). So these carrier arms sit
+    <em>above</em> the floor, not below it &mdash; partially-working, just dominated.
+    <strong>(ii) Scope.</strong> The retirement is specific to injecting \(M\) (or its sign)
+    <em>directly</em> on the fast path. It does <strong>not</strong> retire \(M\)-<em>derived</em>
+    correction in general: EXP-30's <code>delayed_ef</code> feeds back the codec <em>residual</em>
+    \(\delta\) measured against a <em>valid</em> \(M\) at \(\beta_{\text{anc}}=0\), and that is the
+    current SOTA at ~0.75 dense parity. The &ldquo;no interior optimum&rdquo; reading holds for the
+    direct-carrier knob only.
+  </div>
 
   <p>
     For the successor issue number and the next-step plan, see issue&nbsp;#27 closing
@@ -1159,8 +1313,13 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <em>current</em> policy's answers using <em>old</em> weights, which is neither the old policy's
     gradient nor the new one's. EXP-29 (issue #29, &ldquo;Correct the anchor gradients trap utilisation&rdquo;,
     operator-directed after a code review) fixes this: the anchor now replays the exact trajectories its
-    stale weights actually generated. No training-curve headline &mdash; this is an infrastructure
-    correctness fix &mdash; but it is the fix that made the later SOTA legitimate.
+    stale weights actually generated. The operator's one-line framing &mdash; <strong>&ldquo;turning off
+    politeness&rdquo;</strong>: the anchor stops politely deferring to whatever current-policy data is
+    handed to it and instead computes its <em>own honest gradient</em> on its <em>own</em> answers. There
+    is no training-curve headline on this tab &mdash; it is an infrastructure correctness fix &mdash; but
+    it is the fix that made the later SOTA legitimate, and it is the precondition for the single most
+    important finding in the whole program, the <strong>\(\beta_{\text{anc}} = 0\)</strong> result
+    developed at the bottom of this tab.
   </p>
 
   <h3>What the anchor is supposed to compute</h3>
@@ -1312,25 +1471,85 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     replay is the precondition that made the next experiment's parity result legitimate rather than
     confounded.
   </div>
-  <div class="warn">
-    <strong>The honest non-result.</strong> Making \(M\) valid did <em>not</em> rescue the old sign /
-    blend idea. When EXP-30 measured it, the valid generator-consistent gradient was <em>just as
-    orthogonal</em> to the live compressed gradient as the old confounded \(M\) had been
-    (\(\cos \approx 0\) either way). So the EXP-25 &ldquo;sign agreement is a coin-flip&rdquo; finding was
-    <strong>genuinely structural</strong>, not an artifact of the trajectory confound &mdash; fixing the
-    data did not open up the blend geometry (which is why EXP-30's blend gate closed without a training
-    run). The trajectory fix and the sign coin-flip are two independent facts: EXP-29 removed a real
-    confound and unlocked the <em>residual</em> route to SOTA, but it did not un-falsify the
-    <em>sign-replacement</em> route. Both readings stand together.
+  <div class="callout">
+    <strong>What the corrected \(M\) <em>did</em> change for the sign method.</strong> On the old
+    confounded circuit, the signed-EMA merger looked <em>net-harmful at every \(\alpha\)</em> &mdash;
+    monotonically worse correction, with sign-reversal igniting a length-hack &mdash; and that picture was
+    used to retire the whole sign idea. That reading is <strong>superseded by #29</strong>. Re-run on the
+    corrected (valid-\(M\)) circuit, <code>signed_ema</code> at \(\alpha = 0.5\) is now
+    <strong>stable and near dense-parity</strong> (<span class="metric">val@50 = 0.7271</span>, EXP-32
+    <code>cwz1hu5p</code>: 0.7278&nbsp;@25&nbsp;&rarr;&nbsp;0.7271&nbsp;@50, <em>no</em> ignition) &mdash;
+    a working merger, well clear of the no-merger floor (<span class="metric">0.6300</span>). It is
+    <strong>works-but-dominated</strong>, not net-harmful: error feedback (<code>delayed_ef</code>,
+    \(\approx 0.74\)) is still the better &mdash; and default &mdash; merger. The geometric fact that the
+    valid \(M\) is still nearly orthogonal to the live compressed gradient (\(\cos \approx 0.01\), EXP-30
+    GATE-B1) stands; what changed is that on valid data the sign method no longer destabilises, so the
+    structural coin-flip caps it at <em>parity-ish</em> rather than driving it below the floor. See the
+    EXP-25 tab for the full sign-method-now-works reframe.
   </div>
+
+  <h3>How learning actually works here &mdash; and the headline: \(\beta_{\text{anc}} = 0\)</h3>
+  <p>
+    Step back from the plumbing to <em>why</em> a self-consistent anchor matters. A policy gradient is
+    only meaningful <strong>at the policy that produced the data</strong>. REINFORCE moves the weights in
+    the direction that makes the high-advantage trajectories <em>this policy actually sampled</em> more
+    likely. Feed it trajectories some <em>other</em> policy sampled, with no importance correction, and you
+    are no longer climbing the objective &mdash; you are nudging the weights toward a direction computed for
+    a distribution you are not at. That is exactly the &ldquo;politeness&rdquo; the old anchor exhibited:
+    it dutifully scored whatever current-batch data was handed to it, producing a biased off-policy estimate
+    dressed up as a clean gradient. Turning politeness off &mdash; replaying its own trajectories &mdash;
+    makes \(G_{\text{anchor}}\) a <em>real</em> policy gradient of the stale snapshot. Learning works
+    because the anchor's signal is now an honest gradient, not a courteous fiction.
+  </p>
+  <p>
+    Once \(M\) is honest, the next question is how to <em>combine</em> successive anchor gradients into the
+    running matrix the merger consumes. The anchor EMA is
+  </p>
+  $$ M \;\leftarrow\; \beta_{\text{anc}}\, M \;+\; (1-\beta_{\text{anc}})\, G_{\text{anchor}}, $$
+  <p>
+    and the configured default is the supervised-learning instinct, \(\beta_{\text{anc}} = 0.95\) &mdash;
+    a long memory that averages many past gradients to denoise the estimate, exactly as momentum does in
+    SGD. The single most important empirical result of the program is that this instinct is
+    <strong>wrong for RL</strong>: the SOTA configuration runs at <strong>\(\beta_{\text{anc}} = 0\)</strong>,
+    i.e. <em>no</em> accumulation at all &mdash; \(M\) is simply the freshest anchor gradient,
+    \(M = G_{\text{anchor}}\), discarding every older one.
+  </p>
+  <div class="win">
+    <strong>The headline (and the RL reason it is true).</strong> Setting
+    \(\beta_{\text{anc}} = 0\) &mdash; keeping <em>only</em> the most recent anchor gradient and throwing
+    away the EMA history &mdash; is what makes the merger work, and it is the opposite of the supervised
+    default. The reason is <strong>non-stationarity</strong>. In supervised learning the loss surface is
+    fixed, so every past gradient is still an estimate of the <em>same</em> objective and averaging them
+    (\(\beta \approx 0.9\)) cuts variance for free. In RL the objective <em>moves with the policy</em>: a
+    gradient computed three refreshes ago was valid at a policy three refreshes stale and is now an
+    off-policy, biased direction. An EMA with \(\beta > 0\) is therefore a machine for blending in exactly
+    the stale, wrong-distribution gradients that &mdash; just like the pre-#29 confound &mdash; pull the
+    update off-objective. &ldquo;Politely remembering&rdquo; old policy gradients is harmful for the same
+    structural reason scoring the wrong trajectories was. Using only the freshest (\(\beta_{\text{anc}}=0\))
+    is the in-principle-correct choice, and it is what the SOTA uses.
+  </div>
+  <p>
+    This also closes the loop with the ignition story (EXP-27 tab). The damped-EF carrier integrated a
+    near-constant tangential push <em>because</em> \(M\) carried a long, \(\beta=0.95\) memory &mdash; a
+    direction held effectively fixed over the whole run. At \(\beta_{\text{anc}} = 0\) there is no persistent
+    accumulated direction to integrate: \(M\) is refreshed wholesale every fire, so a stale carrier cannot
+    compound. The same knob that makes \(M\) statistically correct (use only the on-policy-now gradient)
+    is the knob that removes the mechanism behind the length-hack. One open follow-up remains
+    (low priority): an explicit \(\beta_{\text{anc}} > 0\) run on the corrected circuit to
+    <em>confirm</em>, head-to-head, that re-introducing accumulated old policy gradients measurably hurts
+    &mdash; the direct experimental test of the non-stationarity hypothesis.
+  </p>
 
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
     Sources: issue #29 &ldquo;Correct the anchor gradients trap utilisation&rdquo; (the EXP-29 plan + PR are the record;
     operator-directed, no claim flow) · <code>verl/workers/comm_eff/anchor.py</code>
     (<code>anchor_pg_loss</code>, <code>replay_relevance_stats</code>, <code>maybe_build_replay_ring</code>) ·
     <code>verl/workers/engine/fsdp/transformer_impl.py</code> (anchor refresh + replay selection + relevance verdict) ·
-    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> knobs) ·
-    PR&nbsp;#16 (merged) · <code>research/runs/SUMMARY.md</code>.
+    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> /
+    <code>beta_anc</code> knobs; default <code>beta_anc=0.95</code>, SOTA runs <code>beta_anc=0</code>) ·
+    <code>verl/workers/comm_eff/spectral_filter.py</code> (the \(M\!\leftarrow\!\beta_{\text{anc}}M+(1{-}\beta_{\text{anc}})G\) EMA) ·
+    PR&nbsp;#16 (merged) · EXP-32 <code>cwz1hu5p</code> (signed_ema α=0.5 on the corrected circuit) ·
+    <code>research/runs/SUMMARY.md</code>.
   </footer>
 </section>
 
@@ -1338,15 +1557,20 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <h2>EXP-30: The &delta;-Residual Merger &mdash; Communication-Efficient GRPO Reaches Dense Parity</h2>
 
   <p class="lede">
-    This is the experiment that produced the program's current state of the art. With a trustworthy anchor
-    in hand (EXP-29), EXP-30 asked the sharpest possible version of the question: instead of borrowing the
-    anchor's <em>signs</em> or its <em>off-subspace energy</em>, what if we feed back the <strong>exact
-    difference</strong> between the clean gradient and the compressed gradient, measured on the very same
-    data? That correction &mdash; the &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash;
-    trains GSM8K to <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
+    This is the experiment that produced the program's current state of the art &mdash; and
+    <strong>error feedback (<code>delayed_ef</code>) is the method that won, so it is the program's
+    default.</strong> With a trustworthy anchor in hand (EXP-29), EXP-30 asked the sharpest possible
+    version of the question: instead of borrowing the anchor's <em>signs</em> or its <em>off-subspace
+    energy</em>, what if we feed back the <strong>exact difference</strong> between the clean gradient and
+    the compressed gradient, measured on the very same data? That correction &mdash; the
+    &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash; trains GSM8K to
+    <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
     <strong>5% of the gradient-communication cost</strong>, with no length-explosion through 100 steps.
     It is the direct vindication of EXP-27's closing recommendation: rebuild error-feedback on the codec's
-    own dropped residual, and the exogenous carrier that caused ignition disappears.
+    own dropped residual, and the exogenous carrier that caused ignition disappears. The sign-based merger
+    (<code>signed_ema</code>) now <em>also</em> works on the corrected circuit (stable near-parity at
+    0.7271, EXP-32) &mdash; but it is <strong>dominated</strong> by error feedback, so <code>delayed_ef</code>
+    stays the best and the default.
   </p>
 
   <figure style="margin: 22px 0; text-align: center;">
@@ -1566,12 +1790,15 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </div>
 
   <div class="win">
-    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\)) is the program's SOTA
-    communication-efficient method: GSM8K val@50 in the 0.74&ndash;0.75 band, the boundary-activation
-    traffic cut ~19.8&times; on the fast path (~4&times; once the anchor's own traffic is honestly
-    amortized in), emission-free through 100 steps for seed 0. Verdict <strong>PASS</strong>; merged as
-    PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline every later arm builds on
-    (<code>runs/EXP-31/B2_baseline/</code>).
+    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\), \(\beta_{\text{anc}}=0\)) is
+    the program's SOTA communication-efficient method <strong>and its default</strong>: GSM8K val@50 in the
+    0.74&ndash;0.75 band, the boundary-activation traffic cut ~19.8&times; on the fast path (~4&times; once
+    the anchor's own traffic is honestly amortized in), emission-free through 100 steps for seed 0. Verdict
+    <strong>PASS</strong>; merged as PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline
+    every later arm builds on (<code>runs/EXP-31/B2_baseline/</code>). The sign merger
+    (<code>signed_ema</code>) is the only other merger that <em>also</em> trains cleanly on the corrected
+    circuit (0.7271, EXP-32) &mdash; but it lands below the B2 lineage and is <strong>dominated</strong>, so
+    error feedback remains the one to beat.
   </div>
 
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
@@ -1595,7 +1822,10 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     clean falsification: a four-lever tournament over every admissible way to <em>use</em> the stale anchor
     gradient came back <strong>null across the board</strong>. The honest verdict is <strong>STOP</strong>
     on the anchor-usage axis &mdash; parity is real and reproduced, but nothing in how we re-weight,
-    accumulate, perturb, or de-noise the anchor signal pushes past dense.
+    accumulate, perturb, or de-noise the anchor signal pushes past dense. The method under test throughout is
+    the program's default, <strong>error feedback (<code>B2</code> / <code>delayed_ef</code>)</strong>; the
+    tournament tunes <em>how its correction is used</em>, and confirms the default is already the best
+    configuration on this axis.
   </p>
 
   <h3>Result 1 &mdash; the dense-reference reframe (parity is real)</h3>
@@ -1609,7 +1839,8 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <thead><tr><th>Configuration</th><th>val@50</th><th>Reading</th></tr></thead>
     <tbody>
       <tr><td>dense &mdash; this box, this config, seed 0</td><td><span class="metric">0.7506</span></td><td>the apples-to-apples bar</td></tr>
-      <tr class="hl"><td><strong>B2 / best comm-efficient (<code>delayed_ef</code> &lambda;=1)</strong></td><td><span class="metric">0.7400</span></td><td><strong>gap 0.011 &mdash; inside &plusmn;0.024 eval noise = PARITY</strong></td></tr>
+      <tr class="hl"><td><strong>B2 / best comm-efficient (<code>delayed_ef</code> &lambda;=1) &mdash; the default</strong></td><td><span class="metric">0.7400</span></td><td><strong>gap 0.011 &mdash; inside &plusmn;0.024 eval noise = PARITY</strong></td></tr>
+      <tr><td>signed_ema (sign merger, &alpha;=0.5) &mdash; corrected circuit, EXP-32</td><td>0.7271</td><td>now stable &amp; near-parity, but &minus;0.013 vs B2 &rArr; <strong>dominated</strong></td></tr>
       <tr><td>dense &mdash; old reference (different box)</td><td>0.7839</td><td>a high draw; the &ldquo;0.044 gap&rdquo; was a wrong-reference artifact</td></tr>
     </tbody>
   </table>
@@ -1620,6 +1851,14 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     ~5% of the gradient-communication cost.</strong> The &ldquo;0.044 gap to dense&rdquo; EXP-31 was
     chartered to close did not exist &mdash; it was an artifact of comparing against a high draw on the
     wrong machine.
+  </p>
+  <p>
+    With the #29 anchor-circuit fix in place, <strong>both</strong> mergers now train cleanly: error
+    feedback (B2) and the sign merger (<code>signed_ema</code>, 0.7271, EXP-32). They rank
+    <strong>error&nbsp;feedback&nbsp;&gt;&nbsp;sign</strong> &mdash; <code>signed_ema</code> reaches stable
+    near-parity but lands ~0.013 below B2, so it is <em>works-but-dominated</em>, not a contender for the
+    default. Error feedback stays the program's best and default method; the tournament below tunes only how
+    <em>its</em> correction is spent.
   </p>
   <div class="warn">
     <strong>The remaining honesty.</strong> Both numbers are single draws inside a ~&plusmn;0.024 band, so
@@ -1728,12 +1967,15 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     As of 2026-06-16 the program has hit its core milestone. The communication-efficient GRPO trainer is
     <em>stable</em>, reaches <em>parity</em> with the dense control within evaluation noise, demonstrates a
     large measured <em>communication saving</em>, and is <em>reproducible</em> from one canonical launcher.
-    The current state of the art is the EXP-30 <code>B2</code> merger (<code>delayed_ef</code>, &lambda;=1):
-    GSM8K <span class="metric">val@50 &asymp; 0.74&ndash;0.75</span>, inside the dense band of
+    The <strong>default and state of the art is error feedback</strong> &mdash; the EXP-30 <code>B2</code>
+    merger (<code>delayed_ef</code>, &lambda;=1, &beta;<sub>anc</sub>=0): GSM8K
+    <span class="metric">val@50 &asymp; 0.74&ndash;0.75</span>, inside the dense band of
     <span class="metric">0.75&ndash;0.78</span>, at roughly 5% of the fast-path gradient-communication cost.
-    The open question is no longer parity &mdash; it is whether anything can <em>surpass</em> dense, and
-    EXP-31 closed the one axis we could test under the locked surface. This tab is the honest current
-    scoreboard and the only to-dos that remain.
+    The sign method (<code>signed_ema</code>) that earlier experiments declared dead <em>now learns</em>
+    &mdash; on the corrected anchor circuit it is stable and near-parity &mdash; but it is dominated by
+    error feedback and is not the default. The open question is no longer parity &mdash; it is whether
+    anything can <em>surpass</em> dense. This tab is the honest current scoreboard, the one insight that
+    unlocked the learning (<strong>&beta;<sub>anc</sub>=0</strong>, below), and the to-dos that remain.
   </p>
 
   <h3>The scoreboard today</h3>
@@ -1748,20 +1990,46 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     </thead>
     <tbody>
       <tr><td>dense control &mdash; band across draws/boxes</td><td><span class="metric">0.75&ndash;0.78</span></td><td>the bar (0.7506 apples-to-apples this box; 0.7536 old code; 0.7839 a high draw elsewhere)</td></tr>
-      <tr class="hl"><td><strong>B2 &mdash; <code>delayed_ef</code> &lambda;=1 (SOTA)</strong></td><td><strong><span class="metric">0.7400&ndash;0.7528</span></strong></td><td><strong>PARITY with dense within &plusmn;0.024 noise, ~5% comm cost</strong></td></tr>
+      <tr class="hl"><td><strong>B2 &mdash; <code>delayed_ef</code> &lambda;=1 (SOTA / DEFAULT)</strong></td><td><strong><span class="metric">0.7400&ndash;0.7528</span></strong></td><td><strong>error feedback &mdash; PARITY with dense within &plusmn;0.024 noise, ~5% comm cost</strong></td></tr>
       <tr><td>ef_powersgd (EXP-26, off-subspace EF)</td><td>0.7210</td><td>superseded by B2; ignited at 100 steps (EXP-27)</td></tr>
-      <tr><td>signed_ema &alpha;=0.5 (EXP-25)</td><td>0.7066</td><td>falsified merger (sign coin-flip)</td></tr>
-      <tr><td>plain PowerSGD + anchor-\(Q\), no merger (C2)</td><td>0.6300</td><td>substrate floor; the merger adds +0.123 on top</td></tr>
+      <tr><td>signed_ema &alpha;=0.5, <strong>corrected valid-M circuit</strong> (EXP-32)</td><td><span class="metric">0.7271</span></td><td><strong>works-but-dominated</strong> &mdash; stable @50 (0.7278@25&rarr;0.7271@50, no length-hack ignition); learns once the anchor is honest, but below B2</td></tr>
+      <tr><td>signed_ema &alpha;=0.5, old invalid-M circuit (EXP-25)</td><td>0.7066</td><td>superseded by #29 &mdash; this number rested on the off-policy anchor confound</td></tr>
+      <tr><td>plain PowerSGD + anchor-\(Q\), no merger (C2)</td><td>0.6300</td><td>substrate floor; error feedback adds +0.12, the sign method +0.10 on top</td></tr>
     </tbody>
   </table>
+
+  <h3>The insight that unlocked it &mdash; &beta;<sub>anc</sub> = 0</h3>
+  <p>
+    The anchor maintains an EMA of its gradient, \(M \leftarrow \beta_{\text{anc}}\cdot M + (1-\beta_{\text{anc}})\cdot G_{\text{anchor}}\),
+    and the merger feeds that \(M\) into the correction. The single most important setting we found is
+    <strong>\(\beta_{\text{anc}} = 0\)</strong>: \(M\) becomes the <em>freshest anchor gradient only</em>, with
+    <strong>no accumulation of older ones</strong>. That is what gives good results.
+  </p>
+  <div class="win">
+    <strong>Why &mdash; the RL insight (the biggest finding).</strong> RL policy gradients are
+    <em>non-stationary</em>: a gradient is only valid <em>at the policy that produced it</em>. Accumulating
+    old policy gradients (\(\beta_{\text{anc}}>0\)) folds in stale, off-policy, biased directions, which hurts
+    &mdash; and is exactly the kind of persistent stale direction that integrates into the reward-flat
+    length-explosion ignition (the EXP-27 tab). This is the <strong>opposite</strong> of supervised learning,
+    where momentum / EMA (\(\beta\approx0.9\)) helps because the loss surface is stationary. So &ldquo;politely
+    remembering&rdquo; old policy gradients is the wrong instinct here; using only the freshest one
+    (\(\beta_{\text{anc}}=0\)) is right. Both the SOTA error-feedback merger (B2) and the now-working sign
+    method run at \(\beta_{\text{anc}}=0\).
+  </div>
 
   <h3>What is settled</h3>
   <ul>
     <li><strong>The substrate is realistic and mechanically correct.</strong> The anchor is the only thing
       that updates the projection basis \(Q\), the fast path can only read it, the only uncompressed pass
-      lives inside the anchor, and there is no hidden full-rank &ldquo;clean step.&rdquo; Since EXP-29 the
-      anchor also grades the trajectories its own stale weights generated &mdash; the gradient signal is
-      now confound-free.</li>
+      lives inside the anchor, and there is no hidden full-rank &ldquo;clean step.&rdquo;</li>
+    <li><strong>The anchor's gradient is now honest (#29) &mdash; the key enabler.</strong> Before #29 the
+      anchor forwarded the <em>current</em> batch through its <code>delay_K</code>-stale weights, producing an
+      off-policy &ldquo;wrong-trajectory&rdquo; gradient. Since EXP-29 it grades the trajectories its
+      <em>own</em> stale weights generated &mdash; on-policy for those weights, so the importance ratio is
+      \(\equiv 1\) (a valid stale-policy REINFORCE gradient), not a biased off-policy estimate. The operator's
+      framing: the anchor stops <em>politely deferring</em> to mismatched current-policy data and uses its own
+      honest gradient. Every pre-#29 verdict that rested on the old wrong-data confound is superseded (see
+      below).</li>
     <li><strong>Parity is reached</strong> (within evaluation noise). EXP-31's apples-to-apples dense rerun
       put the bar at 0.7506; B2's 0.7400&ndash;0.7528 lineage sits inside the dense band. The
       &ldquo;0.044 gap to dense&rdquo; earlier experiments chased was a wrong-reference artifact.</li>
@@ -1772,11 +2040,22 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
       baseline (<code>runs/EXP-31/B2_baseline/</code>) that every later arm builds on.</li>
   </ul>
 
+  <h3>Works, but dominated</h3>
+  <ul>
+    <li><strong>Sign-replacement (signed_ema) now learns &mdash; superseded verdict.</strong> EXP-25 declared
+      it &ldquo;net-harmful at every \(\alpha\), dead.&rdquo; That verdict rested on the off-policy
+      <em>invalid-M</em> anchor: the merger was steering toward a wrong-trajectory gradient. Re-run on the
+      corrected (#29 valid-M, \(\beta_{\text{anc}}=0\)) circuit, signed_ema \(\alpha=0.5\) is
+      <strong>stable and near-parity</strong>: val@50 <span class="metric">0.7271</span> (0.7278@25 &rarr;
+      0.7271@50, no length-hack ignition; EXP-32, W&amp;B <code>cwz1hu5p</code>). So the sign method is
+      <strong>works-but-dominated</strong>, not dead &mdash; it sits below error feedback (B2, ~0.74&ndash;0.75)
+      and above the no-merger floor (0.6300), so it is a valid corrector but not the default. The
+      sign-disagreement geometry is real, but with an honest anchor the agreeing half carries enough signal to
+      learn.</li>
+  </ul>
+
   <h3>What is closed or falsified</h3>
   <ul>
-    <li><strong>Sign-replacement (signed_ema)</strong> &mdash; the anchor's sign agrees with the compressed
-      gradient only ~50% of the time, structurally, even when fresh and even when valid (EXP-25, re-confirmed
-      on the valid anchor in EXP-30). Dead.</li>
     <li><strong>Update-energy / hybrid basis (Step C)</strong> &mdash; a basis tuned for gradient energy
       anti-converts because rollouts run uncompressed (EXP-26, val 0.373). Dead.</li>
     <li><strong>The M-fed exogenous-carrier merger class</strong> &mdash; any correction that injects a
@@ -1788,34 +2067,56 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
       of dense (EXP-31, four levers, all null &rarr; STOP). Do not re-propose anchor-usage levers.</li>
   </ul>
 
-  <h3>What is genuinely open &mdash; the only live to-dos</h3>
+  <h3>Next steps</h3>
+  <p>
+    The two method questions are answered: <strong>error feedback (<code>delayed_ef</code>) stays the
+    default / best</strong>, and the <strong>sign method is closed as works-but-dominated</strong> &mdash;
+    EXP-32 gave it its first stable number on the corrected circuit, and it lands below error feedback. What
+    remains is confirmation and the surpass frontier.
+  </p>
   <ol>
+    <li>
+      <strong>(Optional) Confirm the non-stationarity hypothesis with an explicit \(\beta_{\text{anc}}>0\)
+      run.</strong> The \(\beta_{\text{anc}}=0\) headline is an inference from the carrier-ignition mechanism;
+      one run with \(\beta_{\text{anc}}>0\) on the B2 substrate would directly show that <em>accumulating old
+      policy gradients hurts</em>, turning the non-stationarity argument from theory into a measured ablation.
+      Cheap, bounded, needs no new code.
+    </li>
     <li>
       <strong>Upgrade parity from &ldquo;within noise&rdquo; to &ldquo;established&rdquo; (cheap, bounded).</strong>
       Both the dense bar and B2 are single draws inside a ~&plusmn;0.024 band. Seed replicates of
-      <em>both</em> arms would pin the two bands and turn the statistical tie into a multi-seed result. This
-      is the one measurement that closes the parity claim, and it needs no new code.
+      <em>both</em> arms would pin the two bands and turn the statistical tie into a multi-seed result. It
+      needs no new code.
     </li>
     <li>
       <strong>Surpass requires re-scoping the locked surface &mdash; a new plan + operator decision, not a
       lever.</strong> The deep mechanism says a comm-efficient method can only exceed dense by injecting a
-      signal dense itself lacks. None of the candidates is reachable on the current locked surface:
-      <ul>
-        <li>a <strong>different forward basis</strong> that captures the stable-rank-2 off-principal mode
-          the act-basis \(Q\) misses (must avoid Step-C's update-energy trap);</li>
-        <li>a <strong>generation-side diversity change</strong> (higher \(n\), rollout temperature)
-          converting to a pass@k or relocated-mode edge &mdash; this is the only compression-specific bet,
-          and it changes the sacred uncompressed generation path;</li>
-        <li>a <strong>fundamentally different decentralized-RL objective.</strong></li>
-      </ul>
-      Each is an operator decision about the fixed control surface, not a researcher tuning step.
+      signal dense itself lacks, and the anchor-usage axis cannot supply it (EXP-31 STOP). The remaining
+      frontier &mdash; low-but-nonzero odds &mdash; is the <strong>additive off-principal sub-basis route</strong>:
+      a forward signal that captures the stable off-principal mode the act-basis \(Q\) misses (avoiding Step-C's
+      update-energy trap). Adjacent operator-decision candidates: a generation-side diversity change (higher
+      \(n\), rollout temperature) converting to a pass@k or relocated-mode edge &mdash; the only
+      compression-specific bet, but it touches the sacred uncompressed generation path &mdash; or a
+      fundamentally different decentralized-RL objective. Each is a deliberate change to the fixed control
+      surface, not a researcher tuning step.
     </li>
   </ol>
+
+  <div class="callout">
+    <strong>Conventions in force.</strong> <strong>55-step training is now standard</strong> &mdash; a
+    5-step buffer past val@50 so the final validation accuracy syncs to W&amp;B before the run exits.
+    \(\beta_{\text{anc}}=0\) (freshest anchor gradient only) is the default for every merger. The B2 knob set
+    in <code>runs/EXP-31/B2_baseline/</code> is the substrate every new arm holds fixed.
+  </div>
 
   <div class="win">
     <strong>The honest bottom line.</strong> Communication-efficient GRPO matches dense at ~5% of the
     gradient-communication cost, on a realistic decentralized-pipeline substrate, reproducibly &mdash; the
-    M6 milestone in everything but a multi-seed parity band. The surpass-dense thesis, as far as the
+    M6 milestone in everything but a multi-seed parity band. <strong>Error feedback</strong> is the default
+    that gets there; the <strong>sign method now learns too</strong> once the anchor is honest, just not as
+    well. The unlock was conceptual as much as mechanical: make the anchor's gradient a <em>valid</em> policy
+    gradient (#29) and keep only the <em>freshest</em> one (\(\beta_{\text{anc}}=0\)), because RL gradients
+    are non-stationary and accumulating stale ones hurts. The surpass-dense thesis, as far as the
     anchor-usage axis can test it, is falsified: you cannot out-perform dense by being a cleverer copy of
     dense. Any next step toward surpassing is a deliberate change to the locked surface, made with eyes
     open, not another merger to tune.
@@ -1824,17 +2125,22 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
     Current state as of 2026-06-16. Sources: <code>research/runs/SUMMARY.md</code> (single source of truth for
     results) · <code>runs/EXP-31/verdict.md</code> + <code>BEST_SO_FAR.md</code> · <code>runs/EXP-31/B2_baseline/verdict.md</code>
-    (EXP-30) · <code>research/.claude/GOAL.md</code> (what &ldquo;done&rdquo; means) · <code>CODE_WALKTHROUGH.md</code>.
+    (EXP-30) · <code>runs/EXP-32/</code> + issue #32 (corrected-circuit signed_ema, W&amp;B <code>cwz1hu5p</code>) ·
+    <code>research/.claude/GOAL.md</code> (what &ldquo;done&rdquo; means) · <code>CODE_WALKTHROUGH.md</code>.
   </footer>
 </section>
 </main>
 <footer>Generated by the comm-eff-retrospective agent team (5 members); EXP-27 tab + post-mortem corrections by
 the exp27-postmortem team (4 members, 2026-06-11); EXP-29/30/31 tabs + current-state rewrite added 2026-06-16
-(the trajectory fix, the δ-residual SOTA, and the parity/tournament closeout). Sources: research/runs/SUMMARY.md
+(the trajectory fix, the δ-residual SOTA, and the parity/tournament closeout); refreshed 2026-06-16 after the #29
+anchor-circuit fix and EXP-32 (the sign method now learns on the corrected valid-M circuit, error feedback stays
+the default, and the β_anc=0 / non-stationarity insight is made the headline). Sources: research/runs/SUMMARY.md
 (single source of truth for results), research/runs/EXP-25/, research/runs/EXP-26/, research/runs/EXP-27/,
-research/runs/EXP-31/ (verdict.md, BEST_SO_FAR.md, B2_baseline/), issues #29/#30/#31, CODE_WALKTHROUGH.md, and
-the merged comm_eff source (anchor.py / spectral_filter.py / transformer_impl.py), W&amp;B project
-verl_compression_research. Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.</footer>
+research/runs/EXP-31/ (verdict.md, BEST_SO_FAR.md, B2_baseline/), research/runs/EXP-32/, issues #29/#30/#31/#32,
+CODE_WALKTHROUGH.md, and the merged comm_eff source (anchor.py / spectral_filter.py / transformer_impl.py),
+W&amp;B project verl_compression_research. Numbers are val@50 GSM8K greedy accuracy unless stated otherwise; the
+55-step training convention (a 5-step buffer past val@50 so the metric syncs to W&amp;B before the run exits) is
+now standard.</footer>
 <script>
   const tabs = document.querySelectorAll('nav.tabs button');
   const panes = document.querySelectorAll('section.tab-content');
