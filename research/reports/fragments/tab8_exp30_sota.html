@@ -2,15 +2,20 @@
   <h2>EXP-30: The &delta;-Residual Merger &mdash; Communication-Efficient GRPO Reaches Dense Parity</h2>
 
   <p class="lede">
-    This is the experiment that produced the program's current state of the art. With a trustworthy anchor
-    in hand (EXP-29), EXP-30 asked the sharpest possible version of the question: instead of borrowing the
-    anchor's <em>signs</em> or its <em>off-subspace energy</em>, what if we feed back the <strong>exact
-    difference</strong> between the clean gradient and the compressed gradient, measured on the very same
-    data? That correction &mdash; the &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash;
-    trains GSM8K to <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
+    This is the experiment that produced the program's current state of the art &mdash; and
+    <strong>error feedback (<code>delayed_ef</code>) is the method that won, so it is the program's
+    default.</strong> With a trustworthy anchor in hand (EXP-29), EXP-30 asked the sharpest possible
+    version of the question: instead of borrowing the anchor's <em>signs</em> or its <em>off-subspace
+    energy</em>, what if we feed back the <strong>exact difference</strong> between the clean gradient and
+    the compressed gradient, measured on the very same data? That correction &mdash; the
+    &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash; trains GSM8K to
+    <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
     <strong>5% of the gradient-communication cost</strong>, with no length-explosion through 100 steps.
     It is the direct vindication of EXP-27's closing recommendation: rebuild error-feedback on the codec's
-    own dropped residual, and the exogenous carrier that caused ignition disappears.
+    own dropped residual, and the exogenous carrier that caused ignition disappears. The sign-based merger
+    (<code>signed_ema</code>) now <em>also</em> works on the corrected circuit (stable near-parity at
+    0.7271, EXP-32) &mdash; but it is <strong>dominated</strong> by error feedback, so <code>delayed_ef</code>
+    stays the best and the default.
   </p>
 
   <figure style="margin: 22px 0; text-align: center;">
@@ -230,12 +235,15 @@
   </div>
 
   <div class="win">
-    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\)) is the program's SOTA
-    communication-efficient method: GSM8K val@50 in the 0.74&ndash;0.75 band, the boundary-activation
-    traffic cut ~19.8&times; on the fast path (~4&times; once the anchor's own traffic is honestly
-    amortized in), emission-free through 100 steps for seed 0. Verdict <strong>PASS</strong>; merged as
-    PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline every later arm builds on
-    (<code>runs/EXP-31/B2_baseline/</code>).
+    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\), \(\beta_{\text{anc}}=0\)) is
+    the program's SOTA communication-efficient method <strong>and its default</strong>: GSM8K val@50 in the
+    0.74&ndash;0.75 band, the boundary-activation traffic cut ~19.8&times; on the fast path (~4&times; once
+    the anchor's own traffic is honestly amortized in), emission-free through 100 steps for seed 0. Verdict
+    <strong>PASS</strong>; merged as PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline
+    every later arm builds on (<code>runs/EXP-31/B2_baseline/</code>). The sign merger
+    (<code>signed_ema</code>) is the only other merger that <em>also</em> trains cleanly on the corrected
+    circuit (0.7271, EXP-32) &mdash; but at &minus;0.026 it is <strong>dominated</strong>, so error feedback
+    remains the one to beat.
   </div>
 
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">

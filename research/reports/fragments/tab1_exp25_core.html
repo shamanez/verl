@@ -2,7 +2,7 @@
   <h2>EXP-25: The Core Idea — Two Circuits for Training a Language Model Over a Slow Link</h2>
 
   <p class="lede">
-    This project asks whether you can train a reasoning model with reinforcement learning while compressing the data that flows between machines, and still match an uncompressed run. EXP-25 built the realistic "anchor circuit" that does the compressing — a fast compressed path running every step, plus a slow, deliberately-out-of-date uncompressed reference that steers it — and then tested one specific way of folding the two together. That fold (the <em>signed_ema</em> merger) was a bet, and EXP-25 was designed to confirm or kill it.
+    This project asks whether you can train a reasoning model with reinforcement learning while compressing the data that flows between machines, and still match an uncompressed run. EXP-25 built the realistic "anchor circuit" that does the compressing — a fast compressed path running every step, plus a slow, deliberately-out-of-date uncompressed reference that steers it — and then tested one specific way of folding the two together. That fold (the <em>signed_ema</em> merger) was a bet, and EXP-25 was designed to confirm or kill it. On the circuit as it stood in EXP-25 it looked killed; but a later fix to <em>how the anchor computes its gradient</em> (EXP-29) revived it — on the corrected circuit the same sign merger trains stably to near-parity. The full arc is in the later tabs; this one lays out the design and the original bet.
   </p>
 
   <h3>The problem: training is bottlenecked on communication, not compute</h3>
@@ -84,14 +84,24 @@
     <thead><tr><th>Reference</th><th>GSM8K val accuracy</th><th>Meaning</th></tr></thead>
     <tbody>
       <tr><td>Dense control (no compression)</td><td><span class="metric">0.7536</span></td><td>the bar to match — full-traffic training</td></tr>
-      <tr><td>PowerSGD r=77 + fresh clean step</td><td><span class="metric">0.7415</span></td><td>the old (unrealistic) comm-eff PASS</td></tr>
-      <tr><td>PowerSGD r=77, no refresh</td><td><span class="metric">0.6914</span></td><td>the floor — compression with no help at all</td></tr>
+      <tr><td>PowerSGD r=77 + fresh clean step</td><td><span class="metric">0.7415</span></td><td>the old (unrealistic) clean-step config</td></tr>
+      <tr><td>PowerSGD r=77, frozen basis</td><td><span class="metric">0.6914</span></td><td>the early frozen-basis floor</td></tr>
     </tbody>
   </table>
 
   <p>
-    The bet succeeds only if the best \(\alpha\) arm clears <strong>floor + 0.05 = 0.7414</strong> (matching the old clean-step PASS). It is <strong>falsified</strong> — automatic STOP — if the best arm lands at or below <strong>floor + 0.02 = 0.7114</strong>, meaning the anchor-default merger is no better than doing nothing. In short: did stealing the anchor's signs convert the compressed gradient into a dense-quality update, or not?
+    EXP-25's pass/fail line was set against the old clean-step number (clear <strong>floor + 0.05 = 0.7414</strong> to pass; STOP at or below <strong>0.7114</strong>). Read with hindsight, those targets were anchored to the wrong floor — see the caveat below. The substantive question was the same either way: did stealing the anchor's signs convert the compressed gradient into a dense-quality update, or not?
   </p>
+
+  <div class="warn">
+    <strong>[2026-06-16] The floor these targets used was wrong.</strong> The <span class="metric">0.7415</span>
+    above is not a realistic no-help baseline — it is an old config that still took a <em>fresh</em>, full-rank
+    clean step (the very full-\(H\) transfer the project is trying to avoid), and the <span class="metric">0.6914</span>
+    is an early frozen-basis number. The genuine realistic floor — plain PowerSGD running on the same stale
+    anchor circuit with <em>no</em> merger at all (arm C2, WandB <code>k6nmcuyd</code>) — is
+    <span class="metric">0.6300</span>. Against that honest floor the picture is very different from what
+    EXP-25 concluded: see the corrected verdict in the EXP-25 math tab.
+  </div>
 
   <div class="warn">
     <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the test of that gamble, and the outcome (and the mechanism behind it) is the subject of the later tabs.
