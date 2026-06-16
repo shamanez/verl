@@ -63,7 +63,7 @@ export PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-18432}"
 export COMM_EFF_CAPTURE_ENABLED=false
 
 # ---- measurement / naming (overridable; everything above is pinned) ---------
-export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
+export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-55}"   # 55 = val@50 checkpoint + 5-step buffer so val@50 syncs to WandB before exit (val still read @50)
 export TEST_FREQ="${TEST_FREQ:-25}"
 export VAL_BEFORE_TRAIN=True
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-b2_sota_comm_eff}"
