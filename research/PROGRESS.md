@@ -34,3 +34,6 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 [2026-06-16T09:21Z] EXP-33 window-3 TIMEOUT: b0p00 step=38/55 RUNNING, val@25=0.71418 (C0 reproduces B2 band), val@50 pending (ETA ~09:50 UTC). No errors, no ignition, bytes_ratio=0.0505 (B2 band). Next window: pick up at step ~38, capture val@50 + done_b0p00.flag + C1 launch.
 
 [2026-06-16T19:23:35+10:00] [orchestrator] EXP-33 monitor window-3 (mon-exp33-c): C0 b0p00 step 38/55 healthy (reward ~0.71-0.77, resp_len ~190, clip~0, bytes_ratio 0.0505, anchor 15 fires); val@50 not yet (ETA ~09:50Z). Re-dispatched mon-exp33-d to capture val@50 + C0 done + C1 init. running=[33 C0@38/55]
+
+[EXP-33 window 4 2026-06-16T10:01:34Z] C0(b0p00,β=0) val@25=0.71418 val@50=0.73844 (B2 band PASS), steps 52/55 running, C1 not yet started. Nominal. Background monitor healthy.
+[2026-06-16T20:03:06+10:00] [orchestrator] EXP-33 monitor window-4 (mon-exp33-d): C0 b0p00 CONTROL PASS — val@50=0.73844 IN B2 band [0.716,0.774] (READ a satisfied; +0.003 over EXP31-low 0.7354, -0.014 under EXP30-high 0.7528, within noise). Clean: coldM_fallbacks=0, recon 0.0214 act-band, bytes_ratio 0.0505, resp_len 277->184 no ignition, anchor 15 fires. BAR=0.738 -> falsified iff a C1/C2/C3 val@50>=0.7624. C0 ~step52, done ~10:07Z; C1 b0p25 next. Re-dispatched mon-exp33-e. running=[33 C0-done C1-starting]
