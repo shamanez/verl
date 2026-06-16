@@ -21,7 +21,7 @@
   <h3>Part 1 — What EXP-25 actually achieved</h3>
 
   <p>
-    The headline result is a STOP, but a STOP that left behind a working substrate and a sharp mechanistic picture. Four concrete things were banked.
+    The headline at the time was a STOP, but a STOP that left behind a working substrate and a sharp mechanistic picture — and that, with hindsight, was a verdict on a broken circuit rather than on the merger (see the headline correction above). Four concrete things were banked.
   </p>
 
   <p>
@@ -29,11 +29,11 @@
   </p>
 
   <p>
-    <strong>2. A clean, monotonic dose-response on the merger knob.</strong> The merger blends the fast gradient with the anchor's sign through one knob \(\alpha\); EXP-25 swept it across three byte-identical arms. The result is unambiguous and reproduced in Part 2's table: the more the stale sign is used, the worse training gets. There is no interior sweet spot.
+    <strong>2. A clean, monotonic dose-response on the merger knob (on the EXP-25 circuit).</strong> The merger blends the fast gradient with the anchor's sign through one knob \(\alpha\); EXP-25 swept it across three byte-identical arms. The result was unambiguous and is reproduced in Part 2's table: on that circuit, the more the stale sign was used, the worse training got, with no interior sweet spot. The later correction — once the anchor's gradient was fixed — is that this monotone-downward shape was a property of the <em>confounded sign source</em>, not the knob; at \(\alpha=0.5\) the corrected circuit reaches 0.7271 (Part 2, (e)).
   </p>
 
   <p>
-    <strong>3. The mechanism discovery — length-hacking, not low entropy, is the killer.</strong> When the merger drives training off a cliff, the symptom is not subtle. The model's answers explode in length toward the 16,000-token cap, while its <em>entropy</em> (a measure of how spread-out its next-token choices are, in nats — high means uncertain, low means confident) collapses toward zero. The instinct is to blame the entropy collapse. EXP-25 disproved that: the uncompressed dense control trains down to entropy <span class="metric">0.12</span> — <em>lower</em> than any surviving compressed arm — and stays healthy with bounded ~280-token answers. Low entropy is a confident solver, not a broken one. What actually destroys validation accuracy is the response-length runaway: the model discovers that emitting longer and longer text raises its odds of stumbling onto the answer string under the lenient reward, reward briefly rises, then the answers blow past usefulness and accuracy falls off a cliff.
+    <strong>3. The mechanism discovery — length-hacking, not low entropy, is the killer.</strong> When the merger drove training off a cliff (the pre-#29 low-\(\alpha\) arms), the symptom was not subtle. The model's answers explode in length toward the 16,000-token cap, while its <em>entropy</em> (a measure of how spread-out its next-token choices are, in nats — high means uncertain, low means confident) collapses toward zero. The instinct is to blame the entropy collapse. EXP-25 disproved that: the uncompressed dense control trains down to entropy <span class="metric">0.12</span> — <em>lower</em> than any surviving compressed arm — and stays healthy with bounded ~280-token answers. Low entropy is a confident solver, not a broken one. What actually destroys validation accuracy is the response-length runaway: the model discovers that emitting longer and longer text raises its odds of stumbling onto the answer string under the lenient reward, reward briefly rises, then the answers blow past usefulness and accuracy falls off a cliff.
   </p>
 
   <p>

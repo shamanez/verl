@@ -179,12 +179,15 @@
 
   <h3>One-screen outcome</h3>
   <p>
-    The new merger (ef_powersgd) is the best realistic communication-efficient result the program has produced. It
+    At the time, the new merger (ef_powersgd) was the best realistic communication-efficient result the program had. It
     preserves the update direction (\(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.9558\), versus the old merger's 0.717),
-    beats the falsified EXP-25 signed_ema by 1.4 points and the plain codec on the same realistic substrate by 7.7
-    points, with no deterministic collapse on the promoted run. But it lands at <span class="metric">val@50 0.7210</span>
-    against a parity target of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
-    verdict is <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+    beat the then-failing EXP-25 signed_ema by 1.4 points and the plain codec on the same realistic substrate by 7.7
+    points, with no deterministic collapse on the promoted run. But it landed at <span class="metric">val@50 0.7210</span>
+    against the in-box dense draw of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
+    verdict was <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+    <em>(Reference note: that 0.7414 was a single dense draw used here as the bar; the parity question was later
+    settled against the dense <strong>band</strong> 0.75&ndash;0.78, with the realistic no-merger floor at
+    <span class="metric">0.6300</span>, not 0.7414.)</em>
     <em>[2026-06-16 update: superseded. Issue #27's damped error-feedback ignited anyway (EXP-27, STOP).
     The error-feedback idea was then rebuilt on the codec's <strong>own exact residual</strong> &mdash;
     EXP-30's &delta;-residual merger, <code>delayed_ef</code> &lambda;=1 &mdash; which reached dense parity
@@ -198,7 +201,7 @@
     <tbody>
       <tr><td>dense reference</td><td>compression off</td><td>0.7536</td><td>+0.0122</td></tr>
       <tr><td><strong>B_ef (promoted)</strong></td><td>ef_powersgd (direction-preserving)</td><td><strong>0.7210</strong></td><td>&minus;0.0204</td></tr>
-      <tr><td>EXP-25 reference</td><td>signed_ema (falsified)</td><td>0.7066</td><td>&minus;0.0348</td></tr>
+      <tr><td>EXP-25 reference</td><td>signed_ema (then-failing; later learns &mdash; see EXP-32)</td><td>0.7066</td><td>&minus;0.0348</td></tr>
       <tr><td>B_plain</td><td>plain codec on the realistic substrate</td><td>0.6437</td><td>&minus;0.0977</td></tr>
       <tr><td>C2_hybrid</td><td>geometry-winning basis (Step C)</td><td>0.3730</td><td>&minus;0.3684</td></tr>
     </tbody>

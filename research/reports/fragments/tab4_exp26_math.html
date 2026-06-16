@@ -8,9 +8,13 @@
     captures, and why a basis can hold 99.85% of the <em>picture</em> a layer sends yet only
     31.8% of the <em>learning signal</em>. Then the three things we tested on that geometry —
     a new basis content (Step&nbsp;C), error-feedback (Step&nbsp;B) — and what they taught us.
-    The headline: the issue lands at <span class="metric">REVISE</span>, with the best
-    realistic comm-efficient result to date (val@50 <span class="metric">0.7210</span>) two
-    points short of parity, and one clean, decisive falsification along the way.
+    At the time the issue landed at <span class="metric">REVISE</span> (val@50
+    <span class="metric">0.7210</span>, two points short of the in-box dense draw), with one clean,
+    decisive basis falsification along the way. <em>[Two conclusions here were later overturned by the
+    #29 anchor fix: 0.7210 was beaten by error feedback (EXP-30, the current default, at dense parity
+    ~0.75), and the &ldquo;the sign term is structurally hopeless&rdquo; reading was an artifact of the
+    off-policy anchor — on the corrected circuit the sign method learns (EXP-32, 0.7271). The geometry
+    primer and the Step-C falsification below stand; the sign verdict is caveated inline.]</em>
   </p>
 
   <h3>1. The geometry primer — subspaces as camera angles</h3>
@@ -112,8 +116,12 @@
     <em>operand mismatch</em>: PowerSGD compresses the <em>activation</em> gradient, not the
     <em>weight</em> gradient, so \(G_{\text{comp}}\) is simply not \(Q Q^{\top} G_{\text{weight}}\).
     Both push the naive cosine toward zero independent of direction (the measured
-    \(\cos(G_{\text{fresh}}, G_{\text{comp}})=0.010\) is an artifact — plain PowerSGD r77 ties
-    dense at 0.7415, so it cannot truly be orthogonal to dense).
+    \(\cos(G_{\text{fresh}}, G_{\text{comp}})=0.010\) is an artifact — plain PowerSGD r77 trains to a
+    usable accuracy, so it cannot truly be orthogonal to dense).
+    <em>(The original draft cited 0.7415 here as the PowerSGD-only number; that was an old clean-step
+    config, not the realistic substrate. On the realistic anchor substrate the no-merger floor is
+    <span class="metric">0.6300</span> — still well clear of zero, so the &ldquo;not orthogonal&rdquo;
+    point holds.)</em>
   </p>
   <p>
     The fix was to pivot to <strong>confound-free discriminators</strong> that never reference
