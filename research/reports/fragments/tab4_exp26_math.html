@@ -141,12 +141,24 @@
     </tbody>
   </table>
   <p>
-    The coin-flip sign agreement at <em>zero</em> staleness is the kill shot for the EXP-25
-    merger: it proves the sign disagreement is <strong>structural</strong>, not a symptom of a
-    stale anchor you could fix by refreshing more often. That routed us to a sign-free
-    successor (Step&nbsp;B), and the 68% off-principal miss routed us to test the basis content
-    first (Step&nbsp;C).
+    The coin-flip sign agreement at <em>zero</em> staleness <em>looked like</em> the kill shot for the
+    EXP-25 merger: it shows the sign disagreement is <strong>structural</strong>, not a symptom of a
+    stale anchor you could fix by refreshing more often. That routed us to a sign-free successor
+    (Step&nbsp;B), and the 68% off-principal miss routed us to test the basis content first (Step&nbsp;C).
   </p>
+  <div class="warn">
+    <strong>Post-#29 correction.</strong> The structural-disagreement <em>measurement</em> stands, but it
+    did <strong>not</strong> kill sign-replacement. The agreement was measured against the <em>off-policy
+    invalid-M</em> anchor (an \(M\) formed by forwarding the current batch through stale weights — a
+    wrong-trajectory gradient), so a near-50% sign agreement is what you'd expect from a <em>mismatched</em>
+    reference, not proof the sign term is useless. The variable Step&nbsp;A held fixed was anchor
+    <em>staleness</em> (correctly ruled out); the variable it could not see was the anchor's <em>data
+    validity</em>. #29's on-policy replay fixed the data, and on that corrected circuit
+    <code>signed_ema</code> (\(\alpha=0.5\), \(\beta_{\text{anc}}=0\)) is stable and near-parity
+    (<span class="metric">0.7271</span>, EXP-32). So the routing to Step&nbsp;B/C was a reasonable call at
+    the time, but &ldquo;the sign term is dead&rdquo; was an artifact of the off-policy confound, not a
+    geometric necessity. See the EXP-29 / EXP-32 tabs.
+  </div>
 
   <h3>4. Step C — the Q-content mathematics, and a beautiful falsification</h3>
   <p>
@@ -255,9 +267,11 @@
     the update. The residual dose \(\lVert G_{\text{corr}}-G_{\text{comp}}\rVert/\lVert G_{\text{comp}}\rVert\)
     sat at a median 0.32, rising to 0.47 as the basis went stale (a real, growing correction,
     not a no-op). The outcome: <strong>val@50 0.7210</strong>, the best realistic
-    comm-efficient result to date — +1.4 points over the falsified EXP-25 signed_ema, +7.7
-    points over plain PowerSGD on the same realistic substrate, with no deterministic collapse
-    on the promoted run, and a measured ~19.8&times; communication reduction.
+    comm-efficient result <em>at the time</em> — +1.4 points over the then-failing EXP-25 signed_ema
+    (which later learns, 0.7271; see EXP-32), +7.7 points over plain PowerSGD on the same realistic
+    substrate, with no deterministic collapse on the promoted run, and a measured ~19.8&times;
+    communication reduction. <em>(Superseded as the best result by error feedback, EXP-30 — see the
+    resolution box below.)</em>
   </p>
   <div class="warn">
     <strong>The catch.</strong> Parity is 0.7414; we landed 2.0 points short — hence
