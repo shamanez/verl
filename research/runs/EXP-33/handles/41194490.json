@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "instance_id": "41194490",
+  "ssh_host": "46.243.55.155",
+  "ssh_port": 40266,
+  "public_ipaddr": "46.243.55.155",
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -p 40266 root@46.243.55.155 -L 8080:localhost:8080",
+  "ssh_proxy_alt": "ssh2.vast.ai:34490",
+  "gpu_name": "H200",
+  "num_gpus": 4,
+  "gpu_ram": 143771,
+  "dph_total": 11.3523,
+  "reused": false,
+  "operator_provided": true,
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "operator-provided 4xH200 (no vast-provision; on project VAST_API_KEY account, instance 41194490, vastai-manageable)",
+  "note": "OPERATOR-PROVIDED box for EXP-33 RESUME (C2/C3/C4). Strict directive: use THIS box, do NOT provision. This box IS on the project VAST_API_KEY account (vastai show instances => instance 41194490 4xH200 running $11.3523/hr) => IS vastai-manageable => tear down via vast-teardown skill when science captured. Legacy key ~/.ssh/vast_ai (operator route) + project-standard ~/.ssh/vast_ai_name (appended to authorized_keys) BOTH verified. tmux: exp-33-46_243_55_155. verl@vast-ai-workload 03ca9c8 (comm_eff+b2_sota+baseline+config byte-identical to C0/C1 commit d61607c — verified empty diff)."
+}
