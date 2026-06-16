@@ -56,7 +56,7 @@
     </thead>
     <tbody>
       <tr><td>dense <code>5e2jpho9</code></td><td>50</td><td>0.135</td><td>193</td><td>1 (s6, warmup)</td><td><span class="metric">0.7536</span></td><td>STABLE — zero carrier signature</td></tr>
-      <tr><td>signed_ema &alpha;=0.5 <code>1wulaelw</code></td><td>50 (censored)</td><td>0.371</td><td>170</td><td><strong>2 (consecutive s47–48)</strong>, len 5806@50</td><td>0.7066</td><td>DANGER @50 — early spiral, P(ignite by s100)&nbsp;&asymp;&nbsp;0.6</td></tr>
+      <tr><td>signed_ema &alpha;=0.5 <code>1wulaelw</code> <em>(invalid&#8209;M)</em></td><td>50 (censored)</td><td>0.371</td><td>170</td><td><strong>2 (consecutive s47–48)</strong>, len 5806@50</td><td>0.7066</td><td>DANGER @50 on the <em>pre&#8209;#29</em> circuit — <strong>superseded</strong>: re&#8209;run on valid&#8209;M (EXP&#8209;32 <code>cwz1hu5p</code>) is STABLE, 0.7271@50, no ignition</td></tr>
       <tr class="hl"><td>damped-EF EXP-27 <code>qa6sll3h</code></td><td>67 (killed)</td><td>0.401</td><td>166</td><td><strong>7 (s61–67)</strong></td><td>0.7202</td><td>EXPLODED s61 — same spiral, longer lag</td></tr>
       <tr><td>ef parent r2 <code>tilwe80t</code></td><td>50</td><td>0.396</td><td>146</td><td>1 (isolated)</td><td>0.7210</td><td>FIRST-PASSAGE LUCKY (emitted spikes, survived)</td></tr>
       <tr><td>plain <code>u1v94opv</code></td><td>50</td><td>0.478</td><td>197</td><td><strong>1 (s1, warmup)</strong></td><td>0.6437</td><td>STABLE — no carrier, zero emission after warmup</td></tr>
@@ -87,9 +87,11 @@
     <li><strong>comp_t &perp; G_t exactly</strong> (by construction:
       <code>spectral_filter.py:378–379</code>). Every injected force is tangential —
       it neither helps nor hurts descent, but pushes <em>sideways</em>.</li>
-    <li><strong>M has ~50-global-step memory</strong> (\(\beta=0.95\), refresh every
+    <li><strong>M has ~50-global-step memory</strong> (\(\beta_{\text{anc}}=0.95\), refresh every
       2.5 global steps). The tangential push points in a direction that is effectively
-      constant over the run length.</li>
+      constant over the run length. <em>(This is the load-bearing term: the SOTA later sets
+      \(\beta_{\text{anc}}=0\), collapsing this memory to a single fire &mdash; see the box below
+      and the EXP-29 tab.)</em></li>
     <li><strong>The projection is nearly vacuous</strong>: \(\cos(G_{\text{anchor}},
       G_{\text{comp}}) \approx 0.01\)–\(0.06\) (Step-A, EXP-26), so
       <code>comp_t &asymp; M</code> — this is direct injection of the stale EMA, not
@@ -112,6 +114,30 @@
     Every per-step health metric (cos(G,G+e) &ge; 0.982, score 0.73–0.84) was correct
     and certifies only the descent component — it says nothing about the tangential one.
     Full derivation: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> §§(a)–(h).
+  </div>
+
+  <div class="win">
+    <strong>What the later corrections did to this carrier.</strong> Both ingredients of the persistent
+    tangential force were removed by the SOTA configuration, and for principled reasons:
+    <ul>
+      <li><strong>Valid \(M\) (EXP-29, &ldquo;politeness off&rdquo;).</strong> The carrier was injecting
+        \(M\), and that \(M\) was the <em>off-policy</em> wrong-trajectory gradient (current batch scored
+        by stale weights). On-policy replay makes \(M\) an honest stale-policy gradient &mdash; the right
+        object to reason about &mdash; and let EXP-30 measure a <em>clean</em> codec residual to feed back
+        instead of the stale EMA itself.</li>
+      <li><strong>\(\beta_{\text{anc}} = 0\) (the headline).</strong> Structural fact&nbsp;2 above &mdash;
+        the near-constant direction integrated over the run &mdash; exists <em>only because</em>
+        \(\beta_{\text{anc}}=0.95\) gives \(M\) a ~50-step memory. At \(\beta_{\text{anc}}=0\), \(M\) is the
+        freshest anchor gradient alone, refreshed wholesale every fire, so there is no persistent
+        accumulated direction left to integrate. The RL reason this is also the <em>statistically correct</em>
+        choice &mdash; policy gradients are non-stationary, so averaging old (off-policy) ones with
+        \(\beta>0\) folds in stale biased directions &mdash; is exactly the reason the carrier was harmful.
+        The non-stationarity insight and the ignition cure are the <em>same</em> fact.</li>
+    </ul>
+    Consequently EXP-30's true error feedback (endogenous residual, valid \(M\), \(\beta_{\text{anc}}=0\),
+    \(\lambda=1\)) ran <strong>emission-free through 100 steps to dense parity (~0.75)</strong> &mdash; see
+    the decision-tree box below and the EXP-30/EXP-31 tabs. The diagnosis on this tab was right; the fix
+    operated on precisely the mechanism it named.
   </div>
 
   <h3>Carrier vs substrate: the single-knob isolate</h3>
@@ -180,7 +206,10 @@
         <td><strong>P1 — &alpha;=0.5@100</strong></td>
         <td>Ignites by s100, lock-in ~s55–85</td>
         <td>&asymp; 0.6</td>
-        <td>Extends carrier law to rectified carriers; if survives (P&asymp;0.4): additive-only carrier distinction</td>
+        <td><strong>Superseded by #29.</strong> That P&asymp;0.6 was for the <em>invalid-M</em> carrier.
+          On the corrected (valid-M) circuit, EXP-32 (<code>cwz1hu5p</code>) ran signed_ema &alpha;=0.5
+          <strong>STABLE to 0.7271@50, no ignition</strong> — the carrier's ignition was an artifact of
+          the off-policy \(M\) (and \(\beta_{\text{anc}}=0.95\) memory), not intrinsic to the sign merger.</td>
       </tr>
       <tr>
         <td><strong>P2 — plain@100</strong></td>
@@ -220,12 +249,11 @@
 
   <ol>
     <li>
-      <strong>Retire the M-fed merger class.</strong> Eight arms (dense/psgd-only, plain,
-      ef&nbsp;r1, ef&nbsp;r2, EXP-27, &alpha;=0/0.3/0.5) complete a dose-response over
-      {sign-carrier, M-carrier, rectified-carrier, none}: every carrier arm either ignited or
-      shows DANGER censored at 50; both no-carrier arms are emission-free.
-      The best carrier result (0.7210) &lt; psgd-only&rsquo;s own 0.7415 — there is no interior
-      optimum to tune toward.
+      <strong>Retire the <em>directly-injected-M</em> carrier class.</strong> Eight arms
+      (dense/psgd-only, plain, ef&nbsp;r1, ef&nbsp;r2, EXP-27, &alpha;=0/0.3/0.5) complete a dose-response
+      over {sign-carrier, M-carrier, rectified-carrier, none}: every carrier arm either ignited or
+      shows DANGER censored at 50; both no-carrier arms are emission-free. There is no interior optimum
+      to tune toward <em>on the direct-carrier knob</em> (caveats below).
     </li>
     <li>
       <strong>Labeled guardrail arms (objective changes — not the core):</strong>
@@ -241,6 +269,20 @@
       <em>surface</em> must be fixed first.
     </li>
   </ol>
+
+  <div class="warn">
+    <strong>Two corrections to the &ldquo;retire&rdquo; verdict, from later work.</strong>
+    <strong>(i) Wrong floor.</strong> The comparison baseline above is the old clean-step number
+    <span class="metric">0.7415</span>; the realistic no-merger floor on this anchor substrate is
+    <span class="metric">0.6300</span> (C2, <code>k6nmcuyd</code>). So these carrier arms sit
+    <em>above</em> the floor, not below it &mdash; partially-working, just dominated.
+    <strong>(ii) Scope.</strong> The retirement is specific to injecting \(M\) (or its sign)
+    <em>directly</em> on the fast path. It does <strong>not</strong> retire \(M\)-<em>derived</em>
+    correction in general: EXP-30's <code>delayed_ef</code> feeds back the codec <em>residual</em>
+    \(\delta\) measured against a <em>valid</em> \(M\) at \(\beta_{\text{anc}}=0\), and that is the
+    current SOTA at ~0.75 dense parity. The &ldquo;no interior optimum&rdquo; reading holds for the
+    direct-carrier knob only.
+  </div>
 
   <p>
     For the successor issue number and the next-step plan, see issue&nbsp;#27 closing

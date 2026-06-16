@@ -1,13 +1,28 @@
 <section class="tab-content" id="tab2">
   <h2>EXP-26: The Core Idea &mdash; Measure the Geometry Before You Spend on the Next Guess</h2>
 
+  <div class="warn">
+    <strong>Read this first &mdash; what survived and what was superseded.</strong> EXP-26's
+    <em>method</em> (diagnose the geometry before spending GPU-hours) and its Step-C falsification
+    (a gradient-energy basis anti-converts) both stand. But two of its headline <em>conclusions</em>
+    were later overturned by the #29 anchor-circuit fix: (1) its &ldquo;best result&rdquo; of
+    <span class="metric">0.7210</span> was beaten by error feedback (EXP-30 <code>delayed_ef</code>,
+    now the default, at dense parity ~0.75); and (2) its verdict that the <em>sign</em> term is
+    &ldquo;structurally hopeless, drop it forever&rdquo; was wrong &mdash; once the anchor's gradient was
+    made honest (#29), the sign method (<code>signed_ema</code>) learned and reached a stable
+    <span class="metric">0.7271</span> (EXP-32). The sign-disagreement measurement below was real; the
+    inference that it killed the method was a consequence of the off-policy anchor, not the sign term.
+    Caveats are inline; see the EXP-29 / EXP-30 / EXP-32 tabs.
+  </div>
+
   <p class="lede">
-    EXP-25 spent a full multi-arm training campaign to falsify one bad idea (the "signed_ema" merger).
-    EXP-26 refused to make the same trade: before committing any expensive training run, it ran a cheap
-    <em>geometry audit</em> on real gradients to decide <strong>which</strong> guess was worth the GPU-hours.
-    That single discipline &mdash; diagnose first, then spend &mdash; is the whole story of this experiment, and it
-    led to the best realistic communication-efficient result the program has produced (val@50 of 0.7210), still
-    2 points short of parity, with a precise reason why.
+    EXP-25 spent a full multi-arm training campaign on the "signed_ema" merger and (under the then-current
+    off-policy anchor) concluded it failed. EXP-26 refused to make the same trade: before committing any
+    expensive training run, it ran a cheap <em>geometry audit</em> on real gradients to decide
+    <strong>which</strong> guess was worth the GPU-hours. That single discipline &mdash; diagnose first, then
+    spend &mdash; is the durable contribution of this experiment, and at the time it produced the best
+    realistic communication-efficient result the program had (val@50 of 0.7210). <em>[Superseded &mdash; see
+    the box above; the current best is error feedback, EXP-30.]</em>
   </p>
 
   <h3>The setup, in one paragraph</h3>
@@ -60,19 +75,32 @@
         <td><strong>H3</strong></td>
         <td>The sign-replacement disagreement is structural (a coin-flip), not a staleness artifact.</td>
         <td>Sign-agreement between \(M\) and \(G_{\text{comp}}\): 0.500 / 0.523 / 0.520 across delay settings 0 and 5.</td>
-        <td><strong>Confirmed</strong> &mdash; even a perfectly fresh anchor agrees on the sign only half the time.</td>
+        <td><strong>Measurement holds, inference superseded</strong> &mdash; the ~50% agreement is real, but it was measured against the off-policy <em>invalid-M</em> anchor; on the corrected circuit the sign method <em>learns</em> (EXP-32, 0.7271). Half-agreement does not kill it.</td>
       </tr>
     </tbody>
   </table>
 
   <p>
-    Read together, the story is unambiguous. H3 says the sign term is <em>structurally</em> hopeless: a fresh anchor
-    disagrees on the sign of the update as often as a fair coin, so no amount of fixing staleness can rescue it. H1 says
-    the merger's actual harm is a directional rotation, and H2 says the basis itself leaves most of the real update
-    energy on the table. The emitted decision was <code>go_C_then_B</code> with <code>retire_sign_replacement(confirmed)</code>:
-    drop the sign term forever, and because the basis content is suspect, test a better basis (Step C) <em>before</em>
-    the new merger (Step B).
+    Read together, the story <em>at the time</em> looked unambiguous. H3 appeared to say the sign term was
+    <em>structurally</em> hopeless: a fresh anchor disagreed on the sign of the update as often as a fair coin,
+    so &mdash; the reasoning went &mdash; no amount of fixing staleness could rescue it. H1 says the merger's
+    actual harm is a directional rotation, and H2 says the basis itself leaves most of the real update energy
+    on the table. The emitted decision was <code>go_C_then_B</code> with
+    <code>retire_sign_replacement(confirmed)</code>: drop the sign term, and because the basis content is
+    suspect, test a better basis (Step C) <em>before</em> the new merger (Step B).
   </p>
+  <div class="warn">
+    <strong>Where the H3 conclusion went wrong (post-#29).</strong> &ldquo;Retire the sign term forever&rdquo;
+    did not survive. The coin-flip agreement was measured against the <em>off-policy</em> anchor &mdash; an
+    \(M\) computed by forwarding the current batch through stale weights, i.e. a wrong-trajectory gradient.
+    The fix was not to fix <em>staleness</em> (H3 correctly ruled that out) but to fix the anchor's
+    <em>data</em>: #29's on-policy replay makes the anchor grade the trajectories its own stale weights
+    generated, so \(M\) is a valid stale-policy gradient. On that corrected circuit the sign method
+    (<code>signed_ema</code> \(\alpha=0.5\), \(\beta_{\text{anc}}=0\)) is stable and near-parity
+    (<span class="metric">0.7271</span>, EXP-32). So H3's <em>diagnosis of the symptom</em> was right, but its
+    <em>verdict on the method</em> was an artifact of the off-policy confound. (The Step C / Step B ordering it
+    drove was still sound; the basis result below stands on its own.)
+  </div>
 
   <div class="warn">
     <strong>An honest caveat baked into the audit.</strong> The textbook discriminator &mdash; the angle between the

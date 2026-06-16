@@ -105,34 +105,56 @@
       of dense (EXP-31, four levers, all null &rarr; STOP). Do not re-propose anchor-usage levers.</li>
   </ul>
 
-  <h3>What is genuinely open &mdash; the only live to-dos</h3>
+  <h3>Next steps</h3>
+  <p>
+    The two method questions are answered: <strong>error feedback (<code>delayed_ef</code>) stays the
+    default / best</strong>, and the <strong>sign method is closed as works-but-dominated</strong> &mdash;
+    EXP-32 gave it its first stable number on the corrected circuit, and it lands below error feedback. What
+    remains is confirmation and the surpass frontier.
+  </p>
   <ol>
+    <li>
+      <strong>(Optional) Confirm the non-stationarity hypothesis with an explicit \(\beta_{\text{anc}}>0\)
+      run.</strong> The \(\beta_{\text{anc}}=0\) headline is an inference from the carrier-ignition mechanism;
+      one run with \(\beta_{\text{anc}}>0\) on the B2 substrate would directly show that <em>accumulating old
+      policy gradients hurts</em>, turning the non-stationarity argument from theory into a measured ablation.
+      Cheap, bounded, needs no new code.
+    </li>
     <li>
       <strong>Upgrade parity from &ldquo;within noise&rdquo; to &ldquo;established&rdquo; (cheap, bounded).</strong>
       Both the dense bar and B2 are single draws inside a ~&plusmn;0.024 band. Seed replicates of
-      <em>both</em> arms would pin the two bands and turn the statistical tie into a multi-seed result. This
-      is the one measurement that closes the parity claim, and it needs no new code.
+      <em>both</em> arms would pin the two bands and turn the statistical tie into a multi-seed result. It
+      needs no new code.
     </li>
     <li>
       <strong>Surpass requires re-scoping the locked surface &mdash; a new plan + operator decision, not a
       lever.</strong> The deep mechanism says a comm-efficient method can only exceed dense by injecting a
-      signal dense itself lacks. None of the candidates is reachable on the current locked surface:
-      <ul>
-        <li>a <strong>different forward basis</strong> that captures the stable-rank-2 off-principal mode
-          the act-basis \(Q\) misses (must avoid Step-C's update-energy trap);</li>
-        <li>a <strong>generation-side diversity change</strong> (higher \(n\), rollout temperature)
-          converting to a pass@k or relocated-mode edge &mdash; this is the only compression-specific bet,
-          and it changes the sacred uncompressed generation path;</li>
-        <li>a <strong>fundamentally different decentralized-RL objective.</strong></li>
-      </ul>
-      Each is an operator decision about the fixed control surface, not a researcher tuning step.
+      signal dense itself lacks, and the anchor-usage axis cannot supply it (EXP-31 STOP). The remaining
+      frontier &mdash; low-but-nonzero odds &mdash; is the <strong>additive off-principal sub-basis route</strong>:
+      a forward signal that captures the stable off-principal mode the act-basis \(Q\) misses (avoiding Step-C's
+      update-energy trap). Adjacent operator-decision candidates: a generation-side diversity change (higher
+      \(n\), rollout temperature) converting to a pass@k or relocated-mode edge &mdash; the only
+      compression-specific bet, but it touches the sacred uncompressed generation path &mdash; or a
+      fundamentally different decentralized-RL objective. Each is a deliberate change to the fixed control
+      surface, not a researcher tuning step.
     </li>
   </ol>
+
+  <div class="callout">
+    <strong>Conventions in force.</strong> <strong>55-step training is now standard</strong> &mdash; a
+    5-step buffer past val@50 so the final validation accuracy syncs to W&amp;B before the run exits.
+    \(\beta_{\text{anc}}=0\) (freshest anchor gradient only) is the default for every merger. The B2 knob set
+    in <code>runs/EXP-31/B2_baseline/</code> is the substrate every new arm holds fixed.
+  </div>
 
   <div class="win">
     <strong>The honest bottom line.</strong> Communication-efficient GRPO matches dense at ~5% of the
     gradient-communication cost, on a realistic decentralized-pipeline substrate, reproducibly &mdash; the
-    M6 milestone in everything but a multi-seed parity band. The surpass-dense thesis, as far as the
+    M6 milestone in everything but a multi-seed parity band. <strong>Error feedback</strong> is the default
+    that gets there; the <strong>sign method now learns too</strong> once the anchor is honest, just not as
+    well. The unlock was conceptual as much as mechanical: make the anchor's gradient a <em>valid</em> policy
+    gradient (#29) and keep only the <em>freshest</em> one (\(\beta_{\text{anc}}=0\)), because RL gradients
+    are non-stationary and accumulating stale ones hurts. The surpass-dense thesis, as far as the
     anchor-usage axis can test it, is falsified: you cannot out-perform dense by being a cleverer copy of
     dense. Any next step toward surpassing is a deliberate change to the locked surface, made with eyes
     open, not another merger to tune.
@@ -141,6 +163,7 @@
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
     Current state as of 2026-06-16. Sources: <code>research/runs/SUMMARY.md</code> (single source of truth for
     results) · <code>runs/EXP-31/verdict.md</code> + <code>BEST_SO_FAR.md</code> · <code>runs/EXP-31/B2_baseline/verdict.md</code>
-    (EXP-30) · <code>research/.claude/GOAL.md</code> (what &ldquo;done&rdquo; means) · <code>CODE_WALKTHROUGH.md</code>.
+    (EXP-30) · <code>runs/EXP-32/</code> + issue #32 (corrected-circuit signed_ema, W&amp;B <code>cwz1hu5p</code>) ·
+    <code>research/.claude/GOAL.md</code> (what &ldquo;done&rdquo; means) · <code>CODE_WALKTHROUGH.md</code>.
   </footer>
 </section>

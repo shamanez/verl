@@ -90,30 +90,35 @@
   </p>
 
   <p>
-    <strong>(b) Why it is structural.</strong> Two reasons, both about the gradients being different objects rather than stale copies of one object. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, and deeper, a near-orthogonality geometry. The true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates sitting near zero, where the sign is essentially decided by residual sampling noise. When you compare two independent noisy estimates of a quantity that is near zero on most coordinates, their per-coordinate signs agree about half the time — <em>even when the two gradients' overall directions are aligned</em>. This is the same geometry that makes two random high-dimensional vectors nearly orthogonal. The coin-flip is the expected signature, not an anomaly.
+    <strong>(b) Why the signs disagreed — and which part was fixable.</strong> Three reasons, of increasing importance. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, a near-orthogonality geometry: the true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates near zero, where the sign is decided by residual sampling noise; comparing two independent noisy estimates of a near-zero quantity, their per-coordinate signs agree about half the time even when overall directions are aligned (the same geometry that makes random high-dimensional vectors nearly orthogonal). These two are real and partly irreducible. <strong>But the dominant, fixable cause was a third one the original tab missed: the anchor was grading the <em>wrong trajectories.</em></strong> It ran its clean backward pass at the stale weights but on the trajectories the <em>current</em> policy had generated — an off-policy mismatch, so its gradient was a biased estimate of "the wrong distribution at the wrong weights." Its sign was not a trustworthy clean reference; it was a confounded one. EXP-29 fixed exactly this (the anchor now grades the trajectories its own stale weights generated, an honest stale-policy gradient), and the merger's behavior changed — see the end of this section. So the coin-flip was the expected signature <em>of a broken sign source</em>, not proof the sign primitive is doomed.
   </p>
 
   <div class="callout">
-    <strong>[2026-06-16] A third issue — the trajectory confound — and what survived it.</strong> There was
-    a further problem with the anchor \(M\) measured here, found later by a code review: it computed its
-    gradient at the stale weights but on the <em>current</em> policy's trajectories (a stale-weights &times;
-    current-batch mismatch, since the anchor was fed the current tick's batch). <strong>EXP-29</strong>
-    fixed this with on-policy replay — the anchor now grades the trajectories its own stale weights
-    generated (see the EXP-29 tab). The important part for <em>this</em> tab: <strong>EXP-30 re-measured
-    sign-agreement on the corrected, generator-consistent anchor and found it just as orthogonal</strong>
-    (\(\cos \approx 0\)). So the coin-flip above is genuinely structural — not an artifact of the confound.
-    The fix unlocked the <em>residual</em> route to SOTA (EXP-30) without un-falsifying the
-    <em>sign-replacement</em> route analyzed here; both readings stand together.
+    <strong>[2026-06-16] The trajectory confound, the fix, and what actually changed.</strong> The third
+    issue in (b) — the anchor grading the current policy's trajectories at stale weights — was found later by
+    a code review and fixed in <strong>EXP-29</strong> with on-policy replay (the anchor grades the
+    trajectories its own stale weights generated; see the EXP-29 tab). Two things follow, and they are easy
+    to conflate, so be precise. (1) At the raw <em>gradient-vector</em> level, the corrected anchor is still
+    nearly orthogonal to the clipped fast gradient (\(\cos \approx 0\)) — the loss-mismatch and cancellation
+    geometry of (b) are partly irreducible. That is <em>why error feedback, not sign-replacement, became the
+    SOTA route</em> (EXP-30): feeding back the codec's own dropped residual is a near-aligned correction,
+    whereas the anchor's sign is not. (2) But signed_ema is no longer a coin-flip <em>dressed as a
+    correction that hurts</em>: with the sign source now a valid stale-policy gradient, running the merger at
+    \(\alpha=0.5\) on the corrected circuit (<strong>EXP-32</strong>) trains stably to
+    <span class="metric">0.7271</span> — no ignition, well above the real 0.6300 floor, near dense. The old
+    "net-harmful at every \(\alpha\)" verdict does not survive the fix; "<em>dominated by error feedback</em>"
+    does. The residual route to SOTA and the now-working-but-dominated sign route are both consequences of the
+    same fix.
   </div>
 
   <p>
-    <strong>(c) The confound-free measurement of the damage.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
+    <strong>(c) How hard the merger reorients the step.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
   </p>
 
   $$ \cos\!\big(G_{\text{comp}},\,G_{\text{corr}}\big) \;=\; 0.717 \quad\Longrightarrow\quad \theta = \arccos(0.717) \approx 44^{\circ}. $$
 
   <p>
-    The merger rotates the already-compressed update by about <strong>44 degrees</strong> — nearly halfway to perpendicular. It is not a gentle correction; it is a large reorientation of the step the optimizer takes.
+    The merger rotates the already-compressed update by about <strong>44 degrees</strong> — nearly halfway to perpendicular. This is a <em>large</em> reorientation, not a gentle nudge. On the pre-#29 circuit, where the sign source was biased, a 44° turn toward a confounded direction was damage. On the corrected circuit it is a 44° turn toward a <em>valid</em> stale-policy direction, and the run survives it (0.7271). The magnitude of the rotation is a property of \(\alpha=0.5\); whether it helps or hurts depends entirely on what it is rotating <em>toward</em> — which is exactly what #29 fixed.
   </p>
 
   <p>
@@ -129,28 +134,29 @@
   $$ \big\lVert G_{\text{corr}} - G_{\text{comp}}\big\rVert^2 = \sum_{\text{disagree}} 4\,g_i^2 = 4 f \,\lVert G_{\text{comp}}\rVert^2 \quad\Longrightarrow\quad \frac{\lVert G_{\text{corr}}-G_{\text{comp}}\rVert}{\lVert G_{\text{comp}}\rVert} = 2\sqrt{f}, $$
 
   <p>
-    where \(f\) is the magnitude-weighted fraction of disagreeing coordinates. EXP-25 logged this relative-change quantity every step: its median is <span class="metric">1.416 \(\approx \sqrt{2}\)</span>. Inverting, \(2\sqrt{f}=\sqrt{2}\) gives \(f = \tfrac12\) — confirming, from a completely independent measurement during the actual run, that half the gradient's mass has its sign flipped at full magnitude every single step.
+    where \(f\) is the magnitude-weighted fraction of disagreeing coordinates. EXP-25 logged this relative-change quantity every step: its median is <span class="metric">1.416 \(\approx \sqrt{2}\)</span>. Inverting, \(2\sqrt{f}=\sqrt{2}\) gives \(f = \tfrac12\) — confirming, from a completely independent measurement during the actual run, that half the gradient's mass had its sign flipped at full magnitude every step <em>on that circuit</em>. The algebra \(G_{\text{corr},i}=(2\alpha-1)G_{\text{comp},i}\) is exact and circuit-independent; what changed with #29 is the <em>meaning</em> of a flip. When the anchor's sign comes from a biased off-policy gradient, flipping toward it is a step in the wrong direction; when it comes from a valid stale-policy gradient, the flips land on coordinates where the clean reference genuinely disagrees with the compressed estimate, and following it is informative rather than destructive. Same \(\sqrt 2\), opposite consequence.
   </p>
 
   <p>
-    <strong>(e) The dose-response is exactly what this model predicts.</strong> If the sign term injects a wrong-direction perturbation on half the coordinates, then dialing it up (lowering \(\alpha\)) should monotonically worsen training — which is precisely what was observed:
+    <strong>(e) The dose-response on the old circuit — and how it moved after #29.</strong> On the pre-#29 circuit, where the sign source was a biased off-policy gradient, the model in (d) predicts that dialing the sign term up (lowering \(\alpha\)) injects a wrong-direction perturbation on half the coordinates and should monotonically worsen training — which is precisely what was observed (top three rows). The corrected circuit (EXP-32, bottom row) tells the rest of the story:
   </p>
 
   <table class="data">
-    <thead><tr><th>\(\alpha\)</th><th>Effect on a disagreeing coordinate</th><th>val@50</th><th>Outcome</th></tr></thead>
+    <thead><tr><th>\(\alpha\)</th><th>Circuit</th><th>Effect on a disagreeing coordinate</th><th>val@50</th><th>Outcome</th></tr></thead>
     <tbody>
-      <tr><td>0.0</td><td>\(-1.0\,\lvert G\rvert\) — full reversal</td><td><span class="metric">0.3541</span></td><td>catastrophic collapse</td></tr>
-      <tr><td>0.3</td><td>\(-0.4\,\lvert G\rvert\) — 40% reversal</td><td><span class="metric">0.6164</span></td><td>peak-then-crash</td></tr>
-      <tr><td>0.5</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7066</span></td><td>survives, but throws away half the gradient</td></tr>
+      <tr><td>0.0</td><td>pre-#29</td><td>\(-1.0\,\lvert G\rvert\) — full reversal</td><td><span class="metric">0.3541</span></td><td>catastrophic collapse</td></tr>
+      <tr><td>0.3</td><td>pre-#29</td><td>\(-0.4\,\lvert G\rvert\) — 40% reversal</td><td><span class="metric">0.6164</span></td><td>peak-then-crash</td></tr>
+      <tr><td>0.5</td><td>pre-#29</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7066</span></td><td>survives (on broken data)</td></tr>
+      <tr class="hl"><td>0.5</td><td>corrected (#29)</td><td>\(0\) — disagreeing coord zeroed</td><td><span class="metric">0.7271</span></td><td>stable, near parity, no ignition</td></tr>
     </tbody>
   </table>
 
   <p>
-    The best arm sits at the <em>least-correction</em> edge of the swept range, and \(\alpha\to1\) (no sign term at all — plain PowerSGD) is predicted to be best of all. The correction's optimum is to be turned off. That is a verdict on the <em>primitive</em>, not a tuning miss.
+    Two readings, both true. <em>Within the pre-#29 circuit</em>, the dose-response is monotone and the least-correction edge wins — a clean verdict that the sign term, fed a confounded reference, only hurts. <em>Across the fix</em>, the same \(\alpha=0.5\) merger climbs from 0.7066 to <span class="metric">0.7271</span> once the anchor computes a valid gradient: the verdict was on the <em>circuit</em>, not on the primitive. What remains true is the comparison to the alternative — error feedback reaches dense parity (~0.75) where signed_ema reaches ~0.73, so the sign route is <strong>dominated, not dead</strong>. We did not re-sweep \(\alpha<0.5\) on the corrected circuit; the load-bearing point is that the catastrophic-at-every-dose claim was an artifact, and at the sensible operating point the merger now works.
   </p>
 
   <p>
-    <strong>(f) The sharpening spiral.</strong> The chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward.
+    <strong>(f) The sharpening spiral (the pre-#29, low-\(\alpha\) extreme).</strong> On the old circuit at small \(\alpha\) the chain closes mechanically. A persistent wrong-sign, full-magnitude force on half the coordinates is exactly magnitude-preserving signSGD pointed down a wrong axis: it destroys the natural per-coordinate cancellation that keeps GRPO steps modest, the gradient norm inflates (from the dense ~0.39 to ~3–11 at \(\alpha=0\)), the policy sharpens hard, entropy collapses, and — with no KL or entropy brake — the only reward-correlated escape is to emit ever-longer answers. Length explodes, reward peaks then crashes, validation falls off the cliff. The Part-1 mechanism and the Part-2 mathematics are the same story told forward and backward. <strong>This is the failure mode #29 defused at the operating point:</strong> with a valid sign source, the corrected-circuit \(\alpha=0.5\) run shows none of it — bounded length, no ignition, val 0.7271. The spiral was the signature of pushing hard toward a <em>wrong</em> direction, not of the sign primitive as such.
     <em>[2026-06-11 refinement (EXP-27 post-mortem): the general ordering is now established as
     <strong>length-first</strong> — the spiral ignites and entropy collapse <em>trails</em> it (ef&nbsp;r1
     ignited at entropy 0.83, then collapsed; the boundary is joint dose&times;sharpness, not an entropy
@@ -159,7 +165,21 @@
   </p>
 
   <div class="warn">
-    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect. <em>[2026-06-16: that error-feedback line was itself later rebuilt on the codec's <strong>own exact</strong> residual (EXP-30's &delta;-residual merger) and reached dense parity, ~0.75 — the 0.7210 here is superseded; see the EXP-30 tab.]</em>
+    <strong>The realistic-floor correction (this is the number that moved the verdict).</strong> EXP-25's
+    "net-harmful at every \(\alpha\)" verdict was scored against a <em>fresh, clean</em> reference
+    (\(0.7415\), an old config that took a full-rank clean step). That was the wrong yardstick. The honest
+    realistic floor is plain PowerSGD on the same stale-anchor substrate with <em>no</em> merger — arm C2,
+    val@50 <span class="metric">0.6300</span> (WandB <code>k6nmcuyd</code>); an earlier EXP-26 run of the same
+    no-merger config read <span class="metric">0.6437</span>, both well <em>below</em> signed_ema's 0.7066.
+    Measured against 0.6300, even the pre-#29 signed_ema at \(\alpha=0.5\) was <strong>net-helpful</strong>
+    (+0.077), not harmful — it was partially <em>rescuing</em> a substrate whose stale-anchor basis refresh is
+    itself a drag. So two pre-#29 claims fall together: "net-harmful at every \(\alpha\)" (it cleared the real
+    floor) and the 0.7415 baseline it was judged against. What survives is the <em>relative</em> ranking:
+    error feedback — feed back the codec's own exact dropped residual instead of borrowing a sign — reached
+    <strong>dense parity (~0.75)</strong> with the rotation cut to about 17 degrees (EXP-30's
+    &delta;-residual merger; an earlier residual variant read 0.7210). Sign-replacement reaches ~0.73 on the
+    corrected circuit. The verdict, stated correctly: signed_ema <strong>works and helps</strong>, but is
+    <strong>dominated by error feedback</strong>, which is the default. See the EXP-30 tab.
   </div>
 
   <p>
