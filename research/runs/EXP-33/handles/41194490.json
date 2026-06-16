@@ -1,0 +1,1 @@
+{"instance_id":"41194490","ssh_host":"46.243.55.155","ssh_port":40266,"ssh_key":"~/.ssh/vast_ai_name","num_gpus":4,"gpu_name":"H200","gpu_ram":143771,"label":"EXP-33-resume-window2","tmux_session":"exp-33-46_243_55_155","note":"EXP-33 resume box, monitoring window 2; SSH -i ~/.ssh/vast_ai_name -p 40266 root@46.243.55.155; prev window confirmed C2 b0p50 at step 9/55 healthy"}
