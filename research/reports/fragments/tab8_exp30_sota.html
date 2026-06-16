@@ -13,6 +13,98 @@
     own dropped residual, and the exogenous carrier that caused ignition disappears.
   </p>
 
+  <figure style="margin: 22px 0; text-align: center;">
+    <svg viewBox="0 0 780 470" xmlns="http://www.w3.org/2000/svg" role="img"
+         style="width:100%; height:auto; max-width:780px; display:block; margin:0 auto;"
+         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+      <title>The B2 method end to end: a fast compressed circuit, a stale anchor circuit that updates the basis Q by power iteration, and a residual merger</title>
+      <desc>Every step the fast circuit projects each boundary activation h onto a rank-77 basis Q and sends only 77 coordinates instead of 1536, then produces a noisy gradient G_comp. Every 5 ticks the anchor circuit loads a stale weight snapshot, replays the batch those weights generated, and runs one clean uncompressed pass. Its forward harvests boundary activations a, from which Q is updated by one block power-iteration step V = a-transpose times (a Q), all-reduced across data-parallel ranks (sync_basis) and orthonormalized Q = orth(V), then broadcast; the anchor owns Q and the fast path only reads it. Its backward yields an exact gradient G_anchor. The merger forms delta = G_anchor minus G_comp and applies G_corr = G_comp + delta before AdamW; delta is refreshed only at anchor fires and held between them, so it is stale and K-delayed.</desc>
+      <defs>
+        <marker id="e30ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9" fill="none" stroke="var(--muted)" stroke-width="1.4"/>
+        </marker>
+        <marker id="e30ahi" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+        </marker>
+      </defs>
+
+      <text x="16" y="26" font-size="18" font-weight="600" fill="var(--ink)">B2 (delayed_ef): two circuits, one residual merger</text>
+
+      <line x1="540" y1="18" x2="566" y2="18" stroke="var(--muted)" stroke-width="2"/>
+      <text x="572" y="22" font-size="11" fill="var(--muted)">fast · every step</text>
+      <line x1="540" y1="36" x2="566" y2="36" stroke="var(--accent)" stroke-width="2"/>
+      <text x="572" y="40" font-size="11" fill="var(--muted)">anchor · every 5 ticks (stale)</text>
+
+      <!-- FAST LANE -->
+      <text x="16" y="70" font-size="11" font-weight="600" fill="var(--muted)">FAST COMPRESSED CIRCUIT</text>
+      <rect x="16" y="80" width="118" height="54" rx="8" fill="var(--code)" stroke="var(--line)" stroke-width="1.4"/>
+      <text x="75" y="104" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">activation h</text>
+      <text x="75" y="121" font-size="11" fill="var(--muted)" text-anchor="middle">1536-dim</text>
+      <rect x="214" y="80" width="138" height="54" rx="8" fill="var(--code)" stroke="var(--line)" stroke-width="1.4"/>
+      <text x="283" y="104" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">send Y = hQ</text>
+      <text x="283" y="121" font-size="11" fill="var(--muted)" text-anchor="middle">77 coords · ~19.8× less</text>
+      <rect x="432" y="80" width="106" height="54" rx="8" fill="var(--code)" stroke="var(--line)" stroke-width="1.4"/>
+      <text x="485" y="104" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">G_comp</text>
+      <text x="485" y="121" font-size="11" fill="var(--muted)" text-anchor="middle">noisy, biased</text>
+      <line x1="134" y1="107" x2="210" y2="107" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#e30ah)"/>
+      <text x="172" y="99" font-size="10" fill="var(--muted)" text-anchor="middle">project</text>
+      <line x1="352" y1="107" x2="428" y2="107" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#e30ah)"/>
+      <text x="390" y="99" font-size="10" fill="var(--muted)" text-anchor="middle">ĥ = YQᵀ, bwd</text>
+
+      <!-- Q-UPDATE -->
+      <rect x="146" y="190" width="196" height="86" rx="10" fill="var(--callout)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="244" y="212" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">update basis Q  (q_basis = act)</text>
+      <text x="244" y="234" font-size="10.5" fill="var(--ink)" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">V ← aᵀ(a·Q)   power iteration</text>
+      <text x="244" y="250" font-size="10.5" fill="var(--ink)" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">all-reduce V over DP  (sync)</text>
+      <text x="244" y="266" font-size="10.5" fill="var(--ink)" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">Q ← orth(V),  broadcast</text>
+      <path d="M283,190 L283,136" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#e30ahi)"/>
+      <text x="293" y="160" font-size="10.5" font-weight="600" fill="var(--accent)">Q · read-only</text>
+      <text x="293" y="174" font-size="10" fill="var(--muted)">to fast path</text>
+
+      <!-- ANCHOR LANE -->
+      <text x="16" y="322" font-size="11" font-weight="600" fill="var(--accent)">STALE ANCHOR CIRCUIT</text>
+      <rect x="16" y="332" width="166" height="54" rx="8" fill="var(--callout)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="99" y="356" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">stale clone θ(t−K)</text>
+      <text x="99" y="373" font-size="11" fill="var(--muted)" text-anchor="middle">replays its own batch</text>
+      <rect x="262" y="332" width="146" height="54" rx="8" fill="var(--callout)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="335" y="356" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">G_anchor</text>
+      <text x="335" y="373" font-size="11" fill="var(--muted)" text-anchor="middle">clean, exact, full</text>
+      <line x1="182" y1="359" x2="258" y2="359" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#e30ahi)"/>
+      <text x="220" y="351" font-size="10" fill="var(--muted)" text-anchor="middle">clean bwd</text>
+      <path d="M120,332 L210,278" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#e30ahi)"/>
+      <text x="40" y="306" font-size="10" fill="var(--muted)">clean fwd → activations a</text>
+
+      <!-- MERGER -->
+      <rect x="566" y="168" width="198" height="120" rx="10" fill="var(--card)" stroke="var(--muted)" stroke-width="1.6"/>
+      <text x="665" y="192" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">merger (delayed_ef)</text>
+      <text x="665" y="218" font-size="13" fill="var(--ink)" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">δ = G_anchor − G_comp</text>
+      <text x="665" y="240" font-size="13" fill="var(--ink)" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">G_corr = G_comp + δ</text>
+      <text x="665" y="262" font-size="10.5" fill="var(--muted)" text-anchor="middle">λ=1, β_anc=0</text>
+      <text x="665" y="278" font-size="10.5" font-weight="600" fill="var(--accent)" text-anchor="middle">δ set only at fires, held → stale</text>
+
+      <!-- merger inputs -->
+      <path d="M538,107 L556,107 L556,200 L564,200" fill="none" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#e30ah)"/>
+      <path d="M408,359 L556,359 L556,256 L564,256" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#e30ahi)"/>
+
+      <!-- AdamW -->
+      <rect x="592" y="346" width="146" height="46" rx="8" fill="var(--code)" stroke="var(--line)" stroke-width="1.4"/>
+      <text x="665" y="374" font-size="13" font-weight="600" fill="var(--ink)" text-anchor="middle">AdamW step</text>
+      <line x1="665" y1="288" x2="665" y2="344" stroke="var(--muted)" stroke-width="1.4" marker-end="url(#e30ah)"/>
+      <text x="674" y="320" font-size="10" fill="var(--muted)">G_corr</text>
+
+      <!-- caption -->
+      <text x="16" y="446" font-size="11" fill="var(--muted)">Training path only — rollouts (vLLM) run uncompressed.  Warmup ticks fall back to plain PowerSGD until the first valid δ.</text>
+      <text x="16" y="462" font-size="11" fill="var(--muted)">Per tick: anchor fires every 5 ticks (updates Q + δ); each tick the held, stale δ corrects a fresh G_comp → AdamW.</text>
+    </svg>
+    <figcaption style="font-size: 13px; color: var(--muted); margin-top: 8px; max-width: 780px; margin-left: auto; margin-right: auto;">
+      The B2 method end-to-end. The fast circuit (every step) compresses activations onto the anchor-owned
+      rank-77 basis \(Q\); the stale anchor circuit (every 5 ticks) updates \(Q\) by power iteration and
+      supplies the exact residual \(\delta\); the merger adds \(\delta\) back before AdamW. Note the
+      staleness: \(\delta\) is refreshed only when the anchor fires and held between fires, so each fresh
+      \(G_{\text{comp}}\) is corrected by a stale, \(K\)-delayed \(\delta\).
+    </figcaption>
+  </figure>
+
   <h3>Diagnose-then-spend, once more &mdash; and a gate that closed</h3>
   <p>
     EXP-30 reused EXP-26's discipline: a cheap geometry probe decides which expensive merger earns a
