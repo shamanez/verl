@@ -1,0 +1,184 @@
+<section class="tab-content" id="tab7">
+  <h2>EXP-29: The Trajectory Fix &mdash; Make the Anchor Grade Its Own Homework</h2>
+
+  <p class="lede">
+    Every result up to this point rested on a quiet assumption that turned out to be wrong. The anchor
+    circuit's whole job is to compute a clean, trustworthy gradient \(M\) from a stale snapshot of the
+    weights &mdash; but it was computing that gradient on the <em>wrong data</em>. It graded the
+    <em>current</em> policy's answers using <em>old</em> weights, which is neither the old policy's
+    gradient nor the new one's. EXP-29 (issue #29, &ldquo;Correct the anchor gradients trap utilisation&rdquo;,
+    operator-directed after a code review) fixes this: the anchor now replays the exact trajectories its
+    stale weights actually generated. No training-curve headline &mdash; this is an infrastructure
+    correctness fix &mdash; but it is the fix that made the later SOTA legitimate.
+  </p>
+
+  <h3>What the anchor is supposed to compute</h3>
+  <p>
+    Recall the two-circuit design. The fast compressed circuit runs every step; the <strong>anchor
+    circuit</strong> fires every few ticks, loading a <code>delay_K = 5</code>-tick-stale snapshot of the
+    weights into a clean, no-compression clone and running one full forward/backward to produce the true
+    gradient average \(M\). That \(M\) is the program's reference signal &mdash; the merger folds it into
+    the noisy compressed gradient, and it drives the projection basis \(Q\). If \(M\) is contaminated,
+    everything downstream inherits the contamination.
+  </p>
+  <p>
+    The anchor uses a deliberately clean loss (<code>anchor_pg_loss</code>,
+    <code>verl/workers/comm_eff/anchor.py</code>): a plain REINFORCE policy gradient with the importance
+    ratio held at \(1\) (no PPO clipping, <code>old_log_probs</code> deliberately ignored), so its
+    gradient is exactly
+  </p>
+  $$ G_{\text{anchor}} \;=\; \nabla_\theta\big[\!-\!A \cdot \log\pi_\theta\big]\Big|_{\theta = \theta_{t-K}} \;=\; -\,A\cdot\nabla_\theta\log\pi_{\theta_{t-K}}. $$
+  <p>
+    This is the textbook &ldquo;clean step's gradient, evaluated at the stale weights.&rdquo; The
+    advantages \(A\) and the response tokens are read straight off the batch. And there is the trap:
+    <strong>which</strong> batch?
+  </p>
+
+  <h3>The bug: the anchor graded the current policy's trajectories</h3>
+  <p>
+    On the training path, GRPO is on-policy &mdash; for each step \(t\), vLLM generates rollouts using the
+    <em>current</em> weights (\(\theta_{t-1}\)), and the advantages \(A\) are computed from <em>those</em>
+    rollouts' rewards. The old anchor refresh loaded the stale weights \(\theta_{t-K}\) into the clone but
+    then forwarded <code>anchor_data = data.copy()</code> &mdash; <strong>the current tick's batch</strong>
+    (<code>transformer_impl.py</code>). So it computed
+  </p>
+  $$ G_{\text{anchor}}^{\text{(old)}} \;=\; -\,A_{\text{current}}\cdot\nabla_\theta\log\pi_{\theta}\Big|_{\theta=\theta_{t-K}}, $$
+  <p>
+    with <strong>no importance correction</strong> between the policy that generated the data
+    (\(\pi_{\text{current}}\)) and the weights doing the scoring (\(\theta_{t-K}\)). This object is neither
+    the stale policy's true gradient (that would need the stale policy's <em>own</em> trajectories) nor the
+    current policy's (that would need the current weights). It is a <strong>stale-weights &times;
+    current-batch confound</strong> &mdash; a mismatch baked into \(M\)'s content across all of
+    EXP-25, EXP-26, and EXP-27.
+  </p>
+  <div class="callout">
+    <strong>The analogy.</strong> Picture the careful clerk again, the one who keeps the only fully-correct
+    copy of the ledger. The clerk is meant to redo <em>this morning's</em> transactions using the rules as
+    they stood a week ago, to measure how much the rules have drifted. Instead, the clerk was redoing
+    <em>today's brand-new</em> transactions with last week's rulebook &mdash; an answer to a question nobody
+    asked. The drift measurement is contaminated by the fact that the transactions themselves are not the
+    ones last week's rules would have produced.
+  </div>
+  <p>
+    This was a deliberate original design choice, not a coding slip &mdash; &ldquo;the clean step's gradient
+    at the stale weights&rdquo; was taken to mean &ldquo;clean loss, stale weights, whatever batch is in
+    hand.&rdquo; But for the decentralized-pipeline target the right object is unambiguous: a slow,
+    out-of-date worker computes gradients on the trajectories <em>it itself</em> generated from
+    <em>its own</em> weights. The confound had to go before any claim about how to <em>use</em> \(M\)
+    could be trusted.
+  </p>
+
+  <h3>The fix: on-policy replay</h3>
+  <p>
+    The correction (<code>anchor.replay_paired_batch = true</code>) is conceptually simple and costs no
+    extra generation. A <strong>fire-aware ring buffer</strong> retains recent mini-batches &mdash; the
+    tokens and their advantages &mdash; each tagged with the weights that produced it; when the anchor
+    fires, it replays the <em>paired</em> batch instead of the current one
+    (<code>anchor_data = _replay_batch.copy()</code>, <code>transformer_impl.py</code>):
+  </p>
+  $$ G_{\text{anchor}}^{\text{(fixed)}} \;=\; -\,A_{t-K}\cdot\nabla_\theta\log\pi_{\theta}\Big|_{\theta=\theta_{t-K}}
+     \qquad\text{on the batch } \theta_{t-K}\text{ generated.} $$
+  <p>
+    Now the weights and the trajectories match: a self-consistent on-policy gradient of the stale snapshot.
+    The alignment is exact, not approximate &mdash; the weight snapshot taken at the first training tick of
+    a global step is <em>precisely</em> the snapshot vLLM used to generate that step's rollouts, so storing
+    one snapshot per global step plus the per-tick batches yields exact <code>(batch, generator-weights)</code>
+    pairs (warmup included). Data staleness is exactly \(K\) ticks; the weights are <em>always</em> the
+    batch's true generator (realized weight staleness \(K\) or \(K{+}1\) on the two-ticks-per-step substrate,
+    logged and hard-asserted never fresher than \(K\)).
+  </p>
+  <p>
+    A companion knob, <code>anchor.snapshot_device = cpu</code>, moves the <code>delay_K + 1</code> full
+    weight snapshots (~18.6&nbsp;GB if kept on the GPU) into CPU RAM, loaded to the device only inside the
+    refresh. The batches were already CPU-resident, so the new ring costs essentially zero extra GPU memory
+    &mdash; an explicit operator requirement (the fixed substrate must not grow its HBM footprint). Both
+    knobs <strong>default OFF</strong> (<code>replay_paired_batch = false</code>,
+    <code>snapshot_device = gpu</code>): with the fix disabled, not a single existing line changes and the
+    run is byte-identical to before.
+  </p>
+
+  <h3>How we know it is correct</h3>
+  <p>
+    Because this touches the gradient that everything else trusts, EXP-29 shipped behind a wall of hard
+    correctness gates rather than a validation number.
+  </p>
+  <table class="data">
+    <thead><tr><th>Gate</th><th>What it checks</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Off-path parity</strong></td>
+        <td>With the fix off, no ring is constructed, no new collective or RNG runs &mdash; every existing
+          line executes unchanged (CPU-tested: no replay ring is even built).</td>
+        <td>byte-identical</td>
+      </tr>
+      <tr>
+        <td><strong>Stale-weight value canary</strong></td>
+        <td>On every fire, the fp32 norm + sum of canary weight matrices recorded when the snapshot was
+          pushed must equal the values recomputed off the clone after it loads &mdash; bitwise (the
+          bf16&rarr;CPU&rarr;device round-trip is byte-preserving).</td>
+        <td>bitwise match every fire</td>
+      </tr>
+      <tr>
+        <td><strong>Exact pairing</strong></td>
+        <td>Every post-warmup fire asserts <code>used_tick == step &minus; delay_K</code> and
+          <code>batch_gs == snapshot_gs</code> &mdash; the replayed batch is provably the
+          \(t{-}K\) batch and its true generator snapshot.</td>
+        <td>asserted every fire</td>
+      </tr>
+      <tr class="hl">
+        <td><strong>Relevance probe</strong></td>
+        <td>The decisive value-level check. Each replayed batch <em>stores</em> the log-probs it was
+          generated with; the anchor's forward at the loaded snapshot re-scores the same tokens. If the
+          loaded weights are truly the batch's generator, the masked
+          \(\lvert\log\pi_{\text{loaded}} - \log\pi_{\text{stored}}\rvert\) sits at the engine-noise floor
+          and stays <em>flat</em> across fires; a broken pairing would drift and grow with each policy
+          update.</td>
+        <td>flat, at the noise floor (~0.01 nats)</td>
+      </tr>
+      <tr>
+        <td><strong>Zero GPU-memory growth</strong></td>
+        <td>Peak allocated memory must stay below the prior healthy-phase baseline &mdash; snapshots and
+          replay batches live in CPU RAM.</td>
+        <td>max_mem 30.77&nbsp;GB, below baseline</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    All hard gates passed; the verdict is an <strong>infrastructure PASS</strong> (there is no parity bar
+    on a correctness fix &mdash; replay deliberately <em>changes</em> the science, so a val gate would be
+    meaningless; the &ldquo;not broken&rdquo; check was val@25&nbsp;&ge;&nbsp;0.60). The change merged as
+    PR&nbsp;#16 on the fork and is now a permanent, default-available part of the substrate.
+  </p>
+
+  <h3>Why it mattered &mdash; and, honestly, what it did <em>not</em> fix</h3>
+  <div class="win">
+    <strong>The enabling consequence.</strong> With a self-consistent anchor, the residual
+    \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\), measured at <em>identical</em> batch and
+    weights, becomes a clean measurement of one thing only: <strong>the error the codec introduced</strong>.
+    The relevance probe's noise floor (~0.01 nats) is the same band EXP-30 later used to certify that
+    \(\delta\) is codec error and not an objective/data mismatch. That clean \(\delta\) is exactly the
+    quantity the SOTA merger (EXP-30's <code>delayed_ef</code>, &lambda;=1) re-injects &mdash; so on-policy
+    replay is the precondition that made the next experiment's parity result legitimate rather than
+    confounded.
+  </div>
+  <div class="warn">
+    <strong>The honest non-result.</strong> Making \(M\) valid did <em>not</em> rescue the old sign /
+    blend idea. When EXP-30 measured it, the valid generator-consistent gradient was <em>just as
+    orthogonal</em> to the live compressed gradient as the old confounded \(M\) had been
+    (\(\cos \approx 0\) either way). So the EXP-25 &ldquo;sign agreement is a coin-flip&rdquo; finding was
+    <strong>genuinely structural</strong>, not an artifact of the trajectory confound &mdash; fixing the
+    data did not open up the blend geometry (which is why EXP-30's blend gate closed without a training
+    run). The trajectory fix and the sign coin-flip are two independent facts: EXP-29 removed a real
+    confound and unlocked the <em>residual</em> route to SOTA, but it did not un-falsify the
+    <em>sign-replacement</em> route. Both readings stand together.
+  </div>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: issue #29 &ldquo;Correct the anchor gradients trap utilisation&rdquo; (the EXP-29 plan + PR are the record;
+    operator-directed, no claim flow) · <code>verl/workers/comm_eff/anchor.py</code>
+    (<code>anchor_pg_loss</code>, <code>replay_relevance_stats</code>, <code>maybe_build_replay_ring</code>) ·
+    <code>verl/workers/engine/fsdp/transformer_impl.py</code> (anchor refresh + replay selection + relevance verdict) ·
+    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> knobs) ·
+    PR&nbsp;#16 (merged) · <code>research/runs/SUMMARY.md</code>.
+  </footer>
+</section>

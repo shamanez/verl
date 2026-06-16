@@ -1,0 +1,157 @@
+<section class="tab-content" id="tab8">
+  <h2>EXP-30: The &delta;-Residual Merger &mdash; Communication-Efficient GRPO Reaches Dense Parity</h2>
+
+  <p class="lede">
+    This is the experiment that produced the program's current state of the art. With a trustworthy anchor
+    in hand (EXP-29), EXP-30 asked the sharpest possible version of the question: instead of borrowing the
+    anchor's <em>signs</em> or its <em>off-subspace energy</em>, what if we feed back the <strong>exact
+    difference</strong> between the clean gradient and the compressed gradient, measured on the very same
+    data? That correction &mdash; the &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash;
+    trains GSM8K to <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
+    <strong>5% of the gradient-communication cost</strong>, with no length-explosion through 100 steps.
+    It is the direct vindication of EXP-27's closing recommendation: rebuild error-feedback on the codec's
+    own dropped residual, and the exogenous carrier that caused ignition disappears.
+  </p>
+
+  <h3>Diagnose-then-spend, once more &mdash; and a gate that closed</h3>
+  <p>
+    EXP-30 reused EXP-26's discipline: a cheap geometry probe decides which expensive merger earns a
+    training run. A 20-step probe (<code>stepA_geometry_probe</code>) measured the anchor's
+    <em>valid, replayed</em> gradient against the live compressed gradient on identical batches, and two
+    pre-registered gates &mdash; thresholds fixed in advance &mdash; decided what ran next.
+  </p>
+  <table class="data">
+    <thead><tr><th>Route</th><th>Gate (verbatim rule)</th><th>Measured</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Blend</strong> (B1)</td>
+        <td>anchor&ndash;compressed agreement \(m_1 \ge 0.10\) AND \(m_1 \ge 2 m_2\) on &ge;80% of fires</td>
+        <td>\(m_1 = 0.012\), paired-frac \(= 0.57\)</td>
+        <td><strong>CLOSED</strong> &mdash; never launched</td>
+      </tr>
+      <tr class="hl">
+        <td><strong>Residual</strong> (B2)</td>
+        <td>\(\lVert\delta\rVert / \lVert G_{\text{comp}}\rVert \in [0.1, 1.5]\) AND loss-mismatch \(\le 0.02\) nats</td>
+        <td>median \(= 1.05\), max mismatch \(= 0.0103\)</td>
+        <td><strong>OPEN</strong> &mdash; promoted to a training run</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    The blend gate <em>closing</em> is itself a result. Even with the now-valid anchor, the clean gradient
+    stays essentially orthogonal to the compressed one (agreement \(\approx 0.01\)) &mdash; so a linear
+    blend has almost nothing aligned to add, exactly as EXP-25/26 predicted. The gate retired the entire
+    blend family for the cost of a 4-GPU-hour probe instead of a full training arm. The residual gate, by
+    contrast, confirmed two things the residual route needs: \(\delta\) is the right <em>size</em> (norm
+    ratio ~1) and it is genuine <em>codec error</em>, not an objective mismatch (loss-mismatch 0.01 nats,
+    sitting in EXP-29's relevance band &mdash; the payoff of the trajectory fix).
+  </p>
+
+  <h3>The merger: feed back the exact codec residual</h3>
+  <p>
+    EXP-26's error-feedback re-injected the <em>off-subspace projection</em> of the anchor EMA &mdash; and
+    because the projection was nearly vacuous, that reduced to injecting the stale EMA almost raw, an
+    exogenous force that integrated into the tangential carrier and ignited (the EXP-27 story). B2 does
+    something cleaner. Using the valid replayed anchor gradient \(G_{\text{anchor}}^{\text{rep}}\) and the
+    compressed gradient \(G_{\text{comp}}\) <em>on the identical (batch, weights) pair</em>, it forms the
+    exact residual and adds it back, at full strength, with no decay buffer and no sign term:
+  </p>
+  $$ \delta \;=\; G_{\text{anchor}}^{\text{rep}} \;-\; G_{\text{comp}}, \qquad
+     G_{\text{corr}} \;=\; G_{\text{comp}} \;+\; \lambda\,\delta, \quad \lambda = 1,\ \beta_{\text{anc}} = 0. $$
+  <p>
+    At \(\lambda = 1\) this telescopes to \(G_{\text{corr}} = G_{\text{anchor}}^{\text{rep}}\): the
+    compressed gradient is used as a <em>transport</em> for the clean one, and the codec error cancels
+    exactly. Because \(\delta\) is the circuit's <em>own</em> dropped residual (endogenous), not an external
+    EMA pushed in sideways, there is no persistent tangential force to integrate &mdash; which is precisely
+    why it does not ignite. \(\beta_{\text{anc}} = 0\) keeps the anchor signal memoryless across fires (it
+    is held between fires, not compounded), and the \(K\)-delay is the honest staleness of a slow reference.
+  </p>
+
+  <h3>Why it works: the within-pair geometry (finding F1)</h3>
+  <p>
+    The probe exposed exactly <em>why</em> a residual succeeds where a blend cannot. Measured at identical
+    batch and weights:
+  </p>
+  <table class="data">
+    <thead><tr><th>Quantity</th><th>Measured</th><th>Reading</th></tr></thead>
+    <tbody>
+      <tr><td>\(\cos(\delta,\ G_{\text{comp}})\)</td><td><span class="metric">&minus;0.92 to &minus;0.98</span></td><td>the residual points almost exactly <em>against</em> the compressed gradient</td></tr>
+      <tr><td>\(\lVert\delta\rVert / \lVert G_{\text{comp}}\rVert\)</td><td><span class="metric">&asymp; 1.05</span></td><td>the residual is about as large as the gradient itself</td></tr>
+      <tr><td>\(\Rightarrow\ \cos(G_{\text{anchor}}^{\text{rep}},\ G_{\text{comp}})\)</td><td><span class="metric">&asymp; 0</span></td><td>algebraically forced: the true gradient is nearly orthogonal to the compressed one</td></tr>
+      <tr><td>\(\Rightarrow\ \lVert G_{\text{anchor}}^{\text{rep}}\rVert / \lVert G_{\text{comp}}\rVert\)</td><td><span class="metric">&asymp; 0.33</span></td><td>the compressed gradient is ~3&times; too big and mostly off-direction</td></tr>
+    </tbody>
+  </table>
+  <p>
+    In plain terms: the rank-77 codec does not gently perturb the weight gradient &mdash; the codec error
+    <em>is the dominant component</em> of the compressed gradient. It is three times too large and points
+    almost entirely the wrong way. (This is the weight-space confirmation of EXP-26's activation-space
+    finding that the basis captured only ~1/3 of the update energy.) A blend can only add a near-orthogonal
+    partner and dilute; the residual \(\delta\) <em>simultaneously cancels the stale codec artifact and
+    injects the true direction</em>. That is the whole mechanism.
+  </p>
+
+  <h3>What makes the number: the component decomposition</h3>
+  <p>
+    A six-run, one-knob-at-a-time decomposition (every cell on the fixed surface, only the codec/merger
+    varying) attributes the result to two distinct levers.
+  </p>
+  <table class="data">
+    <thead><tr><th>Cell</th><th>What it isolates</th><th>val@50</th><th>lever value</th></tr></thead>
+    <tbody>
+      <tr><td>C3 &mdash; PowerSGD, \(Q\) <strong>frozen</strong>, no merge</td><td>value of refreshing the basis</td><td>0.0925@25 (no learning)</td><td>&mdash;</td></tr>
+      <tr><td>C2 &mdash; PowerSGD + anchor-updated \(Q\), no merge</td><td>substrate floor</td><td>0.6300</td><td><strong>\(Q\)-update: +~0.5</strong></td></tr>
+      <tr><td>B1 &mdash; blend merger</td><td>blend vs residual</td><td>0.7422</td><td>+0.112 over C2</td></tr>
+      <tr class="hl"><td><strong>B2 &mdash; \(\delta\)-residual merger</strong></td><td><strong>best comm-efficient</strong></td><td><strong>0.7528</strong></td><td><strong>residual: +0.123 over C2</strong></td></tr>
+    </tbody>
+  </table>
+  <p>
+    Two things make B2 work, and the decomposition separates them cleanly. <strong>The
+    power-iteration \(Q\)-update is the dominant lever</strong> (+~0.5): freeze the basis (C3) and the codec
+    passes noise, validation never leaves baseline. On top of that working substrate, <strong>the
+    \(\delta\)-residual merger adds +0.123</strong> (C2&nbsp;0.6300&nbsp;&rarr;&nbsp;B2&nbsp;0.7528) &mdash;
+    and it edges out the blend (B1&nbsp;0.7422) by about a point, the residual-vs-blend contrast the gates
+    predicted.
+  </p>
+
+  <h3>Stability: de-censored to 100 steps</h3>
+  <p>
+    EXP-27 taught the program that a clean 50-step run can be a censored observation of an ignition that
+    fires at step ~61. So B2 was extended to 100 steps (seed 0, identical settings). It
+    <strong>traversed the entire EXP-27 ignition band (steps 51&ndash;66) cleanly</strong> &mdash; no
+    length-explosion, no entropy collapse, response-length flat. Validation: 0.7278@25 / 0.7536@50 /
+    0.7475@75 / 0.7400@100, a mild late decay that still sits well above the realistic floor. Two isolated
+    single-rollout length pins (steps 94, 99) reverted immediately &mdash; the benign stochastic-outlier
+    signature, not the ignition fingerprint (which is a <em>climbing</em> mean with collapsing entropy).
+    The per-fire residual ratio settled to ~1.0 and declined all run &mdash; bounded, not compounding.
+  </p>
+  <div class="warn">
+    <strong>The honest caveat that EXP-31 then resolved.</strong> Measured against the same-code,
+    same-config dense rerun EXP-30 added (val@50 <span class="metric">0.7839</span>), B2's 0.7528 is
+    &minus;0.031, about 96% of dense &mdash; which EXP-30 recorded as <em>near</em>-parity, explicitly
+    <em>not</em> established, pending seed replicates of both arms. Two further findings tempered the claim:
+    the valid anchor signal still carries moderate cross-fire persistence (autocorrelation ~0.62, so
+    \(\beta_{\text{anc}}=0\) stops the carrier <em>compounding</em> but does not make it memoryless &mdash;
+    F2), and the replay gradients are extremely low-rank (stable rank ~2, top-1% of coordinates holding
+    ~60% of the mass &mdash; F3), meaning a rank-77 codec has ample capacity and the remaining failure is
+    basis <em>mismatch</em>, not capacity. <strong>EXP-31 took the binding next step</strong> &mdash; an
+    apples-to-apples dense rerun on the exact same box &mdash; and reframed the bar; see the next tab.
+  </div>
+
+  <div class="win">
+    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\)) is the program's SOTA
+    communication-efficient method: GSM8K val@50 in the 0.74&ndash;0.75 band, the boundary-activation
+    traffic cut ~19.8&times; on the fast path (~4&times; once the anchor's own traffic is honestly
+    amortized in), emission-free through 100 steps for seed 0. Verdict <strong>PASS</strong>; merged as
+    PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline every later arm builds on
+    (<code>runs/EXP-31/B2_baseline/</code>).
+  </div>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: <code>runs/EXP-31/B2_baseline/verdict.md</code> (the EXP-30 verdict, migrated) &mdash;
+    six-run decomposition, gate outcomes, findings F1&ndash;F5, the dense-baseline correction, and the
+    ext100 addendum · W&amp;B runs <code>u9okvgzz</code> (B2), <code>b59ncque</code> (ext100),
+    <code>73ntu76u</code> (dense same-config), <code>k6nmcuyd</code> (C2), <code>djy4tog1</code> (C3) ·
+    PR&nbsp;#17 (merged) · <code>research/runs/SUMMARY.md</code>.
+    Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.
+  </footer>
+</section>

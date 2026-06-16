@@ -199,6 +199,14 @@
     gives cumulative-applied = cumulative-true ± bounded residual — no exogenous carrier,
     no O(T) integral. Predicted: P(no ignition) &asymp; 0.85; P(val &ge; 0.7414) &asymp; 0.3.
     This retires M from the fast path (anchor keeps Q-ownership only).
+    <br><br>
+    <strong>[2026-06-16] This prediction was borne out.</strong> EXP-30 built exactly this &mdash; true
+    error feedback on the codec's own exact residual \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\)
+    at identical (batch, weights), enabled by EXP-29's on-policy replay. It ran <strong>emission-free
+    through 100 steps</strong> (the no-ignition prediction held, traversing the s51&ndash;66 band cleanly)
+    and reached <strong>dense parity (~0.75)</strong> &mdash; clearing the val target the damped carrier
+    here could not. The endogenous residual has no persistent tangential carrier to integrate. See the
+    EXP-30 and EXP-31 tabs.
   </div>
 
   <ol>

@@ -80,6 +80,19 @@
     <strong>(b) Why it is structural.</strong> Two reasons, both about the gradients being different objects rather than stale copies of one object. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, and deeper, a near-orthogonality geometry. The true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates sitting near zero, where the sign is essentially decided by residual sampling noise. When you compare two independent noisy estimates of a quantity that is near zero on most coordinates, their per-coordinate signs agree about half the time — <em>even when the two gradients' overall directions are aligned</em>. This is the same geometry that makes two random high-dimensional vectors nearly orthogonal. The coin-flip is the expected signature, not an anomaly.
   </p>
 
+  <div class="callout">
+    <strong>[2026-06-16] A third issue — the trajectory confound — and what survived it.</strong> There was
+    a further problem with the anchor \(M\) measured here, found later by a code review: it computed its
+    gradient at the stale weights but on the <em>current</em> policy's trajectories (a stale-weights &times;
+    current-batch mismatch, since the anchor was fed the current tick's batch). <strong>EXP-29</strong>
+    fixed this with on-policy replay — the anchor now grades the trajectories its own stale weights
+    generated (see the EXP-29 tab). The important part for <em>this</em> tab: <strong>EXP-30 re-measured
+    sign-agreement on the corrected, generator-consistent anchor and found it just as orthogonal</strong>
+    (\(\cos \approx 0\)). So the coin-flip above is genuinely structural — not an artifact of the confound.
+    The fix unlocked the <em>residual</em> route to SOTA (EXP-30) without un-falsifying the
+    <em>sign-replacement</em> route analyzed here; both readings stand together.
+  </div>
+
   <p>
     <strong>(c) The confound-free measurement of the damage.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
   </p>
@@ -133,7 +146,7 @@
   </p>
 
   <div class="warn">
-    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect.
+    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect. <em>[2026-06-16: that error-feedback line was itself later rebuilt on the codec's <strong>own exact</strong> residual (EXP-30's &delta;-residual merger) and reached dense parity, ~0.75 — the 0.7210 here is superseded; see the EXP-30 tab.]</em>
   </div>
 
   <p>

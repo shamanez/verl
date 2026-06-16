@@ -268,6 +268,14 @@
     2.03&times;), and EXP-27 ignited at its dose <em>minimum</em>. The mechanism is a persistent
     <em>tangential</em> stale-EMA carrier — the implemented update is not true error feedback at
     all. Full post-mortem: the <strong>EXP-27 tab</strong>.
+    <br><br>
+    <strong>RESOLUTION (2026-06-16, EXP-30):</strong> the &ldquo;error-feedback in spirit, different
+    operand&rdquo; caveat in section 5 was the crux. Once the anchor was made self-consistent (EXP-29
+    on-policy replay), EXP-30 fed back the codec's <strong>own exact residual</strong>
+    \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\) measured at <em>identical</em> batch and
+    weights — genuine <em>endogenous</em> error feedback, not the off-subspace EMA proxy that ignited here.
+    It reached <strong>dense parity (~0.75)</strong>, emission-free through 100 steps, and is the program's
+    SOTA. The off-subspace-EMA / 0.7210 / REVISE framing in this tab is superseded; see the EXP-30 tab.
   </div>
 
   <h3>6. The papers we read and used</h3>

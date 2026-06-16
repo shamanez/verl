@@ -71,9 +71,10 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 <header class="page">
   <div class="wrap">
     <h1>Communication-Efficient GRPO — Program Retrospective</h1>
-    <p class="sub">EXP-25 → EXP-27 on the shamanez/verl fork · Qwen2.5-1.5B-Instruct + GSM8K ·
+    <p class="sub">EXP-25 → EXP-31 on the shamanez/verl fork · Qwen2.5-1.5B-Instruct + GSM8K ·
     fast compressed circuit + stale anchor circuit (rank-77 PowerSGD boundary compression, ≈19.8× less
-    boundary traffic) · agent-team synthesis, 2026-06-11</p>
+    boundary traffic) · SOTA = the EXP-30 δ-residual merger at <b>dense parity</b>; anchor-usage axis
+    exhausted (EXP-31 STOP) · 2026-06-16</p>
   </div>
 </header>
 <nav class="tabs"><div class="wrap">
@@ -81,9 +82,11 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   <button data-tab="tab2">EXP-26 · Core Idea</button>
   <button data-tab="tab3">EXP-25 · Results & the Sign Math</button>
   <button data-tab="tab4">EXP-26 · Math, Geometry & Papers</button>
-  <button data-tab="tab5">Where We Are & What's Next</button>
   <button data-tab="tab6">EXP-27 · Damped-EF Ignition</button>
-  <button data-tab="tab7">EXP-30/31 · Best Method &amp; Surpass Path</button>
+  <button data-tab="tab7">EXP-29 · The Trajectory Fix</button>
+  <button data-tab="tab8">EXP-30 · &delta;-Residual SOTA</button>
+  <button data-tab="tab9">EXP-31 · Parity & Tournament</button>
+  <button data-tab="tab5">Where We Are Now</button>
 </div></nav>
 <main>
 <section class="tab-content" id="tab1">
@@ -183,6 +186,17 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
 
   <div class="warn">
     <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the test of that gamble, and the outcome (and the mechanism behind it) is the subject of the later tabs.
+  </div>
+
+  <div class="callout">
+    <strong>[2026-06-16] Where this led.</strong> The two-circuit substrate introduced here is now
+    permanent, and three things happened on top of it. <strong>EXP-29</strong> fixed a confound in how the
+    anchor used <em>trajectories</em> — it had been grading the current policy's data with stale weights
+    (see the EXP-29 tab). <strong>EXP-30</strong> built the &delta;-residual merger that finally reached
+    <strong>dense parity</strong> at ~5% communication cost — the current SOTA. <strong>EXP-31</strong>
+    confirmed that parity against an apples-to-apples dense rerun and showed the anchor-usage axis cannot
+    surpass dense (STOP). The signed_ema bet tested in this tab is falsified — but the substrate it proved
+    is what carried the program to parity.
   </div>
 </section>
 
@@ -345,6 +359,10 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     points, with no deterministic collapse on the promoted run. But it lands at <span class="metric">val@50 0.7210</span>
     against a parity target of <span class="metric">0.7414</span> &mdash; short by 2.04 points &mdash; so the terminal
     verdict is <strong>REVISE</strong>, carried forward as issue #27 (<code>research/runs/EXP-26/verdict.md</code>).
+    <em>[2026-06-16 update: superseded. Issue #27's damped error-feedback ignited anyway (EXP-27, STOP).
+    The error-feedback idea was then rebuilt on the codec's <strong>own exact residual</strong> &mdash;
+    EXP-30's &delta;-residual merger, <code>delayed_ef</code> &lambda;=1 &mdash; which reached dense parity
+    (~0.75) emission-free. 0.7210 is no longer the best result; see the EXP-30 tab.]</em>
   </p>
 
   <table class="data">
@@ -452,6 +470,19 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <strong>(b) Why it is structural.</strong> Two reasons, both about the gradients being different objects rather than stale copies of one object. First, a <em>loss mismatch</em>: the anchor computes a clean policy-gradient loss (no clipping), while the fast path computes the real clipped PPO loss — different functions, different gradients. Second, and deeper, a near-orthogonality geometry. The true GRPO gradient on any single coordinate is a sum of signed per-sample terms that largely <em>cancel</em>, leaving most coordinates sitting near zero, where the sign is essentially decided by residual sampling noise. When you compare two independent noisy estimates of a quantity that is near zero on most coordinates, their per-coordinate signs agree about half the time — <em>even when the two gradients' overall directions are aligned</em>. This is the same geometry that makes two random high-dimensional vectors nearly orthogonal. The coin-flip is the expected signature, not an anomaly.
   </p>
 
+  <div class="callout">
+    <strong>[2026-06-16] A third issue — the trajectory confound — and what survived it.</strong> There was
+    a further problem with the anchor \(M\) measured here, found later by a code review: it computed its
+    gradient at the stale weights but on the <em>current</em> policy's trajectories (a stale-weights &times;
+    current-batch mismatch, since the anchor was fed the current tick's batch). <strong>EXP-29</strong>
+    fixed this with on-policy replay — the anchor now grades the trajectories its own stale weights
+    generated (see the EXP-29 tab). The important part for <em>this</em> tab: <strong>EXP-30 re-measured
+    sign-agreement on the corrected, generator-consistent anchor and found it just as orthogonal</strong>
+    (\(\cos \approx 0\)). So the coin-flip above is genuinely structural — not an artifact of the confound.
+    The fix unlocked the <em>residual</em> route to SOTA (EXP-30) without un-falsifying the
+    <em>sign-replacement</em> route analyzed here; both readings stand together.
+  </div>
+
   <p>
     <strong>(c) The confound-free measurement of the damage.</strong> The cleanest single number sidesteps every loss-and-operand subtlety by comparing the merger's output to its own input. <em>Cosine similarity</em> measures the angle between two vectors (1 = identical direction, 0 = perpendicular). At \(\alpha=0.5\),
   </p>
@@ -505,7 +536,7 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
   </p>
 
   <div class="warn">
-    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect.
+    <strong>The honest 2026-06-10 nuance (from EXP-26).</strong> A later experiment ran <em>plain</em> PowerSGD with no merger at all on this same realistic stale-anchor substrate and scored <span class="metric">0.6437</span> — <em>below</em> signed_ema's 0.7066 and below the frozen-basis floor of 0.6914. So on the realistic substrate, signed_ema was partially <em>rescuing</em> a substrate that was itself degrading (the stale-anchor basis refresh alone is a drag). EXP-25's "merger is net-harmful" verdict was measured against fresh, clean references — not against the realistic baseline. This reframes the bookkeeping: the merger was not the only thing dragging accuracy down. But it does <strong>not</strong> un-falsify the sign mechanism. The coin-flip sign agreement (0.50–0.52 even when fresh) and the 44-degree rotation are confound-free measurements of the sign term itself; they stand regardless of what the substrate around it was doing. The successor that removed the sign term entirely and instead fed back what compression <em>drops</em> (error-feedback PowerSGD) reached <span class="metric">0.7210</span> with the rotation cut to about 17 degrees — direct vindication that the sign-replacement, specifically, was the defect. <em>[2026-06-16: that error-feedback line was itself later rebuilt on the codec's <strong>own exact</strong> residual (EXP-30's &delta;-residual merger) and reached dense parity, ~0.75 — the 0.7210 here is superseded; see the EXP-30 tab.]</em>
   </div>
 
   <p>
@@ -783,6 +814,14 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     2.03&times;), and EXP-27 ignited at its dose <em>minimum</em>. The mechanism is a persistent
     <em>tangential</em> stale-EMA carrier — the implemented update is not true error feedback at
     all. Full post-mortem: the <strong>EXP-27 tab</strong>.
+    <br><br>
+    <strong>RESOLUTION (2026-06-16, EXP-30):</strong> the &ldquo;error-feedback in spirit, different
+    operand&rdquo; caveat in section 5 was the crux. Once the anchor was made self-consistent (EXP-29
+    on-policy replay), EXP-30 fed back the codec's <strong>own exact residual</strong>
+    \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\) measured at <em>identical</em> batch and
+    weights — genuine <em>endogenous</em> error feedback, not the off-subspace EMA proxy that ignited here.
+    It reached <strong>dense parity (~0.75)</strong>, emission-free through 100 steps, and is the program's
+    SOTA. The off-subspace-EMA / 0.7210 / REVISE framing in this tab is superseded; see the EXP-30 tab.
   </div>
 
   <h3>6. The papers we read and used</h3>
@@ -859,199 +898,6 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     <code>verl/workers/comm_eff/spectral_filter.py</code> (<code>ef_powersgd_matrix</code>,
     ~line&nbsp;327) and <code>powersgd_activation.py</code> (family sketches, ~line&nbsp;886).
   </p>
-</section>
-
-<section class="tab-content" id="tab5">
-  <h2>Where We Are, What's Next, How to Move Forward</h2>
-
-  <p class="lede">
-    The program is one experiment away from a defensible parity claim at roughly 20&times; less inter-stage
-    communication. The best realistic communication-efficient result trains GSM8K to <span class="metric">val@50 0.7210</span>
-    against a parity bar of <span class="metric">0.7414</span> &mdash; short by just 2.0 points, on a monotone-upward
-    curve that had not converged. The committed next move (issue #27) is a single cheap, config-only run that damps the
-    one mechanism we know is dangerous and lets the curve keep climbing. My recommendation is to approve it now: it costs
-    under 30 GPU-hours, carries explicit pass/fail gates, and is the highest-information bet on the board. This tab states
-    where we honestly stand, what #27 will and will not settle, and the ranked decision tree beyond it.
-  </p>
-
-  <div class="warn">
-    <strong>OUTCOME (2026-06-11) — #27 has since RUN and STOPPED; this tab is preserved as the
-    pre-EXP-27 strategy snapshot.</strong> The damped run hit the STOP gate on <em>both</em>
-    clauses: best val 0.7202 &le; 0.7210 <em>and</em> length-explosion ignition at the damped
-    settings (lock-in step 61, killed 68). Decision-tree <strong>branch 3 fired</strong> — and the
-    post-mortem sharpened it: the spiral is <em>not</em> the substrate's fault (the single-knob
-    plain-vs-ef contrast shows plain clean on the identical substrate; the <em>merger carrier</em>
-    is the killer), "ignition risk is dose-correlated" below is <em>falsified</em> (dose sets only
-    the lag, near-linearly — EXP-27 ignited at its dose minimum), and within branch 3 the
-    mechanism-backed winner is exactly option <strong>(b) classical per-step error feedback</strong>
-    (true EF on the codec's own dropped residual — no exogenous carrier, telescoping bound), with a
-    <strong>plain@100</strong> run as the carrier-vs-substrate discriminator. Full post-mortem,
-    corrected monitoring rules (E1/P1; entropy demoted to follower), and predictions: the
-    <strong>EXP-27 tab</strong>; successor issue linked from #27's closing comment.
-  </div>
-
-  <h3>Where we are</h3>
-  <p>
-    The goal (<code>research/.claude/GOAL.md</code>) is a communication-efficient pipeline-parallel GRPO trainer that
-    is <em>stable</em>, reaches <em>parity</em> with the dense control, demonstrates measured <em>savings</em>, and is
-    <em>reproducible</em> from one launcher. Two of those four are settled, one is within reach, and one is the open
-    question. Here is the scoreboard that frames everything &mdash; all numbers are val@50 GSM8K greedy on the LOCKED
-    realistic substrate (the anchor owns the rank-77 basis \(Q\), staleness <code>delay_K=5</code>, no clean step). The
-    dense reference is never re-run per operator directive; it is W&amp;B run <code>5e2jpho9</code>.
-  </p>
-
-  <table class="data">
-    <thead>
-      <tr><th>Configuration</th><th>val@50</th><th>vs. parity 0.7414</th><th>What it tells us</th></tr>
-    </thead>
-    <tbody>
-      <tr><td>dense control (compression off)</td><td><span class="metric">0.7536</span></td><td>+0.0122</td><td>the bar; proven byte-identical to upstream verl</td></tr>
-      <tr><td>parity gate (floor + 0.05)</td><td><span class="metric">0.7414</span></td><td>&mdash;</td><td>&asymp; plain PowerSGD + fresh clean step (0.7415)</td></tr>
-      <tr class="highlight"><td><strong>ef_powersgd (decay 0.9 / clip 1.0)</strong></td><td><strong><span class="metric">0.7210</span></strong></td><td><strong>&minus;0.0204</strong></td><td><strong>best realistic comm-eff result to date</strong></td></tr>
-      <tr><td>signed_ema &alpha;=0.5 (EXP-25)</td><td>0.7066</td><td>&minus;0.0348</td><td>the falsified merger; ef beats it by +1.4</td></tr>
-      <tr><td>no-refresh frozen-\(Q\) floor</td><td>0.6914</td><td>&minus;0.0500</td><td>the floor the substrate must clear</td></tr>
-      <tr><td>plain codec on the realistic substrate</td><td>0.6437</td><td>&minus;0.0977</td><td>below the floor &mdash; a new worry (see below)</td></tr>
-      <tr><td>hybrid-\(Q\) (Step C)</td><td>0.3730</td><td>&minus;0.3684</td><td>geometry-winning basis anti-converts</td></tr>
-    </tbody>
-  </table>
-
-  <p>
-    <strong>What is proven.</strong> The substrate is realistic and mechanically correct: the anchor is the only thing
-    that updates the projection basis, the fast path can only read it, the only full uncompressed pass lives inside the
-    anchor, and there is no hidden full-rank "clean step." Compression is real and large: the measured boundary-activation
-    traffic is a ratio of <span class="metric">0.0506</span>, about a <strong>19.8&times; reduction</strong>. And the
-    central thesis of EXP-26 holds &mdash; error-feedback closes most of the merger gap. Removing the sign term and
-    re-injecting the energy the projection dropped lifts the result +7.7 points over the plain codec on the same substrate
-    and preserves the update direction almost perfectly: \(\cos(G_{\text{comp}}, G_{\text{corr}}) = 0.956\) for
-    error-feedback versus 0.717 for the old sign-replacement merger.
-  </p>
-  <p>
-    <strong>What is falsified.</strong> Two ideas are dead, each on clean evidence. Sign-replacement is structurally
-    hopeless: even a perfectly fresh anchor agrees on the sign of the update only about half the time (0.500&ndash;0.523),
-    so no amount of fixing staleness rescues it. And the "tune the basis for update energy" idea is empirically falsified:
-    the basis that maximized GRPO update-energy capture (Step C's hybrid \(Q\)) <em>anti-converted</em> to val@50 0.3730,
-    because the vLLM rollouts run uncompressed &mdash; a basis that sacrifices activation fidelity for update energy
-    destroys train-versus-rollout consistency. Geometry wins do not convert when generation is uncompressed.
-  </p>
-
-  <div class="warn">
-    <strong>What is newly worrying.</strong> Three findings temper the optimism and should shape the next decisions.
-    <ul>
-      <li><strong>The stale-anchor \(Q\) refresh is itself a drag.</strong> Plain compression on the realistic substrate
-        (0.6437) lands <em>below</em> the frozen-\(Q\) floor (0.6914). The substrate's own basis-refresh mechanism
-        degrades training, and the merger is partly <em>compensating</em> for that drag rather than purely correcting
-        compression noise. This inverts EXP-25's "the merger is net-harmful" framing.</li>
-      <li><strong>Stochastic ignition at clip 1.0.</strong> Of two identical error-feedback runs, one fired the full
-        length-explosion fingerprint (response length pinned at 16384, entropy collapse) and ran out of memory at step
-        42; the other completed clean. The residual dose grows with anchor staleness (0.32 rising to 0.47), and ignition
-        risk is dose-correlated &mdash; a real, undamped hazard.
-        <em>[2026-06-11 correction: EXP-27 falsified the dose-correlation reading — dose sets the ignition
-        <strong>lag</strong>, not the risk (near-linear: 2.17&times; dose &harr; 2.03&times; lock-in step); the
-        "clean" r2 realization was first-passage luck (it emitted spikes too). See the EXP-27 tab.]</em></li>
-      <li><strong>Single-seed noise on close calls.</strong> The promoted run's mid-curve val swung between 0.6232 and
-        0.6740 at the same step across realizations &mdash; roughly 5 points. When a comparison is within 2&ndash;3 points,
-        one seed is not enough to call it.</li>
-    </ul>
-  </div>
-
-  <h3>What's next: the committed move (issue #27)</h3>
-  <p>
-    Issue #27 (<code>research/.claude/plans/27.md</code>, status <code>planned</code>, awaiting operator approval) is the
-    REVISE child of EXP-26. It changes three knobs and nothing else &mdash; the code is already merged to
-    <code>vast-ai-workload</code>, so this is config-only:
-  </p>
-  <ol>
-    <li><strong>Cap the residual dose</strong> &mdash; error-feedback clip 1.0 &rarr; 0.5. Ignition risk is
-      dose-correlated, and the dose climbs with staleness; halving the per-tick injection damps the stochastic
-      length-explosion while keeping the direction-preserving correction that bought +7.7 points.</li>
-    <li><strong>Forget faster</strong> &mdash; error-feedback decay 0.9 &rarr; 0.5, so the dropped-energy buffer cannot
-      accumulate into a large delayed kick as the basis goes stale.</li>
-    <li><strong>Run longer</strong> &mdash; 50 &rarr; 100 steps. The 0.674&rarr;0.721 curve was still climbing with
-      shrinking response lengths and no peak-then-crash; parity is only 2.0 points away on a monotone-up trajectory.</li>
-  </ol>
-  <p>
-    The gates are explicit (<code>research/runs/EXP-26/verdict.md</code> next_actions): <strong>PASS</strong> if best
-    val@{50,75,100} &ge; <span class="metric">0.7414</span>; <strong>STOP</strong> if best val &le;
-    <span class="metric">0.7210</span> (damping helped nothing) or ignition fires even at the damped settings;
-    <strong>REVISE</strong> (one final cycle) if it lands strictly between. One REVISE iteration remains on this lineage
-    after #27.
-  </p>
-
-  <h3>How to move forward: the decision tree beyond #27</h3>
-  <p>
-    The branch we take depends entirely on where #27 lands. Ranked by likelihood and payoff:
-  </p>
-  <ol>
-    <li>
-      <strong>If #27 PASSES (&ge; 0.7414).</strong> This is parity at &asymp;20&times; less boundary communication &mdash;
-      the M6 milestone claim is complete: stable, parity, measured savings, one launcher. The follow-through is to promote
-      the canonical launcher per the parent plan's rule (a human decision, not automatic), then consider
-      <em>secondary</em> claims around exploration/pass@k diversity (PowerSGD carries real, uncompressed-corroborated
-      policy diversity that has not yet converted to reward &mdash; see <code>runs/EXP-25/PATH_TO_SURPASS_DENSE.md</code>).
-      Scaling to other models or datasets is <em>out of the fixed control surface</em> and is an operator decision, not a
-      researcher one.
-    </li>
-    <li>
-      <strong>If #27 lands between 0.7210 and 0.7414.</strong> One final REVISE &mdash; the obvious single knob is clip
-      0.5 &rarr; 0.25, or decay-only damping &mdash; and then the lineage <em>stops by iteration budget</em>. The write-up
-      becomes: error-feedback is the right primitive, it closes the merger gap and preserves direction, but it asymptotes
-      a couple of points under parity on this substrate. That is an honest and publishable negative-leaning result.
-    </li>
-    <li>
-      <strong>If #27 is &le; 0.7210 or ignites.</strong> Damping the merger did not help, so the <em>substrate</em>
-      question becomes primary: <em>why does the stale-anchor \(Q\)-refresh underperform a frozen basis</em> (plain 0.6437
-      &lt; floor 0.6914)? Three candidate lineages, ranked by cost:
-      <ul>
-        <li><strong>(a) Cheapest untested combination &mdash; frozen-after-warmup \(Q\) plus error-feedback.</strong> The
-          arithmetic is suggestive: the frozen-\(Q\) floor is 0.6914 and error-feedback added +7.7 points over plain on
-          the refreshing substrate; if that gain transfers, 0.6914 + 0.077 already clears parity. This isolates the
-          basis-refresh drag from the merger and is the first thing to try.</li>
-        <li><strong>(b) Classical per-step error feedback.</strong> Accumulate the fast path's <em>own</em> compression
-          residual rather than the anchor-EMA proxy &mdash; closer to the Stich/Vogels theory the current merger
-          approximates.</li>
-        <li><strong>(c) Variance-controlled unbiased masking plus error feedback.</strong> The EXP-25 forward-primitive
-          recommendation: a zero-mean, variance-tunable perturbation as the forward codec, paired with error feedback on
-          the backward path.</li>
-      </ul>
-    </li>
-  </ol>
-  <p>
-    Explicitly out of scope until parity is in hand: chasing a <em>surpass-dense</em> edge (the surpass thesis is
-    hypothetical and rests on a conversion mechanism we have not demonstrated &mdash; see
-    <code>runs/EXP-25/SURPASS_DENSE_STRATEGY.md</code>), changing the GRPO objective, or relaxing any realism invariant.
-    Parity first; everything else is a secondary claim layered on top of it.
-  </p>
-
-  <h3>Risks and craft lessons worth carrying</h3>
-  <div class="warn">
-    <ul>
-      <li><strong>Budget is real.</strong> EXP-26 cost roughly <span class="metric">$316</span> of box time. Staging and
-        audit-gating (diagnose-then-spend) avoided a six-arm training sweep by screening basis candidates passively in a
-        single run &mdash; that discipline is what keeps the lineage affordable.</li>
-      <li><strong>Stochastic ignition argues for standing safeguards.</strong> The collapse-watch and
-        <code>expandable_segments</code> memory allocation should be defaults on every run,
-        not opt-ins; the parent's clip-1.0 OOM is the case study. <em>[2026-06-11: the watch is now the
-        two-layer length-spiral monitor — E1 early gate (len/max &gt; 4000 in steps 10&ndash;30) + P1 kill
-        (2 consecutive cap-pins); entropy triggers are demoted to corroborators. See the EXP-27 tab.]</em></li>
-      <li><strong>Single seeds limit close calls.</strong> When a result is within 2&ndash;3 points of a gate, add seeds
-        or extend the horizon before calling it. #27's longer 100-step horizon partly addresses this for free.</li>
-    </ul>
-  </div>
-
-  <div class="callout">
-    <strong>Recommended immediate action.</strong> Approve issue #27 and dispatch it
-    (<code>gh issue edit 27 --remove-label status:planned --add-label status:approved</code>).
-    <ul>
-      <li><strong>Cost:</strong> one cell, &le; 30 GPU-hours, &asymp; 5&ndash;6 hours wall on 4&times;H200, config-only on
-        already-merged code &mdash; a small, bounded spend against a $1500 cap with $698 used.</li>
-      <li><strong>Evidence it produces:</strong> the full val trajectory at steps 50/75/100 for the damped merger, a
-        clean answer on whether damping removes the ignition hazard, the residual-dose and direction-preservation
-        trajectories, and the unchanged &asymp;0.05 comm ratio &mdash; i.e. a definitive PASS/REVISE/STOP on whether
-        error-feedback reaches parity at &asymp;20&times; savings.</li>
-    </ul>
-    This is the cheapest run that can complete the M6 milestone, and the gates make every outcome &mdash; including
-    failure &mdash; informative. Approve it.
-  </div>
 </section>
 
 <section class="tab-content" id="tab6">
@@ -1255,6 +1101,14 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     gives cumulative-applied = cumulative-true ± bounded residual — no exogenous carrier,
     no O(T) integral. Predicted: P(no ignition) &asymp; 0.85; P(val &ge; 0.7414) &asymp; 0.3.
     This retires M from the fast path (anchor keeps Q-ownership only).
+    <br><br>
+    <strong>[2026-06-16] This prediction was borne out.</strong> EXP-30 built exactly this &mdash; true
+    error feedback on the codec's own exact residual \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\)
+    at identical (batch, weights), enabled by EXP-29's on-policy replay. It ran <strong>emission-free
+    through 100 steps</strong> (the no-ignition prediction held, traversing the s51&ndash;66 band cleanly)
+    and reached <strong>dense parity (~0.75)</strong> &mdash; clearing the val target the damped carrier
+    here could not. The endogenous residual has no persistent tangential carrier to integrate. See the
+    EXP-30 and EXP-31 tabs.
   </div>
 
   <ol>
@@ -1294,72 +1148,601 @@ window.MathJax = { tex: { inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$
     Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.
   </footer>
 </section>
+
 <section class="tab-content" id="tab7">
-<h2>EXP-30 / EXP-31 — The Best Method, and the Path to Surpass Dense</h2>
-<p class="lede">The settled result of the program: communication-efficient GRPO reaches <b>PARITY with dense</b>
-training at ~5% of the inter-stage gradient-communication cost. The best method is B2 (the K-delayed exact
-codec residual); a clean greedy-<i>surpass</i> remains open, and we name the one lever that can still get there.</p>
+  <h2>EXP-29: The Trajectory Fix &mdash; Make the Anchor Grade Its Own Homework</h2>
 
-<h3>The headline numbers (greedy val@50, GSM8K, this config)</h3>
-<table class="data">
-  <tr><th>method</th><th>val@50</th><th>vs dense</th><th>comm cost</th></tr>
-  <tr><td><b>Dense</b> (comm-eff OFF) — true bar on this config</td><td>0.7506</td><td>—</td><td>1×</td></tr>
-  <tr class="hl"><td><b>B2 — delayed_ef residual (BEST comm-eff)</b></td><td><b>0.7400</b></td><td>−0.011 (within ±0.024 = <b>PARITY</b>)</td><td>~5% (≈3.7× honest)</td></tr>
-  <tr><td>EXP-31 γ-decay sub-basis</td><td>0.7210</td><td>−0.030</td><td>~5%</td></tr>
-  <tr><td>EXP-31 rank-2 sub-basis (γ=1)</td><td>0.6983</td><td>early-win 0.7293@25, late regress</td><td>~5%</td></tr>
-  <tr><td>Dense — <i>old</i> reference (different vLLM config)</td><td>0.7839</td><td>see "the reframe"</td><td>1×</td></tr>
-  <tr class="hl"><td><b>B2 — our method, PREVIOUS run (EXP-30, no-flag config)</b></td><td><b>0.7528</b> (≈75%)</td><td>−0.031 vs that config's dense 0.7839</td><td>~5%</td></tr>
-</table>
+  <p class="lede">
+    Every result up to this point rested on a quiet assumption that turned out to be wrong. The anchor
+    circuit's whole job is to compute a clean, trustworthy gradient \(M\) from a stale snapshot of the
+    weights &mdash; but it was computing that gradient on the <em>wrong data</em>. It graded the
+    <em>current</em> policy's answers using <em>old</em> weights, which is neither the old policy's
+    gradient nor the new one's. EXP-29 (issue #29, &ldquo;Correct the anchor gradients trap utilisation&rdquo;,
+    operator-directed after a code review) fixes this: the anchor now replays the exact trajectories its
+    stale weights actually generated. No training-curve headline &mdash; this is an infrastructure
+    correctness fix &mdash; but it is the fix that made the later SOTA legitimate.
+  </p>
 
-<h3>The best method: B2 — K-delayed exact codec residual</h3>
-<p>The fast circuit's compressed gradient \(G_{\text{comp}}\) is cheap but biased (the rank-77 act codec drops
-~92% of the energy). A stale full gradient \(M_{\text{rep}}\) (replayed every \(K{=}5\) ticks on the identical
-\((\text{batch},\theta_{t-K})\)) supplies an <b>exact error-feedback residual</b>:</p>
-$$\delta(t)=M_{\text{rep}}(t)-G_{\text{comp}}^{\text{ring}}(t-K),\qquad
-  G_{\text{corr}}(t)=G_{\text{comp}}(t)+\lambda\,\delta(t),\quad \lambda=1,\ \beta_{\text{anc}}=0.$$
-<p>\(\delta\) is refreshed at fires, held between; the sum telescopes to
-\(\sum_t G_{\text{full}}(t-K)\) — it <b>reconstructs the dense gradient on stale data</b>.</p>
-<div class="win"><b>Why parity is the ceiling.</b> \(\delta\) cancels the codec artifact and re-injects the true
-direction, so the accumulated update <i>is</i> the dense gradient (on stale data). That is exactly why B2 matches
-dense — and why it cannot, by construction, exceed it.</div>
+  <h3>What the anchor is supposed to compute</h3>
+  <p>
+    Recall the two-circuit design. The fast compressed circuit runs every step; the <strong>anchor
+    circuit</strong> fires every few ticks, loading a <code>delay_K = 5</code>-tick-stale snapshot of the
+    weights into a clean, no-compression clone and running one full forward/backward to produce the true
+    gradient average \(M\). That \(M\) is the program's reference signal &mdash; the merger folds it into
+    the noisy compressed gradient, and it drives the projection basis \(Q\). If \(M\) is contaminated,
+    everything downstream inherits the contamination.
+  </p>
+  <p>
+    The anchor uses a deliberately clean loss (<code>anchor_pg_loss</code>,
+    <code>verl/workers/comm_eff/anchor.py</code>): a plain REINFORCE policy gradient with the importance
+    ratio held at \(1\) (no PPO clipping, <code>old_log_probs</code> deliberately ignored), so its
+    gradient is exactly
+  </p>
+  $$ G_{\text{anchor}} \;=\; \nabla_\theta\big[\!-\!A \cdot \log\pi_\theta\big]\Big|_{\theta = \theta_{t-K}} \;=\; -\,A\cdot\nabla_\theta\log\pi_{\theta_{t-K}}. $$
+  <p>
+    This is the textbook &ldquo;clean step's gradient, evaluated at the stale weights.&rdquo; The
+    advantages \(A\) and the response tokens are read straight off the batch. And there is the trap:
+    <strong>which</strong> batch?
+  </p>
 
-<h3>The dense-baseline reframe (why "78%" before, "75%" now)</h3>
-<p>The earlier \(0.7839\) dense came from a box with vLLM's <b>custom all-reduce enabled</b>; every comm-eff arm
-here (and the re-pinned dense) runs with it <b>disabled</b> (a CUDA-IPC failure forced NCCL all-reduce — a
-controlled variable). That flag perturbs the \(n{=}8\) <i>sampled</i> training rollouts → a different trajectory →
-a different val, so the generation path can move the number. With \(n{=}1\) draw each we can't fully separate
-flag-effect from run variance (dense's own band spans ~0.75–0.78), but on the <b>identical</b> config used for
-every comm-eff arm, <b>dense ≈ 0.75 and comm-eff matches it</b> — the correct apples-to-apples reading.</p>
+  <h3>The bug: the anchor graded the current policy's trajectories</h3>
+  <p>
+    On the training path, GRPO is on-policy &mdash; for each step \(t\), vLLM generates rollouts using the
+    <em>current</em> weights (\(\theta_{t-1}\)), and the advantages \(A\) are computed from <em>those</em>
+    rollouts' rewards. The old anchor refresh loaded the stale weights \(\theta_{t-K}\) into the clone but
+    then forwarded <code>anchor_data = data.copy()</code> &mdash; <strong>the current tick's batch</strong>
+    (<code>transformer_impl.py</code>). So it computed
+  </p>
+  $$ G_{\text{anchor}}^{\text{(old)}} \;=\; -\,A_{\text{current}}\cdot\nabla_\theta\log\pi_{\theta}\Big|_{\theta=\theta_{t-K}}, $$
+  <p>
+    with <strong>no importance correction</strong> between the policy that generated the data
+    (\(\pi_{\text{current}}\)) and the weights doing the scoring (\(\theta_{t-K}\)). This object is neither
+    the stale policy's true gradient (that would need the stale policy's <em>own</em> trajectories) nor the
+    current policy's (that would need the current weights). It is a <strong>stale-weights &times;
+    current-batch confound</strong> &mdash; a mismatch baked into \(M\)'s content across all of
+    EXP-25, EXP-26, and EXP-27.
+  </p>
+  <div class="callout">
+    <strong>The analogy.</strong> Picture the careful clerk again, the one who keeps the only fully-correct
+    copy of the ledger. The clerk is meant to redo <em>this morning's</em> transactions using the rules as
+    they stood a week ago, to measure how much the rules have drifted. Instead, the clerk was redoing
+    <em>today's brand-new</em> transactions with last week's rulebook &mdash; an answer to a question nobody
+    asked. The drift measurement is contaminated by the fact that the transactions themselves are not the
+    ones last week's rules would have produced.
+  </div>
+  <p>
+    This was a deliberate original design choice, not a coding slip &mdash; &ldquo;the clean step's gradient
+    at the stale weights&rdquo; was taken to mean &ldquo;clean loss, stale weights, whatever batch is in
+    hand.&rdquo; But for the decentralized-pipeline target the right object is unambiguous: a slow,
+    out-of-date worker computes gradients on the trajectories <em>it itself</em> generated from
+    <em>its own</em> weights. The confound had to go before any claim about how to <em>use</em> \(M\)
+    could be trusted.
+  </p>
 
-<h3>EXP-31: the surpass attempt (stale-anchor sub-basis) and why it lands at parity</h3>
-<p>The gradient is stable-rank ≈ 2 but the act-basis misses 0.682 of the update energy. EXP-31 harvested that
-off-principal direction from the stale anchor and added it (\(\gamma_t\)-weighted, forward \(Q\) untouched):</p>
-$$\delta_{\text{sub}}=\operatorname{rank}_{r_{sb}}(\delta_{B2}),\qquad
-  G_{\text{corr}}=G_{\text{comp}}+\lambda\big(\delta_{B2}+\gamma_t\,\delta_{\text{sub}}\big).$$
-<p>It genuinely <b>accelerates early learning</b> (captures 88–90% of the off-principal energy; val@25 0.7293 vs
-B2 0.6937) — but amplifying a direction the model already descends speeds the <b>path</b> to dense's optimum, not
-the <b>destination</b>: at full weight it over-shoots near convergence (regress to 0.6983); decayed, it relaxes
-back to parity (0.7210). <b>Conclusion: parity, not surpass.</b></p>
+  <h3>The fix: on-policy replay</h3>
+  <p>
+    The correction (<code>anchor.replay_paired_batch = true</code>) is conceptually simple and costs no
+    extra generation. A <strong>fire-aware ring buffer</strong> retains recent mini-batches &mdash; the
+    tokens and their advantages &mdash; each tagged with the weights that produced it; when the anchor
+    fires, it replays the <em>paired</em> batch instead of the current one
+    (<code>anchor_data = _replay_batch.copy()</code>, <code>transformer_impl.py</code>):
+  </p>
+  $$ G_{\text{anchor}}^{\text{(fixed)}} \;=\; -\,A_{t-K}\cdot\nabla_\theta\log\pi_{\theta}\Big|_{\theta=\theta_{t-K}}
+     \qquad\text{on the batch } \theta_{t-K}\text{ generated.} $$
+  <p>
+    Now the weights and the trajectories match: a self-consistent on-policy gradient of the stale snapshot.
+    The alignment is exact, not approximate &mdash; the weight snapshot taken at the first training tick of
+    a global step is <em>precisely</em> the snapshot vLLM used to generate that step's rollouts, so storing
+    one snapshot per global step plus the per-tick batches yields exact <code>(batch, generator-weights)</code>
+    pairs (warmup included). Data staleness is exactly \(K\) ticks; the weights are <em>always</em> the
+    batch's true generator (realized weight staleness \(K\) or \(K{+}1\) on the two-ticks-per-step substrate,
+    logged and hard-asserted never fresher than \(K\)).
+  </p>
+  <p>
+    A companion knob, <code>anchor.snapshot_device = cpu</code>, moves the <code>delay_K + 1</code> full
+    weight snapshots (~18.6&nbsp;GB if kept on the GPU) into CPU RAM, loaded to the device only inside the
+    refresh. The batches were already CPU-resident, so the new ring costs essentially zero extra GPU memory
+    &mdash; an explicit operator requirement (the fixed substrate must not grow its HBM footprint). Both
+    knobs <strong>default OFF</strong> (<code>replay_paired_batch = false</code>,
+    <code>snapshot_device = gpu</code>): with the fix disabled, not a single existing line changes and the
+    run is byte-identical to before.
+  </p>
 
-<h3>Path forward: the one destination-changing lever (built, default-OFF on vast-ai-workload)</h3>
-<p>A surpass needs a <i>better</i> optimum — beneficial gradient noise toward flatter minima, not amplification.
-Replace the codec's biased noise with a zero-mean, tunable, cross-rank-identical perturbation:</p>
-$$G_{\text{corr}}'=G_{\text{corr}}+\sigma\,\|G_{\text{corr}}\|\,\hat\xi,\qquad
-  \hat\xi=\xi/\|\xi\|,\ \xi\sim\mathcal N(0,I)\ \text{seeded by }(\text{step},\text{target}).$$
-<p>Zero-mean over steps ⇒ unbiased descent + exploration; greedy val rewards the mode, and a flatter minimum
-makes that mode generalize better — the only known route for comm-eff to exceed dense rather than match it. The
-<code>perturb_sigma</code> knob is implemented and 58-test-green (σ=0 ⇒ bitwise-B2); the σ∈{0.05,0.10,0.20} sweep
-runs when a GPU is available. Honest prior ~10–15%.</p>
-<div class="callout"><b>Status.</b> All code (delayed_ef + sub-basis + perturb) is on <code>vast-ai-workload</code>,
-default-OFF = bitwise-B2. Issue #31 kept open as a claim. Full write-up:
-<code>research/runs/EXP-31/{verdict,BEST_SO_FAR,next_surpass_lever}.md</code> and the standalone
-<code>~/Documents/comm_eff_grpo_best_method.html</code>.</div>
+  <h3>How we know it is correct</h3>
+  <p>
+    Because this touches the gradient that everything else trusts, EXP-29 shipped behind a wall of hard
+    correctness gates rather than a validation number.
+  </p>
+  <table class="data">
+    <thead><tr><th>Gate</th><th>What it checks</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Off-path parity</strong></td>
+        <td>With the fix off, no ring is constructed, no new collective or RNG runs &mdash; every existing
+          line executes unchanged (CPU-tested: no replay ring is even built).</td>
+        <td>byte-identical</td>
+      </tr>
+      <tr>
+        <td><strong>Stale-weight value canary</strong></td>
+        <td>On every fire, the fp32 norm + sum of canary weight matrices recorded when the snapshot was
+          pushed must equal the values recomputed off the clone after it loads &mdash; bitwise (the
+          bf16&rarr;CPU&rarr;device round-trip is byte-preserving).</td>
+        <td>bitwise match every fire</td>
+      </tr>
+      <tr>
+        <td><strong>Exact pairing</strong></td>
+        <td>Every post-warmup fire asserts <code>used_tick == step &minus; delay_K</code> and
+          <code>batch_gs == snapshot_gs</code> &mdash; the replayed batch is provably the
+          \(t{-}K\) batch and its true generator snapshot.</td>
+        <td>asserted every fire</td>
+      </tr>
+      <tr class="hl">
+        <td><strong>Relevance probe</strong></td>
+        <td>The decisive value-level check. Each replayed batch <em>stores</em> the log-probs it was
+          generated with; the anchor's forward at the loaded snapshot re-scores the same tokens. If the
+          loaded weights are truly the batch's generator, the masked
+          \(\lvert\log\pi_{\text{loaded}} - \log\pi_{\text{stored}}\rvert\) sits at the engine-noise floor
+          and stays <em>flat</em> across fires; a broken pairing would drift and grow with each policy
+          update.</td>
+        <td>flat, at the noise floor (~0.01 nats)</td>
+      </tr>
+      <tr>
+        <td><strong>Zero GPU-memory growth</strong></td>
+        <td>Peak allocated memory must stay below the prior healthy-phase baseline &mdash; snapshots and
+          replay batches live in CPU RAM.</td>
+        <td>max_mem 30.77&nbsp;GB, below baseline</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    All hard gates passed; the verdict is an <strong>infrastructure PASS</strong> (there is no parity bar
+    on a correctness fix &mdash; replay deliberately <em>changes</em> the science, so a val gate would be
+    meaningless; the &ldquo;not broken&rdquo; check was val@25&nbsp;&ge;&nbsp;0.60). The change merged as
+    PR&nbsp;#16 on the fork and is now a permanent, default-available part of the substrate.
+  </p>
+
+  <h3>Why it mattered &mdash; and, honestly, what it did <em>not</em> fix</h3>
+  <div class="win">
+    <strong>The enabling consequence.</strong> With a self-consistent anchor, the residual
+    \(\delta = G_{\text{anchor}}^{\text{rep}} - G_{\text{comp}}\), measured at <em>identical</em> batch and
+    weights, becomes a clean measurement of one thing only: <strong>the error the codec introduced</strong>.
+    The relevance probe's noise floor (~0.01 nats) is the same band EXP-30 later used to certify that
+    \(\delta\) is codec error and not an objective/data mismatch. That clean \(\delta\) is exactly the
+    quantity the SOTA merger (EXP-30's <code>delayed_ef</code>, &lambda;=1) re-injects &mdash; so on-policy
+    replay is the precondition that made the next experiment's parity result legitimate rather than
+    confounded.
+  </div>
+  <div class="warn">
+    <strong>The honest non-result.</strong> Making \(M\) valid did <em>not</em> rescue the old sign /
+    blend idea. When EXP-30 measured it, the valid generator-consistent gradient was <em>just as
+    orthogonal</em> to the live compressed gradient as the old confounded \(M\) had been
+    (\(\cos \approx 0\) either way). So the EXP-25 &ldquo;sign agreement is a coin-flip&rdquo; finding was
+    <strong>genuinely structural</strong>, not an artifact of the trajectory confound &mdash; fixing the
+    data did not open up the blend geometry (which is why EXP-30's blend gate closed without a training
+    run). The trajectory fix and the sign coin-flip are two independent facts: EXP-29 removed a real
+    confound and unlocked the <em>residual</em> route to SOTA, but it did not un-falsify the
+    <em>sign-replacement</em> route. Both readings stand together.
+  </div>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: issue #29 &ldquo;Correct the anchor gradients trap utilisation&rdquo; (the EXP-29 plan + PR are the record;
+    operator-directed, no claim flow) · <code>verl/workers/comm_eff/anchor.py</code>
+    (<code>anchor_pg_loss</code>, <code>replay_relevance_stats</code>, <code>maybe_build_replay_ring</code>) ·
+    <code>verl/workers/engine/fsdp/transformer_impl.py</code> (anchor refresh + replay selection + relevance verdict) ·
+    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> knobs) ·
+    PR&nbsp;#16 (merged) · <code>research/runs/SUMMARY.md</code>.
+  </footer>
+</section>
+
+<section class="tab-content" id="tab8">
+  <h2>EXP-30: The &delta;-Residual Merger &mdash; Communication-Efficient GRPO Reaches Dense Parity</h2>
+
+  <p class="lede">
+    This is the experiment that produced the program's current state of the art. With a trustworthy anchor
+    in hand (EXP-29), EXP-30 asked the sharpest possible version of the question: instead of borrowing the
+    anchor's <em>signs</em> or its <em>off-subspace energy</em>, what if we feed back the <strong>exact
+    difference</strong> between the clean gradient and the compressed gradient, measured on the very same
+    data? That correction &mdash; the &ldquo;delayed error-feedback&rdquo; merger, <code>B2</code> &mdash;
+    trains GSM8K to <span class="metric">val@50 &asymp; 0.75</span>, reaching the dense band at roughly
+    <strong>5% of the gradient-communication cost</strong>, with no length-explosion through 100 steps.
+    It is the direct vindication of EXP-27's closing recommendation: rebuild error-feedback on the codec's
+    own dropped residual, and the exogenous carrier that caused ignition disappears.
+  </p>
+
+  <h3>Diagnose-then-spend, once more &mdash; and a gate that closed</h3>
+  <p>
+    EXP-30 reused EXP-26's discipline: a cheap geometry probe decides which expensive merger earns a
+    training run. A 20-step probe (<code>stepA_geometry_probe</code>) measured the anchor's
+    <em>valid, replayed</em> gradient against the live compressed gradient on identical batches, and two
+    pre-registered gates &mdash; thresholds fixed in advance &mdash; decided what ran next.
+  </p>
+  <table class="data">
+    <thead><tr><th>Route</th><th>Gate (verbatim rule)</th><th>Measured</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Blend</strong> (B1)</td>
+        <td>anchor&ndash;compressed agreement \(m_1 \ge 0.10\) AND \(m_1 \ge 2 m_2\) on &ge;80% of fires</td>
+        <td>\(m_1 = 0.012\), paired-frac \(= 0.57\)</td>
+        <td><strong>CLOSED</strong> &mdash; never launched</td>
+      </tr>
+      <tr class="hl">
+        <td><strong>Residual</strong> (B2)</td>
+        <td>\(\lVert\delta\rVert / \lVert G_{\text{comp}}\rVert \in [0.1, 1.5]\) AND loss-mismatch \(\le 0.02\) nats</td>
+        <td>median \(= 1.05\), max mismatch \(= 0.0103\)</td>
+        <td><strong>OPEN</strong> &mdash; promoted to a training run</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    The blend gate <em>closing</em> is itself a result. Even with the now-valid anchor, the clean gradient
+    stays essentially orthogonal to the compressed one (agreement \(\approx 0.01\)) &mdash; so a linear
+    blend has almost nothing aligned to add, exactly as EXP-25/26 predicted. The gate retired the entire
+    blend family for the cost of a 4-GPU-hour probe instead of a full training arm. The residual gate, by
+    contrast, confirmed two things the residual route needs: \(\delta\) is the right <em>size</em> (norm
+    ratio ~1) and it is genuine <em>codec error</em>, not an objective mismatch (loss-mismatch 0.01 nats,
+    sitting in EXP-29's relevance band &mdash; the payoff of the trajectory fix).
+  </p>
+
+  <h3>The merger: feed back the exact codec residual</h3>
+  <p>
+    EXP-26's error-feedback re-injected the <em>off-subspace projection</em> of the anchor EMA &mdash; and
+    because the projection was nearly vacuous, that reduced to injecting the stale EMA almost raw, an
+    exogenous force that integrated into the tangential carrier and ignited (the EXP-27 story). B2 does
+    something cleaner. Using the valid replayed anchor gradient \(G_{\text{anchor}}^{\text{rep}}\) and the
+    compressed gradient \(G_{\text{comp}}\) <em>on the identical (batch, weights) pair</em>, it forms the
+    exact residual and adds it back, at full strength, with no decay buffer and no sign term:
+  </p>
+  $$ \delta \;=\; G_{\text{anchor}}^{\text{rep}} \;-\; G_{\text{comp}}, \qquad
+     G_{\text{corr}} \;=\; G_{\text{comp}} \;+\; \lambda\,\delta, \quad \lambda = 1,\ \beta_{\text{anc}} = 0. $$
+  <p>
+    At \(\lambda = 1\) this telescopes to \(G_{\text{corr}} = G_{\text{anchor}}^{\text{rep}}\): the
+    compressed gradient is used as a <em>transport</em> for the clean one, and the codec error cancels
+    exactly. Because \(\delta\) is the circuit's <em>own</em> dropped residual (endogenous), not an external
+    EMA pushed in sideways, there is no persistent tangential force to integrate &mdash; which is precisely
+    why it does not ignite. \(\beta_{\text{anc}} = 0\) keeps the anchor signal memoryless across fires (it
+    is held between fires, not compounded), and the \(K\)-delay is the honest staleness of a slow reference.
+  </p>
+
+  <h3>Why it works: the within-pair geometry (finding F1)</h3>
+  <p>
+    The probe exposed exactly <em>why</em> a residual succeeds where a blend cannot. Measured at identical
+    batch and weights:
+  </p>
+  <table class="data">
+    <thead><tr><th>Quantity</th><th>Measured</th><th>Reading</th></tr></thead>
+    <tbody>
+      <tr><td>\(\cos(\delta,\ G_{\text{comp}})\)</td><td><span class="metric">&minus;0.92 to &minus;0.98</span></td><td>the residual points almost exactly <em>against</em> the compressed gradient</td></tr>
+      <tr><td>\(\lVert\delta\rVert / \lVert G_{\text{comp}}\rVert\)</td><td><span class="metric">&asymp; 1.05</span></td><td>the residual is about as large as the gradient itself</td></tr>
+      <tr><td>\(\Rightarrow\ \cos(G_{\text{anchor}}^{\text{rep}},\ G_{\text{comp}})\)</td><td><span class="metric">&asymp; 0</span></td><td>algebraically forced: the true gradient is nearly orthogonal to the compressed one</td></tr>
+      <tr><td>\(\Rightarrow\ \lVert G_{\text{anchor}}^{\text{rep}}\rVert / \lVert G_{\text{comp}}\rVert\)</td><td><span class="metric">&asymp; 0.33</span></td><td>the compressed gradient is ~3&times; too big and mostly off-direction</td></tr>
+    </tbody>
+  </table>
+  <p>
+    In plain terms: the rank-77 codec does not gently perturb the weight gradient &mdash; the codec error
+    <em>is the dominant component</em> of the compressed gradient. It is three times too large and points
+    almost entirely the wrong way. (This is the weight-space confirmation of EXP-26's activation-space
+    finding that the basis captured only ~1/3 of the update energy.) A blend can only add a near-orthogonal
+    partner and dilute; the residual \(\delta\) <em>simultaneously cancels the stale codec artifact and
+    injects the true direction</em>. That is the whole mechanism.
+  </p>
+
+  <h3>What makes the number: the component decomposition</h3>
+  <p>
+    A six-run, one-knob-at-a-time decomposition (every cell on the fixed surface, only the codec/merger
+    varying) attributes the result to two distinct levers.
+  </p>
+  <table class="data">
+    <thead><tr><th>Cell</th><th>What it isolates</th><th>val@50</th><th>lever value</th></tr></thead>
+    <tbody>
+      <tr><td>C3 &mdash; PowerSGD, \(Q\) <strong>frozen</strong>, no merge</td><td>value of refreshing the basis</td><td>0.0925@25 (no learning)</td><td>&mdash;</td></tr>
+      <tr><td>C2 &mdash; PowerSGD + anchor-updated \(Q\), no merge</td><td>substrate floor</td><td>0.6300</td><td><strong>\(Q\)-update: +~0.5</strong></td></tr>
+      <tr><td>B1 &mdash; blend merger</td><td>blend vs residual</td><td>0.7422</td><td>+0.112 over C2</td></tr>
+      <tr class="hl"><td><strong>B2 &mdash; \(\delta\)-residual merger</strong></td><td><strong>best comm-efficient</strong></td><td><strong>0.7528</strong></td><td><strong>residual: +0.123 over C2</strong></td></tr>
+    </tbody>
+  </table>
+  <p>
+    Two things make B2 work, and the decomposition separates them cleanly. <strong>The
+    power-iteration \(Q\)-update is the dominant lever</strong> (+~0.5): freeze the basis (C3) and the codec
+    passes noise, validation never leaves baseline. On top of that working substrate, <strong>the
+    \(\delta\)-residual merger adds +0.123</strong> (C2&nbsp;0.6300&nbsp;&rarr;&nbsp;B2&nbsp;0.7528) &mdash;
+    and it edges out the blend (B1&nbsp;0.7422) by about a point, the residual-vs-blend contrast the gates
+    predicted.
+  </p>
+
+  <h3>Stability: de-censored to 100 steps</h3>
+  <p>
+    EXP-27 taught the program that a clean 50-step run can be a censored observation of an ignition that
+    fires at step ~61. So B2 was extended to 100 steps (seed 0, identical settings). It
+    <strong>traversed the entire EXP-27 ignition band (steps 51&ndash;66) cleanly</strong> &mdash; no
+    length-explosion, no entropy collapse, response-length flat. Validation: 0.7278@25 / 0.7536@50 /
+    0.7475@75 / 0.7400@100, a mild late decay that still sits well above the realistic floor. Two isolated
+    single-rollout length pins (steps 94, 99) reverted immediately &mdash; the benign stochastic-outlier
+    signature, not the ignition fingerprint (which is a <em>climbing</em> mean with collapsing entropy).
+    The per-fire residual ratio settled to ~1.0 and declined all run &mdash; bounded, not compounding.
+  </p>
+  <div class="warn">
+    <strong>The honest caveat that EXP-31 then resolved.</strong> Measured against the same-code,
+    same-config dense rerun EXP-30 added (val@50 <span class="metric">0.7839</span>), B2's 0.7528 is
+    &minus;0.031, about 96% of dense &mdash; which EXP-30 recorded as <em>near</em>-parity, explicitly
+    <em>not</em> established, pending seed replicates of both arms. Two further findings tempered the claim:
+    the valid anchor signal still carries moderate cross-fire persistence (autocorrelation ~0.62, so
+    \(\beta_{\text{anc}}=0\) stops the carrier <em>compounding</em> but does not make it memoryless &mdash;
+    F2), and the replay gradients are extremely low-rank (stable rank ~2, top-1% of coordinates holding
+    ~60% of the mass &mdash; F3), meaning a rank-77 codec has ample capacity and the remaining failure is
+    basis <em>mismatch</em>, not capacity. <strong>EXP-31 took the binding next step</strong> &mdash; an
+    apples-to-apples dense rerun on the exact same box &mdash; and reframed the bar; see the next tab.
+  </div>
+
+  <div class="win">
+    <strong>Bottom line.</strong> B2 (<code>delayed_ef</code>, \(\lambda=1\)) is the program's SOTA
+    communication-efficient method: GSM8K val@50 in the 0.74&ndash;0.75 band, the boundary-activation
+    traffic cut ~19.8&times; on the fast path (~4&times; once the anchor's own traffic is honestly
+    amortized in), emission-free through 100 steps for seed 0. Verdict <strong>PASS</strong>; merged as
+    PR&nbsp;#17. The exact knob set is frozen as the reproduction baseline every later arm builds on
+    (<code>runs/EXP-31/B2_baseline/</code>).
+  </div>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: <code>runs/EXP-31/B2_baseline/verdict.md</code> (the EXP-30 verdict, migrated) &mdash;
+    six-run decomposition, gate outcomes, findings F1&ndash;F5, the dense-baseline correction, and the
+    ext100 addendum · W&amp;B runs <code>u9okvgzz</code> (B2), <code>b59ncque</code> (ext100),
+    <code>73ntu76u</code> (dense same-config), <code>k6nmcuyd</code> (C2), <code>djy4tog1</code> (C3) ·
+    PR&nbsp;#17 (merged) · <code>research/runs/SUMMARY.md</code>.
+    Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.
+  </footer>
+</section>
+
+<section class="tab-content" id="tab9">
+  <h2>EXP-31: Parity Confirmed, and the Anchor-Usage Axis Exhausted</h2>
+
+  <p class="lede">
+    EXP-31 set out to <em>surpass</em> dense and returned two results instead. First, a measurement that
+    reframed the whole scoreboard: re-running the dense control apples-to-apples &mdash; same box, same code,
+    same seed &mdash; put the dense bar at <span class="metric">0.7506</span>, not the 0.7839 EXP-30 had
+    chased, which makes the SOTA <code>B2</code> a <strong>statistical tie with dense</strong>. Second, a
+    clean falsification: a four-lever tournament over every admissible way to <em>use</em> the stale anchor
+    gradient came back <strong>null across the board</strong>. The honest verdict is <strong>STOP</strong>
+    on the anchor-usage axis &mdash; parity is real and reproduced, but nothing in how we re-weight,
+    accumulate, perturb, or de-noise the anchor signal pushes past dense.
+  </p>
+
+  <h3>Result 1 &mdash; the dense-reference reframe (parity is real)</h3>
+  <p>
+    EXP-30 left one binding loose end: its &ldquo;dense = 0.7839&rdquo; reference was a single draw measured
+    on a <em>different</em> box and configuration than the comm-eff arms. EXP-31 closed it by re-running the
+    dense control on the <em>exact</em> EXP-31 box, seed 0, with the identical
+    <code>disable_custom_all_reduce</code> setting every comm-eff arm uses. The result:
+  </p>
+  <table class="data">
+    <thead><tr><th>Configuration</th><th>val@50</th><th>Reading</th></tr></thead>
+    <tbody>
+      <tr><td>dense &mdash; this box, this config, seed 0</td><td><span class="metric">0.7506</span></td><td>the apples-to-apples bar</td></tr>
+      <tr class="hl"><td><strong>B2 / best comm-efficient (<code>delayed_ef</code> &lambda;=1)</strong></td><td><span class="metric">0.7400</span></td><td><strong>gap 0.011 &mdash; inside &plusmn;0.024 eval noise = PARITY</strong></td></tr>
+      <tr><td>dense &mdash; old reference (different box)</td><td>0.7839</td><td>a high draw; the &ldquo;0.044 gap&rdquo; was a wrong-reference artifact</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Dense on this task is best read as a <strong>band &asymp; 0.75&ndash;0.78</strong> (single-draw rollout
+    nondeterminism is ~&plusmn;0.024), and B2's 0.74&ndash;0.75 lineage sits squarely inside it. The
+    headline of the whole program follows: <strong>communication-efficient GRPO already matches dense at
+    ~5% of the gradient-communication cost.</strong> The &ldquo;0.044 gap to dense&rdquo; EXP-31 was
+    chartered to close did not exist &mdash; it was an artifact of comparing against a high draw on the
+    wrong machine.
+  </p>
+  <div class="warn">
+    <strong>The remaining honesty.</strong> Both numbers are single draws inside a ~&plusmn;0.024 band, so
+    this is statistical parity, not a multi-seed proof that the <em>means</em> coincide. Pinning the dense
+    and B2 <em>bands</em> with seed replicates is the one measurement that would upgrade &ldquo;parity
+    within noise&rdquo; to &ldquo;parity established.&rdquo; That, and the surpass question, are the only
+    things left open &mdash; see the final tab.
+  </div>
+
+  <h3>The sub-basis probe: faster, but not a better optimum</h3>
+  <p>
+    Before the tournament, EXP-31 tested its most mechanistically-motivated surpass idea: a rank-2
+    <em>sub-basis</em> correction that adds back the off-principal gradient mode the act-basis \(Q\) misses
+    (the stable-rank-2 object finding F3 had flagged). Mechanically it worked &mdash; it captured ~88&ndash;90%
+    of the off-principal energy and was bitwise-B2 at rank 0 &mdash; and it <em>accelerated early learning</em>
+    (+0.036 over B2 at step 25). But at constant weight it over-amplified near convergence and regressed by
+    step 50; a decaying weight removed the regression but also tempered the early gain. Every variant
+    clustered at ~0.70&ndash;0.74 &mdash; none cleared the dense band.
+  </p>
+  <div class="callout">
+    <strong>The lesson that set up the tournament.</strong> The sub-basis <em>speeds the path</em> to the
+    optimum but does not <em>find a better optimum</em>. That is the recurring shape of every comm-eff
+    correction the program has built: it can recover what compression lost and converge faster, but it
+    converges to the same place dense does. To go past dense you need a signal dense itself lacks &mdash;
+    which is exactly the hypothesis the four-lever tournament was designed to test and exhaust.
+  </div>
+
+  <h3>Result 2 &mdash; the four-lever anchor-usage tournament (STOP)</h3>
+  <p>
+    Holding the codec, the basis \(Q\), the batch, and the generation side all fixed (the locked B2
+    substrate), the only remaining freedom is <em>how the correction &delta; is used</em>. The tournament
+    enumerated the complete admissible set of four levers and ran each as B2 plus exactly one knob, against
+    a same-box B2 reference (<code>B2_live</code>: val@25 0.7202, val@50 0.7354). All numbers are val@25
+    greedy GSM8K; the operator gate was aggressive (kill unless val@25 clearly improves on 0.7202).
+  </p>
+  <table class="data">
+    <thead><tr><th>Lever</th><th>Idea</th><th>Config</th><th>val@25</th><th>&Delta; vs B2_live</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td><strong>L4</strong> perturbation</td><td>add isotropic noise to &delta; (flat-minima / SGLD)</td><td>&sigma;=0.01</td><td>0.7157</td><td>&minus;0.0045</td><td>NULL (parity)</td></tr>
+      <tr><td><strong>L2</strong> &delta;-momentum</td><td>EMA-accumulate &delta; across fires</td><td>&mu;=0.9</td><td><span class="metric">0.5701</span></td><td>&minus;0.1501</td><td>REGRESS</td></tr>
+      <tr><td><strong>L2</strong> &delta;-momentum</td><td>&hellip; lighter buffer</td><td>&mu;=0.5</td><td>0.7089</td><td>&minus;0.0113</td><td>NULL (parity)</td></tr>
+      <tr><td><strong>L3</strong> adaptive dose</td><td>spend more &delta; where compression hurt most</td><td>ratio, &kappa;=1.0</td><td>0.7119</td><td>&minus;0.0083</td><td>NULL (parity)</td></tr>
+      <tr><td><strong>L3</strong> adaptive dose</td><td>&hellip; cosine-gated</td><td>cos, &kappa;=1.0</td><td>0.7134</td><td>&minus;0.0068</td><td>NULL (parity)</td></tr>
+      <tr><td><strong>L1</strong> control-variate</td><td>use M as a variance-reducing baseline</td><td>&mdash;</td><td>SKIPPED</td><td>&mdash;</td><td>GATED OUT</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Not one lever cleared even the val@25 continue-to-improve bar. The best (L4) sat 0.0045 <em>below</em>
+    B2; the worst (L2 at &mu;=0.9) actively regressed by 0.15. L1 was gated out on its pre-registered
+    condition: a control variate needs the anchor to be correlated with the compressed gradient to cancel
+    variance, but the program has measured that correlation at ~0 (the same orthogonality that closed every
+    blend gate), so an M-baseline would <em>add</em> variance, not reduce it. The process criteria all
+    passed &mdash; off-path parity bitwise, byte-ratio identical to B2, B2 itself reproduced the band, no
+    ignition or OOM &mdash; and an 8-agent adversarial code review confirmed every lever did exactly what
+    its math intended. <strong>These are trustworthy nulls, not code artifacts.</strong>
+  </p>
+
+  <h3>Why all four are null &mdash; the mechanistic close</h3>
+  <div class="callout">
+    <strong>You cannot beat dense by manipulating a stale reconstruction of dense.</strong> The correction
+    \(\delta\) reconstructs the <em>dense gradient evaluated on stale data</em>. Re-weighting it (L3),
+    accumulating it (L2), perturbing it (L4), or de-noising it (L1) all operate on that same stale estimate
+    of the dense gradient &mdash; so each, at best, recovers dense and lands at parity, and at worst (L2
+    &mu;=0.9) just piles staleness on staleness. There is no interior optimum to tune toward, because the
+    target the correction reconstructs <em>is</em> dense. To exceed dense, the comm-efficient path would
+    have to inject a signal dense genuinely lacks &mdash; and no way of <em>using</em> the anchor produces
+    such a signal.
+  </div>
+
+  <h3>What surpass would actually require (and why it is out of scope here)</h3>
+  <p>
+    The deep mechanism rules out the entire &ldquo;manipulate &delta;&rdquo; family. Every credible
+    surpass route now lies <em>outside</em> the anchor-usage axis and outside this experiment's locked
+    surface:
+  </p>
+  <ul>
+    <li>a <strong>different forward basis</strong> that captures the stable-rank-2 off-principal mode the
+      act-basis \(Q\) misses &mdash; but that is the forward \(Q\), a locked / Step-C axis (and Step-C's
+      update-energy basis already anti-converted, EXP-26);</li>
+    <li>a <strong>generation-side diversity change</strong> (higher \(n\), rollout temperature) converting
+      to a pass@k or relocated-mode edge &mdash; explicitly locked off here, since generation runs
+      uncompressed and is sacred;</li>
+    <li>a <strong>fundamentally different decentralized-RL objective</strong>, not a re-use of the same
+      stale dense estimate.</li>
+  </ul>
+  <p>
+    None is a non-blocked knob in EXP-31, so there is no admissible REVISE &mdash; a future attempt has to
+    re-scope the locked surface with a new plan and an operator decision, not iterate a lever. That is what
+    makes STOP the honest verdict: the anchor-usage axis is <em>complete and exhausted</em>, and the
+    program is at defensible parity. Where that leaves us is the final tab.
+  </p>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Sources: <code>runs/EXP-31/verdict.md</code> (tournament STOP) · <code>runs/EXP-31/BEST_SO_FAR.md</code>
+    + <code>verdict_parity_FROZEN.md</code> (the parity reframe + sub-basis) · issue #31 ·
+    W&amp;B runs <code>fy920fty</code> (B2_live / Cell A), <code>ybemd5ux</code>/<code>knlzxh2x</code> (L2),
+    <code>kzohyuod</code>/<code>wmpmmdj1</code> (L3), <code>cvu8jw1n</code> (L4) · <code>research/runs/SUMMARY.md</code>.
+    Lever numbers are val@25 GSM8K greedy; B2 lineage val@50 is 0.74&ndash;0.75.
+  </footer>
+</section>
+
+<section class="tab-content" id="tab5">
+  <h2>Where We Are Now: Parity Reached, Surpass Open</h2>
+
+  <p class="lede">
+    As of 2026-06-16 the program has hit its core milestone. The communication-efficient GRPO trainer is
+    <em>stable</em>, reaches <em>parity</em> with the dense control within evaluation noise, demonstrates a
+    large measured <em>communication saving</em>, and is <em>reproducible</em> from one canonical launcher.
+    The current state of the art is the EXP-30 <code>B2</code> merger (<code>delayed_ef</code>, &lambda;=1):
+    GSM8K <span class="metric">val@50 &asymp; 0.74&ndash;0.75</span>, inside the dense band of
+    <span class="metric">0.75&ndash;0.78</span>, at roughly 5% of the fast-path gradient-communication cost.
+    The open question is no longer parity &mdash; it is whether anything can <em>surpass</em> dense, and
+    EXP-31 closed the one axis we could test under the locked surface. This tab is the honest current
+    scoreboard and the only to-dos that remain.
+  </p>
+
+  <h3>The scoreboard today</h3>
+  <p>
+    All numbers val@50 GSM8K greedy on the locked realistic substrate (anchor owns the rank-77 basis \(Q\),
+    staleness <code>delay_K=5</code>, no clean step, on-policy replay on). Dense is a single-draw band, not a
+    point.
+  </p>
+  <table class="data">
+    <thead>
+      <tr><th>Configuration</th><th>val@50</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>dense control &mdash; band across draws/boxes</td><td><span class="metric">0.75&ndash;0.78</span></td><td>the bar (0.7506 apples-to-apples this box; 0.7536 old code; 0.7839 a high draw elsewhere)</td></tr>
+      <tr class="hl"><td><strong>B2 &mdash; <code>delayed_ef</code> &lambda;=1 (SOTA)</strong></td><td><strong><span class="metric">0.7400&ndash;0.7528</span></strong></td><td><strong>PARITY with dense within &plusmn;0.024 noise, ~5% comm cost</strong></td></tr>
+      <tr><td>ef_powersgd (EXP-26, off-subspace EF)</td><td>0.7210</td><td>superseded by B2; ignited at 100 steps (EXP-27)</td></tr>
+      <tr><td>signed_ema &alpha;=0.5 (EXP-25)</td><td>0.7066</td><td>falsified merger (sign coin-flip)</td></tr>
+      <tr><td>plain PowerSGD + anchor-\(Q\), no merger (C2)</td><td>0.6300</td><td>substrate floor; the merger adds +0.123 on top</td></tr>
+    </tbody>
+  </table>
+
+  <h3>What is settled</h3>
+  <ul>
+    <li><strong>The substrate is realistic and mechanically correct.</strong> The anchor is the only thing
+      that updates the projection basis \(Q\), the fast path can only read it, the only uncompressed pass
+      lives inside the anchor, and there is no hidden full-rank &ldquo;clean step.&rdquo; Since EXP-29 the
+      anchor also grades the trajectories its own stale weights generated &mdash; the gradient signal is
+      now confound-free.</li>
+    <li><strong>Parity is reached</strong> (within evaluation noise). EXP-31's apples-to-apples dense rerun
+      put the bar at 0.7506; B2's 0.7400&ndash;0.7528 lineage sits inside the dense band. The
+      &ldquo;0.044 gap to dense&rdquo; earlier experiments chased was a wrong-reference artifact.</li>
+    <li><strong>The saving is real and measured.</strong> Boundary-activation traffic is cut ~19.8&times;
+      on the fast path (byte ratio ~0.0505), ~4&times; once the anchor's own traffic is honestly amortized
+      in &mdash; read straight off the live runs, not estimated.</li>
+    <li><strong>It reproduces from one launcher.</strong> The exact B2 knob set is frozen as the canonical
+      baseline (<code>runs/EXP-31/B2_baseline/</code>) that every later arm builds on.</li>
+  </ul>
+
+  <h3>What is closed or falsified</h3>
+  <ul>
+    <li><strong>Sign-replacement (signed_ema)</strong> &mdash; the anchor's sign agrees with the compressed
+      gradient only ~50% of the time, structurally, even when fresh and even when valid (EXP-25, re-confirmed
+      on the valid anchor in EXP-30). Dead.</li>
+    <li><strong>Update-energy / hybrid basis (Step C)</strong> &mdash; a basis tuned for gradient energy
+      anti-converts because rollouts run uncompressed (EXP-26, val 0.373). Dead.</li>
+    <li><strong>The M-fed exogenous-carrier merger class</strong> &mdash; any correction that injects a
+      persistent stale direction integrates into a reward-flat length-explosion (EXP-27 ignition at step ~61).
+      B2's <em>endogenous</em> residual avoids this; the carrier family is retired.</li>
+    <li><strong>The entire anchor-usage axis for surpass</strong> &mdash; re-weighting, accumulating,
+      perturbing, and de-noising the correction \(\delta\) all cap at parity, because \(\delta\)
+      reconstructs the dense gradient on stale data and you cannot beat dense by manipulating a stale copy
+      of dense (EXP-31, four levers, all null &rarr; STOP). Do not re-propose anchor-usage levers.</li>
+  </ul>
+
+  <h3>What is genuinely open &mdash; the only live to-dos</h3>
+  <ol>
+    <li>
+      <strong>Upgrade parity from &ldquo;within noise&rdquo; to &ldquo;established&rdquo; (cheap, bounded).</strong>
+      Both the dense bar and B2 are single draws inside a ~&plusmn;0.024 band. Seed replicates of
+      <em>both</em> arms would pin the two bands and turn the statistical tie into a multi-seed result. This
+      is the one measurement that closes the parity claim, and it needs no new code.
+    </li>
+    <li>
+      <strong>Surpass requires re-scoping the locked surface &mdash; a new plan + operator decision, not a
+      lever.</strong> The deep mechanism says a comm-efficient method can only exceed dense by injecting a
+      signal dense itself lacks. None of the candidates is reachable on the current locked surface:
+      <ul>
+        <li>a <strong>different forward basis</strong> that captures the stable-rank-2 off-principal mode
+          the act-basis \(Q\) misses (must avoid Step-C's update-energy trap);</li>
+        <li>a <strong>generation-side diversity change</strong> (higher \(n\), rollout temperature)
+          converting to a pass@k or relocated-mode edge &mdash; this is the only compression-specific bet,
+          and it changes the sacred uncompressed generation path;</li>
+        <li>a <strong>fundamentally different decentralized-RL objective.</strong></li>
+      </ul>
+      Each is an operator decision about the fixed control surface, not a researcher tuning step.
+    </li>
+  </ol>
+
+  <div class="win">
+    <strong>The honest bottom line.</strong> Communication-efficient GRPO matches dense at ~5% of the
+    gradient-communication cost, on a realistic decentralized-pipeline substrate, reproducibly &mdash; the
+    M6 milestone in everything but a multi-seed parity band. The surpass-dense thesis, as far as the
+    anchor-usage axis can test it, is falsified: you cannot out-perform dense by being a cleverer copy of
+    dense. Any next step toward surpassing is a deliberate change to the locked surface, made with eyes
+    open, not another merger to tune.
+  </div>
+
+  <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
+    Current state as of 2026-06-16. Sources: <code>research/runs/SUMMARY.md</code> (single source of truth for
+    results) · <code>runs/EXP-31/verdict.md</code> + <code>BEST_SO_FAR.md</code> · <code>runs/EXP-31/B2_baseline/verdict.md</code>
+    (EXP-30) · <code>research/.claude/GOAL.md</code> (what &ldquo;done&rdquo; means) · <code>CODE_WALKTHROUGH.md</code>.
+  </footer>
 </section>
 </main>
 <footer>Generated by the comm-eff-retrospective agent team (5 members); EXP-27 tab + post-mortem corrections by
-the exp27-postmortem team (4 members, 2026-06-11). Sources: research/runs/EXP-25/, research/runs/EXP-26/,
-research/runs/EXP-27/ (MECHANISM_ANALYSIS.md, RUN_COMPARISON.md), .claude/plans/26-27, CODE_WALKTHROUGH.md,
-W&amp;B project verl_compression_research. Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.</footer>
+the exp27-postmortem team (4 members, 2026-06-11); EXP-29/30/31 tabs + current-state rewrite added 2026-06-16
+(the trajectory fix, the δ-residual SOTA, and the parity/tournament closeout). Sources: research/runs/SUMMARY.md
+(single source of truth for results), research/runs/EXP-25/, research/runs/EXP-26/, research/runs/EXP-27/,
+research/runs/EXP-31/ (verdict.md, BEST_SO_FAR.md, B2_baseline/), issues #29/#30/#31, CODE_WALKTHROUGH.md, and
+the merged comm_eff source (anchor.py / spectral_filter.py / transformer_impl.py), W&amp;B project
+verl_compression_research. Numbers are val@50 GSM8K greedy accuracy unless stated otherwise.</footer>
 <script>
   const tabs = document.querySelectorAll('nav.tabs button');
   const panes = document.querySelectorAll('section.tab-content');
