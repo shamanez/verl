@@ -24,10 +24,12 @@ lasting record is **here + git history + W&B + the merged code**.
 - **Locked substrate:** PowerSGD **r=77** act codec · anchor **owns Q** · **cadence=delay_K=5** ·
   **clean_cadence=0** · **replay_paired_batch=true** · snapshot_device=cpu · batch128/mini64/lr1e-6/n8/
   resp16384/seed0 · **disable_custom_all_reduce=true** (required for the box to init; greedy-val-neutral).
-- **Current frontier status (2026-06-16):** The 4-lever anchor-usage tournament (EXP-31, issue #31)
+- **Current frontier status (2026-06-17):** The 4-lever anchor-usage tournament (EXP-31, issue #31)
   is **CLOSED — VERDICT STOP**. All four admissible levers (L4 perturbation, L2 δ-momentum, L3 adaptive
-  dose, L1 control-variate) are NULL. No nameable non-blocked knob with a credible path to ≥0.78 remains
-  on the anchor-usage axis. See §EXP-31 tournament below.
+  dose, L1 control-variate) are NULL. The β_anc EMA sweep (EXP-33, issue #33) is **CLOSED — VERDICT PASS
+  (measurement)**: the β axis is a flat free-averaging region (all β∈[0,0.75] tie within ±0.024; β=1
+  collapses). β=0 holds as the default. No nameable non-blocked knob with a credible path to ≥0.78 remains
+  on either the anchor-usage or β_anc axes. See §EXP-31 tournament and §EXP-33 below.
 
 Everything below B2 in the table (EXP-20/23/25/26/27/29) is **superseded history**, folded into this file
 (detailed run dirs de-bloated 2026-06-15; full detail in git history + W&B + the merged code).
@@ -70,6 +72,7 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 | **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict + B2 ground truth migrated to `runs/EXP-31/B2_baseline/` |
 | **EXP-31 (sub-basis)** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
 | **EXP-31 (tournament)** | M6 | 4-lever anchor-usage tournament (L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate) on B2 substrate | **NULL across all levers** — **STOP** | box i_41048644 4×H200; W&B fy920fty/ybemd5ux/knlzxh2x/kzohyuod/wmpmmdj1; verdict `runs/EXP-31/verdict.md` |
+| **EXP-33** | M6 | β_anc EMA sweep {0, 0.25, 0.50, 0.75, 1.00} on B2 delayed_ef substrate — first direct β-curve on the valid-M circuit | **FLAT free-averaging region** (all β∈[0,0.75] within ±0.024; C2 β=0.5 nominal peak 0.75284 NOT a SOTA promotion; C4 β=1 cold-M collapse) — **PASS (measurement)** | box i_41194490 4×H200 (torn down); WandB `verl_compression_research_beta_sweep`; verdict `runs/EXP-33/verdict.md` |
 
 ## EXP-25 — what we learned (issue #25, VERDICT = STOP)
 
@@ -153,6 +156,43 @@ no ignition/OOM/divergence. Code verified GO (adversarial 8-agent workflow — e
 cannot exceed dense by reweighting (L3), accumulating (L2), perturbing (L4), or de-noising (L1) a stale
 estimate of dense. To surpass, a signal dense genuinely lacks is required; no admissible lever on the
 anchor-usage axis provides it. Full detail: `runs/EXP-31/verdict.md`.
+
+## EXP-33 — β_anc sweep (issue #33, VERDICT = PASS, 2026-06-17)
+
+**The β_anc axis is a flat free-averaging region: β=0 (freshness) is the right default.**
+
+This was the first direct β→accuracy curve on the corrected valid-M circuit. All five cells ran clean
+on the locked B2 substrate (PowerSGD r=77, delayed_ef λ=1, anchor cadence=delay_K=5,
+replay_paired_batch=true) with only `spectral.beta_anc` varied.
+
+**β→accuracy curve** (val@50 = `val-core/openai/gsm8k/acc/mean@1` at global_step 50, same box/seed):
+
+| cell | β_anc | val@50 | gap vs C0 (0.73844) | interpretation |
+|---|---|---|---|---|
+| C0 b0p00 | 0.00 | **0.73844** | — (control) | reproduces B2 band [0.716,0.774] |
+| C1 b0p25 | 0.25 | **0.73995** | +0.00151 | TIE (within ±0.024) |
+| C2 b0p50 | 0.50 | **0.75284** | +0.01440 | TIE / nominal peak (NOT a SOTA promotion) |
+| C3 b0p75 | 0.75 | **0.72176** | −0.01668 | TIE / mild down |
+| C4 b1p00 | 1.00 | — (30-step bracket) | n/a | cold-M collapse: merger_coldM_fallbacks=196/196 → plain PowerSGD (degenerate) |
+
+**Key findings:**
+- **Freshness-best hypothesis SUPPORTED.** max(val@50[C1,C2,C3]) − val@50[C0] = +0.0144 ≤ +0.024 bar. No β>0 cell strictly beats β=0 beyond noise.
+- **Flat free-averaging region.** β∈[0,0.75] all lie within ±0.024 of C0 — mild EMA averaging is neither harmful nor helpful. Consistent with the "freshness ≥ variance-reduction" design invariant.
+- **β=1 degenerate cliff confirmed.** Cold-M freeze (M stays at zeros) → delayed_ef strict no-op → plain PowerSGD. Mechanism predicted and confirmed.
+- **β is comm-neutral.** bytes_ratio identical all 5 cells (0.0504–0.0506, gate [0.0500,0.0510]).
+- **promote_launcher_as: none.** B2 (= C0, β=0) stays the reference. No new launcher promoted.
+- **blend_eta divergence noted (non-confound).** All 5 cells used blend_eta=0.5 vs B2 snapshot 0.3; dead under delayed_ef, identical across cells — no confound.
+
+Full detail: `runs/EXP-33/verdict.md`. WandB project: `verl_compression_research_beta_sweep`.
+
+## Milestone M6
+
+M6 goal: validated, canonical communication-efficient GRPO launcher achieving ≥ dense parity (0.7536 ± noise) at materially lower gradient-comm cost.
+
+**PASS experiments contributing to M6:**
+
+- **EXP-30** (2026-06-13): K-delayed codec residual B2 (delayed_ef λ=1, β_anc=0) on valid-M anchor circuit with on-policy replay. val@50=0.7528 — first correction-carrying cell to convert without ignition, ZERO post-warmup emission across 50 steps. Success criteria checked: GATE-B2 OPEN (‖δ‖/‖G_comp_ring‖=1.05 ∈ [0.1,1.5]), bytes_ratio=0.0505, recon act-band, 196 targets, bitwise-identical with comm-eff OFF. Key metrics: val@50=0.7528, bytes_ratio=0.05052, max_mem=28.66 GB. PR #17 merged (ca5f4b002). Ground truth: `runs/EXP-31/B2_baseline/`.
+- **EXP-33** (2026-06-17): β_anc EMA sweep {0, 0.25, 0.50, 0.75, 1.00} on B2 delayed_ef substrate — first direct β-curve on the valid-M circuit. All success criteria checked: off-axis parity (only beta_anc varies), identical bytes_ratio (0.0504–0.0506 all cells), act-band recon, all cells complete+stable, C0 reproduces B2 band, C4 cold-M collapse confirmed. Key metrics: β→accuracy flat (max gap C2 +0.0144 < ±0.024 bar), β=0 confirmed as the right default. Verdict: `runs/EXP-33/verdict.md`.
 
 ## "Done" means
 

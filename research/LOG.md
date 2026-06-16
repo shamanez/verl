@@ -7,6 +7,14 @@
 > (`resolved_params_B2.txt` + `launch_B2.sh` + `verdict.md` + `beat_dense/` + `metrics/`). Only the active
 > **EXP-31** dir is retained.
 
+## EXP-33 · 2026-06-17T04:54:20+10:00 · M6 · PASS
+β_anc (anchor-gradient EMA) sweep on the SOTA B2 delayed_ef substrate — {0, 0.25, 0.5, 0.75, 1.0}, everything else locked
+
+- hypothesis: On the corrected SOTA B2 substrate (delayed_ef λ=1, valid-M PowerSGD r=77 anchor circuit, replay_paired_batch=true), β_anc=0 (no EMA averaging, latest fire's M_rep) is weakly optimal — no β>0 beats C0 beyond ±0.024 rollout noise, and β=1 collapses to the plain-PowerSGD no-merger floor via cold-M freeze.
+- result: PASS (measurement). Freshness-best hypothesis SUPPORTED. β→accuracy curve is a FLAT free-averaging region for β∈[0,0.75]: C0 β=0.00 → 0.73844 (control, B2 band); C1 β=0.25 → 0.73995 (+0.0015, TIE); C2 β=0.50 → 0.75284 (+0.0144, TIE — nominal peak, within ±0.024 noise); C3 β=0.75 → 0.72176 (−0.0167, TIE); C4 β=1.00 → cold-M collapse confirmed (merger_coldM_fallbacks=196/196 permanent → plain PowerSGD, val@25=0.44807 val@30=0.56406, climbing toward floor). Max gap C2 +0.0144 < falsification bar +0.024. No β>0 cell strictly beats β=0 beyond noise. bytes_ratio 0.0504–0.0506 identical across all 5 cells (β is comm-neutral). promote_launcher_as: none — B2 (=C0, β=0) stays the reference. Box i_41194490 torn down (0 live instances verified).
+- run dir: runs/EXP-33/
+- verdict: runs/EXP-33/verdict.md
+
 ## EXP-31 · 2026-06-16T04:20:00+10:00 · M6 · STOP (tournament phase)
 4-lever anchor-signal-usage tournament — L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate
 
