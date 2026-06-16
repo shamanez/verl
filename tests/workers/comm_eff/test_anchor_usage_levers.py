@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-31 anchor-usage levers L2 (δ-momentum) + L3 (adaptive dose) — CPU tests.
+"""Anchor-usage levers L2 (δ-momentum) + L3 (adaptive dose) — CPU tests.
 
-Plan ``.claude/plans/31.md`` Correctness invariants covered here (all CPU, no
+Correctness invariants covered here (all CPU, no
 GPU, no torch.distributed):
 
 1. **off-path parity (hard):** defaults (μ=0, mode=off, κ=0) ⇒ ``delayed_ef_matrix``
-   returns ``g_corr`` ``torch.equal`` to the B2 path on BOTH a refresh tick and a
-   held tick — bitwise-B2, no buffer/history touched.
+   returns ``g_corr`` ``torch.equal`` to the delayed_ef path on BOTH a refresh tick and a
+   held tick — bitwise delayed_ef, no buffer/history touched.
 2. **L2 gain-1 (hard):** constant-δ stream, 100 refreshes, μ=0.9 ⇒
    ``‖m − δ‖/‖δ‖ < 1e-3`` (stationary gain EXACTLY 1, NOT 10×). μ=0 ⇒ exact identity
    (the helper returns the SAME tensor object, no buffer touched).
@@ -34,8 +34,7 @@ GPU, no torch.distributed):
    async-critical shared-codebook invariant. A per-rank buffer would FAIL this.
 
 The unit-under-test is loaded with the same importlib shim the other comm_eff CPU
-tests use (``test_subbasis_merger_exp31`` / ``test_delayed_ef_exp30``) so it runs
-with no ``torch.distributed`` / FSDP runtime.
+tests use so it runs with no ``torch.distributed`` / FSDP runtime.
 """
 
 import importlib.util
@@ -104,7 +103,7 @@ def _fire(f, name, g, m_rep, ring):
 
 
 # --------------------------------------------------------------------------- #
-# 1. off-path parity — defaults == B2 bitwise on a refresh AND a held tick.
+# 1. off-path parity — defaults == delayed_ef bitwise on a refresh AND a held tick.
 # --------------------------------------------------------------------------- #
 def test_off_path_parity_refresh_and_held():
     torch.manual_seed(0)
@@ -113,7 +112,7 @@ def test_off_path_parity_refresh_and_held():
     m_rep = torch.randn(5, 4) * 2.0
     ring = torch.randn(5, 4) * 0.5
 
-    # B2 reference: NO new-lever args (defaults μ=0, mode=off, κ=0).
+    # delayed_ef reference: NO new-lever args (defaults μ=0, mode=off, κ=0).
     ref = _mk_filter()
     ref_refresh = _fire(ref, _NAME, g1, m_rep, ring).clone()
     ref_held = ref.delayed_ef_matrix(_NAME, g2, ring_grad=None).clone()
@@ -123,8 +122,8 @@ def test_off_path_parity_refresh_and_held():
     new_refresh = _fire(new, _NAME, g1, m_rep, ring).clone()
     new_held = new.delayed_ef_matrix(_NAME, g2, ring_grad=None).clone()
 
-    assert torch.equal(new_refresh, ref_refresh), "OFF-path refresh tick must be bitwise-B2"
-    assert torch.equal(new_held, ref_held), "OFF-path held tick must be bitwise-B2"
+    assert torch.equal(new_refresh, ref_refresh), "OFF-path refresh tick must be bitwise delayed_ef"
+    assert torch.equal(new_held, ref_held), "OFF-path held tick must be bitwise delayed_ef"
     # No lever state touched on the OFF path.
     assert not new._delta_momentum, "μ=0 must build NO momentum buffer"
     assert not new._adaptive_lambda_hist, "mode=off must build NO agreement history"
@@ -161,7 +160,7 @@ def test_l2_gain_one_constant_delta_stream():
     assert rel < 1e-3, f"normalized EMA stationary gain must be 1 (m→δ); got rel-err {rel} (10× would be ~9)"
     # Sanity: the FORBIDDEN naive m←μm+δ would give ‖m‖≈10·‖δ‖ — confirm we are NOT there.
     assert torch.linalg.norm(m).item() < 2.0 * torch.linalg.norm(delta).item(), (
-        "buffer norm must NOT blow up to 1/(1-μ)=10× (the constant-λ>1 ignition dead-end)"
+        "buffer norm must NOT blow up to 1/(1-μ)=10× (the constant-λ>1 over-gain dead-end)"
     )
 
 
@@ -219,7 +218,7 @@ def test_l2_async_degrade_long_hold():
     assert norms[0] < dnorm, "age decay must start shrinking immediately"
     assert all(norms[i + 1] <= norms[i] + 1e-9 for i in range(len(norms) - 1)), "monotone non-increasing fade"
     # age 30 (norms index 29) ⇒ exactly μ**30 · ‖δ‖ (closed-form age-decay).
-    assert abs(norms[29] - (mu ** 30) * dnorm) < 1e-4 * dnorm, "age-30 fade must equal μ**30·‖δ‖"
+    assert abs(norms[29] - (mu**30) * dnorm) < 1e-4 * dnorm, "age-30 fade must equal μ**30·‖δ‖"
     # age 60 ⇒ collapsed toward 0 (‖c‖ < 1% of ‖δ‖), proving → 0 as the anchor ages.
     assert norms[-1] < 1e-2 * dnorm, f"a long hold must fade the correction toward 0; got {norms[-1]} vs ‖δ‖={dnorm}"
 
@@ -280,7 +279,7 @@ def test_l3_bounds_and_mean_one_ratio():
         assert 0.0 <= lt <= cap + 1e-9, f"λ_t out of [0,{cap}]: {lt}"
         lam_ts.append(lt)
     # Drop the warmup (median not yet settled) and check E[λ_t] ≈ λ within ~5%.
-    tail = lam_ts[len(centers):]  # after one full symmetric period
+    tail = lam_ts[len(centers) :]  # after one full symmetric period
     mean_lt = sum(tail) / len(tail)
     assert abs(mean_lt - lam) <= 0.05 * lam, f"MEAN-1 centered: E[λ_t]≈{lam}; got {mean_lt}"
 
@@ -306,13 +305,13 @@ def test_l3_bounds_cos_mode_extreme_disagreement_clamps():
 def test_l3_lambda_t_drives_g_corr_via_delayed_ef():
     """The adaptive λ_t (not the constant λ) scales the correction in g_corr."""
     # κ>0 with a controlled single fire: verify g_corr uses λ_t, and that on the very
-    # first fire (c̄ = c_t ⇒ deviation 0) λ_t == λ ⇒ g_corr == B2.
+    # first fire (c̄ = c_t ⇒ deviation 0) λ_t == λ ⇒ g_corr == delayed_ef.
     f = _mk_filter(lam=1.0, adaptive_lambda_mode="ratio", adaptive_lambda_kappa=0.5, lambda_cap=2.0)
     g = torch.full((3, 3), 1.0)
     m_rep = torch.full((3, 3), 5.0)
     ring = torch.full((3, 3), 2.0)  # δ = 5 − 2 = 3
     out = _fire(f, _NAME, g, m_rep, ring)
-    # First fire: deviation 0 ⇒ λ_t = 1 ⇒ g_corr = g + 1*δ = 1 + 3 = 4 (== B2).
+    # First fire: deviation 0 ⇒ λ_t = 1 ⇒ g_corr = g + 1*δ = 1 + 3 = 4 (== delayed_ef).
     assert torch.allclose(out, torch.full((3, 3), 4.0), atol=1e-6)
     assert f.delayed_ef_adaptive_lambda_applied == 1
 
@@ -323,10 +322,7 @@ def test_l3_lambda_t_drives_g_corr_via_delayed_ef():
 def test_cross_rank_determinism_momentum_and_lambda():
     torch.manual_seed(7)
     # A fixed (gm, anc, delta) stream shared by both "ranks".
-    stream = [
-        (torch.randn(4, 4), torch.randn(4, 4) * 2.0, torch.randn(4, 4) * 0.7)
-        for _ in range(20)
-    ]
+    stream = [(torch.randn(4, 4), torch.randn(4, 4) * 2.0, torch.randn(4, 4) * 0.7) for _ in range(20)]
     fa = _mk_filter(
         lam=1.0,
         delta_momentum_mu=0.9,
@@ -346,7 +342,7 @@ def test_cross_rank_determinism_momentum_and_lambda():
     for step, (gm, anc, delta) in enumerate(stream):
         fa.current_step = step
         fb.current_step = step
-        refreshed = (step % 3 == 0)  # mix refresh + held ticks
+        refreshed = step % 3 == 0  # mix refresh + held ticks
         ma = fa._apply_delta_momentum(_NAME, delta, refreshed=refreshed)
         mb = fb._apply_delta_momentum(_NAME, delta, refreshed=refreshed)
         assert torch.equal(ma, mb), f"δ-momentum buffer diverged across ranks at step {step}"

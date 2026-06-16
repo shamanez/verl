@@ -78,11 +78,9 @@ _PRF_MIX_BASE = 1_000_003
 _PRF_MIX_LAYER = 7919
 _MASK31 = 0x7FFFFFFF
 
-# EXP-26 Step C: the Q-basis families with a BUILT sketch construction (the ones
-# register() / the LIVE path will accept). "act" is the existing activation-energy
-# basis; the rest are the RLVR-native families from STEP_C_SPEC.md. A family NOT in
-# this set still fails loud (the fail-loud guard for an un-implemented family is
-# preserved — it only narrowed from "anything != act" to "anything not implemented").
+# Q-basis families with implemented sketch construction. "act" is the
+# activation-energy basis; the rest are alternate GRPO-related sketch sources.
+# A family not in this set fails loudly at registration.
 IMPLEMENTED_Q_FAMILIES = ("act", "grad", "adv", "tail", "hybrid", "ticket")
 
 
@@ -136,7 +134,7 @@ def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
         # bit-identical across ranks — a GPU QR could differ in low bits and
         # break the cross-rank Q consensus). Move ONLY the result onto q's device
         # right before torch.where so the degenerate-column repair does not raise
-        # a cross-device error. dtype is already fp32 on both (EXP-25 id-0 hotfix).
+        # a cross-device error. dtype is already fp32 on both.
         q = torch.where(bad.unsqueeze(0), q_fix.to(q.device), q)
     return q
 
@@ -212,28 +210,24 @@ class PowerSGDActivationCompressor:
         self.warm_start = bool(warm_start)
         self.compress_recompute = bool(compress_recompute)
         self.sync_basis = bool(sync_basis)
-        # EXP-26 Step C: the LIVE Q-basis FAMILY (content of the sketch orth(V) the
-        # fast/training path consumes at FIXED rank). "act" (default) = the EXP-25
-        # activation-energy basis (V += Mᵀ(MQ)), byte-identical. The RLVR-native
-        # families bias V toward GRPO update energy. The LIVE family path is built in
-        # anchor_update_basis (V from the family statistic); the screen runs "act"
-        # live while families accumulate PASSIVELY (q_basis_passive). The implemented
-        # families are FAMILY_BUILDERS; register() fails loud on anything else.
+        # Live Q-basis family: the content of the sketch orth(V) consumes at
+        # fixed rank. "act" is the activation-energy basis (V += M.T @ (M @ Q));
+        # other families use alternate GRPO-related sketch sources. register()
+        # fails loudly on unsupported families.
         self.q_basis = str(q_basis)
-        # EXP-26 Step C1 PASSIVE screen: families to passively accumulate inside the
-        # anchor pass (off the live Q / fast path / optimizer). Each is built +
-        # dumped at the anchor cadence by build_and_dump_family_sketches.
+        # Passive screen families to accumulate inside the anchor pass, off the
+        # live Q, fast path, and optimizer.
         self.q_basis_passive: list = [str(f) for f in (q_basis_passive or [])]
-        # EXP-26 Step C1: the hybrid family column split (act cols + grad cols == r).
+        # Hybrid family column split (act cols + grad cols == r).
         self.hybrid_act_cols = int(hybrid_act_cols)
         self.hybrid_grad_cols = int(hybrid_grad_cols)
-        # EXP-26 Step E: the anchor refresh cadence — the Q broadcast (H·r per
+        # Anchor refresh cadence: the Q broadcast (H*r per
         # boundary) happens once per ``anchor_cadence`` optimizer ticks in the
         # owns_q substrate, so its per-tick AMORTIZED element cost is
         # ``Σ_boundary H·r / anchor_cadence``. (The per-token Y term N·r dominates,
         # so the exact divisor is a small correction, but use the real cadence.)
         self.anchor_cadence = max(1, int(anchor_cadence))
-        # EXP-26 Step C1: per-boundary harvest buffers for the family sketches +
+        # Per-boundary harvest buffers for the family sketches plus
         # the G_b capture. Populated ONLY inside the anchor's stale-weight forward
         # (_anchor_sketch_mode) and its backward, consumed + cleared by
         # build_and_dump_family_sketches. Never touch the live Q / fast path.
@@ -253,12 +247,12 @@ class PowerSGDActivationCompressor:
         # _anchor_sketch_mode ONLY when families are requested (passive or a live
         # non-"act" family), so the byte-identical "act"-only path stashes nothing.
         self._family_harvest = False
-        # EXP-25 (R2): when True the ANCHOR owns Q. The fast net is then a pure
+        # When True the anchor owns Q. The fast net is then a pure
         # read-only consumer: its end-of-step maybe_update_basis is gated OFF (by
         # the engine call site) AND its forward-hook sketch accumulation is gated
         # OFF here (so V never grows on the fast path). Q is updated ONLY by the
         # anchor's slow-net forward (anchor_update_basis) and propagated by
-        # broadcast_basis. False (default) = EXP-20 fast-owns-Q (byte-identical).
+        # broadcast_basis. False keeps the fast-owned-Q path.
         self.anchor_owns_q = bool(anchor_owns_q)
         # Transient toggle: True ONLY inside the anchor's stale-weight forward so
         # the SAME forward hook that is suppressed on the fast path DOES fold the
@@ -316,7 +310,7 @@ class PowerSGDActivationCompressor:
         # equivalent for budget-equality checks.
         self.last_y_coords_per_token: int = self.rank
 
-        # EXP-26 Step E: measured inter-stage communication volume (per optimizer
+        # Measured inter-stage communication volume (per optimizer
         # tick, summed over boundaries). Reset by the engine each train_batch, then
         # accumulated in the forward hook from the actual codec payload:
         #   bytes_compressed   = Σ_boundary N·r  (Y = M@Q coords sent per fwd) +
@@ -324,7 +318,7 @@ class PowerSGDActivationCompressor:
         #                        refresh (added in the engine).
         #   bytes_dense_equiv  = Σ_boundary N·H  (the uncompressed activation).
         # "bytes" here counts ELEMENTS (fp count); the dense-vs-compressed RATIO is
-        # the reported Step-E number and is dtype-invariant. last_* mirrors the most
+        # the reported number and is dtype-invariant. last_* mirrors the most
         # recent tick for the metrics surface.
         self.tick_elems_compressed: float = 0.0
         self.tick_elems_dense_equiv: float = 0.0
@@ -332,7 +326,7 @@ class PowerSGDActivationCompressor:
         self.last_elems_dense_equiv: float = 0.0
 
     # ----------------------------------------------------------------------
-    # EXP-26 Step C/E: family-screen + byte-counter helpers
+    # Family-screen and byte-counter helpers
     # ----------------------------------------------------------------------
     @property
     def _families_active(self) -> bool:
@@ -348,7 +342,7 @@ class PowerSGDActivationCompressor:
         self.tick_elems_dense_equiv = 0.0
 
     def add_amortized_q_broadcast_bytes(self) -> None:
-        """EXP-26 Step E: add the amortized per-tick Q-broadcast element count.
+        """Add the amortized per-tick Q-broadcast element count.
 
         The shared basis Q (H×r per boundary) is broadcast once per anchor refresh
         (every ``anchor.cadence`` optimizer ticks), so its per-tick amortized cost is
@@ -449,7 +443,7 @@ class PowerSGDActivationCompressor:
             orig_shape = h.shape
             M = h.reshape(-1, hidden_size)
 
-            # EXP-25 (R2): anchor stale-forward harvest. The anchor forward must be
+            # Anchor stale-forward harvest. The anchor forward must be
             # CLEAN (uncompressed) — its gradient is G_anchor (→ M) and its
             # activations feed Q. So when _anchor_sketch_mode is on we fold the raw
             # activation into the sketch V (V += Mᵀ(MQ)) but return h UNCHANGED (no
@@ -462,7 +456,7 @@ class PowerSGDActivationCompressor:
                     q_act = q_fp32.to(dtype=M.dtype)
                     if compressor._should_accumulate_sketch(layer_idx, grad_enabled=grad_enabled):
                         M32 = M.detach().float()
-                        Y32 = (M32 @ q_fp32)  # (N, r) in fp32
+                        Y32 = M32 @ q_fp32  # (N, r) in fp32
                         contrib = M32.t() @ Y32  # (H, r)
                         cur = compressor._sketch.get(layer_idx, None)
                         if cur is None:
@@ -472,7 +466,7 @@ class PowerSGDActivationCompressor:
                             cur.add_(contrib)
                             compressor._sketch_count[layer_idx] = compressor._sketch_count.get(layer_idx, 0) + 1
                         compressor._sketched_this_gen[layer_idx] = compressor._fwd_generation
-                # EXP-26 Step C: family harvest. ONLY when families are requested
+                # Family harvest. Only when families are requested
                 # (passive screen or a live non-"act" family) AND on the gradient-
                 # bearing anchor forward (grad_enabled) AND once per forward-gen
                 # (dedupe grad-ckpt recompute). Stash the boundary activation M
@@ -481,32 +475,17 @@ class PowerSGDActivationCompressor:
                 # during the anchor backward. Both are off the live Q / fast path /
                 # optimizer (the off-path-parity + probes-don't-feed-optimizer hard
                 # gates bind this — M/G_b only ever feed the family sketch dump).
-                if (
-                    compressor._family_harvest
-                    and grad_enabled
-                    and compressor._family_dedupe_ok(layer_idx)
-                ):
-                    # EXP-26 FIX (Defect 8, the C1 (8,15) G_b=0 gap). The anchor pass
-                    # consumes the WHOLE batch as several micro-batches (forward+backward
-                    # interleaved per micro-batch). The old code overwrote both _family_M
-                    # and _family_Gb on EVERY micro-batch (last-write-wins). At step 8 the
-                    # LAST surviving G_b read EXACTLY 0.0 (N=951, correct shape, all-zero
-                    # grad) while the weight grads G_anchor from the SAME backward were
-                    # healthy — i.e. the grad hook fired but received a zero activation
-                    # grad from a recompute / loss-detached micro-batch pass under
-                    # use_reentrant=False grad-ckpt. Fix = make G_b LAST-NONZERO-wins: the
-                    # hook skips an all-zero contribution so a real micro-batch's grad is
-                    # never displaced by a zero one. M stays last-write (cheap, bounded —
-                    # NO family combines M and G_b row-wise, so M/G_b need not be from the
-                    # same micro-batch). Last-nonzero-wins (not cat) keeps memory bounded
-                    # to one micro-batch — catting the full anchor batch's tokens (~1M ×
-                    # 1536 × 14 boundaries) would OOM and the family V is a per-token
-                    # second moment whose RANKING is micro-batch-stable (the C1 screen
-                    # confirmed UC/OPP flat across ticks 10 and 15).
+                if compressor._family_harvest and grad_enabled and compressor._family_dedupe_ok(layer_idx):
+                    # The anchor consumes the batch as several micro-batches. Keep
+                    # the last nonzero G_b so a recompute or loss-detached all-zero
+                    # contribution cannot overwrite a real activation gradient.
+                    # M stays last-write because no family combines M and G_b
+                    # row-wise. This keeps memory bounded to one micro-batch.
                     compressor._family_M[layer_idx] = M.detach().to(torch.float32)
                     # Capture G_b via a grad hook on the SAME in-graph tensor h whose
                     # reshape is M (M shares storage with h; the hook fires on h).
                     if h.requires_grad:
+
                         def _grad_hook(grad, _li=layer_idx, _c=compressor, _hs=int(hidden_size)):
                             try:
                                 g = grad.detach().reshape(-1, _hs).to(torch.float32)
@@ -520,6 +499,7 @@ class PowerSGDActivationCompressor:
                             except Exception:  # pragma: no cover - defensive
                                 pass
                             return None  # do NOT modify the gradient (dump-only)
+
                         compressor._family_Gb_handles.append(h.register_hook(_grad_hook))
                     compressor._family_mark_gen(layer_idx)
                 # Return the activation UNCHANGED — the anchor forward is clean.
@@ -558,7 +538,7 @@ class PowerSGDActivationCompressor:
                 compressor.last_reconstruction_rel_error[layer_idx] = rel
                 compressor.last_y_coords_per_token = q_act.shape[1]
 
-                # EXP-26 Step E: accumulate this boundary's inter-stage comm volume
+                # Accumulate this boundary's inter-stage comm volume
                 # for THIS optimizer tick. The codec sends Y = M@Q (N·r coords);
                 # the dense baseline would send M (N·H). Counted ONLY on the
                 # gradient-bearing fast-train forward (grad_enabled) so the
@@ -571,12 +551,12 @@ class PowerSGDActivationCompressor:
                     compressor.tick_elems_compressed += float(N) * float(r_sent)
                     compressor.tick_elems_dense_equiv += float(N) * float(Hdim)
 
-                # EXP-26 Step A: dump A (the boundary activation M), Â=(A@Q)Qᵀ and
+                # Dump A (the boundary activation M), A_hat=(A@Q)Q.T and
                 # the basis Q for THIS boundary, keyed by the UNIFIED
                 # (global_step, optimizer_tick) so the analyst can recompute
                 # reconstruction_rel_error from the dumped fp32 tensors and confirm
-                # it matches `rel` above (the fp32-dump-fidelity invariant). CRITICAL
-                # (EXP-26 hotfix): key on state.current_optimizer_tick() — the SAME
+                # it matches `rel` above (the fp32-dump-fidelity invariant). Key on
+                # state.current_optimizer_tick() — the SAME
                 # tick the merger / anchor / G_dense dumps use — NOT the
                 # per-micro-batch fwd_generation. Keying on fwd_generation made the
                 # activation dumps open a fresh tick per micro-batch forward and
@@ -596,15 +576,30 @@ class PowerSGDActivationCompressor:
                         "reconstruction_rel_error": rel,
                         "q_cond": q_cond,
                     }
-                    _w.dump(role="A", target_name=_tname, tensor=M32,
-                            global_step=int(compressor._global_step),
-                            optimizer_tick=int(_tick), extra=_stats)
-                    _w.dump(role="A_hat", target_name=_tname, tensor=Mhat32,
-                            global_step=int(compressor._global_step),
-                            optimizer_tick=int(_tick), extra=_stats)
-                    _w.dump(role="Q", target_name=_tname, tensor=q_fp32,
-                            global_step=int(compressor._global_step),
-                            optimizer_tick=int(_tick), extra=_stats)
+                    _w.dump(
+                        role="A",
+                        target_name=_tname,
+                        tensor=M32,
+                        global_step=int(compressor._global_step),
+                        optimizer_tick=int(_tick),
+                        extra=_stats,
+                    )
+                    _w.dump(
+                        role="A_hat",
+                        target_name=_tname,
+                        tensor=Mhat32,
+                        global_step=int(compressor._global_step),
+                        optimizer_tick=int(_tick),
+                        extra=_stats,
+                    )
+                    _w.dump(
+                        role="Q",
+                        target_name=_tname,
+                        tensor=q_fp32,
+                        global_step=int(compressor._global_step),
+                        optimizer_tick=int(_tick),
+                        extra=_stats,
+                    )
 
                 # Block-power-iteration sketch V += Mᵀ (M Q) = Mᵀ Y, OFF the
                 # graph, accumulated ONLY on the gradient-bearing actor-train
@@ -648,7 +643,7 @@ class PowerSGDActivationCompressor:
         reuses the generation set by ``set_context`` and re-runs the boundary
         forward under grad during backward).
 
-        **EXP-25 (R2) anchor-owns-Q.** In that mode the FAST path must NEVER fold
+        **Anchor-owns-Q.** In that mode the fast path must NEVER fold
         into V (Q is anchor-owned), so on the fast path (``_anchor_sketch_mode``
         False) this returns False unconditionally. Inside the anchor's stale-
         weight forward (``_anchor_sketch_mode`` True) we DO accumulate — and we
@@ -657,7 +652,7 @@ class PowerSGDActivationCompressor:
         """
         if not grad_enabled:
             return False
-        # EXP-25 (R2): anchor-owns-Q routing.
+        # Anchor-owns-Q routing.
         if self.anchor_owns_q:
             if not self._anchor_sketch_mode:
                 # Fast path: NEVER accumulate (Q is owned by the anchor).
@@ -665,7 +660,7 @@ class PowerSGDActivationCompressor:
             # Anchor stale-forward: accumulate regardless of path_tag (None here),
             # still deduped per forward-generation against grad-ckpt recompute.
             return self._sketched_this_gen.get(layer_idx, -1) != self._fwd_generation
-        # Legacy fast-owns-Q (EXP-20): unchanged.
+        # Fast-owns-Q path.
         state = self._state
         tag = getattr(state, "path_tag", None) if state is not None else None
         if tag != TRAIN_TAG:
@@ -713,7 +708,7 @@ class PowerSGDActivationCompressor:
         in lockstep, so a
         symmetric per-boundary collective set is sufficient.
         """
-        # Fail-closed (R2 sole-Q-writer): the FAST net must NEVER write Q when the
+        # Fail-closed sole-Q-writer invariant: the FAST net must NEVER write Q when the
         # anchor owns it. The sole call site (engine_workers.py) is gated on
         # ``fast_owns_q``, so reaching here in anchor_owns_q mode means that gate
         # leaked — Q would get two writers (fast overwrite vs anchor broadcast),
@@ -722,8 +717,8 @@ class PowerSGDActivationCompressor:
         # ``powersgd_basis_updates == 0`` check.
         assert not getattr(self, "anchor_owns_q", False), (
             "comm_eff.powersgd: maybe_update_basis() entered in anchor_owns_q mode — the "
-            "FAST net must NEVER update Q when the anchor owns it (#25 R2 sole-writer "
-            "invariant). The engine_workers gate (fast_owns_q) must have leaked."
+            "FAST net must NEVER update Q when the anchor owns it. The engine_workers "
+            "gate (fast_owns_q) must have leaked."
         )
         if is_clean_step:
             # No V accumulated on a clean step (the train forward ran dense, no
@@ -789,14 +784,14 @@ class PowerSGDActivationCompressor:
         return updated
 
     # ----------------------------------------------------------------------
-    # EXP-25 (R2): anchor-owned Q — slow-net update + broadcast
+    # Anchor-owned Q: slow-net update plus broadcast
     # ----------------------------------------------------------------------
     def set_anchor_sketch_mode(self, on: bool) -> None:
         """Toggle whether the forward hook folds activations into V (anchor pass).
 
         The engine sets this True around the anchor's stale-weight forward (so the
         SAME projection hook that is suppressed on the fast path harvests the
-        slow-net activations into V) and clears it after. Also arms the EXP-26
+        slow-net activations into V) and clears it after. Also arms the
         family harvest (M + G_b stash) iff families are requested, and resets the
         per-generation family dedupe so the anchor forward is counted fresh.
         Pure setter (the harvest buffers themselves are cleared by
@@ -810,7 +805,7 @@ class PowerSGDActivationCompressor:
         else:
             self._family_harvest = False
 
-    # ---- EXP-26 Step C: family-harvest dedupe + advantage plumbing ----
+    # ---- Family-harvest dedupe + advantage plumbing ----
     def _family_dedupe_ok(self, layer_idx: int) -> bool:
         """True iff this boundary has not yet harvested M/G_b in the current forward
         generation (dedupe against grad-ckpt recompute, which re-runs the boundary
@@ -859,7 +854,7 @@ class PowerSGDActivationCompressor:
         self._adv_weight = None
         self._family_sketched_this_gen = {}
 
-    # ---- EXP-26 Step C: per-family sketch construction (the heart of the screen) ----
+    # ---- Per-family sketch construction ----
     def _compute_family_V(
         self, family: str, layer_idx: int, *, q_act_override: Optional[torch.Tensor] = None
     ) -> Optional[torch.Tensor]:
@@ -871,19 +866,11 @@ class PowerSGDActivationCompressor:
         present locally (the caller then contributes a zero sketch for collective
         symmetry). All math is fp32, off-graph (operands are already detached).
 
-        ``q_act_override`` (EXP-26 FIX, Defect 9): the act-reference basis the
-        act/adv probes and the tail/hybrid deflation use. The PASSIVE C1 screen ran
-        with ``q_basis=act`` LIVE, so ``self._basis`` WAS a warm act basis and the
-        screen's hybrid measured AC=0.9987 (forward-safe). In the LIVE hybrid/tail
-        arm ``self._basis`` is the EVOLVING family Q (hybrid/tail), so reading the
-        act-reference off it deflates against — and column-joins — a drifting,
-        non-act basis: the live probe showed recon_rel_error plateauing at 0.68
-        instead of the act band, because the "act columns" no longer captured the
-        top activation directions. The caller passes a freshly DP-synced warm act
-        basis (``orth(sync(self._sketch))``) here so the LIVE family construction
-        replicates EXACTLY what the screen ranked. ``None`` keeps the legacy
-        behaviour (read the act-reference off ``self._basis`` — correct for the
-        PASSIVE screen and for a live ``q_basis=act``).
+        ``q_act_override`` is the act-reference basis used by act/adv probes and
+        tail/hybrid deflation. Live hybrid/tail arms pass a freshly DP-synced warm
+        act basis (``orth(sync(self._sketch))``) so act deflation and hybrid act
+        columns do not read from the evolving family Q. ``None`` reads the
+        reference from ``self._basis``.
 
         Constructions (H=hidden, r=rank, Q_act = the LIVE act basis, P = a fixed
         per-layer deterministic orthonormal PROBE used for randomized range-finding
@@ -908,10 +895,8 @@ class PowerSGDActivationCompressor:
         H = self._hidden_size
         if H is None:
             return None
-        r = self._effective_rank()
         # Act-reference basis: a freshly-synced warm act basis when the caller
-        # supplies one (LIVE hybrid/tail arm), else the live basis (PASSIVE screen
-        # / live act). See q_act_override in the docstring (Defect 9).
+        # supplies one, otherwise the live basis.
         q = q_act_override if q_act_override is not None else self._basis.get(layer_idx)
         if q is None:
             return None
@@ -949,8 +934,8 @@ class PowerSGDActivationCompressor:
             # G_t ⟂ span(Q_act) by construction, so Q_act would sketch ~0). The DP
             # all-reduce + fp32 orth(V_t) then recovers the off-act-principal
             # grad-energy directions (tail); the caller column-joins them with Q_act
-            # for hybrid. (Deflation removes exactly the act-principal share the
-            # Step-A audit found Q_act over-captures while missing update energy.)
+            # for hybrid. Deflation removes the act-principal share while exposing
+            # update-energy directions outside span(Q_act).
             if Gb is None:
                 return None
             proj = (Gb @ q) @ q.t()  # (N, H) projection onto span(Q_act)
@@ -991,7 +976,8 @@ class PowerSGDActivationCompressor:
             # bootstrap basis but is still identical across ranks.
             seed = powersgd_layer_seed(self.base_seed + 104729, layer_idx)
             gen = torch.Generator(device="cpu").manual_seed(seed)
-            P = orthonormalize(torch.randn(H, r, generator=gen, dtype=torch.float32)).to(device=device, dtype=torch.float32)
+            probe = torch.randn(H, r, generator=gen, dtype=torch.float32)
+            P = orthonormalize(probe).to(device=device, dtype=torch.float32)
             cache[layer_idx] = P
         return P
 
@@ -1007,10 +993,9 @@ class PowerSGDActivationCompressor:
           grad principal ``orth(V_pooled)[:, :hybrid_grad_cols]`` and re-orth.
         * else (act/grad/adv/tail): ``orth(V_pooled)``.
 
-        ``q_act_override`` (Defect 9): the warm act basis whose first ``hybrid_act_cols``
-        columns seed the hybrid join. ``None`` reads it off ``self._basis`` (correct
-        for the PASSIVE screen / live act); the LIVE hybrid arm passes a freshly-synced
-        warm act basis so the join is act-anchored, not hybrid-self-referential.
+        ``q_act_override`` is the warm act basis whose first ``hybrid_act_cols``
+        columns seed the hybrid join. ``None`` reads it off ``self._basis``; live
+        hybrid passes a freshly-synced warm act basis so the join is act-anchored.
         """
         H = int(self._hidden_size)
         r = self._effective_rank()
@@ -1040,17 +1025,15 @@ class PowerSGDActivationCompressor:
             # Re-orth of a (n_act+n_grad)-column join yields that many columns; pad
             # to r with the deterministic seed complement so the dump shape is (H, r).
             if Q.shape[1] < r:
-                seed_q = init_basis(
-                    hidden_size=H, rank=r, base_seed=self.base_seed, layer_idx=layer_idx
-                ).to(device=Q.device, dtype=torch.float32)
+                seed_q = init_basis(hidden_size=H, rank=r, base_seed=self.base_seed, layer_idx=layer_idx).to(
+                    device=Q.device, dtype=torch.float32
+                )
                 Q = orthonormalize(torch.cat([Q, seed_q], dim=1)[:, :r].to(self.qr_dtype), eps=self.reortho_eps)
             return Q.to(torch.float32)
         return orthonormalize(V_pooled.to(self.qr_dtype), eps=self.reortho_eps).to(torch.float32)
 
-    def build_and_dump_family_sketches(
-        self, *, writer=None, global_step: int, optimizer_tick: int
-    ) -> dict:
-        """EXP-26 Step C1 PASSIVE screen: build + dump a candidate basis ``Q_f`` for
+    def build_and_dump_family_sketches(self, *, writer=None, global_step: int, optimizer_tick: int) -> dict:
+        """Build and dump a passive candidate basis ``Q_f`` for
         every family in ``q_basis_passive`` from the harvested anchor-pass M / G_b /
         advantage, WITHOUT touching the live Q / fast path / optimizer.
 
@@ -1102,8 +1085,11 @@ class PowerSGDActivationCompressor:
                 if writer is not None:
                     role = f"Q_{family}"
                     writer.dump(
-                        role=role, target_name=f"boundary_{layer_idx}", tensor=Q_f,
-                        global_step=int(global_step), optimizer_tick=int(optimizer_tick),
+                        role=role,
+                        target_name=f"boundary_{layer_idx}",
+                        tensor=Q_f,
+                        global_step=int(global_step),
+                        optimizer_tick=int(optimizer_tick),
                         extra={"family": family, "layer_idx": int(layer_idx), "rank": int(Q_f.shape[1])},
                     )
             out[family] = fam_out
@@ -1116,8 +1102,11 @@ class PowerSGDActivationCompressor:
                 gb = self._family_Gb.get(layer_idx)
                 if gb is not None:
                     writer.dump(
-                        role="G_b", target_name=f"boundary_{layer_idx}", tensor=gb,
-                        global_step=int(global_step), optimizer_tick=int(optimizer_tick),
+                        role="G_b",
+                        target_name=f"boundary_{layer_idx}",
+                        tensor=gb,
+                        global_step=int(global_step),
+                        optimizer_tick=int(optimizer_tick),
                         extra={"layer_idx": int(layer_idx)},
                     )
         if self._state is not None and hasattr(self._state, "note_family_screen"):
@@ -1125,7 +1114,7 @@ class PowerSGDActivationCompressor:
         return out
 
     def anchor_update_basis(self) -> bool:
-        """EXP-25 (R2): ``Q ← orth(V)`` from the ANCHOR's slow-net sketch.
+        """``Q <- orth(V)`` from the anchor's slow-net sketch.
 
         The SAME block-power-iteration math as :meth:`maybe_update_basis` (DP-sync
         of the raw sketch over the DP group, then fp32 ``orth(V)`` per boundary),
@@ -1134,7 +1123,7 @@ class PowerSGDActivationCompressor:
         and consuming V built from the slow-net stale-weight forward activations.
         Clears the sketch after. Returns True iff any Q was updated.
 
-        **EXP-26 Step C LIVE family path.** When ``q_basis != "act"`` the consumed
+        **Live family path.** When ``q_basis != "act"`` the consumed
         sketch is built from the family's statistic (``_compute_family_V`` on the
         harvested M / G_b / advantage) instead of the act sketch ``self._sketch``,
         and ``_build_family_Q`` does the per-family construction (ticket coordinate
@@ -1154,7 +1143,7 @@ class PowerSGDActivationCompressor:
         do_sync = bool(self.sync_basis) and torch.distributed.is_initialized()
         group = self._dp_group() if do_sync else None
         live_family = self.q_basis
-        is_act = (live_family == "act")
+        is_act = live_family == "act"
 
         # Without sync and with an empty local sketch (act path) or empty harvest
         # (family path), nothing to do (no collective).
@@ -1164,12 +1153,10 @@ class PowerSGDActivationCompressor:
             if not is_act and not (self._family_M or self._family_Gb):
                 return False
 
-        # Defect 9: tail/hybrid need a WARM ACT basis as their act-reference (the
-        # deflation subspace + the hybrid act columns), NOT the evolving family Q in
-        # self._basis. The warm act basis is orth(sync(self._sketch)) — exactly the
-        # act-path construction, computed per boundary in the SAME fixed order so the
-        # extra DP all-reduce stays collective-symmetric. Falls back to self._basis
-        # only on the very first (cold) fire when no act sketch has accumulated yet.
+        # Tail/hybrid need a warm act basis as their act-reference: the deflation
+        # subspace and hybrid act columns must not come from the evolving family Q.
+        # The warm act basis is the act-path construction, computed per boundary in
+        # a fixed order so the extra DP all-reduce stays collective-symmetric.
         needs_act_ref = live_family in ("tail", "hybrid")
 
         updated = False
@@ -1180,8 +1167,10 @@ class PowerSGDActivationCompressor:
                 S = self._sketch.get(layer_idx, None)
                 if S is None and do_sync and self._hidden_size is not None:
                     S = torch.zeros(
-                        int(self._hidden_size), self._effective_rank(),
-                        dtype=torch.float32, device=self._sketch_device(),
+                        int(self._hidden_size),
+                        self._effective_rank(),
+                        dtype=torch.float32,
+                        device=self._sketch_device(),
                     )
                 if S is not None:
                     Ssum = S.to(torch.float32)
@@ -1203,9 +1192,7 @@ class PowerSGDActivationCompressor:
                 width = 1 if live_family == "ticket" else self._effective_rank()
             if V is None:
                 if do_sync and self._hidden_size is not None:
-                    V = torch.zeros(
-                        int(self._hidden_size), width, dtype=torch.float32, device=self._sketch_device()
-                    )
+                    V = torch.zeros(int(self._hidden_size), width, dtype=torch.float32, device=self._sketch_device())
                 else:
                     continue
             Vsum = V.to(torch.float32)
@@ -1228,7 +1215,7 @@ class PowerSGDActivationCompressor:
         return updated
 
     def broadcast_basis(self, *, src: int = 0) -> Optional[dict]:
-        """EXP-25 (R2): ``dist.broadcast`` the anchor's Q to every DP rank + receipt.
+        """``dist.broadcast`` the anchor's Q to every DP rank plus receipt.
 
         Broadcasts each boundary's ``Q`` from rank ``src`` (the anchor-owning
         rank) over the DP group, in the FIXED ``sorted(boundary_indices)`` order
@@ -1241,7 +1228,7 @@ class PowerSGDActivationCompressor:
 
         With ``sync_basis=true`` the consensus ``orth(V)`` already produced a
         bit-identical Q on every rank, so this broadcast is belt-and-braces — but
-        it is the load-bearing POSITIVE-RECEIPT mechanism the (R2) invariant
+        it is the load-bearing positive-receipt mechanism the sole-writer invariant
         requires: it proves every fast/DP rank holds the anchor's Q (a dropped
         broadcast / wrong group would surface as recv != src here).
         """
@@ -1274,9 +1261,8 @@ class PowerSGDActivationCompressor:
             # copy_ the received value into the held basis (the receipt: every
             # non-src rank's Q is now bit-equal to src's).
             self._basis[layer_idx] = q_contig.to(device=self._sketch_device(), dtype=torch.float32)
-            post = float(
-                (self._basis[layer_idx].detach().to(torch.float64) * self._ramp_like(self._basis[layer_idx])).sum().item()
-            )
+            post_basis = self._basis[layer_idx]
+            post = float((post_basis.detach().to(torch.float64) * self._ramp_like(post_basis)).sum().item())
             receipts[layer_idx] = {
                 "src_checksum": post,  # after broadcast every rank == src's value
                 "recv_checksum": post,
@@ -1409,7 +1395,7 @@ class PowerSGDActivationCompressor:
                 "comm_eff.powersgd: basis Q DIVERGED across DP ranks "
                 f"(max_rel_dev={max_rel_dev:.3e} > atol={atol:.1e}) despite "
                 f"sync_basis={self.sync_basis}. The shared codebook must be "
-                "identical on every rank (hard-invariant #4); a non-zero deviation "
+                "identical on every rank; a non-zero deviation "
                 "means the consensus all-reduce used the wrong process group or an "
                 "asymmetric sketch. Refusing to train divergent per-rank codebooks."
             )
@@ -1427,21 +1413,20 @@ class PowerSGDActivationCompressor:
         """Install projection hooks on the boundary decoder blocks (idempotent)."""
         if self._handles:
             return
-        # EXP-26 Step C: fail LOUD if an UN-implemented Q-basis family is selected
+        # Fail loudly if an unimplemented Q-basis family is selected
         # (live or passive). The implemented families are IMPLEMENTED_Q_FAMILIES
         # {act,grad,adv,tail,hybrid,ticket} (their sketch constructions are built in
         # _compute_family_V / _build_family_Q). Silently falling back to "act" would
-        # make a Step-C arm a mislabeled control, so crash on anything else. The
-        # default "act" + an empty passive list ⇒ byte-identical substrate.
+        # make an arm a mislabeled control, so crash on anything else.
         _bad_live = self.q_basis not in IMPLEMENTED_Q_FAMILIES
         _bad_passive = [f for f in self.q_basis_passive if f not in IMPLEMENTED_Q_FAMILIES]
         if _bad_live or _bad_passive:
             raise NotImplementedError(
                 f"comm_eff.powersgd q_basis={self.q_basis!r} / q_basis_passive="
-                f"{self.q_basis_passive!r} (EXP-26 Step C): un-implemented family. "
+                f"{self.q_basis_passive!r}: unimplemented family. "
                 f"Implemented families are {IMPLEMENTED_Q_FAMILIES}; their sketch "
                 "constructions live in _compute_family_V / _build_family_Q. Add the "
-                "construction on the exp/* branch before selecting a new family."
+                "construction before selecting a new family."
             )
         layers = find_decoder_layers(module)
         if layers is None:

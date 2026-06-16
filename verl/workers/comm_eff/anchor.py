@@ -85,7 +85,7 @@ __all__ = [
     "replay_relevance_stats",
     "snapshot_canary",
     "verify_canary_on_module",
-    # EXP-30 Step-A geometry probe (pure, CPU-testable)
+    # Geometry probe helpers (pure, CPU-testable)
     "grad_summary_stats",
     "paired_cosine",
     "cos_over_targets",
@@ -110,7 +110,7 @@ def _canon(name: str) -> str:
     """
     name = name.replace("._fsdp_wrapped_module", "")
     if name.startswith("_fsdp_wrapped_module."):
-        name = name[len("_fsdp_wrapped_module."):]
+        name = name[len("_fsdp_wrapped_module.") :]
     return name
 
 
@@ -174,8 +174,8 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     """
     # Lazy imports: keep module import cheap + CPU-testable; the engine path and
     # the CPU tests both have these available.
-    from verl.utils.metric import AggregationType, Metric
     from verl.trainer.ppo.core_algos import agg_loss
+    from verl.utils.metric import AggregationType, Metric
     from verl.workers.utils.padding import no_padding_2_padding
 
     # Per-token log-probs of the response, padded to (bsz, max_response_len) —
@@ -237,7 +237,7 @@ class AnchorStalenessQueue:
         assert delay_K >= 0, f"delay_K must be >= 0, got {delay_K}"
         self.delay_K = int(delay_K)
         # OrderedDict[step -> snapshot]; insertion order == step order.
-        self._snapshots: "OrderedDict[int, dict]" = OrderedDict()
+        self._snapshots: OrderedDict[int, dict] = OrderedDict()
         self._maxlen = self.delay_K + 1
 
     def push(self, step: int, snapshot: dict) -> None:
@@ -384,8 +384,8 @@ def verify_canary_on_module(module: torch.nn.Module, canary: dict, canon: Option
 class AnchorReplayRing:
     """Paired ``(batch, generator-weights)`` replay ring for the anchor refresh.
 
-    EXP-29: the anchor's stale weights must be paired with the trajectories
-    those SAME weights generated. A snapshot taken at the FIRST ``train_batch``
+    The anchor's stale weights can be paired with the trajectories those same
+    weights generated. A snapshot taken at the FIRST ``train_batch``
     tick of global step ``G`` (before any optimizer tick of ``G``) is exactly
     the weights vLLM held when it generated step ``G``'s rollouts; per-tick
     batch clones then give exact ``(batch[t-K], gen_snapshot)`` pairs, warmup
@@ -420,8 +420,8 @@ class AnchorReplayRing:
         # so only ticks of this residue class can ever be replayed.
         self._keep_residue = (-self.delay_K) % self.cadence
         self._maxlen = self.delay_K // self.cadence + 1
-        self._batches: "OrderedDict[int, tuple]" = OrderedDict()
-        self._snapshots: "OrderedDict[int, tuple]" = OrderedDict()
+        self._batches: OrderedDict[int, tuple] = OrderedDict()
+        self._snapshots: OrderedDict[int, tuple] = OrderedDict()
 
     def tick_retained(self, tick: int) -> bool:
         """True iff a future anchor fire can ever request ``tick``'s batch.
@@ -521,15 +521,11 @@ class AnchorReplayRing:
 def replay_relevance_stats(log_probs: torch.Tensor, ref_log_probs: torch.Tensor, response_mask: torch.Tensor):
     """Masked ``(sum, count)`` of ``|logπ_loaded − logπ_reference|`` over response tokens.
 
-    EXP-29 relevance probe: the replayed batch STORES the log-probs its
-    trajectories were generated/scored with (``rollout_log_probs`` from vLLM at
-    the generator weights; ``old_log_probs`` from the recompute at the same
-    weights). The anchor's clean forward at the LOADED snapshot weights
-    re-scores the same tokens — if the loaded weights are truly the batch's
-    generator, the masked mean abs diff sits at the engine-noise floor and
-    stays FLAT across fires; a broken pairing drifts with policy updates and
-    GROWS. Pure detached arithmetic — fp32, no grad, no collective; the caller
-    aggregates the (sum, count) pairs across micro-batches.
+    The replayed batch stores the log-probs its trajectories were generated or
+    scored with. The anchor's clean forward at the loaded snapshot weights
+    re-scores the same tokens; close agreement indicates the snapshot matches
+    the batch's generator. Pure detached arithmetic: fp32, no grad, no
+    collective; the caller aggregates the (sum, count) pairs across micro-batches.
     """
     mask = response_mask.to(torch.bool)
     diff = (log_probs.detach().to(torch.float32) - ref_log_probs.detach().to(torch.float32)).abs()
@@ -552,7 +548,7 @@ def maybe_build_replay_ring(state, anchor_cfg, delay_K: int, cadence: int = 1) -
     ring = getattr(state, "_anchor_replay_ring", None)
     if ring is None:
         ring = AnchorReplayRing(delay_K=delay_K, cadence=cadence)
-        setattr(state, "_anchor_replay_ring", ring)
+        state._anchor_replay_ring = ring
     return ring
 
 
@@ -717,6 +713,7 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
         # summon_full_params, while the rebuilt clone has plain Tensor params.
         # Copy each param/buffer manually after DTensor -> Tensor materialization.
         import torch as _torch
+
         def _to_plain(t):
             # DTensor -> full unsharded plain Tensor (works inside summon).
             if hasattr(t, "full_tensor"):
@@ -730,6 +727,7 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
                 except Exception:
                     pass
             return t
+
         # Match by canonical (FSDP-infix-stripped) key. The rebuilt clone
         # has NON-infixed names; the live inner_module's summoned names may carry
         # the `._fsdp_wrapped_module.` infix (per-layer wrapping). A raw `n in
@@ -813,7 +811,7 @@ def capture_anchor_tensors(
     global_step: int,
     optimizer_tick: int,
 ) -> int:
-    """EXP-26 Step A: dump a ``{name: tensor}`` map under ``role`` (detached/fp32).
+    """Dump a ``{name: tensor}`` map under ``role`` (detached/fp32).
 
     Pure I/O — used for the K-stale ``G_anchor`` map (role ``"G_anchor"``), the
     anchor EMA ``M`` map (role ``"M"``), and the ``delay_K=0`` fresh-anchor
@@ -829,15 +827,18 @@ def capture_anchor_tensors(
         if t is None:
             continue
         if writer.dump(
-            role=role, target_name=name, tensor=t,
-            global_step=global_step, optimizer_tick=optimizer_tick,
+            role=role,
+            target_name=name,
+            tensor=t,
+            global_step=global_step,
+            optimizer_tick=optimizer_tick,
         ):
             n += 1
     return n
 
 
 # --------------------------------------------------------------------------- #
-# EXP-30 Step-A geometry probe — pure math (no engine/FSDP/distributed deps).
+# Geometry probe helpers: pure math (no engine/FSDP/distributed deps).
 #
 # The probe's invariant: everything below is TELEMETRY-ONLY. Nothing here is
 # ever written back into a gradient, an EMA, the sketch V, Q, or the optimizer
@@ -867,7 +868,7 @@ def grad_summary_stats(t: torch.Tensor, *, top_frac: float = 0.01, power_iters: 
     # vector cannot be orthogonal to the top singular subspace of a real-world
     # gradient; 24 iterations puts σ1 within ~1% for decaying spectra).
     n = a.shape[1]
-    v = torch.full((n,), 1.0 / (n ** 0.5), dtype=torch.float32, device=a.device)
+    v = torch.full((n,), 1.0 / (n**0.5), dtype=torch.float32, device=a.device)
     sigma1 = 0.0
     for _ in range(max(1, int(power_iters))):
         u = a @ v
@@ -889,8 +890,9 @@ def grad_summary_stats(t: torch.Tensor, *, top_frac: float = 0.01, power_iters: 
     return {"fro": fro, "sigma1": sigma1, "stable_rank": float(stable_rank), "top1pct_mass": float(top_mass)}
 
 
-def paired_cosine(a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] = None,
-                  norm_b: Optional[float] = None) -> Optional[float]:
+def paired_cosine(
+    a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] = None, norm_b: Optional[float] = None
+) -> Optional[float]:
     """fp32 cosine between two same-shape tensors; cached norms avoid re-reducing
     multi-GB CPU tensors per pairing. Returns ``None`` (excluded from medians,
     counted by the caller) when either side is numerically zero — a cosine with
@@ -898,9 +900,7 @@ def paired_cosine(a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] =
     statistic."""
     af = a.detach().to(torch.float32).reshape(-1)
     bf = b.detach().to(torch.float32).reshape(-1)
-    assert af.numel() == bf.numel(), (
-        f"paired_cosine shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}"
-    )
+    assert af.numel() == bf.numel(), f"paired_cosine shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}"
     na = float(torch.linalg.norm(af).item()) if norm_a is None else float(norm_a)
     nb = float(torch.linalg.norm(bf).item()) if norm_b is None else float(norm_b)
     if na <= _PROBE_EPS or nb <= _PROBE_EPS:
@@ -908,8 +908,7 @@ def paired_cosine(a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] =
     return float(torch.dot(af, bf).item()) / (na * nb)
 
 
-def cos_over_targets(a: dict, b: dict, *, norms_a: Optional[dict] = None,
-                     norms_b: Optional[dict] = None) -> dict:
+def cos_over_targets(a: dict, b: dict, *, norms_a: Optional[dict] = None, norms_b: Optional[dict] = None) -> dict:
     """Per-target cosines over the INTERSECTION of two ``{name: tensor}`` maps
     (keys are canonical names; on the healthy path the sets are identical — the
     caller asserts coverage). ``None`` cosines (zero vectors) are kept so the
@@ -925,14 +924,12 @@ def cos_over_targets(a: dict, b: dict, *, norms_a: Optional[dict] = None,
 def delta_stats_over_targets(rep: dict, ring: dict, *, ring_norms: Optional[dict] = None) -> tuple:
     """m5 within-pair codec error per target: ``δ = G_anc_rep(t) − G_comp_ring(t−K)``
     on IDENTICAL (batch, θ). Returns ``(ratio, cos)`` dicts where
-    ``ratio[name] = ‖δ‖/‖G_comp_ring‖`` (the GATE-B2 denominator is the paired
-    RING entry per the plan's operationalization) and ``cos[name] =
-    cos(δ, G_comp_ring)``.
+    ``ratio[name] = ‖δ‖/‖G_comp_ring‖`` and ``cos[name] = cos(δ, G_comp_ring)``.
 
-    SCALE CONTRACT (the #25 mean-vs-sum trap): both inputs MUST already be
-    DP-MEAN-reduced under the SAME loss normalization — the engine feeds the
-    ``_dp_all_reduce_anchor_grads`` (MEAN) anchor gradient and the FSDP-mean
-    fast gradient, both normalized by the same ``agg_loss`` global_batch_info.
+    Scale contract: both inputs MUST already be DP-MEAN-reduced under the same
+    loss normalization. The engine feeds the ``_dp_all_reduce_anchor_grads``
+    (MEAN) anchor gradient and the FSDP-mean fast gradient, both normalized by
+    the same ``agg_loss`` global_batch_info.
     This function applies NO rescaling of its own (pure linearity), which is
     exactly what the scale-consistency unit test pins: feeding a SUM-reduced
     side inflates the ratio by the world size.
@@ -1018,9 +1015,7 @@ def geometry_fire_record(
             m4_medians[j] = None
             continue
         lag_grads, lag_norms = entry
-        m4_medians[j] = matrix_median(
-            cos_over_targets(g_comp, lag_grads, norms_a=g_comp_norms, norms_b=lag_norms)
-        )
+        m4_medians[j] = matrix_median(cos_over_targets(g_comp, lag_grads, norms_a=g_comp_norms, norms_b=lag_norms))
     # m5 — within-pair codec error vs the exact t−K ring entry.
     if ring_entry is not None:
         ring_grads, ring_norms = ring_entry

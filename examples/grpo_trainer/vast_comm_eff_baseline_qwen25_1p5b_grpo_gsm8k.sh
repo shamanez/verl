@@ -9,44 +9,38 @@
 # objective.
 #
 # ===========================================================================
-# THE canonical communication-efficient base launcher. As of issue #25
-# (EXP-25, 2026-06-09) the comm-eff base is the ANCHOR CIRCUIT on a PowerSGD
-# codec, and the defaults below ENCODE it. Every circuit is still an
+# Canonical communication-efficient base launcher. The defaults below configure
+# the anchor circuit on a PowerSGD codec. Every circuit is still an
 # independent env toggle so ablations stay one-liners:
 #
 #   comm-eff master ........ COMM_EFF_ENABLED          (true)     off => byte-identical dense
 #   codec .................. COMM_EFF_COMPRESSION_TYPE (powersgd) the locked compressor
 #   PowerSGD rank .......... COMM_EFF_POWERSGD_RANK    (77)       byte-matched to mask p=0.95 (H=1536)
-#   anchor (MANDATORY) ..... COMM_EFF_ANCHOR_ENABLED   (true)     stale full-grad reference M
+#   anchor ................. COMM_EFF_ANCHOR_ENABLED   (true)     stale full-grad reference M
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
 #   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
 #   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
-#   merger (SOTA = B2) ..... COMM_EFF_SPECTRAL_CORRECTION_MODE (delayed_ef)  K-delayed codec-residual fold of M into G
+#   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (delayed_ef)  K-delayed codec-residual fold of M into G
 #   merger dose lambda ..... COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA (1.0)        G_corr = G_comp + lambda*(M_rep - G_comp_ring)
-#   naive clean cadence .... COMM_EFF_CLEAN_CADENCE    (0=OFF)    DEAD — the anchor replaced it
+#   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    anchor replaces periodic clean steps
 #   legacy mask ............ COMM_EFF_MASK_ENABLED     (false)    prf_mask codec, reference only
 #
-# THE BASE in one line (= B2, the comm-eff SOTA): PowerSGD r=77 + a continuously-
+# Base in one line: PowerSGD r=77 plus a continuously
 # maintained, delay_K=5 stale, full-coverage (196 matrices, DP-reduced) anchor
 # gradient M, refreshed every 5 ticks from a no-hook isolated clone; the anchor
 # OWNS the PowerSGD basis Q (computes Q<-orth(V) from its stale-forward
 # activations and broadcasts it — the fast circuit is a read-only consumer,
 # fail-closed from ever writing Q); the delayed_ef merger folds M into the fast
 # gradient as the K-delayed EXACT codec residual G_corr = G_comp + lambda*delta,
-# delta = M_rep - G_comp_ring, lambda=1, beta_anc=0. These exact values are the B2
-# ground truth (research/runs/EXP-31/B2_baseline/resolved_params_B2.txt).
+# delta = M_rep - G_comp_ring, lambda=1, beta_anc=0.
 #
-# WHY this base + the result (do NOT restate numbers here — they live in
-# research/runs/SUMMARY.md): the anchor is the REALISTIC decentralized-PP
-# setting — a continuously-maintained stale anchor replaces the old clean_cadence
+# Why this base: the anchor is the realistic decentralized-PP
+# setting — a continuously maintained stale anchor replaces the old clean_cadence
 # periodic-dense-step crutch, which was unrealizable (full-H transfer + itself
-# stale on a slow link). The circuit is mechanically PROVEN (R1 full-coverage
-# DP-reduced M + R2 anchor-owns-Q probe gates green), and the delayed_ef merger
-# recovers the codec's weight-gradient error from the stale anchor to reach
-# PARITY with dense at ~5% gradient-comm cost. The substrate is held FIXED; the
-# OPEN research axis (issue #31) is HOW the stale anchor gradient is USED — the
-# anchor-usage levers below. Grad_norm is a SYMPTOM not the disease (Adam is
-# scale-invariant + verl grad-clips); judge on val/critic-score, not grad_norm.
+# stale on a slow link). The delayed_ef merger recovers a codec residual from the
+# stale anchor. Keep this substrate fixed unless you are deliberately testing a
+# different axis. Grad_norm is a symptom, not the disease (Adam is scale-invariant
+# and verl grad-clips); judge on validation and critic-score, not grad_norm.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -60,17 +54,15 @@
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: multi-GPU only (4..8). The mandatory anchor allocates a ~3 GB
+# Hardware: multi-GPU only (4..8). The anchor allocates a ~3 GB
 # no-hook clone/rank for its stale forward-backward, so the default actor token
 # budget is already halved (PPO_MAX_TOKEN_LEN_PER_GPU=18432) to fit 4×H200; this
-# is the EXP-25 footprint. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
+# is the default memory posture. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
 # a reference-only ablation) frees the clone and you can raise it back to 36864.
 #
-# Examples (the substrate is held FIXED; the axis = how the anchor gradient is used):
-#   # the B2 SOTA base is the DEFAULT here — a bare launch reproduces it. For a
-#   # clean, named, self-contained B2 baseline, use vast_comm_eff_b2_sota_*.sh.
-#   # an issue-#31 anchor-usage lever ON TOP of B2 (e.g. the zero-mean perturbation):
-#   COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb bash <thisfile>
+# Examples:
+#   # delayed_ef is the default. Add optional anchor-usage levers as overrides:
+#   COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=perturb bash <thisfile>
 #   # dense control via the same launcher (master switch off => byte-identical):
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
 #   # legacy prf_mask codec (reference only — NOT the base; cannot anchor-own-Q):
@@ -216,202 +208,103 @@ export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_comm_eff_baseline}"
 
 # Token budget per micro-batch for dynamic batching. Actor budget halved to
-# 18432 (from 36864) to fit the mandatory anchor's ~3 GB clone on 4×H200 (the
-# EXP-25 footprint); log_prob/ref keep 36864 (no clone on those paths).
+# 18432 (from 36864) to fit the anchor's ~3 GB clone on 4×H200; log_prob/ref
+# keep 36864 because those paths do not allocate the clone.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-18432}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 
 # ---------------------------------------------------------------------------
-# 6. Communication-efficient method — hydra knob surface (see header).
-#    Every circuit is an independent env toggle. Defaults = the comm-eff SOTA
-#    base B2 (PowerSGD r=77 + anchor on + anchor-owns-Q + delayed_ef merger λ=1;
-#    ground truth research/runs/EXP-31/B2_baseline/). Field names mirror
-#    verl/trainer/config/actor/actor.yaml exactly — do NOT reference a knob
-#    absent from that schema (Hydra struct-mode rejects unknown keys regardless
-#    of enabled flags; that bit us on clean_cadence).
+# 6. Communication-efficient method.
+#    The launcher pins the current PowerSGD + anchor delayed-EF baseline while
+#    exposing every research knob as an env override. Field names mirror the
+#    actor config schema; Hydra struct mode rejects unknown keys.
 # ---------------------------------------------------------------------------
 COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
 # --- codec selector: dense | prf_mask | powersgd ---
-# powersgd (default) = the locked compressor for the anchor base; it is the ONLY
-# codec compatible with anchor-owns-Q. prf_mask is retained as a reference-only
-# codec (COMM_EFF_COMPRESSION_TYPE=prf_mask + COMM_EFF_MASK_ENABLED=true +
-# COMM_EFF_ANCHOR_OWNS_Q=false); "dense" selects the codec by COMM_EFF_MASK_ENABLED
-# (legacy). All arms call THIS SAME launcher with only the codec/merger knobs
-# differing (stability contract — never re-type the baseline).
+# powersgd is the baseline codec and is the only codec compatible with
+# anchor-owned Q. prf_mask is retained for reference ablations; dense disables
+# communication compression.
 COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
 # --- activation mask (reference-only codec; OFF in the PowerSGD anchor base) ---
 COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
-COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction (sweep 0.9->0.5->0.1, #15)
+COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction for prf_mask
 COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
 COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
-# Fallback if training is unstable: try N unmasked warmup steps (not yet
-# implemented) and/or COMM_EFF_MASK_RESCALE=true (theory's 1/(1-p), bf16-risky).
-# --- naive periodic clean (unmasked) step: 0=OFF. DEAD — the anchor replaced it
-#     (a full-rank clean@K is not realizable on a slow link + is itself stale).
-#     Leave at 0; do not re-enable in the base. ---
+# --- periodic dense step: 0=OFF. Kept only as a diagnostic control. ---
 COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
-# --- anchor circuit (MANDATORY — the comm-eff base; EXP-25) ---
+# --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
-# how OFTEN the anchor recomputes M+Q, in optimizer/mini-batch TICKS (not global
-# steps: train_batch 128 / ppo_mini 64 = 2 ticks/step, so cadence 5 ≈ every 2.5 steps).
+# Anchor cadence is measured in optimizer ticks, not trainer global steps.
 COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
-# staleness: the anchor forwards from a delay_K-tick-stale weight snapshot.
-# delay_K=5 is the canonical staleness (matches cadence). NB the schema default
-# is 20 — the base PINS it to 5 here; do not rely on the schema default.
+# The anchor forwards from a delay_K-tick-stale weight snapshot.
 COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-5}"
-# EXP-25 (R2): anchor-owns-Q — THE structural inversion + a mandatory base
-# property. true (default): the ANCHOR is the ONLY thing that updates the
-# PowerSGD basis Q (fast maybe_update_basis + fast sketch gated OFF, fail-closed;
-# anchor computes Q ← orth(V) from its stale-forward activations and broadcasts
-# Q + M every refresh). Set false only for the reference-only fast-owns-Q
-# ablation. Active iff COMM_EFF_COMPRESSION_TYPE=powersgd AND anchor enabled.
+# When true, only the anchor refresh updates the PowerSGD basis Q.
 COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
-# valid on-policy anchor M (EXP-29; part of the locked B2 base): replay the SAME
-# (batch, theta) the fast circuit saw so delta is the codec's weight-grad error,
-# not a batch effect; snapshot the stale weights to CPU (OOM guard).
+# Paired replay uses the same batch/weights the fast circuit saw so the
+# correction tracks codec error rather than batch mismatch.
 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
-# --- anchor-guided gradient correction = the MERGER (ON in the base = B2). It
-#     folds the stale anchor gradient M into the fast compressed update; the open
-#     RESEARCH AXIS (issue #31) is HOW that is done. The combiners consult only
-#     the anchor-gradient M_anchor. ---
+# --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
-COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"        # anchor EMA decay; 0 = use the latest fire's M (B2)
-# Correction cadence in optimizer ticks. 1 = fire every tick (the merger must
-# fire every fast step).
+COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"        # anchor EMA decay; 0 = use the latest fire's M (delayed_ef)
+# Correction cadence in optimizer ticks.
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload full-coverage M (OOM guard)
-# Cap on target matrices corrected per tick. -1 = no cap = full coverage of all
-# 196 projection matrices the merger corrects (a >=0 cap silently drops merger
-# targets — diagnostic throttle only).
+# Cap target matrices per correction. -1 means no cap.
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
-# merger MODE = the SOTA (B2): delayed_ef (default) = K-delayed EXACT codec residual
-# G_corr = G_comp + lambda*(M_rep - G_comp_ring). Validated in
-# verl/workers/config/comm_eff.py; applied in verl/workers/comm_eff/spectral_filter.py.
+# delayed_ef computes G_corr = G_comp + lambda*(M_rep - G_comp_ring).
 COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-delayed_ef}"
-# delayed_ef dose lambda: 1.0 (default) = B2; 0.0 = G_comp bitwise (= plain
-# PowerSGD, the merger-off limiting case).
+# delayed_ef dose; 0.0 is the plain PowerSGD limiting case.
 COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
 COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # force when correction_mode=inject
 COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # weight when correction_mode=blend
-# --- EXP-26 Step B: ef_powersgd merger (direction-PRESERVING error-feedback) ---
-# Select with COMM_EFF_SPECTRAL_CORRECTION_MODE=ef_powersgd. Re-adds the dropped
-# off-subspace residual to G_comp with NO sign term (keeps G_comp's direction).
-# ef_decay=ef_clip=0 (defaults) ⇒ G_corr==G_comp = the plain-PowerSGD limiting
-# case (the EF-residual-disabled ablation). A live arm sets ef_clip>0 (residual
-# norm cap as a fraction of ||G_comp||) and optionally ef_decay in [0,1).
+# --- ef_powersgd merger ---
 COMM_EFF_SPECTRAL_EF_DECAY="${COMM_EFF_SPECTRAL_EF_DECAY:-0.0}"
 COMM_EFF_SPECTRAL_EF_CLIP="${COMM_EFF_SPECTRAL_EF_CLIP:-0.0}"
-# --- EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (delayed_ef) ---
-# delta_subbasis_rank > 0 ADDS rank_{r_sb}(S) into the delayed_ef correction term
-# (S = the act-deflated stale weight gradient δ when family=tail, the default; or
-# the raw stale anchor gradient M_rep when family=grad). The forward codec Q is
-# untouched (Step-C avoided by construction). 0 (default, OFF) ⇒ the merger is the
-# EXACT B2 path (off-path parity — preserves every existing run incl. Cell A).
-# Cell D production: COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK=2 (family=tail).
+# --- optional additive stale-anchor sub-basis ---
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK:-0}"
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY:-tail}"  # tail | grad
-# EXP-31 Cell D γ-knob (over-amplification fix): the sub-basis WEIGHT γ + a HOLD-
-# then-DECAY schedule. γ holds at full WEIGHT for HOLD_STEPS, THEN decays linearly
-# over DECAY_STEPS: γ_t = WEIGHT*(1 if step<HOLD_STEPS else max(0, 1 -
-# (step-HOLD_STEPS)/DECAY_STEPS)) (constant WEIGHT when DECAY_STEPS=0). WEIGHT=1.0 +
-# DECAY_STEPS=0 (defaults) = the EXACT current Cell D behaviour (γ_t≡1); WEIGHT=0 ⇒
-# B2; HOLD_STEPS=0 (default) = the existing linear-from-step-0 decay (bitwise).
-# γ-decay-over-full-run: WEIGHT=1.0 DECAY_STEPS=50 HOLD_STEPS=0. Hold-then-decay
-# (preserve r2's early lead AND finish clean): WEIGHT=1.0 HOLD_STEPS=25 DECAY_STEPS=25.
-# Constant half-dose: WEIGHT=0.5 DECAY_STEPS=0. (active iff mode=delayed_ef + rank>0).
+# Sub-basis weight schedule. With decay_steps=0 the weight is constant.
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT:-1.0}"
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS:-0}"
 COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS:-0}"
-# --- EXP-31 surpass lever: zero-mean tunable cross-rank-identical perturbation ---
-# perturb_sigma > 0 ADDS σ·‖G_corr‖·ξ (ξ a unit Gaussian seeded by (perturb_seed,
-# target, step) — identical on every DP rank, fresh per step ⇒ zero-mean) AFTER the
-# delayed_ef correction term: SGLD/SAM-style beneficial noise → flatter minima →
-# potentially beats dense on greedy val. 0.0 (default, OFF) ⇒ G_corr is the EXACT
-# delayed_ef / Cell-D path (composes with DELTA_SUBBASIS_RANK=0 ⇒ bitwise-B2). Local,
-# ZERO added communication. The surpass sweep: COMM_EFF_SPECTRAL_PERTURB_SIGMA in
-# {0.05, 0.10, 0.20} on the B2 substrate (active iff mode=delayed_ef).
+# --- optional zero-mean perturbation after correction ---
 COMM_EFF_SPECTRAL_PERTURB_SIGMA="${COMM_EFF_SPECTRAL_PERTURB_SIGMA:-0.0}"
 COMM_EFF_SPECTRAL_PERTURB_SEED="${COMM_EFF_SPECTRAL_PERTURB_SEED:-0}"
-# --- EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1) ---
-# delta_momentum_mu > 0 keeps a fading running EMA of the correction δ (accumulated
-# ONLY at refresh ticks: m ← μ·m + (1−μ)·δ, gain EXACTLY 1) so the persistently-
-# missed direction becomes a steady push; the held buffer is the correction between
-# fires (faded by μ**age when AGE_DECAY ⇒ → 0 if fires stop). 0.0 (default, OFF) ⇒
-# correction == δ bitwise (= B2; composes with DELTA_SUBBASIS_RANK=0 + σ=0 ⇒
-# bitwise-B2). The L2 sweep: COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU in {0.5, 0.9}
-# (active iff mode=delayed_ef). AGE_DECAY=true is the async staleness-degrade.
+# --- optional correction momentum ---
 COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU:-0.0}"
 COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY:-false}"  # true|false
-# --- EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate) ---
-# The constant λ in g_corr = G_comp + λ·δ becomes a per-target, per-tick λ_t =
-# clamp(λ + κ·(c̄ − c_t), 0, LAMBDA_CAP) where c_t is the agreement (cos(G_comp,M_rep)
-# for MODE=cos, ‖δ‖/‖G_comp‖ for MODE=ratio) and c̄ its running median ⇒ E[λ_t]≈λ
-# (MEAN-1 centered — only the step-to-step DEVIATION is the lever; the naive
-# 1+κ(1−cos) is forbidden, it pins at constant 1+κ under this system's cos≈0).
-# MODE=off (default) OR KAPPA=0.0 ⇒ λ_t ≡ DELAYED_EF_LAMBDA (constant) ⇒ bitwise B2.
-# The L3 sweep: MODE in {cos, ratio}, KAPPA in {0.5, 1.0}, LAMBDA_CAP=2.0 (active
-# iff mode=delayed_ef).
+# --- optional adaptive delayed-EF dose ---
 COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE:-off}"  # off|cos|ratio
 COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA:-0.0}"
 COMM_EFF_SPECTRAL_LAMBDA_CAP="${COMM_EFF_SPECTRAL_LAMBDA_CAP:-2.0}"
-# --- EXP-31 Cell C: correction-δ compression rank (SECONDARY savings) ---
-# r_delta > 0 compresses the correction δ to r_delta columns before injection
-# (the Cell C residual-codec savings cell; a SEPARATE later code change). 0
-# (default, OFF) ⇒ δ injected uncompressed (the B2 / Cell D path).
+# --- optional correction-delta compression ---
 COMM_EFF_SPECTRAL_R_DELTA="${COMM_EFF_SPECTRAL_R_DELTA:-0}"
-# --- EXP-26 Step C: Q-basis FAMILY (content of orth(V) at FIXED rank) ---
-# "act" (default) = the EXP-25 activation-energy basis (byte-identical substrate).
-# RLVR-native families {grad,adv,tail,hybrid,ticket} are IMPLEMENTED (EXP-26 Step
-# C1); the compressor fails loud on an UN-implemented family only. This is the LIVE
-# basis the fast/training path consumes (the C2/Step-B LIVE-family arm). The C1
-# screen keeps this "act" LIVE while families accumulate PASSIVELY (below). Steps
-# A/B (with q_basis=act) are byte-identical to the substrate.
+# --- Q-basis family ---
 COMM_EFF_POWERSGD_Q_BASIS="${COMM_EFF_POWERSGD_Q_BASIS:-act}"
-# --- EXP-26 Step C1 PASSIVE screen: families to passively accumulate inside the
-#     anchor pass (off the live Q / fast path / optimizer) so ONE short run builds
-#     candidate bases for ALL families at once. Hydra list literal, e.g.
-#     COMM_EFF_POWERSGD_Q_BASIS_PASSIVE='[act,grad,adv,tail,hybrid,ticket]'.
-#     Empty default => no passive accumulation (byte-identical). ---
+# Passive families are accumulated inside the anchor pass without affecting
+# the live fast path or optimizer.
 COMM_EFF_POWERSGD_Q_BASIS_PASSIVE="${COMM_EFF_POWERSGD_Q_BASIS_PASSIVE:-[]}"
-# --- EXP-26 Step C1 hybrid family column split at FIXED rank r (act + grad == r).
-#     -1/-1 (default) = AUTO: act=ceil(r/2), grad=r-act (39 + 38 = 77 at r=77, the
-#     STEP_C_SPEC.md split). Set BOTH explicitly (>=0, summing to r) to override. ---
+# Hybrid split at fixed rank r; -1/-1 lets the implementation choose.
 COMM_EFF_POWERSGD_HYBRID_ACT_COLS="${COMM_EFF_POWERSGD_HYBRID_ACT_COLS:--1}"
 COMM_EFF_POWERSGD_HYBRID_GRAD_COLS="${COMM_EFF_POWERSGD_HYBRID_GRAD_COLS:--1}"
-# --- EXP-26 Step A: real-gradient geometry-audit tensor capture (OFF by default;
-#     a strict no-op ⇒ byte-identical to the EXP-25 substrate). When enabled the
-#     comm-eff hooks dump fp32 tensors (A/Â/Q, G_comp, G_corr, M/G_anchor, the
-#     parallel G_dense, the delay_K=0 fresh-anchor probe) keyed by (global_step,
-#     optimizer_tick, target_name, shape, dtype, norm) under CAPTURE_DIR. Every
-#     dump is detached/dump-only — NO numerical side effect on the optimizer. ---
+# --- optional tensor capture probes ---
 COMM_EFF_CAPTURE_ENABLED="${COMM_EFF_CAPTURE_ENABLED:-false}"
-COMM_EFF_CAPTURE_DIR="${COMM_EFF_CAPTURE_DIR:-/workspace/captures}"   # rsynced to runs/EXP-26/captures/
+COMM_EFF_CAPTURE_DIR="${COMM_EFF_CAPTURE_DIR:-/workspace/captures}"   # rsynced to runs//captures/
 COMM_EFF_CAPTURE_MAX_TICKS="${COMM_EFF_CAPTURE_MAX_TICKS:-10}"        # audit needs ~5-10 ticks
 COMM_EFF_CAPTURE_STRATIFIED="${COMM_EFF_CAPTURE_STRATIFIED:-0}"       # >0 => N targets/matrix-type (volume guard)
 COMM_EFF_CAPTURE_G_DENSE="${COMM_EFF_CAPTURE_G_DENSE:-false}"         # parallel uncompressed G_dense backward (highest-OOM-risk probe)
 COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe (the Option-A dense reference)
-# EXP-26 Step C/B should-have: loss for the delay_K=0 fresh-anchor probe.
-# clean_pg (default, ratio≡1 like the anchor refresh) | ppo_clip (the fast path's
-# PPO ratio/clip loss — removes the loss-mismatch confound; gives a clean
-# cos(G_fresh_ppo, G_corr) direction test). Dump-only probe; never the optimizer.
+# Loss for the delay_K=0 fresh-anchor probe. Dump-only; never optimizer input.
 COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS="${COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS:-clean_pg}"
 COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQUIRED for the fidelity invariant
-# EXP-26 (bug #7 fix): min_tick skips cold-Q ticks so the max_ticks budget holds
-# the POST-warm anchor fires (where G_fresh_anchor pairs with warm-Q G_comp/G_corr
-# = the H1 inputs). Was silently dropped before (declared in config/yaml/capture.py
-# but NEVER wired here). 0 = capture from start.
+# min_tick skips cold-Q ticks while preserving the max_ticks capture budget.
 COMM_EFF_CAPTURE_MIN_TICK="${COMM_EFF_CAPTURE_MIN_TICK:-0}"
 COMM_EFF_CAPTURE_RANK0_ONLY="${COMM_EFF_CAPTURE_RANK0_ONLY:-true}"    # capture rank0 only (disk guard); default true
-# --- PowerSGD activation compression (the base codec). Defaults: rank=77
-#     (byte-matched to the prf_mask at p=0.95 for H=1536: 0.05·1536≈77), block
-#     power iteration, compress the old-logprob recompute (=> ρ≈1), sync_basis=true
-#     (single shared consensus Q across DP — REQUIRED under DP), fp32 QR (REQUIRED
-#     — bf16-QR loses orthogonality). NB Q is updated by the ANCHOR (owns_q=true),
-#     NOT by the fast update_cadence path (which is gated off in the base). ---
+# --- PowerSGD activation compression ---
 COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"               # r=77 ≡ p=0.95 (0.05·H, H=1536)
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
 COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks (same as mask)
@@ -447,37 +340,37 @@ cat <<EOF
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense => legacy mask-by-flag)
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
-  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off; naive periodic full-grad step — NOT sustainable)
+  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA  (B2 = delayed_ef lambda=1)
-  ef_powersgd (EXP-26): ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP  (active iff mode=ef_powersgd; 0/0 => G_corr==G_comp)
-  subbasis (EXP-31 D):  delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA  (active iff mode=delayed_ef; rank=0 => correction==delta = B2)
-  subbasis γ-knob:      delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS  (γ_t=weight*(1 if step<hold_steps else max(0,1-(step-hold_steps)/decay_steps)); weight=1+decay_steps=0 => γ≡1 = current Cell D; weight=0 => B2; hold_steps=0 => linear-from-0 decay)
-  perturb (EXP-31):     perturb_sigma=$COMM_EFF_SPECTRAL_PERTURB_SIGMA perturb_seed=$COMM_EFF_SPECTRAL_PERTURB_SEED  (active iff mode=delayed_ef; σ=0 => g_corr unperturbed = B2/Cell-D; σ>0 adds σ·‖g_corr‖·unit-ξ, ξ seeded by (seed,target,step) => cross-rank identical, zero-mean over steps)
-  L2 δ-momentum (EXP-31): delta_momentum_mu=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU age_decay=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY  (active iff mode=delayed_ef; μ=0 => correction==δ = B2; μ>0 => normalized-EMA m←μm+(1-μ)δ at refresh ticks, gain EXACTLY 1; age_decay fades held correction by μ**age => async staleness-degrade)
-  L3 adaptive-λ (EXP-31): adaptive_lambda_mode=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE kappa=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA lambda_cap=$COMM_EFF_SPECTRAL_LAMBDA_CAP  (active iff mode=delayed_ef; off|κ=0 => λ_t≡delayed_ef_lambda = B2; else λ_t=clamp(λ+κ(c̄-c_t),0,cap), c_t=cos|ratio agreement, c̄=running median => MEAN-1 centered, E[λ_t]≈λ)
-  q_basis (EXP-26):    live=$COMM_EFF_POWERSGD_Q_BASIS  passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE  hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)  (act=byte-identical; C1 screen: live act + passive families)
-  capture (EXP-26-A):  enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
+  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA
+  ef_powersgd:         ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP
+  subbasis:            delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA
+  subbasis schedule:   delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS
+  perturb:             perturb_sigma=$COMM_EFF_SPECTRAL_PERTURB_SIGMA perturb_seed=$COMM_EFF_SPECTRAL_PERTURB_SEED
+  delta_momentum:      delta_momentum_mu=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU age_decay=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY
+  adaptive_lambda:     adaptive_lambda_mode=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE kappa=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA lambda_cap=$COMM_EFF_SPECTRAL_LAMBDA_CAP
+  q_basis:             live=$COMM_EFF_POWERSGD_Q_BASIS passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)
+  capture:             enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
 EOF
 
 # ---------------------------------------------------------------------------
-# 6b. EXP-16 early-stop instrumentation (greppable). A lightweight background
+# 6b.  early-stop instrumentation (greppable). A lightweight background
 #     watcher tails the LIVE training log for the corrupting-failure patterns
 #     the training-log-monitor kills a cell on (non-finite grad_norm/loss, FSDP
 #     backward/hook errors, DTensor/aten::copy_ writeback errors, the
 #     string-metric reduce crash, use_orig_params guard, spectral crashes). On
 #     the FIRST match it writes a one-line `EARLY_STOP_SIGNAL: <pattern> @ <line>`
-#     to the log AND a `runs/<EXP>/EARLY_STOP_SIGNAL` sentinel file, then exits.
+#     to the log AND a `runs/<experiment>/EARLY_STOP_SIGNAL` sentinel file, then exits.
 #     This is a SIGNAL ONLY — it does NOT kill training (the monitor/runner owns
 #     teardown). It just gives the monitor a single high-signal grep target so it
 #     does not have to re-derive the regex from the rescue-trigger list. Strict
 #     opt-in side effect: writes only into this run's own dir.
 #
-#     EXP-20 fix (CRITICAL — a clean run used to hang here forever): the old
+#      fix (CRITICAL — a clean run used to hang here forever): the old
 #     watcher ran `tail -F | grep -m1` in a backgrounded subshell and the EXIT
 #     trap killed only the SUBSHELL pid, orphaning the child `tail -F`. On a
 #     CLEAN run grep -m1 never matches, `tail -F` follows the (now-idle) log
@@ -506,7 +399,7 @@ EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_p
 #    invocation, overriding the OOM-relevant + comm-eff Hydra knobs. Every
 #    enabled flag comes from env so the full ablation grid is a one-liner.
 #
-#    EXP-20: launch the training in the BACKGROUND, capture its PID, start the
+#    : launch the training in the BACKGROUND, capture its PID, start the
 #    early-stop watcher bound to that PID, then `wait` on training explicitly.
 #    The watcher self-terminates when training exits (guard 1), and the EXIT
 #    trap reaps the watcher's whole process group (guard 2).
@@ -602,7 +495,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!
 
-# EXP-20 early-stop watcher — bound to TRAIN_PID + its own process group.
+#  early-stop watcher — bound to TRAIN_PID + its own process group.
 # Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or
 # crash), so grep hits EOF and the watcher subshell returns. Guard 2: setsid
 # puts the watcher in its own pgroup; the EXIT trap kills the whole group so
@@ -639,15 +532,9 @@ wait "$TRAIN_PID" || TRAIN_RC=$?
 kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# WandB final-flush (fix for the truncated-dashboard bug). verl/Ray SIGKILLs
-# its workers at teardown before WandB's async uploader flushes the LAST batch,
-# so the online run is cut ~2 steps short — the final (step-N) validation point
-# never lands and the run is marked "crashed" (observed across EXP-20 + the
-# dense control: lastHistoryStep=48 of 50, summary stuck at the step-40/25 val).
-# The COMPLETE history is always in the local .wandb file, so re-sync it here —
-# AFTER training, BEFORE done.flag (which gates the orchestrator's teardown) —
-# to upload the missing tail and finish the run cleanly. Best-effort + bounded:
-# never blocks done.flag (the local train.log stays the authoritative record).
+# WandB final-flush. Ray teardown can race WandB's async uploader, so resync the
+# local run directory after training and before done.flag. Best-effort only; the
+# local train.log remains authoritative.
 if command -v wandb >/dev/null 2>&1; then
   WANDB_RUN_DIR=$(ls -dt /workspace/verl/wandb/run-* /workspace/verl/wandb/offline-run-* 2>/dev/null | head -1 || true)
   if [[ -n "${WANDB_RUN_DIR:-}" ]]; then
@@ -659,6 +546,6 @@ fi
 
 touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
 echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
-# Propagate the training exit status so the EXP-20 launch.sh `run_step` sees a
+# Propagate the training exit status so the  launch.sh `run_step` sees a
 # real failure (set -e / `|| true` semantics in the driver still apply).
 exit "$TRAIN_RC"

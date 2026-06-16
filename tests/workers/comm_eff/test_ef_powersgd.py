@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-26 CPU unit tests for the new code: the direction-preserving ef_powersgd
+"""comm-eff CPU unit tests for the new code: the direction-preserving ef_powersgd
 merger, the Q-basis-family guard, and the diagnostic-capture writer.
 
 These exercise the Correctness invariants the on-box pre-run probe also gates on,
@@ -94,9 +94,7 @@ def test_ef_powersgd_preserves_sign_of_g_comp():
     g_comp = torch.randn(16, 16)
     _warm_anchor(sf, "layer.o_proj.weight", torch.randn(16, 16))
     g_corr = sf.ef_powersgd_matrix("layer.o_proj.weight", g_comp)
-    cos = torch.nn.functional.cosine_similarity(
-        g_corr.flatten().unsqueeze(0), g_comp.flatten().unsqueeze(0)
-    ).item()
+    cos = torch.nn.functional.cosine_similarity(g_corr.flatten().unsqueeze(0), g_comp.flatten().unsqueeze(0)).item()
     # With ef_clip=0.5 the residual is capped at half ||G_comp|| so the corrected
     # direction must remain dominated by G_comp (strongly positive cosine).
     assert cos > 0.7, f"ef_powersgd flipped/destroyed the direction (cos={cos:.3f})"
@@ -108,7 +106,7 @@ def test_ef_powersgd_never_calls_sign():
 
     src = inspect.getsource(SpectralFilter.ef_powersgd_matrix)
     assert "sign(" not in src and ".sign" not in src, (
-        "ef_powersgd must be direction-preserving (NO sign term) — the EXP-25 "
+        "ef_powersgd must be direction-preserving (NO sign term) — the signed_ema "
         "signed_ema failure mode must be structurally excluded"
     )
 
@@ -215,9 +213,7 @@ def test_config_accepts_ef_powersgd_and_validates_ranges():
     # ef_powersgd is an accepted correction_mode (constructs cleanly).
     CommEffConfig(
         enabled=True,
-        spectral=CommEffSpectralConfig(
-            enabled=True, correction_mode="ef_powersgd", ef_decay=0.5, ef_clip=1.0
-        ),
+        spectral=CommEffSpectralConfig(enabled=True, correction_mode="ef_powersgd", ef_decay=0.5, ef_clip=1.0),
     )
 
     # Bad ef_decay (>= 1) is loud.
@@ -258,8 +254,7 @@ def test_capture_writer_dumps_keyed_fp32_and_caps_ticks():
     with tempfile.TemporaryDirectory() as d:
         w = CaptureWriter(capture_dir=d, max_ticks=2, stratified_targets=0, rank=0)
         t = torch.randn(4, 4)
-        assert w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t,
-                      global_step=1, optimizer_tick=1)
+        assert w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t, global_step=1, optimizer_tick=1)
         # Reload + verify it is the real fp32 tensor.
         import json
 
@@ -304,22 +299,20 @@ def test_capture_writer_stratified_subset():
 
 
 # --------------------------------------------------------------------------- #
-# EXP-26 hotfix: unified capture tick (all roles share ONE (gs, tick) key)
+# comm-eff hotfix: unified capture tick (all roles share ONE (gs, tick) key)
 # --------------------------------------------------------------------------- #
 def test_capture_tick_unification():
     """current_optimizer_tick()/capture_tick() give the per-train_batch tick.
 
-    Regression guard for the Step-A bug where the powersgd activation hook keyed
+    Regression guard for the geometry-probe bug where the powersgd activation hook keyed
     dumps by fwd_generation (hundreds/step) and starved the max_ticks budget so
     NO gradient role (G_comp/G_corr/G_dense/M) ever landed. The fix: every role
     reads ONE stamped tick via capture_tick().
     """
-    from verl.workers.config.comm_eff import CommEffConfig, CommEffSpectralConfig
     from verl.workers.comm_eff.state import maybe_build_comm_eff_state
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffSpectralConfig
 
-    st = maybe_build_comm_eff_state(
-        CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=True))
-    )
+    st = maybe_build_comm_eff_state(CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=True)))
     # During the fast forward of train_batch N, spectral_step holds N-1, so the
     # tick this batch's tensors belong to is N == spectral_step + 1.
     st.spectral_step = 0
@@ -337,13 +330,11 @@ def test_capture_tick_unification():
     st._capture_tick = st.current_optimizer_tick()  # spectral_step=1 => tick=2
     assert st.capture_tick() == 2
 
-    # EXP-26 Defect-1/tick regression: a NO-MERGER arm (spectral disabled) never
+    # comm-eff tick regression: a NO-MERGER arm (spectral disabled) never
     # advances spectral_step, so the tick MUST track anchor_step instead (else
     # every dump collapses to tick=1 and overwrites). anchor_step is incremented
     # at the TOP of the anchor refresh, so it already equals N during the batch.
-    st2 = maybe_build_comm_eff_state(
-        CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=False))
-    )
+    st2 = maybe_build_comm_eff_state(CommEffConfig(enabled=True, spectral=CommEffSpectralConfig(enabled=False)))
     st2.spectral_step = 0  # stays 0 all run (grad-correction early-returns: spectral None)
     st2.anchor_step = 1  # anchor refresh advanced it to 1 at the top of batch 1
     assert st2.current_optimizer_tick() == 1
@@ -356,18 +347,26 @@ def test_capture_writer_canonicalizes_target_name():
     SAME logical matrix must key on the SAME canonical target_name so the audit
     pairs them. Regression guard for the cos(G_dense,G_comp) n=0 bug.
     """
-    from verl.workers.comm_eff.capture import CaptureWriter
     import json as _json
+
+    from verl.workers.comm_eff.capture import CaptureWriter
+
     with tempfile.TemporaryDirectory() as d:
         w = CaptureWriter(capture_dir=d, rank=0)
         t = torch.randn(4, 4)
         # live-FSDP infixed name (as the merger dumps G_comp)
-        w.dump(role="G_comp", target_name="model.layers.0._fsdp_wrapped_module.mlp.up_proj.weight",
-               tensor=t, global_step=1, optimizer_tick=1)
+        w.dump(
+            role="G_comp",
+            target_name="model.layers.0._fsdp_wrapped_module.mlp.up_proj.weight",
+            tensor=t,
+            global_step=1,
+            optimizer_tick=1,
+        )
         # clone non-infixed name (as the G_dense probe dumps)
-        w.dump(role="G_dense", target_name="model.layers.0.mlp.up_proj.weight",
-               tensor=t, global_step=1, optimizer_tick=1)
-        rows = [_json.loads(l) for l in open(w.manifest_path)]
+        w.dump(
+            role="G_dense", target_name="model.layers.0.mlp.up_proj.weight", tensor=t, global_step=1, optimizer_tick=1
+        )
+        rows = [_json.loads(line) for line in open(w.manifest_path)]
         names = {r["role"]: r["target_name"] for r in rows}
         assert names["G_comp"] == names["G_dense"] == "model.layers.0.mlp.up_proj.weight", names
         # raw preserved
@@ -376,31 +375,35 @@ def test_capture_writer_canonicalizes_target_name():
 
 
 def test_capture_min_tick_skips_cold_ticks_before_budget():
-    """EXP-26 bug #7 regression: min_tick must skip cold-Q ticks BEFORE the
+    """comm-eff min_tick regression: min_tick must skip cold-Q ticks BEFORE the
     max_ticks budget is consumed, so the post-warm anchor-fire ticks (10/15) land.
     Previously COMM_EFF_CAPTURE_MIN_TICK was silently dropped (not wired) and the
     8-slot budget filled with cold ticks 1-8, losing the H1 inputs.
     """
-    from verl.workers.comm_eff.capture import CaptureWriter
-    import tempfile as _tf, os as _os
+    import tempfile as _tf
+
     import torch as _torch
+
+    from verl.workers.comm_eff.capture import CaptureWriter
+
     with _tf.TemporaryDirectory() as d:
         w = CaptureWriter(capture_dir=d, max_ticks=8, min_tick=9, rank=0)
         t = _torch.randn(2, 2)
         # cold ticks 1..8 must NOT open (and must NOT consume budget slots)
         for tk in range(1, 9):
-            assert not w.should_capture_tick(gs := tk, tk), f"cold tick {tk} should be skipped"
-            assert not w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t,
-                              global_step=tk, optimizer_tick=tk), f"cold tick {tk} dumped"
+            assert not w.should_capture_tick(tk, tk), f"cold tick {tk} should be skipped"
+            assert not w.dump(
+                role="G_comp", target_name="m.q_proj.weight", tensor=t, global_step=tk, optimizer_tick=tk
+            ), f"cold tick {tk} dumped"
         # post-warm ticks 9..16 must open (budget was untouched by the cold ticks)
         opened = 0
         for tk in range(9, 17):
-            if w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t,
-                      global_step=tk, optimizer_tick=tk):
+            if w.dump(role="G_comp", target_name="m.q_proj.weight", tensor=t, global_step=tk, optimizer_tick=tk):
                 opened += 1
         assert opened == 8, f"expected ticks 9-16 to open (8), got {opened}"
         # specifically the post-warm anchor-fire ticks 10 and 15 are present
         import json as _json
-        ticks = {(_json.loads(l)["optimizer_tick"]) for l in open(w.manifest_path)}
+
+        ticks = {(_json.loads(line)["optimizer_tick"]) for line in open(w.manifest_path)}
         assert 10 in ticks and 15 in ticks, f"post-warm fires 10/15 missing: {sorted(ticks)}"
         assert 8 not in ticks and 1 not in ticks, f"cold ticks leaked: {sorted(ticks)}"

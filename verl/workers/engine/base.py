@@ -152,7 +152,7 @@ class BaseEngine:
         # FSDPEngine._maybe_comm_eff_anchor_refresh for the clone-no-hook impl).
 
     def _maybe_comm_eff_capture_g_dense(self, data: TensorDict, loss_function: Callable) -> None:
-        """EXP-26 Step A: parallel UNCOMPRESSED G_dense capture hook (strict no-op
+        """Parallel UNCOMPRESSED G_dense capture hook (strict no-op
         when disabled or when comm_eff.capture.capture_g_dense is false).
 
         Sits between the compressed ``forward_backward_batch`` (which leaves the
@@ -173,7 +173,7 @@ class BaseEngine:
         # FSDPEngine._maybe_comm_eff_capture_g_dense for the clone-no-hook impl).
 
     def _maybe_comm_eff_geometry_probe(self) -> None:
-        """EXP-30 Step-A geometry-probe hook point (strict no-op when disabled).
+        """Geometry-probe hook point (strict no-op when disabled).
 
         Sits AFTER the grad-correction hook and BEFORE ``optimizer_step`` — the
         point where the fast compressed per-target gradient ``G_comp(t)`` is
@@ -210,7 +210,7 @@ class BaseEngine:
         # EMA, BEFORE the masked fast path. No-op when disabled.
         self._maybe_comm_eff_anchor_refresh(data, loss_function)
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
-        # EXP-26 Step A: capture the parallel UNCOMPRESSED G_dense (on an isolated
+        # Capture the parallel UNCOMPRESSED G_dense (on an isolated
         # clone) alongside the live compressed G_comp, BEFORE the merger rewrites
         # the grads. Strict no-op unless comm_eff.capture.capture_g_dense=true.
         # Dump-only — never touches the optimizer.
@@ -219,10 +219,9 @@ class BaseEngine:
         # backward and before the optimizer step, so it would correct grads in
         # place; disabled => grads are untouched.
         self._maybe_comm_eff_grad_correction()
-        # EXP-30 Step A: geometry probe — per-tick G_comp staging + per-fire
-        # m1–m7 record, AFTER correction (inert on Step A by config contract)
-        # and BEFORE the optimizer step. Telemetry-only; strict no-op unless
-        # comm_eff.probe.geometry_enabled.
+        # Geometry probe: per-tick G_comp staging plus per-fire metrics, after
+        # correction and before the optimizer step. Telemetry-only; strict no-op
+        # unless comm_eff.probe.geometry_enabled.
         self._maybe_comm_eff_geometry_probe()
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():

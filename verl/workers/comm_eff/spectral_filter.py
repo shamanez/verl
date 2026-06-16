@@ -12,33 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Anchor-guided correction of compressed (masked) gradients.
+"""Anchor-guided correction of compressed gradients.
 
-The live correction is the **signed-EMA merger** (EXP-25/R3). For a single
-targeted 2D gradient matrix ``G_noisy`` (the fast, activation-compressed
-gradient) with a running anchor-gradient EMA ``M_anchor``::
+The filter stores a per-target anchor-gradient EMA ``M_anchor`` and applies the
+selected ``correction_mode`` to the fast compressed gradient before the optimizer
+step. Supported modes are ``delayed_ef``, ``ef_powersgd``, ``signed_ema``,
+``inject``, ``blend`` and ``none``.
 
-    M_anchor = beta_anc * M_anchor + (1 - beta_anc) * G_anchor    # anchor EMA
-    G_corr   = alpha * G_noisy + (1 - alpha) * |G_noisy| * sign(M_anchor)
+``delayed_ef`` is the paired-replay codec-residual path::
 
-The MAGNITUDE comes from the fast compressed gradient ``G_noisy``; the SIGN
-comes from the β-EMA of the K-stale unmasked anchor gradient ``M_anchor``.
-``alpha`` (``signed_ema_alpha``) is the swept axis: ``alpha=0`` ⇒ pure
-``|G_noisy|·sign(M)``; ``alpha=1`` ⇒ ``G_noisy`` unchanged. A matrix-level
-cold-M guard returns ``G_noisy`` unchanged whenever ``M`` is unwarmed/zero, so
-the merger never silently zeroes a gradient (see :meth:`SpectralFilter.signed_ema_matrix`).
+    delta(t)  = M_rep - G_comp_ring(t - K)
+    G_corr(t) = G_comp(t) + lambda * delta(t)
 
-Two older anchor combiners remain available via ``correction_mode``:
-
-* ``inject`` — additive injection of the scale-matched anchor complement
-  (:meth:`SpectralFilter.inject_matrix`).
-* ``blend`` — convex blend toward the scale-matched anchor
-  (:meth:`SpectralFilter.blend_matrix`).
-
-All three combiners consult ONLY the anchor-gradient EMA ``M_anchor`` (no SVD,
-no basis cache). The initial SVD/Tikhonov/two-sided-projection "reweight"
-method and its seeded-anchor cache were removed (EXP-25) — they were the dead
-spectral-correction path the project no longer uses.
+The residual refreshes at anchor fires and is held between fires. A matrix-level
+cold-M guard returns the fast gradient unchanged whenever the anchor value is
+unwarmed or shape-mismatched, so the correction path never silently zeroes or
+invents a gradient.
 
 FSDP note: this module operates purely on **logical 2D matrices**. It knows
 nothing about FSDP, ``DTensor``, ``FlatParameter`` or sharding. The engine-side
@@ -85,7 +74,7 @@ def _canon(name: str) -> str:
     """
     name = name.replace("._fsdp_wrapped_module", "")
     if name.startswith("_fsdp_wrapped_module."):
-        name = name[len("_fsdp_wrapped_module."):]
+        name = name[len("_fsdp_wrapped_module.") :]
     return name
 
 
@@ -93,10 +82,9 @@ class SpectralFilter:
     """Stateful per-target anchor-guided gradient corrector (anchor-EMA + merger).
 
     Holds the running anchor-gradient EMA ``M_anchor`` for every targeted
-    matrix, keyed by parameter name, and applies the correction on demand. The
-    live correction is the signed-EMA merger (``correction_mode="signed_ema"``);
-    ``inject`` and ``blend`` are alternate anchor combiners. All of them consult
-    only ``M_anchor`` — there is no SVD/basis state.
+    matrix, keyed by parameter name, and applies the selected correction on
+    demand. All correction modes consult only logical 2D matrices; FSDP-specific
+    extraction and writeback stay in the engine.
 
     The anchor EMA cold-starts at zeros (``ensure_anchor``) and is populated by
     the live anchor circuit via :meth:`update_anchor`. Until ``M_anchor`` is
@@ -136,15 +124,13 @@ class SpectralFilter:
         # filter is built the values are known-good — assert defensively anyway.
         assert ema_device in ("gpu", "cpu"), ema_device
         # Correction mode (the anchor combiner the fast-path grad uses):
-        # "none" (EXP-30 Step A) = INERT — the M EMA is still maintained
-        # (β_anc=0 ⇒ M_rep = latest paired G_anc_rep) but NO correction is ever
-        # applied or written back; the optimizer consumes the raw G_comp;
+        # "none" = inert; the M EMA is still maintained but no correction is
+        # applied or written back and the optimizer consumes the raw G_comp;
         # "inject" = additive injection of the scale-matched anchor complement;
         # "blend" = convex blend toward the scale-matched anchor;
-        # "signed_ema" (EXP-25/R3) = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M);
-        # "ef_powersgd" (EXP-26 Step B) = direction-preserving error-feedback,
-        # G_corr = G_comp + clipped-residual, NO sign term;
-        # "delayed_ef" (EXP-30 B2) = K-delayed exact codec residual,
+        # "signed_ema" = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M);
+        # "ef_powersgd" = direction-preserving error feedback;
+        # "delayed_ef" = K-delayed exact codec residual,
         # G_corr = G_comp + lambda*(M_rep - G_comp_ring(t-K)), delta refreshed at
         # anchor fires and HELD between them.
         # Validated in CommEffConfig.__post_init__; assert defensively here too.
@@ -155,131 +141,90 @@ class SpectralFilter:
         self.correction_mode = str(correction_mode)
         self.inject_gamma = float(inject_gamma)
         self.blend_eta = float(blend_eta)
-        # EXP-25 (R3): the signed_ema merger weight alpha.
+        # signed_ema merger weight alpha.
         self.signed_ema_alpha = float(signed_ema_alpha)
-        # EXP-26 Step B: error-feedback residual knobs. decay=clip=0 ⇒ the merger
-        # reduces to plain PowerSGD (G_corr == G_comp) — the limiting-case identity.
+        # Error-feedback residual knobs. decay=clip=0 reduces to plain PowerSGD.
         self.ef_decay = float(ef_decay)
         self.ef_clip = float(ef_clip)
-        # EXP-30 B2: the delayed_ef residual weight λ. 0.0 (default, OFF/legacy
-        # posture) ⇒ delayed_ef_matrix returns G_comp EXACTLY (the limiting-case
-        # identity invariant); the B2 cell sets λ=1.0 explicitly.
+        # delayed_ef residual weight. 0.0 returns G_comp exactly.
         self.delayed_ef_lambda = float(delayed_ef_lambda)
-        # EXP-31 Cell D: additive stale-anchor rank-r sub-basis folded into the
-        # delayed_ef correction term. ``delta_subbasis_rank`` r_sb > 0 enables the
-        # NEW additive term ``δ_subbasis = rank_{r_sb}(S)`` where the source S is
-        # the act-deflated stale weight-gradient (``family="tail"``, S = δ_B2) or
-        # the raw stale anchor gradient (``family="grad"``, S = M_rep). r_sb = 0
-        # (default) SKIPS the sub-basis branch entirely (the rank-0 path is the
-        # EXACT B2 path, bitwise — Correctness invariant "off-path parity"). The
-        # sub-basis enters ONLY the correction δ (the forward codec Q is never
-        # read/written here ⇒ Step-C avoidance by construction). Validated in
-        # CommEffConfig.__post_init__; assert defensively here too.
+        # Optional additive stale-anchor rank-r sub-basis folded into the
+        # delayed_ef correction term. r_sb=0 skips the branch entirely. The
+        # sub-basis enters only the correction; the forward codec Q is untouched.
         self.delta_subbasis_rank = int(delta_subbasis_rank)
         assert self.delta_subbasis_rank >= 0, self.delta_subbasis_rank
         assert delta_subbasis_family in ("tail", "grad"), delta_subbasis_family
         self.delta_subbasis_family = str(delta_subbasis_family)
-        # EXP-31 Cell D γ-knob: the over-amplification fix. ``delta_subbasis_weight``
-        # (γ) scales the additive δ_subbasis term; ``delta_subbasis_decay_steps`` (D)
-        # linearly decays it to 0 over training, AFTER an optional HOLD of
-        # ``delta_subbasis_hold_steps`` (H) steps at full weight (the shelf-then-ramp
-        # schedule: γ_t = weight·1 for step<H, then weight·max(0, 1 − (step−H)/D);
-        # the constant ``weight`` when D <= 0). weight=1.0, decay_steps=0 (defaults)
-        # ⇒ γ_t == 1.0 always = the EXACT current Cell D behaviour; weight=0 ⇒ γ_t==0
-        # ⇒ correction == δ_B2 (== B2); hold_steps=0 (default) reproduces the existing
-        # linear-from-step-0 decay BITWISE. γ_t is a SCALAR on the (already
-        # deterministic, DP-mean) δ_subbasis — no new RNG (the seeded SVD is
-        # untouched). ``current_step`` is the TRAINING step the decay schedule reads;
-        # the engine sets it each grad-correction step (apply_spectral_correction_to_params)
-        # from ``state.global_step``. Defaults 0 ⇒ at construction γ_t = weight
-        # (decay starts at the first step). Validated in CommEffConfig.__post_init__;
-        # assert defensively here too.
+        # Sub-basis weight and optional hold-then-decay schedule. The scalar
+        # gamma_t scales the deterministic DP-mean sub-basis and does not affect
+        # the seeded SVD. current_step is stamped by the engine before correction.
         self.delta_subbasis_weight = float(delta_subbasis_weight)
         assert self.delta_subbasis_weight >= 0.0, self.delta_subbasis_weight
         self.delta_subbasis_decay_steps = int(delta_subbasis_decay_steps)
         assert self.delta_subbasis_decay_steps >= 0, self.delta_subbasis_decay_steps
-        # EXP-31 hold-then-decay: H = steps γ holds at full weight before decaying.
-        # 0 (default) ⇒ the existing linear-from-0 decay (bitwise). >= 0.
+        # Number of steps gamma holds at full weight before decaying.
         self.delta_subbasis_hold_steps = int(delta_subbasis_hold_steps)
         assert self.delta_subbasis_hold_steps >= 0, self.delta_subbasis_hold_steps
         # The current TRAINING step (set by the engine each grad-correction step;
         # read by delayed_ef_matrix to compute the decay factor). 0 until set.
         self.current_step = 0
-        # EXP-31 Cell D: base seed for the per-target randomized SVD generator.
+        # Base seed for the per-target randomized SVD generator.
         # The low-rank sub-basis is built with ``torch.svd_lowrank`` (randomized),
-        # whose result depends on a random projection. δ_B2 / M_rep are already
-        # DP-MEAN-identical across ranks, so to keep δ_subbasis BIT-IDENTICAL
+        # whose result depends on a random projection. The source matrices are
+        # DP-mean-identical across ranks, so to keep the sub-basis bit-identical
         # across DP ranks the random projection MUST be seeded deterministically
         # (same on every rank). We mix this base_seed with a per-target salt
         # derived from the target name (see ``_subbasis_seed``) so each target
         # gets its own reproducible generator while staying cross-rank identical.
         self.base_seed = int(base_seed)
-        # EXP-31 surpass lever: zero-mean, σ-scaled, cross-rank-identical gradient
-        # perturbation added AFTER the delayed_ef correction term. ``perturb_sigma``
-        # σ = 0.0 (default, OFF) ⇒ the perturbation branch is SKIPPED entirely ⇒
-        # ``delayed_ef_matrix`` returns the EXACT delayed_ef / Cell-D g_corr bitwise
-        # (off-path parity; composes with rank-0 ⇒ bitwise-B2). The noise direction
-        # ξ is drawn from a per-(perturb_seed, target, current_step) seed that is a
+        # Optional zero-mean, sigma-scaled, cross-rank-identical perturbation added
+        # after the delayed_ef correction. sigma=0 skips the branch. The noise
+        # direction is drawn from a per-(perturb_seed, target, current_step) seed that is a
         # pure function of those three — NO rank/device-local state — so every DP
-        # rank draws the SAME ξ (the multi-rank-agreement invariant; else the ranks
+        # rank draws the SAME direction (the multi-rank-agreement invariant; else the ranks
         # would descend in DIFFERENT directions and diverge). Fresh per step ⇒
-        # zero-mean over training. σ relative to ‖g_corr‖ ⇒ scale-free / tunable.
-        # Validated in CommEffConfig.__post_init__; assert defensively here too.
+        # zero-mean over training.
         self.perturb_sigma = float(perturb_sigma)
         assert self.perturb_sigma >= 0.0, self.perturb_sigma
         self.perturb_seed = int(perturb_seed)
-        # EXP-31 surpass lever: per-step count of targets the perturbation was
-        # APPLIED to (reset by the engine loop where the other delayed_ef counters
-        # reset). 0 on the OFF path (σ=0) and on cold/skip ticks.
+        # Per-step count of targets the perturbation was applied to.
         self.delayed_ef_perturb_applied = 0
-        # EXP-31 L2 δ-momentum (NORMALIZED EMA, stationary gain EXACTLY 1). μ=0.0
-        # (default, OFF) ⇒ the momentum branch is SKIPPED entirely ⇒ correction == δ
-        # bitwise (off-path parity). The normalized recurrence m ← μ·m + (1−μ)·δ has
-        # stationary gain 1 (constant δ ⇒ m→δ) — a re-weighting, NOT the forbidden
-        # naive m←μ·m+δ (gain 1/(1−μ)=10× ignition dead-end). age_decay fades the
-        # APPLIED held correction by μ**age so it → 0 when fires stop (async
-        # staleness-degrade). Validated in CommEffConfig.__post_init__; assert
-        # defensively here too.
+        # Normalized delta-momentum. mu=0 skips the branch. The recurrence
+        # m <- mu*m + (1-mu)*delta has stationary gain 1 for a constant delta.
+        # age_decay fades the applied held correction by mu**age.
         self.delta_momentum_mu = float(delta_momentum_mu)
         assert 0.0 <= self.delta_momentum_mu < 1.0, self.delta_momentum_mu
         assert isinstance(delta_momentum_age_decay, bool), delta_momentum_age_decay
         self.delta_momentum_age_decay = bool(delta_momentum_age_decay)
-        # Per-target δ-momentum EMA buffer m (detached fp32, EMA-storage device,
-        # shape-keyed reset — mirrors _delayed_ef_delta). Built from the DP-mean δ ⇒
-        # cross-rank identical. Empty (and untouched) on the OFF path.
+        # Per-target delta-momentum EMA buffer m, detached fp32 and shape-keyed.
         self._delta_momentum: dict[str, torch.Tensor] = {}
         # Per-target last REFRESH step (the optimizer/training step at which m was
         # last accumulated), used by age_decay to fade the held correction by the
         # number of ticks since the last fire. Pure scalar bookkeeping, cross-rank
         # identical (current_step is DP-identical).
         self._delta_momentum_last_step: dict[str, int] = {}
-        # Per-step count of targets the momentum buffer was applied to (reset by the
-        # engine loop). 0 on the OFF path (μ=0).
+        # Per-step count of targets the momentum buffer was applied to.
         self.delayed_ef_momentum_applied = 0
-        # EXP-31 L3 adaptive dose (MEAN-1 CENTERED gate). mode="off" OR κ=0.0
-        # (defaults) ⇒ λ_t ≡ delayed_ef_lambda (constant) ⇒ bitwise B2. λ_t =
-        # clamp(λ + κ·(c̄ − c_t), 0, lambda_cap) where c̄ is the running median of the
-        # per-target agreement c_t over a bounded history ⇒ E[λ_t]≈λ (mean-1
-        # centered). c_t / c̄ / λ_t are built from the DP-mean G_comp + M_rep ⇒
-        # cross-rank identical. Validated in CommEffConfig.__post_init__; assert
-        # defensively here too.
+        # Adaptive dose. mode="off" or kappa=0 keeps lambda_t constant. Otherwise
+        # lambda_t = clamp(lambda + kappa*(median(c)-c_t), 0, lambda_cap), using
+        # DP-mean inputs so all ranks agree.
         assert adaptive_lambda_mode in ("off", "cos", "ratio"), adaptive_lambda_mode
         self.adaptive_lambda_mode = str(adaptive_lambda_mode)
         self.adaptive_lambda_kappa = float(adaptive_lambda_kappa)
         assert self.adaptive_lambda_kappa >= 0.0, self.adaptive_lambda_kappa
         self.lambda_cap = float(lambda_cap)
         assert self.lambda_cap >= 0.0, self.lambda_cap
-        # Per-target bounded agreement history (last 64 c_t) for the running median
-        # c̄. A deque of plain Python floats (no tensor, no rank-local state) keyed by
+        # Per-target bounded agreement history for the running median. A deque of
+        # plain Python floats (no tensor, no rank-local state) keyed by
         # canonical target name. Empty (and untouched) on the OFF path.
-        self._adaptive_lambda_hist: dict[str, "deque[float]"] = {}
+        self._adaptive_lambda_hist: dict[str, deque[float]] = {}
         # The fixed history bound (last N c_t feeding the median c̄).
         self._adaptive_lambda_hist_len = 64
         # Per-step sum + count of the applied λ_t (reset by the engine loop) so the
         # engine can log the mean λ_t. 0 on the OFF path (λ_t≡λ, branch not taken).
         self.delayed_ef_adaptive_lambda_applied = 0
         self._adaptive_lambda_sum = 0.0
-        # EXP-30 B2: per-target HELD residual δ (detached fp32, EMA-storage
+        # Per-target held delayed_ef residual, detached fp32 on the EMA-storage
         # device). Refreshed when a fire-aligned ring entry exists (the anchor
         # just refreshed M_rep AND G_comp_ring(t−K) is the exact pair), HELD on
         # the in-between ticks, shape-keyed reset. β_anc=0 keeps zero EMA memory
@@ -289,19 +234,18 @@ class SpectralFilter:
         # REFRESHED δ this step vs reused the held one vs fell back cold.
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
-        # EXP-31 Cell D: per-step counters (reset by the engine loop): how many
+        # Per-step counters: how many
         # targets had the additive sub-basis APPLIED vs SKIPPED because the
         # randomized SVD was degenerate (zero/NaN source, r_sb > min-dim, etc.).
         self.delayed_ef_subbasis_applied = 0
         self.delayed_ef_subbasis_skipped = 0
-        # EXP-31 Cell D: per-fire ‖δ_subbasis‖/‖δ_B2‖ ratios collected this step
-        # (so the engine loop can log the median on the existing delayed_ef line).
+        # Per-fire ||delta_subbasis||/||delta|| ratios collected this step.
         self._subbasis_energy_ratios: list[float] = []
-        # EXP-25 (R3): per-step count of matrices whose M was cold (||M||<=eps) so
+        # Per-step count of matrices whose M was cold (||M||<=eps) so
         # the merger no-op'd to G_noisy (the silent grad-zeroing guard). Reset by
         # the engine each grad-correction step before the loop.
         self.merger_coldM_fallbacks = 0
-        # EXP-26: per-step count of ef_powersgd targets whose accumulated residual
+        # Per-step count of ef_powersgd targets whose accumulated residual
         # e_t was RESET because the target's logical 2D shape changed (no stale
         # carry across a shape change). Reset by the engine each grad-correction
         # step before the loop.
@@ -310,7 +254,7 @@ class SpectralFilter:
         # ema_device=gpu; on (pinned) CPU when ema_device=cpu (moved to the
         # gradient's device only inside update_anchor / the combiner).
         self._anchor: dict[str, torch.Tensor] = {}
-        # EXP-26 Step B: per-target accumulated error-feedback residual e_t
+        # Per-target accumulated error-feedback residual e_t
         # (detached fp32). Lives on the EMA storage device; shape-keyed reset.
         # Used ONLY by ef_powersgd; never read by the optimizer directly.
         self._ef_residual: dict[str, torch.Tensor] = {}
@@ -400,16 +344,18 @@ class SpectralFilter:
         anc_norm = torch.linalg.norm(anc)
         if anc_norm <= eps or gm_norm <= eps:
             return g_mask  # anchor not warmed / zero grad → no-op
-        coeff = (gm * anc).sum() / (gm_norm * gm_norm + eps)   # <G_mask,M_anchor>/||G_mask||^2
+        coeff = (gm * anc).sum() / (gm_norm * gm_norm + eps)  # <G_mask,M_anchor>/||G_mask||^2
         complement = anc - coeff * gm
         scale = gm_norm / (anc_norm + eps)
         g_corr = gm + self.inject_gamma * scale * complement
         # Diagnostic: cosine(G_mask, M_anchor) — measures orthogonality on the LIVE anchor.
         cos = (coeff * gm_norm / (anc_norm + eps)).item()
-        print(f"[comm_eff][EXP-18][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
-              f"gamma={self.inject_gamma} scale={scale.item():.4f} "
-              f"||inj||/||G_mask||={(torch.linalg.norm(self.inject_gamma*scale*complement)/(gm_norm+eps)).item():.4f}",
-              flush=True)
+        inj_ratio = (torch.linalg.norm(self.inject_gamma * scale * complement) / (gm_norm + eps)).item()
+        print(
+            f"[comm_eff][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
+            f"gamma={self.inject_gamma} scale={scale.item():.4f} ||inj||/||G_mask||={inj_ratio:.4f}",
+            flush=True,
+        )
         return g_corr.to(g_mask.dtype)
 
     def blend_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
@@ -437,21 +383,21 @@ class SpectralFilter:
         g_corr = (1.0 - eta) * gm + eta * scale * anc
         # Diagnostic: cosine(G_mask, M_anchor) on the LIVE anchor + magnitude ratio.
         cos = ((gm * anc).sum() / (gm_norm * anc_norm + eps)).item()
-        print(f"[comm_eff][EXP-18][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
-              f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
-              flush=True)
+        print(
+            f"[comm_eff][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
+            f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
+            flush=True,
+        )
         return g_corr.to(g_mask.dtype)
 
     def signed_ema_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
-        """EXP-25 (R3) signed-EMA merger: ``G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)``.
+        """Signed-EMA merger: ``G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M)``.
 
-        The SL-validated merger. The MAGNITUDE comes from the fast compressed
-        gradient ``G_noisy`` (= ``g_mask``), the SIGN from the β-EMA of the
-        K-stale anchor gradient ``M_anchor`` (NOT the fresh full gradient).
-        ``α`` (``signed_ema_alpha``) is the swept axis; ``α=0`` ⇒ pure
-        ``|G_noisy|·sign(M)`` (the SFT default), ``α=1`` ⇒ ``G_noisy`` unchanged.
+        The magnitude comes from the fast compressed gradient ``G_noisy``
+        (``g_mask``), while the sign comes from the anchor EMA ``M_anchor``.
+        ``alpha=0`` gives the pure sign-merger; ``alpha=1`` returns ``G_noisy``.
 
-        **COLD-M FALLBACK (MANDATORY — silent grad-zeroing guard).** Mirrors the
+        **COLD-M FALLBACK.** Mirrors the
         cold-anchor guard in :meth:`blend_matrix` (``if anc_norm <= eps: return
         g_mask``). When ``M[name]`` is unwarmed/zero (the first ``delay_K`` steps
         before the first anchor refresh, and any matrix ``M`` does not cover),
@@ -485,16 +431,14 @@ class SpectralFilter:
         return g_corr.to(g_mask.dtype)
 
     def ef_powersgd_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
-        """EXP-26 Step B: direction-PRESERVING error-feedback PowerSGD merger.
+        """Direction-preserving error-feedback PowerSGD merger.
 
         ``G_corr = G_comp + e_t`` where ``e_t`` is the accumulated, decayed,
         norm-clipped OFF-SUBSPACE residual — the component of the stale anchor EMA
-        ``M_anchor`` that ``G_comp`` (= ``g_mask``) does NOT already span (exactly
-        the low-rank-compression bias the audit measures). There is **NO sign
+        ``M_anchor`` that ``G_comp`` (= ``g_mask``) does NOT already span. There is **NO sign
         term**: the correction only ADDS the dropped off-principal energy, so
         ``G_corr`` keeps ``G_comp``'s direction/sign (direction-preserving, not
-        sign-replacing — the EXP-25 ``signed_ema`` failure mode is structurally
-        excluded).
+        sign-replacing).
 
         Update (per targeted matrix, all detached fp32)::
 
@@ -570,7 +514,7 @@ class SpectralFilter:
         return g_corr.to(g_mask.dtype)
 
     # ------------------------------------------------------------------ #
-    # EXP-31 Cell D: additive stale-anchor sub-basis (weight-gradient tail)
+    # Additive stale-anchor sub-basis (weight-gradient tail)
     # ------------------------------------------------------------------ #
     def _subbasis_seed(self, name: str) -> int:
         """Deterministic per-target seed for the randomized SVD generator.
@@ -579,7 +523,7 @@ class SpectralFilter:
         canonical target name so (a) every target gets its OWN reproducible
         generator and (b) the seed is a pure function of (base_seed, name) — it
         contains NO rank-local / device-local state — so it is IDENTICAL on every
-        DP rank. Because the source ``S`` (δ_B2 or M_rep) is already DP-MEAN
+        DP rank. Because the source ``S`` (delta or M_rep) is already DP-MEAN
         identical across ranks, a rank-invariant seed makes ``torch.svd_lowrank``
         return bit-identical columns on every rank (the multi-rank-agreement
         invariant). The salt is a stable non-cryptographic hash of the canonical
@@ -596,7 +540,7 @@ class SpectralFilter:
 
         Returns ``U[:, :r] diag(s[:r]) V[:, :r]ᵀ`` (fp32, detached, on
         ``source``'s device, ``source``'s shape) — the dominant rank-``r``
-        direction of the source, which for ``family="tail"`` (source = δ_B2 =
+        direction of the source, which for ``family="tail"`` (source = delta =
         the act-deflated stale weight gradient) is exactly the off-act-principal
         direction the activation codec structurally drops, and for
         ``family="grad"`` (source = M_rep) is the raw stale-anchor top-``r``.
@@ -606,8 +550,8 @@ class SpectralFilter:
         are bit-identical across DP ranks (the source is already DP-mean
         identical). ``niter=2`` matches the act-basis block-power-iteration depth.
 
-        Shape-guarded: returns ``None`` (the caller counts a SKIP and folds in
-        the plain B2 δ unchanged) when the source is degenerate — non-finite,
+        Shape-guarded: returns ``None`` (the caller counts a skip and folds in
+        the plain delta unchanged) when the source is degenerate — non-finite,
         ~zero-norm, fewer than ``r`` usable directions (``r > min(shape)``), or
         not 2D — so a pathological target never injects garbage or raises.
         """
@@ -673,7 +617,7 @@ class SpectralFilter:
         return mixed
 
     def _apply_perturbation(self, name: str, g: torch.Tensor) -> torch.Tensor:
-        """EXP-31 surpass lever: add zero-mean, σ-scaled, cross-rank-identical noise.
+        """Add zero-mean, sigma-scaled, cross-rank-identical noise.
 
         ``g_corr ← g_corr + σ·‖g_corr‖·ξ`` where ξ is a UNIT-normalized isotropic
         Gaussian drawn from a per-(perturb_seed, target, step) seed (so the
@@ -711,12 +655,11 @@ class SpectralFilter:
         return g + perturbation
 
     def _subbasis_gamma(self) -> float:
-        """EXP-31 Cell D γ-knob: the sub-basis weight γ_t at ``self.current_step``.
+        """Sub-basis weight gamma_t at ``self.current_step``.
 
         ``γ_t = delta_subbasis_weight · decay_factor`` — a HOLD-then-decay schedule
-        (the targeted fix: preserve r2's early lead via the hold shelf AND finish
-        clean via the decay ramp). With ``h = delta_subbasis_hold_steps``,
-        ``d = delta_subbasis_decay_steps``, ``s = current_step``::
+        with ``h = delta_subbasis_hold_steps``, ``d = delta_subbasis_decay_steps``,
+        ``s = current_step``::
 
             decay_factor = 1.0                              if d <= 0   (constant γ = weight)
                          = 1.0                              if s < h    (the HOLD shelf)
@@ -724,14 +667,10 @@ class SpectralFilter:
 
         i.e. γ holds at the full ``weight`` for steps ``0..h-1``, then decays
         linearly to 0 over the next ``d`` steps (reaching 0 at ``s == h + d``,
-        clamped at 0 past the horizon). With the DEFAULTS (``weight=1.0,
-        decay_steps=0``) this is a constant ``1.0`` ⇒ the sub-basis enters at full
-        weight every step (the EXACT current Cell D behaviour). With ``hold_steps=0``
-        (default) the shelf is empty (``s < 0`` is never true) ⇒ the schedule
-        reduces to the EXISTING linear-from-step-0 decay ``max(0, 1 − s/d)``
-        EXACTLY (bitwise). ``weight=0`` ⇒ ``γ_t == 0`` ⇒ the sub-basis term
-        vanishes (the correction reduces to δ_B2 == B2). A pure scalar — no RNG,
-        no effect on the seeded δ_subbasis SVD.
+        clamped at 0 past the horizon). With ``decay_steps=0`` this is a constant
+        ``weight``. With ``hold_steps=0`` the shelf is empty and the schedule starts
+        decaying immediately. ``weight=0`` skips the sub-basis term. This scalar
+        has no effect on the seeded sub-basis SVD.
         """
         w = self.delta_subbasis_weight
         d = self.delta_subbasis_decay_steps
@@ -748,15 +687,14 @@ class SpectralFilter:
         return float(w) * decay_factor
 
     # ------------------------------------------------------------------ #
-    # EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1)
+    # Delta momentum (normalized EMA, stationary gain 1)
     # ------------------------------------------------------------------ #
     def _apply_delta_momentum(self, name: str, delta: torch.Tensor, refreshed: bool) -> torch.Tensor:
         """Return the correction after the normalized-EMA δ-momentum transform.
 
-        OFF-GUARD (critical): ``delta_momentum_mu == 0.0`` ⇒ the momentum branch is
-        SKIPPED ENTIRELY — ``delta`` is returned UNCHANGED (the same object) and NO
-        buffer is touched, so the correction is bitwise-identical to B2 (off-path
-        parity). ``name`` is assumed ALREADY canonicalized by the caller.
+        OFF-GUARD: ``delta_momentum_mu == 0.0`` skips the branch, returns
+        ``delta`` unchanged, and touches no buffer. ``name`` is assumed already
+        canonicalized by the caller.
 
         NORMALIZED EMA (stationary gain EXACTLY 1):
 
@@ -764,8 +702,8 @@ class SpectralFilter:
           recomputed from the exact (batch, θ) pair): accumulate
           ``m ← μ·m + (1−μ)·δ`` (first fire for this target: ``m = δ.clone()``), then
           the correction is ``m``. The stationary gain of this recurrence is EXACTLY
-          1 (a constant δ stream drives ``m → δ``), a re-weighting — NOT the forbidden
-          naive ``m ← μ·m + δ`` (gain ``1/(1−μ)`` = the constant-λ>1 ignition dead-end).
+          1 (a constant δ stream drives ``m -> δ``), a re-weighting rather than a
+          gain increase.
           The accumulation happens ONLY at refresh ticks (δ is HELD between fires in
           :meth:`delayed_ef_matrix`; accumulating every tick would re-add the same δ
           ~5× — explicitly forbidden by the plan).
@@ -786,7 +724,7 @@ class SpectralFilter:
         """
         mu = self.delta_momentum_mu
         if mu == 0.0:
-            return delta  # OFF: bitwise-B2 correction, no buffer touched.
+            return delta  # OFF: no buffer touched.
 
         # Shape-keyed reset (mirror the held-δ guard): a logical-shape change drops
         # the stale buffer + its last-refresh bookkeeping so nothing cross-shape leaks.
@@ -826,20 +764,20 @@ class SpectralFilter:
                 age = 0
             # APPLIED-only scaling: the stored buffer is unchanged; only this tick's
             # injected correction fades by μ**age so a long hold → 0 (async degrade).
-            correction = correction * (mu ** age)
+            correction = correction * (mu**age)
         self.delayed_ef_momentum_applied += 1
         return correction
 
     # ------------------------------------------------------------------ #
-    # EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate)
+    # Adaptive dose (centered gate)
     # ------------------------------------------------------------------ #
     def _adaptive_lambda(self, name: str, gm: torch.Tensor, anc: torch.Tensor, delta_raw: torch.Tensor) -> float:
         """Return the per-target, per-tick dose ``λ_t`` (MEAN-1 CENTERED gate).
 
-        OFF-GUARD (critical): ``adaptive_lambda_mode == "off"`` OR
+        OFF-GUARD: ``adaptive_lambda_mode == "off"`` OR
         ``adaptive_lambda_kappa == 0.0`` ⇒ ``λ_t = self.delayed_ef_lambda`` (the
-        constant B2 dose) and NO history is touched, so the final ``g_corr`` is
-        bitwise-identical to B2. ``name`` is assumed ALREADY canonicalized.
+        constant dose) and no history is touched. ``name`` is assumed already
+        canonicalized.
 
         When ON::
 
@@ -847,11 +785,10 @@ class SpectralFilter:
             c̄   = running MEDIAN of c_t over the last ``_adaptive_lambda_hist_len`` ticks
             λ_t = clamp(self.delayed_ef_lambda + κ·(c̄ − c_t), 0.0, lambda_cap)
 
-        MEAN-1 CENTERED: because ``c̄`` is the median of the very ``c_t`` stream, the
+        Centered: because ``c̄`` is the median of the very ``c_t`` stream, the
         deviation ``(c̄ − c_t)`` is centered at ~0 ⇒ ``E[λ_t] ≈ delayed_ef_lambda``
-        (=1). Only the step-to-step DEVIATION is the lever — NOT the forbidden naive
-        ``1 + κ(1 − cos)`` which, under this system's ``cos≈0`` geometry, would pin at
-        a constant ``1+κ`` (a disguised constant-λ>1 ignition dead-end).
+        for a stationary agreement distribution. Only the step-to-step deviation
+        changes the dose.
 
         ``c_t`` uses the RAW δ (captured BEFORE the L2 momentum transform). The
         history deque carries plain Python floats (no tensor / no rank-local state);
@@ -862,7 +799,7 @@ class SpectralFilter:
         """
         lam = float(self.delayed_ef_lambda)
         if self.adaptive_lambda_mode == "off" or self.adaptive_lambda_kappa == 0.0:
-            return lam  # OFF: constant B2 dose, no history touched.
+            return lam  # OFF: constant dose, no history touched.
 
         eps = 1e-12
         if self.adaptive_lambda_mode == "cos":
@@ -873,7 +810,7 @@ class SpectralFilter:
             gm_norm = torch.linalg.norm(gm)
             d_norm = torch.linalg.norm(delta_raw)
             c_t = float((d_norm / (gm_norm + eps)).item())
-        if not (c_t == c_t):  # NaN guard (non-finite agreement ⇒ fall back to B2 dose)
+        if not (c_t == c_t):  # NaN guard: fall back to the constant dose.
             return lam
 
         hist = self._adaptive_lambda_hist.get(name)
@@ -899,39 +836,38 @@ class SpectralFilter:
         return float(lam_t)
 
     def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor, ring_grad: Optional[torch.Tensor] = None):
-        """EXP-30 B2: K-delayed EXACT codec residual (the anchor-feasible EF analogue).
+        """K-delayed exact codec residual.
 
         ::
 
             δ(t)      = M_rep(t) − G_comp_ring(t−K)     # codec error on IDENTICAL (batch, θ)
             G_corr(t) = G_comp(t) + λ·δ                  # δ refreshed at fires, HELD between
 
-        **EXP-31 Cell D: additive stale-anchor sub-basis (γ-weighted).** When
+        **Additive stale-anchor sub-basis.** When
         ``delta_subbasis_rank`` (r_sb) > 0 AND the weight γ_t > 0, a rank-r_sb
         low-rank reconstruction of the source S is ADDED to the correction term,
         scaled by the (optionally decaying) weight γ_t::
 
-            δ_subbasis = rank_{r_sb}(S)                       # seeded randomized SVD
-            γ_t        = weight · (1 if step<hold_steps else max(0, 1−(step−hold_steps)/decay_steps))  # decay_steps>0; else weight
-            G_corr(t)  = G_comp(t) + λ·(δ + γ_t·δ_subbasis)   # forward Q UNCHANGED
+            delta_subbasis = rank_{r_sb}(S)                   # seeded randomized SVD
+            γ_t = weight · schedule(step, hold_steps, decay_steps)
+            G_corr(t)  = G_comp(t) + lambda*(delta + gamma_t*delta_subbasis)
 
-        ``weight=1.0, decay_steps=0`` (defaults) ⇒ γ_t == 1.0 always = the EXACT
-        Cell D path; ``weight=0`` ⇒ γ_t == 0 ⇒ the sub-basis branch is SKIPPED ⇒
-        ``correction == δ`` bitwise (== B2). γ_t is a scalar (no RNG) — see
+        ``weight=1.0, decay_steps=0`` keeps gamma_t at 1.0; ``weight=0`` skips the
+        sub-basis branch, leaving ``correction == delta``. gamma_t is a scalar; see
         :meth:`_subbasis_gamma`.
 
         ``family="tail"`` (default) takes ``S = δ`` (the act-deflated stale weight
         gradient = the off-act-principal direction the codec drops);
         ``family="grad"`` takes ``S = M_rep`` (the raw stale anchor gradient). The
         sub-basis enters ONLY this correction term — the forward/recon codec Q is
-        never read or written here, so Step-C is avoided by construction. r_sb = 0
+        never read or written here, so forward-basis updates are avoided. r_sb = 0
         (default) SKIPS the sub-basis branch ENTIRELY ⇒ ``G_corr = G_comp + λ·δ``
         bitwise (off-path parity). δ_subbasis is built from δ / M_rep (both
         DP-mean) via a per-target SEEDED randomized SVD, so it is bit-identical
         across DP ranks (determinism / multi-rank-agreement invariant).
 
         ``M_rep`` is the anchor EMA at ``β_anc=0`` — exactly the latest fire's
-        generator-consistent ``G_anc_rep`` (the EXP-29 paired replay gradient).
+        generator-consistent ``G_anc_rep`` from paired replay.
         ``ring_grad`` is the fast COMPRESSED gradient stored at tick ``t−K`` by
         the fire-aware :class:`~verl.workers.comm_eff.state.FastGradRing` — the
         SAME (batch, θ) pair the anchor just replayed, so δ is the codec's
@@ -944,7 +880,7 @@ class SpectralFilter:
         ``g_comp`` EXACTLY (the same tensor object — bitwise; no fp32 round
         trip), so ``delayed_ef`` at λ=0 is plain PowerSGD.
 
-        **Scale contract (the #25 mean-vs-sum trap).** ``M_rep`` is fed from the
+        **Scale contract.** ``M_rep`` is fed from the
         DP-MEAN-reduced anchor gradient and ``ring_grad`` from the FSDP-mean
         fast gradient under the same ``agg_loss`` normalization; this method
         applies no rescaling, so δ is well-scaled iff both feeds honor that —
@@ -1001,33 +937,30 @@ class SpectralFilter:
             self.merger_coldM_fallbacks += 1
             return g_comp
 
-        # EXP-31 L3 (adaptive dose) reads the RAW δ (BEFORE the L2 momentum transform)
+        # Adaptive dose reads the raw delta before the momentum transform
         # for its agreement metric c_t = ‖δ‖/‖gm‖, so capture it here; cos-mode reads
         # gm/anc directly. λ_t is computed AFTER the correction is finalized, but the
         # raw δ it depends on is this fire's exact codec residual, not the momentum
-        # buffer. (When L3 is OFF the helper returns the constant B2 dose, no-op.)
+        # buffer. When adaptive dose is off, the helper returns the constant dose.
         delta_raw = delta
 
-        # EXP-31 L2: δ-MOMENTUM (NORMALIZED EMA, stationary gain EXACTLY 1). When OFF
+        # Delta momentum. When off
         # (delta_momentum_mu == 0.0) the helper returns ``delta`` UNCHANGED (the same
-        # object) and touches NO buffer ⇒ the correction is bitwise-B2 (off-path
-        # parity). When ON, the per-target buffer m ← μ·m + (1−μ)·δ is accumulated
+        # object) and touches no buffer. When on, the per-target buffer m ← μ·m + (1−μ)·δ is accumulated
         # ONLY at refresh ticks (δ is HELD between fires) and the held buffer (faded
         # by age when age_decay) is the correction on the in-between ticks. The buffer
         # is the DP-mean δ ⇒ cross-rank identical. The rest of the function (sub-basis
         # branch + g_corr) then uses this transformed ``delta``.
         delta = self._apply_delta_momentum(name, delta, refreshed)
 
-        # EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (γ-weighted).
+        # Additive stale-anchor rank-r_sb sub-basis (gamma-weighted).
         # When OFF (delta_subbasis_rank == 0) OR the weight γ_t == 0 this branch is
-        # SKIPPED ENTIRELY (not computed-then-zeroed) so ``correction == delta`` is
-        # the EXACT B2 path (off-path-parity, bitwise — also the weight=0 limiting
-        # case). When ON, the source S is the act-deflated stale weight gradient δ
+        # skipped entirely (not computed-then-zeroed), so ``correction == delta``.
+        # When on, the source S is the act-deflated stale weight gradient δ
         # (family="tail") — the off-act-principal direction the codec misses — or
         # the raw stale anchor gradient M_rep (family="grad"); δ_subbasis =
-        # rank_{r_sb}(S) is added to δ SCALED by γ_t (the EXP-31 decay weight, a
-        # pure scalar — no RNG). The forward codec Q is never touched ⇒ Step-C
-        # avoidance by construction.
+        # rank_{r_sb}(S) is added to δ, scaled by gamma_t. The forward codec Q is
+        # never touched.
         gamma_t = self._subbasis_gamma() if self.delta_subbasis_rank > 0 else 0.0
         if self.delta_subbasis_rank > 0 and gamma_t != 0.0:
             source = delta if self.delta_subbasis_family == "tail" else anc
@@ -1037,35 +970,27 @@ class SpectralFilter:
                 self.delayed_ef_subbasis_applied += 1
                 _dn = float(torch.linalg.norm(delta).item())
                 if _dn > 1e-12:
-                    # ‖γ_t·δ_subbasis‖/‖δ_B2‖ — the EFFECTIVE injected energy ratio
+                    # ||gamma_t*delta_subbasis|| / ||delta||: the effective injected energy ratio
                     # (so the logged median reflects the decayed weight, not the raw
-                    # sub-basis). At γ_t=1 this is the original ‖δ_subbasis‖/‖δ_B2‖.
-                    self._subbasis_energy_ratios.append(
-                        abs(gamma_t) * float(torch.linalg.norm(delta_sb).item()) / _dn
-                    )
+                    # sub-basis).
+                    self._subbasis_energy_ratios.append(abs(gamma_t) * float(torch.linalg.norm(delta_sb).item()) / _dn)
             else:
-                # Degenerate source → fall back to the plain B2 δ (never garbage).
+                # Degenerate source: fall back to the plain delta.
                 correction = delta
                 self.delayed_ef_subbasis_skipped += 1
         else:
-            # rank-0 OR γ_t==0 ⇒ the EXACT B2 correction (bitwise; no SVD computed).
+            # rank-0 OR gamma_t==0: use the plain delta and skip the SVD.
             correction = delta
 
-        # EXP-31 L3: ADAPTIVE-DOSE (MEAN-1 CENTERED gate). The constant ``lam`` is
+        # Adaptive dose. The constant ``lam`` is
         # replaced by a per-target, per-tick λ_t = clamp(λ + κ·(c̄ − c_t), 0, cap)
         # built from the agreement c_t (cos(gm,anc) or ‖δ_raw‖/‖gm‖) and its running
-        # median c̄ ⇒ E[λ_t]≈λ (mean-1 centered). When OFF (mode="off" OR κ=0) the
-        # helper returns the constant ``self.delayed_ef_lambda`` and touches NO
-        # history ⇒ λ_t == lam ⇒ g_corr is bitwise-B2. c_t/c̄/λ_t are built from the
+        # median c̄. When off (mode="off" OR κ=0), the helper returns the constant
+        # ``self.delayed_ef_lambda`` and touches no history. c_t/c̄/λ_t are built from the
         # DP-mean gm + anc ⇒ cross-rank identical.
         lam_t = self._adaptive_lambda(name, gm, anc, delta_raw)
         g_corr = gm + lam_t * correction
-        # EXP-31 surpass lever: add the zero-mean σ-scaled cross-rank-identical
-        # perturbation. σ=0 (default) ⇒ _apply_perturbation returns g_corr UNCHANGED
-        # (the guard is checked twice — here for the no-call fast path and inside the
-        # helper — so the OFF path is the EXACT delayed_ef / Cell-D / B2 g_corr,
-        # bitwise). When σ>0 the perturbation is ‖σ·‖g_corr‖·ξ‖ in a unit direction
-        # ξ seeded by (perturb_seed, target, step) ⇒ identical on every DP rank.
+        # Optional zero-mean sigma-scaled cross-rank-identical perturbation.
         if self.perturb_sigma > 0.0:
             g_corr = self._apply_perturbation(name, g_corr)
         return g_corr.to(g_comp.dtype)
@@ -1087,7 +1012,7 @@ class SpectralFilter:
 def apply_spectral_correction_to_params(
     named_params,
     *,
-    spectral: "SpectralFilter",
+    spectral: SpectralFilter,
     target_substrs,
     max_targets: int,
     state,
@@ -1119,7 +1044,7 @@ def apply_spectral_correction_to_params(
 
     Returns the number of matrices corrected.
     """
-    # EXP-30 Step A: correction_mode="none" is INERT by contract — no per-target
+    # correction_mode="none" is inert by contract: no per-target
     # walk, no writeback, no counter bump; the optimizer consumes the raw
     # gradients untouched. (The engine hook also early-returns before the FSDP
     # summon for this mode; handling it here keeps the CPU-testable core safe
@@ -1129,15 +1054,15 @@ def apply_spectral_correction_to_params(
 
     instrumented = bool(state.fsdp_grad_repr)  # log discovery only once
     corrected = 0
-    # EXP-25 (R3): reset the per-step cold-M fallback counter before the loop so
+    # Reset the per-step cold-M fallback counter before the loop so
     # the [comm_eff][merger] line below reports THIS step's fallbacks (N==target
     # count on step 1 when M is cold, → 0 after M warms). Mirror it onto the
     # state so comm_eff metrics can surface it.
     spectral.merger_coldM_fallbacks = 0
-    # EXP-26 Step B: reset the per-step ef_powersgd residual-reset counter so the
+    # Reset the per-step ef_powersgd residual-reset counter so the
     # [comm_eff][merger] line + metrics report THIS step's shape-mismatch resets.
     spectral.residual_reset_on_shape_mismatch = 0
-    # EXP-30 B2: per-step delayed_ef refresh/hold counters + the fire-aware ring
+    # Per-step delayed_ef refresh/hold counters plus fire-aware ring
     # context, resolved ONCE before the loop. The ring lives on the state (built
     # by CommEffState.build when correction_mode=delayed_ef); the current tick is
     # the anchor's per-train_batch counter (the cadence/staleness clock). The
@@ -1148,23 +1073,23 @@ def apply_spectral_correction_to_params(
     # never see its own push).
     spectral.delayed_ef_refreshed = 0
     spectral.delayed_ef_held = 0
-    # EXP-31 Cell D: reset the per-step additive-sub-basis counters + the per-fire
-    # energy-ratio accumulator so the [comm_eff][EXP-30][delayed_ef] line reports
+    # Reset the per-step additive-sub-basis counters plus the per-fire
+    # energy-ratio accumulator so the [comm_eff][delayed_ef] line reports
     # THIS step's sub-basis activity. All zero on the OFF path (rank 0).
     spectral.delayed_ef_subbasis_applied = 0
     spectral.delayed_ef_subbasis_skipped = 0
     spectral._subbasis_energy_ratios = []
-    # EXP-31 surpass lever: reset the per-step perturbation-applied counter so the
-    # [comm_eff][EXP-30][delayed_ef] line reports THIS step's perturbation activity.
+    # Reset the per-step perturbation-applied counter so the
+    # [comm_eff][delayed_ef] line reports THIS step's perturbation activity.
     # 0 on the OFF path (perturb_sigma=0) and on cold/skip ticks.
     spectral.delayed_ef_perturb_applied = 0
-    # EXP-31 L2/L3: reset the per-step δ-momentum + adaptive-λ telemetry so the
-    # [comm_eff][EXP-30][delayed_ef] line reports THIS step's lever activity. All
+    # Reset per-step delta-momentum and adaptive-lambda telemetry so the
+    # [comm_eff][delayed_ef] line reports THIS step's lever activity. All
     # zero on the OFF paths (delta_momentum_mu=0 / adaptive_lambda_mode=off|κ=0).
     spectral.delayed_ef_momentum_applied = 0
     spectral.delayed_ef_adaptive_lambda_applied = 0
     spectral._adaptive_lambda_sum = 0.0
-    # EXP-31 Cell D γ-knob: stamp THIS step onto the filter so the sub-basis decay
+    # Stamp this step onto the filter so the sub-basis decay
     # schedule (``_subbasis_gamma``) reads the current training step. Cleanly wired
     # from state.global_step (the same counter the capture key uses below). Defaults
     # to 0 when the state lacks it (CPU-test ducks) ⇒ γ_t = weight at step 0. With
@@ -1185,14 +1110,16 @@ def apply_spectral_correction_to_params(
             _delay_K = int(getattr(_anc_cfg, "delay_K", _ring.delay_K)) if _anc_cfg is not None else _ring.delay_K
             _entry = _ring.get(_tick - _delay_K)
             _ring_entry_grads = _entry[0] if _entry is not None else None
-    # EXP-26 Step A: optional capture writer + the UNIFIED (gs, tick) key, threaded
+    # Optional capture writer and the unified (gs, tick) key, threaded
     # from the engine. None ⇒ no dump (the byte-identical path). The optimizer tick
     # is state.capture_tick() — the SINGLE per-train_batch tick stamped at the start
     # of the fast-path forward — so G_comp/G_corr co-locate with the powersgd-hook
     # A/Â/Q, the anchor M/G_anchor, and the parallel G_dense under ONE key.
     _cap = getattr(state, "_capture_writer", None)
     _cap_gs = int(getattr(state, "global_step", -1) or -1)
-    _cap_tick = int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0)
+    _cap_tick = (
+        int(state.capture_tick()) if hasattr(state, "capture_tick") else int(getattr(state, "spectral_step", 0) or 0)
+    )
 
     for name, p in named_params:
         grad = getattr(p, "grad", None)
@@ -1215,15 +1142,18 @@ def apply_spectral_correction_to_params(
             repr_log.update(discovery_meta)
             state.fsdp_grad_repr = repr_log
             logger.warning("comm_eff FSDP grad-repr discovery: %s", repr_log)
-            print(f"[comm_eff][EXP-7][FSDP-DISCOVERY] {repr_log}", flush=True)
+            print(f"[comm_eff][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
-        # EXP-26 Step A: dump G_comp (the merger INPUT — the fast compressed
+        # Dump G_comp, the merger input: the fast compressed
         # gradient) BEFORE any correction, detached/fp32. No-op when _cap is None.
         if _cap is not None:
             _cap.dump(
-                role="G_comp", target_name=name, tensor=full,
-                global_step=_cap_gs, optimizer_tick=_cap_tick,
+                role="G_comp",
+                target_name=name,
+                tensor=full,
+                global_step=_cap_gs,
+                optimizer_tick=_cap_tick,
             )
 
         _mode = getattr(spectral, "correction_mode", "signed_ema")
@@ -1236,7 +1166,7 @@ def apply_spectral_correction_to_params(
         elif _mode == "ef_powersgd":
             g_proj = spectral.ef_powersgd_matrix(name, full)
         elif _mode == "delayed_ef":
-            # EXP-30 B2: collect this tick's RAW pre-correction G_comp for the
+            # Collect this tick's raw pre-correction G_comp for the
             # fire-aware ring BEFORE correcting (the ring must hold the codec's
             # output, never the merged gradient), then apply the K-delayed
             # residual. CPU fp32 storage — the zero-GPU-growth invariant.
@@ -1254,17 +1184,20 @@ def apply_spectral_correction_to_params(
                 f"comm_eff spectral correction_mode={_mode!r} is not supported; "
                 "expected one of (none, inject, blend, signed_ema, ef_powersgd, delayed_ef)"
             )
-        # EXP-26 Step A: dump G_corr (post-merger, pre-Adam — what the optimizer
+        # Dump G_corr, post-merger and pre-Adam: what the optimizer
         # will consume after writeback), detached/fp32.
         if _cap is not None:
             _cap.dump(
-                role="G_corr", target_name=name, tensor=g_proj,
-                global_step=_cap_gs, optimizer_tick=_cap_tick,
+                role="G_corr",
+                target_name=name,
+                tensor=g_proj,
+                global_step=_cap_gs,
+                optimizer_tick=_cap_tick,
             )
         rel = spectral.relative_change(full, g_proj)
         state.spectral_rel_change[name] = rel
         print(
-            f"[comm_eff][EXP-7][spectral] {name} correction_mode={_mode} "
+            f"[comm_eff][spectral] {name} correction_mode={_mode} "
             f"rel_change=||G_proj-G_mask||/||G_mask||={rel:.6f} "
             f"shape={logical_shape} grad_type={container_meta.get('grad_container_type')}",
             flush=True,
@@ -1275,7 +1208,7 @@ def apply_spectral_correction_to_params(
         corrected += 1
         state.spectral_corrections += 1
 
-    # EXP-25 (R3): surface the merger's per-step cold-M fallback count + the
+    # Surface the merger's per-step cold-M fallback count plus the
     # corrected-matrix count so the probe can grep them. On step 1 (M cold) the
     # fallback count == corrected (the merger no-op'd every matrix to G_noisy, NOT
     # zeroed); after M warms it drops to ~0. A signed_ema run with
@@ -1293,7 +1226,7 @@ def apply_spectral_correction_to_params(
             flush=True,
         )
     elif _mode == "ef_powersgd":
-        # EXP-26 Step B: surface the merger's per-step cold-M fallback + the
+        # Surface the merger's per-step cold-M fallback plus the
         # shape-mismatch residual-reset count so the probe can grep them. With
         # ef_decay=ef_clip=0 (the limiting case) G_corr==G_comp on every target.
         cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
@@ -1310,9 +1243,9 @@ def apply_spectral_correction_to_params(
             flush=True,
         )
     elif _mode == "delayed_ef":
-        # EXP-30 B2: push this tick's collected RAW G_comp into the fire-aware
+        # Push this tick's collected raw G_comp into the fire-aware
         # ring (post-walk, so the same-tick get never saw it), then surface the
-        # per-step refresh/hold/fallback counts + the per-fire B2 tier-1 scalar
+        # per-step refresh/hold/fallback counts plus the per-fire scalar
         # ||δ||/||G_comp_ring|| (median over refreshed targets) so the analyst
         # can grep "bounded, batch-refreshed, no monotone climb".
         if _ring is not None and _ring_push:
@@ -1338,28 +1271,27 @@ def apply_spectral_correction_to_params(
                     _ratios.append(float(torch.linalg.norm(_d.to(torch.float32)).item()) / _gn)
             if _ratios:
                 _ratio_line = f" delta_ratio_median={_st.median(_ratios):.6f}"
-        # EXP-31 Cell D: surface the additive-sub-basis activity. applied/skipped
+        # Surface the additive-sub-basis activity. applied/skipped
         # count per-target sub-basis folds; subbasis_energy_ratio (median
-        # ‖δ_subbasis‖/‖δ_B2‖ over applied targets) is the headline geometry
-        # scalar. All zero / absent on the OFF path (delta_subbasis_rank=0), so the
-        # B2 line is unchanged in spirit (the extra fields read 0 / nan).
+        # ||delta_subbasis||/||delta|| over applied targets) is the geometry
+        # scalar. All zero or absent when delta_subbasis_rank=0.
         import statistics as _st2
 
         _sb_applied = int(getattr(spectral, "delayed_ef_subbasis_applied", 0))
         _sb_skipped = int(getattr(spectral, "delayed_ef_subbasis_skipped", 0))
         _sb_ratios = list(getattr(spectral, "_subbasis_energy_ratios", []) or [])
         _sb_ratio_med = _st2.median(_sb_ratios) if _sb_ratios else float("nan")
-        # EXP-31 Cell D γ-knob: the sub-basis weight γ_t applied THIS step (after
+        # Sub-basis weight gamma_t applied this step after
         # the linear decay over delta_subbasis_decay_steps). 1.0 on the OFF default
-        # (weight=1, decay_steps=0); 0.0 ⇒ the sub-basis branch was skipped = B2.
+        # (weight=1, decay_steps=0); 0.0 means the sub-basis branch was skipped.
         _sb_gamma = spectral._subbasis_gamma() if getattr(spectral, "delta_subbasis_rank", 0) > 0 else 0.0
-        # EXP-31 surpass lever: the zero-mean perturbation σ + how many targets it
+        # Zero-mean perturbation sigma plus how many targets it
         # was applied to THIS step. σ=0 (OFF) ⇒ perturb_applied==0 (the line reads
-        # exactly like B2/Cell-D; the perturbation never fired).
+        # the perturbation never fired).
         _pt_sigma = float(getattr(spectral, "perturb_sigma", 0.0))
         _pt_applied = int(getattr(spectral, "delayed_ef_perturb_applied", 0))
         print(
-            f"[comm_eff][EXP-30][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
+            f"[comm_eff][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
             f"corrected={corrected} refreshed={refreshed} held={held} "
             f"merger_coldM_fallbacks={cold} ring_entries={len(_ring) if _ring is not None else 0}"
             f"{_ratio_line} "
@@ -1375,8 +1307,8 @@ def apply_spectral_correction_to_params(
             f"perturb_sigma={_pt_sigma} perturb_seed={getattr(spectral, 'perturb_seed', 0)} "
             f"perturb_applied={_pt_applied} "
             f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between; "
-            f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly = B2; "
-            f"perturb_sigma==0 ⇒ g_corr unperturbed = B2/Cell-D)",
+            f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly; "
+            f"perturb_sigma==0 ⇒ g_corr unperturbed)",
             flush=True,
         )
 

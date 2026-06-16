@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-30 B2 ``delayed_ef`` merger + the ``none`` inert mode — CPU unit tests.
+"""comm-eff delayed_ef ``delayed_ef`` merger + the ``none`` inert mode — CPU unit tests.
 
 Plan Correctness invariants covered here:
 
@@ -24,7 +24,7 @@ Plan Correctness invariants covered here:
 * cold guards: unwarmed M / missing ring + no held δ ⇒ G_comp unchanged,
   counted — never a silent grad change;
 * ``correction_mode=none`` through the core loop: grads bitwise untouched,
-  zero corrections, zero writebacks (the Step-A inert posture);
+  zero corrections, zero writebacks (the geometry-probe inert posture);
 * core-loop end-to-end: delayed_ef corrects per the formula, pushes the raw
   pre-correction G_comp into the fire-aware ring, pops the consumed entry.
 """
@@ -89,8 +89,7 @@ def test_delayed_ef_cold_m_fallback():
 
 
 def test_delayed_ef_refresh_then_hold():
-    f = SpectralFilter(beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0,
-                       ema_device="cpu")
+    f = SpectralFilter(beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu")
     m_rep = torch.full((3, 3), 5.0)
     f.update_anchor(_NAME, m_rep)  # β=0 ⇒ M == m_rep exactly
     ring = torch.full((3, 3), 2.0)
@@ -168,16 +167,23 @@ def _mk_state(correction_mode, delayed_ef_lambda=1.0):
         compression_type="dense",
         mask=None,
         clean_cadence=0,
-        anchor=_Duck(enabled=True, cadence=5, delay_K=5, owns_q=False,
-                     replay_paired_batch=True, snapshot_device="cpu"),
-        spectral=_Duck(enabled=True, beta_anc=0.0, cadence=1,
-                       correction_mode=correction_mode, inject_gamma=1.0,
-                       blend_eta=0.3, signed_ema_alpha=0.0, ef_decay=0.0,
-                       ef_clip=0.0, delayed_ef_lambda=delayed_ef_lambda,
-                       ema_device="cpu", max_targets=-1),
+        anchor=_Duck(enabled=True, cadence=5, delay_K=5, owns_q=False, replay_paired_batch=True, snapshot_device="cpu"),
+        spectral=_Duck(
+            enabled=True,
+            beta_anc=0.0,
+            cadence=1,
+            correction_mode=correction_mode,
+            inject_gamma=1.0,
+            blend_eta=0.3,
+            signed_ema_alpha=0.0,
+            ef_decay=0.0,
+            ef_clip=0.0,
+            delayed_ef_lambda=delayed_ef_lambda,
+            ema_device="cpu",
+            max_targets=-1,
+        ),
         capture=None,
-        probe=_Duck(geometry_enabled=False, out_dir="", rank0_only=True,
-                    m4_lags=5, per_target_sidecar=True),
+        probe=_Duck(geometry_enabled=False, out_dir="", rank0_only=True, m4_lags=5, per_target_sidecar=True),
     )
     state = _st.CommEffState(cfg)
     state.build(None)
@@ -266,9 +272,7 @@ def test_core_loop_delayed_ef_corrects_and_manages_ring():
     for n, p in module.named_parameters():
         if p.grad is None or p.grad.dim() != 2:
             continue
-        assert torch.allclose(p.grad, expected[_sf._canon(n)], atol=1e-6), (
-            f"delayed_ef formula mismatch on {n}"
-        )
+        assert torch.allclose(p.grad, expected[_sf._canon(n)], atol=1e-6), f"delayed_ef formula mismatch on {n}"
     # Ring management: tick 10 (retained) pushed with the RAW pre-correction
     # G_comp; the consumed tick-5 entry popped.
     assert state.fast_grad_ring.get(5) is None, "consumed ring entry must be popped"

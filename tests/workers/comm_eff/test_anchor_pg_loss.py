@@ -143,9 +143,9 @@ def test_anchor_pg_loss_ignores_old_log_probs(_identity_extract):
         loss.backward()
         return loss.detach().clone(), lp.grad.clone()
 
-    loss_a, grad_a = _grad_for(torch.tensor([[0.3, -0.7]]))   # old == new (ratio 1 anyway)
-    loss_b, grad_b = _grad_for(torch.tensor([[9.0, -9.0]]))   # old wildly off
-    loss_c, grad_c = _grad_for(torch.tensor([[-4.0, 4.0]]))   # old wildly off, other sign
+    loss_a, grad_a = _grad_for(torch.tensor([[0.3, -0.7]]))  # old == new (ratio 1 anyway)
+    loss_b, grad_b = _grad_for(torch.tensor([[9.0, -9.0]]))  # old wildly off
+    loss_c, grad_c = _grad_for(torch.tensor([[-4.0, 4.0]]))  # old wildly off, other sign
 
     # The clean PG must be byte-identical across all three: old_log_probs unused.
     torch.testing.assert_close(loss_a, loss_b, rtol=0, atol=0)
@@ -191,7 +191,7 @@ def test_fast_path_ppo_loss_DOES_depend_on_old_log_probs():
         loss.backward()
         return lp.grad.clone()
 
-    grad_ratio1 = _grad_for(torch.tensor([[0.3, -0.7]]))      # old == new => ratio 1
+    grad_ratio1 = _grad_for(torch.tensor([[0.3, -0.7]]))  # old == new => ratio 1
     grad_ratio_off = _grad_for(torch.tensor([[0.05, -0.9]]))  # small offset => ratio != 1
 
     # At ratio==1 the fast path reduces to the SAME clean PG the anchor computes.
@@ -209,7 +209,7 @@ def test_fast_path_ppo_loss_DOES_depend_on_old_log_probs():
 
 
 def test_anchor_pg_loss_round_trips_through_replay_clone(_identity_extract):
-    """EXP-29: anchor_pg_loss on a replay-ring batch clone is BYTE-identical to
+    """paired replay: anchor_pg_loss on a replay-ring batch clone is BYTE-identical to
     the loss on the original batch.
 
     The replay ring stores ``clone_batch_for_replay(data, device=cpu)`` and the
@@ -231,9 +231,7 @@ def test_anchor_pg_loss_round_trips_through_replay_clone(_identity_extract):
         loss.backward()
         return loss.detach().clone(), lp.grad.clone()
 
-    _mo, data = _make_batch(
-        torch.tensor([[0.3, -0.7]], requires_grad=True), advantages, response_mask, old_log_probs
-    )
+    _mo, data = _make_batch(torch.tensor([[0.3, -0.7]], requires_grad=True), advantages, response_mask, old_log_probs)
     cloned = clone_batch_for_replay(data, device=torch.device("cpu"))
 
     loss_orig, grad_orig = _loss_grad(data)

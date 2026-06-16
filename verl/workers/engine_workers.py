@@ -675,11 +675,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # does not update the basis sketch. Clean steps stay dense.
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
-                if (
-                    not clean_step
-                    and getattr(comm_eff_state, "powersgd", None) is not None
-                    and ps_recompute
-                ):
+                if not clean_step and getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute:
                     prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
                     comm_eff_state.mask_active = True
                     stamped_mask_active = True
@@ -747,7 +743,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                     getattr(powersgd, "sync_basis", None),
                                 )
                                 print(
-                                    f"[comm_eff][EXP-20] basis-sync DP group: dp_world_size={dp_ws} "
+                                    f"[comm_eff] basis-sync DP group: dp_world_size={dp_ws} "
                                     f"global_world_size={ws} sync_basis={getattr(powersgd, 'sync_basis', None)}",
                                     flush=True,
                                 )
@@ -911,7 +907,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # maybe_update_basis. Strict no-op for the mask/dense/disabled
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
-                # EXP-25 (R2): when the ANCHOR owns Q the fast net is a pure
+                # When the anchor owns Q, the fast net is a pure
                 # read-only consumer — its end-of-step basis update is GATED OFF
                 # (Q is updated only by the anchor's slow-net forward +
                 # broadcast, in the engine's _maybe_comm_eff_anchor_refresh).
@@ -936,7 +932,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                     getattr(powersgd, "sync_basis", None),
                                 )
                                 print(
-                                    f"[comm_eff][EXP-20] cross-rank Q agreement: max_rel_dev={dev:.3e} "
+                                    f"[comm_eff] cross-rank Q agreement: max_rel_dev={dev:.3e} "
                                     f"sync_basis={getattr(powersgd, 'sync_basis', None)} (hard-invariant #4)",
                                     flush=True,
                                 )
@@ -944,7 +940,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             # A genuine divergence must fail the training step.
                             raise
 
-        # EXP-26 Step E: finalize this train_batch's measured inter-stage comm
+        # Finalize this train_batch's measured inter-stage comm
         # volume. The powersgd hook accumulated Σ N·r (compressed Y) and Σ N·H
         # (dense-equiv) over the fast-train forward; add the amortized per-tick
         # Q-broadcast term (H·r/cadence per boundary) and snapshot into last_elems_*
@@ -982,11 +978,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # Explicit zeros on the disabled path for PowerSGD counters.
                     "comm_eff/powersgd_applications": 0,
                     "comm_eff/powersgd_basis_updates": 0,
-                    # Explicit zeros on the disabled path for EXP-25 counters.
+                    # Explicit zeros on the disabled path for anchor-owned-Q counters.
                     "comm_eff/anchor_q_updates": 0,
                     "comm_eff/anchor_q_broadcasts": 0,
                     "comm_eff/merger_coldM_fallbacks": 0,
-                    # Explicit zero on the disabled path for the EXP-26 family screen.
+                    # Explicit zero on the disabled path for the family screen.
                     "comm_eff/family_screen_builds": 0,
                 }
             else:

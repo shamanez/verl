@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-26 Step C1 CPU unit tests for the Q-basis-family screen.
+"""comm-eff Q-basis family CPU unit tests for the Q-basis-family screen.
 
 Exercises the family sketch constructions, the LIVE-family path, off-path parity
-(no families ⇒ byte-identical), the Step-E byte counters, and config validation —
+(no families ⇒ byte-identical), byte counters, and config validation —
 all on CPU with no distributed runtime, so a hard-gate regression is caught here
 before any GPU-hour is spent. Mirrors the on-box pre-run probe's family checks:
 
@@ -28,8 +28,6 @@ before any GPU-hour is spent. Mirrors the on-box pre-run probe's family checks:
 * config validation (q_basis_passive enum, hybrid sum, fresh_anchor_loss enum).
 """
 
-import math
-
 import pytest
 import torch
 
@@ -39,17 +37,21 @@ from verl.workers.comm_eff.powersgd_activation import (
     orthonormalize,
 )
 
-
 H = 32  # hidden size for the tests (small but > rank)
-R = 8   # rank
+R = 8  # rank
 
 
 def _make_compressor(**kw):
     """A registered-shape compressor with H known + a couple of boundaries, set up
     so the family helpers can run without a real forward/distributed runtime."""
     c = PowerSGDActivationCompressor(
-        rank=R, base_seed=0, pp_size=8, sync_basis=False, qr_dtype="fp32",
-        anchor_owns_q=True, **kw,
+        rank=R,
+        base_seed=0,
+        pp_size=8,
+        sync_basis=False,
+        qr_dtype="fp32",
+        anchor_owns_q=True,
+        **kw,
     )
     c._hidden_size = H
     c.boundary_indices = [1, 3]
@@ -173,7 +175,7 @@ def test_act_family_none_without_m():
 # --------------------------------------------------------------------------- #
 def test_live_act_path_consumes_act_sketch():
     """q_basis='act' ⇒ anchor_update_basis orthonormalizes the act sketch V (the
-    EXP-25 path), independent of the family harvest."""
+    signed_ema path), independent of the family harvest."""
     c = _make_compressor(q_basis="act", q_basis_passive=[])
     li = c.boundary_indices[0]
     # Simulate the act sketch the forward hook would accumulate.
@@ -208,7 +210,7 @@ def test_live_grad_family_path_builds_from_gb():
 
 
 # --------------------------------------------------------------------------- #
-# Step-E byte counters
+# Byte counters
 # --------------------------------------------------------------------------- #
 def test_byte_counters_ratio_below_one():
     """Y=N·r compressed vs N·H dense ⇒ ratio = r/H < 1; amortized Q broadcast adds
@@ -256,8 +258,9 @@ def test_config_validates_passive_family_enum():
     from verl.workers.config.comm_eff import CommEffConfig, CommEffPowerSGDConfig
 
     with pytest.raises(ValueError, match="q_basis_passive"):
-        CommEffConfig(enabled=True, compression_type="powersgd",
-                      powersgd=CommEffPowerSGDConfig(q_basis_passive=["grad", "bogus"]))
+        CommEffConfig(
+            enabled=True, compression_type="powersgd", powersgd=CommEffPowerSGDConfig(q_basis_passive=["grad", "bogus"])
+        )
 
 
 def test_config_validates_hybrid_split_sums_to_rank():
@@ -265,13 +268,19 @@ def test_config_validates_hybrid_split_sums_to_rank():
 
     # Hybrid requested but split does NOT sum to rank ⇒ loud error.
     with pytest.raises(ValueError, match="hybrid_act_cols"):
-        CommEffConfig(enabled=True, compression_type="powersgd",
-                      powersgd=CommEffPowerSGDConfig(rank=77, q_basis_passive=["hybrid"],
-                                                     hybrid_act_cols=40, hybrid_grad_cols=30))
+        CommEffConfig(
+            enabled=True,
+            compression_type="powersgd",
+            powersgd=CommEffPowerSGDConfig(
+                rank=77, q_basis_passive=["hybrid"], hybrid_act_cols=40, hybrid_grad_cols=30
+            ),
+        )
     # Correct split (39 + 38 = 77) parses.
-    cfg = CommEffConfig(enabled=True, compression_type="powersgd",
-                        powersgd=CommEffPowerSGDConfig(rank=77, q_basis_passive=["hybrid"],
-                                                       hybrid_act_cols=39, hybrid_grad_cols=38))
+    cfg = CommEffConfig(
+        enabled=True,
+        compression_type="powersgd",
+        powersgd=CommEffPowerSGDConfig(rank=77, q_basis_passive=["hybrid"], hybrid_act_cols=39, hybrid_grad_cols=38),
+    )
     assert cfg.powersgd.hybrid_act_cols == 39
 
 
@@ -279,19 +288,22 @@ def test_config_hybrid_unconstrained_when_unused():
     from verl.workers.config.comm_eff import CommEffConfig, CommEffPowerSGDConfig
 
     # Hybrid NOT requested ⇒ the (default) split need not sum to rank.
-    cfg = CommEffConfig(enabled=True, compression_type="powersgd",
-                        powersgd=CommEffPowerSGDConfig(rank=77, q_basis_passive=["grad"]))
+    cfg = CommEffConfig(
+        enabled=True, compression_type="powersgd", powersgd=CommEffPowerSGDConfig(rank=77, q_basis_passive=["grad"])
+    )
     assert cfg.powersgd.q_basis == "act"
 
 
 def test_config_validates_fresh_anchor_loss_enum():
-    from verl.workers.config.comm_eff import CommEffConfig, CommEffCaptureConfig
+    from verl.workers.config.comm_eff import CommEffCaptureConfig, CommEffConfig
 
     with pytest.raises(ValueError, match="fresh_anchor_loss"):
-        CommEffConfig(enabled=True, compression_type="powersgd",
-                      capture=CommEffCaptureConfig(fresh_anchor_loss="bogus"))
-    cfg = CommEffConfig(enabled=True, compression_type="powersgd",
-                        capture=CommEffCaptureConfig(fresh_anchor_loss="ppo_clip"))
+        CommEffConfig(
+            enabled=True, compression_type="powersgd", capture=CommEffCaptureConfig(fresh_anchor_loss="bogus")
+        )
+    cfg = CommEffConfig(
+        enabled=True, compression_type="powersgd", capture=CommEffCaptureConfig(fresh_anchor_loss="ppo_clip")
+    )
     assert cfg.capture.fresh_anchor_loss == "ppo_clip"
 
 

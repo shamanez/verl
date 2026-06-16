@@ -27,6 +27,8 @@ Headline assertions:
 import os
 import unittest
 
+from omegaconf.errors import ConfigKeyError
+
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.comm_eff import maybe_build_comm_eff_state
 from verl.workers.config import (
@@ -109,9 +111,9 @@ class TestCommEffConfigDefaults(unittest.TestCase):
         self.assertFalse(config.comm_eff.enabled)
 
     def test_yaml_plain_override_anchor_replay_knobs(self):
-        """EXP-29: the replay knobs are declared in the YAML struct, so a PLAIN
+        """paired replay: the replay knobs are declared in the YAML struct, so a PLAIN
         (no `+`) CLI override composes. This is the dataclass<->YAML drift gate
-        the first EXP-29 launch failed on (`Key 'replay_paired_batch' is not in
+        the first paired replay launch failed on (`Key 'replay_paired_batch' is not in
         struct`) — a new dataclass field MUST be mirrored in actor.yaml or every
         launcher override of it dies in Hydra validation before main."""
         from hydra import compose, initialize_config_dir
@@ -144,7 +146,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
 
     def test_rejects_unknown_top_level_key(self):
         """An unknown comm_eff key (typo) must raise, not be silently dropped."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(ConfigKeyError):
             omega_conf_to_dataclass(
                 {"enabled": False, "enabledd": True},  # typo'd key
                 dataclass_type=CommEffConfig,
@@ -152,7 +154,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
 
     def test_rejects_unknown_nested_mask_key(self):
         """An unknown key under comm_eff.mask must raise."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(ConfigKeyError):
             omega_conf_to_dataclass(
                 {"enabled": False, "mask": {"p": 0.9, "bogus": 1}},
                 dataclass_type=CommEffConfig,
@@ -160,7 +162,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
 
     def test_rejects_unknown_nested_spectral_key(self):
         """An unknown key under comm_eff.spectral must raise."""
-        with self.assertRaises(Exception):
+        with self.assertRaises(ConfigKeyError):
             omega_conf_to_dataclass(
                 {"enabled": False, "spectral": {"beta_anc": 0.9, "typo": 2}},
                 dataclass_type=CommEffConfig,
@@ -176,7 +178,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
             CommEffConfig(anchor=CommEffAnchorConfig(cadence=0))
 
     def test_anchor_replay_knob_defaults(self):
-        """EXP-29 knobs default OFF / gpu — the byte-identical legacy path."""
+        """paired replay knobs default OFF / gpu — the byte-identical legacy path."""
         cfg = CommEffConfig()
         self.assertFalse(cfg.anchor.replay_paired_batch)
         self.assertEqual(cfg.anchor.snapshot_device, "gpu")
@@ -184,9 +186,7 @@ class TestCommEffConfigSchema(unittest.TestCase):
     def test_anchor_replay_knob_validation(self):
         """replay_paired_batch is a strict bool; snapshot_device is a closed enum."""
         # Valid settings construct fine.
-        cfg = CommEffConfig(
-            anchor=CommEffAnchorConfig(replay_paired_batch=True, snapshot_device="cpu")
-        )
+        cfg = CommEffConfig(anchor=CommEffAnchorConfig(replay_paired_batch=True, snapshot_device="cpu"))
         self.assertTrue(cfg.anchor.replay_paired_batch)
         self.assertEqual(cfg.anchor.snapshot_device, "cpu")
         # A YAML "False" string (truthy!) must be loud, not a silent enable.
@@ -200,10 +200,8 @@ class TestCommEffConfigSchema(unittest.TestCase):
 
     def test_anchor_replay_rejects_unknown_key(self):
         """The structured schema still rejects a typo'd replay key."""
-        with self.assertRaises(Exception):
-            omega_conf_to_dataclass(
-                {"anchor": {"replay_paired_batches": True}}, dataclass_type=CommEffConfig
-            )
+        with self.assertRaises(ConfigKeyError):
+            omega_conf_to_dataclass({"anchor": {"replay_paired_batches": True}}, dataclass_type=CommEffConfig)
 
 
 class TestCommEffPowerSGDConfig(unittest.TestCase):
@@ -242,8 +240,8 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
     def test_resolve_compression_type_back_compat(self):
         """resolve_compression_type honors an explicit codec, else falls back to
         the legacy mask selector."""
-        from verl.workers.config import CommEffMaskConfig
         from verl.workers.comm_eff.state import resolve_compression_type
+        from verl.workers.config import CommEffMaskConfig
 
         # explicit powersgd wins
         self.assertEqual(
@@ -305,12 +303,12 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         self.assertEqual(config2.comm_eff.powersgd.rank, 102)
 
 
-class TestCommEffExp30Knobs(unittest.TestCase):
-    """EXP-30: geometry-probe + delayed_ef knobs — defaults OFF/legacy, the
+class TestCommEffGeometryProbeKnobs(unittest.TestCase):
+    """comm-eff: geometry-probe + delayed_ef knobs — defaults OFF/legacy, the
     dataclass<->actor.yaml drift gate, and the cross-field validation rules."""
 
     def test_defaults_off_legacy(self):
-        """Every EXP-30 knob defaults OFF/legacy (off-path parity)."""
+        """Every comm-eff knob defaults OFF/legacy (off-path parity)."""
         from verl.workers.config import CommEffProbeConfig
 
         cfg = CommEffConfig()
@@ -321,7 +319,7 @@ class TestCommEffExp30Knobs(unittest.TestCase):
         self.assertEqual(cfg.probe.m4_lags, 5)
         self.assertTrue(cfg.probe.per_target_sidecar)
         # delayed_ef λ=0 = the exact-identity limiting case; the DEFAULT merger is
-        # the inert "none" (the SOTA delayed_ef is set explicitly by the launcher,
+        # the inert "none" (the current delayed_ef is set explicitly by the launcher,
         # not the dataclass default).
         self.assertEqual(cfg.spectral.delayed_ef_lambda, 0.0)
         self.assertEqual(cfg.spectral.correction_mode, "none")
@@ -367,7 +365,7 @@ class TestCommEffExp30Knobs(unittest.TestCase):
             CommEffConfig(spectral=CommEffSpectralConfig(delayed_ef_lambda=-0.1))
 
     def test_probe_requires_replay_and_inert_merger(self):
-        """The Step-A posture is validated as a unit: probe needs the EXP-29
+        """The geometry-probe posture is validated as a unit: probe needs the paired replay
         replay substrate AND an inert merger (correction_mode=none)."""
         from verl.workers.config import (
             CommEffAnchorConfig,
@@ -375,7 +373,7 @@ class TestCommEffExp30Knobs(unittest.TestCase):
             CommEffSpectralConfig,
         )
 
-        # The sanctioned Step-A shape parses.
+        # The sanctioned geometry-probe shape parses.
         cfg = CommEffConfig(
             anchor=CommEffAnchorConfig(enabled=True, replay_paired_batch=True, snapshot_device="cpu"),
             spectral=CommEffSpectralConfig(enabled=True, correction_mode="none", beta_anc=0.0),
@@ -429,13 +427,11 @@ class TestCommEffExp30Knobs(unittest.TestCase):
             CommEffConfig(probe=CommEffProbeConfig(m4_lags=6))
 
     def test_probe_rejects_unknown_key(self):
-        with self.assertRaises(Exception):
-            omega_conf_to_dataclass(
-                {"probe": {"geometry_enabld": True}}, dataclass_type=CommEffConfig
-            )
+        with self.assertRaises(ConfigKeyError):
+            omega_conf_to_dataclass({"probe": {"geometry_enabld": True}}, dataclass_type=CommEffConfig)
 
-    def test_yaml_plain_override_exp30_knobs(self):
-        """The dataclass<->actor.yaml drift gate for EXP-30 (the EXP-29
+    def test_yaml_plain_override_geometry_probe_knobs(self):
+        """The dataclass<->actor.yaml drift gate for comm-eff (the paired replay
         first-launch killer): every new knob composes as a PLAIN override
         through the actor YAML, and the YAML defaults mirror the dataclass."""
         from hydra import compose, initialize_config_dir
@@ -454,7 +450,7 @@ class TestCommEffExp30Knobs(unittest.TestCase):
                     "comm_eff.spectral.beta_anc=0.0",
                     "comm_eff.spectral.delayed_ef_lambda=1.0",
                     "comm_eff.probe.geometry_enabled=true",
-                    "comm_eff.probe.out_dir=/workspace/runs/EXP-30/metrics",
+                    "comm_eff.probe.out_dir=/workspace/runs/comm-eff/metrics",
                     "comm_eff.probe.rank0_only=true",
                     "comm_eff.probe.m4_lags=5",
                     "comm_eff.probe.per_target_sidecar=true",
@@ -462,7 +458,7 @@ class TestCommEffExp30Knobs(unittest.TestCase):
             )
         config = omega_conf_to_dataclass(cfg)
         self.assertTrue(config.comm_eff.probe.geometry_enabled)
-        self.assertEqual(config.comm_eff.probe.out_dir, "/workspace/runs/EXP-30/metrics")
+        self.assertEqual(config.comm_eff.probe.out_dir, "/workspace/runs/comm-eff/metrics")
         self.assertEqual(config.comm_eff.probe.m4_lags, 5)
         self.assertEqual(config.comm_eff.spectral.correction_mode, "none")
         self.assertEqual(config.comm_eff.spectral.beta_anc, 0.0)
@@ -479,13 +475,13 @@ class TestCommEffExp30Knobs(unittest.TestCase):
         self.assertEqual(config_default.comm_eff.probe.m4_lags, 5)
         self.assertTrue(config_default.comm_eff.probe.per_target_sidecar)
         self.assertEqual(config_default.comm_eff.spectral.delayed_ef_lambda, 0.0)
-        # Default merger is the inert "none" (the SOTA delayed_ef is set explicitly
+        # Default merger is the inert "none" (the current delayed_ef is set explicitly
         # by the launcher); the YAML default mirrors the dataclass default.
         self.assertEqual(config_default.comm_eff.spectral.correction_mode, "none")
 
-    def test_yaml_delayed_ef_b2_shape_composes(self):
-        """The (gated) B2 cell's exact override set composes — pre-validated now
-        so a future GATE-B2-open dispatch cannot die in Hydra."""
+    def test_yaml_delayed_ef_shape_composes(self):
+        """The gated delayed_ef override set composes — pre-validated now
+        so a future delayed_ef gate-open dispatch cannot die in Hydra."""
         from hydra import compose, initialize_config_dir
 
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):

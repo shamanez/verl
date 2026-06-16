@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis merger — CPU tests.
+"""Additive sub-basis: additive stale-anchor rank-r_sb sub-basis merger — CPU tests.
 
-Design doc (``research/runs/EXP-31/cellD_design.md``) Correctness invariants
+Correctness invariants
 covered here (all CPU, no GPU, no torch.distributed):
 
 * **off-path parity (hard):** ``delta_subbasis_rank=0`` SKIPS the sub-basis branch
-  entirely ⇒ ``delayed_ef_matrix`` returns the EXACT B2 ``g_corr`` (byte-compare
+  entirely ⇒ ``delayed_ef_matrix`` returns the EXACT delayed_ef ``g_corr`` (byte-compare
   to a separate rank-0 filter on the same inputs) AND the new-knob-OFF default is
-  bitwise-identical to the legacy B2 filter that has no sub-basis args at all.
+  bitwise-identical to the delayed_ef filter that has no sub-basis args at all.
 * **limiting-case identity (hard):** ``λ=0`` still returns the ``g_comp`` object
   identity even with the sub-basis ON (the λ=0 early-return is FIRST).
 * **sub-basis math:** ``_subbasis_delta(S, r=full)`` reconstructs S to < 1e-5;
@@ -31,21 +31,21 @@ covered here (all CPU, no GPU, no torch.distributed):
   ``base_seed`` produce bit-identical δ_subbasis for the same (name, source);
   feeding the SAME DP-mean source on two independent "ranks" yields a
   bit-identical correction (the cross-rank-agreement invariant on a synthetic δ).
-* **scale contract (the #25 mean-vs-sum trap):** feeding a SUM-reduced source
+* **scale contract (the mean-vs-sum trap):** feeding a SUM-reduced source
   (×world_size) inflates ‖δ_subbasis‖ by world_size (the SVD applies no rescaling)
-  — mirrors ``test_delayed_ef_exp30``.
-* **Step-C avoidance (structural):** the merger reads/writes only the correction
+  — mirrors the delayed-EF scale tests.
+* **Q-basis avoidance (structural):** the merger reads/writes only the correction
   δ; it never touches a forward basis. Asserted here by the absence of any forward
-  -Q state on the filter and the fact that rank-0 is byte-identical to B2 (the
+  -Q state on the filter and the fact that rank-0 is byte-identical to delayed_ef (the
   forward path is provably untouched). The full forward-Q-checksum gate is the
   on-box probe (needs a GPU).
 
-EXP-31 surpass lever (``perturb_sigma`` — zero-mean tunable cross-rank-identical
+Perturbation lever (``perturb_sigma`` — zero-mean tunable cross-rank-identical
 gradient perturbation) Correctness invariants covered here:
 
 * **off-path parity (hard):** ``perturb_sigma=0`` SKIPS the perturbation branch ⇒
   ``delayed_ef_matrix`` returns the EXACT un-perturbed g_corr (``torch.equal``);
-  composed with ``delta_subbasis_rank=0`` it is bitwise-B2.
+  composed with ``delta_subbasis_rank=0`` it is bitwise delayed_ef.
 * **perturbation magnitude:** with σ>0, ``‖g_corr_perturbed − g_corr‖ ≈ σ·‖g_corr‖``
   (ξ is unit-normalized so the injected norm is exactly σ·‖g_corr‖).
 * **determinism / cross-rank identity (hard):** two filters with the same
@@ -127,23 +127,23 @@ def _warm_and_fire(f, name, m_rep, ring, g):
 
 
 # --------------------------------------------------------------------------- #
-# off-path parity — rank=0 SKIPS the sub-basis branch ⇒ bitwise B2.
+# off-path parity — rank=0 SKIPS the sub-basis branch ⇒ bitwise delayed_ef.
 # --------------------------------------------------------------------------- #
-def test_rank0_is_bitwise_b2():
+def test_rank0_is_bitwise_delayed_ef():
     torch.manual_seed(0)
     m_rep = torch.randn(6, 5)
     ring = torch.randn(6, 5)
     g = torch.randn(6, 5)
 
     f_off = _mk_filter(rank=0)
-    f_b2 = SpectralFilter(  # the legacy B2 filter — NO sub-basis kwargs at all
+    f_delayed_ef = SpectralFilter(  # the delayed_ef filter — no sub-basis kwargs at all
         beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu"
     )
     out_off = _warm_and_fire(f_off, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    out_b2 = _warm_and_fire(f_b2, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    out_delayed_ef = _warm_and_fire(f_delayed_ef, _NAME, m_rep.clone(), ring.clone(), g.clone())
 
-    assert torch.equal(out_off, out_b2), (
-        "delta_subbasis_rank=0 must be BITWISE identical to the legacy B2 merger"
+    assert torch.equal(out_off, out_delayed_ef), (
+        "delta_subbasis_rank=0 must be BITWISE identical to the delayed_ef merger"
     )
     # The sub-basis branch was skipped entirely: no apply, no energy ratio.
     assert f_off.delayed_ef_subbasis_applied == 0
@@ -151,14 +151,12 @@ def test_rank0_is_bitwise_b2():
     assert f_off._subbasis_energy_ratios == []
 
 
-def test_rank0_default_kwargs_match_explicit_b2():
-    """The new knobs DEFAULT off — a filter that never names them == B2."""
+def test_rank0_default_kwargs_match_explicit_delayed_ef():
+    """The new knobs DEFAULT off — a filter that never names them == delayed_ef."""
     torch.manual_seed(1)
     m_rep, ring, g = torch.randn(4, 4), torch.randn(4, 4), torch.randn(4, 4)
     # Default construction (no sub-basis args) — delta_subbasis_rank defaults 0.
-    f_default = SpectralFilter(
-        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu"
-    )
+    f_default = SpectralFilter(beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu")
     assert f_default.delta_subbasis_rank == 0
     assert f_default.delta_subbasis_family == "tail"
     out = _warm_and_fire(f_default, _NAME, m_rep, ring, g)
@@ -231,12 +229,12 @@ def test_subbasis_degenerate_source_returns_none():
     assert f._subbasis_delta(_NAME, torch.randn(4, 4), r=0) is None
 
 
-def test_subbasis_degenerate_source_in_merger_skips_and_keeps_b2():
-    """A degenerate δ source folds in the plain B2 δ (never garbage) + counts SKIP.
+def test_subbasis_degenerate_source_in_merger_skips_and_keeps_delayed_ef():
+    """A degenerate δ source folds in the plain delayed_ef δ (never garbage) + counts SKIP.
 
-    Build a tick where δ_B2 = M_rep − ring is exactly ZERO (M_rep == ring): the
+    Build a tick where δ_delayed_ef = M_rep − ring is exactly ZERO (M_rep == ring): the
     tail source is the zero matrix ⇒ the sub-basis SKIPS, and G_corr == G_comp + δ
-    = G_comp (since δ=0) — i.e. the plain B2 result, with a SKIP counted.
+    = G_comp (since δ=0) — i.e. the plain delayed_ef result, with a SKIP counted.
     """
     f = _mk_filter(rank=2, family="tail")
     same = torch.full((4, 4), 2.0)
@@ -245,7 +243,7 @@ def test_subbasis_degenerate_source_in_merger_skips_and_keeps_b2():
     assert f.delayed_ef_subbasis_skipped == 1
     assert f.delayed_ef_subbasis_applied == 0
     assert torch.allclose(out.to(torch.float32), g.to(torch.float32), atol=1e-6), (
-        "with δ_B2=0 and a degenerate tail source, G_corr must equal G_comp (plain B2)"
+        "with δ_delayed_ef=0 and a degenerate tail source, G_corr must equal G_comp (plain delayed_ef)"
     )
 
 
@@ -305,7 +303,7 @@ def test_same_seed_identical_subbasis():
 def test_cross_rank_identity_on_synthetic_delta():
     """Two independent 'ranks' fed the SAME DP-mean δ produce identical corrections.
 
-    δ_B2 is DP-MEAN identical across ranks by construction; the seed is a pure
+    δ_delayed_ef is DP-MEAN identical across ranks by construction; the seed is a pure
     function of (base_seed, name) with no rank-local state. So two filters built
     identically and fed the same (M_rep, ring, g) — the cross-rank stand-in —
     must yield a bit-identical G_corr (the multi-rank-agreement invariant on a
@@ -334,13 +332,13 @@ def test_seed_salt_is_per_target_and_reproducible():
 
 
 # --------------------------------------------------------------------------- #
-# scale contract (#25 mean-vs-sum) — a SUM-reduced source inflates the norm.
+# scale contract (mean-vs-sum) — a SUM-reduced source inflates the norm.
 # --------------------------------------------------------------------------- #
 def test_scale_contract_sum_reduced_inflates_by_world_size():
     torch.manual_seed(8)
     world_size = 4
     S_mean = torch.randn(10, 8)
-    S_sum = S_mean * world_size  # the SUM-reduced side (the #25 trap)
+    S_sum = S_mean * world_size  # the SUM-reduced side (the mean-vs-sum trap)
     f = _mk_filter(rank=3)
     sb_mean = f._subbasis_delta(_NAME, S_mean, r=3)
     sb_sum = f._subbasis_delta(_NAME, S_sum, r=3)
@@ -353,21 +351,26 @@ def test_scale_contract_sum_reduced_inflates_by_world_size():
 
 
 # --------------------------------------------------------------------------- #
-# EXP-31 γ-knob — sub-basis WEIGHT + linear DECAY (the over-amplification fix).
+# Sub-basis gamma knob — sub-basis WEIGHT + linear DECAY (the over-amplification fix).
 # --------------------------------------------------------------------------- #
-def test_gamma_defaults_reproduce_current_cellD_bitwise():
-    """weight=1.0 + decay_steps=0 ⇒ γ_t≡1 ⇒ the EXACT pre-γ Cell D δ_subbasis path.
+def test_gamma_defaults_reproduce_current_subbasis_bitwise():
+    """weight=1.0 + decay_steps=0 ⇒ γ_t≡1 ⇒ the EXACT pre-γ sub-basis δ_subbasis path.
 
     A filter that names the new knobs at their DEFAULTS must be byte-identical to a
-    filter that does NOT name them at all (the OLD Cell D constructor) — the γ-knob
+    filter that does NOT name them at all (the OLD sub-basis constructor) — the γ-knob
     is a pure extension with a no-op default.
     """
     torch.manual_seed(40)
     m_rep, ring, g = torch.randn(8, 6), torch.randn(8, 6), torch.randn(8, 6)
     # OLD-style constructor: rank=2 tail, NO weight/decay args at all.
     f_old = SpectralFilter(
-        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0,
-        ema_device="cpu", delta_subbasis_rank=2, delta_subbasis_family="tail", base_seed=0,
+        beta_anc=0.0,
+        correction_mode="delayed_ef",
+        delayed_ef_lambda=1.0,
+        ema_device="cpu",
+        delta_subbasis_rank=2,
+        delta_subbasis_family="tail",
+        base_seed=0,
     )
     # NEW constructor with the DEFAULT γ-knobs explicit.
     f_new = _mk_filter(rank=2, family="tail", weight=1.0, decay_steps=0, base_seed=0)
@@ -375,24 +378,24 @@ def test_gamma_defaults_reproduce_current_cellD_bitwise():
     out_old = _warm_and_fire(f_old, _NAME, m_rep.clone(), ring.clone(), g.clone())
     out_new = _warm_and_fire(f_new, _NAME, m_rep.clone(), ring.clone(), g.clone())
     assert torch.equal(out_old, out_new), (
-        "weight=1.0 + decay_steps=0 must reproduce the pre-γ Cell D δ_subbasis path BITWISE"
+        "weight=1.0 + decay_steps=0 must reproduce the pre-γ sub-basis δ_subbasis path BITWISE"
     )
     assert f_new.delayed_ef_subbasis_applied == 1
     # γ_t at the default step (0) is exactly the weight (1.0).
     assert f_new._subbasis_gamma() == 1.0
 
 
-def test_gamma_weight_zero_is_bitwise_b2():
-    """weight=0 ⇒ γ_t==0 ⇒ the sub-basis branch is skipped ⇒ correction == δ_B2 (= B2)."""
+def test_gamma_weight_zero_is_bitwise_delayed_ef():
+    """weight=0 ⇒ γ_t==0 ⇒ the sub-basis branch is skipped ⇒ correction == δ_delayed_ef (= delayed_ef baseline)."""
     torch.manual_seed(41)
     m_rep, ring, g = torch.randn(7, 5), torch.randn(7, 5), torch.randn(7, 5)
     f_w0 = _mk_filter(rank=2, family="tail", weight=0.0, decay_steps=0)
-    f_b2 = SpectralFilter(  # legacy B2 filter, no sub-basis at all
+    f_delayed_ef = SpectralFilter(  # delayed_ef filter, no sub-basis at all
         beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu"
     )
     out_w0 = _warm_and_fire(f_w0, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    out_b2 = _warm_and_fire(f_b2, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    assert torch.equal(out_w0, out_b2), "weight=0 must be BITWISE identical to B2"
+    out_delayed_ef = _warm_and_fire(f_delayed_ef, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    assert torch.equal(out_w0, out_delayed_ef), "weight=0 must be BITWISE identical to delayed_ef"
     # γ_t==0 ⇒ the SVD was never computed: no apply, no skip, no energy ratio.
     assert f_w0.delayed_ef_subbasis_applied == 0
     assert f_w0.delayed_ef_subbasis_skipped == 0
@@ -442,7 +445,7 @@ def test_gamma_decay_steps_zero_is_constant_weight():
 
 
 def test_gamma_constant_half_dose_formula():
-    """weight=0.5, decay_steps=0 ⇒ G_corr = G_comp + λ(δ_B2 + 0.5·δ_subbasis)."""
+    """weight=0.5, decay_steps=0 ⇒ G_corr = G_comp + λ(δ_delayed_ef + 0.5·δ_subbasis)."""
     torch.manual_seed(42)
     m_rep, ring, g = torch.randn(8, 6), torch.randn(8, 6), torch.randn(8, 6)
     f = _mk_filter(rank=2, family="tail", weight=0.5, decay_steps=0)
@@ -451,7 +454,7 @@ def test_gamma_constant_half_dose_formula():
     delta_sb = f._subbasis_delta(_NAME, delta, r=2)
     expected = g.to(torch.float32) + 1.0 * (delta + 0.5 * delta_sb)
     assert torch.allclose(out.to(torch.float32), expected, atol=1e-5), (
-        "constant half-dose must give G_corr = G_comp + λ(δ_B2 + 0.5·δ_subbasis)"
+        "constant half-dose must give G_corr = G_comp + λ(δ_delayed_ef + 0.5·δ_subbasis)"
     )
     assert f.delayed_ef_subbasis_applied == 1
     # The logged energy ratio reflects the EFFECTIVE (γ-scaled) sub-basis norm.
@@ -475,8 +478,8 @@ def test_gamma_decay_midrun_formula_uses_current_step():
     )
 
 
-def test_gamma_decay_past_horizon_is_b2():
-    """Past decay_steps the sub-basis vanishes ⇒ G_corr == B2 (γ_t clamped to 0)."""
+def test_gamma_decay_past_horizon_is_delayed_ef():
+    """Past decay_steps the sub-basis vanishes ⇒ G_corr == delayed_ef (γ_t clamped to 0)."""
     torch.manual_seed(44)
     m_rep, ring, g = torch.randn(7, 5), torch.randn(7, 5), torch.randn(7, 5)
     f = _mk_filter(rank=2, family="tail", weight=1.0, decay_steps=10)
@@ -485,7 +488,7 @@ def test_gamma_decay_past_horizon_is_b2():
     out = f.delayed_ef_matrix(_NAME, g.clone(), ring_grad=ring.clone())
     expected = g.to(torch.float32) + 1.0 * (m_rep.to(torch.float32) - ring.to(torch.float32))
     assert torch.allclose(out.to(torch.float32), expected, atol=1e-6), (
-        "past the decay horizon the correction must reduce to δ_B2 (= B2)"
+        "past the decay horizon the correction must reduce to δ_delayed_ef (= delayed_ef baseline)"
     )
     # γ_t==0 ⇒ skipped branch (no SVD): no apply / skip / ratio.
     assert f.delayed_ef_subbasis_applied == 0
@@ -504,7 +507,7 @@ def test_gamma_negative_decay_steps_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# EXP-31 hold-then-decay — γ holds at full weight for hold_steps, THEN decays.
+# anchor-usage hold-then-decay — γ holds at full weight for hold_steps, THEN decays.
 # --------------------------------------------------------------------------- #
 def test_hold_steps_zero_reproduces_linear_from_zero_decay_bitwise():
     """hold_steps=0 ⇒ the EXISTING linear-from-step-0 decay, gamma BITWISE-identical.
@@ -519,9 +522,15 @@ def test_hold_steps_zero_reproduces_linear_from_zero_decay_bitwise():
     f_explicit = _mk_filter(rank=2, weight=1.0, decay_steps=50, hold_steps=0)
     # A filter that NEVER names hold_steps (the default must be 0).
     f_unspecified = SpectralFilter(
-        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0,
-        ema_device="cpu", delta_subbasis_rank=2, delta_subbasis_family="tail",
-        delta_subbasis_weight=1.0, delta_subbasis_decay_steps=50, base_seed=0,
+        beta_anc=0.0,
+        correction_mode="delayed_ef",
+        delayed_ef_lambda=1.0,
+        ema_device="cpu",
+        delta_subbasis_rank=2,
+        delta_subbasis_family="tail",
+        delta_subbasis_weight=1.0,
+        delta_subbasis_decay_steps=50,
+        base_seed=0,
     )
     assert f_unspecified.delta_subbasis_hold_steps == 0, "hold_steps must DEFAULT to 0"
     # Sweep the whole horizon + past it. The legacy formula is the reference.
@@ -582,7 +591,7 @@ def test_hold25_decay25_applied_in_merger_during_hold_and_ramp():
     torch.manual_seed(45)
     m_rep, ring, g = torch.randn(8, 6), torch.randn(8, 6), torch.randn(8, 6)
 
-    # In the HOLD window (step 10): G_corr = G_comp + λ(δ_B2 + 1.0·δ_subbasis).
+    # In the HOLD window (step 10): G_corr = G_comp + λ(δ_delayed_ef + 1.0·δ_subbasis).
     f_hold = _mk_filter(rank=2, family="tail", weight=1.0, decay_steps=25, hold_steps=25)
     f_hold.update_anchor(_NAME, m_rep.clone())
     f_hold.current_step = 10
@@ -637,7 +646,7 @@ def test_gamma_negative_hold_steps_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# EXP-31 surpass lever — zero-mean tunable cross-rank-identical perturbation.
+# Perturbation lever — zero-mean tunable cross-rank-identical perturbation.
 # --------------------------------------------------------------------------- #
 def _unperturbed_g_corr(name, m_rep, ring, g, *, rank=0, family="tail", base_seed=0):
     """The g_corr a σ=0 filter (same delayed_ef config) produces — the reference."""
@@ -645,24 +654,24 @@ def _unperturbed_g_corr(name, m_rep, ring, g, *, rank=0, family="tail", base_see
     return _warm_and_fire(f, name, m_rep.clone(), ring.clone(), g.clone())
 
 
-def test_perturb_sigma_zero_is_bitwise_b2():
-    """perturb_sigma=0 + rank=0 ⇒ the perturbation branch is SKIPPED ⇒ bitwise B2."""
+def test_perturb_sigma_zero_is_bitwise_delayed_ef():
+    """perturb_sigma=0 + rank=0 ⇒ the perturbation branch is SKIPPED ⇒ bitwise delayed_ef."""
     torch.manual_seed(50)
     m_rep, ring, g = torch.randn(6, 5), torch.randn(6, 5), torch.randn(6, 5)
     f_off = _mk_filter(rank=0, perturb_sigma=0.0, perturb_seed=7)
-    f_b2 = SpectralFilter(  # legacy B2 filter — NO perturb/sub-basis kwargs at all
+    f_delayed_ef = SpectralFilter(  # delayed_ef filter — NO perturb/sub-basis kwargs at all
         beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0, ema_device="cpu"
     )
     out_off = _warm_and_fire(f_off, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    out_b2 = _warm_and_fire(f_b2, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    assert torch.equal(out_off, out_b2), (
-        "perturb_sigma=0 (rank 0) must be BITWISE identical to the legacy B2 merger"
+    out_delayed_ef = _warm_and_fire(f_delayed_ef, _NAME, m_rep.clone(), ring.clone(), g.clone())
+    assert torch.equal(out_off, out_delayed_ef), (
+        "perturb_sigma=0 (rank 0) must be BITWISE identical to the delayed_ef merger"
     )
     # The perturbation never fired.
     assert f_off.delayed_ef_perturb_applied == 0
 
 
-def test_perturb_sigma_zero_is_bitwise_cellD():
+def test_perturb_sigma_zero_is_bitwise_subbasis():
     """perturb_sigma=0 with the sub-basis ON ⇒ EXACT Cell-D path (perturb is a no-op).
 
     A filter that names perturb_sigma=0 must be byte-identical to the OLD Cell-D
@@ -672,15 +681,18 @@ def test_perturb_sigma_zero_is_bitwise_cellD():
     torch.manual_seed(51)
     m_rep, ring, g = torch.randn(8, 6), torch.randn(8, 6), torch.randn(8, 6)
     f_old = SpectralFilter(  # OLD Cell-D constructor: rank=2, NO perturb kwargs.
-        beta_anc=0.0, correction_mode="delayed_ef", delayed_ef_lambda=1.0,
-        ema_device="cpu", delta_subbasis_rank=2, delta_subbasis_family="tail", base_seed=0,
+        beta_anc=0.0,
+        correction_mode="delayed_ef",
+        delayed_ef_lambda=1.0,
+        ema_device="cpu",
+        delta_subbasis_rank=2,
+        delta_subbasis_family="tail",
+        base_seed=0,
     )
     f_new = _mk_filter(rank=2, family="tail", base_seed=0, perturb_sigma=0.0)
     out_old = _warm_and_fire(f_old, _NAME, m_rep.clone(), ring.clone(), g.clone())
     out_new = _warm_and_fire(f_new, _NAME, m_rep.clone(), ring.clone(), g.clone())
-    assert torch.equal(out_old, out_new), (
-        "perturb_sigma=0 must reproduce the pre-perturb Cell-D path BITWISE"
-    )
+    assert torch.equal(out_old, out_new), "perturb_sigma=0 must reproduce the pre-perturb Cell-D path BITWISE"
     assert f_new.delayed_ef_perturb_applied == 0
 
 
@@ -882,7 +894,7 @@ def test_perturb_negative_sigma_rejected():
 def test_perturb_composes_with_subbasis_additively():
     """σ>0 on the sub-basis path adds σ·‖g_corr‖ noise ON TOP of the Cell-D g_corr.
 
-    The perturbation is applied to the FULL g_corr (= G_comp + λ(δ_B2 + δ_subbasis)),
+    The perturbation is applied to the FULL g_corr (= G_comp + λ(δ_delayed_ef + δ_subbasis)),
     so ‖perturbed − Cell-D-g_corr‖ ≈ σ·‖Cell-D-g_corr‖ — the lever composes with the
     sub-basis, it does not replace it.
     """

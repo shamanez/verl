@@ -67,7 +67,7 @@ def _load(mod_name, rel_path):
 _stub_parent_packages()
 _sf = _load("verl.workers.comm_eff.spectral_filter", "verl/workers/comm_eff/spectral_filter.py")
 _anchor = _load("verl.workers.comm_eff.anchor", "verl/workers/comm_eff/anchor.py")
-_st = _load("_exp8_state", "verl/workers/comm_eff/state.py")
+_st = _load("_comm_eff_state_anchor_queue", "verl/workers/comm_eff/state.py")
 
 AnchorStalenessQueue = _anchor.AnchorStalenessQueue
 snapshot_named_params = _anchor.snapshot_named_params
@@ -367,9 +367,7 @@ def test_anchor_reuses_grpo_loss_unmasked_no_step_no_rollout():
     # Snapshot optimizer state to prove no step was taken.
     params_before = [p.detach().clone() for p in module.parameters()]
 
-    trace = _simulate_anchor_refresh(
-        module, opt, spectral, state, grpo_like_loss, mask_hook_fires_if_active=True
-    )
+    trace = _simulate_anchor_refresh(module, opt, spectral, state, grpo_like_loss, mask_hook_fires_if_active=True)
 
     # 2. reused the GRPO-like loss; supervised path untouched (would have raised).
     assert "loss_function" in trace and "backward" in trace
@@ -379,7 +377,7 @@ def test_anchor_reuses_grpo_loss_unmasked_no_step_no_rollout():
     # 5. mask_active stayed False => zero mask applications during the pass.
     assert state.anchor_mask_applications == 0
     # 7. no optimizer step => live params unchanged.
-    for b, p in zip(params_before, module.parameters()):
+    for b, p in zip(params_before, module.parameters(), strict=False):
         assert torch.allclose(b, p), "anchor must NOT step the optimizer (params changed)"
     assert state.anchor_optimizer_steps == 0
     # 6. ordering: grads extracted then fed to the EMA (update_anchor) AFTER
@@ -401,9 +399,7 @@ def test_anchor_pass_does_not_fire_mask_even_if_hook_present():
     # we measure the DELTA, not the absolute.
     state.mask_applications = 7
 
-    _simulate_anchor_refresh(
-        module, opt, spectral, state, lambda o: o.pow(2).mean(), mask_hook_fires_if_active=True
-    )
+    _simulate_anchor_refresh(module, opt, spectral, state, lambda o: o.pow(2).mean(), mask_hook_fires_if_active=True)
     assert state.anchor_mask_applications == 0  # delta over the anchor pass is 0
     assert state.mask_applications == 7  # unchanged: no mask fired
 
