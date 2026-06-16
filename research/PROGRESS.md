@@ -54,3 +54,11 @@ EXP-33 window 6 monitoring complete 2026-06-16T10:57:19Z
 [2026-06-16T14:40Z] EXP-33 RESUME monitor-detail exit TIMEOUT: b0p50 step=9/55 HEALTHY (reward 0.23 rising, no ignition, anchor firing, bytes_ratio in band) — b0p75/b1p00 not yet started — ETA b0p50 done ~15:55 UTC
 [2026-06-17T00:21:09+10:00] [orchestrator] EXP-33 tick: C2 b0p50 (β=0.50) HEALTHY at step 9/55 (monitor window 1 timeout) — substrate all-PASS (beta_anc=0.50, bytes_ratio 0.0504, recon 0.027, delayed_ef active), reward rising 0.12->0.23, NO divergence (P1/P2/P3/E1/NaN/OOM clear). val@25 due ~14:53Z, done ~15:55Z. Re-dispatched monitor window 2. running=[33:C2] analyzing=[] logging=[] blocked=[]
 [2026-06-17T00:56:23+10:00] [orchestrator] EXP-33 tick: C2 b0p50 (β=0.50) HEALTHY at step 29/55 — val@25=0.70811 BANKED (tie with C0 0.71418, Δ-0.0061 within ±0.024). reward(critic/score/mean) ~0.6-0.7 rising; len-mean stable ~200; steps26-27 cap-pin was BENIGN transient (clip 0.000977=1seq/1024), CLEARED step28-29 (max 808). NOT ignition — verified independently. Re-dispatched monitor window 3 with TIGHTENED ignition criterion (TRUE-P1 clip>=0.05 x2 / TRUE-P2 mean rising x5 & >2x baseline / TRUE-E1 mean>4k). running=[33:C2] analyzing=[] logging=[] blocked=[]
+
+## EXP-33 C2 b0p50 (β=0.50) — val@50 CAPTURED 2026-06-17 01:29 AEST
+val@50=0.75284 (WIP — cell still running gs=52/55 at report time; done flag expected ~01:38).
+gap vs C0 (0.73844) = +0.01440 → TIE (within ±0.024 noise). Freshness hypothesis SUPPORTED for β=0.5.
+β→accuracy curve so far: C0=0.73844, C1=0.73995 (+0.00151), C2=0.75284 (+0.01440). All ties.
+No NaN/OOM/ignition/collapse. bytes_ratio=0.0505 (gate OK), recon=0.026 (act-band), cold_fallbacks=0.
+Monitor window 3 exited TIMEOUT (val@50 captured, done flag pending).
+[2026-06-17T01:36:56+10:00] [orchestrator] EXP-33 tick: C2 b0p50 (β=0.50) DONE — val@50=0.75284 BANKED (gap vs C0 +0.0144, TIE within ±0.024; slightly positive but not falsifying). Substrate held (bytes 0.0505, recon 0.0258, coldM=0, clip 0.0 all steps, 0 errors). Curve so far FLAT: C0 0.73844 / C1 0.73995 / C2 0.75284 — none near 0.7624 bar. C2 finishing steps 53-55; C3 b0p75 (β=0.75) imminent. Re-dispatched monitor window 4 (hard-checks beta_anc=0.75 passthrough). running=[33:C3-launching] analyzing=[] logging=[] blocked=[]
