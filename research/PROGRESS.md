@@ -17,3 +17,5 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 [2026-06-16T00:15:11+10:00] [orchestrator/goal] EXP-31: Cell A DONE B2_live val 0.0910/0.7202/0.7354 (WandB fy920fty). Full autonomous pipeline ARMED: chain1 A->L4(.01 running)->L4(.03); chain2 waits CHAIN_L4_DONE then checkout exp/31@1d9077d (FETCH_HEAD SHA-asserted) -> L2(mu.9/.5 age_decay) + L3(ratio/cos x kappa .5/1.0 cap2) = 8 lever cells, zero GPU idle. Gate vs B2_live@50=0.7354: EXTEND>.7594/BANK .7114-.7594/KILL<.7114. Monitor on L4_s001. Operator: autonomous, no questions, GPU always busy.
 [2026-06-16T04:19:46+10:00] [analyst #31] verdict=STOP
 [2026-06-16T04:25:57+10:00] [log-writer #31] logged verdict=STOP milestone=M6
+[2026-06-16T13:11:44+10:00] [research-planner #32] plan written
+[2026-06-16T13:12:07+10:00] [triage] dispatched 1 planners, 0 issues already planned
