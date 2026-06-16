@@ -78,11 +78,22 @@
       baseline (<code>runs/EXP-31/B2_baseline/</code>) that every later arm builds on.</li>
   </ul>
 
+  <h3>Works, but dominated</h3>
+  <ul>
+    <li><strong>Sign-replacement (signed_ema) now learns &mdash; superseded verdict.</strong> EXP-25 declared
+      it &ldquo;net-harmful at every \(\alpha\), dead.&rdquo; That verdict rested on the off-policy
+      <em>invalid-M</em> anchor: the merger was steering toward a wrong-trajectory gradient. Re-run on the
+      corrected (#29 valid-M, \(\beta_{\text{anc}}=0\)) circuit, signed_ema \(\alpha=0.5\) is
+      <strong>stable and near-parity</strong>: val@50 <span class="metric">0.7271</span> (0.7278@25 &rarr;
+      0.7271@50, no length-hack ignition; EXP-32, W&amp;B <code>cwz1hu5p</code>). So the sign method is
+      <strong>works-but-dominated</strong>, not dead &mdash; it sits below error feedback (B2, ~0.74&ndash;0.75)
+      and above the no-merger floor (0.6300), so it is a valid corrector but not the default. The
+      sign-disagreement geometry is real, but with an honest anchor the agreeing half carries enough signal to
+      learn.</li>
+  </ul>
+
   <h3>What is closed or falsified</h3>
   <ul>
-    <li><strong>Sign-replacement (signed_ema)</strong> &mdash; the anchor's sign agrees with the compressed
-      gradient only ~50% of the time, structurally, even when fresh and even when valid (EXP-25, re-confirmed
-      on the valid anchor in EXP-30). Dead.</li>
     <li><strong>Update-energy / hybrid basis (Step C)</strong> &mdash; a basis tuned for gradient energy
       anti-converts because rollouts run uncompressed (EXP-26, val 0.373). Dead.</li>
     <li><strong>The M-fed exogenous-carrier merger class</strong> &mdash; any correction that injects a

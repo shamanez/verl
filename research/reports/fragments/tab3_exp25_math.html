@@ -86,7 +86,7 @@
   </table>
 
   <p>
-    All sit at roughly one-half — a coin-flip. Crucially this holds even at <strong>zero staleness</strong> (a perfectly fresh anchor gradient), which kills the obvious defense. The disagreement is <em>not</em> caused by the sign being out of date; it is structural. For about half the coordinates, the merger flips the sign of the update.
+    All sit at roughly one-half — a coin-flip — and (the original tab's key point) this holds even at <strong>zero staleness</strong>, so the disagreement is not merely the sign being out of date. On the EXP-25 circuit, for about half the coordinates the merger flips the sign of the update. The original tab read this as "structural, therefore unfixable." That was half right: it is not caused by <em>staleness</em>, but it <em>was</em> caused by something fixable — the anchor was computing its gradient on the wrong data (next paragraph), so its sign was a biased estimate to begin with. These numbers describe the <em>pre-#29</em> anchor.
   </p>
 
   <p>
