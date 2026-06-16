@@ -5,12 +5,15 @@
     As of 2026-06-16 the program has hit its core milestone. The communication-efficient GRPO trainer is
     <em>stable</em>, reaches <em>parity</em> with the dense control within evaluation noise, demonstrates a
     large measured <em>communication saving</em>, and is <em>reproducible</em> from one canonical launcher.
-    The current state of the art is the EXP-30 <code>B2</code> merger (<code>delayed_ef</code>, &lambda;=1):
-    GSM8K <span class="metric">val@50 &asymp; 0.74&ndash;0.75</span>, inside the dense band of
+    The <strong>default and state of the art is error feedback</strong> &mdash; the EXP-30 <code>B2</code>
+    merger (<code>delayed_ef</code>, &lambda;=1, &beta;<sub>anc</sub>=0): GSM8K
+    <span class="metric">val@50 &asymp; 0.74&ndash;0.75</span>, inside the dense band of
     <span class="metric">0.75&ndash;0.78</span>, at roughly 5% of the fast-path gradient-communication cost.
-    The open question is no longer parity &mdash; it is whether anything can <em>surpass</em> dense, and
-    EXP-31 closed the one axis we could test under the locked surface. This tab is the honest current
-    scoreboard and the only to-dos that remain.
+    The sign method (<code>signed_ema</code>) that earlier experiments declared dead <em>now learns</em>
+    &mdash; on the corrected anchor circuit it is stable and near-parity &mdash; but it is dominated by
+    error feedback and is not the default. The open question is no longer parity &mdash; it is whether
+    anything can <em>surpass</em> dense. This tab is the honest current scoreboard, the one insight that
+    unlocked the learning (<strong>&beta;<sub>anc</sub>=0</strong>, below), and the to-dos that remain.
   </p>
 
   <h3>The scoreboard today</h3>
@@ -25,20 +28,46 @@
     </thead>
     <tbody>
       <tr><td>dense control &mdash; band across draws/boxes</td><td><span class="metric">0.75&ndash;0.78</span></td><td>the bar (0.7506 apples-to-apples this box; 0.7536 old code; 0.7839 a high draw elsewhere)</td></tr>
-      <tr class="hl"><td><strong>B2 &mdash; <code>delayed_ef</code> &lambda;=1 (SOTA)</strong></td><td><strong><span class="metric">0.7400&ndash;0.7528</span></strong></td><td><strong>PARITY with dense within &plusmn;0.024 noise, ~5% comm cost</strong></td></tr>
+      <tr class="hl"><td><strong>B2 &mdash; <code>delayed_ef</code> &lambda;=1 (SOTA / DEFAULT)</strong></td><td><strong><span class="metric">0.7400&ndash;0.7528</span></strong></td><td><strong>error feedback &mdash; PARITY with dense within &plusmn;0.024 noise, ~5% comm cost</strong></td></tr>
       <tr><td>ef_powersgd (EXP-26, off-subspace EF)</td><td>0.7210</td><td>superseded by B2; ignited at 100 steps (EXP-27)</td></tr>
-      <tr><td>signed_ema &alpha;=0.5 (EXP-25)</td><td>0.7066</td><td>falsified merger (sign coin-flip)</td></tr>
-      <tr><td>plain PowerSGD + anchor-\(Q\), no merger (C2)</td><td>0.6300</td><td>substrate floor; the merger adds +0.123 on top</td></tr>
+      <tr><td>signed_ema &alpha;=0.5, <strong>corrected valid-M circuit</strong> (EXP-32)</td><td><span class="metric">0.7271</span></td><td><strong>works-but-dominated</strong> &mdash; stable @50 (0.7278@25&rarr;0.7271@50, no length-hack ignition); learns once the anchor is honest, but below B2</td></tr>
+      <tr><td>signed_ema &alpha;=0.5, old invalid-M circuit (EXP-25)</td><td>0.7066</td><td>superseded by #29 &mdash; this number rested on the off-policy anchor confound</td></tr>
+      <tr><td>plain PowerSGD + anchor-\(Q\), no merger (C2)</td><td>0.6300</td><td>substrate floor; error feedback adds +0.12, the sign method +0.10 on top</td></tr>
     </tbody>
   </table>
+
+  <h3>The insight that unlocked it &mdash; &beta;<sub>anc</sub> = 0</h3>
+  <p>
+    The anchor maintains an EMA of its gradient, \(M \leftarrow \beta_{\text{anc}}\cdot M + (1-\beta_{\text{anc}})\cdot G_{\text{anchor}}\),
+    and the merger feeds that \(M\) into the correction. The single most important setting we found is
+    <strong>\(\beta_{\text{anc}} = 0\)</strong>: \(M\) becomes the <em>freshest anchor gradient only</em>, with
+    <strong>no accumulation of older ones</strong>. That is what gives good results.
+  </p>
+  <div class="win">
+    <strong>Why &mdash; the RL insight (the biggest finding).</strong> RL policy gradients are
+    <em>non-stationary</em>: a gradient is only valid <em>at the policy that produced it</em>. Accumulating
+    old policy gradients (\(\beta_{\text{anc}}>0\)) folds in stale, off-policy, biased directions, which hurts
+    &mdash; and is exactly the kind of persistent stale direction that integrates into the reward-flat
+    length-explosion ignition (the EXP-27 tab). This is the <strong>opposite</strong> of supervised learning,
+    where momentum / EMA (\(\beta\approx0.9\)) helps because the loss surface is stationary. So &ldquo;politely
+    remembering&rdquo; old policy gradients is the wrong instinct here; using only the freshest one
+    (\(\beta_{\text{anc}}=0\)) is right. Both the SOTA error-feedback merger (B2) and the now-working sign
+    method run at \(\beta_{\text{anc}}=0\).
+  </div>
 
   <h3>What is settled</h3>
   <ul>
     <li><strong>The substrate is realistic and mechanically correct.</strong> The anchor is the only thing
       that updates the projection basis \(Q\), the fast path can only read it, the only uncompressed pass
-      lives inside the anchor, and there is no hidden full-rank &ldquo;clean step.&rdquo; Since EXP-29 the
-      anchor also grades the trajectories its own stale weights generated &mdash; the gradient signal is
-      now confound-free.</li>
+      lives inside the anchor, and there is no hidden full-rank &ldquo;clean step.&rdquo;</li>
+    <li><strong>The anchor's gradient is now honest (#29) &mdash; the key enabler.</strong> Before #29 the
+      anchor forwarded the <em>current</em> batch through its <code>delay_K</code>-stale weights, producing an
+      off-policy &ldquo;wrong-trajectory&rdquo; gradient. Since EXP-29 it grades the trajectories its
+      <em>own</em> stale weights generated &mdash; on-policy for those weights, so the importance ratio is
+      \(\equiv 1\) (a valid stale-policy REINFORCE gradient), not a biased off-policy estimate. The operator's
+      framing: the anchor stops <em>politely deferring</em> to mismatched current-policy data and uses its own
+      honest gradient. Every pre-#29 verdict that rested on the old wrong-data confound is superseded (see
+      below).</li>
     <li><strong>Parity is reached</strong> (within evaluation noise). EXP-31's apples-to-apples dense rerun
       put the bar at 0.7506; B2's 0.7400&ndash;0.7528 lineage sits inside the dense band. The
       &ldquo;0.044 gap to dense&rdquo; earlier experiments chased was a wrong-reference artifact.</li>

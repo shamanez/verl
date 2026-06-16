@@ -9,7 +9,10 @@
     clean falsification: a four-lever tournament over every admissible way to <em>use</em> the stale anchor
     gradient came back <strong>null across the board</strong>. The honest verdict is <strong>STOP</strong>
     on the anchor-usage axis &mdash; parity is real and reproduced, but nothing in how we re-weight,
-    accumulate, perturb, or de-noise the anchor signal pushes past dense.
+    accumulate, perturb, or de-noise the anchor signal pushes past dense. The method under test throughout is
+    the program's default, <strong>error feedback (<code>B2</code> / <code>delayed_ef</code>)</strong>; the
+    tournament tunes <em>how its correction is used</em>, and confirms the default is already the best
+    configuration on this axis.
   </p>
 
   <h3>Result 1 &mdash; the dense-reference reframe (parity is real)</h3>
@@ -23,7 +26,8 @@
     <thead><tr><th>Configuration</th><th>val@50</th><th>Reading</th></tr></thead>
     <tbody>
       <tr><td>dense &mdash; this box, this config, seed 0</td><td><span class="metric">0.7506</span></td><td>the apples-to-apples bar</td></tr>
-      <tr class="hl"><td><strong>B2 / best comm-efficient (<code>delayed_ef</code> &lambda;=1)</strong></td><td><span class="metric">0.7400</span></td><td><strong>gap 0.011 &mdash; inside &plusmn;0.024 eval noise = PARITY</strong></td></tr>
+      <tr class="hl"><td><strong>B2 / best comm-efficient (<code>delayed_ef</code> &lambda;=1) &mdash; the default</strong></td><td><span class="metric">0.7400</span></td><td><strong>gap 0.011 &mdash; inside &plusmn;0.024 eval noise = PARITY</strong></td></tr>
+      <tr><td>signed_ema (sign merger, &alpha;=0.5) &mdash; corrected circuit, EXP-32</td><td>0.7271</td><td>now stable &amp; near-parity, but &minus;0.013 vs B2 &rArr; <strong>dominated</strong></td></tr>
       <tr><td>dense &mdash; old reference (different box)</td><td>0.7839</td><td>a high draw; the &ldquo;0.044 gap&rdquo; was a wrong-reference artifact</td></tr>
     </tbody>
   </table>
@@ -34,6 +38,14 @@
     ~5% of the gradient-communication cost.</strong> The &ldquo;0.044 gap to dense&rdquo; EXP-31 was
     chartered to close did not exist &mdash; it was an artifact of comparing against a high draw on the
     wrong machine.
+  </p>
+  <p>
+    With the #29 anchor-circuit fix in place, <strong>both</strong> mergers now train cleanly: error
+    feedback (B2) and the sign merger (<code>signed_ema</code>, 0.7271, EXP-32). They rank
+    <strong>error&nbsp;feedback&nbsp;&gt;&nbsp;sign</strong> &mdash; <code>signed_ema</code> reaches stable
+    near-parity but lands ~0.013 below B2, so it is <em>works-but-dominated</em>, not a contender for the
+    default. Error feedback stays the program's best and default method; the tournament below tunes only how
+    <em>its</em> correction is spent.
   </p>
   <div class="warn">
     <strong>The remaining honesty.</strong> Both numbers are single draws inside a ~&plusmn;0.024 band, so

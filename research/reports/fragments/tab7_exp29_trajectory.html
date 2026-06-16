@@ -8,8 +8,13 @@
     <em>current</em> policy's answers using <em>old</em> weights, which is neither the old policy's
     gradient nor the new one's. EXP-29 (issue #29, &ldquo;Correct the anchor gradients trap utilisation&rdquo;,
     operator-directed after a code review) fixes this: the anchor now replays the exact trajectories its
-    stale weights actually generated. No training-curve headline &mdash; this is an infrastructure
-    correctness fix &mdash; but it is the fix that made the later SOTA legitimate.
+    stale weights actually generated. The operator's one-line framing &mdash; <strong>&ldquo;turning off
+    politeness&rdquo;</strong>: the anchor stops politely deferring to whatever current-policy data is
+    handed to it and instead computes its <em>own honest gradient</em> on its <em>own</em> answers. There
+    is no training-curve headline on this tab &mdash; it is an infrastructure correctness fix &mdash; but
+    it is the fix that made the later SOTA legitimate, and it is the precondition for the single most
+    important finding in the whole program, the <strong>\(\beta_{\text{anc}} = 0\)</strong> result
+    developed at the bottom of this tab.
   </p>
 
   <h3>What the anchor is supposed to compute</h3>
@@ -161,24 +166,84 @@
     replay is the precondition that made the next experiment's parity result legitimate rather than
     confounded.
   </div>
-  <div class="warn">
-    <strong>The honest non-result.</strong> Making \(M\) valid did <em>not</em> rescue the old sign /
-    blend idea. When EXP-30 measured it, the valid generator-consistent gradient was <em>just as
-    orthogonal</em> to the live compressed gradient as the old confounded \(M\) had been
-    (\(\cos \approx 0\) either way). So the EXP-25 &ldquo;sign agreement is a coin-flip&rdquo; finding was
-    <strong>genuinely structural</strong>, not an artifact of the trajectory confound &mdash; fixing the
-    data did not open up the blend geometry (which is why EXP-30's blend gate closed without a training
-    run). The trajectory fix and the sign coin-flip are two independent facts: EXP-29 removed a real
-    confound and unlocked the <em>residual</em> route to SOTA, but it did not un-falsify the
-    <em>sign-replacement</em> route. Both readings stand together.
+  <div class="callout">
+    <strong>What the corrected \(M\) <em>did</em> change for the sign method.</strong> On the old
+    confounded circuit, the signed-EMA merger looked <em>net-harmful at every \(\alpha\)</em> &mdash;
+    monotonically worse correction, with sign-reversal igniting a length-hack &mdash; and that picture was
+    used to retire the whole sign idea. That reading is <strong>superseded by #29</strong>. Re-run on the
+    corrected (valid-\(M\)) circuit, <code>signed_ema</code> at \(\alpha = 0.5\) is now
+    <strong>stable and near dense-parity</strong> (<span class="metric">val@50 = 0.7271</span>, EXP-32
+    <code>cwz1hu5p</code>: 0.7278&nbsp;@25&nbsp;&rarr;&nbsp;0.7271&nbsp;@50, <em>no</em> ignition) &mdash;
+    a working merger, well clear of the no-merger floor (<span class="metric">0.6300</span>). It is
+    <strong>works-but-dominated</strong>, not net-harmful: error feedback (<code>delayed_ef</code>,
+    \(\approx 0.74\)) is still the better &mdash; and default &mdash; merger. The geometric fact that the
+    valid \(M\) is still nearly orthogonal to the live compressed gradient (\(\cos \approx 0.01\), EXP-30
+    GATE-B1) stands; what changed is that on valid data the sign method no longer destabilises, so the
+    structural coin-flip caps it at <em>parity-ish</em> rather than driving it below the floor. See the
+    EXP-25 tab for the full sign-method-now-works reframe.
   </div>
+
+  <h3>How learning actually works here &mdash; and the headline: \(\beta_{\text{anc}} = 0\)</h3>
+  <p>
+    Step back from the plumbing to <em>why</em> a self-consistent anchor matters. A policy gradient is
+    only meaningful <strong>at the policy that produced the data</strong>. REINFORCE moves the weights in
+    the direction that makes the high-advantage trajectories <em>this policy actually sampled</em> more
+    likely. Feed it trajectories some <em>other</em> policy sampled, with no importance correction, and you
+    are no longer climbing the objective &mdash; you are nudging the weights toward a direction computed for
+    a distribution you are not at. That is exactly the &ldquo;politeness&rdquo; the old anchor exhibited:
+    it dutifully scored whatever current-batch data was handed to it, producing a biased off-policy estimate
+    dressed up as a clean gradient. Turning politeness off &mdash; replaying its own trajectories &mdash;
+    makes \(G_{\text{anchor}}\) a <em>real</em> policy gradient of the stale snapshot. Learning works
+    because the anchor's signal is now an honest gradient, not a courteous fiction.
+  </p>
+  <p>
+    Once \(M\) is honest, the next question is how to <em>combine</em> successive anchor gradients into the
+    running matrix the merger consumes. The anchor EMA is
+  </p>
+  $$ M \;\leftarrow\; \beta_{\text{anc}}\, M \;+\; (1-\beta_{\text{anc}})\, G_{\text{anchor}}, $$
+  <p>
+    and the configured default is the supervised-learning instinct, \(\beta_{\text{anc}} = 0.95\) &mdash;
+    a long memory that averages many past gradients to denoise the estimate, exactly as momentum does in
+    SGD. The single most important empirical result of the program is that this instinct is
+    <strong>wrong for RL</strong>: the SOTA configuration runs at <strong>\(\beta_{\text{anc}} = 0\)</strong>,
+    i.e. <em>no</em> accumulation at all &mdash; \(M\) is simply the freshest anchor gradient,
+    \(M = G_{\text{anchor}}\), discarding every older one.
+  </p>
+  <div class="win">
+    <strong>The headline (and the RL reason it is true).</strong> Setting
+    \(\beta_{\text{anc}} = 0\) &mdash; keeping <em>only</em> the most recent anchor gradient and throwing
+    away the EMA history &mdash; is what makes the merger work, and it is the opposite of the supervised
+    default. The reason is <strong>non-stationarity</strong>. In supervised learning the loss surface is
+    fixed, so every past gradient is still an estimate of the <em>same</em> objective and averaging them
+    (\(\beta \approx 0.9\)) cuts variance for free. In RL the objective <em>moves with the policy</em>: a
+    gradient computed three refreshes ago was valid at a policy three refreshes stale and is now an
+    off-policy, biased direction. An EMA with \(\beta > 0\) is therefore a machine for blending in exactly
+    the stale, wrong-distribution gradients that &mdash; just like the pre-#29 confound &mdash; pull the
+    update off-objective. &ldquo;Politely remembering&rdquo; old policy gradients is harmful for the same
+    structural reason scoring the wrong trajectories was. Using only the freshest (\(\beta_{\text{anc}}=0\))
+    is the in-principle-correct choice, and it is what the SOTA uses.
+  </div>
+  <p>
+    This also closes the loop with the ignition story (EXP-27 tab). The damped-EF carrier integrated a
+    near-constant tangential push <em>because</em> \(M\) carried a long, \(\beta=0.95\) memory &mdash; a
+    direction held effectively fixed over the whole run. At \(\beta_{\text{anc}} = 0\) there is no persistent
+    accumulated direction to integrate: \(M\) is refreshed wholesale every fire, so a stale carrier cannot
+    compound. The same knob that makes \(M\) statistically correct (use only the on-policy-now gradient)
+    is the knob that removes the mechanism behind the length-hack. One open follow-up remains
+    (low priority): an explicit \(\beta_{\text{anc}} > 0\) run on the corrected circuit to
+    <em>confirm</em>, head-to-head, that re-introducing accumulated old policy gradients measurably hurts
+    &mdash; the direct experimental test of the non-stationarity hypothesis.
+  </p>
 
   <footer style="font-size:13px; color:var(--muted); margin-top:24px; border-top:1px solid var(--line); padding-top:10px;">
     Sources: issue #29 &ldquo;Correct the anchor gradients trap utilisation&rdquo; (the EXP-29 plan + PR are the record;
     operator-directed, no claim flow) · <code>verl/workers/comm_eff/anchor.py</code>
     (<code>anchor_pg_loss</code>, <code>replay_relevance_stats</code>, <code>maybe_build_replay_ring</code>) ·
     <code>verl/workers/engine/fsdp/transformer_impl.py</code> (anchor refresh + replay selection + relevance verdict) ·
-    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> knobs) ·
-    PR&nbsp;#16 (merged) · <code>research/runs/SUMMARY.md</code>.
+    <code>verl/workers/config/comm_eff.py</code> (the <code>replay_paired_batch</code> / <code>snapshot_device</code> /
+    <code>beta_anc</code> knobs; default <code>beta_anc=0.95</code>, SOTA runs <code>beta_anc=0</code>) ·
+    <code>verl/workers/comm_eff/spectral_filter.py</code> (the \(M\!\leftarrow\!\beta_{\text{anc}}M+(1{-}\beta_{\text{anc}})G\) EMA) ·
+    PR&nbsp;#16 (merged) · EXP-32 <code>cwz1hu5p</code> (signed_ema α=0.5 on the corrected circuit) ·
+    <code>research/runs/SUMMARY.md</code>.
   </footer>
 </section>

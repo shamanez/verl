@@ -104,17 +104,22 @@
   </div>
 
   <div class="warn">
-    <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the test of that gamble, and the outcome (and the mechanism behind it) is the subject of the later tabs.
+    <strong>What was known going in versus bet.</strong> The two-circuit <em>substrate</em> was engineered and verified before the sweep — that the stale anchor produces a correct, full-coverage, cross-rank-consistent gradient, and that it (and only it) drives the basis \(Q\). That part was proven mechanically and is the durable contribution. The <em>merger rule</em> — that replacing signs with the stale anchor's would help — was the genuine, unproven gamble. EXP-25 was the first test of that gamble; the outcome <em>as measured here</em> (and the mechanism behind it) is the subject of the later tabs. A crucial twist: the verdict below was reached on a circuit that, as later discovered, fed the anchor the wrong data — once that was fixed, the same merger behaved very differently, so read EXP-25's STOP as conditional on the circuit of the time.
   </div>
 
   <div class="callout">
     <strong>[2026-06-16] Where this led.</strong> The two-circuit substrate introduced here is now
-    permanent, and three things happened on top of it. <strong>EXP-29</strong> fixed a confound in how the
-    anchor used <em>trajectories</em> — it had been grading the current policy's data with stale weights
-    (see the EXP-29 tab). <strong>EXP-30</strong> built the &delta;-residual merger that finally reached
-    <strong>dense parity</strong> at ~5% communication cost — the current SOTA. <strong>EXP-31</strong>
-    confirmed that parity against an apples-to-apples dense rerun and showed the anchor-usage axis cannot
-    surpass dense (STOP). The signed_ema bet tested in this tab is falsified — but the substrate it proved
-    is what carried the program to parity.
+    permanent, and several things happened on top of it. <strong>EXP-29</strong> fixed a confound in how the
+    anchor computed its gradient — it had been grading the <em>current</em> policy's data with stale weights,
+    an off-policy "wrong-trajectory" gradient; the fix has the anchor grade the trajectories its own stale
+    weights generated, making its signal a valid policy gradient (see the EXP-29 tab). On that corrected
+    circuit the signed_ema merger of <em>this</em> tab was re-run (<strong>EXP-32</strong>) and it
+    <strong>now works</strong>: stable, no length-hack ignition, validation
+    <span class="metric">0.7271</span> at step 50 — near parity. So the sign bet is no longer falsified; it is
+    <em>works-but-dominated</em>. <strong>EXP-30</strong> built the &delta;-residual merger (error feedback)
+    that reached <strong>dense parity</strong> (~0.75) at ~5% communication cost and remains the
+    <strong>default / best</strong> method; <strong>EXP-31</strong> confirmed that parity against an
+    apples-to-apples dense rerun and showed the anchor-usage axis cannot surpass dense (STOP). The substrate
+    this tab proved is what carried the whole program there.
   </div>
 </section>

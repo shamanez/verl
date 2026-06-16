@@ -2,8 +2,21 @@
   <h2>EXP-25: What We Achieved, and the Mathematics of the EMA-Sign Merger</h2>
 
   <p class="lede">
-    EXP-25 has two stories. The first is a genuine win: it built and verified the realistic two-circuit substrate that every later experiment now runs on — a continuously-maintained, deliberately-stale, full-coverage uncompressed reference that drives the compression. The second is an honest falsification: the specific way EXP-25 chose to <em>use</em> that reference — borrowing its per-coordinate signs (the <em>signed_ema</em> merger) — cannot work, and we can now show exactly why with the actual measured numbers. This tab covers both: what was banked, and the small piece of mathematics that explains why stealing the anchor's signs is a coin-flip dressed up as a correction.
+    EXP-25 has two stories. The first is a genuine win: it built and verified the realistic two-circuit substrate that every later experiment now runs on — a continuously-maintained, deliberately-stale, full-coverage uncompressed reference that drives the compression. The second was read at the time as a falsification: the specific way EXP-25 chose to <em>use</em> that reference — borrowing its per-coordinate signs (the <em>signed_ema</em> merger) — appeared not to work, and the mathematics below shows exactly why <em>on the circuit as it then stood</em>. That qualifier turned out to matter. A later fix (EXP-29) changed how the anchor computes its gradient, and on the corrected circuit the very same merger trains stably to near-parity (<span class="metric">0.7271</span>, EXP-32). So the honest reading today is not "cannot work" but <strong>works-but-dominated</strong>: the sign merger is fine, just beaten by error feedback (the default method). This tab keeps the original analysis — it correctly diagnoses the <em>old</em> circuit — and threads through, at each step, what the #29 fix changed.
   </p>
+
+  <div class="win">
+    <strong>[2026-06-16] Headline correction.</strong> The strong claim this tab originally made — that the
+    sign merger is <em>net-harmful at every \(\alpha\)</em> — was an artifact of a broken circuit, not a
+    property of the merger. It rested on (i) a wrong floor (<span class="metric">0.7415</span>, an old
+    fresh-clean-step config) and (ii) an anchor that graded the current policy's trajectories with stale
+    weights, producing an off-policy "wrong-trajectory" sign source. Fix the floor to the real one
+    (<span class="metric">0.6300</span>, plain PowerSGD on the stale anchor, no merger) and fix the anchor's
+    data (EXP-29), and signed_ema at \(\alpha=0.5\) trains stably to <span class="metric">0.7271</span> — well
+    above the floor and within striking distance of dense (~0.75). It is <strong>dominated</strong> by error
+    feedback (delayed_ef, ~0.74, the default), not harmful. Read the falsification chain below as a correct
+    post-mortem of the <em>pre-#29</em> circuit, now superseded.
+  </div>
 
   <h3>Part 1 — What EXP-25 actually achieved</h3>
 
@@ -28,7 +41,7 @@
   </p>
 
   <div class="callout">
-    <strong>The KL guardrail diagnostic.</strong> To prove length-hacking is the proximate killer, EXP-25 re-ran the catastrophic \(\alpha=0\) arm with a small KL penalty added (a leash tying the policy to a fixed reference, which starves runaway non-stopping generations). The length explosion vanished — answers stayed at ~120 tokens, truncation stayed at zero — and the catastrophe (validation accuracy <span class="metric">0.354</span>) became a mild decline to <span class="metric">0.679</span>. The leash removed the <em>symptom</em>. But 0.679 is still <em>below</em> the no-help floor of 0.6914: the merger's underlying direction damage survives the guardrail. The brake stops the crash; it does not make the sign-borrowing helpful.
+    <strong>The KL guardrail diagnostic.</strong> To prove length-hacking is the proximate killer, EXP-25 re-ran the catastrophic \(\alpha=0\) arm with a small KL penalty added (a leash tying the policy to a fixed reference, which starves runaway non-stopping generations). The length explosion vanished — answers stayed at ~120 tokens, truncation stayed at zero — and the catastrophe (validation accuracy <span class="metric">0.354</span>) became a mild decline to <span class="metric">0.679</span>. This pins length-hacking as the proximate mechanism of the \(\alpha=0\) collapse, which is the durable point. The original tab went further — reading 0.679 as "below the floor, so the sign damage survives the brake" — but that read used the wrong floor and the pre-#29 circuit; on the corrected circuit \(\alpha=0.5\) needs no leash at all and reaches 0.7271. So treat this as a clean diagnosis of the <em>old</em> \(\alpha=0\) failure, not as evidence the sign primitive is intrinsically harmful.
   </div>
 
   <h3>Part 2 — The mathematics of the EMA-sign bet</h3>
@@ -40,7 +53,7 @@
   $$ G_{\text{corr}} \;=\; \alpha\,G_{\text{comp}} \;+\; (1-\alpha)\,\lvert G_{\text{comp}}\rvert \odot \operatorname{sign}(M), $$
 
   <p>
-    where \(\lvert G_{\text{comp}}\rvert\) is the per-coordinate absolute value (the magnitudes), \(\operatorname{sign}(M)\) is \(+1\) or \(-1\) per coordinate (the directions from the anchor), \(\odot\) is element-wise multiplication, and \(\alpha\in[0,1]\) is the mixing knob. \(M\) is an <em>exponential moving average</em> (EMA) of the stale anchor gradient — a running blend \(M_t = \beta M_{t-1} + (1-\beta)G_{\text{anchor}}\) with \(\beta=0.95\), so it remembers roughly the last twenty refreshes and smooths out noise.
+    where \(\lvert G_{\text{comp}}\rvert\) is the per-coordinate absolute value (the magnitudes), \(\operatorname{sign}(M)\) is \(+1\) or \(-1\) per coordinate (the directions from the anchor), \(\odot\) is element-wise multiplication, and \(\alpha\in[0,1]\) is the mixing knob. \(M\) is an <em>exponential moving average</em> (EMA) of the stale anchor gradient — a running blend \(M_t = \beta M_{t-1} + (1-\beta)G_{\text{anchor}}\). EXP-25 ran this with \(\beta=0.95\), smoothing over roughly the last twenty refreshes. That choice turns out to matter more than the sign rule: because RL policy gradients are valid only at the policy that produced them, accumulating old ones (\(\beta>0\)) folds in stale, off-policy directions, whereas using only the <em>freshest</em> anchor gradient (\(\beta_{\text{anc}}=0\), \(M=G_{\text{anchor}}\)) is what the corrected-circuit result relies on. That distinction is developed in the anchor tab; here we analyze the merger geometry EXP-25 actually measured.
   </p>
 
   <h3>Why it could plausibly work</h3>
@@ -53,10 +66,10 @@
     Apply that intuition here. The anchor's \(M\) is an averaged, clean, uncompressed gradient — exactly the kind of robust sign source signSGD wants. If the <em>direction</em> the true update wants to go is stable over the five-tick refresh window, then a slightly stale sign is still the <em>right</em> sign. The merger would then give the best of both worlds: keep the fast circuit's well-calibrated magnitudes (\(\lvert G_{\text{comp}}\rvert\)), and borrow trustworthy direction bits from the clean reference (\(\operatorname{sign}(M)\)). Superficially, this is exactly the seam where a stale clean reference should help a noisy fast one.
   </p>
 
-  <h3>Why it cannot work — the falsification chain</h3>
+  <h3>Why it didn't work on the old circuit — the falsification chain</h3>
 
   <p>
-    The whole argument hinges on one assumption: that the anchor's sign and the fast gradient's sign usually <em>agree</em>. They do not. We measured it.
+    The whole argument hinges on one assumption: that the anchor's sign and the fast gradient's sign usually <em>agree</em>. On the EXP-25 circuit they did not, and we measured it. (Hold onto <em>why</em> they disagreed — that turns out to be the fixable part, addressed at the end of this section.)
   </p>
 
   <p>
