@@ -23,3 +23,4 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 [2026-06-16T14:06:50+10:00] [orchestrator] tick: dispatched experiment-runner (EXP-32 LAUNCHED on operator box 46.243.55.134:40154) + training-log-monitor(bg). running=[32] analyzing=[] logging=[] blocked=[]. EXP-31 closed STOP. Awaiting monitor terminal report (val@25 decision point).
 [2026-06-16T17:03:49+10:00] [research-planner #33] plan written
 [2026-06-16T17:04:07+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-06-16T17:12:16+10:00] [triage] operator approved #33 (EXP-33 β_anc sweep): status:planned → status:approved; ready for orchestrator pickup
