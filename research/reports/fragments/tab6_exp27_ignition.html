@@ -4,11 +4,20 @@
   <p class="lede">
     EXP-27 damps the ef_powersgd residual (clip 1.0&rarr;0.5, decay 0.9&rarr;0.5) and runs for
     100 steps. The dose was capped exactly as designed. The run ignited anyway at step&nbsp;61,
-    reached val@50&nbsp;=&nbsp;<span class="metric">0.7202</span> (below the 0.7210 falsify
-    floor), and was killed at step&nbsp;68. This tab records what happened, why, and what comes
-    next. Full analysis: <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> +
-    <code>runs/EXP-27/RUN_COMPARISON.md</code>.
+    reached val@50&nbsp;=&nbsp;<span class="metric">0.7202</span>, and was killed at step&nbsp;68.
+    This tab records what happened, why, and what came next. Full analysis:
+    <code>runs/EXP-27/MECHANISM_ANALYSIS.md</code> + <code>runs/EXP-27/RUN_COMPARISON.md</code>.
   </p>
+  <div class="callout">
+    <strong>Read this tab through two later corrections.</strong> (1) EXP-27 ran on the
+    <em>pre-#29 anchor circuit</em>, so its \(M\) was the off-policy &ldquo;wrong-trajectory&rdquo;
+    gradient (current batch scored by stale weights, no importance correction) &mdash; see the EXP-29 tab.
+    (2) It ran at the configured default \(\beta_{\text{anc}} = 0.95\), a <em>long</em> anchor-EMA memory.
+    Both turned out to be exactly the ingredients of the carrier identified below, and both were removed in
+    the SOTA configuration (valid \(M\) via on-policy replay, and \(\beta_{\text{anc}} = 0\)). The
+    diagnosis here was correct; the later fixes <em>act on the very mechanism it isolated</em>. Where a
+    pre-#29 claim is now superseded, it is flagged inline.
+  </div>
 
   <h3>Run timeline: healthy phase &rarr; ignition lock-in</h3>
 
