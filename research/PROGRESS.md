@@ -24,3 +24,4 @@ the sub-basis bet is frozen as a parity-only null. Dose λ/β_anc unblocked (EXP
 [2026-06-16T17:03:49+10:00] [research-planner #33] plan written
 [2026-06-16T17:04:07+10:00] [triage] dispatched 1 planners, 0 issues already planned
 [2026-06-16T17:12:16+10:00] [triage] operator approved #33 (EXP-33 β_anc sweep): status:planned → status:approved; ready for orchestrator pickup
+[2026-06-16T17:32:45+10:00] [orchestrator] EXP-33 LAUNCHED: 5-cell beta_anc sweep {0,.25,.5,.75,1} on B2 delayed_ef substrate, operator box 84.8.116.228 (4xH200, op-managed). C0 b0p00 running; off-axis parity OK (beta_anc=0.00 passthrough last-wins); secrets copied; data auto-prep. tmux exp-33-84_8_116_228; bg monitor mon-exp33-a. running=[33] analyzing=[] logging=[] blocked=[]
