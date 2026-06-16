@@ -16,7 +16,7 @@
 
 The anchor circuit produces a CLEAN per-target gradient ``G_anchor`` that the
 spectral filter consumes into its anchor-gradient EMA ``M_anchor``. "Clean"
-means three things:
+means four things:
 
 * **Same loss as the fast path, UNMASKED.** The anchor reuses the GRPO
   actor-loss over the rollout-expanded batch (``responses``, ``response_mask``,
@@ -31,11 +31,18 @@ means three things:
   (so the optimizer never sees it and no accidental step occurs), and takes NO
   ``optimizer.step()`` of its own (``anchor_optimizer_steps == 0``).
 
+* **Generator-consistent (paired) batch.** With ``anchor.replay_paired_batch=true``
+  (the launcher base) the anchor replays the paired
+  ``(batch[t-delay_K], generator_snapshot)`` that produced the matching fast
+  rollout, so ``M_anchor`` is the dense gradient at the SAME ``(batch, θ)`` the
+  fast path compressed — the residual is codec error, not a batch effect. This
+  on-policy pairing is what makes ``M`` a valid dense reference.
+
 * **Raw gradient into the EMA, before any correction.** ``G_anchor`` is read
   RAW per target and fed to ``SpectralFilter.update_anchor`` BEFORE any
-  fast-path corrector (``signed_ema_matrix`` / ``inject_matrix`` /
-  ``blend_matrix``) runs (``anchor_grad_corrected == 0``). The anchor
-  gradient is never the input to the correction.
+  fast-path merger (``delayed_ef_matrix`` / ``signed_ema_matrix`` /
+  ``inject_matrix`` / ``blend_matrix``) runs (``anchor_grad_corrected == 0``).
+  The anchor gradient is never the input to the correction.
 
 This module owns the FSDP-AGNOSTIC pieces so they are unit-testable on CPU with
 no distributed runtime:

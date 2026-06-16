@@ -1467,7 +1467,7 @@ class FSDPEngine(BaseEngine):
         _fire_canary = None  # push-time canary to verify off the clone (replay / cpu-snapshot modes)
         _replay_batch = None
         if replay_mode:
-            # : replay the PAIRED (batch[t-delay_K], generator-snapshot).
+            # Replay the PAIRED (batch[t-delay_K], generator-snapshot).
             _rep = ring.get_replay(step, delay_K)
             if _rep is None:  # pragma: no cover - ring always has >=1 after push
                 return

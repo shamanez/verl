@@ -175,7 +175,7 @@ def test_act_family_none_without_m():
 # --------------------------------------------------------------------------- #
 def test_live_act_path_consumes_act_sketch():
     """q_basis='act' ⇒ anchor_update_basis orthonormalizes the act sketch V (the
-    signed_ema path), independent of the family harvest."""
+    default q_basis=act path), independent of the family harvest."""
     c = _make_compressor(q_basis="act", q_basis_passive=[])
     li = c.boundary_indices[0]
     # Simulate the act sketch the forward hook would accumulate.

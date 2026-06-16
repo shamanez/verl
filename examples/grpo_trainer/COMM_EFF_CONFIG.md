@@ -21,7 +21,7 @@ all-off so `comm_eff.enabled=false` is a dense no-op.
 |---|---|---:|---|
 | `COMM_EFF_ENABLED` | `comm_eff.enabled` | `true` | Turn the comm-eff path on. Set `false` for dense verl behavior. |
 | `COMM_EFF_COMPRESSION_TYPE` | `comm_eff.compression_type` | `powersgd` | Select `powersgd`, `prf_mask`, or `dense`. |
-| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | Optional periodic dense step for diagnostics. Keep `0` for the baseline path. |
+| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | **DEAD — superseded by the mandatory anchor circuit.** A periodic full-`H` dense step is not communication-efficient and would itself be stale on a real decentralized-PP link; the anchor is its realistic replacement. Leave `0`; kept only as a historical/diagnostic knob, do not re-enable. |
 
 ## PowerSGD Codec
 
@@ -98,10 +98,24 @@ bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 |---|---|---:|---|
 | `COMM_EFF_MASK_ENABLED` | `mask.enabled` | `false` | Enable per-token/channel activation masking. |
 | `COMM_EFF_MASK_P` | `mask.p` | `0.9` | Fraction of entries masked. |
-| `COMM_EFF_MASK_RESCALE` | `mask.rescale` | `true` | Apply inverted-dropout rescale. |
+| `COMM_EFF_MASK_RESCALE` | `mask.rescale` | `true` | Inverted-dropout `1/(1-p)` gain. **Keep `true`.** `false` collapses activation RMS and blows up `grad_norm` (~2700 vs ~4.5) via the pre-norm `1/RMS` backward — a closed finding; do not run no-rescale. |
 | `COMM_EFF_MASK_RECOMPUTE` | `mask.mask_recompute` | `true` | Reuse the mask on old-log-prob recompute. |
+| (n/a — structural) | `mask.rescale_mode` | `auto` | Magnitude-restoration scheme — see below. The legacy `rescale` bool maps through `auto`. |
 | `COMM_EFF_MASK_SEED` | `mask.seed` | `0` | PRF seed. |
 | `COMM_EFF_MASK_PP_SIZE` | `mask.pp_size` | `8` | Simulated pipeline boundary count. |
+
+### `mask.rescale_mode ∈ {none, constant, rms_match, auto}`
+
+How the masked activation `h⊙m` is re-scaled before it crosses the wire:
+
+| mode | formula | use it when |
+|---|---|---|
+| `none` | `h⊙m` | never (RMS collapse → grad blow-up). |
+| `constant` | `h⊙m / (1-p)` | **default / recommended.** Inverted dropout; the grad-norm stabilizer. Its RMS *overshoot* damps the downstream RMSNorm backward — a feature. |
+| `rms_match` | `h⊙m · detach(rms_true / rms_masked)` | only for exact forward-activation stats / low-bit quant. Per-token EXACT pre-mask RMS, but **worse** grad-norm than `constant`. |
+| `auto` | `constant` if `rescale=true` else `none` | back-compat; what existing configs resolve to. |
+
+To select explicitly: `actor_rollout_ref.actor.comm_eff.mask.rescale_mode=rms_match`.
 
 ## Capture Probes
 

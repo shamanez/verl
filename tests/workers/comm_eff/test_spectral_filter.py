@@ -16,10 +16,11 @@
 
 These cover formula-correctness invariants without a GPU or distributed runtime.
 The filter operates on logical 2D matrices; FSDP unsharding is the engine's job.
-The live correction is the signed-EMA merger (``correction_mode="signed_ema"``);
-``inject`` and ``blend`` are alternate anchor combiners. All consult only the
-anchor-gradient EMA ``M_anchor`` (no SVD / no basis cache — the dead
-reweight/SVD/Tikhonov/seeded path was removed in signed_ema).
+The live correction is the delayed-EF paired-replay residual merger
+(``correction_mode="delayed_ef"``). The mergers exercised here — ``signed_ema``,
+``inject`` and ``blend`` — are alternate/superseded combiners that consult only
+the anchor-gradient EMA ``M_anchor`` (no SVD / no basis cache — the dead
+reweight/SVD/Tikhonov/seeded path was removed when the EMA-only mergers replaced it).
 
 * anchor EMA cold-starts at zeros and moves under update_anchor
 * signed_ema: alpha=1 => G_noisy unchanged; alpha=0 => |G_noisy|*sign(M);

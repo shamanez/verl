@@ -32,8 +32,8 @@ The anchor invariants are exercised here at the unit level:
 5. **mask_active == False on the anchor pass** — masking is disabled for the
    whole anchor fwd/bwd; ``anchor_mask_applications`` stays 0.
 6. **G_anchor read BEFORE any fast-path correction** — the raw grads are fed to
-   ``SpectralFilter.update_anchor`` (the EMA); the fast-path corrector
-   (``signed_ema_matrix``) is never called on the anchor gradient
+   ``SpectralFilter.update_anchor`` (the EMA); a fast-path merger
+   (e.g. ``signed_ema_matrix``) is never called on the anchor gradient
    (``anchor_grad_corrected`` stays 0).
 """
 
