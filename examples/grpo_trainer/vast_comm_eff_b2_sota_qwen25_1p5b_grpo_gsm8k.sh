@@ -57,19 +57,16 @@ export TEST_FREQ="${TEST_FREQ:-25}"
 export VAL_BEFORE_TRAIN=True
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-delayed_ef_comm_eff}"
 
-# ---- box compatibility: some Vast hosts crash in vLLM custom all-reduce
-#      (CUDA-IPC under the mp executor) during KV-cache init. Opt in if that
-#      happens; it is validation-neutral (NCCL all-reduce instead). -----------
-DISABLE_CUSTOM_ALL_REDUCE="${DISABLE_CUSTOM_ALL_REDUCE:-false}"
-EXTRA_OVERRIDES=()
-if [[ "${DISABLE_CUSTOM_ALL_REDUCE}" == "true" ]]; then
-  EXTRA_OVERRIDES+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=true")
-fi
+# ---- vLLM all-reduce: disable_custom_all_reduce is a CONTROLLED VAR (default
+#      true), OWNED by the generic launcher. We only pass the selector through;
+#      the generic launcher converts it to the Hydra override (so it is added
+#      exactly once). Default true because some Vast boxes crash in vLLM custom
+#      all-reduce at KV-cache init AND every run since EXP-32 ran true (apples-to-
+#      apples val@50). Override =false only on a box that does not crash. ---------
+export DISABLE_CUSTOM_ALL_REDUCE="${DISABLE_CUSTOM_ALL_REDUCE:-true}"
 
 echo "=== delayed_ef comm-eff baseline (lambda=1, r=77 anchor circuit) ===" >&2
 echo "    steps=$TOTAL_TRAINING_STEPS test_freq=$TEST_FREQ name=$EXPERIMENT_NAME disable_custom_all_reduce=$DISABLE_CUSTOM_ALL_REDUCE" >&2
 echo "    (optional anchor-usage levers default OFF)" >&2
 
-# Portable empty-array expansion under `set -u` (bash 3.2+ safe).
-exec bash "$HERE/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh" \
-  "${EXTRA_OVERRIDES[@]+"${EXTRA_OVERRIDES[@]}"}" "$@"
+exec bash "$HERE/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh" "$@"

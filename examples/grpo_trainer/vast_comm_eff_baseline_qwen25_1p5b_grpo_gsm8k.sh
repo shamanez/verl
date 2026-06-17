@@ -311,6 +311,18 @@ COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-redu
 COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 required for stable orthogonalization
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
+# ---- vLLM all-reduce: default to NCCL (disable_custom_all_reduce=true) ---------
+# WHY true by default: (1) some Vast H100/H200 boxes crash in vLLM's custom
+# all-reduce (CUDA-IPC under the mp executor) at KV-cache init; NCCL avoids it.
+# (2) It is greedy-val-neutral, so we hold it TRUE as a controlled var across ALL
+# arms — every run since EXP-32 ran TRUE — keeping val@50 comparisons apples-to-
+# apples. Override DISABLE_CUSTOM_ALL_REDUCE=false only on a box that does not crash.
+DISABLE_CUSTOM_ALL_REDUCE="${DISABLE_CUSTOM_ALL_REDUCE:-true}"
+VLLM_ALLREDUCE_OVERRIDE=()
+if [[ "${DISABLE_CUSTOM_ALL_REDUCE}" == "true" ]]; then
+  VLLM_ALLREDUCE_OVERRIDE+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=true")
+fi
+
 if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
   echo "INFO: anchor ON (the base) -> ~3 GB no-hook clone/rank; the default PPO_MAX_TOKEN_LEN_PER_GPU=18432 fits 4×H200. If you raise it, prefer 8×GPU." >&2
 fi
@@ -487,6 +499,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
   actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
   actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \
+  "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!
