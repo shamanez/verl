@@ -4,7 +4,7 @@
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (attempt 2)** | 1×4H200 (i_41292294, **team**) | — | operator box; 3 cells back-to-back, tmux `exp-34-104_202_252_41`. Attempt 1 crashed at vLLM init (custom_all_reduce IPC); **break-glass `DISABLE_CUSTOM_ALL_REDUCE=true` applied in-place**. Attempt 2 cell 1 (β=0.25) PAST vLLM init + training; monitor active (bg) |
+| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (attempt 2, healthy)** | 1×4H200 (i_41292294, **team**) | — | break-glass `DISABLE_CUSTOM_ALL_REDUCE=true` (attempt 1 crashed at vLLM init). Cell 1 (β=0.25) @ step ~14/55, reward 0.18→0.56, no ignition. **~139–157s/step → ~2.5h/cell → ~7.5h total** (~30 GPU-hr, ~$95, < 96 cap). Lightweight bg poll loop active; each cell runs to val@50. Teardown (team key, 41292294 only) on aggregate done.flag |
 | 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 stays default; max gap C2 +0.0144 < 0.024 |
 | 32 | signed_ema α=0.5 on valid-M | DONE | (op-managed) | done | val@50 0.7271 < B2 0.7528 |
 
