@@ -4,7 +4,7 @@
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (attempt 2, healthy)** | 1×4H200 (i_41292294, **team**) | — | Cell 1 (β=0.25) @ step ~28/55, **val@25=0.7271** (ties EXP-32 β=0 ref, as prior predicted), reward 0.79, no ignition. ~177s/step → cell1 done ~80min. Monitoring: relaxed (180s) monitor **subagent** (bg-bash has no egress — refreshes heartbeat itself). Each cell → val@50. Teardown (team key, 41292294 only) on aggregate done.flag |
+| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (attempt 2, healthy)** | 1×4H200 (i_41292294, **team**) | — | **Cell 1 (β=0.25) val@50 = 0.76118** (val@25 0.7271 → +0.034). NOMINALLY clears surpass bar (+0.0341 > 0.024 vs EXP-32 0.7271; > B2 0.7528) — but single draw, 1 of 3 cells, NOT a verdict. Cell 1 finishing (~step 50/55); cells 2(β.50)+3(β.75) pending. Monitoring: cheap fg-probe + bg-sleep pacer (20min). Teardown (team key, 41292294 only) on aggregate done.flag |
 | 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 stays default; max gap C2 +0.0144 < 0.024 |
 | 32 | signed_ema α=0.5 on valid-M | DONE | (op-managed) | done | val@50 0.7271 < B2 0.7528 |
 
