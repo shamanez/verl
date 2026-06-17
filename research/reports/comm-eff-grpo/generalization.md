@@ -589,11 +589,14 @@ doors — structure vs objective) **and** why both *naive* forms (R5-as-diagonal
 practically a mutual tie inside dense-Adam's class). **Adam is the diagonal everything collapses to** —
 the unifying reference for the whole surpass analysis.
 
-**The asymmetry that ranks R3 #1:** R3's escape is a *recipe* (lift to an objective + same-θ
-concurrent gradients) that, once followed, gives a different fixed point with high confidence; R5's
-escape is an *empirical* bet (does the shipped curvature genuinely carry off-diagonal structure, or is
-it a re-skinned `v_t`?). **But if R3 is built as a step-scale rather than an objective, it ties R5** —
-the #1 ranking is conditional on the objective-level formulation.
+**The asymmetry that ranks R3 #1 (theorist's spine).** Given its locked recipe, R3's escape is
+**STRUCTURAL / provable by construction**: `min_θ[L(θ) + λ·R(Var_r)]` changes the **fixed point** by
+construction (it's a different objective) — *only the GSM8K-greedy win-size is empirical*. R5's escape
+is admissible but its **benefit is contingent even granted off-diagonal structure**: there is **no
+theorem** that a non-diagonal preconditioner finds a *better* basin than dense-Adam (and the
+finite-difference estimate is noisy). So R3's "does it beat dense?" is *how much*, while R5's is
+*whether at all* — that gap is the ranking. **But if R3 is built as a step-scale rather than an
+objective, it ties R5** — the #1 ranking is conditional on adopting the objective-level formulation.
 **R1** is the only compression-*specific* exploration bet (category 2) but likely a pass@k edge, not a
 greedy surpass. **R4** is a separate *test-time* generalization claim the fixed-point ceiling does not
 adjudicate. **R2**
