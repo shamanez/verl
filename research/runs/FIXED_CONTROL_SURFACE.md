@@ -30,7 +30,7 @@ once, here, and read it off for every launch.
 | **max_prompt_length** | **1024** | |
 | **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
 | **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25). **NON-BINDING under static batching**: with `ppo_micro_batch_size_per_gpu=1` + `use_dynamic_bsz=False`, each micro-batch is exactly 1 sequence (≤16384+prompt ≈ 16.6K < 18432), so this cap NEVER triggers and does NOT affect the result — 18432 vs 36864 is mathematically identical here. **Keep 18432 on B2-style comparison cells INCLUDING the dense reference** so the dense baseline is apples-to-apples (only the codec/merger varies); raising to 36864 on an anchor-OFF ablation is allowed but then it is NOT one-knob vs the comm-eff cells |
-| **total_training_steps** | **55** (→100 extended) | **55 = 50 + a 5-step WandB-flush buffer**: with `test_freq=25` the val@50 checkpoint syncs mid-run (steps 51–55) instead of being the un-flushed final action (fixes the lost-final-val problem). **The comparison number is still val@50** — identical to the 50-step baselines; the extra 5 steps are not used for the comparison. Extend to 100 for a winner. |
+| **total_training_steps** | **50** (→100 extended) | **50, NOT 55** (operator 2026-06-17: no end-of-training val@55). verl validates at `is_last_step OR global_steps % test_freq == 0` (`ray_trainer.py:1720-1721`), so `total=55, test_freq=25` fired a 3rd val at step 55 (is_last_step); `total=50` makes the last step coincide with the test_freq val ⇒ **val@25 / val@50 ONLY**. val@50 flush is handled by the launcher's `wandb sync` final-flush daemon + the authoritative local train.log (the old 5-step buffer is obsolete). **Comparison number = val@50**, identical across total=50/55 (same step-50 model). Extend to 100 (a test_freq multiple → no spurious val) for a winner. |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
 | **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
 | **save_freq** | **50** | |
@@ -128,7 +128,7 @@ all default OFF ⇒ bitwise B2):
 
 ```bash
 # B2 = the SOTA comm-eff base — a BARE run, 50 steps, val every 25 (nothing else to set):
-TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
+TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
 
 # the issue-#31 variable axis = anchor-gradient USAGE on top of B2 (e.g. the built L4 perturbation lever):
@@ -137,16 +137,16 @@ COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
 
 # disable_custom_all_reduce=true is the B2 wrapper DEFAULT (locked-surface controlled var; the bare
 # run above already sets it). Override =false ONLY to opt out on a box that does not hit the crash:
-DISABLE_CUSTOM_ALL_REDUCE=false TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_custom_ar \
+DISABLE_CUSTOM_ALL_REDUCE=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_custom_ar \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
 
 # dense reference (band ≈ 0.75–0.78) — one-knob OFF, shares the comm-eff code path (NOT via b2_sota,
 # which force-enables comm-eff): set the master switch on the GENERIC launcher.
-COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=dense_ref \
+COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=dense_ref \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
-Pass `TOTAL_TRAINING_STEPS` (55, then 100 for an extended winner) + `TEST_FREQ=25` per launch. The full B2
+Pass `TOTAL_TRAINING_STEPS` (50, then 100 for an extended winner) + `TEST_FREQ=25` per launch. The full B2
 substrate is baked into the b2_sota launcher — do **not** re-type it; the ground truth of any run is its
 `resolved_params.txt` (the SOTA settings are summarized in `runs/SUMMARY.md`). Closed anchor-usage
 levers and their tested knobs are summarized in `.claude/plans/SUMMARY.md`.

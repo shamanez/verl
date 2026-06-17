@@ -34,5 +34,8 @@ W&B project: `verl_compression_research_beta_sweep_signed_ema`.
 ## Correctness
 No NaN/Inf, no length-ignition (response_length stayed ~150–220, well below cap), no collapse on cells 1–2. `bytes_ratio = 0.0504` (PowerSGD r=77).
 
+## val@55 handling (operator directive 2026-06-17)
+No end-of-training val@55 going forward (`TOTAL_TRAINING_STEPS=50`, not 55 — see FIXED_CONTROL_SURFACE / `no-end-of-training-val55` memory). Cells 1 & 2 already ran total=55 so their val@55 (0.7384, and cell-2's pending) exist but are **informational only — ignored for the headline** (val@50). Cell 3 (in-flight on total=55) is honored by tearing the box down the instant its **val@50** is captured (skips steps 51–55 + val@55).
+
 ## Teardown
-Box `41292294` is torn down with the **team key** (vast_account=team) the instant cell 3 completes + metrics sync — NO keep-warm. (Backstop: teardown Stop hook on verdict / >30-min stale heartbeat / budget.)
+Box `41292294` is torn down with the **team key** (vast_account=team) the instant **cell 3's val@50 is captured + rsynced** (NOT waiting for step 55 / done.flag) — minimizes box cost AND skips val@55. NO keep-warm. Analyst runs offline from the laptop after teardown. (Backstop: teardown Stop hook on verdict / >30-min stale heartbeat / budget, team-key auth via `vast_account=team`.)
