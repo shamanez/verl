@@ -452,7 +452,7 @@ proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, 
       <td><b>R3</b> cross-rank second moment (SAM-style)</td>
       <td>(c) disagreement</td>
       <td><span class="tag t-escape">accept</span></td>
-      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Open: the estimate is the anchor's <i>stale</i> cross-shard variance — must stay cross-rank-identical after aggregation and tolerate variable staleness.</td>
+      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal actually lifts val past the dense band.</td>
     </tr>
     <tr>
       <td>2</td>
@@ -473,7 +473,7 @@ proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, 
       <td><b>R4</b> compression as a flat-minima regularizer</td>
       <td>— (test-time)</td>
       <td><span class="tag t-cond">out of scope</span></td>
-      <td>The fixed-point ceiling bounds the <i>train</i> objective, not test risk — R4 concedes train-parity and claims a <b>test-time / OOD</b> edge (theorist scoping confirmation pending). Not a GSM8K-greedy surpass; cheapest probe is eval-only over existing B2/dense checkpoints.</td>
+      <td>The fixed-point ceiling bounds the <i>train</i> objective, not test risk — R4 concedes train-parity and claims a <b>test-time / OOD</b> edge (theorist confirms the scope-change). <b>Caveat:</b> the codec bias is <i>coherent / fixed-direction</i>, so the flat-minima bet is <b>~50/50</b> — as likely a <i>worse</i> basin as a better one. Not a GSM8K-greedy surpass; gate on an OOD eval <b>and</b> a sharpness / Hessian-trace measurement (cheapest: eval-only over existing B2/dense checkpoints).</td>
     </tr>
     <tr>
       <td>5</td>
@@ -573,13 +573,14 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   <li><b>Parity is noise-bounded.</b> B2's band (0.735–0.754) overlaps the bottom of the dense band (0.75–0.78); the
   apples-to-apples dense draw (0.7839) is <i>above</i> B2. "Parity" means within $\pm$0.024/draw, not B2 $\ge$ dense
   pointwise — which is why surpass is a real, open target.</li>
-  <li><b>Route verdicts are theorist-stamped</b> (delivered after the section drafts, folded into
-  <code>theory.md</code> §7.2–7.3): <b>R3-reframed (cross-rank disagreement) is ACCEPT and theorist's #1</b> — the
-  only route rated mathematically promising, with one open async sub-question; <b>R5 (anchor curvature) is #2</b>,
-  admissible but heavy and escaping only with <b>non-diagonal</b> curvature (a diagonal proxy duplicates AdamW's
-  $v_t$); <b>R1</b> escapes but is almost certainly pass@k-only; <b>R4</b> is out of scope of the $\sigma(M)$ ceiling
-  (a test-time claim; theorist scoping confirmation pending); <b>R2</b> is a clean reject. The original
-  heterogeneous-staleness idea is itself rejected.</li>
+  <li><b>Route verdicts are theorist-stamped and final</b> (folded into <code>theory.md</code> §7.2–7.3, matching
+  <code>generalization.md</code> §4): <b>R3 (cross-rank disagreement) is ACCEPT and theorist's #1</b> — the only route
+  rated mathematically promising; its async guard is confirmed (same-$\theta$ constraint), so its remaining gate is
+  <b>empirical</b>. <b>R5 (#2)</b> is admissible-but-heavy, escaping only with <b>non-diagonal</b> curvature (a
+  diagonal proxy duplicates AdamW's $v_t$). <b>R1</b> escapes but is almost certainly pass@k-only. <b>R4</b> changes
+  scope to a test-time / OOD claim — and because the codec bias is coherent, its flat-minima bet is ~50/50 (as likely
+  a worse basin). <b>R2</b> is a clean reject. <b>The remaining per-route items are now empirical experiments, not
+  open verdicts</b> — which is the strongest honest close: one theorist-rated-promising route exists.</li>
 </ul>
 
 

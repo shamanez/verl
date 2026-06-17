@@ -332,16 +332,20 @@ PowerSGD null), so the interaction is a hope, not a mechanism.
 outcome is "Route-A-only" (a real pass@k edge, greedy ties). This is the prior team's vetted lead
 and the only compression-*specific* bet.
 
-> **[theorist: validity — ADMISSIBLE as category 2 (theorist's stated rating: "conversion-positive
-> exploration likely yields only pass@k"). ESCAPES the σ(M) ceiling (acts upstream of the codec on the
-> rollout/data distribution), but a greedy SURPASS requires relocating the argmax — likely a pass@k
-> coverage edge (Route A) only, not a greedy-mode move (Route B). Direct per-route confirmation pending.]**
-> **[systems: feasibility — FEASIBLE, NOT YET RUN, the designated lead bet (systems, confirmed).
-> `rollout_n` (default 8) + rollout temperature are exposed launcher knobs; the dense × {T,n} control is
-> mandated. Two code-verified gates: (1) the codec is TRAIN-ONLY ⇒ this is a *generation* bet on n/T,
-> not on the codec; (2) val is greedy argmax mean@1 ⇒ diffuse policy invisible unless training-time
-> diversity relocates the mode. Decisive discriminator = pass@k coverage curve. Off the locked
-> "generation" axis ⇒ new lineage w/ matched dense control.]**
+> **[theorist: validity — PARTIAL ESCAPE → NEW ceiling (theorist, DIRECT). n/T move `g(θ_t)` itself ⇒
+> outside σ(M) (not a `Φ(G_comp,M)` lever, hard-reject list doesn't bind). BUT the mandatory dense×{T,n}
+> control defines a NEW ceiling = dense-at-matched-(T,n); R1 beats it ONLY if compression×exploration
+> INTERACT (the one genuinely-live compression-specific bet). Likely pass@k/Route-A only; greedy-mode
+> surpass = long shot (the codec's diffuse policy already failed to convert on greedy once).]**
+> **[systems: feasibility — RUNNABLE at n≤8 + T-sweep; n>8 = verify box headroom first (systems,
+> confirmed). `rollout_n` (default 8) + rollout temperature are exposed launcher knobs; the dense ×
+> {T,n} control is mandated and was never run. **n>8 caveat:** static batching keeps per-micro-batch
+> memory flat, but generation memory + rollout buffer + log_prob/ref passes scale with batch×n, so n=16
+> risks vLLM KV-cache/generation OOM on the same 4×H200/8×H100 box (sized for n=8 + 16K response) and
+> lengthens each step ⇒ headroom-check or a bigger box. Two code-verified gates: (1) codec is TRAIN-ONLY
+> ⇒ a *generation* bet on n/T, not the codec; (2) val is greedy mean@1 ⇒ diffuse policy invisible unless
+> it relocates the mode. Decisive discriminator = pass@k coverage curve. Off the locked "generation"
+> axis ⇒ new lineage.]**
 
 ---
 
@@ -436,10 +440,9 @@ advantage estimate** — it does not naturally produce a per-sequence scalar bas
 the existing group baseline** (σ(M)-measurable ⇒ ceiling). Kept only to ask theorist whether *any*
 objective-side use escapes; absent a positive answer it is **retired**.
 
-> **[theorist: validity — REJECT (theorist's stated rating: "everything deterministic-in-(G_comp,M) is
-> capped at dense"). A baseline derived from `M` (a gradient mean) is a deterministic function of
-> (G_comp, M) ⇒ σ(M)-measurable ⇒ capped. Direct per-route confirmation pending; no objective-side escape
-> identified.]**
+> **[theorist: validity — REJECT (theorist, DIRECT): a baseline from `M` is deterministic-in-(G_comp,M)
+> ⇒ σ(M)-measurable ⇒ can't move the fixed point, capped at dense; + EXP-31 L1 cov(G_comp,M)≈0 (nothing
+> to cancel ⇒ adding an M-baseline RAISES variance). No objective-side escape identified.]**
 > **[systems: feasibility — WIREABLE but mechanism UNDERSPECIFIED (systems, confirmed). Genuinely not yet
 > tested and distinct from EXP-31's L1 gradient control-variate (cov≈0, skipped). BUT: the GRPO advantage
 > is already a group-LOO baseline, and `M` is gradient-space (per-matrix EMA, not a per-sequence scalar)
@@ -482,11 +485,16 @@ is the rare route whose math *likes* the async-realism constraints.
 > ESCAPES *only* if anchor-curvature beats Adam's own `v_t` via off-diagonal / lower-noise /
 > cross-rank-shared structure (else collapses to a noisier Adam — the AdamW-`v_t` overlap is the binding
 > constraint). Direct per-route confirmation pending.]**
-> **[systems: feasibility — NEEDS NEW CODE; verdict pending (R5 was not among systems' four ruled
-> routes), but the load-bearing substrate fact is systems-corroborated: the anchor maintains only `M`
-> (gradient EMA) + `Q` (basis) — no curvature/second-moment state. A diagonal proxy is cheap (no extra
-> backward — reuse `M_t`, `M_{t−1}`); a HVP or block estimate is heavier and risks the
-> production-diagnostics-OFF OOM tier.]**
+> **[systems: feasibility — NEEDS-BUILD (MODERATE, not greenfield) — systems-confirmed. The anchor
+> maintains only `M` (grad EMA, `ema_device=cpu`) + `Q` — no preconditioner/curvature/Fisher state. BUT
+> a **partial primitive already exists**: `powersgd_activation.py`'s basis-family sketches already
+> compute grad second moments (the `grad` family's `V = Gᵀ(G·P)`; the `ticket` family returns a per-dim
+> grad-2nd-moment vector, shape (H,)) — *transient* (built to construct `Q`, not maintained/applied), but
+> they prove the diagonal-2nd-moment computation is **already in-tree and cross-rank-reduced**. So R5 =
+> "maintain a diagonal across steps + apply + broadcast," not "invent it." Broadcast of a per-matrix
+> diagonal (same shape as `M`) is **within the OOM/comm budget** (≈doubles `M`'s ~6 GB CPU state to ~12
+> GB host RAM, not HBM; same DP-reduce+broadcast pattern). *(Gotcha: the `m1/m2/m3` in `anchor.py` are
+> cosine geometry-probe telemetry, NOT optimizer moments.)*]**
 
 ---
 
@@ -544,9 +552,12 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
    Adam-overlap problem** (Adam has no cross-rank term) ⇒ the *cleanest* category-3 escape, which is why
    it leads.
 2. **R5-CHEAP: anchor diagonal-curvature preconditioner** (category 1). *(Gated on theorist
-   confirming the curvature carries structure Adam's `v_t` lacks.)* Start with the **cheapest** variant
-   — a diagonal proxy from `M_t`, `M_{t−1}` (no extra backward) — broadcast it anchor-owned (cross-rank
-   identical) and apply as a preconditioner to the compressed step. **Mandatory control:** matched
+   confirming the curvature carries structure Adam's `v_t` lacks.)* **Build is moderate, not greenfield**
+   — `powersgd_activation.py`'s basis sketches already compute a cross-rank-reduced diagonal grad second
+   moment (the `grad`/`ticket` families), just transiently; R5 = maintain it across steps + apply +
+   broadcast (within the OOM/comm budget — same shape/path as `M`, kept on CPU). Start with the
+   **cheapest** variant — a diagonal proxy from `M_t`, `M_{t−1}` (no extra backward) — broadcast it
+   anchor-owned (cross-rank identical) and apply as a preconditioner. **Mandatory control:** matched
    dense-AdamW, so the comparison isolates *anchor-curvature beyond Adam's own diagonal*. Decisive
    metric: does val beat the dense band with margin (not just ±0.024)? Diagnostic: cosine between the
    anchor preconditioner and Adam's `v_t` — high cosine ⇒ collapse to noisier-Adam (kill); low cosine ⇒
@@ -555,9 +566,12 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
 3. **R1-GATE: dense × {T, n} surface calibration** (category 2). *Cheap kill, never run.* Sweep dense
    over a small {T ∈ 0.7,1.0,1.2} × {n ∈ 8,16} grid; if **no (T, n) lifts dense above its band**, the
    diffuse-policy hypothesis is dead before spending on the compressed arm. **Off-axis (n locked) ⇒
-   new lineage with matched dense control; justify in the plan.** Decisive metric set:
-   rollout_ppl, best-of-group reward, within-group reward variance, **greedy val (bar)**, **pass@k
-   coverage curve**. *(Gated on theorist confirming R1 escapes the ceiling.)*
+   new lineage with matched dense control; justify in the plan.** **Box-headroom note (systems):**
+   T-sweep at n=8 is runnable as-is; **n=16 risks vLLM KV-cache/generation OOM** on the same box
+   (generation memory scales with batch×n) — headroom-check or a bigger box before the n=16 cells.
+   Decisive metric set: rollout_ppl, best-of-group reward, within-group reward variance, **greedy val
+   (bar)**, **pass@k coverage curve**. *(R1 verdict: theorist PARTIAL-escape → must beat the new
+   dense-at-(T,n) ceiling via a compression×exploration interaction.)*
 4. **R1-MAIN: compressed (B2) × {T, n} vs the dense surface.** Only if the gate shows *any* lift.
    Discriminator: does (compressed − dense) **pass@k advantage grow with k**? Grows ⇒
    compression-specific edge (the dream); flat ⇒ Route-A-only, log as secondary, **not** a surpass.
