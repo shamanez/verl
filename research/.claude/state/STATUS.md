@@ -4,7 +4,7 @@
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (2/3 cells)** | 1×4H200 (i_41292294, **team**) | — | **Cell 1 (β=0.25) DONE**: val s25=0.7271, **s50=0.7612**, s55=0.7384. val@50 nominally clears bar but val@50/val@55 spread (0.023≈noise) ⇒ NOISE-FRAGILE, likely tie. **Cell 2 (β=0.50) running** (step 1, clean). Cell 3 (β=0.75) pending. Monitoring: fg-probe + bg-sleep pacer (20min). Analyst weighs both late draws. Teardown (team key, 41292294 only) on aggregate done.flag |
+| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (cell 3 pending)** | 1×4H200 (i_41292294, **team**) | — | val@50: **b0.25=0.7612, b0.50=0.7635** (both clear +0.024 bar over EXP-32 0.7271; both > B2 0.7528) — 2-cell positive signal β_anc>0 lifts signed_ema; NOISE-FRAGILE (b0.25 val@55 fell to 0.7384). **Cell 3 (β=0.75) still to run.** Results recorded → `runs/EXP-34/RESULTS.md`, pushed to origin@c40387bae. Teardown (team key, 41292294 only) the instant cell 3 metrics sync; analyst runs offline after |
 | 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 stays default; max gap C2 +0.0144 < 0.024 |
 | 32 | signed_ema α=0.5 on valid-M | DONE | (op-managed) | done | val@50 0.7271 < B2 0.7528 |
 
