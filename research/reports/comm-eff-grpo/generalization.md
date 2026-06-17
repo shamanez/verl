@@ -331,9 +331,12 @@ and the only compression-*specific* bet.
 > the rollout/data distribution, changing *which* gradient is compressed, not how a fixed one is
 > reconstructed; honest deliverable is likely a pass@k coverage edge (Route A), greedy-mode relocation
 > (Route B) is the high bar]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: RUNNABLE via launcher
-> overrides as a new lineage (n + rollout T), with a matched dense × {T,n} control; off the locked
-> "generation" axis ⇒ requires the separate justification the conversion spine already supplies]**
+> **[systems: feasibility — FEASIBLE, NOT YET RUN, the designated lead bet (systems, confirmed).
+> `rollout_n` (default 8) + rollout temperature are exposed launcher knobs; the dense × {T,n} control is
+> mandated. Two code-verified gates: (1) the codec is TRAIN-ONLY ⇒ this is a *generation* bet on n/T,
+> not on the codec; (2) val is greedy argmax mean@1 ⇒ diffuse policy invisible unless training-time
+> diversity relocates the mode. Decisive discriminator = pass@k coverage curve. Off the locked
+> "generation" axis ⇒ new lineage w/ matched dense control.]**
 
 ---
 
@@ -362,11 +365,13 @@ may be sanctioned like `test_freq`).
 > **[theorist: validity — unvetted (theorist); my prior: ESCAPES — it concedes the training objective
 > and claims a *test-time / OOD* generalization edge, a different claim than matching the dense gradient;
 > open question for theorist: does GRPO-on-GSM8K make the generalization gap ill-defined?]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: WIREABLE read-only]** — `val_files` is a
-> config path (`_generated_ppo_trainer.yaml`); pointing it at a different test parquet (GSM-hard / a MATH
-> subset) is a **measurement-only knob** (validation is read-only, no training change — same class as
-> `test_freq`). The only build is *preparing* the OOD parquet + a matching reward fn; no trainer-code
-> change. Awaiting systems' confirmation.
+> **[systems: feasibility — NOT MEASURABLE AS-IS; needs an OOD split wired (systems, confirmed). Data is
+> GSM8K-only; no held-out/OOD/MATH split exists (zero hits for ood/MATH-lighteval/SVAMP/ASDiv in launchers
+> + FIXED_CONTROL_SURFACE). `val_files` is a config path, so an alternate test parquet is read-only
+> (measurement-class like `test_freq`), but it must be *prepared* (a second eval dataset, e.g.
+> SVAMP/ASDiv/MATH, + matching reward fn) and it changes the locked measurement surface. **Cheapest
+> version (systems): eval-only on EXISTING B2 vs dense checkpoints on the new split — no retrain.** Genuinely
+> novel angle: a test-time edge orthogonal to the train-reward bar everything else targets.]**
 
 ---
 
