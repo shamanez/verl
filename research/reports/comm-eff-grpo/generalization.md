@@ -407,11 +407,11 @@ aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerat
 Whether a cross-rank-2nd-moment estimate remains well-defined when ranks report at *different*
 staleness is the open async question for theorist.
 
-> **[theorist: validity — ACCEPT (theorist, relayed via team-lead): the cross-rank second moment is the
-> *one* genuinely-outside-σ(M) signal — variance is not a function of the gradient means. (The
-> staleness-ensemble framing stays REJECT.) Still open for theorist's direct ruling: does the estimate
-> stay cross-rank-identical after aggregation + tolerate *variable* staleness? Direct per-route tag
-> pending.]**
+> **[theorist: validity — ACCEPT (theorist, DIRECT): explicitly named as "the mathematically-most-
+> promising route I'd ADD" — the one signal genuinely outside σ(M) that lives on THIS substrate (the DP
+> swarm); variance is not a function of the gradient means (his §5.4 cat-3). (The staleness-ensemble
+> framing stays REJECT.) The remaining gate is the async constraint: the estimate must stay
+> cross-rank-identical after aggregation + tolerate variable staleness.]**
 > **[systems: feasibility — NEEDS BUILD (systems-confirmed): `delay_K` is a fixed scalar
 > (`comm_eff.py:136`) and `AnchorStalenessQueue` serves a deterministic `t−K` (`anchor.py:243-258`); the
 > circuit is cross-rank-identical by mandate. No cross-rank second-moment state exists; forming a
