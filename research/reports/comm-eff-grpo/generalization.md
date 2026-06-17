@@ -567,17 +567,27 @@ structurally lacks** — R3 the cross-shard 2nd moment (category c), R5 non-diag
 a). **R3 is #1 — but CONDITIONAL on the variance-AS-OBJECTIVE form** (theorist); **R5 is #2**, conditional
 on a beyond-diagonal requirement. Both are theorist-ACCEPT, systems-FEASIBLE (moderate).
 
-**The shared kill-check — the diagonal trap.** The honest control is **dense-Adam**, which carries a
-diagonal second moment (`v_t`). So **any version of R3 or R5 that reduces to a per-coordinate diagonal
-scale collapses to "a better diagonal than Adam's" — the same CATEGORY of object, which does NOT clear
-the bar:** R5-as-a-**diagonal**-proxy and **R3-as-a-`g/√var` step** are the *same* near-miss (each is a
-different diagonal, technically outside σ(M), but practically an R5-tie). Each escapes only by leaving
-the per-coordinate-scale category:
-- **R3** must use the disagreement at the **OBJECTIVE level** — a SAM ascent-descent or a `λ·R(Var_r)`
-  penalty whose gradient carries a `∇_θ Var_r` term ⇒ a **different objective with a different fixed
-  point** (provably not dense's). *That* is the clean cat-3 escape; the `g/√var` step is not.
-- **R5** must ship genuinely **off-diagonal** curvature (the `H·Δθ`-non-diagonal preconditioner), not a
-  diagonal proxy.
+**The shared kill-check — the diagonal trap (theorist's unifying decision procedure).** The honest
+control is **dense-Adam**, which *is* a diagonal preconditioner `D = v_t^{−1/2}` applied as `D⊙g`. So the
+one question that adjudicates **both** R3 and R5:
+
+> **Is the route's output reducible to `D⊙g` for some diagonal `D`?**
+> — **YES ⇒ collapses to dense-Adam** (a different/better diagonal is *still* a diagonal — same
+>   hypothesis class, no matter how cleverly `D` is computed: from `M_t−M_{t−1}`, from cross-shard
+>   variance, whatever). **REJECT.**
+> — **NO ⇒ admissible escape**, via one of **two distinct exits from the diagonal class**:
+>   - **R5 — off-diagonal STRUCTURE:** an off-diagonal / non-separable preconditioner (the
+>     `H·Δθ`-non-diagonal coupling) that no diagonal can represent. *Same objective, richer
+>     preconditioner.*
+>   - **R3 — a different OBJECTIVE:** a variance penalty (SAM ascent-descent / `λ·R(Var_r)` whose
+>     gradient has a `∇_θ Var_r` term) that changes the **fixed point**, not a rescale of the same
+>     objective's gradient. *Different objective, different optimum (provably not dense's).*
+
+This is why R3 and R5 are **genuinely distinct routes** (they exit the diagonal class through different
+doors — structure vs objective) **and** why both *naive* forms (R5-as-diagonal, R3-as-`g/√var`) share
+**one** failure mode (each is a different-but-still-diagonal `D`, technically outside σ(M) yet
+practically a mutual tie inside dense-Adam's class). **Adam is the diagonal everything collapses to** —
+the unifying reference for the whole surpass analysis.
 
 **The asymmetry that ranks R3 #1:** R3's escape is a *recipe* (lift to an objective + same-θ
 concurrent gradients) that, once followed, gives a different fixed point with high confidence; R5's
