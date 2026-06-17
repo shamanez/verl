@@ -2221,9 +2221,8 @@ class FSDPEngine(BaseEngine):
         backward and here — re-verified bitwise against the push-time canary),
         so a second clean-PG backward on the CURRENT tick's batch yields
         ``G_anc_old(t) = ∇[−A·logπ](batch_t; θ_{t−K})`` — the generator-
-        MISMATCHED anchor feed every prior merger consumed, now measured at the
-        SAME θ as the valid ``G_anc_rep`` (m3 then isolates the pure batch
-        effect at fixed θ).
+        mismatched probe reference, now measured at the SAME θ as the valid
+        ``G_anc_rep`` (m3 then isolates the pure batch effect at fixed θ).
 
         Telemetry-only invariants enforced here: the probe backward runs on the
         isolated clone (off the optimizer's param group), is DP-MEAN-reduced

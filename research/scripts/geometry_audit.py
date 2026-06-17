@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""EXP-26 Step A: real-gradient geometry audit over the dumped fp32 tensors.
+"""Real-gradient geometry audit over dumped fp32 tensors.
 
 The Step-A capture (comm_eff.capture.enabled) writes fp32 tensors under
-``runs/EXP-26/captures/rank<r>/`` keyed by ``(global_step, optimizer_tick, role,
+``runs/<run>/captures/rank<r>/`` keyed by ``(global_step, optimizer_tick, role,
 target_name)`` with a per-row ``manifest.jsonl``. This script reads those dumps
 and computes the discriminators the plan's ## Success criteria gate on — the
-analyst invokes it and captures stdout into ``runs/EXP-26/analysis.log``:
+analyst invokes it and captures stdout into ``runs/<run>/analysis.log``:
 
   cos(G_dense, G_comp)   median over targets, post-warmup tick — H1 (compression
                          is direction-benign iff >= 0.95)
@@ -28,8 +28,8 @@ a recommendation the analyst reads alongside the training-arm criteria; the
 thresholds mirror the plan's ## Step A — geometry audit checklist.
 
 Usage:
-    python research/scripts/geometry_audit.py runs/EXP-26 [--rank 0] [--warmup-tick 3]
-    python research/scripts/geometry_audit.py runs/EXP-26 --captures-subdir captures
+    python research/scripts/geometry_audit.py runs/<run> [--rank 0] [--warmup-tick 3]
+    python research/scripts/geometry_audit.py runs/<run> --captures-subdir captures
 """
 from __future__ import annotations
 
@@ -167,9 +167,9 @@ def audit(run_dir: Path, rank: int, warmup_tick: int, captures_subdir: str) -> d
     gdense = idx.get("G_dense", {})
     gcomp = idx.get("G_comp", {})
     gcorr = idx.get("G_corr", {})
-    gfresh = idx.get("G_fresh_anchor", {})  # EXP-26 Option A: the TRUSTED dense reference
+    gfresh = idx.get("G_fresh_anchor", {})  # TRUSTED dense reference
 
-    # ---- OPTION A (EXP-26 STUCK resolution) ----
+    # ---- trusted dense-reference path ----
     # The parallel uncompressed `G_dense` clone backward does NOT compose with the
     # codec-ON path (it comes back ~r/H of the true norm — the analyst's gate:
     # cos(G_dense, G_fresh_anchor)≈0.24, norm_ratio≈0.28). So the dense REFERENCE
@@ -340,8 +340,8 @@ def _decide(o: dict) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="EXP-26 Step A geometry audit")
-    ap.add_argument("run_dir", help="the EXP-26 run dir (contains captures/)")
+    ap = argparse.ArgumentParser(description="real-gradient geometry audit")
+    ap.add_argument("run_dir", help="run dir containing captures/")
     ap.add_argument("--rank", type=int, default=0, help="DP rank subdir to read (default 0)")
     ap.add_argument("--warmup-tick", type=int, default=3, help="ignore ticks below this (post-warmup)")
     ap.add_argument("--captures-subdir", default="captures", help="capture subdir under run_dir")
@@ -352,7 +352,7 @@ def main() -> int:
     res = audit(run_dir, args.rank, args.warmup_tick, args.captures_subdir)
 
     print("=" * 72)
-    print("EXP-26 Step A — real-gradient geometry audit")
+    print("real-gradient geometry audit")
     print("=" * 72)
     for k, v in res.items():
         if k == "decision":

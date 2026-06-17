@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EXP-26 Step C1 — Q-family geometry screen audit.
+"""Q-family geometry screen audit.
 
 Extends research/scripts/geometry_audit.py (Step A) with the SAME projection
 convention so UC_act here is comparable to Step A's 0.318. For each family f
@@ -21,6 +21,9 @@ q_by_H collapses boundaries by H (setdefault) exactly as Step A did.
 
 Winner rule (spec): family f beats control iff UC_f > UC_act AND OPP_f > OPP_act
 on the median.
+
+Usage:
+    python research/scripts/stepC_screen_audit.py runs/<run>/captures/C1_screen/rank0
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ from pathlib import Path
 
 import torch
 
-CAP = Path("/Users/shamane/Documents/verl/research/runs/EXP-26/captures/C1_screen/rank0")
+CAP = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("runs/<run>/captures/C1_screen/rank0")
 FAMILIES = ["act", "grad", "adv", "tail", "hybrid", "ticket"]
 
 
@@ -243,7 +246,7 @@ def main():
     out["winners"] = winners
 
     print("=" * 78)
-    print("EXP-26 Step C1 — Q-family geometry screen")
+    print("Q-family geometry screen")
     print("=" * 78)
     print(f"post-warm ticks (latest 2 family ticks): {sorted(post_warm)}")
     print(f"UC via LIVE Q role (Step-A comparability anchor, ~0.318 expected): "
