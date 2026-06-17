@@ -395,20 +395,25 @@ optimum (the flat-minima mechanism needs its *own* evidence, not just an OOD num
 > is different and genuine: use the **cross-rank second moment** (swarm gradient *disagreement*), which
 > the mean `M` discards, as a signal.
 
-**Mechanism.** The fast swarm produces many per-rank gradients. Their **mean** is what `M`/the codec
-already use. Their **cross-rank variance / disagreement** is information *outside* σ(M): descend
-confidently where ranks **agree**, damp the step where they **fight** (a SAM-style, variance-aware
-robust direction). The DP axis is **not compressed**, so per-rank gradients are available pre-projection
-to form this second moment.
+**Mechanism (circuit attribution corrected by systems).** The signal is the **cross-DATA-shard
+gradient variance computed on the ANCHOR circuit**, *not* the FSDP fast path. systems verified
+(`transformer_impl.py:1004-1018`) that the anchor backward runs on a per-rank **un-sharded clone with no
+FSDP hooks**, so each DP rank produces a **full-shaped gradient over its OWN data shard**; these are
+mean-all-reduced (`:1863`) to form `M`. The per-rank full gradients `g_r` exist at `:1069-1082`,
+*immediately before* that SUM/`dp_world` mean — so the per-coordinate cross-rank variance
+`Var_r[g_r] = E[g_r²] − (E[g_r])²` is computable there with **one extra all-reduce of `g_r²`**. Use it
+to **descend confidently where shards agree, damp the step where they fight** (a SAM-style,
+variance-aware robust direction). *(On the FSDP fast path each rank holds only a **parameter shard** of
+one global gradient, so cross-rank variance is **not** naturally defined there — the mechanism rides the
+anchor circuit, which is async-favorable but means the variance is **`delay_K`-stale** like `M`.)*
 
 **Why it escapes the ceiling (theorist's load-bearing argument).** σ(M) contains only the gradient
 *means* `g(θ_t), g(θ_{t−K})`. A variance-adaptive / SAM-style direction **provably optimizes a
-DIFFERENT objective than `E[g]`** (it trades the mean-descent for a robustness-penalized objective) ⇒
-it is **not** σ(M)-measurable and injects genuinely-new information — exactly theorist's category 3 —
-**and it lives natively on THIS substrate** (the DP swarm: many independent per-rank gradients per step,
-on the *uncompressed* axis, over different data shards; no new architecture). This is **not** the
-isotropic perturbation EXP-31 L4 ran (uncorrelated noise, REJECT) — the signal is the *structured*
-cross-rank disagreement, which both the dense mean **and** the anchor `M` (itself a DP-mean) discard.
+DIFFERENT objective than `E[g]`** (it trades mean-descent for a robustness-penalized objective) ⇒ it is
+**not** σ(M)-measurable and injects genuinely-new information — exactly theorist's category 3. The
+cross-data-shard disagreement is the one quantity both the dense mean **and** the anchor `M` (itself a
+DP-mean) discard. This is **not** the isotropic perturbation EXP-31 L4 ran (uncorrelated noise, REJECT)
+— the signal is *structured* cross-shard disagreement.
 
 **Async-realism caveat.** The derived robust direction **must stay cross-rank-identical after
 aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**.

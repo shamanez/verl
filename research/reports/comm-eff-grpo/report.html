@@ -452,7 +452,7 @@ proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, 
       <td><b>R3</b> cross-rank second moment (SAM-style)</td>
       <td>(c) disagreement</td>
       <td><span class="tag t-escape">accept</span></td>
-      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal actually lifts val past the dense band.</td>
+      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard); a SAM-style / variance-adaptive step <b>provably optimizes a different objective than $\mathbb{E}[g]$</b> — stronger than merely "outside $\sigma(M)$" — and lives natively on the existing DP swarm (no new architecture) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal actually lifts val past the dense band.</td>
     </tr>
     <tr>
       <td>2</td>
@@ -492,8 +492,11 @@ stale mean) and survives only as a Tier-3 <i>parity</i> item; R3 now denotes the
 cross-rank <i>second moment</i> (§5).</p>
 
 <h3>4.5 &nbsp;The roadmap</h3>
-<p>Every item runs on the B2 SOTA launcher, varying one knob, with a matched dense control wherever the comparison
-is to dense.</p>
+<p><b>Read the bets by criterion, not just by rank:</b> <b>R3</b> is most likely to actually beat dense on the
+<i>train</i> objective (the lead surpass bet); <b>R1</b> is the cheapest near-term signal (run it <i>first</i>);
+<b>R4</b> is an orthogonal <i>generalization</i> hedge. The program: <b>run R1 first, build R3 in parallel, keep R4 as
+a hedge.</b> Every item runs on the B2 SOTA launcher, varying one knob, with a matched dense control wherever the
+comparison is to dense.</p>
 <p><b>Tier 1 — the surpass bets (highest expected information).</b></p>
 <ol>
   <li><b>R3-2ndmoment: cross-rank disagreement-aware step</b> (category c) — <b>theorist's #1, the only route rated
@@ -601,11 +604,11 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   Run both cheap, alongside the never-run dense$\times\{T,n\}$ R1 gate, against a matched dense control, and judge on
   the dense <i>band</i> with margin — not a single draw.</p>
 </div>
-<p><b>Immediate next step:</b> run the cheap, gating Tier-1 probes in parallel — the <b>R3</b> cross-rank-disagreement
-step (theorist's #1; one extra all-reduce at the anchor, no invariant bump), the <b>R5</b> non-diagonal curvature
-proxy (diagnostic: its cosine with Adam's $v_t$ — high ⇒ kill; a diagonal proxy is not worth running), and the
-never-run <b>R1</b> dense$\times\{T,n\}$ gate — each against a matched dense control, judged on the dense band with
-margin. Together they decide whether a surpass is reachable at all.</p>
+<p><b>Immediate next step (best-by-criterion program):</b> <b>run R1 first</b> — the never-run dense$\times\{T,n\}$
+gate is the cheapest signal — while <b>building R3 in parallel</b> (the lead train-objective bet: a cross-rank
+disagreement step, one extra all-reduce at the anchor), with <b>R4</b> as an orthogonal OOD hedge (eval-only on
+existing checkpoints) and <b>R5</b> behind a non-diagonal-vs-Adam check. Each against a matched dense control, judged
+on the dense band with margin. Together they decide whether a surpass is reachable at all.</p>
 
 <footer>
   <p><b>Provenance.</b> This report synthesizes three cross-examined section documents in this directory:
