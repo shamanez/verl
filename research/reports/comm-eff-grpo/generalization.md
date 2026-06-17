@@ -475,48 +475,56 @@ objective-side use escapes; absent a positive answer it is **retired**.
 
 #### R5 — Anchor-curvature preconditioner (second-order) — **candidate, theorist category (a)**
 
-**Mechanism.** The anchor already maintains a full-coverage, DP-reduced gradient EMA `M`. Have it
-*also* maintain a cheap **curvature estimate** — a diagonal Hessian / second-moment, or a
-finite-difference `(M_t − M_{t−1})` curvature proxy along the update direction — and broadcast it
-(cross-rank identical, like `Q`) as a **preconditioner** the swarm applies to its compressed step.
+**Mechanism (theorist-sharpened).** The anchor already maintains a full-coverage, DP-reduced gradient
+EMA `M`. Differencing successive anchor EMAs gives a **finite-difference Hessian-vector product**:
+`(M_t − M_{t−1}) ≈ g(θ_{t−K}) − g(θ_{t−K−1}) ≈ H·Δθ` — second-order structure along the trajectory
+direction, computable on the anchor at ~zero extra comm. Use it as a **preconditioner / momentum-
+correction** broadcast cross-rank-identical (like `Q`) to the swarm.
 
 **Why it targets the one escape my other routes miss.** This is theorist's category **(a):
-curvature / second-order structure dense-SGD-at-this-LR does not use.** It is the only category that
-injects information dense *structurally* lacks, rather than reconstructing/reweighting a first-order
-quantity ⇒ in principle the strongest surpass route.
+curvature / second-order structure the first-order trajectory throws away.** Formally `(M_t − M_{t−1})`
+is σ(stale-dense-gradient)-measurable, yet it does **not** collapse — because the ceiling bounds you
+against the *first-order* optimizer, which uses only the gradient mean and discards its evolution. A
+curvature proxy extracts exactly that discarded 2nd-order structure ⇒ it injects information dense
+*structurally* lacks.
 
-**The sharp validity caveat I must flag (code-verified).** The dense reference is **AdamW** (verl
-default betas; `_generated_ppo_trainer.yaml`), which **already applies a diagonal second-moment
-preconditioner** (`v_t`). So R5 does **not** escape by "adding curvature dense lacks" — dense already
-has *diagonal* curvature. R5's escape is **narrower and must be one of:**
-1. **Off-diagonal / block curvature** Adam's diagonal `v_t` cannot represent; **or**
-2. **Less-noisy diagonal curvature** from the anchor's *full-coverage, DP-reduced* gradient vs Adam's
-   noisy per-microbatch running `v_t`; **or**
-3. A **cross-rank-shared** curvature the swarm's *per-shard* Adam states structurally cannot form
-   (each worker sees only its shard; the anchor sees the whole).
-If none of these holds, R5 **collapses one level up** — it becomes "a noisier estimate of what Adam
-already computes," i.e. the ceiling again. **This is the precise question for theorist.**
+**THE decisive control — it's dense-ADAM, not dense-SGD (theorist's whole-ballgame caveat).** AdamW
+(verl default; `_generated_ppo_trainer.yaml`) **already uses `v_t` = a diagonal second moment = a
+diagonal preconditioner.** So a **DIAGONAL** curvature proxy from the anchor **just duplicates `v_t` ⇒
+collapses to dense-Adam (DEAD END).** *(This is the inverse of how I first framed it — the cheap
+diagonal proxy is the kill-case, not the starting point.)* **R5 escapes ONLY if it ships curvature Adam
+cannot represent:**
+1. **Off-diagonal / true-Hessian** curvature (Adam is diagonal-only); **or**
+2. the **`H·Δθ` trajectory-direction term used as a NON-diagonal** preconditioner / momentum-correction
+   that a coordinate-wise `v_t` cannot represent.
+**R5 = admissible category-(a) escape IFF non-diagonal.** Extra caveats: the finite-difference is
+**noisy** (two stale gradients differenced) ⇒ needs damping/clipping; and the win — "preconditioned
+descent finds a better basin than dense-Adam" — is an **empirical bet, not a theorem**.
 
-**Async-admissibility (favorable).** Curvature changes *slowly* relative to gradients, so a *stale*
-curvature estimate hurts far less than a stale gradient — staleness-tolerance is a **strength** here,
-not a liability. A bounded diagonal preconditioner also **degrades gracefully** as it ages (it is a
-scaling, not a direction), and it is naturally cross-rank-identical (anchor-owned, broadcast). So R5
-is the rare route whose math *likes* the async-realism constraints.
+**Async-admissibility (favorable).** `(M_t − M_{t−1})` uses only **lagging** anchor snapshots, `M` is a
+DP-mean ⇒ cross-rank-identical, and curvature is **slow-varying** ⇒ tolerates variable staleness. The
+anchor is the *natural* site (it already runs a full-coverage dense backward at cadence; differencing
+successive `M`'s is ~free, no extra comm). So R5's math *likes* the async constraints.
 
-> **[theorist: validity — ADMISSIBLE-but-"heavy" (theorist, DIRECT; category 1). ESCAPES *only* if
-> anchor-curvature beats Adam's own `v_t` via off-diagonal / lower-noise / cross-rank-shared structure
-> (else collapses to a noisier Adam — the AdamW-`v_t` overlap is the binding constraint, not compute).
-> The remaining gate is empirical: does it beat `v_t`?]**
+> **[theorist: validity — ESCAPES (theorist, DIRECT; category 1) IFF NON-DIAGONAL. `(M_t − M_{t−1}) ≈
+> H·Δθ` is a finite-difference HVP = 2nd-order structure the first-order trajectory discards. BUT the
+> real control is dense-**Adam** (already has diagonal `v_t`), so a **diagonal** proxy DUPLICATES `v_t`
+> and collapses — the escape requires **off-diagonal / true-Hessian** curvature OR `H·Δθ` as a
+> **non-diagonal** preconditioner. Async-admissible (lagging snapshots, DP-mean, slow-varying). Noisy ⇒
+> damp/clip; win is empirical.]**
 > **[systems: feasibility — NEEDS-BUILD (MODERATE, not greenfield) — systems-confirmed. The anchor
 > maintains only `M` (grad EMA, `ema_device=cpu`) + `Q` — no preconditioner/curvature/Fisher state. BUT
 > a **partial primitive already exists**: `powersgd_activation.py`'s basis-family sketches already
 > compute grad second moments (the `grad` family's `V = Gᵀ(G·P)`; the `ticket` family returns a per-dim
 > grad-2nd-moment vector, shape (H,)) — *transient* (built to construct `Q`, not maintained/applied), but
-> they prove the diagonal-2nd-moment computation is **already in-tree and cross-rank-reduced**. So R5 =
-> "maintain a diagonal across steps + apply + broadcast," not "invent it." Broadcast of a per-matrix
-> diagonal (same shape as `M`) is **within the OOM/comm budget** (≈doubles `M`'s ~6 GB CPU state to ~12
-> GB host RAM, not HBM; same DP-reduce+broadcast pattern). *(Gotcha: the `m1/m2/m3` in `anchor.py` are
-> cosine geometry-probe telemetry, NOT optimizer moments.)*]**
+> they prove the (diagonal) 2nd-moment computation is **already in-tree and cross-rank-reduced**.
+> **Caveat (theorist):** that in-tree primitive is *diagonal* = the **collapse case** (duplicates Adam's
+> `v_t`); the admissible escape needs the **non-diagonal** version (off-diagonal/true-Hessian, or the
+> `H·Δθ`=`M_t−M_{t−1}` term as a non-diagonal preconditioner), which is more build than the diagonal
+> sketch. The cheap path (just differencing `M`'s and broadcasting, within budget — ≈doubles `M`'s ~6 GB
+> CPU to ~12 GB host RAM, same DP-reduce+broadcast pattern) gives the *raw* `H·Δθ`; the work is applying
+> it **non-diagonally**. *(Gotcha: `anchor.py` `m1/m2/m3` = cosine geometry telemetry, NOT optimizer
+> moments.)*]**
 
 ---
 

@@ -452,7 +452,7 @@ proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, 
       <td><b>R3</b> cross-rank second moment (SAM-style)</td>
       <td>(c) disagreement</td>
       <td><span class="tag t-escape">accept</span></td>
-      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard); a SAM-style / variance-adaptive step <b>provably optimizes a different objective than $\mathbb{E}[g]$</b> — stronger than merely "outside $\sigma(M)$" — and lives natively on the existing DP swarm (no new architecture) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal actually lifts val past the dense band.</td>
+      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard); a SAM-style / variance-adaptive step <b>provably optimizes a different objective than $\mathbb{E}[g]$</b> — stronger than merely "outside $\sigma(M)$" — and lives natively on the existing DP swarm (no new architecture) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal lifts val past the dense band. <b>One open validity item (pending theorist):</b> R3 is a <i>distinct</i> escape only if the disagreement drives an <b>objective-level</b> robustness / min-max term; a naive $g/\sqrt{\mathrm{var}}$ "damp-where-shards-disagree" is just a diagonal preconditioner that re-inherits R5's Adam-$v_t$ overlap — if it collapses to that, R3 ties/drops to R5. (The signal rides the <i>anchor's</i> per-data-shard stale gradients, not the param-sharded fast path.)</td>
     </tr>
     <tr>
       <td>2</td>
@@ -576,14 +576,16 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   <li><b>Parity is noise-bounded.</b> B2's band (0.735–0.754) overlaps the bottom of the dense band (0.75–0.78); the
   apples-to-apples dense draw (0.7839) is <i>above</i> B2. "Parity" means within $\pm$0.024/draw, not B2 $\ge$ dense
   pointwise — which is why surpass is a real, open target.</li>
-  <li><b>Route verdicts are theorist-stamped and final</b> (folded into <code>theory.md</code> §7.2–7.3, matching
+  <li><b>Route verdicts are theorist-stamped</b> (folded into <code>theory.md</code> §7.2–7.3, matching
   <code>generalization.md</code> §4): <b>R3 (cross-rank disagreement) is ACCEPT and theorist's #1</b> — the only route
   rated mathematically promising; its async guard is confirmed (same-$\theta$ constraint), so its remaining gate is
   <b>empirical</b>. <b>R5 (#2)</b> is admissible-but-heavy, escaping only with <b>non-diagonal</b> curvature (a
   diagonal proxy duplicates AdamW's $v_t$). <b>R1</b> escapes but is almost certainly pass@k-only. <b>R4</b> changes
   scope to a test-time / OOD claim — and because the codec bias is coherent, its flat-minima bet is ~50/50 (as likely
-  a worse basin). <b>R2</b> is a clean reject. <b>The remaining per-route items are now empirical experiments, not
-  open verdicts</b> — which is the strongest honest close: one theorist-rated-promising route exists.</li>
+  a worse basin). <b>R2</b> is a clean reject. The remaining per-route items are mostly empirical experiments, with <b>one open
+  verdict</b>: whether R3's disagreement is a <i>distinct</i> escape (an objective-level robustness term) or collapses
+  to a $g/\sqrt{\mathrm{var}}$ diagonal scale that re-inherits R5's Adam-overlap — pending theorist's distinctness
+  ruling. The close is still strong: a theorist-rated-promising lead route exists, gated on one clean question.</li>
 </ul>
 
 

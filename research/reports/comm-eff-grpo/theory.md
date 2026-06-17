@@ -633,10 +633,26 @@ must pass:
    *applying* the derived correction, not on mixing $\theta$'s into the estimate.
    A genuine SAM-style or variance-adaptive term qualifies; isotropic perturbation
    (EXP-31 L4) does **not** — it is rank-identical *uncorrelated noise*, carrying
-   no disagreement structure, which is exactly why it was null. This is,
-   mathematically, the **most promising** of the three escapes: it is the one
-   signal the compressed swarm has in abundance that a single dense trajectory
-   structurally lacks.
+   no disagreement structure, which is exactly why it was null. **(d) — the
+   decisive condition: it must use the variance as an *objective*, not as a
+   step-scale.** A *variance-normalized step* $g/\sqrt{\operatorname{Var}_r[g_r]}$
+   is just a **diagonal preconditioner**, and although it is not literally Adam's
+   $v_t$ (Adam's $v_t=\mathbb E_t[g^2]$ is the *temporal* second moment, conflating
+   $\bar g^2$ + temporal variance; the cross-rank $\operatorname{Var}_r$ is the
+   *spatial/data-shard* variance with $\bar g^2$ subtracted, so they differ on
+   high-mean-low-disagreement coordinates), it is the **same category of object** —
+   a per-coordinate rescale of an $\mathbb E[g]$ step — so it only buys "a better
+   diagonal than Adam's" and is **dominated by / equivalent to** the curvature
+   route (category 1). The clean escape is the **variance-as-objective** form:
+   optimize $\min_\theta \big[\,L(\theta)+\lambda\,\mathcal R(\operatorname{Var}_r[g_r(\theta)])\,\big]$
+   (or SAM's $\max_{\|\epsilon\|\le\rho}L(\theta+\epsilon)$ ascent-then-descent),
+   whose gradient carries a $\nabla_\theta\operatorname{Var}_r$ term and therefore a
+   **different fixed point** (a flat/robust minimum) than dense's $\mathbb E[g]$
+   optimum — that, not a rescaled step, is what genuinely escapes both $\sigma(M)$
+   and dense-Adam. So this route is the **most promising** of the three *only in
+   its objective-level form*; as a step-scale it ties the curvature route. It is
+   the one signal the compressed swarm has in abundance that a single dense
+   trajectory structurally lacks.
 
 The disqualifier, stated once: **any $\Phi$ that is a deterministic function of
 $(G_{\text{comp}}, M)$ alone — reweighting, accumulating, sign-copying,
@@ -644,6 +660,33 @@ perturbing with rank-identical noise, de-noising — is inside the ceiling and
 caps at dense.** The escape must read a quantity *outside* the stale-dense
 sufficient statistic: curvature, a conversion-positive exploration signal, or a
 cross-rank second moment.
+
+**The diagonal-preconditioner kill-check (shared by the two second-moment
+co-leads, categories 1 and 3).** Categories 1 (curvature) and 3 (cross-rank
+second moment) are the only two that read a quantity dense-**Adam** structurally
+lacks — but they share a single failure mode, and the honest control for both is
+dense-Adam (not dense-SGD), because Adam already applies a *diagonal*
+preconditioner $D=\operatorname{diag}(v_t)^{-1/2}$. Both routes, in their naive
+forms, also reduce to a diagonal rescale $D\odot g$ of the $\mathbb E[g]$ step:
+the curvature route as a diagonal Fisher/Hessian proxy, the second-moment route
+as a variance-normalized step $g/\sqrt{\operatorname{Var}_r}$. **Any output
+reducible to $D\odot g$ for some diagonal $D$ — however cleverly $D$ is estimated
+(from $M_t-M_{t-1}$, from cross-shard variance, …) — lives inside dense-Adam's
+hypothesis class and collapses** (a different or "better" diagonal is still a
+diagonal). The two co-leads are precisely the **two distinct exits** from that
+class:
+
+- **Category 1 (R5) exits via off-diagonal *structure*** — a non-separable
+  $H\Delta\theta$ / off-diagonal coupling no diagonal can represent (same
+  objective, richer preconditioner).
+- **Category 3 (R3) exits via a different *objective*** — a variance *penalty*
+  $\min_\theta[L+\lambda\mathcal R(\operatorname{Var}_r)]$ (or SAM's min-max) with
+  a different fixed point (not a rescale of the same objective's gradient).
+
+So the unified kill-check is: *is the correction reducible to $D\odot g$? If yes,
+it collapses to dense-Adam; if no — off-diagonal coupling, or a fixed-point-
+changing objective — it is an admissible escape.* This is why R5 and R3 are
+genuinely distinct surpass routes yet share one disqualifier.
 
 ---
 
