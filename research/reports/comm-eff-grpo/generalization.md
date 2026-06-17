@@ -432,18 +432,34 @@ object that REJECTs (inside σ(M)). So: **same-θ cross-shard 2nd moment = the r
 σ(M)); cross-θ "spread" = noisier-stale-dense (REJECT).** The async tolerance is on the *application* of
 the derived correction, **not** on mixing θ's into the estimate.
 
-**Distinctness vs R5's diagonal trap — RESOLVED.** With the same-θ constraint **plus** using the
-disagreement at the *objective* level (a robustness/min-max objective, not a `g/√var` per-coordinate
-scale — which would be a diagonal preconditioner that re-inherits R5's Adam-overlap), R3 is a genuine,
-**distinct** cat-3 escape. **Theorist's verdict: with these constraints R3 is the UNCONDITIONAL lead.**
+**Distinctness vs R5's diagonal trap — the two forms are NOT the same escape (theorist's final, precise
+ruling).** R3 leads **only in the variance-AS-OBJECTIVE form**:
+- **Variance-normalized STEP** `g / √Var_r[g_r]` **is a diagonal preconditioner.** It is *not literally*
+  Adam's `v_t` — Adam's `v_t = EMA_t[g²]` is the second moment over *time* (conflates mean²+temporal
+  variance), whereas the cross-rank `Var_r` is *spatial* (cross-shard) variance at one step with the
+  mean² *subtracted* (they differ on high-mean/low-disagreement coords). So it's a *different diagonal*,
+  technically outside σ(M) — **but it is the same CATEGORY of object (a per-coordinate scale)**, "just a
+  better diagonal than Adam's." That is weak and practically fragile, and **does NOT clear the bar that
+  ranks R3 above R5** — this form **ties / is dominated by R5**.
+- **Variance-AS-OBJECTIVE** (true SAM ascent-then-descent, or an explicit penalty
+  `min_θ [L(θ) + λ·R(Var_r[g_r(θ)])]`) has a gradient containing a **`∇_θ Var_r` term** —
+  Hessian-gradient / per-shard outer-product structure, **NOT a rescaling of `ḡ`**. This is a
+  **genuinely different objective with a different fixed point** (a flat/robust minimum, provably **not
+  dense's optimum**) — outside σ(M) *and* outside Adam's information (Adam optimizes `E[g]` and never
+  sees a variance penalty). **This is the clean category-3 escape.**
 
-> **[theorist: validity — ACCEPT, UNCONDITIONAL LEAD (theorist, DIRECT; cat-3). The cross-shard 2nd
-> moment is info `M` (a DP-mean) structurally discards ⇒ outside σ(M). Async sub-ruling RESOLVED both
-> YES: cross-rank-identical (compute the correction from all-reduced sufficient stats, apply the same
-> direction) + variable-staleness-tolerant (disagreement geometry is slow-varying; application can lag).
-> **The constraint that makes it ACCEPT not collapse: same-θ concurrent gradients only** (data-variance);
-> differencing across θ/lags = the rejected heterogeneous-staleness object. With same-θ + objective-level
-> use (not `g/√var`), R3 is the unconditional lead.]**
+**⇒ R3 is the #1 train-objective lead CONDITIONAL on the objective-level (min-max / variance-penalized)
+formulation. Implemented as a variance-normalized step, R3 ties / is dominated by R5** (both reduce to
+"a diagonal Adam approximates"). This is the difference between R3 being a clean lead and an R5-tie.
+
+> **[theorist: validity — ACCEPT; #1 LEAD *conditional on the objective-level form* (theorist, DIRECT;
+> cat-3). The cross-shard 2nd moment is info `M` (a DP-mean) discards ⇒ outside σ(M). Async RESOLVED both
+> YES (correction from all-reduced sufficient stats ⇒ cross-rank-identical; slow-varying geometry ⇒
+> staleness-tolerant). TWO constraints decide ACCEPT-vs-tie: (1) **same-θ** concurrent gradients only
+> (data-variance; cross-θ = the rejected staleness object); (2) **variance-AS-OBJECTIVE** (SAM
+> ascent-descent / `λ·R(Var_r)` penalty whose gradient has a `∇_θ Var_r` term ⇒ a *different fixed
+> point*) — NOT a `g/√var` step (a different diagonal, but same-category ⇒ ties/dominated-by R5). With
+> both, R3 leads; as a step-scale, R3 = R5-tie.]**
 > **[systems: feasibility — FEASIBLE / NEEDS-BUILD (moderate) — systems code-verified. The per-rank
 > full-shaped gradients exist at `transformer_impl.py:1069-1082`, immediately before the SUM/`dp_world`
 > mean that forms `M` ⇒ the cross-coordinate variance is **one extra all-reduce of `g_r²`** there + an
@@ -548,29 +564,37 @@ successive `M`'s is ~free, no extra comm). So R5's math *likes* the async constr
 Ordered by **(promise of a *real* surpass) × (feasibility)**. **R3 and R5 are the two
 *train-objective* surpass bets** (theorist): the only two routes that inject information **dense-ADAM
 structurally lacks** — R3 the cross-shard 2nd moment (category c), R5 non-diagonal curvature (category
-a). **R3 is the UNCONDITIONAL lead** (theorist resolved its gate — see below); **R5 is #2**, still
-conditional on a beyond-diagonal requirement. Both are theorist-ACCEPT, systems-FEASIBLE (moderate).
+a). **R3 is #1 — but CONDITIONAL on the variance-AS-OBJECTIVE form** (theorist); **R5 is #2**, conditional
+on a beyond-diagonal requirement. Both are theorist-ACCEPT, systems-FEASIBLE (moderate).
 
-**The shared kill-check — the diagonal trap (and why R3 clears it while R5's clearance is still
-empirical).** The honest control is **dense-Adam**, which carries a diagonal second moment (`v_t`). So
-**any version of R3 or R5 that reduces to a per-coordinate diagonal collapses** (duplicates `v_t`):
-R5-as-a-**diagonal**-proxy and R3-as-`g/√var` are the *same* dead end. Each must go **beyond a
-diagonal** — R5 via **off-diagonal / `H·Δθ`-non-diagonal** curvature; R3 via the disagreement driving a
-**robustness/min-max objective**, not a coordinate-wise scale. **The asymmetry that ranks them:** R3
-additionally has a *clean* recipe to be distinct — the **same-θ constraint** (concurrent gradients,
-data-variance not trajectory-drift) — that theorist confirms makes it the **unconditional** lead; R5's
-"is the curvature genuinely off-diagonal vs a re-skinned `v_t`?" stays an **empirical** open bet.
+**The shared kill-check — the diagonal trap.** The honest control is **dense-Adam**, which carries a
+diagonal second moment (`v_t`). So **any version of R3 or R5 that reduces to a per-coordinate diagonal
+scale collapses to "a better diagonal than Adam's" — the same CATEGORY of object, which does NOT clear
+the bar:** R5-as-a-**diagonal**-proxy and **R3-as-a-`g/√var` step** are the *same* near-miss (each is a
+different diagonal, technically outside σ(M), but practically an R5-tie). Each escapes only by leaving
+the per-coordinate-scale category:
+- **R3** must use the disagreement at the **OBJECTIVE level** — a SAM ascent-descent or a `λ·R(Var_r)`
+  penalty whose gradient carries a `∇_θ Var_r` term ⇒ a **different objective with a different fixed
+  point** (provably not dense's). *That* is the clean cat-3 escape; the `g/√var` step is not.
+- **R5** must ship genuinely **off-diagonal** curvature (the `H·Δθ`-non-diagonal preconditioner), not a
+  diagonal proxy.
+
+**The asymmetry that ranks R3 #1:** R3's escape is a *recipe* (lift to an objective + same-θ
+concurrent gradients) that, once followed, gives a different fixed point with high confidence; R5's
+escape is an *empirical* bet (does the shipped curvature genuinely carry off-diagonal structure, or is
+it a re-skinned `v_t`?). **But if R3 is built as a step-scale rather than an objective, it ties R5** —
+the #1 ranking is conditional on the objective-level formulation.
 **R1** is the only compression-*specific* exploration bet (category 2) but likely a pass@k edge, not a
 greedy surpass. **R4** is a separate *test-time* generalization claim the fixed-point ceiling does not
 adjudicate. **R2**
 is the lone σ(M)-measurable REJECT among the candidates.
 
 **Best-by-criterion (theorist's framing — the practical reading of the rank):** the routes win on
-*different* axes. **R3 = the train-objective surpass LEAD** (unconditional — same-θ cross-shard 2nd
-moment driving a robustness objective; the strongest, with a locked recipe), **R5 = the #2
-train-objective bet** (non-diagonal curvature; equally outside dense-Adam's info set but its
-beyond-diagonal clearance is still an empirical question) — *the two routes most likely to actually beat
-dense.* **R1 = #1 for a near-term RUNNABLE bet** (no new code at n≤8; the thing to *run first*, even
+*different* axes. **R3 = the train-objective surpass LEAD** (conditional on the variance-AS-OBJECTIVE
+form — same-θ cross-shard 2nd moment driving a SAM/penalty objective with a different fixed point; as a
+`g/√var` step it ties R5), **R5 = the #2 train-objective bet** (non-diagonal curvature; equally outside
+dense-Adam's info set but its beyond-diagonal clearance is an empirical question) — *the two routes most
+likely to actually beat dense.* **R1 = #1 for a near-term RUNNABLE bet** (no new code at n≤8; the thing to *run first*, even
 though its prior is pass@k-only). **R4 = the generalization fallback** (concede train parity, bet on
 OOD). So the program **runs R1 first** (cheapest signal), **builds R3 (lead) and R5 in parallel**
 (highest payoff, both must clear the diagonal trap), and keeps R4 as the orthogonal-axis hedge.
@@ -583,19 +607,22 @@ which **is** R3. **Curriculum** is admissible but generic — it changes the dat
 
 | rank | route | theorist category | escapes σ(M)? | prior | gating verdict still needed |
 |---|---|---|---|---|---|
-| **1** | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT, UNCONDITIONAL LEAD (theorist, DIRECT)**; async gate RESOLVED | med–high | recipe locked: **same-θ** concurrent gradients (not cross-θ) + robustness *objective* (not `g/√var`); systems build (1 all-reduce) |
+| **1** | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT; #1 IFF variance-AS-OBJECTIVE (theorist, DIRECT)**; as a `g/√var` step it ties R5 | med–high | **same-θ** concurrent gradients (not cross-θ) **+ objective-level** (SAM/`λ·R(Var)`, different fixed point — not `g/√var`); async resolved; systems build (1 all-reduce) |
 | **2** | **R5 anchor-curvature preconditioner** | **1 — curvature** | **YES — ACCEPT IFF NON-DIAGONAL (theorist, DIRECT)**; `M_t−M_{t−1}≈H·Δθ` | cond. high | **diagonal trap (empirical)**: a diagonal proxy duplicates Adam's `v_t` ⇒ dead end; needs off-diagonal / full-coverage-lower-noise / cross-rank-shared. Noisy ⇒ damp |
 | 3 | **R1 swarm diversity (n + T)** | **2 — exploration** | ADMISSIBLE (theorist: "likely pass@k only"); greedy surpass **iff** conversion-positive | <20%, likely Route-A | direction settled; open: does it relocate the greedy argmax, or pass@k-only? |
 | 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | **ESCAPES by SCOPE-CHANGE (theorist)**; redefines goal to OOD/test, NOT the GSM8K greedy bar | low–med (~50/50 basin) | settled (scope-change); gate on OOD eval **+** sharpness/Hessian-trace measurement |
 | 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO — REJECT (theorist**: "everything deterministic-in-(G_comp,M) is capped"**)** | very low | settled REJECT; retired unless an objective-side escape is found |
 
 **Re-ranking triggers (all verdicts in; the two train-objective bets differ in how settled their escape is):**
-- **R3 = unconditional lead, R5 = #2** — the only two routes outside dense-Adam's information (c & a).
-  Run **both** (independent). The difference that ranks them is the diagonal trap:
-  - **R3** has a *locked* recipe to clear it: **same-θ** concurrent cross-shard 2nd moment (data-variance,
-    NOT cross-θ drift — that's the rejected staleness object) driving a **robustness/min-max objective**
-    (not `g/√var`). Async fully resolved (theorist): correction from all-reduced sufficient stats ⇒
-    cross-rank-identical; disagreement geometry slow-varying ⇒ staleness-tolerant. ⇒ **unconditional.**
+- **R3 = #1 (conditional on form), R5 = #2** — the only two routes outside dense-Adam's information (c &
+  a). Run **both** (independent). Both face the diagonal trap; the ranking turns on how each clears it:
+  - **R3** clears it ONLY in the **variance-AS-OBJECTIVE** form (SAM ascent-descent / `λ·R(Var_r)`
+    penalty whose gradient has a `∇_θ Var_r` term ⇒ a *different fixed point*), under the **same-θ**
+    concurrent-gradient constraint (data-variance, NOT cross-θ drift = the rejected staleness object).
+    Async fully resolved (correction from all-reduced sufficient stats ⇒ cross-rank-identical;
+    slow-varying ⇒ staleness-tolerant). **As a `g/√var` STEP it is a different diagonal but same-category
+    ⇒ ties / is dominated by R5.** So R3 leads *iff* objective-level; the recipe is known, hence ranked
+    #1 over R5's empirical bet.
   - **R5** clears it **iff** the curvature is **non-diagonal** (off-diagonal/true-Hessian, full-coverage
     lower-noise, or cross-rank-shared); a diagonal proxy duplicates Adam's `v_t` and is a dead end. This
     is an **empirical** question (does the shipped curvature actually carry beyond-diagonal structure?),
@@ -624,12 +651,14 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
    matched dense (no disagreement term). Decisive metric: val beats the dense band with margin.
    **Constraint 1 — same-θ (the ACCEPT-vs-collapse line):** form the 2nd moment from **concurrent
    per-rank gradients at the SAME θ** (data-variance); **do NOT difference across θ/lags** (= the
-   rejected heterogeneous-staleness object, inside σ(M)). **Constraint 2 — objective-level (not
-   `g/√var`):** drive a robustness/min-max objective, not a per-coordinate variance-normalized step
-   (which is a diagonal preconditioner ⇒ duplicates Adam's `v_t`). **Async fully resolved (theorist):**
-   correction from all-reduced sufficient stats ⇒ cross-rank-identical; geometry slow-varying ⇒
-   application tolerates the `delay_K`-staleness. Both constraints honored ⇒ **the unconditional
-   train-objective lead.**
+   rejected heterogeneous-staleness object, inside σ(M)). **Constraint 2 — variance-AS-OBJECTIVE, NOT a
+   step (the lead-vs-R5-tie line):** drive a SAM ascent-descent / `λ·R(Var_r)` penalty whose gradient
+   carries a `∇_θ Var_r` term ⇒ a **different objective with a different fixed point** (provably not
+   dense's). A `g/√var` *step* is a different diagonal but same-category ⇒ **ties / is dominated by R5**
+   (do not implement it that way). **Async fully resolved (theorist):** correction from all-reduced
+   sufficient stats ⇒ cross-rank-identical; geometry slow-varying ⇒ application tolerates the
+   `delay_K`-staleness. Honor BOTH constraints ⇒ **the #1 train-objective lead** (the recipe is known,
+   which is why it outranks R5's empirical beyond-diagonal bet).
 2. **R5-CURV: anchor NON-diagonal curvature preconditioner** (category 1) — **#2 train-objective bet**.
    *(Gated on the non-diagonal requirement below — an empirical question, hence #2 not co-lead.)* The signal is the finite-difference HVP
    `M_t − M_{t−1} ≈ H·Δθ` (differencing successive anchor EMAs — ~free, no extra backward, within the
@@ -713,18 +742,22 @@ conversion-positive new exploration that **moves the greedy mode**, **(c)** mult
 is information not noise). The formal test: a route surpasses **iff it injects information outside
 σ(M) = σ(g(θ_t), g(θ_{t−K}))** — the stale + current dense-gradient *means*. **The two
 train-objective surpass bets — the only two routes that inject information dense-ADAM structurally lacks
-— are R3 (the unconditional LEAD) and R5 (#2):** **R3 (cross-rank second moment / disagreement-as-signal,
+— are R3 (the LEAD) and R5 (#2):** **R3 (cross-rank second moment / disagreement-as-signal,
 SAM-style, category (c)** — descend where the swarm's data-shards agree, damp where they fight; the
 cross-shard *variance* is what the mean `M` discards**)** and **R5 (anchor NON-diagonal curvature,
 category (a)** — the finite-difference HVP `M_t − M_{t−1} ≈ H·Δθ`, second-order structure the first-order
 trajectory throws away**)**. Both face **one decisive kill-check, the diagonal trap:** the honest control
 is **dense-Adam**, which already carries a diagonal `v_t`, so **any version that reduces to a
-per-coordinate diagonal collapses** — R5-as-a-diagonal-proxy and R3-as-`g/√var` are the *same* dead end.
-Each escapes only beyond a diagonal: R5 via off-diagonal / `H·Δθ`-non-diagonal curvature (an **empirical**
-question — hence #2), R3 via the disagreement driving a robustness/min-max *objective* under a **same-θ**
-(concurrent, data-variance) constraint that theorist confirms makes it the **unconditional** lead (its
-async gate is fully resolved — correction from all-reduced sufficient stats is cross-rank-identical, and
-the slow-varying geometry tolerates staleness). Both are theorist-ACCEPT, systems-FEASIBLE (moderate
+per-coordinate diagonal scale is "a better diagonal than Adam's" — same category, does not clear the
+bar** — R5-as-a-diagonal-proxy and **R3-as-a-`g/√var` step** are the *same* near-miss (each a different
+diagonal, technically outside σ(M), but practically an R5-tie). Each escapes only by leaving the
+per-coordinate-scale category: R5 via off-diagonal / `H·Δθ`-non-diagonal curvature (an **empirical**
+question — hence #2); **R3 via the disagreement driving a variance-AS-OBJECTIVE method** (SAM
+ascent-descent / `λ·R(Var_r)` penalty whose gradient has a `∇_θ Var_r` term ⇒ a **different fixed
+point**, provably not dense's) under the **same-θ** concurrent-gradient constraint. Theorist's ruling:
+**R3 is #1 *conditional on this objective-level form*** (its async gate is fully resolved — correction
+from all-reduced sufficient stats is cross-rank-identical, slow-varying geometry tolerates staleness; the
+recipe is known, which ranks it over R5's empirical bet) — **but built as a `g/√var` step, R3 ties R5.** Both are theorist-ACCEPT, systems-FEASIBLE (moderate
 build), and async-favorable. **R1 (swarm rollout diversity, n + T, category (b))** is the #1 near-term *runnable*
 bet (escapes upstream onto a new dense-at-(T,n) ceiling) but likely a pass@k edge unless it relocates
 the greedy argmax; **R4 (compression as a structured flat-minima regularizer)** is a distinct
