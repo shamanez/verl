@@ -172,6 +172,23 @@ merger's measured value is **+0.123** (0.7528 − 0.6300 = the gap the codec ope
 EF closes). **No tested anchor-usage or β lever gives a credible dense surpass** (§ closed
 frontier, see strategist's section).
 
+**Why EF closes exactly that gap, and why parity (not surpass) is the ceiling** (the
+mechanism `theorist` and I converge on; memory `exp25-collapse-gradient-flow:18`,
+`surpass-dense-converged-thesis:15`): the PowerSGD drop is a **deterministic structured
+bias, not zero-mean noise.** The dropped residual `(I−P)·G` (with `P=QQᵀ` the rank-77
+activation-basis projector) has **SNR ≈ 42:1** and carries only **0.058% of the gradient
+energy**, and crucially the basis `Q` **converges to a stable dominant subspace**
+(reconstruction error flat ≈0.024 — locked, not rotating), so the **same** off-subspace
+direction is dropped every step. `delayed_ef`'s `δ = M_rep − G_comp_ring` is precisely
+that dropped residual on the **same (batch, θ)**, re-injected — so EF **de-biases**
+toward the dense gradient and recovers parity. Because δ only ever *reconstructs the
+dense gradient on stale data*, EF (and every reweight/accumulate/perturb/de-noise variant
+of it, see strategist's closed frontier) **cannot exceed dense** — it has no signal dense
+lacks. Corroboration that the bias is small + low-variance: EXP-20 (memory
+`powersgd-activation-issue20`) found compressed steps booked **57–95%** of the
+train-reward gain; the old clean step was just a flush of the small accumulated
+off-subspace bias (4.8–19.6% share).
+
 **Ordering (the headline):** `no-merger 0.6300  <  signed_ema 0.7271  <  B2 0.7528 ≈
 dense 0.75–0.78`. signed_ema clears the floor by ~+0.10 but caps ~0.026 **below** B2.
 
@@ -238,16 +255,24 @@ artifact.**
 ### signed_ema instability — the evidence
 
 - **α=0 (pure sign) is a documented policy-collapse spiral** (`EXP-25`,
-  memory `entropy-collapse-alpha0-signed-ema`): entropy decayed monotonically
-  5.69→0.06 over 48 steps, `response_length/mean` exploded ~step 30 (300→~8600 tok, near
-  the 16384 cap), `critic/score/mean` peaked 0.787@28 then **degraded to 0.318@45**.
-  Mechanism: at α=0 the merger is **magnitude-preserving sign-SGD with persistent
-  stale-anchor signs** — no cross-batch sign cancellation ⇒ full-magnitude steps in a
-  fixed stale direction ⇒ sharpening spiral, with no-KL/no-entropy to arrest it.
-- **~50% sign-disagreement with dense is STRUCTURAL, not staleness** (memory
-  `exp25-collapse-gradient-flow`; `no-merger-floor-0p63-not-0p74:19`: the sign from `M`
-  is a measured ~coin-flip on valid `M`, cos≈0.012). The sign term carries an
-  **irreducible** disagreement that doesn't shrink with fresher `M`.
+  memory `entropy-collapse-alpha0-signed-ema`, `exp25-collapse-gradient-flow:12`): val
+  collapsed to **0.354**; entropy decayed monotonically 5.69→0.06 over 48 steps,
+  `response_length/mean` exploded ~step 30 (300→~8600 tok, near the 16384 cap),
+  `critic/score/mean` peaked 0.787@28 then **degraded to 0.318@45**. **Mechanism (exact):**
+  on the ~50% of coordinates where sign(M) disagrees, `α·G + (1−α)·|G|·sign(M)` reduces to
+  `(2α−1)·|G|` → **full sign reversal at α=0**, destroying per-coordinate sign
+  cancellation. Measured: `grad_norm` inflated from dense **0.387 → 3.3 at α=0** (mean 11).
+  With no-KL/no-entropy nothing brakes the runaway. Length-hack ignites only under
+  sign-reversal: α=0 @step30, α=0.3 @step33; α=0.5 not within 50 steps (but censored, below).
+- **~50% sign-disagreement with dense is STRUCTURAL, not staleness/EMA/compression**
+  (memory `exp25-collapse-gradient-flow:14`). Measured = fraction of coordinates where
+  sign(anchor grad `M`) ≠ sign(dense grad): **50.4% at the FIRST warm step** (`M` = ONE
+  fresh anchor grad, ~zero EMA depth, delay_K=4 ⇒ not a staleness or EMA artifact),
+  **FLAT for the whole run, UNIFORM across all matrix types and all 28 layers** (not
+  concentrated at the 7 compressed boundaries). It is the coin-flip of two independent
+  estimators of a **near-zero-mean GRPO per-coordinate gradient** — an **irreducible**
+  disagreement that does not shrink with fresher `M`, so sign-replacement is
+  fundamentally wrong here, not a delay_K/β tuning issue.
 - **α=0.5's 50-step "survival" was CENSORED** (memory
   `entropy-collapse-alpha0-signed-ema` 2026-06-11 correction;
   `canonical-anchor-comm-eff-base` EXP-27 post-mortem): it had **consecutive 16384
@@ -278,14 +303,19 @@ artifact.**
 
 ### Structural vs tuning — the agreed framing
 
-I treat signed_ema instability as **structural** (a property of sign-replacement under
-no-KL/no-entropy GRPO with a stale anchor), not a tuning artifact, on three grounds:
-(1) it spans α (collapse at α=0, censored-unstable at α=0.5 — the whole tested range);
-(2) the sign-disagreement is a measured ~coin-flip on *valid* `M`, so fresher `M` does
-not fix it; (3) the direction-preserving mergers (B2, ef_powersgd) on the *same
-substrate* do not spiral, isolating the cause to the sign term. **This is the question I
-am settling with `theorist`; their reply is folded in at §6.** *(If theorist dissents,
-this paragraph is the one to revise.)*
+**Agreed answer: STRUCTURAL** (a property of sign-replacement under no-KL/no-entropy
+GRPO with a stale anchor), not a tuning artifact. `theorist`'s independent prior from the
+math is also STRUCTURAL; I have sent them the data and the three grounds below and we are
+converging on this single answer (derivation exchange in §6). The three grounds:
+(1) it spans α — collapse at α=0 (val 0.354), censored-unstable at α=0.5 (cap-pins steps
+47–48, P(ignite by 100) ≈ 55–70%) — the whole tested range, so no α fixes it;
+(2) the sign-disagreement is **50.4% at the first warm step** with ~zero EMA depth and is
+FLAT across the run and uniform across all layers/matrices, so fresher `M` (smaller
+delay_K) or any β does not fix it — it is the coin-flip of two estimators of a
+near-zero-mean GRPO gradient;
+(3) the **direction-preserving** mergers (B2 `delayed_ef`, `ef_powersgd`) on the *same
+substrate* do not spiral, isolating the cause to the **sign-replacement operator**, not
+the substrate or staleness.
 
 ---
 

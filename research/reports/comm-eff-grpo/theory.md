@@ -535,16 +535,25 @@ must pass:
    surpass. Prior: likely yields at most a pass@k edge, not a greedy-mean
    surpass.
 
-3. **Multi-rank disagreement as signal, not noise.** The swarm has many
-   independent compressed gradients. Their *disagreement* (variance across ranks)
-   is a quantity $M$ — a mean — discards. If that disagreement encodes
-   task-relevant structure (e.g. a robust/sharpness-aware direction: descend
-   where ranks *agree*, damp where they *fight*), it is information beyond the
-   dense mean. **Test**: is the signal in the *cross-rank second moment*, not the
-   first? Caveat: the async-realism constraint requires it stay
-   cross-rank-identical *after* aggregation and tolerate variable staleness — a
-   genuine SAM-style term qualifies; isotropic perturbation (EXP-31 L4) does not,
-   because it is uncorrelated noise, not disagreement structure.
+3. **Multi-rank disagreement as signal, not noise.** The fast **swarm** (the DP
+   ranks — the uncompressed axis, each holding a different data shard) produces
+   many independent gradients per step. Their *disagreement* — the cross-rank
+   **second moment** $\frac1R\sum_r (g_r-\bar g)(g_r-\bar g)^\top$ or its diagonal
+   — is a quantity that both the dense mean $\bar g$ **and** the anchor $M$
+   (itself a DP-mean) **discard**. If that disagreement encodes task-relevant
+   structure — e.g. a robust / sharpness-aware direction (descend where ranks
+   *agree*, damp where they *fight*), which provably optimizes a *different*
+   objective than $\mathbb E[g]$ — it is information outside $\sigma(M)$. **Test**:
+   is the signal in the *cross-rank second moment*, not the first? Async-realism
+   caveats: (a) it must be computed from the **swarm** ranks, not the single slow
+   anchor (the anchor is one node and has no within-itself disagreement); (b) the
+   *aggregated* correction must remain cross-rank-identical and tolerate variable
+   staleness. A genuine SAM-style or variance-adaptive term qualifies; isotropic
+   perturbation (EXP-31 L4) does **not** — it is rank-identical *uncorrelated
+   noise*, carrying no disagreement structure, which is exactly why it was null.
+   This is, mathematically, the **most promising** of the three escapes: it is the
+   one signal the compressed swarm has in abundance that a single dense trajectory
+   structurally lacks.
 
 The disqualifier, stated once: **any $\Phi$ that is a deterministic function of
 $(G_{\text{comp}}, M)$ alone — reweighting, accumulating, sign-copying,
@@ -575,13 +584,16 @@ cross-rank second moment.
    a near-zero-mean gradient), a sign-SGD-style **sharpening** that ignites the
    length hack as $\alpha\to0$. Best $\alpha=0.5$ ($\approx0.71$) is **dominated**
    by B2.
-5. **Stale-reconstruction ceiling**: any merger whose only non-compressed input
-   is the stale dense estimate $M$ has its fixed point at **dense** and cannot
-   surpass it (data-processing on the stale-dense sufficient statistic). EXP-31's
-   four nulls are this ceiling, instantiated. **Surpass requires injecting
-   information outside $\sigma(M)$**: curvature/2nd-order, a *conversion-positive*
-   exploration signal (must move the greedy mode, with a dense$\times\{T,n\}$
-   control), or a *cross-rank second-moment* (disagreement-as-signal) term.
+5. **Stale-reconstruction ceiling**: any merger that is a deterministic map
+   $\Phi(G_{\text{comp}}, M)$ — i.e. $\mathcal F_t$-measurable w.r.t.
+   $\sigma(g(\theta_t), g(\theta_{t-K}))$, the stale+current dense gradients — has
+   its error-minimizing fixed point at the **dense** update and cannot surpass it.
+   EXP-31's four nulls (reweight / accumulate / perturb / de-noise) are this
+   ceiling, instantiated. **Surpass requires injecting information outside
+   $\sigma(M)$**: curvature/2nd-order, a *conversion-positive* exploration signal
+   (must move the greedy mode, with a dense$\times\{T,n\}$ control), or — most
+   promisingly — a *cross-rank second-moment* (swarm disagreement-as-signal) term,
+   the one quantity the compressed swarm has and a single dense trajectory lacks.
 
 *Cross-examination status (folded below in §7 once `systems`/`strategist` reply).*
 

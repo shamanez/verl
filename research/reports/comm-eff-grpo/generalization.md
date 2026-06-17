@@ -192,9 +192,13 @@ G_corr(t) = G_comp(t) + λ·δ(t),   λ = 1,  β_anc = 0
 G_corr ≈ |G|·sign(M)
 ```
 
-- **Cheaper comm — potentially 1-bit sign traffic.** If the anchor ships only `sign(M)`, the
-  merger's transfer collapses from full-precision to **1 bit per coordinate** — a large saving
-  precisely on the cost B2 pays in §3.1. This is the *only* reason to keep it alive.
+- **Cheaper comm — PROJECTED 1-bit sign traffic.** *Honest framing:* the current code computes
+  `G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)` **locally** (`spectral_filter.py:430`) — magnitude
+  from the fast compressed grad, **sign from the local anchor EMA `M`**. The 1-bit saving is a
+  **projected deployment capability**: in a real swarm the anchor could broadcast only `sign(M)`
+  (1 bit/coordinate) instead of the full-precision `M` that B2 needs (§3.1). It is **not** a measured
+  saving in the lock-step sim — the sim transmits nothing. This *projected* comm advantage is the
+  *only* reason to keep `signed_ema` alive.
 - **But unstable.** α→0 is a sign-SGD sharpening spiral; entropy collapse / length-explosion.
   At α=0.5 the 50-step survival was **censored** (already spiraling at steps 47–48). It reaches
   only ≈0.70 and is **dominated by B2**. The instability spans both the cold-`M` (β=1) and the
@@ -209,7 +213,7 @@ G_corr ≈ |G|·sign(M)
 
 | | `delayed_ef` (B2) | `signed_ema` (α=0.5) |
 |---|---|---|
-| Merger comm | full-precision `M`, low-frequency | **1-bit sign(M)** — far cheaper |
+| Merger comm | full-precision `M`, low-frequency (PROVEN) | **1-bit sign(M)** — far cheaper (PROJECTED; computed locally today) |
 | Quality | **dense parity (0.735–0.754)** | ≈0.70, dominated |
 | Stability | robust, graceful under staleness | **unstable** (sharpening spiral, censored survival) |
 | Use when | link can afford periodic `M` | comm budget is the hard wall **and** stability is fixed |
@@ -317,7 +321,11 @@ whether an OOD eval split is wireable as a *measurement-only* knob (validation i
 may be sanctioned like `test_freq`).
 
 > **[theorist: validity — PENDING]** *(does GRPO-on-GSM8K make the generalization gap ill-defined?)*
-> **[systems: feasibility — PENDING]** *(is an OOD eval split wireable read-only?)*
+> **[systems: feasibility — PENDING; code check by strategist: WIREABLE read-only]** — `val_files` is a
+> config path (`_generated_ppo_trainer.yaml`); pointing it at a different test parquet (GSM-hard / a MATH
+> subset) is a **measurement-only knob** (validation is read-only, no training change — same class as
+> `test_freq`). The only build is *preparing* the OOD parquet + a matching reward fn; no trainer-code
+> change. Awaiting systems' confirmation.
 
 ---
 
@@ -400,11 +408,13 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
 
 ### Tier 3 — deployment-realism (parity-preservation, not surpass)
 
-4. **R3: variable-staleness robustness.** Replace the fixed `K=5` with a **staleness
-   distribution** (heavy right tail) and confirm B2 **degrades gracefully** (no ignition, parity
-   held within noise). This is the experiment that validates §1.2's "tolerate variable staleness"
-   claim and de-risks the whole decentralized story — *expected parity, not surpass, but
-   load-bearing for the deployment narrative.*
+4. **R3: variable-staleness robustness.** **Requires a small build** (verified: `delay_K` is a fixed
+   integer and `AnchorStalenessQueue` serves a deterministic `t − delay_K`; no distribution primitive
+   exists). Extend the queue to draw `K` from a **staleness distribution** (heavy right tail) and
+   confirm B2 **degrades gracefully** (no ignition, parity held within noise). This validates §1.2's
+   "tolerate variable staleness" claim and de-risks the whole decentralized story — *expected parity,
+   not surpass, but load-bearing for the deployment narrative.* (Build must preserve cross-rank
+   identical staleness per refresh, or the swarm diverges — §1.2.)
 5. **Scaling smoke test: `r/H` vs spectrum.** On the *current* model, measure how much
    boundary-gradient energy `r=77` captures (it is the proxy for §2.1). If the captured fraction is
    already marginal at `H=1536`, that predicts `r/H` must rise with model size to hold parity — the
