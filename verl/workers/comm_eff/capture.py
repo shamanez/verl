@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-26 Step A: real-gradient geometry-audit tensor capture.
+"""Diagnostic tensor capture for communication-efficient gradient analysis.
 
-This module owns the **fp32 tensor dump** for the Step-A geometry audit. It is a
-strict no-op unless ``comm_eff.capture.enabled=true`` (the disabled path never
-imports it — the engine guards on the flag). The design goals, in priority order:
+This module owns optional fp32 tensor dumps for comm-eff diagnostics. It is a
+strict no-op unless ``comm_eff.capture.enabled=true``. The design goals are:
 
 1. **Zero numerical side effect.** Every captured tensor is ``.detach()``ed,
    cloned, moved to CPU and written to disk. The capture writer NEVER feeds a
@@ -33,11 +32,10 @@ imports it — the engine guards on the flag). The design goals, in priority ord
 
 3. **Bounded volume.** The number of captured ticks is capped
    (``max_ticks``); the per-tick target set can be stratified to a few targets
-   per matrix-type (``stratified_targets``) — the √2 sign-disagreement was
-   uniform across the 7 matrix types / 28 layers in EXP-25, so a stratified
-   subset is defensible (the subset is recorded in the manifest).
+   per matrix-type (``stratified_targets``). The chosen subset is recorded in
+   the manifest.
 
-Disk layout (under ``capture_dir``, rsynced to ``runs/EXP-26/captures/``)::
+Disk layout under ``capture_dir``::
 
     captures/
       manifest.jsonl                       # one row per (tick, role, target)
@@ -70,7 +68,7 @@ __all__ = [
     "CAPTURE_ROLES",
 ]
 
-# The audit roles. Each names a distinct tensor the Step-A geometry audit needs.
+# The capture roles. Each names a distinct diagnostic tensor.
 #   A              -> the boundary activation M (N, H) at the projection hook
 #   A_hat          -> the reconstruction (A@Q)Qᵀ at the projection hook
 #   Q              -> the frozen PowerSGD basis (H, r)
@@ -80,9 +78,9 @@ __all__ = [
 #   G_anchor       -> the RAW K-stale anchor gradient per target (DP-reduced)
 #   G_dense        -> the parallel UNCOMPRESSED fast gradient (measurement probe)
 #   G_fresh_anchor -> the delay_K=0 fresh-anchor gradient (measurement probe)
-#   G_b            -> the boundary activation gradient dL_anchor/dh (EXP-26 Step C1;
+#   G_b            -> the boundary activation gradient dL_anchor/dh
 #                     the operand the grad/tail/ticket family sketches are built from)
-#   Q_<family>     -> the EXP-26 Step-C1 PASSIVE-screen candidate basis per family
+#   Q_<family>     -> passive-screen candidate basis per family
 #                     (Q_act / Q_grad / Q_adv / Q_tail / Q_hybrid / Q_ticket), each
 #                     an (H, r) orthonormal basis the analyst judges by update geometry
 CAPTURE_ROLES = (
@@ -121,7 +119,7 @@ def _canon(name: str) -> str:
     """
     name = name.replace("._fsdp_wrapped_module", "")
     if name.startswith("_fsdp_wrapped_module."):
-        name = name[len("_fsdp_wrapped_module."):]
+        name = name[len("_fsdp_wrapped_module.") :]
     return name
 
 
@@ -131,7 +129,7 @@ def _sanitize(name: str) -> str:
 
 
 class CaptureWriter:
-    """Process-local fp32 tensor-dump writer for the Step-A geometry audit.
+    """Process-local fp32 tensor-dump writer for comm-eff diagnostics.
 
     Constructed once per worker (only when ``capture.enabled``) and shared across
     the anchor / merger / projection hooks. Thread-safe append to the manifest.
@@ -156,25 +154,16 @@ class CaptureWriter:
         self.base_dir = capture_dir or os.path.join(os.getcwd(), "captures")
         self.max_ticks = int(max_ticks)
         self.stratified_targets = int(stratified_targets)
-        # EXP-26: skip ticks BELOW min_tick (cold-Q warmup). The anchor warms Q at
-        # cadence (e.g. tick 5/10 for cadence=5), so a capture that starts at tick 1
-        # is dominated by PRE-warm ticks where Q is the cold seed basis
-        # (recon_rel_error ~0.97 -> the audit read ~0.065 post-"warmup", not the
-        # on-box ~0.024, and Q_act activation-capture read 0.525 not ~0.99). Setting
-        # min_tick just above the first anchor refresh ensures the captured ticks
-        # are POST-warm so H2 (Q update-capture / activation-capture) is trustworthy.
+        # Skip ticks below min_tick. This is useful when avoiding cold-start
+        # captures before Q or anchor state has warmed.
         self.min_tick = int(min_tick)
         assert dump_dtype in ("fp32", "bf16"), dump_dtype
         self.dump_dtype = torch.float32 if dump_dtype == "fp32" else torch.bfloat16
         if rank is None:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self.rank = int(rank)
-        # EXP-26 disk-volume guard: by default capture ONLY rank 0. The audit's
-        # gradient roles (G_dense / G_comp / G_corr / M / G_anchor) are DP-reduced
-        # (identical across ranks) and the powersgd Q/A/Â are sync_basis-consensus
-        # (also identical), so rank 0 is sufficient — and writing all 4 ranks blew
-        # the 200 GB box disk (76 GB for one arm) and crashed torch.save mid-write.
-        # ``rank0_only=False`` restores per-rank dumps (rarely needed).
+        # Disk-volume guard: by default capture only rank 0. Set
+        # ``rank0_only=False`` only when per-rank dumps are needed.
         self.rank0_only = bool(rank0_only)
         self._inactive = self.rank0_only and self.rank != 0
         self.root = os.path.join(self.base_dir, f"rank{self.rank}")
@@ -197,7 +186,7 @@ class CaptureWriter:
             self.rank,
         )
         print(
-            f"[comm_eff][EXP-26][capture] writer root={self.root} max_ticks={self.max_ticks} "
+            f"[comm_eff][capture] writer root={self.root} max_ticks={self.max_ticks} "
             f"stratified_targets={self.stratified_targets} dump_dtype={dump_dtype} rank={self.rank} "
             f"rank0_only={self.rank0_only} min_tick={self.min_tick} inactive={self._inactive}",
             flush=True,
@@ -318,7 +307,7 @@ class CaptureWriter:
         return self._n_written
 
 
-def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Optional["CaptureWriter"]:
+def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Optional[CaptureWriter]:
     """Construct a :class:`CaptureWriter` iff ``comm_eff.capture.enabled``, else None.
 
     The single gate so the disabled / non-capture path never creates a writer or

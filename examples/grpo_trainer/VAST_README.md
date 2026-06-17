@@ -32,16 +32,16 @@ Two zones, one direction of flow:
 
 | Zone | What lives here | Stability |
 |---|---|---|
-| **Experiment sandbox** — `research/runs/EXP-<ID>/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
+| **Experiment sandbox** — `research/runs/run-id/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
 | **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `vast-ai-workload`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
 
 **Canonical launcher + CLI overrides.** A run never re-types the baseline. It
 calls the canonical `vast_*.sh` and overrides only the knob(s) it's testing —
 either via the launcher's `${VAR:-default}` env vars or via Hydra args
-forwarded through the launcher's trailing `"$@"`. Example (issue-13 Test 2B):
+forwarded through the launcher's trailing `"$@"`. Example:
 
 ```bash
-COMM_EFF_MASK_RECOMPUTE=false EXPERIMENT_NAME=exp13-t2-cellB \
+COMM_EFF_MASK_RECOMPUTE=false EXPERIMENT_NAME=mask_recompute_off \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   trainer.total_training_steps=10
 ```
@@ -57,7 +57,7 @@ real settings. So we never rely on prose: we read the launched command back.
 
 - Every launcher runs under `set -x`, so `train.log` contains the fully
   shell-expanded `python3 -m verl.trainer.main_ppo …` command.
-- The analyst runs `research/scripts/capture_resolved_config.py runs/EXP-<ID>`
+- The analyst runs `research/scripts/capture_resolved_config.py runs/run-id`
   on **every** completed run, emitting `resolved_params.txt` (Hydra last-wins,
   one `key=value` per line) + `resolved_cmd.txt`. That file — not prose — is
   the source of truth for what ran, and the verdict pastes its headline knobs.
@@ -69,7 +69,7 @@ from `resolved_params.txt`** (never from the plan or a manifest), regenerates
 the run's `REPRODUCIBILITY.md` from it, and opens a **draft** PR (base
 `vast-ai-workload`) so a human reviews the exact diff before it becomes
 canonical. A proven config thus lands in `examples/grpo_trainer/` carrying the
-exact values that worked, plus a provenance header (EXP-ID, commit, verdict,
+exact values that worked, plus a provenance header (run-id, commit, verdict,
 headline metric). Draft = nothing becomes canonical without your merge.
 
 ## How this composes with the harness

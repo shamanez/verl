@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for the EXP-29 anchor on-policy replay ring.
+"""CPU unit tests for the paired replay anchor on-policy replay ring.
 
 Loads ``anchor.py`` by file path (same harness as ``test_anchor_queue.py``) so
 the heavy ``verl.__init__`` chain is not required. Pins the plan's CPU-gate
@@ -285,16 +285,14 @@ TensorDict = tensordict.TensorDict
 
 
 def _njt(lengths, dim=4):
-    return torch.nested.as_nested_tensor(
-        [torch.randn(n, dim) for n in lengths], layout=torch.jagged
-    )
+    return torch.nested.as_nested_tensor([torch.randn(n, dim) for n in lengths], layout=torch.jagged)
 
 
 def test_clone_dense_leaf_mutation_isolation():
     td = TensorDict({"adv": torch.randn(3, 7)}, batch_size=[3])
     clone = clone_batch_for_replay(td, device=torch.device("cpu"))
     before = clone["adv"].clone()
-    td["adv"].add_(123.0)        # in-place mutation of the live leaf
+    td["adv"].add_(123.0)  # in-place mutation of the live leaf
     td["new_key"] = torch.zeros(3)  # key assignment on the live mapping
     assert torch.equal(clone["adv"], before)
     assert "new_key" not in clone.keys()
@@ -398,7 +396,7 @@ def test_relevance_stats_zero_for_generator_weights():
 def test_relevance_stats_masked_mean_abs_diff_exact():
     lp = torch.tensor([[-0.5, -1.0, -3.0]])
     ref = torch.tensor([[-0.7, -1.5, -9.0]])  # diffs 0.2, 0.5, 6.0
-    mask = torch.tensor([[1, 1, 0]])          # padded position excluded
+    mask = torch.tensor([[1, 1, 0]])  # padded position excluded
     s, c = replay_relevance_stats(lp, ref, mask)
     assert c == 2
     assert abs(s - 0.7) < 1e-6  # 0.2 + 0.5; the 6.0 at the masked slot ignored
@@ -414,7 +412,7 @@ def test_relevance_stats_discriminates_drifted_weights():
         ref_lp = torch.log_softmax(gen.o_proj(gen.q_proj(x)), dim=-1)
     drifted = _Tiny(d=8)
     with torch.no_grad():
-        for (n, p), (_n2, p2) in zip(gen.named_parameters(), drifted.named_parameters()):
+        for (n, p), (_n2, p2) in zip(gen.named_parameters(), drifted.named_parameters(), strict=False):
             p2.copy_(p + 0.01 * torch.randn_like(p))  # ~K optimizer ticks of drift
         drift_lp = torch.log_softmax(drifted.o_proj(drifted.q_proj(x)), dim=-1)
     mask = torch.ones(4, 8)

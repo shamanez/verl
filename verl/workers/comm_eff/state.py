@@ -158,7 +158,7 @@ def resolve_compression_type(config: Any) -> str:
 
 
 class FastGradRing:
-    """EXP-30: fire-aware ring of the fast compressed per-target gradients
+    """Fire-aware ring of the fast compressed per-target gradients
     ``G_comp(t)`` — the c512128 retention pattern relocated from the anchor's
     batch replay ring to WEIGHT-GRADIENT storage.
 
@@ -174,8 +174,9 @@ class FastGradRing:
     ``{canon_name: CPU tensor}`` (fp32, detached) and ``norms`` is the matching
     ``{canon_name: float}`` Frobenius norms (computed on-device at extraction so
     the CPU consumer never re-reduces 5 GB just for a denominator). Consumers:
-    Step A's m5 within-pair codec error ``δ(t) = G_anc_rep(t) − G_comp_ring(t−K)``
-    and the B2 ``delayed_ef`` merger's fire-time residual refresh. Pure
+    the geometry probe's within-pair codec error
+    ``delta(t) = G_anc_rep(t) - G_comp_ring(t-K)`` and the ``delayed_ef``
+    merger's fire-time residual refresh. Pure
     container — no collectives, no RNG, CPU-testable. CPU residency is ASSERTED
     on push (the zero-GPU-memory-growth invariant).
     """
@@ -186,10 +187,10 @@ class FastGradRing:
         self.cadence = max(1, int(cadence))
         self._keep_residue = (-self.delay_K) % self.cadence
         self._maxlen = self.delay_K // self.cadence + 1
-        self._entries: "OrderedDict[int, tuple]" = OrderedDict()
+        self._entries: OrderedDict[int, tuple] = OrderedDict()
 
     def tick_retained(self, tick: int) -> bool:
-        """True iff a future fire (or the B2 residual refresh) can request ``tick``."""
+        """True iff a future fire or delayed_ef residual refresh can request ``tick``."""
         return (int(tick) % self.cadence) == self._keep_residue
 
     def push(self, tick: int, grads: dict, norms: Optional[dict] = None) -> bool:
@@ -234,7 +235,7 @@ class FastGradRing:
 
 
 class GradLagBuffer:
-    """EXP-30: rolling buffer of the last ``max_lag`` ticks of per-target
+    """Rolling buffer of the last ``max_lag`` ticks of per-target
     ``G_comp`` for the m4 lag-autocorrelation ``cos(G_comp(t), G_comp(t−j))``,
     j=1..max_lag.
 
@@ -250,7 +251,7 @@ class GradLagBuffer:
     def __init__(self, max_lag: int = 5):
         assert 1 <= int(max_lag) <= 5, f"max_lag must be in [1, 5] (≤6-entry plan bound), got {max_lag}"
         self.max_lag = int(max_lag)
-        self._entries: "OrderedDict[int, tuple]" = OrderedDict()
+        self._entries: OrderedDict[int, tuple] = OrderedDict()
 
     def push(self, tick: int, grads: dict, norms: Optional[dict] = None) -> bool:
         tick = int(tick)
@@ -290,7 +291,7 @@ class CommEffState:
     never instantiates this class — see ``maybe_build_comm_eff_state``.
     """
 
-    def __init__(self, config: "CommEffConfig"):
+    def __init__(self, config: CommEffConfig):
         # Invariant: never construct a disabled state. The factory enforces it;
         # this assert catches a future caller that forgets to go through it.
         assert _is_enabled(config), (
@@ -379,7 +380,7 @@ class CommEffState:
         self.powersgd_applications = 0
         self.powersgd_basis_updates = 0
 
-        # EXP-25 (R2) anchor-owns-Q counters.
+        # Anchor-owns-Q counters.
         #   anchor_q_updates    — orth(V) Q refreshes the ANCHOR computed from its
         #                         slow-net stale-forward activations (replaces the
         #                         fast net's maybe_update_basis in owns_q mode).
@@ -387,28 +388,28 @@ class CommEffState:
         #                         rank to every DP rank (one per refresh).
         self.anchor_q_updates = 0
         self.anchor_q_broadcasts = 0
-        # EXP-25 (R3): per-step count of matrices the signed_ema merger no-op'd to
+        # Per-step count of matrices the signed_ema merger no-op'd to
         # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
         # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
         self.merger_coldM_fallbacks = 0
-        # EXP-26 Step B: per-step count of ef_powersgd targets whose accumulated
+        # Per-step count of ef_powersgd targets whose accumulated
         # error-feedback residual was RESET because the target's logical 2D shape
         # changed (no stale carry across shape change). The shape-aware-residual
         # invariant surfaces this so the probe can prove the reset fired.
         self.residual_reset_on_shape_mismatch = 0
-        # EXP-26 Step C1: cumulative count of PASSIVE family-screen builds (one per
+        # Cumulative count of passive family-screen builds (one per
         # anchor refresh that built candidate Q_f for the q_basis_passive families).
         # 0 unless the screen is configured; lets the probe confirm the screen fired.
         self.family_screen_builds = 0
-        # EXP-29: cumulative count of anchor refreshes that replayed a PAIRED
+        # Cumulative count of anchor refreshes that replayed a paired
         # (batch[t-delay_K], generator-snapshot) instead of the current batch.
         # 0 unless anchor.replay_paired_batch=true; post-warmup it advances once
         # per anchor fire, so the probe can prove every fire went through replay.
         self.anchor_replay_fires = 0
-        # EXP-30 Step A geometry probe. ALL None / 0 unless probe.geometry_enabled
+        # Geometry probe. All None / 0 unless probe.geometry_enabled
         # (off-path parity: the OFF path builds no ring, no buffer, no stash).
         #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
-        #                         ALSO built (probe-independent) when the B2
+        #                         ALSO built (probe-independent) when the
         #                         delayed_ef merger is selected — it feeds δ.
         #   grad_lag_buffer     — GradLagBuffer for m4 (≤5 stored + in-flight ≤6).
         #   geometry_probe_fires— cumulative fires with a complete m1–m7 record.
@@ -425,11 +426,11 @@ class CommEffState:
         self._probe_fire_stash = None
         self._probe_prev_rep = None
         self._probe_prev_rep_tick = -1
-        # EXP-26 Step A: optional tensor-capture writer (CommEffState owns it so
+        # Optional tensor-capture writer (CommEffState owns it so
         # the anchor / merger / projection hooks can all reach it via the state).
         # None unless comm_eff.capture.enabled — built in build(). Pure I/O sink.
         self._capture_writer = None
-        # EXP-26 capture: the SINGLE per-train_batch optimizer tick all capture
+        # The single per-train_batch optimizer tick all capture
         # roles key on, stamped at the start of the real fast-path forward (see
         # FSDPEngine.forward_backward_batch). -1 = not yet stamped (fall back to
         # current_optimizer_tick()). Unifying the key across roles is what keeps the
@@ -510,7 +511,7 @@ class CommEffState:
             from verl.workers.comm_eff.powersgd_activation import PowerSGDActivationCompressor
 
             ps_cfg = getattr(self.config, "powersgd", None)
-            # EXP-25 (R2): anchor-owns-Q lives on the anchor sub-config so it can be
+            # anchor-owns-Q lives on the anchor sub-config so it can be
             # set alongside anchor.enabled/cadence/delay_K. Read it here to build the
             # compressor in the right mode (fast Q-update gated off + slow-net Q).
             anc_cfg_for_q = getattr(self.config, "anchor", None)
@@ -526,13 +527,13 @@ class CommEffState:
                 qr_dtype=str(getattr(ps_cfg, "qr_dtype", "fp32")),
                 reortho_eps=float(getattr(ps_cfg, "reortho_eps", 1e-6)),
                 anchor_owns_q=anchor_owns_q,
-                # EXP-26 Step C: LIVE Q-basis family (default "act" = byte-identical).
+                # Live Q-basis family.
                 q_basis=str(getattr(ps_cfg, "q_basis", "act")),
-                # EXP-26 Step C1: PASSIVE screen families + hybrid column split.
+                # Passive screen families plus hybrid column split.
                 q_basis_passive=list(getattr(ps_cfg, "q_basis_passive", []) or []),
                 hybrid_act_cols=int(getattr(ps_cfg, "hybrid_act_cols", -1)),
                 hybrid_grad_cols=int(getattr(ps_cfg, "hybrid_grad_cols", -1)),
-                # EXP-26 Step E: anchor cadence for the Q-broadcast byte amortization.
+                # Anchor cadence for the Q-broadcast byte amortization.
                 anchor_cadence=int(getattr(anc_cfg_for_q, "cadence", 1)) if anc_cfg_for_q is not None else 1,
                 state=self,
             )
@@ -547,7 +548,7 @@ class CommEffState:
                 getattr(ps_cfg, "qr_dtype", "fp32"),
             )
             print(
-                f"[comm_eff][EXP-20] powersgd codec: rank={self.powersgd.rank} "
+                f"[comm_eff] powersgd codec: rank={self.powersgd.rank} "
                 f"update_cadence={self.powersgd.update_cadence} warm_start={self.powersgd.warm_start} "
                 f"compress_recompute={self.powersgd.compress_recompute} "
                 f"sync_basis={self.powersgd.sync_basis} "
@@ -570,43 +571,39 @@ class CommEffState:
                 inject_gamma=float(getattr(spec_cfg, "inject_gamma", 1.0)),
                 blend_eta=float(getattr(spec_cfg, "blend_eta", 0.5)),
                 signed_ema_alpha=float(getattr(spec_cfg, "signed_ema_alpha", 0.0)),
-                # EXP-26 Step B: error-feedback residual knobs (ef_powersgd).
+                # Error-feedback residual knobs (ef_powersgd).
                 ef_decay=float(getattr(spec_cfg, "ef_decay", 0.0)),
                 ef_clip=float(getattr(spec_cfg, "ef_clip", 0.0)),
-                # EXP-30 B2: K-delayed exact codec residual weight (delayed_ef).
+                # K-delayed exact codec residual weight (delayed_ef).
                 delayed_ef_lambda=float(getattr(spec_cfg, "delayed_ef_lambda", 0.0)),
-                # EXP-31 Cell D: additive stale-anchor rank-r_sb sub-basis (OFF by
-                # default; r_sb=0 ⇒ the exact B2 path). base_seed = the locked
+                # Additive stale-anchor rank-r_sb sub-basis. base_seed = the
                 # codec seed (powersgd.seed, identical on every DP rank) so the
                 # per-target randomized SVD that builds δ_subbasis is bit-identical
                 # across ranks (the multi-rank-agreement invariant).
                 delta_subbasis_rank=int(getattr(spec_cfg, "delta_subbasis_rank", 0)),
                 delta_subbasis_family=str(getattr(spec_cfg, "delta_subbasis_family", "tail")),
-                # EXP-31 Cell D γ-knob: the sub-basis WEIGHT + linear DECAY (the
-                # over-amplification fix). weight=1.0, decay_steps=0 (defaults) ⇒
-                # γ_t==1 always = the EXACT current Cell D path; weight=0 ⇒ B2.
+                # Sub-basis weight plus linear decay.
                 delta_subbasis_weight=float(getattr(spec_cfg, "delta_subbasis_weight", 1.0)),
                 delta_subbasis_decay_steps=int(getattr(spec_cfg, "delta_subbasis_decay_steps", 0)),
-                # EXP-31 hold-then-decay: γ holds at full weight for hold_steps,
+                # Hold-then-decay: gamma holds at full weight for hold_steps,
                 # THEN decays (0 default ⇒ the existing linear-from-0 schedule).
                 delta_subbasis_hold_steps=int(getattr(spec_cfg, "delta_subbasis_hold_steps", 0)),
                 base_seed=int(getattr(getattr(self.config, "powersgd", None), "seed", 0) or 0),
-                # EXP-31 surpass lever: zero-mean tunable cross-rank-identical
-                # perturbation (σ=0 default ⇒ the exact delayed_ef / B2 path). The
+                # Zero-mean tunable cross-rank-identical perturbation. The
                 # config-must-mirror-dataclass gotcha — without threading these here
                 # the CLI/yaml σ never reaches the filter and the lever is dead.
                 perturb_sigma=float(getattr(spec_cfg, "perturb_sigma", 0.0)),
                 perturb_seed=int(getattr(spec_cfg, "perturb_seed", 0)),
-                # EXP-31 L2: δ-momentum (NORMALIZED EMA, stationary gain EXACTLY 1).
-                # μ=0 default ⇒ correction == δ bitwise (= B2). The buffer is built
+                # Delta-momentum (normalized EMA, stationary gain exactly 1).
+                # mu=0 skips the branch. The buffer is built
                 # from the DP-mean δ ⇒ cross-rank identical. age_decay fades the held
                 # correction by age (async staleness-degrade). The config-must-mirror-
                 # dataclass gotcha — without threading these here the CLI/yaml μ never
                 # reaches the filter and the lever is dead.
                 delta_momentum_mu=float(getattr(spec_cfg, "delta_momentum_mu", 0.0)),
                 delta_momentum_age_decay=bool(getattr(spec_cfg, "delta_momentum_age_decay", False)),
-                # EXP-31 L3: adaptive dose (MEAN-1 CENTERED gate). mode=off/κ=0
-                # default ⇒ λ_t ≡ delayed_ef_lambda (= B2). λ_t = clamp(λ + κ·(c̄ − c_t),
+                # Adaptive dose (centered gate). mode=off/kappa=0 keeps
+                # lambda_t == delayed_ef_lambda. lambda_t = clamp(lambda + kappa*(c_bar - c_t),
                 # 0, lambda_cap), built from the DP-mean gm + M_rep ⇒ cross-rank
                 # identical. Same mirror-or-it-is-dead gotcha as above.
                 adaptive_lambda_mode=str(getattr(spec_cfg, "adaptive_lambda_mode", "off")),
@@ -630,7 +627,7 @@ class CommEffState:
             anchor_enabled = bool(getattr(anc_cfg, "enabled", False)) if anc_cfg is not None else False
             isolation_mode = "clone" if anchor_enabled else "n/a (anchor.enabled=false)"
             print(
-                f"[comm_eff][EXP-12] spectral storage: ema_device={self.spectral.ema_device} "
+                f"[comm_eff] spectral storage: ema_device={self.spectral.ema_device} "
                 f"correction_mode={self.spectral.correction_mode} "
                 f"signed_ema_alpha={self.spectral.signed_ema_alpha} "
                 f"ef_decay={self.spectral.ef_decay} ef_clip={self.spectral.ef_clip} "
@@ -638,23 +635,24 @@ class CommEffState:
                 flush=True,
             )
 
-        # EXP-30: fire-aware fast-grad ring + m4 lag buffer. The ring is built
-        # when EITHER the Step-A geometry probe is on (m5 needs G_comp_ring(t−K))
-        # OR the B2 delayed_ef merger is selected (δ refresh needs the same
+        # Fire-aware fast-grad ring plus m4 lag buffer. The ring is built
+        # when EITHER the geometry probe is on (m5 needs G_comp_ring(t−K))
+        # OR the delayed_ef merger is selected (delta refresh needs the same
         # entry); the lag buffer is probe-only (m4). The OFF path constructs
         # NOTHING — flag-OFF parity (both attributes stay None, no allocation).
         anc_cfg_rings = getattr(self.config, "anchor", None)
         probe_cfg = getattr(self.config, "probe", None)
         probe_on = bool(getattr(probe_cfg, "geometry_enabled", False)) if probe_cfg is not None else False
-        delayed_ef_on = (
-            spec_enabled and str(getattr(spec_cfg, "correction_mode", "signed_ema")) == "delayed_ef"
-        )
+        delayed_ef_on = spec_enabled and str(getattr(spec_cfg, "correction_mode", "signed_ema")) == "delayed_ef"
         if (probe_on or delayed_ef_on) and anc_cfg_rings is not None:
             _ring_delay_K = int(getattr(anc_cfg_rings, "delay_K", 0))
             _ring_cadence = int(getattr(anc_cfg_rings, "cadence", 1))
             self.fast_grad_ring = FastGradRing(delay_K=_ring_delay_K, cadence=_ring_cadence)
             if probe_on:
                 self.grad_lag_buffer = GradLagBuffer(max_lag=int(getattr(probe_cfg, "m4_lags", 5)))
+            lag_buffer_label = (
+                "maxlen=" + str(self.grad_lag_buffer.max_lag) if self.grad_lag_buffer is not None else None
+            )
             print(
                 f"[geometry-probe] armed: geometry_enabled={probe_on} delayed_ef={delayed_ef_on} "
                 f"fast_grad_ring(maxlen={self.fast_grad_ring._maxlen}, delay_K={_ring_delay_K}, "
@@ -662,14 +660,14 @@ class CommEffState:
                 # NB `is not None`, not truthiness: GradLagBuffer defines __len__,
                 # so an EMPTY (just-armed) buffer is falsy and the build print
                 # would lie "None" while the buffer exists (observed on the
-                # EXP-30 first launch; functional paths all use `is None`).
-                f"lag_buffer={('maxlen=' + str(self.grad_lag_buffer.max_lag)) if self.grad_lag_buffer is not None else None} "
+                # first launch; functional paths all use `is None`).
+                f"lag_buffer={lag_buffer_label} "
                 f"out_dir={getattr(probe_cfg, 'out_dir', '') if probe_cfg is not None else ''} "
                 f"rank0_only={getattr(probe_cfg, 'rank0_only', True) if probe_cfg is not None else True}",
                 flush=True,
             )
 
-        # EXP-26 Step A: build the diagnostic capture writer iff
+        # Build the diagnostic capture writer iff
         # comm_eff.capture.enabled. Strict no-op (None) otherwise — the disabled /
         # non-capture path never touches the filesystem. Lazy import so the
         # disabled path never pays the import cost.
@@ -680,7 +678,7 @@ class CommEffState:
 
             self._capture_writer = maybe_build_capture_writer(self.config)
             print(
-                f"[comm_eff][EXP-26] capture ENABLED: dir={getattr(cap_cfg, 'capture_dir', '') or './captures'} "
+                f"[comm_eff] capture ENABLED: dir={getattr(cap_cfg, 'capture_dir', '') or './captures'} "
                 f"max_ticks={getattr(cap_cfg, 'max_ticks', 10)} "
                 f"stratified_targets={getattr(cap_cfg, 'stratified_targets', 0)} "
                 f"capture_g_dense={getattr(cap_cfg, 'capture_g_dense', False)} "
@@ -705,7 +703,7 @@ class CommEffState:
     def current_optimizer_tick(self) -> int:
         """The optimizer tick the CURRENT train_batch will land on (1-based).
 
-        EXP-26 capture key. ALL capture roles (the powersgd-hook A/Â/Q, the merger
+        Capture key. All capture roles (the powersgd-hook A/Â/Q, the merger
         G_comp/G_corr, the anchor M/G_anchor, the parallel G_dense, the delay_K=0
         fresh-anchor probe) key on THIS so they co-locate under one
         ``(global_step, optimizer_tick)`` and the ``max_ticks`` budget counts
@@ -821,7 +819,7 @@ class CommEffState:
         self.powersgd_basis_updates += 1
 
     def note_family_screen(self, n_families: int = 0) -> None:
-        """Record one EXP-26 Step-C1 passive family-screen build (one per anchor
+        """Record one passive family-screen build (one per anchor
         refresh that built candidate Q_f). Pure counter bump."""
         self.family_screen_builds += 1
 
@@ -833,10 +831,7 @@ class CommEffState:
         the contamination falsifier. Emitting all keys (including the zeros)
         makes the confinement machine-checkable without substring grepping.
         """
-        return {
-            f"comm_eff/mask_applications/{tag}": count
-            for tag, count in self.mask_applications_by_path.items()
-        }
+        return {f"comm_eff/mask_applications/{tag}": count for tag, count in self.mask_applications_by_path.items()}
 
     def mask_ratio_metrics(self) -> dict:
         """Return the most-recently-measured masked fraction per boundary layer.
@@ -939,10 +934,10 @@ class CommEffState:
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
-        # EXP-26 Step C1: cumulative passive family-screen builds.
+        # Cumulative passive family-screen builds.
         out["comm_eff/family_screen_builds"] = self.family_screen_builds
-        # EXP-26 Step E: measured inter-stage communication volume this tick (element
-        # counts; the RATIO is the reported Step-E number, dtype-invariant). Y=M@Q
+        # Measured inter-stage communication volume this tick (element
+        # counts; the ratio is dtype-invariant). Y=M@Q
         # (N·r) coords + amortized Q-broadcast vs the dense activation (N·H). Only
         # surfaced once a tick has been measured (last_* > 0). The analyst greps
         # comm/bytes_compressed + comm/bytes_dense_equiv (and the ratio) from the
@@ -983,18 +978,18 @@ class CommEffState:
             # Lets logs confirm spectral_corrections increments only on the
             # cadence steps (spectral_step % spectral.cadence == 0), not every step.
             "comm_eff/spectral_step": self.spectral_step,
-            # EXP-25 (R2) anchor-owns-Q counters + (R3) merger cold-M fallbacks.
+            # Anchor-owns-Q counters plus merger cold-M fallbacks.
             "comm_eff/anchor_q_updates": self.anchor_q_updates,
             "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
-            # EXP-26 Step B: ef_powersgd shape-aware residual resets this step.
+            # ef_powersgd shape-aware residual resets this step.
             "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
-            # EXP-26 Step C1: cumulative passive family-screen builds.
+            # Cumulative passive family-screen builds.
             "comm_eff/family_screen_builds": self.family_screen_builds,
-            # EXP-29: cumulative paired-replay anchor fires (0 unless
+            # Cumulative paired-replay anchor fires (0 unless
             # anchor.replay_paired_batch=true).
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
-            # EXP-30: cumulative Step-A geometry-probe fires with a complete
+            # Cumulative geometry-probe fires with a complete
             # m1–m7 record written (0 unless probe.geometry_enabled).
             "comm_eff/geometry_probe_fires": self.geometry_probe_fires,
         }

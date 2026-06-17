@@ -67,7 +67,7 @@ _stub_parent_packages()
 # spectral_filter import SpectralFilter` resolves to our file-loaded module
 # instead of triggering the heavy verl package __init__ (tensordict/vllm/ray).
 _sf = _load("verl.workers.comm_eff.spectral_filter", "verl/workers/comm_eff/spectral_filter.py")
-_st = _load("_exp7_state", "verl/workers/comm_eff/state.py")
+_st = _load("_comm_eff_state_grad_hook", "verl/workers/comm_eff/state.py")
 
 SpectralFilter = _sf.SpectralFilter
 apply_spectral_correction_to_params = _sf.apply_spectral_correction_to_params

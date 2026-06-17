@@ -16,10 +16,11 @@
 
 These cover formula-correctness invariants without a GPU or distributed runtime.
 The filter operates on logical 2D matrices; FSDP unsharding is the engine's job.
-The live correction is the signed-EMA merger (``correction_mode="signed_ema"``);
-``inject`` and ``blend`` are alternate anchor combiners. All consult only the
-anchor-gradient EMA ``M_anchor`` (no SVD / no basis cache — the dead
-reweight/SVD/Tikhonov/seeded path was removed in EXP-25).
+The live correction is the delayed-EF paired-replay residual merger
+(``correction_mode="delayed_ef"``). The mergers exercised here — ``signed_ema``,
+``inject`` and ``blend`` — are alternate/superseded combiners that consult only
+the anchor-gradient EMA ``M_anchor`` (no SVD / no basis cache — the dead
+reweight/SVD/Tikhonov/seeded path was removed when the EMA-only mergers replaced it).
 
 * anchor EMA cold-starts at zeros and moves under update_anchor
 * signed_ema: alpha=1 => G_noisy unchanged; alpha=0 => |G_noisy|*sign(M);
@@ -104,7 +105,7 @@ def test_ema_device_cpu_roundtrip_equals_on_device():
 
 
 # =========================================================================== #
-# signed_ema merger (EXP-25/R3): G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M)
+# signed_ema merger (signed_ema/R3): G_corr = alpha*G_noisy + (1-alpha)*|G_noisy|*sign(M)
 # =========================================================================== #
 def test_signed_ema_alpha_one_returns_g_noisy_exactly():
     """alpha=1 => G_corr == G_noisy verbatim, regardless of the (warm) anchor."""
@@ -176,7 +177,7 @@ def test_signed_ema_finds_anchor_across_fsdp_infix():
 # "._fsdp_wrapped_module." infix). These tests assert the feed-key and read-key
 # resolve to the same EMA entry.
 # =========================================================================== #
-CLONE_NAME = "model.layers.0.self_attn.q_proj.weight"                      # fallback clone (non-infixed)
+CLONE_NAME = "model.layers.0.self_attn.q_proj.weight"  # fallback clone (non-infixed)
 LIVE_NAME = "model.layers.0._fsdp_wrapped_module.self_attn.q_proj.weight"  # live FSDP per-layer-wrapped
 
 
@@ -193,7 +194,9 @@ def test_canon_strips_fsdp_infix():
 def test_inject_finds_anchor_across_fsdp_infix():
     """Feed under the clone name, inject under the live name, and ensure it fires."""
     f = SpectralFilter(
-        beta_anc=0.5, correction_mode="inject", inject_gamma=1.0,
+        beta_anc=0.5,
+        correction_mode="inject",
+        inject_gamma=1.0,
     )
     gen = torch.Generator().manual_seed(7)
     # A clean anchor gradient (the K-stale unmasked G_anchor) fed under the clone name.
@@ -206,7 +209,7 @@ def test_inject_finds_anchor_across_fsdp_infix():
     diff = torch.linalg.norm(g_corr.to(torch.float32) - g_mask).item()
     assert diff > 1e-6, (
         "inject_matrix returned g_mask unchanged — M_anchor read as zero across "
-        "the FSDP infix (the EXP-18 bug). The injection must fire."
+        "the FSDP infix (the FSDP target-name bug). The injection must fire."
     )
 
 
@@ -215,7 +218,7 @@ def test_anchor_ema_shared_entry_across_infix():
     (exactly one key, the canonical one) — not two divergent buffers."""
     f = SpectralFilter(beta_anc=0.5, correction_mode="inject")
     g_anchor = torch.ones(8, 8, dtype=torch.float32)
-    f.update_anchor(CLONE_NAME, g_anchor)          # feed under clone name
+    f.update_anchor(CLONE_NAME, g_anchor)  # feed under clone name
     # Exactly one EMA entry, keyed canonically.
     assert list(f._anchor.keys()) == [CLONE_NAME]
     assert CLONE_NAME in f._anchor and LIVE_NAME not in f._anchor
@@ -234,9 +237,7 @@ def test_anchor_ema_shared_entry_across_infix():
 # =========================================================================== #
 def test_blend_eta_zero_returns_g_mask_exactly():
     """eta=0 => the convex blend collapses to G_mask verbatim (the floor)."""
-    f = SpectralFilter(
-        beta_anc=0.5, correction_mode="blend", blend_eta=0.0
-    )
+    f = SpectralFilter(beta_anc=0.5, correction_mode="blend", blend_eta=0.0)
     gen = torch.Generator().manual_seed(21)
     # A nonzero anchor so the no-op short-circuit (anc_norm<=eps) is NOT what
     # produces the result — eta=0 itself must give G_mask.
@@ -251,9 +252,7 @@ def test_blend_eta_one_is_scale_matched_anchor():
     a vector PARALLEL to M_anchor whose magnitude equals ||G_mask||."""
     gen = torch.Generator().manual_seed(22)
     # beta_anc=0 => M_anchor == m_anchor exactly (a real, warm anchor).
-    f2 = SpectralFilter(
-        beta_anc=0.0, correction_mode="blend", blend_eta=1.0
-    )
+    f2 = SpectralFilter(beta_anc=0.0, correction_mode="blend", blend_eta=1.0)
     m_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
     f2.update_anchor("w", m_anchor)  # beta=0 => M_anchor == m_anchor exactly
     g_mask = torch.randn(16, 16, generator=gen, dtype=torch.float32)
@@ -272,9 +271,7 @@ def test_blend_magnitude_stable_at_eta_0p7():
     """The convex blend keeps ||G_corr||/||G_mask|| <= 1.
     For orthogonal terms it equals sqrt((1-eta)^2 + eta^2) < 1; for any anchor it
     is bounded by 1 under the convex blend (triangle ineq with scale-match)."""
-    f = SpectralFilter(
-        beta_anc=0.0, correction_mode="blend", blend_eta=0.7
-    )
+    f = SpectralFilter(beta_anc=0.0, correction_mode="blend", blend_eta=0.7)
     gen = torch.Generator().manual_seed(23)
     f.update_anchor("w", torch.randn(32, 32, generator=gen, dtype=torch.float32))
     g_mask = torch.randn(32, 32, generator=gen, dtype=torch.float32)
@@ -288,9 +285,7 @@ def test_blend_finds_anchor_across_fsdp_infix():
     feed M_anchor under the CLONE (non-infixed) name, blend under the LIVE
     (infixed) name. The blend MUST fire (result != G_mask) AND must NOT equal the
     eta=0 floor — proving M_anchor was found nonzero under the canonical key."""
-    f = SpectralFilter(
-        beta_anc=0.5, correction_mode="blend", blend_eta=0.7
-    )
+    f = SpectralFilter(beta_anc=0.5, correction_mode="blend", blend_eta=0.7)
     gen = torch.Generator().manual_seed(24)
     g_anchor = torch.randn(16, 16, generator=gen, dtype=torch.float32)
     f.update_anchor(CLONE_NAME, g_anchor)  # feed under clone (non-infixed) name
@@ -299,7 +294,7 @@ def test_blend_finds_anchor_across_fsdp_infix():
     diff = torch.linalg.norm(g_corr.to(torch.float32) - g_mask).item()
     assert diff > 1e-6, (
         "blend_matrix returned g_mask unchanged — M_anchor read as zero across "
-        "the FSDP infix (the EXP-18 bug). The blend must fire."
+        "the FSDP infix (the FSDP target-name bug). The blend must fire."
     )
     # Exactly one canonical EMA entry (no divergent live/clone buffers).
     assert list(f._anchor.keys()) == [CLONE_NAME]

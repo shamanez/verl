@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""EXP-30 Step-A geometry probe — CPU unit tests (no GPU / distributed / FSDP).
+"""comm-eff geometry-probe geometry probe — CPU unit tests (no GPU / distributed / FSDP).
 
 Covers the plan's Correctness invariants that are CPU-checkable:
 
 * fire-aware fast-grad ring bounds (≤ delay_K//cadence + 1 = 2 entries at the
   locked cadence=5/delay_K=5) + exact-tick lookup + CPU residency;
 * m4 lag-buffer bounds (≤ 5 stored + in-flight = the plan's ≤6-entry bound);
-* δ scale-consistency — the #25 mean-vs-sum trap: ``delta_stats_over_targets``
+* δ scale-consistency — the mean-vs-sum trap: ``delta_stats_over_targets``
   applies NO hidden rescaling, so mean+mean reduction is world-size invariant
   and a sum-reduced side inflates the ratio by exactly (world−1) on the
   identical-objects construction;
@@ -183,7 +183,7 @@ def test_cos_over_targets_intersection_and_medians():
 
 
 # --------------------------------------------------------------------------- #
-# δ scale-consistency — the #25 mean-vs-sum trap (hard correctness invariant).
+# δ scale-consistency — the mean-vs-sum trap (hard correctness invariant).
 # --------------------------------------------------------------------------- #
 def test_delta_scale_consistency_mean_vs_sum():
     """``delta_stats_over_targets`` is pure linear algebra (NO hidden rescaling),
@@ -193,7 +193,7 @@ def test_delta_scale_consistency_mean_vs_sum():
     * correct pipeline (mean+mean) is world-size INVARIANT;
     * the trap (SUM-reduced anchor vs MEAN-reduced fast grad) on the
       identical-global-objects construction (true δ = 0) yields a ratio of
-      exactly (world − 1) — i.e. m5/GATE-B2 off by a world-size factor.
+      exactly (world − 1) — i.e. m5/delayed_ef gate off by a world-size factor.
     """
     name = "layer.q_proj.weight"
     torch.manual_seed(0)
@@ -218,7 +218,7 @@ def test_delta_scale_consistency_mean_vs_sum():
         # EVERY world size (invariance; fp32 summation-order noise only).
         assert ratio[name] == pytest.approx(0.0, abs=1e-6), f"world={world}"
 
-        # The trap: anchor side SUM-reduced (the #25 bug) while comp is MEAN.
+        # The trap: anchor side SUM-reduced (the mean-vs-sum bug) while comp is MEAN.
         rep_sum = {name: sum_(ranks_rep)}
         ratio_bug, _ = _an.delta_stats_over_targets(rep_sum, comp_mean)
         # sum = world*mean ⇒ δ_bug = (world−1)*global ⇒ ratio == world−1 exactly.
@@ -261,11 +261,22 @@ def test_beta_anc_zero_yields_latest_fire_exactly():
 # geometry_fire_record — verbatim field names + warmup nulls + known values.
 # --------------------------------------------------------------------------- #
 _PLAN_FIELDS = [
-    "step", "tick", "warmup_fallback",
-    "m1_matrix_median", "m2_matrix_median", "m3_matrix_median",
-    "m4_j1", "m4_j2", "m4_j3", "m4_j4", "m4_j5",
-    "m5_ratio_matrix_median", "m5_cos_matrix_median",
-    "m6_matrix_median", "m7_stable_rank_median", "m7_top1pct_mass_median",
+    "step",
+    "tick",
+    "warmup_fallback",
+    "m1_matrix_median",
+    "m2_matrix_median",
+    "m3_matrix_median",
+    "m4_j1",
+    "m4_j2",
+    "m4_j3",
+    "m4_j4",
+    "m4_j5",
+    "m5_ratio_matrix_median",
+    "m5_cos_matrix_median",
+    "m6_matrix_median",
+    "m7_stable_rank_median",
+    "m7_top1pct_mass_median",
     "loss_mismatch_nats",
 ]
 
@@ -281,13 +292,26 @@ def _mk_fire_inputs(n_targets=3, d=4):
 def test_geometry_fire_record_warmup_nulls_and_field_names():
     names, g, norms, stats = _mk_fire_inputs()
     record, per_target = _an.geometry_fire_record(
-        step=3, tick=5, warmup_fallback=True, fire_index=1,
-        g_comp=g, g_comp_norms=norms,
-        rep=g, rep_norms=norms, old=g, old_norms=norms, rep_stats=stats,
+        step=3,
+        tick=5,
+        warmup_fallback=True,
+        fire_index=1,
+        g_comp=g,
+        g_comp_norms=norms,
+        rep=g,
+        rep_norms=norms,
+        old=g,
+        old_norms=norms,
+        rep_stats=stats,
         lag_entries={5 - j: None for j in range(1, 6)},  # no lag history yet
-        ring_entry=None, ring_tick=0, prev_rep=None,
-        loss_mismatch_nats=0.009, used_tick=5, batch_gs=3,
-        realized_weight_delay=0, m4_lags=5,
+        ring_entry=None,
+        ring_tick=0,
+        prev_rep=None,
+        loss_mismatch_nats=0.009,
+        used_tick=5,
+        batch_gs=3,
+        realized_weight_delay=0,
+        m4_lags=5,
     )
     for field in _PLAN_FIELDS:
         assert field in record, f"plan contract field {field!r} missing from the JSONL record"
@@ -321,15 +345,28 @@ def test_geometry_fire_record_post_warmup_known_cosines():
     prev = ({n: torch.ones(4, 4) for n in names}, dict(norms))
 
     record, per_target = _an.geometry_fire_record(
-        step=7, tick=10, warmup_fallback=False, fire_index=2,
-        g_comp=g, g_comp_norms=norms,
-        rep=rep, rep_norms=rep_norms, old=old, old_norms=old_norms, rep_stats=stats,
+        step=7,
+        tick=10,
+        warmup_fallback=False,
+        fire_index=2,
+        g_comp=g,
+        g_comp_norms=norms,
+        rep=rep,
+        rep_norms=rep_norms,
+        old=old,
+        old_norms=old_norms,
+        rep_stats=stats,
         lag_entries={10 - j: lag_entry for j in range(1, 6)},
-        ring_entry=(ring_grads, ring_norms), ring_tick=5,
-        prev_rep=prev, loss_mismatch_nats=0.01,
-        used_tick=5, batch_gs=3, realized_weight_delay=5, m4_lags=5,
+        ring_entry=(ring_grads, ring_norms),
+        ring_tick=5,
+        prev_rep=prev,
+        loss_mismatch_nats=0.01,
+        used_tick=5,
+        batch_gs=3,
+        realized_weight_delay=5,
+        m4_lags=5,
     )
-    assert record["m1_matrix_median"] == pytest.approx(1.0)   # rep ∥ g_comp
+    assert record["m1_matrix_median"] == pytest.approx(1.0)  # rep ∥ g_comp
     assert record["m2_matrix_median"] == pytest.approx(-1.0)  # old anti ∥
     assert record["m3_matrix_median"] == pytest.approx(-1.0)
     for j in range(1, 6):
@@ -366,16 +403,23 @@ def _mk_config(probe_on=False, correction_mode="none", spectral_enabled=True):
         compression_type="dense",
         mask=None,
         clean_cadence=0,
-        anchor=_Duck(enabled=True, cadence=5, delay_K=5, owns_q=False,
-                     replay_paired_batch=True, snapshot_device="cpu"),
-        spectral=_Duck(enabled=spectral_enabled, beta_anc=0.0, cadence=1,
-                       correction_mode=correction_mode, inject_gamma=1.0,
-                       blend_eta=0.3, signed_ema_alpha=0.0, ef_decay=0.0,
-                       ef_clip=0.0, delayed_ef_lambda=0.0, ema_device="cpu",
-                       max_targets=-1),
+        anchor=_Duck(enabled=True, cadence=5, delay_K=5, owns_q=False, replay_paired_batch=True, snapshot_device="cpu"),
+        spectral=_Duck(
+            enabled=spectral_enabled,
+            beta_anc=0.0,
+            cadence=1,
+            correction_mode=correction_mode,
+            inject_gamma=1.0,
+            blend_eta=0.3,
+            signed_ema_alpha=0.0,
+            ef_decay=0.0,
+            ef_clip=0.0,
+            delayed_ef_lambda=0.0,
+            ema_device="cpu",
+            max_targets=-1,
+        ),
         capture=None,
-        probe=_Duck(geometry_enabled=probe_on, out_dir="", rank0_only=True,
-                    m4_lags=5, per_target_sidecar=True),
+        probe=_Duck(geometry_enabled=probe_on, out_dir="", rank0_only=True, m4_lags=5, per_target_sidecar=True),
     )
 
 
