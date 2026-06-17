@@ -452,7 +452,7 @@ proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, 
       <td><b>R3</b> cross-rank second moment (SAM-style)</td>
       <td>(c) disagreement</td>
       <td><span class="tag t-escape">accept</span></td>
-      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard); a SAM-style / variance-adaptive step <b>provably optimizes a different objective than $\mathbb{E}[g]$</b> — stronger than merely "outside $\sigma(M)$" — and lives natively on the existing DP swarm (no new architecture) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal lifts val past the dense band. <b>One open validity item (pending theorist):</b> R3 is a <i>distinct</i> escape only if the disagreement drives an <b>objective-level</b> robustness / min-max term; a naive $g/\sqrt{\mathrm{var}}$ "damp-where-shards-disagree" is just a diagonal preconditioner that re-inherits R5's Adam-$v_t$ overlap — if it collapses to that, R3 ties/drops to R5. (The signal rides the <i>anchor's</i> per-data-shard stale gradients, not the param-sharded fast path.)</td>
+      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard); a SAM-style / variance-adaptive step <b>provably optimizes a different objective than $\mathbb{E}[g]$</b> — stronger than merely "outside $\sigma(M)$" — and lives natively on the existing DP swarm (no new architecture) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Theorist confirms the async guard holds (cross-rank-identical + variable-staleness-tolerant, under a same-$\theta$ constraint); the remaining gate is <b>empirical</b> — the build, and whether the disagreement signal lifts val past the dense band. <b>Theorist's ruling (last open item, now closed):</b> R3 leads <b>only as a variance-AS-OBJECTIVE method</b> — a min-max / variance-penalty term (e.g. $\min_\theta[L(\theta)+\lambda R(\mathrm{Var}_r[g_r])]$, or SAM's ascent-then-descent) whose fixed point is a <i>flat/robust</i> minimum, genuinely different from dense's $\mathbb{E}[g]$ optimum. A mere variance-normalized <i>step</i> $g/\sqrt{\mathrm{var}}$ is just another diagonal preconditioner and <b>ties R5</b>. (The signal rides the <i>anchor's</i> per-data-shard stale gradients, not the param-sharded fast path.)</td>
     </tr>
     <tr>
       <td>2</td>
@@ -582,10 +582,11 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   <b>empirical</b>. <b>R5 (#2)</b> is admissible-but-heavy, escaping only with <b>non-diagonal</b> curvature (a
   diagonal proxy duplicates AdamW's $v_t$). <b>R1</b> escapes but is almost certainly pass@k-only. <b>R4</b> changes
   scope to a test-time / OOD claim — and because the codec bias is coherent, its flat-minima bet is ~50/50 (as likely
-  a worse basin). <b>R2</b> is a clean reject. The remaining per-route items are mostly empirical experiments, with <b>one open
-  verdict</b>: whether R3's disagreement is a <i>distinct</i> escape (an objective-level robustness term) or collapses
-  to a $g/\sqrt{\mathrm{var}}$ diagonal scale that re-inherits R5's Adam-overlap — pending theorist's distinctness
-  ruling. The close is still strong: a theorist-rated-promising lead route exists, gated on one clean question.</li>
+  a worse basin). <b>R2</b> is a clean reject. <b>Theorist has now closed the last open verdict:</b> R3 leads <b>only as a
+  variance-as-objective method</b> (a min-max / variance-penalty term with a different fixed point than dense's
+  $\mathbb{E}[g]$); the variance-normalized-<i>step</i> version is just another diagonal preconditioner and ties R5.
+  So R3 stays #1 for a train-objective surpass, now with a precise formulation condition — and the remaining gates
+  are purely empirical.</li>
 </ul>
 
 
