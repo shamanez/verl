@@ -566,13 +566,14 @@ adjudicate. **R2**
 is the lone σ(M)-measurable REJECT among the candidates.
 
 **Best-by-criterion (theorist's framing — the practical reading of the rank):** the routes win on
-*different* axes. **R3 and R5 = co-#1 for a TRAIN-objective surpass** (the only two injecting info
-dense-Adam lacks — R3 a robustness objective, R5 non-diagonal curvature) — *the routes most likely to
-actually beat dense.* **R1 = #1 for a near-term RUNNABLE bet** (no new code at n≤8; the thing to *run
-first*, even though its prior is pass@k-only). **R4 = the generalization fallback** (concede train
-parity, bet on OOD). So the program **runs R1 first** (cheapest signal), **builds R3 and R5 in
-parallel** (highest payoff, both gated on escaping the diagonal trap), and keeps R4 as the
-orthogonal-axis hedge.
+*different* axes. **R3 = the train-objective surpass LEAD** (unconditional — same-θ cross-shard 2nd
+moment driving a robustness objective; the strongest, with a locked recipe), **R5 = the #2
+train-objective bet** (non-diagonal curvature; equally outside dense-Adam's info set but its
+beyond-diagonal clearance is still an empirical question) — *the two routes most likely to actually beat
+dense.* **R1 = #1 for a near-term RUNNABLE bet** (no new code at n≤8; the thing to *run first*, even
+though its prior is pass@k-only). **R4 = the generalization fallback** (concede train parity, bet on
+OOD). So the program **runs R1 first** (cheapest signal), **builds R3 (lead) and R5 in parallel**
+(highest payoff, both must clear the diagonal trap), and keeps R4 as the orthogonal-axis hedge.
 
 *(Two adjacent ideas were considered and SUBSUMED, not ranked: **exploiting the on/off-policy gap** is
 not a separate route — the anchor's staleness is **already** an off-policy signal folded into B2's `δ`,
@@ -588,17 +589,17 @@ which **is** R3. **Curriculum** is admissible but generic — it changes the dat
 | 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | **ESCAPES by SCOPE-CHANGE (theorist)**; redefines goal to OOD/test, NOT the GSM8K greedy bar | low–med (~50/50 basin) | settled (scope-change); gate on OOD eval **+** sharpness/Hessian-trace measurement |
 | 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO — REJECT (theorist**: "everything deterministic-in-(G_comp,M) is capped"**)** | very low | settled REJECT; retired unless an objective-side escape is found |
 
-**Re-ranking triggers (all verdicts in; remaining gates are the shared diagonal trap + the empirical run):**
-- **R3 and R5 are CO-#1** for a train-objective surpass — the only two routes outside dense-Adam's
-  information. Run **both** (independent: c & a). Each clears its gate the same way — by escaping the
-  **diagonal trap**:
-  - **R3** clears it iff the cross-shard disagreement drives a robustness/min-max *objective*, not a
-    `g/√var` step (a diagonal). Its async constraint is otherwise satisfied (systems: variance built by
-    an all-reduce ⇒ cross-rank-identical; tolerate the `delay_K`-staleness).
-  - **R5** clears it iff the curvature is **non-diagonal** (off-diagonal/true-Hessian or `H·Δθ` as a
-    non-diagonal preconditioner); a diagonal proxy duplicates Adam's `v_t` and is a dead end. Async-OK
-    (slow-varying curvature).
-  If either collapses to a diagonal, it drops out; whichever clears, leads.
+**Re-ranking triggers (all verdicts in; the two train-objective bets differ in how settled their escape is):**
+- **R3 = unconditional lead, R5 = #2** — the only two routes outside dense-Adam's information (c & a).
+  Run **both** (independent). The difference that ranks them is the diagonal trap:
+  - **R3** has a *locked* recipe to clear it: **same-θ** concurrent cross-shard 2nd moment (data-variance,
+    NOT cross-θ drift — that's the rejected staleness object) driving a **robustness/min-max objective**
+    (not `g/√var`). Async fully resolved (theorist): correction from all-reduced sufficient stats ⇒
+    cross-rank-identical; disagreement geometry slow-varying ⇒ staleness-tolerant. ⇒ **unconditional.**
+  - **R5** clears it **iff** the curvature is **non-diagonal** (off-diagonal/true-Hessian, full-coverage
+    lower-noise, or cross-rank-shared); a diagonal proxy duplicates Adam's `v_t` and is a dead end. This
+    is an **empirical** question (does the shipped curvature actually carry beyond-diagonal structure?),
+    so R5 stays conditional — hence #2.
 - **R1** escape is contingent on **conversion-positivity** (greedy-mode relocation vs pass@k-only) —
   the top near-term *runnable* bet, run its cheap GATE first.
 - **R2** REJECT (σ(M)-measurable); **R4** out-of-scope (generalization, not the fixed-point bar).
