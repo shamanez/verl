@@ -243,6 +243,19 @@ valid-M one is 0.7271, not 0.7066.**
 
 **So the valid-M signed_ema number IS 0.7271**, and it is **DOMINATED** by B2 (0.7528).
 
+**Why it's dominated, and why we do NOT overclaim the margin** (shared verbatim with
+theory.md §5.3, so the two reports state it identically): *"Both mergers recover most of
+the 0.123 floor→dense gap, but by different mechanisms: error-feedback re-injects the
+exact dropped residual (recovering ~all of it, capped only by a second-order staleness
+term), whereas signed_ema carries no residual and recovers the gap only indirectly — by
+suppressing wrong-sign descent on the ~50% of coordinates where the stale anchor disagrees
+(at α=0.5 those coordinates are zeroed rather than corrected). Because signed_ema injects
+no off-subspace information and discards rather than reconstructs the disagreeing half, it
+caps strictly below error-feedback; the measured ~0.026 shortfall is of the order of the
+disagreement fraction and is within single-draw noise, so it should be read as 'dominated,
+by a margin consistent with the sign-bias mechanism,' not as a precisely-predicted
+constant."*
+
 **LOUD FLAG — SUMMARY.md undersells this.** `SUMMARY.md:19` says signed_ema has *"no
 durable post-#29 verdict that promoted it"*. That is **technically true but misleading by
 omission**: a post-#29 **valid-M** number exists (0.7271); it simply wasn't *promoted*
@@ -396,6 +409,19 @@ runnable now:
   it fits the existing `ema_device=cpu` / DP-reduce envelope (no new HBM pressure). Note
   the validity gate (theorist's call): the dense baseline is AdamW, which *already* has a
   diagonal `v_t`, so an anchor diagonal only helps if it beats Adam's own.
+- **A cross-rank gradient-*disagreement* signal IS reachable (the one structurally-new
+  quantity not already in Adam).** The anchor backward runs on a per-rank deep-copy clone
+  with **no FSDP hooks**, so each DP rank's `p.grad` is the full-shaped gradient of its
+  *own data shard* (`transformer_impl.py:1004-1018`); these per-rank full gradients exist
+  at the DP-reduce site (`transformer_impl.py:1069-1082`) right before being mean-reduced
+  into `M`. A per-coordinate **cross-data-shard variance** (the spread the mean `M`
+  discards) is therefore computable with **one extra `all_reduce` of `gd²`** alongside the
+  existing one — bit-identical across ranks by construction (no invariant bump), M-shaped,
+  fitting the `ema_device=cpu` budget. Caveats: this is the *anchor's* cross-data-shard
+  variance and is `delay_K`-stale (the FSDP *fast* path is parameter-sharded, so cross-rank
+  variance is not naturally defined there); and a variance-aware step risks collapsing into
+  a diagonal-preconditioner-by-another-name (the Adam-overlap tension above). Unlike a raw
+  curvature diagonal, though, the *disagreement* term has no direct Adam analogue.
 - **Staleness is a single uniform scalar, not per-worker.** `delay_K` is one config int
   (`comm_eff.py:136`, default 20; locked to 5 here); the snapshot queue holds exactly
   `delay_K+1` snapshots (`anchor.py:243-248`), and the whole circuit is **cross-rank

@@ -559,12 +559,20 @@ injection — a signal $\xi$ that is **not** $\sigma(M)$-measurable (not derivab
 from the stale dense gradient). Three admissible categories, with the test each
 must pass:
 
-1. **Curvature / second-order structure.** Dense-SGD-at-fixed-LR uses only the
-   first moment $g$. A correction that uses genuine curvature (a Hessian-vector
-   product, a preconditioner estimated from the *spread* of swarm gradients, a
-   Fisher/natural-gradient term) injects information the dense first-order
-   trajectory does not have. **Test**: does it require a quantity beyond a
-   gradient mean? If yes, it can escape; if it is just a reweighted gradient, no.
+1. **Curvature / second-order structure.** A correction that uses genuine
+   curvature (a Hessian-vector product, a preconditioner estimated from the
+   *spread* of swarm gradients, a Fisher/natural-gradient term, or a
+   trajectory-direction proxy $M_t-M_{t-1}\approx H\,\Delta\theta$ differenced
+   from successive stale anchor gradients) injects second-order structure the
+   first-order trajectory discards. **Test (sharper than it first looks)**: the
+   honest control is **dense-Adam, not dense-SGD** — Adam *already* carries a
+   *diagonal* second moment $v_t$. So a **diagonal** curvature proxy merely
+   duplicates Adam and collapses back inside the ceiling; an escape must supply
+   curvature Adam lacks — **non-diagonal / off-diagonal Hessian** information (e.g.
+   the trajectory $H\Delta\theta$ term used as a non-diagonal preconditioner). The
+   $M_t-M_{t-1}$ proxy is **async-admissible** (lagging anchor snapshots, DP-mean
+   ⇒ cross-rank-identical, slow-varying ⇒ tolerates staleness) and ~free on the
+   anchor — but only escapes if it is used *non-diagonally*.
 
 2. **Genuinely new exploration that *converts*.** The codec sustains a measurably
    more diffuse policy than dense (uncompressed-generator $\text{ppl}$ $1.40$ vs

@@ -135,8 +135,9 @@ TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
 COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh   # all 4 levers OFF = bitwise B2
 
-# if the box hits the vLLM CUDA-IPC init crash, opt in (greedy-val-neutral controlled var):
-DISABLE_CUSTOM_ALL_REDUCE=true TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
+# disable_custom_all_reduce=true is the B2 wrapper DEFAULT (locked-surface controlled var; the bare
+# run above already sets it). Override =false ONLY to opt out on a box that does not hit the crash:
+DISABLE_CUSTOM_ALL_REDUCE=false TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_custom_ar \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
 
 # dense reference (band ≈ 0.75–0.78) — one-knob OFF, shares the comm-eff code path (NOT via b2_sota,

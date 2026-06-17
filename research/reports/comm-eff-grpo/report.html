@@ -437,76 +437,86 @@ only if its sharpening instability is solved first.</p>
 <p>The ceiling closes every operation on a stale dense estimate. A surpass route must inject information that is
 <b>structurally absent</b> from $\sigma(M)$. The theorist's three admissible categories: <b>(a)</b> genuine
 curvature / second-order structure; <b>(b)</b> conversion-positive exploration that moves the <i>greedy</i> mode;
-<b>(c)</b> a cross-rank second moment (swarm disagreement-as-signal). The candidate routes, with theorist's
-now-delivered per-route verdict:</p>
+<b>(c)</b> a cross-rank second moment (swarm disagreement-as-signal). The two genuine <i>fixed-point</i> bets both
+inject a second moment $\sigma(M)$ lacks — <b>R5</b> (anchor curvature) and the reframed <b>R3</b> (cross-rank
+disagreement); R3 may edge R5 because AdamW already supplies a diagonal $v_t$ that R5 must beat, but has no cross-rank
+term at all. The candidate routes, with theorist's now-delivered per-route verdict:</p>
 
 <table>
-  <thead><tr><th>route</th><th>category</th><th>escapes ceiling?</th><th>prior</th><th>theorist verdict (authoritative)</th></tr></thead>
+  <thead><tr><th>rank</th><th>route</th><th>category</th><th>escapes $\sigma(M)$?</th><th>verdict / open gate</th></tr></thead>
   <tbody>
     <tr>
-      <td><b>R5</b> anchor/swarm-curvature preconditioner</td>
+      <td>1</td>
+      <td><b>R5</b> anchor-curvature preconditioner</td>
       <td>(a) curvature</td>
-      <td><span class="tag t-cond">conditional — the real bet</span></td>
-      <td>cond. high</td>
-      <td>The one genuinely-outside-$\sigma(M)$ signal on this substrate is the cross-rank second moment; R5 escapes <b>iff</b> the anchor/swarm curvature carries structure Adam's diagonal $v_t$ lacks (off-diagonal / lower-noise / cross-rank-shared). Empirical gate, not a theory call.</td>
+      <td><span class="tag t-cond">conditional</span></td>
+      <td>Escapes <b>iff</b> the anchor curvature carries structure AdamW's own diagonal $v_t$ lacks (off-diagonal / lower-noise / cross-rank-shared) — else it collapses to "a noisier Adam." Empirical gate; its math <i>likes</i> staleness (curvature ages slowly).</td>
     </tr>
     <tr>
-      <td><b>R1</b> swarm rollout diversity ($n$ + temperature)</td>
+      <td>2</td>
+      <td><b>R3</b> cross-rank second moment (SAM-style)</td>
+      <td>(c) disagreement</td>
+      <td><span class="tag t-escape">accept</span></td>
+      <td>The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$, which holds only the gradient <i>means</i>. <b>No Adam-overlap</b> (Adam has no cross-rank term) ⇒ may be the <i>cleanest</i> escape and could take #1. Open: stays cross-rank-identical + variable-staleness-tolerant after aggregation.</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><b>R1</b> swarm rollout diversity ($n$ + $T$)</td>
       <td>(b) exploration</td>
       <td><span class="tag t-escape">escapes</span> <span class="tag t-cond">pass@k-only</span></td>
-      <td>&lt;20%</td>
-      <td>$n$/$T$ act upstream of the codec (outside $\sigma(M)$) ⇒ genuinely escapes the fixed-data ceiling; but vs the mandatory dense$\times\{T,n\}$ control it wins only if compression&times;exploration <i>interact</i> — almost surely a pass@k edge, not a greedy-mode surpass. Top runnable bet.</td>
+      <td>$n$/$T$ act upstream of the codec (outside $\sigma(M)$) ⇒ genuinely escapes the fixed-data ceiling; but almost surely a pass@k edge, not a greedy-mode surpass (the codec already runs more diffuse and didn't convert). Cheapest to test; dense$\times\{T,n\}$ control mandatory.</td>
     </tr>
     <tr>
+      <td>4</td>
       <td><b>R4</b> compression as a flat-minima regularizer</td>
       <td>— (test-time)</td>
-      <td><span class="tag t-cond">escapes by redefining</span></td>
-      <td>low–med</td>
-      <td>Escapes because the ceiling bounds the <i>train</i> objective, not test risk — so it is <b>not</b> a GSM8K-greedy surpass. Needs an OOD eval (unwired); cheapest is an eval-only OOD pass over existing B2/dense checkpoints + a sharpness measurement.</td>
+      <td><span class="tag t-cond">out of scope</span></td>
+      <td>The fixed-point ceiling bounds the <i>train</i> objective, not test risk — R4 concedes train-parity and claims a <b>test-time / OOD</b> edge. Not a GSM8K-greedy surpass; needs an OOD eval (cheapest: eval-only over existing B2/dense checkpoints).</td>
     </tr>
     <tr>
-      <td>R3 heterogeneous-staleness ensemble</td>
-      <td>(c)-staleness</td>
-      <td><span class="tag t-collapse">reject</span></td>
-      <td>low</td>
-      <td>Still $\{$stale dense gradients$\}$, $\sigma(M)$-measurable (= EXP-31 L2 with a lag distribution); also off-architecture (one slow anchor, no per-worker-$K$ axis).</td>
-    </tr>
-    <tr>
+      <td>5</td>
       <td>R2 anchor as advantage-baseline</td>
       <td>— (objective-side)</td>
       <td><span class="tag t-collapse">reject</span></td>
-      <td>very low</td>
-      <td>$\sigma(M)$-measurable; the GRPO advantage is already optimally group-mean-baselined and variance reduction cannot move the fixed point (EXP-31 L1 cov$\approx$0).</td>
+      <td>$\sigma(M)$-measurable; the GRPO advantage is already a group-LOO baseline, and a baseline from $M$ (a gradient mean) cannot move the fixed point (EXP-31 L1 cov$\approx$0).</td>
     </tr>
   </tbody>
 </table>
 <p class="small">R1 acts <b>upstream of the codec</b> — it changes which gradient is compressed (the rollout/data
 distribution), not how a fixed gradient is reconstructed — so it escapes the gradient-reconstruction ceiling; but
-val is greedy mean@1, so any gain is likely a pass@k edge unless it relocates the trained $\arg\max$. R3 is the
-<i>staleness</i> variant of category (c); the genuine category-(c) signal is the cross-rank <i>second moment</i> —
-see §5.</p>
+val is greedy mean@1, so any gain is likely a pass@k edge unless it relocates the trained $\arg\max$. Note R3 is
+<b>reframed</b>: the original "heterogeneous-staleness ensemble" is itself a reject (averaging stale means is still a
+stale mean) and survives only as a Tier-3 <i>parity</i> item; R3 now denotes the genuine category-(c) signal — the
+cross-rank <i>second moment</i> (§5).</p>
 
 <h3>4.5 &nbsp;The roadmap</h3>
 <p>Every item runs on the B2 SOTA launcher, varying one knob, with a matched dense control wherever the comparison
 is to dense.</p>
-<p><b>Tier 1 — the surpass bets.</b></p>
+<p><b>Tier 1 — the surpass bets (highest expected information).</b></p>
 <ol>
-  <li><b>R5-cheap: anchor diagonal-curvature preconditioner.</b> Cheapest variant first — a diagonal proxy from
-  $M_t, M_{t-1}$ (no extra backward), broadcast anchor-owned, applied as a preconditioner. Decisive diagnostic:
-  cosine between the anchor preconditioner and Adam's $v_t$ — high cosine ⇒ collapse to noisier-Adam (kill); low
-  cosine ⇒ genuine new structure. <i>Gated on theorist confirming it carries structure Adam lacks.</i></li>
-  <li><b>R1-gate: dense $\times\{T,n\}$ surface calibration.</b> A cheap kill that has <i>never been run</i>. If no
-  $(T,n)$ lifts dense above its band, the diffuse-policy hypothesis is dead before spending on the compressed arm.
-  Track pass@k coverage, not just greedy val.</li>
+  <li><b>R5-cheap: anchor diagonal-curvature preconditioner</b> (category a). Cheapest variant first — a diagonal
+  proxy from $M_t, M_{t-1}$ (no extra backward), broadcast anchor-owned, applied as a preconditioner. <b>Decisive
+  diagnostic:</b> cosine between the anchor preconditioner and Adam's $v_t$ — high ⇒ collapse to noisier-Adam (kill);
+  low ⇒ genuine new structure. <i>Gated on theorist confirming it carries structure Adam lacks.</i></li>
+  <li><b>R3-2ndmoment: cross-rank disagreement-aware step</b> (category c). Form a per-coordinate cross-rank second
+  moment (the swarm's gradient disagreement; the DP axis is uncompressed, so per-rank gradients are reachable) and
+  <b>damp the step where ranks fight, trust it where they agree</b> (SAM-style). Matched dense control (which has no
+  disagreement term). <b>No Adam-overlap</b> ⇒ the cleanest category-(c) escape, potentially the top bet. Async guard:
+  the direction must be cross-rank-identical after aggregation and stable as staleness varies, or it diverges the
+  swarm.</li>
+  <li><b>R1-gate: dense $\times\{T,n\}$ surface calibration</b> (category b). A cheap kill that has <i>never been
+  run</i>. If no $(T,n)$ lifts dense above its band, the diffuse-policy hypothesis is dead before spending on the
+  compressed arm. Track the pass@k coverage curve, not just greedy val.</li>
   <li><b>R1-main: compressed (B2) $\times\{T,n\}$ vs the dense surface.</b> Only if the gate shows lift. Does the
   (compressed − dense) pass@k advantage <i>grow with $k$</i>? Grows ⇒ compression-specific edge; flat ⇒ Route-A-only.</li>
 </ol>
 <p><b>Tier 2 — the generalization edge.</b> R4: measure B2 vs dense on a held-out / harder eval split (a read-only
-measurement knob; no training change). If B2 $\ge$ dense OOD while train-parity holds, that is a genuine surpass on
-the axis that matters.</p>
-<p><b>Tier 3 — deployment realism (parity-preservation).</b> R3 variable-staleness robustness (needs a small build —
-extend the snapshot queue to a staleness <i>distribution</i>); and a scaling smoke test of $r/H$ vs the
-boundary-gradient spectrum on the current model.</p>
+measurement knob; cheapest is an eval-only pass over <i>existing</i> B2/dense checkpoints — no retrain). If B2 $\ge$
+dense OOD while train-parity holds, that is a genuine surpass on the axis that matters.</p>
+<p><b>Tier 3 — deployment realism (parity-preservation, not surpass).</b> Variable-staleness robustness — the
+parity-only sibling of R3 (needs a small build: extend the snapshot queue to a staleness <i>distribution</i> and
+confirm B2 degrades gracefully); and a scaling smoke test of $r/H$ vs the boundary-gradient spectrum on the current
+model.</p>
 <p><b>Conditional.</b> <code>signed_ema</code> stabilization (the 1-bit-traffic escape hatch) — only if a real
 comm-budget pressure makes full-width $M$ transfer infeasible.</p>
 
@@ -514,7 +524,8 @@ comm-budget pressure makes full-width $M$ transfer infeasible.</p>
 <!-- ===================== 4. SYNTHESIS ===================== -->
 <h2 id="synthesis"><span class="num">5</span>Synthesis — where the two specialists converge</h2>
 <p>The math (<code>theorist</code>) and the strategy (<code>strategist</code>) arrived at the surpass question from
-opposite ends, and their answers <b>unify into a single strongest bet</b>:</p>
+opposite ends, and their answers <b>converge on one class of signal</b> — a second moment $\sigma(M)$ lacks — which
+the team then sharpened into two distinct top bets:</p>
 <ul>
   <li><code>theorist</code> proves the only mathematically clean escape categories and names the
   <b>cross-rank second moment</b> — the swarm's gradient <i>disagreement</i>, $\tfrac{1}{R}\sum_r (g_r - \bar g)(g_r - \bar g)^\top$
@@ -524,14 +535,19 @@ opposite ends, and their answers <b>unify into a single strongest bet</b>:</p>
   beats Adam's <i>own</i> diagonal $v_t$.</li>
 </ul>
 <div class="keypt">
-  <strong>The convergence.</strong> A preconditioner estimated from the <b>swarm's cross-rank gradient spread</b> is
-  exactly the cross-rank second moment. So the team's two independent top picks are the same object viewed twice:
-  build R5's curvature term <b>from the swarm disagreement</b> (category c), not from the anchor's temporal
-  difference $M_t - M_{t-1}$ (which is still a function of stale dense gradients, hence inside the ceiling). A
-  SAM-style / variance-adaptive direction — descend where ranks agree, damp where they fight — optimizes a
-  <i>different</i> objective than $\mathbb{E}[g]$ and is the single most defensible route to a genuine surpass. It is
-  also async-friendly: curvature changes slowly, so a stale estimate hurts far less than a stale gradient, and a
-  diagonal preconditioner degrades gracefully as it ages.
+  <strong>The convergence — and the sharper conclusion.</strong> Both specialists land on the same <i>class</i> of
+  signal: inject a <b>second moment</b> that $\sigma(M)$ (which holds only gradient <i>means</i>) lacks. The team's
+  final view separates two realizations and ranks them:
+  <ul style="margin:8px 0 0">
+    <li><b>R5 — anchor curvature</b> (a <i>temporal</i> second moment, e.g. from $M_t, M_{t-1}$): competes directly
+    with AdamW's <i>own</i> diagonal $v_t$, so it escapes only if it carries structure Adam lacks (off-diagonal,
+    lower-noise, or cross-rank-shared) — the <b>Adam-overlap hurdle</b>.</li>
+    <li><b>R3-reframed — cross-rank disagreement</b> (a <i>spatial</i> second moment; descend where swarm ranks agree,
+    damp where they fight, SAM-style): Adam has <b>no cross-rank term at all</b>, so there is <b>no overlap
+    hurdle</b> — mathematically the <b>cleanest</b> escape, and it could outrank R5.</li>
+  </ul>
+  <p style="margin:8px 0 0">Both are async-friendly: a second moment ages slowly, degrades gracefully, and is
+  anchor-owned hence cross-rank-identical.</p>
 </div>
 <p>This also sharpens the disqualifier: R3 (heterogeneous staleness) feels async-native but is the
 <i>wrong</i> instance of category (c) — averaging over staleness is still averaging stale dense estimates, so it
@@ -554,10 +570,11 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   apples-to-apples dense draw (0.7839) is <i>above</i> B2. "Parity" means within $\pm$0.024/draw, not B2 $\ge$ dense
   pointwise — which is why surpass is a real, open target.</li>
   <li><b>Route verdicts are theorist-stamped</b> (delivered after the section drafts and folded into
-  <code>theory.md</code> §7.2–7.3): R2 and R3 are rejected as $\sigma(M)$-measurable; R1 escapes but is almost
-  certainly pass@k-only (not a greedy-mode surpass); R4 escapes only by redefining the objective (a test-time / OOD
-  claim). The single genuinely-outside-$\sigma(M)$ signal on this substrate is the <b>cross-rank second moment</b>
-  (R5 built from the swarm's gradient spread, conditional on an empirical win over Adam's $v_t$).</li>
+  <code>theory.md</code> §7.2–7.3): R2 is rejected as $\sigma(M)$-measurable; R3 was <b>reframed</b> — its
+  heterogeneous-staleness form is rejected, but the <b>cross-rank second moment</b> it now denotes is accepted
+  (genuinely outside $\sigma(M)$); R1 escapes but is almost certainly pass@k-only; R4 escapes only by redefining the
+  objective (test-time / OOD). The two genuine fixed-point bets are <b>R5</b> (anchor curvature, conditional on an
+  empirical win over AdamW's $v_t$) and <b>R3-reframed</b> (cross-rank disagreement, no Adam-overlap).</li>
 </ul>
 
 
@@ -571,15 +588,16 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   its only error is a vanishing staleness term. <code>signed_ema</code> is dominated (0.7271) and structurally
   unstable — keep it only as a 1-bit-comm escape hatch.</p>
   <p style="margin-bottom:0"><b>What is open.</b> Surpassing dense. The stale-reconstruction ceiling proves no merger
-  reading only a stale dense estimate can beat dense. The escape is to read what dense lacks — and the team's two
-  independent top picks converge on one object: a <b>preconditioner / robust direction built from the swarm's
-  cross-rank gradient second moment</b>. Run it cheap first (R5 diagonal proxy; the never-run dense$\times\{T,n\}$
-  R1 gate), always against a matched dense control, and judge on the dense <i>band</i> with margin — not a single
-  draw.</p>
+  reading only a stale dense estimate can beat dense. The escape is to inject a <b>second moment</b> that estimate
+  lacks — and the team's two top bets are <b>R5</b> (anchor curvature, conditional on beating AdamW's own diagonal
+  $v_t$) and <b>R3-reframed</b> (the swarm's <b>cross-rank disagreement</b>, SAM-style — which Adam has no term for,
+  so the cleaner escape). Run them cheap first alongside the never-run dense$\times\{T,n\}$ R1 gate, always against a
+  matched dense control, and judge on the dense <i>band</i> with margin — not a single draw.</p>
 </div>
-<p><b>Immediate next step:</b> confirm the theorist verdict on R5 (does anchor/swarm curvature carry structure Adam's
-$v_t$ lacks?), then run the R5-cheap diagonal preconditioner built from cross-rank spread and the R1 dense gate in
-parallel — both are cheap, both are gating, and together they decide whether a surpass is reachable at all.</p>
+<p><b>Immediate next step:</b> run the three cheap, gating Tier-1 probes in parallel — the <b>R5</b> diagonal-curvature
+proxy (diagnostic: its cosine with Adam's $v_t$ — high ⇒ kill), the <b>R3</b> cross-rank-disagreement step (the
+no-Adam-overlap escape, possibly the cleanest), and the never-run <b>R1</b> dense$\times\{T,n\}$ gate — each against a
+matched dense control, judged on the dense band with margin. Together they decide whether a surpass is reachable at all.</p>
 
 <footer>
   <p><b>Provenance.</b> This report synthesizes three cross-examined section documents in this directory:
