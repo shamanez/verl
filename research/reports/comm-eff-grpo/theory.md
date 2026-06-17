@@ -527,7 +527,7 @@ which §3.3 and §4.2 already computed:
 |---|---|---|---|
 | **no-merger** | $-(I-P)g(\theta_t)$ — the **full** persistent codec bias | unchanged (no anchor used) | $0.6300$ (floor) |
 | **signed_ema** | sign flips/zeroing on the $\approx50\%$ disagreeing coords $\Rightarrow$ a **non-vanishing** $O(\|g\|)$ error | error **stays** $\approx50\%$-coord bias — does **not** vanish | $0.7271$ |
-| **EF (B2)** | $-(I-P)\Delta_K g$ — only the **off-subspace gradient drift over $K$** | error $\to 0$ (consistent) | $0.7528 \approx$ dense |
+| **EF (B2)** | $-(I-P)\Delta_K g$ — only the **off-subspace gradient drift over $K$** | error $\to 0$ (consistent) | $0.7528 \approx$ dense (within noise; band $0.735$–$0.754$ overlaps the bottom of dense $0.75$–$0.78$, so EF $\le$ dense-ceiling, not $\ge$ pointwise) |
 
 The decisive distinction is **consistency** in the $K\to0$ limit:
 
