@@ -251,9 +251,12 @@ $$
 **$\delta$ is exactly the dropped codec residual** of the matching pair — the
 $(I-P)g$ that §2.1 split off. Because it is computed on the *identical*
 $(\text{batch},\theta)$, it is the codec's *weight-gradient error*, not a batch
-or staleness artifact. This is the property that distinguishes B2 from
-`ef_powersgd` (§4.5), which uses $M-\operatorname{proj}_G(M)$ on the *current*
-live gradient and is therefore exactly orthogonal-to-$G$ and not a true
+or staleness artifact. (Strictly, the ring stores the gradient compressed with
+the *fire-time* projector $P_{t-K}$, so $\delta=(I-P_{t-K})g(\theta_{t-K})$; since
+$Q$ is anchor-owned and converges, $P_{t-K}\approx P_t$ and the distinction is
+negligible — I write a single $P$ below.) This is the property that distinguishes
+B2 from `ef_powersgd` (§4.5), which uses $M-\operatorname{proj}_G(M)$ on the
+*current* live gradient and is therefore exactly orthogonal-to-$G$ and not a true
 residual.
 
 ### 3.3 Why it reaches parity (additive, magnitude-preserving de-biasing)
@@ -406,10 +409,13 @@ killer is a **length reward-hack**, and the sign mechanism feeds it:
    are *zeroed* rather than reversed — but even there the run is censored-unstable
    (already spiraling at steps 47–48; $P(\text{ignite by }100)\approx55$–$70\%$).
 
-So $\alpha=0.5$ ($\approx0.7066$ on the invalid-M circuit) is the **best**
-signed-EMA setting yet remains **dominated** by B2 ($0.7528$) and is the *only*
-one worth keeping as a reference; $\alpha\to0$ is catastrophic
-($\approx0.354$).
+So $\alpha=0.5$ is the **best** signed-EMA setting yet remains **dominated** by
+B2 and is the *only* one worth keeping as a reference; $\alpha\to0$ is
+catastrophic. The current **valid-M** number (EXP-32, post-#29 paired-replay
+circuit) is $\alpha{=}0.5 \approx \mathbf{0.7271}$ — clears the $0.6300$ floor by
+$\approx0.10$ but caps $\approx0.026$ **below** B2 ($0.7528$). (The often-quoted
+$0.7066$ is the **legacy, invalid-M** EXP-25 number — do not cite it as current;
+$\alpha{=}0$ collapsed to $\approx0.354$ on that same legacy circuit.)
 
 ### 4.4 Formal contrast: additive vs multiplicative
 
@@ -421,7 +427,7 @@ one worth keeping as a reference; $\alpha\to0$ is catastrophic
 | target / fixed point | dense-on-stale: error $=-(I-P)\Delta_K g$ (small) | sign-of-stale-dense: bias on $\approx50\%$ of coords (large) |
 | bias in the perfect-anchor limit | $\to 0$ as $K\to0$ (unbiased in the limit) | **stays $\approx50\%$** even at $K\to0$ (structurally biased) |
 | interaction with GRPO clip | safe: bounded additive nudge in a blind subspace; clip still caps each token | unsafe: reverses informative signs *before* the clip sees them, breaking sign-cancellation |
-| measured | $0.7528$ = parity | $0.7066$ (best $\alpha$) → $0.354$ ($\alpha{=}0$) |
+| measured | $0.7528$ = parity (valid-M) | $0.7271$ (best $\alpha{=}0.5$, valid-M) → $0.354$ ($\alpha{=}0$, legacy) |
 
 The one-sentence version: **B2 transmits the dense gradient and refills the part
 the codec dropped; `signed_ema` throws away the gradient's sign and substitutes a
@@ -582,8 +588,8 @@ cross-rank second moment.
 4. **`signed_ema`** is **multiplicative sign-replacement**, structurally biased
    on $\approx50\%$ of coordinates (coin-flip sign-agreement of two estimators of
    a near-zero-mean gradient), a sign-SGD-style **sharpening** that ignites the
-   length hack as $\alpha\to0$. Best $\alpha=0.5$ ($\approx0.71$) is **dominated**
-   by B2.
+   length hack as $\alpha\to0$. Best $\alpha=0.5$ ($\approx0.7271$, valid-M) is
+   **dominated** by B2.
 5. **Stale-reconstruction ceiling**: any merger that is a deterministic map
    $\Phi(G_{\text{comp}}, M)$ — i.e. $\mathcal F_t$-measurable w.r.t.
    $\sigma(g(\theta_t), g(\theta_{t-K}))$, the stale+current dense gradients — has

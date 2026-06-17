@@ -357,6 +357,27 @@ the substrate or staleness.
 canonical launcher exists (`vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`) but GOAL.md
 holds Goal 4 "pending a surpass". B2 is the reference; no surpass found.
 
+### Substrate capability boundaries (what the setup can / cannot do today)
+
+For the future-work discussion (strategist's section), two capability facts about the
+*current* substrate, verified in source — they bound which surpass routes are even
+runnable now:
+
+- **Staleness is a single uniform scalar, not per-worker.** `delay_K` is one config int
+  (`comm_eff.py:136`, default 20; locked to 5 here); the snapshot queue holds exactly
+  `delay_K+1` snapshots (`anchor.py:243-248`), and the whole circuit is **cross-rank
+  identical by mandate** (Q broadcast, DP-mean M, seeded-SVD bit-identical). There is
+  **no heterogeneous-staleness axis** — a per-worker-staleness ensemble would need new
+  code *and* would press on the async-realism invariant (the target is ONE slow anchor,
+  not workers-at-different-lags).
+- **Evaluation is GSM8K-only, greedy mean@1; no OOD/held-out split is wired.** Data is
+  `$HOME/data/gsm8k` via `examples/data_preprocess/gsm8k.py`; val = the GSM8K test set
+  (1319), greedy argmax (memory `surpass-dense-conversion-spine:27`). A grep for
+  OOD/held-out/MATH-lighteval/SVAMP/ASDiv across launchers + `FIXED_CONTROL_SURFACE.md`
+  returns zero hits. Any *generalization* (test-time edge) hypothesis is **un-measurable
+  today** without wiring a second eval dataset; the cheapest path is an eval-only OOD
+  pass over existing B2-vs-dense checkpoints (no retrain).
+
 ---
 
 ## 6. Cross-examination (theorist, strategist) — folding in

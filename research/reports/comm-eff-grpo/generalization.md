@@ -21,9 +21,14 @@
 | Fast-path gradient comm | bytes ratio ≈ **0.0505** (~5% of dense) | PROVEN |
 | No-merger floor | val@50 **0.6300** | PROVEN |
 | **B2 `delayed_ef`** (λ=1, β_anc=0) | val@50 **0.735–0.754** (first proof 0.7528) = **dense parity** | PROVEN SOTA |
-| `signed_ema` (α=0.5) | val@50 **≈ 0.70**, dominated by B2, unstable | CANDIDATE/legacy |
+| `signed_ema` (α=0.5) | val@50 **0.7271** (EXP-32, **valid-M**), dominated by B2, unstable | PROVEN (valid-M) |
 | **Dense reference** | val@50 band **≈ 0.75–0.78**; apples-to-apples current-code draw (`73ntu76u`) = **0.7839** | PROVEN (band, variance-dominated) |
 | Eval noise (single draw, seed 0) | ≈ **±0.024** | PROVEN |
+
+**Canonical ordering:** `0.6300` (no-merger floor) `< signed_ema 0.7271 < B2 0.7528 ≈ dense 0.75–0.78`.
+*(Note: the legacy `≈0.70`/`0.7066` signed_ema figure is the **invalid-M** EXP-25 measurement and is
+**not** used here — per the SUMMARY Evidence Boundary, only post-#29 **valid-M** numbers count for
+anchor-circuit claims. The valid-M signed_ema number is **0.7271**, EXP-32.)*
 
 **The surpass bar is the dense *band*, and the apples-to-apples current-code draw is
 0.7839 — above B2's parity band.** Goal 4 in `GOAL.md` (a surpass) is the only open
@@ -199,11 +204,12 @@ G_corr ≈ |G|·sign(M)
   (1 bit/coordinate) instead of the full-precision `M` that B2 needs (§3.1). It is **not** a measured
   saving in the lock-step sim — the sim transmits nothing. This *projected* comm advantage is the
   *only* reason to keep `signed_ema` alive.
-- **But unstable.** α→0 is a sign-SGD sharpening spiral; entropy collapse / length-explosion.
-  At α=0.5 the 50-step survival was **censored** (already spiraling at steps 47–48). It reaches
-  only ≈0.70 and is **dominated by B2**. The instability spans both the cold-`M` (β=1) and the
-  sign-reversal regimes — it is a property of putting an `M`-carrier merger in the loop, not a
-  tuning artifact (`entropy-collapse-alpha0-signed-ema`, `exp25-collapse-gradient-flow`).
+- **But unstable.** α→0 is a sign-SGD sharpening spiral; entropy collapse / length-explosion. The
+  valid-M α=0.5 measurement (EXP-32) reaches **0.7271** — above the 0.6300 floor but **dominated by
+  B2 (0.7528)** — and the legacy α=0.5 50-step survival was **censored** (already spiraling at steps
+  47–48 in EXP-25/27). The instability spans both the cold-`M` (β=1) and the sign-reversal regimes —
+  it is a property of putting an `M`-carrier merger in the loop, not a tuning artifact
+  (`entropy-collapse-alpha0-signed-ema`, `exp25-collapse-gradient-flow`).
 - **Verdict at scale:** **only preferable when the comm budget tightens to the point that
   full-width `M` transfer is infeasible** (very large models + very thin anchor↔swarm links) AND
   a stability fix is found. As of now it is **not promoted**; α=0.5 is the only setting worth
@@ -214,7 +220,7 @@ G_corr ≈ |G|·sign(M)
 | | `delayed_ef` (B2) | `signed_ema` (α=0.5) |
 |---|---|---|
 | Merger comm | full-precision `M`, low-frequency (PROVEN) | **1-bit sign(M)** — far cheaper (PROJECTED; computed locally today) |
-| Quality | **dense parity (0.735–0.754)** | ≈0.70, dominated |
+| Quality | **dense parity (0.735–0.754)** | **0.7271** (valid-M), dominated |
 | Stability | robust, graceful under staleness | **unstable** (sharpening spiral, censored survival) |
 | Use when | link can afford periodic `M` | comm budget is the hard wall **and** stability is fixed |
 
