@@ -287,11 +287,11 @@ are null.
 ### 4.3 The candidate routes (each must escape §4.1)
 
 Each route is annotated with **[theorist: validity]** and **[systems: feasibility]** verdicts.
-*(Status at this writing: peer verdicts were requested early and repeatedly but had not landed by
-finalization; per the cross-exam protocol, theorist/systems slots that did not return are marked
-**"unvetted (\<peer\>)"** with my stated prior, and any feasibility fact I could verify directly from
-the code is labeled **"code check by strategist"**. These should be confirmed by the peers before
-acting.)*
+*(Status: both cross-exams are complete. **theorist** has ruled all five routes against the σ(M)
+ceiling (R3 ACCEPT, R5 admissible-heavy, R1 partial-escape/pass@k-likely, R4 escapes-by-scope-change,
+R2 REJECT); **systems** has ruled feasibility (R1 runnable; R3/R4/R2 needs-build; R5 substrate
+corroborated). What remains per route is **empirical** — the experiment that would confirm the
+conditional escape — not an open verdict.)*
 
 ---
 
@@ -490,7 +490,7 @@ is the rare route whose math *likes* the async-realism constraints.
 
 ---
 
-### 4.4 Route ranking (R3 verdict ACCEPT-confirmed; others awaiting theorist's direct tags — see §4.3 slots)
+### 4.4 Route ranking (all theorist verdicts in; remaining gates are empirical — see §4.3 slots)
 
 Ordered by **(promise of a *real* surpass) × (feasibility)**. The two genuine *fixed-point* bets are
 the **reframed R3** and **R5** — both inject a **second moment** (cross-rank disagreement / curvature)
@@ -504,10 +504,10 @@ is the lone σ(M)-measurable REJECT among the candidates.
 
 | rank | route | theorist category | escapes σ(M)? | prior | gating verdict still needed |
 |---|---|---|---|---|---|
-| 1 | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT (theorist, relayed)**; variance is outside σ(M) | cond. med–high | **theorist (direct)**: cross-rank-identical after aggregation? variable-staleness-tolerant? |
+| 1 | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT (theorist, DIRECT)**; "the mathematically-most-promising route", variance is outside σ(M) | cond. med–high | only the async guard: cross-rank-identical after aggregation? variable-staleness-tolerant? + systems build |
 | 2 | **R5 anchor-curvature preconditioner** | **1 — curvature** | ADMISSIBLE ("heavy", theorist); escapes **iff** it beats Adam's `v_t` (off-diag / lower-noise / cross-rank-shared) | cond. high | direction settled; open: empirically does it beat Adam's `v_t`, or collapse to noisier-Adam? |
 | 3 | **R1 swarm diversity (n + T)** | **2 — exploration** | ADMISSIBLE (theorist: "likely pass@k only"); greedy surpass **iff** conversion-positive | <20%, likely Route-A | direction settled; open: does it relocate the greedy argmax, or pass@k-only? |
-| 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | OUT OF SCOPE of σ(M); valid as a *generalization* claim | low–med | **theorist**: does a gen-edge count, and is the gap well-defined on GRPO/GSM8K? |
+| 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | **ESCAPES by SCOPE-CHANGE (theorist)**; redefines goal to OOD/test, NOT the GSM8K greedy bar | low–med (~50/50 basin) | settled (scope-change); gate on OOD eval **+** sharpness/Hessian-trace measurement |
 | 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO — REJECT (theorist**: "everything deterministic-in-(G_comp,M) is capped"**)** | very low | settled REJECT; retired unless an objective-side escape is found |
 
 **Re-ranking triggers (R3 verdict in; others gated on theorist's direct tags):**
@@ -635,6 +635,7 @@ relocates the greedy argmax; **R4 (compression as a structured flat-minima regul
 (anchor-as-advantage-baseline)** is the lone σ(M)-measurable REJECT. *(Note: my first R3 framing — a
 heterogeneous-staleness ensemble — is itself REJECT, just noisier stale-dense; only the cross-rank-2nd-
 moment reframe escapes. Its parity-only sibling, variable-staleness robustness, stays on the roadmap as
-deployment-realism, not a surpass.)* **All route validities are theorist-gated and awaiting his
-ACCEPT/REJECT** (sent with explicit σ(M)-membership arguments); the report's per-route slots fold his
-verdicts in directly.
+deployment-realism, not a surpass.)* **Both cross-exams are complete: theorist has ruled all five routes
+against the σ(M) ceiling and systems has ruled feasibility** — the remaining gates are *empirical*
+(R3's async guard, R5's beat-Adam test, R1's conversion-positivity), the experiments that would confirm
+each conditional escape, not open verdicts.
