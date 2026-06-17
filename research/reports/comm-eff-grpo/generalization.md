@@ -481,10 +481,10 @@ not a liability. A bounded diagonal preconditioner also **degrades gracefully** 
 scaling, not a direction), and it is naturally cross-rank-identical (anchor-owned, broadcast). So R5
 is the rare route whose math *likes* the async-realism constraints.
 
-> **[theorist: validity — ADMISSIBLE (theorist's stated rating: "admissible but heavy"; category 1),
-> ESCAPES *only* if anchor-curvature beats Adam's own `v_t` via off-diagonal / lower-noise /
-> cross-rank-shared structure (else collapses to a noisier Adam — the AdamW-`v_t` overlap is the binding
-> constraint). Direct per-route confirmation pending.]**
+> **[theorist: validity — ADMISSIBLE-but-"heavy" (theorist, DIRECT; category 1). ESCAPES *only* if
+> anchor-curvature beats Adam's own `v_t` via off-diagonal / lower-noise / cross-rank-shared structure
+> (else collapses to a noisier Adam — the AdamW-`v_t` overlap is the binding constraint, not compute).
+> The remaining gate is empirical: does it beat `v_t`?]**
 > **[systems: feasibility — NEEDS-BUILD (MODERATE, not greenfield) — systems-confirmed. The anchor
 > maintains only `M` (grad EMA, `ema_device=cpu`) + `Q` — no preconditioner/curvature/Fisher state. BUT
 > a **partial primitive already exists**: `powersgd_activation.py`'s basis-family sketches already
