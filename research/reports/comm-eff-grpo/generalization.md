@@ -401,10 +401,14 @@ confidently where ranks **agree**, damp the step where they **fight** (a SAM-sty
 robust direction). The DP axis is **not compressed**, so per-rank gradients are available pre-projection
 to form this second moment.
 
-**Why it escapes the ceiling.** σ(M) contains only the gradient *means* `g(θ_t), g(θ_{t−K})`. A
-second-moment (variance/disagreement) functional is **not** σ(M)-measurable ⇒ it injects genuinely-new
-information, exactly theorist's category 3. This is **not** the isotropic perturbation EXP-31 L4 ran
-(uncorrelated noise, REJECT) — the signal is the *structured* cross-rank disagreement.
+**Why it escapes the ceiling (theorist's load-bearing argument).** σ(M) contains only the gradient
+*means* `g(θ_t), g(θ_{t−K})`. A variance-adaptive / SAM-style direction **provably optimizes a
+DIFFERENT objective than `E[g]`** (it trades the mean-descent for a robustness-penalized objective) ⇒
+it is **not** σ(M)-measurable and injects genuinely-new information — exactly theorist's category 3 —
+**and it lives natively on THIS substrate** (the DP swarm: many independent per-rank gradients per step,
+on the *uncompressed* axis, over different data shards; no new architecture). This is **not** the
+isotropic perturbation EXP-31 L4 ran (uncorrelated noise, REJECT) — the signal is the *structured*
+cross-rank disagreement, which both the dense mean **and** the anchor `M` (itself a DP-mean) discard.
 
 **Async-realism caveat.** The derived robust direction **must stay cross-rank-identical after
 aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**.
@@ -509,6 +513,20 @@ clear, so its escape is *unconditional on optimizer overlap* (only its async con
 compression-*specific* exploration bet (category 2) but likely a pass@k edge, not a greedy surpass.
 **R4** is a separate *test-time* generalization claim the fixed-point ceiling does not adjudicate. **R2**
 is the lone σ(M)-measurable REJECT among the candidates.
+
+**Best-by-criterion (theorist's framing — the practical reading of the rank):** the single linear rank
+hides that the routes win on *different* axes. **R3 = #1 for a TRAIN-objective surpass** (strongest
+math: it provably optimizes a different objective than `E[g]`) — *the route most likely to actually beat
+dense.* **R1 = #1 for a near-term RUNNABLE bet** (no new code at n≤8; it is the thing to *run first*,
+even though its prior is pass@k-only). **R4 = the generalization fallback** (concede train parity, bet
+on OOD). So the program runs R1 first (cheapest signal), builds R3 in parallel (highest payoff), and
+keeps R4 as the orthogonal-axis hedge.
+
+*(Two adjacent ideas were considered and SUBSUMED, not ranked: **exploiting the on/off-policy gap** is
+not a separate route — the anchor's staleness is **already** an off-policy signal folded into B2's `δ`,
+so exploiting it collapses back to σ(M) unless the new information is the swarm's data-heterogeneity,
+which **is** R3. **Curriculum** is admissible but generic — it changes the data distribution like R1
+(upstream), not a compression-specific lever.)*
 
 | rank | route | theorist category | escapes σ(M)? | prior | gating verdict still needed |
 |---|---|---|---|---|---|
