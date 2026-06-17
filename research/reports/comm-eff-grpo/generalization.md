@@ -352,24 +352,27 @@ systematically removes off-subspace gradient components every fast step), biasin
 toward flatter minima that **generalize better** than dense on a held-out / harder split — even if
 **train reward only reaches parity**.
 
-**Why it escapes the ceiling.** It does **not** try to beat dense on the *training objective* at
-all — it claims a **test-time generalization edge**. The ceiling is about matching the dense
-*gradient*; R4 concedes the gradient and bets on the *solution's* generalization. This is a
-categorically different claim, so the ceiling does not bind it.
+**Why it escapes the ceiling — by REDEFINING the goal (theorist-confirmed).** It does **not** try to
+beat dense on the *training objective* at all — it **concedes train-objective parity** and moves the
+goalposts to a **different metric** (test / OOD generalization risk). The σ(M) ceiling is a statement
+about the *train* gradient / train-objective optimum; it says **nothing** about test-distribution risk,
+so R4 escapes it. **But this is admissible only as a SCOPE CHANGE: it does NOT meet GOAL.md's GSM8K
+greedy-mean@1 bar — it redefines it.**
 
-**Caveats / risk.** EXP-31's L4 perturbation (isotropic ξ, σ=0.01) was a **regularization control**
-and was **null** — but it touched the anchor nowhere and was *isotropic*. **Compression noise is
-structured and biased** (it removes the off-subspace component; 42:1 SNR, ~0.06% dropped per
-`exp25-collapse-gradient-flow`), so R4 is **not** identical to L4 — it is a *structured* regularizer,
-not isotropic noise. **The blocker:** GSM8K's greedy val on the *same* distribution may make
-"generalization gap" ill-defined; R4 needs an **OOD / harder eval split** (e.g. GSM-hard, MATH
-subset) to even be measurable, and the project's fixed control is GSM8K. Feasibility hinges on
-whether an OOD eval split is wireable as a *measurement-only* knob (validation is read-only, so this
-may be sanctioned like `test_freq`).
+**Caveats / risk (sharpened by theorist).** EXP-31's L4 perturbation (isotropic ξ, σ=0.01) was a
+**regularization control** and was **null** — but it was *isotropic* and touched the anchor nowhere.
+**Compression bias `(I−P)g` is a COHERENT, fixed-direction perturbation each step** — formally **more
+like a fixed preconditioner than stochastic SGD noise**. So the flat-minima story is **plausible but
+NOT guaranteed**: a *coherent* bias is **as likely to steer toward a WORSE basin as a flatter one —
+50/50 at best** (biased ≠ flatness-seeking). **Two gates, not one:** (1) a real **OOD eval** (no split
+wired today — GSM8K-only); **and** (2) a **sharpness / Hessian-trace measurement** of the B2 vs dense
+optimum (the flat-minima mechanism needs its *own* evidence, not just an OOD number). Cheapest form of
+(1): eval-only over **existing** B2-vs-dense checkpoints, no retrain.
 
-> **[theorist: validity — unvetted (theorist); my prior: ESCAPES — it concedes the training objective
-> and claims a *test-time / OOD* generalization edge, a different claim than matching the dense gradient;
-> open question for theorist: does GRPO-on-GSM8K make the generalization gap ill-defined?]**
+> **[theorist: validity — ESCAPES by SCOPE-CHANGE (theorist-confirmed): targets a metric the σ(M)
+> ceiling does not bound (test/OOD risk), so it escapes — but it REDEFINES the goal and does NOT meet
+> GOAL.md's GSM8K greedy-mean bar. Coherent fixed-direction bias ⇒ flat-minima plausible-not-guaranteed,
+> ~50/50 it's a worse basin. Gate on OOD eval AND a sharpness/Hessian-trace measurement.]**
 > **[systems: feasibility — NOT MEASURABLE AS-IS; needs an OOD split wired (systems, confirmed). Data is
 > GSM8K-only; no held-out/OOD/MATH split exists (zero hits for ood/MATH-lighteval/SVAMP/ASDiv in launchers
 > + FIXED_CONTROL_SURFACE). `val_files` is a config path, so an alternate test parquet is read-only
