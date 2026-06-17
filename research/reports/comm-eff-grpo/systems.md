@@ -122,6 +122,16 @@ G_corr(t) = G_comp(t) + λ·δ                    # δ refreshed at fires, HELD 
 - This is **error-feedback on the PowerSGD codec residual**: δ is the *exact* gradient
   the codec dropped at tick `t−K`, recovered from the retained fast gradient ring and
   the replayed anchor gradient (`spectral_filter.py:843-844, 920-929`).
+- **Disambiguation (do not conflate with `ef_powersgd`).** `delayed_ef`/B2 is *genuine*
+  error-feedback: δ = `M_rep − G_comp_ring` is the real codec residual on the **same
+  (batch, θ)**. A separate, non-promoted merger `ef_powersgd` (`spectral_filter.py:433` /
+  `ef_powersgd_matrix`) instead injects `comp_t = M − proj_G(M)` — the orthogonal
+  complement of `M` w.r.t. the *live* grad. The EXP-27 post-mortem line that "the
+  implemented ef is **not** error feedback — `comp_t` is orthogonal to the live grad ⇒ a
+  tangential length-hack force" (memory `exp25-collapse-gradient-flow:16`) is about
+  **`ef_powersgd`, NOT B2**; B2's δ carries no such orthogonality defect. (This matters
+  because the two are easy to conflate by name; theorist's bias/variance argument for B2
+  depends on δ being the true residual, which it is.)
 - **λ=1, β_anc=0, cadence=delay_K=5, clean_cadence=0** (`SUMMARY.md` "Canonical B2
   Settings"; `FIXED_CONTROL_SURFACE.md` ☆ substrate table).
 - **λ=0 is a bitwise identity** → plain PowerSGD (`spectral_filter.py:894-896`), which
@@ -303,19 +313,29 @@ artifact.**
 
 ### Structural vs tuning — the agreed framing
 
-**Agreed answer: STRUCTURAL** (a property of sign-replacement under no-KL/no-entropy
-GRPO with a stale anchor), not a tuning artifact. `theorist`'s independent prior from the
-math is also STRUCTURAL; I have sent them the data and the three grounds below and we are
-converging on this single answer (derivation exchange in §6). The three grounds:
+**Agreed answer (LOCKED with `theorist`): STRUCTURAL** — a property of the
+sign-replacement operator under no-KL/no-entropy GRPO with a stale anchor, not a tuning
+artifact. Both of us reached STRUCTURAL independently (systems from the empirics,
+theorist from the bias/variance math) and converged on this single answer. The three
+grounds:
 (1) it spans α — collapse at α=0 (val 0.354), censored-unstable at α=0.5 (cap-pins steps
 47–48, P(ignite by 100) ≈ 55–70%) — the whole tested range, so no α fixes it;
 (2) the sign-disagreement is **50.4% at the first warm step** with ~zero EMA depth and is
 FLAT across the run and uniform across all layers/matrices, so fresher `M` (smaller
-delay_K) or any β does not fix it — it is the coin-flip of two estimators of a
-near-zero-mean GRPO gradient;
+delay_K) or any β does not fix it;
 (3) the **direction-preserving** mergers (B2 `delayed_ef`, `ef_powersgd`) on the *same
 substrate* do not spiral, isolating the cause to the **sign-replacement operator**, not
 the substrate or staleness.
+
+**Why structural (theorist's mechanism, which I confirm):** the ~50% disagreement is the
+coin-flip sign-agreement of **two independent estimators of a near-zero-mean GRPO
+per-coordinate gradient**. GRPO's group baseline subtracts the within-group mean, so the
+advantage is a sibling contrast and the per-coordinate gradient is ~zero-mean; the sign
+of a ~zero-mean quantity is essentially a coin flip, so two estimators (the fast
+compressed grad vs the stale anchor `M`) agree ~50% of the time *by construction*.
+Sign-**replacement** is therefore the wrong operator for a near-zero-mean signal, full
+stop — and α only trades reversal-bias (α<0.5) for zeroing-the-disagreers (α=0.5),
+neither of which recovers the correct sign. This is why no α/β/delay_K setting helps.
 
 ---
 

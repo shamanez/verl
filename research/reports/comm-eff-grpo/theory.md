@@ -601,9 +601,11 @@ cross-rank second moment.
    promisingly — a *cross-rank second-moment* (swarm disagreement-as-signal) term,
    the one quantity the compressed swarm has and a single dense trajectory lacks.
 
-*Cross-examination status: predictions + the ceiling were sent to `systems` and
-`strategist` early; their replies are folded into §7 as they arrive. The
-anticipated-objection subsection §7.1 stands on the math alone.*
+*Cross-examination status: **CONVERGED with `systems`** on all four points (both
+quantitative predictions confirmed against W&B; the signed_ema number corrected
+to the valid-M $0.7271$; signed_ema instability settled as STRUCTURAL by three
+agreed grounds — see §7.2). `strategist` completed independently; the §5.3
+scaffold stands as their ceiling constraint.*
 
 ---
 
@@ -646,4 +648,43 @@ operator for a near-zero-mean signal.
 
 ### 7.2 Live cross-examination log
 
-*(populated as `systems` / `strategist` respond — see SendMessage thread)*
+**`systems` — CONVERGED on all four points** (their `systems.md` §2, §4, §6; we
+exchanged predictions and they confirmed against W&B receipts):
+
+- **Prediction 1 (the $0.6300\to0.7528$ jump) — confirmed.** systems confirms
+  the PowerSGD drop is a *deterministic structured bias, not zero-mean noise*;
+  $\|(I-P)g\|$ carries only $0.058\%$ of gradient energy at **SNR $\approx42{:}1$**
+  (a signal-to-**bias** ratio, variance term negligible — my §2.2 model), and $Q$
+  converges to a stable subspace (recon error flat $\approx0.024$) so the *same*
+  off-subspace direction is dropped every step. $\delta=M_{\text{rep}}-G_{\text{comp}}^{\text{ring}}$
+  is exactly that dropped residual on the same $(\text{batch},\theta)$ ⇒ EF
+  de-biases toward dense ⇒ parity. Corroboration they added: EXP-20 found
+  compressed steps booked **57–95%** of the train-reward gain, the clean step
+  flushing only the small ($4.8$–$19.6\%$) accumulated off-subspace bias — i.e.
+  the bias is small per step but **integrated**, exactly the §2.3 argument.
+- **Prediction 2 (signed_ema grad-norm vs $\alpha$) — confirmed.** grad-norm
+  inflates dense $0.387 \to 3.3$ at $\alpha{=}0$ (mean $11$); length-hack ignites
+  only under sign-reversal ($\alpha{=}0$ @step 30, $\alpha{=}0.3$ @step 33),
+  $\alpha{=}0.5$ censored-unstable (cap-pins steps 47–48).
+- **Number correction (material) — folded in.** The current **valid-M** signed_ema
+  number is **$0.7271$** (EXP-32, post-#29), **not** $0.7066$ (legacy invalid-M,
+  EXP-25). My §4.3 / §4.4 / §6 now cite $0.7271$. Measured ordering
+  $0.6300 < 0.7271 < 0.7528 \approx \text{dense } 0.75$–$0.78$ — matches my
+  derivation's predicted ordering exactly.
+- **SETTLED: signed_ema instability is STRUCTURAL** (both sides, independently).
+  systems' three grounds = my three: (1) it spans $\alpha$ (collapse at $0$,
+  censored-unstable at $0.5$); (2) $50.4\%$ sign-disagreement at the *first* warm
+  step with $\approx$zero EMA depth, flat/uniform across layers ⇒ not a
+  staleness/$\beta$/$\alpha$ artifact; (3) the **direction-preserving** mergers
+  (B2 `delayed_ef`, `ef_powersgd`, cos$(G_{\text{comp}},G_{\text{corr}})=0.956$
+  vs signed_ema's $0.717$) do **not** spiral on the same substrate ⇒ the cause is
+  the **sign-replacement operator**, not the substrate. *One agreed answer:
+  STRUCTURAL.*
+
+**`strategist` — completed their section (`generalization.md`) independently**;
+sent no candidate routes for me to adjudicate. The §5.3 pre-judgment scaffold
+(the three admissible escape categories + the hard-reject list) stands as the
+constraint their surpass program is checked against. **Open item**: if strategist
+later proposes a concrete route, it gets tagged ACCEPT/REJECT by
+$\sigma(M)$-membership per §5.3 — no route inside $\sigma(G_{\text{comp}},M)$ can
+clear the ceiling.

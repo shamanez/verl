@@ -389,6 +389,46 @@ use of the anchor escapes; absent a positive answer it is **retired**.
 
 ---
 
+#### R5 — Anchor-curvature preconditioner (second-order) — **candidate, theorist category (a)**
+
+**Mechanism.** The anchor already maintains a full-coverage, DP-reduced gradient EMA `M`. Have it
+*also* maintain a cheap **curvature estimate** — a diagonal Hessian / second-moment, or a
+finite-difference `(M_t − M_{t−1})` curvature proxy along the update direction — and broadcast it
+(cross-rank identical, like `Q`) as a **preconditioner** the swarm applies to its compressed step.
+
+**Why it targets the one escape my other routes miss.** This is theorist's category **(a):
+curvature / second-order structure dense-SGD-at-this-LR does not use.** It is the only category that
+injects information dense *structurally* lacks, rather than reconstructing/reweighting a first-order
+quantity ⇒ in principle the strongest surpass route.
+
+**The sharp validity caveat I must flag (code-verified).** The dense reference is **AdamW** (verl
+default betas; `_generated_ppo_trainer.yaml`), which **already applies a diagonal second-moment
+preconditioner** (`v_t`). So R5 does **not** escape by "adding curvature dense lacks" — dense already
+has *diagonal* curvature. R5's escape is **narrower and must be one of:**
+1. **Off-diagonal / block curvature** Adam's diagonal `v_t` cannot represent; **or**
+2. **Less-noisy diagonal curvature** from the anchor's *full-coverage, DP-reduced* gradient vs Adam's
+   noisy per-microbatch running `v_t`; **or**
+3. A **cross-rank-shared** curvature the swarm's *per-shard* Adam states structurally cannot form
+   (each worker sees only its shard; the anchor sees the whole).
+If none of these holds, R5 **collapses one level up** — it becomes "a noisier estimate of what Adam
+already computes," i.e. the ceiling again. **This is the precise question for theorist.**
+
+**Async-admissibility (favorable).** Curvature changes *slowly* relative to gradients, so a *stale*
+curvature estimate hurts far less than a stale gradient — staleness-tolerance is a **strength** here,
+not a liability. A bounded diagonal preconditioner also **degrades gracefully** as it ages (it is a
+scaling, not a direction), and it is naturally cross-rank-identical (anchor-owned, broadcast). So R5
+is the rare route whose math *likes* the async-realism constraints.
+
+> **[theorist: validity — unvetted (theorist); my prior: ESCAPES *only* if anchor-curvature beats
+> Adam's own `v_t` via off-diagonal / lower-noise / cross-rank-shared structure (else collapses to a
+> noisier Adam). The strongest candidate IF that holds — it is the only route hitting category (a).]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS NEW CODE — no curvature
+> state exists; the anchor maintains only `M` (gradient EMA) + `Q` (basis). A diagonal proxy is cheap
+> (no extra backward — reuse `M_t`, `M_{t−1}`); a HVP or block estimate is heavier and risks the
+> production-diagnostics-OFF OOM tier.]**
+
+---
+
 ### 4.4 Route ranking (my priors; peer verdicts unvetted at finalization — see §4.3 slots)
 
 | rank | route | escapes ceiling? (my prior) | prior | gating verdict still needed |
