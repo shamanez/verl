@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Communication-Efficient Pipeline-Parallel GRPO — Findings &amp; Future Work</title>
+<script>
+window.MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']]
+  },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --ink: #1d1d1f;
+    --muted: #6b6b70;
+    --line: #e4e4e0;
+    --accent: #2c5f8a;
+    --accent-soft: #eef4f9;
+    --green: #1f7a4d;
+    --green-bg: #e8f5ee;
+    --amber: #8a6d1f;
+    --amber-bg: #fbf3da;
+    --red: #a23b3b;
+    --red-bg: #fbe9e9;
+    --code-bg: #f4f4f1;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.62;
+    font-size: 16.5px;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 56px 28px 96px; }
+  header.title { border-bottom: 2px solid var(--ink); padding-bottom: 26px; margin-bottom: 8px; }
+  h1 { font-size: 2.0rem; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.015em; }
+  .subtitle { font-size: 1.12rem; color: var(--muted); margin: 0 0 16px; }
+  .byline { font-size: 0.86rem; color: var(--muted); }
+  .byline b { color: var(--ink); }
+  .verdict {
+    background: var(--accent-soft); border: 1px solid #cfe0ee; border-left: 4px solid var(--accent);
+    padding: 16px 20px; border-radius: 6px; margin: 26px 0; font-size: 1.02rem;
+  }
+  .verdict b { color: var(--accent); }
+  h2 {
+    font-size: 1.5rem; margin: 52px 0 6px; padding-top: 14px; letter-spacing: -0.01em;
+    border-top: 1px solid var(--line);
+  }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  h3 { font-size: 1.16rem; margin: 32px 0 6px; }
+  h4 { font-size: 1.02rem; margin: 22px 0 4px; color: #333; }
+  p { margin: 12px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: var(--code-bg); padding: 1.5px 5px; border-radius: 4px; font-size: 0.88em;
+         font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 14px 16px; border-radius: 6px; overflow-x: auto;
+        font-size: 0.85rem; line-height: 1.5; border: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: #f3f3f0; font-weight: 600; }
+  tbody tr:nth-child(even) { background: #fafaf8; }
+  .num-cell { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .callout { border-radius: 7px; padding: 16px 20px; margin: 22px 0; }
+  .theorem { background: #f5f1fb; border: 1px solid #ddd0f0; border-left: 4px solid #6b4ca6; }
+  .theorem .lbl { color: #6b4ca6; font-weight: 700; text-transform: uppercase; font-size: 0.78rem; letter-spacing: 0.05em; }
+  .caveat { background: var(--amber-bg); border: 1px solid #ecdca6; border-left: 4px solid var(--amber); font-size: 0.95rem; }
+  .caveat .lbl { color: var(--amber); font-weight: 700; }
+  .keypt { background: var(--green-bg); border: 1px solid #bfe3cf; border-left: 4px solid var(--green); }
+  .tag { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 1.5px 7px; border-radius: 10px;
+         text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
+  .t-escape { background: var(--green-bg); color: var(--green); border: 1px solid #bfe3cf; }
+  .t-cond   { background: var(--amber-bg); color: var(--amber); border: 1px solid #ecdca6; }
+  .t-collapse { background: var(--red-bg); color: var(--red); border: 1px solid #eec4c4; }
+  .t-proven { background: var(--green-bg); color: var(--green); border: 1px solid #bfe3cf; }
+  .t-thin { background: var(--amber-bg); color: var(--amber); border: 1px solid #ecdca6; }
+  .t-closed { background: var(--red-bg); color: var(--red); border: 1px solid #eec4c4; }
+  .toc { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 18px 24px; margin: 28px 0; }
+  .toc ol { margin: 6px 0; padding-left: 22px; }
+  .toc li { margin: 3px 0; }
+  .lead { font-size: 1.06rem; }
+  .row-hi { background: var(--green-bg) !important; }
+  .row-floor { background: #f6f0ee !important; }
+  .small { font-size: 0.88rem; color: var(--muted); }
+  footer { margin-top: 60px; border-top: 1px solid var(--line); padding-top: 20px; font-size: 0.84rem; color: var(--muted); }
+  .pill { font-variant-numeric: tabular-nums; font-weight: 600; }
+  hr.soft { border: none; border-top: 1px dashed var(--line); margin: 28px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="title">
+  <h1>Communication-Efficient Pipeline-Parallel GRPO</h1>
+  <p class="subtitle">What works, the mathematics of why, and where it can go — a two-circuit anchor on a PowerSGD codec</p>
+  <p class="byline">
+    Synthesis by the <b>comm-eff-grpo</b> agent team — members <b>systems</b> (setup &amp; evidence),
+    <b>theorist</b> (GRPO + anchor de-biasing math), <b>strategist</b> (generalization &amp; future work);
+    integrated by the team lead. &nbsp;·&nbsp; Model: Qwen2.5-1.5B-Instruct / GSM8K &nbsp;·&nbsp; 2026-06-17
+  </p>
+</header>
+
+<div class="verdict">
+  <b>Headline.</b> PowerSGD low-rank compression of the pipeline-boundary gradient, paired with a single
+  slow <b>anchor</b> circuit that de-biases the fast swarm's compressed gradient via error-feedback,
+  reaches <b>dense parity</b> (val@50 $\approx$ 0.7528 vs. a dense band of 0.75–0.78) at <b>$\approx$5% of the
+  gradient communication</b>. This is real and proven. The anchor genuinely improves the biased estimate —
+  it lifts the no-merger floor from 0.6300 to 0.7528. But it lands <b>at</b> dense, not past it, and there is a
+  clean mathematical reason: a merger that only reads the (stale) dense gradient can at best <i>reconstruct</i>
+  dense. <b>Surpassing</b> dense is the one open goal, and it requires injecting information the dense
+  trajectory structurally lacks.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#results">Headline results</a></li>
+    <li><a href="#setup">The setup — two circuits, one codec, two mergers</a></li>
+    <li><a href="#math">The mathematics — GRPO, de-biasing, and the stale-reconstruction ceiling</a></li>
+    <li><a href="#general">Generalization &amp; future work — scaling, and the routes to surpass</a></li>
+    <li><a href="#synthesis">Synthesis — where the two specialists converge</a></li>
+    <li><a href="#caveats">Honest-evidence flags</a></li>
+    <li><a href="#bottom">Bottom line &amp; what to do next</a></li>
+  </ol>
+</div>
+
+<!-- ===================== 0. RESULTS ===================== -->
+<h2 id="results"><span class="num">1</span>Headline results</h2>
+
+<p class="lead">All numbers are GSM8K greedy mean@1, deterministic (seed 0), <b>val@50</b>, on the locked control
+surface (PowerSGD $r{=}77$ activation basis, anchor owns $Q$, cadence $=$ delay_K $=5$, $\beta_{\text{anc}}{=}0$).
+Only <b>valid-M</b> measurements count (see §2.1); pre-#29 / clean-step numbers are history.</p>
+
+<table>
+  <thead>
+    <tr><th>Method</th><th>val@50</th><th>Comm (bytes ratio)</th><th>Validity / receipt</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>Dense</b> (method OFF)</td>
+      <td class="num-cell"><b>0.75–0.78</b> band<br><span class="small">apples-to-apples 0.7839</span></td>
+      <td class="num-cell">1.0</td>
+      <td>reference band, variance-dominated ($\pm$0.024/draw); W&amp;B <code>73ntu76u</code></td>
+    </tr>
+    <tr class="row-hi">
+      <td><b>B2 <code>delayed_ef</code></b> (error-feedback, $\lambda{=}1$, $\beta{=}0$)</td>
+      <td class="num-cell"><b>0.7528</b><br><span class="small">band 0.735–0.754</span></td>
+      <td class="num-cell"><b>~0.0505</b></td>
+      <td><span class="tag t-proven">valid-M · SOTA</span> W&amp;B <code>fy920fty</code></td>
+    </tr>
+    <tr>
+      <td><code>signed_ema</code> ($\alpha{=}0.5$)</td>
+      <td class="num-cell">0.7271<br><span class="small">EXP-32, dominated</span></td>
+      <td class="num-cell">~0.0505</td>
+      <td><span class="tag t-proven">valid-M</span> <span class="tag t-thin">thin</span> single draw; W&amp;B id unrecovered</td>
+    </tr>
+    <tr class="row-floor">
+      <td><b>No-merger</b> (PowerSGD$+Q$, <code>none</code>)</td>
+      <td class="num-cell"><b>0.6300</b></td>
+      <td class="num-cell">~0.0505</td>
+      <td><span class="tag t-proven">valid-M</span> realistic floor; W&amp;B <code>k6nmcuyd</code></td>
+    </tr>
+    <tr>
+      <td class="small"><code>signed_ema</code> ($\alpha{=}0.5$) — <i>legacy</i></td>
+      <td class="num-cell small">0.7066</td>
+      <td class="num-cell small">—</td>
+      <td class="small"><span class="tag t-closed">invalid-M</span> EXP-25 circuit — <b>do not cite as current</b></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="keypt">
+  <strong>The canonical ordering (derived, not fitted):</strong>
+  $$ \underbrace{0.6300}_{\text{no-merger floor}} \;<\; \underbrace{0.7271}_{\texttt{signed\_ema}} \;<\; \underbrace{0.7528}_{\text{B2 (EF)}} \;\approx\; \underbrace{0.75\text{–}0.78}_{\text{dense}} $$
+  The merger's measured value is <b>+0.123</b> (0.7528 − 0.6300): exactly the gap the codec opened, which
+  error-feedback closes. <code>signed_ema</code> clears the floor by $\approx$+0.10 but caps $\approx$0.026
+  <i>below</i> B2. The savings: bytes ratio $\approx$ <b>0.0505</b> ($\approx$<b>19.8&times;</b> reduction),
+  identical across all compressed arms because only the merger differs.
+</div>
+
+<p class="small"><b>Goals scorecard</b> (against the project north-star): <b>(1) Stable</b> — met at 50 steps for B2
+(<code>signed_ema</code> is not — §2.4); <b>(2) Parity</b> — met (B2 $\approx$ dense within noise at ~5% comm);
+<b>(3) Savings</b> — met (~0.0505, measured); <b>(4) Reproducible</b> — one canonical launcher exists, but the
+north-star holds Goal 4 <i>pending a surpass</i>. B2 is the reference; no surpass found.</p>
+
+
+<!-- ===================== 1. SETUP ===================== -->
+<h2 id="setup"><span class="num">2</span>The setup — two circuits, one codec, two mergers</h2>
+
+<p>The training path is split into two circuits. Compression applies <b>only</b> to the inter-stage
+(pipeline-parallel, PP) gradient traffic during training; rollouts are generated by ordinary, non-PP
+verl + vLLM and are not compressed. With the method off, training is byte-identical to upstream verl.</p>
+
+<h3>2.1 &nbsp;The two circuits</h3>
+<ul>
+  <li><b>Fast circuit (the "swarm").</b> The normal actor forward/backward, with the PP-boundary gradient
+  compressed by PowerSGD low-rank projection. Many workers, each a <b>read-only consumer</b> of a shared
+  projection basis $Q$.</li>
+  <li><b>Anchor circuit (the single "slow node").</b> An uncompressed, no-optimizer clone pass run at a fixed
+  cadence. It produces a stale, full-coverage gradient EMA $M$ over all <b>196 decoder matrices</b> (28 layers
+  $\times$ 7), DP-mean-reduced; it <b>owns</b> the PowerSGD basis $Q$ and is the only thing that updates it.</li>
+</ul>
+
+<p>This replaces an earlier, unrealistic periodic full-dense "clean step." The decisive design constraint is
+<b>async-realism</b>: in deployment the anchor is one slow node serving a fast swarm over a network, so it
+<b>always lags, never leads</b>. The fixed <code>delay_K=5</code> lock-step in the code is a <i>simulation</i> of
+that lag. This rules out delay-compensation / anchor-lead tricks and makes the two-circuit structure
+<b>mandatory</b> — it is the practical-future-use point.</p>
+
+<div class="caveat">
+  <span class="lbl">Validity boundary (load-bearing).</span> Only <b>valid-M</b> measurements count: $M_{\text{rep}}$
+  (the replayed anchor gradient) paired with the retained fast gradient at the <b>same $(\text{batch},\theta)$</b>,
+  enabled by <code>replay_paired_batch=true</code> + <code>snapshot_device=cpu</code> (the post-#29 paired-replay
+  fix). This removes the stale-weights&times;current-batch confound and is what makes the <code>signed_ema</code>
+  number question (below) non-trivial.
+</div>
+
+<h3>2.2 &nbsp;The codec — PowerSGD, $r{=}77$, activation basis</h3>
+<p>Per PP boundary the swarm transmits a rank-$r$ sketch $Y = M Q$ ($N\cdot r$ coordinates instead of $N\cdot H$).
+$r{=}77$ is byte-matched to the legacy mask at $p{=}0.95$ for $H{=}1536$ (Qwen2.5-1.5B: $0.05\cdot 1536 \approx 77$).
+$Q$ is one codebook per boundary, <b>identical across DP ranks</b> (or ranks sketch different subspaces and
+diverge) and harvested from uncompressed anchor activations. The DP axis itself is <b>not</b> compressed — only
+the PP boundary is.</p>
+
+<h3>2.3 &nbsp;The two mergers (both implemented; one promoted)</h3>
+<p>The merger rewrites selected fast gradients after backward and before the optimizer step. Both live in
+<code>spectral_filter.py</code> and differ in exactly one knob from "no merger."</p>
+
+<h4>(A) <code>delayed_ef</code> = "B2" — the confirmed SOTA</h4>
+<pre>δ(t)      = M_rep − G_comp_ring(t − K)     # codec error on the IDENTICAL (batch, θ)
+G_corr(t) = G_comp(t) + λ·δ(t)             # λ = 1, β_anc = 0, refreshed at fires, held between</pre>
+<p>This is genuine <b>error-feedback on the PowerSGD codec residual</b>: $\delta$ is the exact gradient the codec
+dropped at tick $t-K$, recovered from the retained fast-gradient ring and the replayed anchor gradient on the
+<i>same</i> pair. At $\lambda{=}0$ it is a bitwise identity (plain PowerSGD), which is why "no-merger" and B2
+differ in one knob. <span class="small">(Do not conflate with <code>ef_powersgd</code>, a separate, non-promoted
+mode that injects the part of $M$ orthogonal to the <i>live</i> gradient — a tangential length-hack force. B2's
+$\delta$ is the true paired residual and carries no such defect.)</span></p>
+
+<h4>(B) <code>signed_ema</code> — candidate/legacy, not promoted</h4>
+<pre>G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)</pre>
+<p>Keep the <b>magnitude</b> of the compressed gradient; take the <b>sign</b> from the stale anchor EMA $M$.
+$\alpha{=}0$ is pure sign-replacement; $\alpha{=}0.5$ is the only setting worth tracking. As of a later commit
+it was purged from the launcher default (default merger is now <code>none</code>; the launcher defaults to
+<code>delayed_ef</code>) — but it remains runnable as a supported mode.</p>
+
+<h3>2.4 &nbsp;The signed_ema evidence correction, and stability</h3>
+<div class="keypt">
+  <strong>Evidence gap, resolved.</strong> There are <b>two</b> distinct <code>signed_ema</code> numbers, and the
+  valid-M one is <b>0.7271</b> (EXP-32), not 0.7066. The 0.7066 is the <span class="tag t-closed">legacy
+  invalid-M</span> EXP-25 circuit. The valid-M 0.7271 is dominated by B2 (0.7528). The project summary
+  <i>undersells</i> this — it never prints 0.7271 and says "no durable post-#29 verdict promoted it," which is
+  true but misleading by omission: a valid-M number exists; it simply lost to B2.
+  <span class="tag t-thin">thin</span> — the EXP-32 W&amp;B id was not recoverable, so 0.7271 is a
+  medium-high-confidence single draw.
+</div>
+<p><b>B2 is stable; <code>signed_ema</code> is unstable, and structurally so.</b> At $\alpha{=}0$ <code>signed_ema</code>
+collapses (val 0.354; entropy 5.69→0.06; response length explodes toward the 16384 cap; grad-norm inflates from
+dense 0.387 to 3.3). Even its best setting $\alpha{=}0.5$ is <b>censored-unstable</b> — consecutive length-cap pins
+at steps 47–48, $P(\text{ignite by 100})\approx$ 55–70%. The instability is <b>structural, not a tuning artifact</b>
+(an answer <code>systems</code> and <code>theorist</code> reached independently and locked); the next section
+gives the mechanism.</p>
+
+
+<!-- ===================== 2. MATH ===================== -->
+<h2 id="math"><span class="num">3</span>The mathematics — GRPO, de-biasing, and the ceiling</h2>
+
+<h3>3.1 &nbsp;GRPO: advantage, objective, gradient</h3>
+<p>GRPO removes the value network. For a prompt $q$, sample a group of $n{=}8$ completions, score each with the
+verifier reward $r_i$, and assign every token of completion $i$ the <b>group-standardized</b> advantage:</p>
+$$ \hat A_i \;=\; \frac{r_i - \operatorname{mean}_{j\le n}(r_j)}{\operatorname{std}_{j\le n}(r_j) + \varepsilon},
+\qquad \sum_{i=1}^{n}\hat A_i = 0. $$
+<p>Two facts drive everything downstream: (1) the advantage is <b>mean-zero within the group</b> — a contrast
+between siblings, so the per-coordinate gradient is <b>near-zero-mean</b>; (2) reward is sequence-level and
+broadcast to all tokens, so a <i>uniform</i> lengthening of correct completions is nearly reward-neutral — the
+seed of the length hack. Vanilla GRPO (no KL, no entropy here) maximizes the clipped surrogate</p>
+$$ \mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}\!\left[\frac{1}{\sum_i |o_i|}\sum_{i,t}
+\min\!\big(\rho_{i,t}\,\hat A_i,\; \operatorname{clip}(\rho_{i,t},\,1-\epsilon,\,1+\epsilon)\,\hat A_i\big)\right], $$
+<p>with per-token ratio $\rho_{i,t} = \pi_\theta / \pi_{\theta_{\text{old}}}$. The clip is a hard gate: a token
+already moved past $1\pm\epsilon$ in the rewarded direction contributes zero gradient. This is why an
+<i>additive</i> residual correction is safe but a <i>sign-replacing</i> one is not (§3.4). The dense GRPO gradient
+$g(\theta)$ is the reference signal the compression machinery must transmit in ~5% of the bytes.</p>
+
+<h3>3.2 &nbsp;The compressed gradient is pure bias, near-zero variance</h3>
+<p>At a boundary, PowerSGD sends $G_{\text{comp}} = C(g) = QQ^\top g = Pg$ with $P$ the rank-77 orthogonal
+projector. The split is exact and orthogonal:</p>
+$$ g = \underbrace{Pg}_{G_{\text{comp}}} + \underbrace{(I-P)g}_{\text{dropped residual}}, \qquad \langle Pg,\,(I-P)g\rangle = 0. $$
+<p>Because $P$ is a <b>deterministic</b> projector (fixed $Q$ within a step), the codec is not a zero-mean
+stochastic perturbation. Its error is a structured bias with essentially no added variance:</p>
+$$ \mathbb{E}[G_{\text{comp}}] - g = -(I-P)g, \qquad \operatorname{Var}(G_{\text{comp}}) \approx 0. $$
+<p>The dropped residual is tiny — $\|(I-P)g\|^2/\|g\|^2 \approx 0.058\%$, a signal-to-bias ratio of $\approx 42{:}1$ —
+and $Q$ <b>converges</b> to a stable subspace, so the <i>same</i> off-subspace direction is dropped every step.</p>
+
+<div class="theorem">
+  <span class="lbl">Why a 0.06% drop costs 0.12 in reward</span>
+  <p style="margin-top:8px">A small but <b>coherent</b> bias (same direction every step) is not a small effect on the
+  optimization. For zero-mean noise, per-step errors partially cancel and the trajectory gap grows like
+  $O(\sqrt{T})$. For a persistent bias $b_t = -(I-P)g_t$ there is no cancellation — the gap accumulates every step
+  in the same direction, growing $\Theta(T)$. Adam does not save you: with a persistent component the first-moment
+  EMA converges to a biased $\bar m \neq \bar g$, so the normalized step is persistently misdirected. Integrated
+  over 50 steps, that lands the policy in the measurably worse $0.63$ basin. <b>The merger's entire job is to cancel
+  $\sum_t b_t$ before Adam integrates it.</b></p>
+</div>
+
+<h3>3.3 &nbsp;Error-feedback (B2): additive, magnitude-preserving de-biasing</h3>
+<p>The key is <i>what $\delta$ is a residual of</i>. The ring stores the raw compressed gradient produced on the
+same $(\text{batch},\theta_{t-K})$ pair the anchor just replayed densely, so</p>
+$$ \delta = \underbrace{M_{\text{rep}}}_{\approx\, g(\theta_{t-K})} - \underbrace{C(g(\theta_{t-K}))}_{Pg(\theta_{t-K})}
+= (I-P)\,g(\theta_{t-K}) \;=\; \text{the exact dropped codec residual.} $$
+<p>Substituting into $G_{\text{corr}} = G_{\text{comp}} + \lambda\delta$ and comparing with the dense target
+$g(\theta_t)$ gives the correction error in closed form:</p>
+$$ G_{\text{corr}}(t) - g(\theta_t) \;=\; -(I-P)\,\Delta_K g, \qquad \Delta_K g \equiv g(\theta_t) - g(\theta_{t-K}). $$
+<p>Read slowly, this is the whole merger: the persistent codec bias $-(I-P)g(\theta_t)$ (the floor) is replaced by
+the <b>staleness residual</b> $-(I-P)\Delta_K g$ — only the off-subspace part of how much the gradient drifted over
+$K{=}5$ ticks. It is <b>additive and magnitude-preserving</b> (the kept subspace is sent untouched; only the missing
+complement is refilled, and since $P\delta = 0$ the correction adds energy <i>only</i> where the codec is blind).
+At $\eta = 10^{-6}$ the 5-tick drift is small, so $G_{\text{corr}} \approx g(\theta_t)$ up to a second-order term —
+recovering essentially all of the $0.63 \to 0.75$ gap. B2 reaches parity because its fixed point is
+<b>dense-on-stale-data</b>, and the staleness penalty is small but $\ge 0$ — which is exactly why it reaches parity
+<i>and not beyond</i>.</p>
+
+<h3>3.4 &nbsp;signed_ema: multiplicative sign-replacement (why it is dominated and unstable)</h3>
+<p>On a coordinate where the compressed sign and the anchor sign <b>disagree</b>, the update reduces to</p>
+$$ G^c_{\text{corr}} = \alpha\,G^c_{\text{comp}} + (1-\alpha)\,|G^c_{\text{comp}}|\,\operatorname{sign}(M^c)
+= (2\alpha-1)\,G^c_{\text{comp}} \;\xrightarrow{\;\alpha=0\;}\; -G^c_{\text{comp}} \;(\text{full sign reversal}). $$
+<p>The disagreement fraction is $\approx 50.4\%$ — and it is <b>structural</b>: already $\approx 50\%$ at the first
+warm step (fresh $M$, near-zero EMA depth), flat across the run, uniform across all 28 layers. The mechanism:</p>
+<div class="theorem">
+  <span class="lbl">Why $\approx$50% is the coin-flip rate</span>
+  <p style="margin-top:8px">GRPO per-coordinate gradients are near-zero-mean (the group baseline subtracts the
+  mean; the advantage is a sibling contrast). Two independent estimators of a near-zero-mean quantity — the
+  compressed live gradient and the stale anchor — agree on each coordinate's sign at the <b>coin-flip</b> rate. So
+  $\approx 50\%$ disagreement is the <i>expected</i> behavior of any sign-replacement on this signal, not a defect
+  of staleness, compression, or EMA depth. No $K$, $\beta$, or $\alpha$ removes it. <b>Sign-replacement is simply
+  the wrong operator for a near-zero-mean signal.</b></p>
+</div>
+<p>Hence <code>signed_ema</code> injects bias even with a perfect fresh anchor: on half the coordinates it overwrites
+a correct sign with an uncorrelated one, destroying the per-coordinate cancellation that keeps $\|g\|$ small
+(grad-norm 0.387 → 3.3 at $\alpha{=}0$). Combined with sign-SGD-style magnitude sharpening on a no-KL/no-entropy
+surface, this feeds the length reward-hack and ignites the spiral as $\alpha\to 0$.</p>
+
+<table>
+  <thead><tr><th>property</th><th><code>delayed_ef</code> (B2)</th><th><code>signed_ema</code></th></tr></thead>
+  <tbody>
+    <tr><td>operation</td><td><b>additive</b>: $G_{\text{comp}}+\lambda\delta$</td><td><b>multiplicative</b>: $|G_{\text{comp}}|\odot\operatorname{sign}(M)$</td></tr>
+    <tr><td>magnitude / direction</td><td>preserved; refilled along $(I-P)$, complementary to what was sent</td><td>own magnitude kept, <b>sign discarded</b>, reoriented to $\operatorname{sign}(M)$</td></tr>
+    <tr><td>bias as anchor $\to$ perfect ($K\to0$)</td><td>$\to 0$ (consistent)</td><td><b>stays $\approx 50\%$</b> (inconsistent)</td></tr>
+    <tr><td>GRPO clip interaction</td><td>safe: bounded nudge in a blind subspace</td><td>unsafe: reverses informative signs before the clip sees them</td></tr>
+    <tr><td>measured (valid-M)</td><td class="num-cell"><b>0.7528</b> (parity)</td><td class="num-cell">0.7271 ($\alpha{=}0.5$); 0.354 ($\alpha{=}0$, legacy)</td></tr>
+  </tbody>
+</table>
+
+<h3>3.5 &nbsp;The stale-reconstruction ceiling — why nothing yet beats dense</h3>
+<div class="theorem">
+  <span class="lbl">Theorem (stale-reconstruction ceiling)</span>
+  <p style="margin-top:8px">Let the anchor maintain $M \approx g(\theta_{t-K})$, a $K$-stale estimate of the dense
+  gradient, and let the merger be any deterministic, cross-rank-identical map
+  $G_{\text{corr}} = \Phi(G_{\text{comp}}, M)$ whose only non-compressed input is $M$. Then $G_{\text{corr}}$ is
+  measurable with respect to $\mathcal{F}_t = \sigma\big(g(\theta_t),\, g(\theta_{t-K})\big)$ — the
+  $\sigma$-algebra of the current and stale <b>dense</b> gradients. The error-minimizing $\Phi^\star$ therefore
+  returns exactly the dense update $g(\theta_t)$ (achievable as $K\to 0$). Hence</p>
+  $$ \text{(any merger that reads only } G_{\text{comp}} \text{ and a stale dense estimate } M) \;\le\; \text{dense}. $$
+  <p style="margin-bottom:0">"Better than dense" is by definition a descent direction the dense first-order oracle
+  does <b>not</b> take at this $(\theta_t, \text{LR})$ — and that direction is not a function of
+  $\{g(\theta_t), g(\theta_{t-K})\}$. $\delta$ only ever reconstructs <i>dense-on-stale-data</i>; you land at dense,
+  never past it.</p>
+</div>
+<p>This is exactly what the EXP-31 four-lever tournament found empirically: you cannot beat dense by
+<b>reweighting</b> (adaptive dose: null), <b>accumulating</b> ($\delta$-momentum: null/regress),
+<b>perturbing</b> (isotropic $\sigma$: null), or <b>de-noising</b> (control-variate: $\operatorname{cov}\approx 0$,
+gated out) a stale estimate of dense. Each lever is a different $\Phi$ with the same information bottleneck $M$;
+the ceiling binds all of them. The $\beta_{\text{anc}}$ sweep (EXP-33) is the same story — flat for $\beta\in[0,0.5]$,
+cold-$M$ collapse at $\beta{=}1$.</p>
+
+<p><b>Within the bound, why EF reaches it and signed_ema does not</b> — it is a question of <i>consistency</i>:</p>
+<table>
+  <thead><tr><th></th><th>error vs dense $g(\theta_t)$</th><th>as $K\to 0$ (fresh anchor)</th><th>lands</th></tr></thead>
+  <tbody>
+    <tr class="row-floor"><td>no-merger</td><td>$-(I-P)g(\theta_t)$ — full persistent bias</td><td>unchanged</td><td class="num-cell">0.6300</td></tr>
+    <tr><td><code>signed_ema</code></td><td>sign error on $\approx 50\%$ of coords — $O(\|g\|)$</td><td><b>does not vanish</b> (inconsistent)</td><td class="num-cell">0.7271</td></tr>
+    <tr class="row-hi"><td>EF (B2)</td><td>$-(I-P)\Delta_K g$ — off-subspace 5-tick drift</td><td>$\to 0$ (consistent)</td><td class="num-cell">0.7528 $\approx$ dense</td></tr>
+  </tbody>
+</table>
+
+
+<!-- ===================== 3. GENERALIZATION ===================== -->
+<h2 id="general"><span class="num">4</span>Generalization &amp; future work</h2>
+
+<h3>4.1 &nbsp;The async target is the generalizable contribution</h3>
+<p>The fixed <code>delay_K=5</code> lock-step is a clean simulation of a super-asynchronous target: a fast swarm of
+heterogeneous workers exchanging ~5%-compressed boundary gradients through a shared read-only $Q$, served by a
+single slow anchor that owns $Q$ and ships it (and $M$) over a network. The anchor's effective staleness
+$K_{\text{eff}}$ grows with swarm size (more workers per anchor), network diameter (geo-distributed links), and
+stragglers (a heavy right tail). Because the anchor <b>physically cannot lead</b> the swarm, admissible methods must
+use it as a lagging reference, <b>degrade gracefully as it ages</b>, and stay <b>cross-rank identical</b>. This is
+precisely why B2 is the right primitive — its correction $\delta$ <i>shrinks toward the pure compressed step</i> as
+the anchor ages rather than diverging. The two-circuit split — hot path at ~5% comm, expensive full-coverage work
+confined to one node, staleness tolerated — is the contribution that is independent of model and dataset.</p>
+
+<h3>4.2 &nbsp;Scaling — does parity hold, what breaks first</h3>
+<table>
+  <thead><tr><th>axis</th><th>parity risk</th><th>what breaks first</th></tr></thead>
+  <tbody>
+    <tr><td>Bigger models</td><td>LOW–MED</td><td>anchor-node throughput (one node, full-coverage $M$); then codec fidelity if $r/H$ held fixed against a heavier-tailed spectrum</td></tr>
+    <tr><td>Longer context</td><td>LOW</td><td>anchor-clone memory (engineering limit, not method) — the compressed object's rank is set by hidden size, not sequence length</td></tr>
+    <tr><td>Harder datasets</td><td>MED–HIGH</td><td>a $K$-stale anchor reconstructs a <b>non-stationary</b> gradient direction; variable-staleness tolerance becomes parity-determining</td></tr>
+    <tr><td>More swarm workers</td><td>MED</td><td>staleness $K_{\text{eff}}$ grows — but the extra data diversity is the one axis that injects <i>new</i> information (the surpass hope)</td></tr>
+  </tbody>
+</table>
+<p>The single most important scaling unknown: does the ~5% bytes ratio hold, or must rank $r/H$ rise with model
+size to preserve parity? Boundary-gradient spectra get heavier-tailed at scale, so a fixed <i>fraction</i> of rank
+may capture less energy.</p>
+
+<h3>4.3 &nbsp;Both mergers at scale — the bytes-vs-stability trade-off</h3>
+<table>
+  <thead><tr><th></th><th><code>delayed_ef</code> (B2)</th><th><code>signed_ema</code> ($\alpha{=}0.5$)</th></tr></thead>
+  <tbody>
+    <tr><td>Merger comm</td><td>full-precision $M$, low-frequency (proven)</td><td><b>~1-bit $\operatorname{sign}(M)$</b> — far cheaper (projected)</td></tr>
+    <tr><td>Quality</td><td><b>dense parity</b> (0.735–0.754)</td><td>0.7271 (valid-M), dominated</td></tr>
+    <tr><td>Stability</td><td>robust, graceful under staleness</td><td><b>unstable</b> (sharpening spiral, censored survival)</td></tr>
+    <tr><td>Use when</td><td>link can afford periodic $M$ transfer</td><td>comm budget is the hard wall <b>and</b> stability is fixed</td></tr>
+  </tbody>
+</table>
+<p>B2 is the reference at every scale we can currently justify. <code>signed_ema</code> is a <b>bytes-floor escape
+hatch</b>: its 1-bit traffic is the right answer only when full-width $M$ transfer is the binding constraint, and
+only if its sharpening instability is solved first.</p>
+
+<h3>4.4 &nbsp;The surpass routes — each must escape the ceiling</h3>
+<p>The ceiling closes every operation on a stale dense estimate. A surpass route must inject information that is
+<b>structurally absent</b> from $\sigma(M)$. The theorist's three admissible categories: <b>(a)</b> genuine
+curvature / second-order structure; <b>(b)</b> conversion-positive exploration that moves the <i>greedy</i> mode;
+<b>(c)</b> a cross-rank second moment (swarm disagreement-as-signal). The candidate routes, with the lead's verdict
+applying that framework:</p>
+
+<table>
+  <thead><tr><th>route</th><th>category</th><th>escapes ceiling?</th><th>prior</th><th>open question for theorist</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>R5</b> anchor-curvature preconditioner</td>
+      <td>(a) curvature</td>
+      <td><span class="tag t-cond">conditional</span></td>
+      <td>cond. high</td>
+      <td>does anchor-curvature beat Adam's diagonal $v_t$ (off-diagonal / lower-noise / cross-rank-shared), or collapse to "noisier Adam"?</td>
+    </tr>
+    <tr>
+      <td><b>R1</b> swarm rollout diversity ($n$ + temperature)</td>
+      <td>(b) exploration</td>
+      <td><span class="tag t-escape">escapes*</span></td>
+      <td>&lt;20%</td>
+      <td>greedy-mode relocation (a real surpass), or pass@k-only (a different-axis edge)?</td>
+    </tr>
+    <tr>
+      <td><b>R4</b> compression as a flat-minima regularizer</td>
+      <td>— (test-time)</td>
+      <td><span class="tag t-cond">conditional</span></td>
+      <td>low–med</td>
+      <td>does a test-time / OOD edge count as a surpass, and is the gap well-defined on GRPO/GSM8K?</td>
+    </tr>
+    <tr>
+      <td>R3 heterogeneous-staleness ensemble</td>
+      <td>(c)*</td>
+      <td><span class="tag t-collapse">likely collapses</span></td>
+      <td>low</td>
+      <td>is staleness-spread information, or just a noisier stale-dense estimate?</td>
+    </tr>
+    <tr>
+      <td>R2 anchor as advantage-baseline</td>
+      <td>— (objective-side)</td>
+      <td><span class="tag t-collapse">likely collapses</span></td>
+      <td>very low</td>
+      <td>does <i>any</i> objective-side use of the anchor escape?</td>
+    </tr>
+  </tbody>
+</table>
+<p class="small">*R1 acts <b>upstream of the codec</b> — it changes which gradient is compressed (the rollout/data
+distribution), not how a fixed gradient is reconstructed — so it escapes the gradient-reconstruction ceiling; but
+val is greedy mean@1, so any gain is likely a pass@k edge unless it relocates the trained $\arg\max$. R3 is the
+<i>staleness</i> variant of category (c); the genuine category-(c) signal is the cross-rank <i>second moment</i> —
+see §5.</p>
+
+<h3>4.5 &nbsp;The roadmap</h3>
+<p>Every item runs on the B2 SOTA launcher, varying one knob, with a matched dense control wherever the comparison
+is to dense.</p>
+<p><b>Tier 1 — the surpass bets.</b></p>
+<ol>
+  <li><b>R5-cheap: anchor diagonal-curvature preconditioner.</b> Cheapest variant first — a diagonal proxy from
+  $M_t, M_{t-1}$ (no extra backward), broadcast anchor-owned, applied as a preconditioner. Decisive diagnostic:
+  cosine between the anchor preconditioner and Adam's $v_t$ — high cosine ⇒ collapse to noisier-Adam (kill); low
+  cosine ⇒ genuine new structure. <i>Gated on theorist confirming it carries structure Adam lacks.</i></li>
+  <li><b>R1-gate: dense $\times\{T,n\}$ surface calibration.</b> A cheap kill that has <i>never been run</i>. If no
+  $(T,n)$ lifts dense above its band, the diffuse-policy hypothesis is dead before spending on the compressed arm.
+  Track pass@k coverage, not just greedy val.</li>
+  <li><b>R1-main: compressed (B2) $\times\{T,n\}$ vs the dense surface.</b> Only if the gate shows lift. Does the
+  (compressed − dense) pass@k advantage <i>grow with $k$</i>? Grows ⇒ compression-specific edge; flat ⇒ Route-A-only.</li>
+</ol>
+<p><b>Tier 2 — the generalization edge.</b> R4: measure B2 vs dense on a held-out / harder eval split (a read-only
+measurement knob; no training change). If B2 $\ge$ dense OOD while train-parity holds, that is a genuine surpass on
+the axis that matters.</p>
+<p><b>Tier 3 — deployment realism (parity-preservation).</b> R3 variable-staleness robustness (needs a small build —
+extend the snapshot queue to a staleness <i>distribution</i>); and a scaling smoke test of $r/H$ vs the
+boundary-gradient spectrum on the current model.</p>
+<p><b>Conditional.</b> <code>signed_ema</code> stabilization (the 1-bit-traffic escape hatch) — only if a real
+comm-budget pressure makes full-width $M$ transfer infeasible.</p>
+
+
+<!-- ===================== 4. SYNTHESIS ===================== -->
+<h2 id="synthesis"><span class="num">5</span>Synthesis — where the two specialists converge</h2>
+<p>The math (<code>theorist</code>) and the strategy (<code>strategist</code>) arrived at the surpass question from
+opposite ends, and their answers <b>unify into a single strongest bet</b>:</p>
+<ul>
+  <li><code>theorist</code> proves the only mathematically clean escape categories and names the
+  <b>cross-rank second moment</b> — the swarm's gradient <i>disagreement</i>, $\tfrac{1}{R}\sum_r (g_r - \bar g)(g_r - \bar g)^\top$
+  — as the <i>most promising</i>, because it is the one quantity both the dense mean and the anchor (itself a
+  DP-mean) structurally discard.</li>
+  <li><code>strategist</code> ranks the <b>R5 anchor-curvature preconditioner</b> #1 and warns it only escapes if it
+  beats Adam's <i>own</i> diagonal $v_t$.</li>
+</ul>
+<div class="keypt">
+  <strong>The convergence.</strong> A preconditioner estimated from the <b>swarm's cross-rank gradient spread</b> is
+  exactly the cross-rank second moment. So the team's two independent top picks are the same object viewed twice:
+  build R5's curvature term <b>from the swarm disagreement</b> (category c), not from the anchor's temporal
+  difference $M_t - M_{t-1}$ (which is still a function of stale dense gradients, hence inside the ceiling). A
+  SAM-style / variance-adaptive direction — descend where ranks agree, damp where they fight — optimizes a
+  <i>different</i> objective than $\mathbb{E}[g]$ and is the single most defensible route to a genuine surpass. It is
+  also async-friendly: curvature changes slowly, so a stale estimate hurts far less than a stale gradient, and a
+  diagonal preconditioner degrades gracefully as it ages.
+</div>
+<p>This also sharpens the disqualifier: R3 (heterogeneous staleness) feels async-native but is the
+<i>wrong</i> instance of category (c) — averaging over staleness is still averaging stale dense estimates, so it
+collapses. The information is in the <b>spatial</b> (cross-shard) spread, not the <b>temporal</b> (staleness) spread.</p>
+
+
+<!-- ===================== 5. CAVEATS ===================== -->
+<h2 id="caveats"><span class="num">6</span>Honest-evidence flags</h2>
+<ul>
+  <li><span class="tag t-thin">thin</span> The valid-M <code>signed_ema</code> number 0.7271 is a single draw and
+  its W&amp;B id was not recoverable (run dir de-bloated). Medium-high confidence, resting on two memory entries +
+  two commits.</li>
+  <li><span class="tag t-closed">censored</span> <code>signed_ema</code> $\alpha{=}0.5$'s 50-step "survival" is a
+  censored observation — it was already spiraling at steps 47–48. Even the best-$\alpha$ number is from a run on the
+  edge of ignition.</li>
+  <li><span class="tag t-closed">censored</span> <i>All</i> 50-step "stable" claims (including B2 and dense) are
+  censored at the 50-step horizon; no 100-step stability proof for B2 is on record. The asymmetry that matters: B2
+  shows no pre-ignition precursors, <code>signed_ema</code> does.</li>
+  <li><b>Parity is noise-bounded.</b> B2's band (0.735–0.754) overlaps the bottom of the dense band (0.75–0.78); the
+  apples-to-apples dense draw (0.7839) is <i>above</i> B2. "Parity" means within $\pm$0.024/draw, not B2 $\ge$ dense
+  pointwise — which is why surpass is a real, open target.</li>
+  <li><b>Route verdicts are lead-synthesized</b> from theorist's ceiling framework; the per-route ACCEPT/REJECT
+  stamps were not all returned by theorist before the section docs were finalized. They should be confirmed before
+  any expensive arm.</li>
+</ul>
+
+
+<!-- ===================== 6. BOTTOM LINE ===================== -->
+<h2 id="bottom"><span class="num">7</span>Bottom line &amp; what to do next</h2>
+<div class="verdict">
+  <p style="margin-top:0"><b>What is proven.</b> Communication-efficient pipeline-parallel GRPO <i>works</i>: a
+  PowerSGD codec plus a two-circuit slow-anchor error-feedback merger trains Qwen2.5-1.5B on GSM8K to
+  <b>dense parity at ~5% gradient comm</b>. The anchor genuinely de-biases the compressed gradient (0.6300 → 0.7528),
+  and the mechanism is understood in closed form: error-feedback refills exactly the codec's dropped residual, so
+  its only error is a vanishing staleness term. <code>signed_ema</code> is dominated (0.7271) and structurally
+  unstable — keep it only as a 1-bit-comm escape hatch.</p>
+  <p style="margin-bottom:0"><b>What is open.</b> Surpassing dense. The stale-reconstruction ceiling proves no merger
+  reading only a stale dense estimate can beat dense. The escape is to read what dense lacks — and the team's two
+  independent top picks converge on one object: a <b>preconditioner / robust direction built from the swarm's
+  cross-rank gradient second moment</b>. Run it cheap first (R5 diagonal proxy; the never-run dense$\times\{T,n\}$
+  R1 gate), always against a matched dense control, and judge on the dense <i>band</i> with margin — not a single
+  draw.</p>
+</div>
+<p><b>Immediate next step:</b> confirm the theorist verdict on R5 (does anchor/swarm curvature carry structure Adam's
+$v_t$ lacks?), then run the R5-cheap diagonal preconditioner built from cross-rank spread and the R1 dense gate in
+parallel — both are cheap, both are gating, and together they decide whether a surpass is reachable at all.</p>
+
+<footer>
+  <p><b>Provenance.</b> This report synthesizes three cross-examined section documents in this directory:
+  <code>systems.md</code> (setup &amp; evidence, fully cited to <code>SUMMARY.md</code> / <code>LOG.md</code> /
+  <code>CODE_WALKTHROUGH.md</code> / verl source / W&amp;B), <code>theory.md</code> (GRPO + anchor de-biasing
+  derivations, formulas verified against <code>spectral_filter.py</code> / <code>core_algos.py</code> /
+  <code>powersgd_activation.py</code>), and <code>generalization.md</code> (scaling, mergers-at-scale, surpass
+  routes, roadmap). Numbers are valid-M (post-#29 paired-replay) only. W&amp;B entity/project:
+  <code>shamanework-pl/verl_compression_research</code>.</p>
+  <p>Produced by the <b>comm-eff-grpo</b> Claude Code agent team — 2026-06-17.</p>
+</footer>
+
+</div>
+</body>
+</html>

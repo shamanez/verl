@@ -379,10 +379,23 @@ holds Goal 4 "pending a surpass". B2 is the reference; no surpass found.
 
 ### Substrate capability boundaries (what the setup can / cannot do today)
 
-For the future-work discussion (strategist's section), two capability facts about the
+For the future-work discussion (strategist's section), three capability facts about the
 *current* substrate, verified in source — they bound which surpass routes are even
 runnable now:
 
+- **The anchor maintains only `M` (grad EMA) + `Q` (basis) — no preconditioner /
+  second-moment / curvature state.** A grep of `verl/workers/comm_eff/` for
+  precondition/curvature/hessian/second_moment/fisher/natural-grad returns zero
+  optimizer-state hits (the `m1/m2/m3` in `anchor.py:1011-1014` are *cosine* geometry-probe
+  telemetry, not optimizer moments). So a curvature/preconditioner route (e.g. an
+  anchor-maintained diagonal) is new code — though *not* greenfield: the basis-family
+  sketches in `powersgd_activation.py` already compute a per-dim grad second moment
+  transiently (`grad` family `V = G_bᵀ(G_b·P)`; `ticket` family returns an `(H,)` vector,
+  `:882, 942, 984`), so the diagonal *computation* exists, just not maintained/applied as
+  a preconditioner. A per-matrix diagonal is the same shape as `M`, so holding+broadcasting
+  it fits the existing `ema_device=cpu` / DP-reduce envelope (no new HBM pressure). Note
+  the validity gate (theorist's call): the dense baseline is AdamW, which *already* has a
+  diagonal `v_t`, so an anchor diagonal only helps if it beats Adam's own.
 - **Staleness is a single uniform scalar, not per-worker.** `delay_K` is one config int
   (`comm_eff.py:136`, default 20; locked to 5 here); the snapshot queue holds exactly
   `delay_K+1` snapshots (`anchor.py:243-248`), and the whole circuit is **cross-rank
@@ -402,28 +415,58 @@ runnable now:
 
 ## 6. Cross-examination (theorist, strategist) — folding in
 
-**Status:** I have sent `theorist` all four measured data points with receipts (the
-0.6300→0.7528 jump, signed_ema 0.7271/0.354, the 42:1-SNR biased-compression measurement,
-and the 50.4%-at-first-warm-step sign-disagreement), plus a clean-step-floor correction
-(the old 0.7414 "psgd ties dense" is the *clean-step* config, not the realistic floor —
-do not anchor the math to it). I have sent `strategist` the closed null-lever list +
-savings. Theorist independently proposed STRUCTURAL for signed_ema; we agree. The
-remaining exchange is theorist's **formal bias/variance derivation**, which I will cite
-once it lands. Per task instruction, I have not blocked on it — the report stands on the
-agreed mechanism and the measured numbers.
+**Status:** the `theorist` exchange is **fully settled** (`theory.md` final;
+`research/reports/comm-eff-grpo/theory.md`). Their formal bias/variance derivation is in
+hand and **reproduces my measured ordering AND mechanism** (derived, not fitted — see the
+three-rung error analysis below); I verified both predictions, supplied the data, flagged
+one disambiguation, and we locked ONE agreed structural answer. The `strategist` exchange
+delivered confirmed numbers, the closed-frontier list, and feasibility verdicts on their
+5 surpass routes (see §5 capability boundaries); their explicit acknowledgement is the
+only loose end and it does not block anything.
 
-- **[CONVERGED — theorist, derivation pending]** Both sides hold the same mechanism:
-  EF returns the dropped codec energy **asymptotically unbiasedly** (it adds the exact
-  residual δ on the same (batch, θ) — and the drop is a *deterministic* low-energy bias,
-  SNR 42:1, fixed subspace), so it recovers parity; signed_ema injects a **non-vanishing
-  sign-bias** on ~half the coordinates (keeps compressed magnitude, borrows a ~coin-flip
-  stale sign), which neither shrinks with α nor with fresher `M`. Predicted ordering
-  `floor 0.6300 < signed_ema 0.7271 < B2 0.7528 ≈ dense` — matches measurement. *Awaiting
-  theorist's written derivation to cite verbatim; will revise only if it dissents.*
-- **[CONVERGED — theorist]** STRUCTURAL vs tuning for signed_ema instability → **STRUCTURAL**
-  (see §4 "Agreed answer"). This is the one agreed answer the report needed.
-- **[PENDING — strategist]** Acknowledgement of the closed null-lever list so it is not
-  resurrected; their surpass thesis. *(Sent; no reply yet — does not block this section.)*
+- **[CONFIRMED — theorist's derivation, theory.md §5.3]** The full bias/variance
+  derivation is now in hand and it reproduces the measured ordering from the *per-step
+  error each estimator leaves vs the dense gradient*, derived not fitted:
+  - **no-merger:** error = −(I−P)g(θ_t) — small per step (~0.06% energy, 42:1
+    signal-to-bias) but **coherent** (fixed Q), so Adam integrates it ~linearly over 50
+    steps into a Θ(T) displacement ⇒ the 0.6300 floor.
+  - **EF (B2):** error = −(I−P)Δ_K g, with δ = the exact dropped residual on the same
+    (batch, θ); a **consistent** estimator (error → 0 as K → 0, bounded second-order by
+    off-subspace-energy × 5-tick drift) ⇒ lands **at dense up to a vanishing staleness
+    penalty** ⇒ 0.7528.
+  - **signed_ema:** error = a **non-vanishing first-order** bias — on the ~50% disagreeing
+    coords `(2α−1)·G_comp` (zeroed at α=0.5, not reconstructed); an **inconsistent**
+    estimator whose residual stays ~50% even at K → 0 ⇒ recovers the floor gap only where
+    signs happen to agree (+0.10 ⇒ 0.7271), forfeits the disagreeing half (−0.026 vs EF).
+  - **One line:** EF is a *consistent* estimator of the dense update, signed_ema an
+    *inconsistent* one — both bounded by dense, EF reaches it, signed_ema sits a finite
+    margin below. My cos(G_comp, G_corr) = 0.956 (EF/ef_powersgd) vs 0.717 (signed_ema) is
+    the geometric witness (EF preserves direction, signed_ema reorients) — theorist cites
+    it. **Math + measurement agree on ordering AND mechanism.**
+- **[VERIFIED — theorist P1, sub-points]** (c) the 42:1 is signal-to-**bias**, variance ≈0
+  (Q frozen within-step ⇒ deterministic projection) ✓; (b) δ is bounded/batch-refreshed
+  **by construction** (`spectral_filter.py:920-929`), architectural not a logged δ-norm
+  curve ✓; (a) the **linear-in-T** integrated-bias shape is theory-derived — my data
+  confirms the premise (biased, persistent, same-direction every step) and the +0.123
+  recovery, but a single val endpoint can't independently confirm linear vs another
+  monotone shape, so phrase "consistent with linear" not "measured linear."
+  **Caveat retained:** "EF reaches dense" is parity *within single-draw noise* — B2's
+  reproduction band (0.735–0.754) overlaps the bottom of the dense band (0.75–0.78), not
+  B2 ≥ dense pointwise (§2 "Caveat on the dense band").
+- **[VERIFIED — theorist P2]** signed_ema shortfall. CONFIRMED: grad-norm monotone in α
+  (dense 0.387 → α=0 3.3, mean 11) and val ordering α0.5 > α0.3 > α0 = 0.7066 / 0.6164 /
+  0.3541 (**invalid-M** EXP-25 triple — use only for the *shape*; the valid-M headline is
+  α0.5 = 0.7271). The `(2α−1)·G_comp` algebra on the disagreeing coords is exact.
+- **[FLAGGED — disambiguation for theorist]** The EXP-27 "the implemented ef is **not**
+  error feedback / `comp_t` is orthogonal to the live grad" critique applies to
+  **`ef_powersgd`, NOT `delayed_ef`/B2**. B2's δ is the genuine paired codec residual, so
+  theorist's bias/variance argument for B2 stands. Folded into §1.6 of this report too.
+- **[LOCKED — theorist]** STRUCTURAL vs tuning for signed_ema instability → **STRUCTURAL**,
+  one agreed answer, with theorist's near-zero-mean-estimator mechanism (see §4 "Why
+  structural"). Both sides reached it independently.
+- **[OPEN — strategist]** Explicit acknowledgement of the closed null-lever list +
+  surpass thesis. *(Numbers/list/feasibility delivered; their reply is the only loose
+  end and does not block this section.)*
 
 ---
 

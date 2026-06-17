@@ -18,7 +18,8 @@
 | quantity | value | status |
 |---|---|---|
 | Codec | PowerSGD low-rank, `r=77`, activation basis | PROVEN |
-| Fast-path gradient comm | bytes ratio ≈ **0.0505** (~5% of dense) | PROVEN |
+| Fast-path gradient comm | bytes ratio ≈ **0.0505** (band 0.0504–0.0506, identical across all compressed arms; ~5% of dense) | PROVEN |
+| Compression scope | **only the PP-boundary gradient** is projected; the **DP axis is NOT compressed** and **rollouts/generation (vLLM) are out of scope** | PROVEN |
 | No-merger floor | val@50 **0.6300** | PROVEN |
 | **B2 `delayed_ef`** (λ=1, β_anc=0) | val@50 **0.735–0.754** (first proof 0.7528) = **dense parity** | PROVEN SOTA |
 | `signed_ema` (α=0.5) | val@50 **0.7271** (EXP-32, **valid-M**), dominated by B2, unstable | PROVEN (valid-M) |
@@ -233,7 +234,7 @@ the binding constraint, and only if its instability is solved. The roadmap (§5)
 
 ## 4. The surpass question — genuinely-open routes
 
-### 4.1 The ceiling that closes the obvious routes
+### 4.1 The ceiling that closes the obvious routes — and the formal escape test
 
 `theorist`'s load-bearing result (empirically confirmed by EXP-31/33):
 
@@ -242,8 +243,26 @@ the binding constraint, and only if its instability is solved. The roadmap (§5)
 > gradient on stale data; every admissible anchor-usage lever is some operation on that stale
 > dense estimate ⇒ it asymptotes to dense, never exceeds it.
 
-**A surpass route must therefore inject information that is structurally ABSENT from a stale
-dense gradient.** This is the filter every candidate below must pass.
+**Formal test (theorist, theory.md §5.3).** Let **σ(M) = σ(g(θ_t), g(θ_{t−K}))** be the sigma-algebra
+of the current + stale dense gradient *means*. Any deterministic `Φ(G_comp, M)` is σ(M)-measurable ⇒
+**capped at dense**. A route **ACCEPTS** (can surpass) **iff it injects information OUTSIDE σ(M)**.
+There are exactly **three** admissible escape categories:
+
+1. **Curvature / second-order** — uses a quantity *beyond a gradient mean* (Hessian-vector,
+   preconditioner from swarm-gradient *spread*, Fisher / natural-gradient). *Test: needs more than a
+   first moment.* A merely reweighted/accumulated gradient (EXP-31 L2/L3) is **inside** σ(M) ⇒ REJECT.
+2. **Conversion-positive exploration** — must move the **greedy argmax** (training-time mode
+   relocation), not merely widen eval-time entropy. *Test: changes argmax π, with a mandatory
+   dense × {T,n} control.* Raising n + rollout temperature is the only compression-*specific* knob;
+   likely a pass@k edge, **not** a greedy surpass.
+3. **Cross-rank second moment** — disagreement-as-signal (descend where ranks agree, damp where they
+   fight = SAM-style robust direction). Swarm variance is information the *mean* `M` discards. *Test:
+   the signal lives in the cross-rank 2nd moment, stays cross-rank-identical after aggregation, and
+   tolerates variable staleness.* Isotropic perturbation (EXP-31 L4) is uncorrelated noise ⇒ REJECT.
+
+**A surpass route must land in one of these three categories** (or, separately, claim a *test-time
+generalization* edge the fixed-point ceiling does not adjudicate — see R4). This is the filter every
+candidate below is tagged against.
 
 ### 4.2 CLOSED frontier — do NOT re-propose (all null on the valid-M circuit)
 
@@ -270,7 +289,7 @@ acting.)*
 
 ---
 
-#### R1 — Swarm rollout diversity (raise `n` + rollout temperature) — **LEAD**
+#### R1 — Swarm rollout diversity (raise `n` + rollout temperature) — **most-vetted lead; rank in §4.4**
 
 **Mechanism.** Raise rollouts-per-prompt `n` and/or rollout sampling temperature `T` **on the
 compressed fast circuit**, with a **mandatory matched dense × {T, n} control**.
@@ -312,7 +331,7 @@ and the only compression-*specific* bet.
 
 ---
 
-#### R4 — Compression as a flat-minima regularizer (test-time generalization edge) — **#2**
+#### R4 — Compression as a flat-minima regularizer (test-time generalization edge) — **rank in §4.4**
 
 **Mechanism.** Hypothesis that the low-rank projection is an **implicit regularizer** (it
 systematically removes off-subspace gradient components every fast step), biasing the solution
@@ -345,31 +364,42 @@ may be sanctioned like `test_freq`).
 
 ---
 
-#### R3 — Heterogeneous-staleness ensemble — **#3 (most async-native, likely ceiling-bound)**
+#### R3 — Cross-rank second moment / disagreement-as-signal (SAM-style) — **theorist category 3; rank in §4.4**
 
-**Mechanism.** In the real swarm, workers consume `Q`/`M` at **different** staleness. Treat the
-**cross-worker spread** of those staleness-varied gradients as a structured signal — e.g. an
-ensemble/averaging that the lock-step `K=5` sim cannot produce.
+> **Reframed (theorist scaffold).** My first framing — a *heterogeneous-staleness ensemble* that
+> averages staleness-varied gradients — is **REJECT**: averaging over staleness is still averaging
+> *stale dense means* ⇒ a noisier σ(M)-measurable estimate, capped at dense. The **category-3 escape**
+> is different and genuine: use the **cross-rank second moment** (swarm gradient *disagreement*), which
+> the mean `M` discards, as a signal.
 
-**Why it *might* escape — and why it probably doesn't.** Variable staleness is genuinely a property
-of the deployment regime the lock-step sim suppresses. **But** averaging over staleness is still
-averaging over *stale dense estimates* — by §4.1 the result is a (noisier) stale dense estimate, so
-the ceiling likely **holds**. Its value is more as a **robustness/parity-preservation** result under
-realistic variable lag than as a surpass route. **It is the most deployment-native item**, so it
-belongs on the roadmap even if it is parity-only.
+**Mechanism.** The fast swarm produces many per-rank gradients. Their **mean** is what `M`/the codec
+already use. Their **cross-rank variance / disagreement** is information *outside* σ(M): descend
+confidently where ranks **agree**, damp the step where they **fight** (a SAM-style, variance-aware
+robust direction). The DP axis is **not compressed**, so per-rank gradients are available pre-projection
+to form this second moment.
 
-> **[theorist: validity — unvetted (theorist); my prior: COLLAPSES — averaging over staleness is still
-> averaging stale dense estimates ⇒ a (noisier) stale dense estimate; value is robustness, not surpass]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS BUILD]** — `delay_K` is a **single
-> integer** in `comm_eff.py` (`delay_K: int`, B2=5) and `AnchorStalenessQueue.get_stale` returns the
-> deterministic `t − delay_K` snapshot (retaining only `delay_K+1` snapshots). There is **no jitter /
-> distribution / per-worker staleness** primitive today — the substrate supports only **fixed uniform
-> K**. R3 (and the Tier-3 robustness item) is therefore **not config-only**: it requires extending the
-> queue to serve a *staleness distribution*. Awaiting systems' confirmation.
+**Why it escapes the ceiling.** σ(M) contains only the gradient *means* `g(θ_t), g(θ_{t−K})`. A
+second-moment (variance/disagreement) functional is **not** σ(M)-measurable ⇒ it injects genuinely-new
+information, exactly theorist's category 3. This is **not** the isotropic perturbation EXP-31 L4 ran
+(uncorrelated noise, REJECT) — the signal is the *structured* cross-rank disagreement.
+
+**Async-realism caveat.** The derived robust direction **must stay cross-rank-identical after
+aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**.
+Whether a cross-rank-2nd-moment estimate remains well-defined when ranks report at *different*
+staleness is the open async question for theorist.
+
+> **[theorist: validity — unvetted (theorist); reframe sent for ACCEPT/REJECT. My prior: the
+> cross-rank-2nd-moment version is ACCEPT (category 3 — variance is outside σ(M)); the staleness-ensemble
+> version is REJECT. Open: does it stay cross-rank-identical + variable-staleness-tolerant?]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS BUILD]** — no cross-rank
+> second-moment / disagreement state exists; the anchor maintains only `M` (the mean) + `Q`. Forming a
+> per-coordinate cross-rank variance needs a new all-reduce of the second moment (the DP axis is
+> uncompressed, so the raw per-rank gradients are reachable) + a variance-aware writeback. Heavier than a
+> merger knob; awaiting systems' confirmation.
 
 ---
 
-#### R2 — Anchor as advantage-baseline (objective-side, not gradient-side) — **#4 (likely ceiling-bound)**
+#### R2 — Anchor as advantage-baseline (objective-side, not gradient-side) — **likely ceiling-bound; rank in §4.4**
 
 **Mechanism.** Use the stale `M` to form a **variance-reduction baseline on the GRPO advantage**
 (the objective side), explicitly *different* from EXP-31's control-variate which gated the
@@ -431,18 +461,32 @@ is the rare route whose math *likes* the async-realism constraints.
 
 ### 4.4 Route ranking (my priors; peer verdicts unvetted at finalization — see §4.3 slots)
 
-| rank | route | escapes ceiling? (my prior) | prior | gating verdict still needed |
-|---|---|---|---|---|
-| 1 | **R1 swarm diversity (n + T)** | YES (acts upstream of codec, on data dist) | <20%, likely Route-A | **theorist**: greedy-mode relocation possible, or pass@k-only? |
-| 2 | **R4 compression-as-regularizer** | YES (test-time edge, concedes train objective) | low–med | **theorist**: is the gen-gap well-defined on GRPO/GSM8K? |
-| 3 | R3 heterogeneous-staleness | WEAK (likely noisier stale-dense) | low | **theorist**: confirm collapse; value = robustness, not surpass |
-| 4 | R2 anchor-as-advantage-baseline | NO (likely B/V collapse) | very low | **theorist**: does *any* objective-side anchor use escape? |
+Ordered by **(promise of a *real* surpass) × (feasibility)**. The two genuine *fixed-point* bets are
+**R5** and the **reframed R3** — both inject a **second moment** (curvature / cross-rank disagreement)
+that is outside σ(M), theorist categories 1 and 3. **R1** is the only compression-*specific* exploration
+bet (category 2) but likely a pass@k edge, not a greedy surpass. **R4** is a separate *test-time*
+generalization claim the fixed-point ceiling does not adjudicate. **R2** is the lone σ(M)-measurable
+REJECT among the candidates.
 
-**Re-ranking trigger:** if theorist rules R1 can only deliver a pass@k edge (not greedy-mode
-relocation), R1 and R4 effectively tie — both become "edge on a different axis than the locked greedy
-bar" — and the program should run **both** measurement-cheap probes (R1-GATE, R4 OOD) before either
-expensive arm. If theorist finds an objective-side escape for R2, it jumps the ranking (it would be the
-first route to inject info on the *objective* side). Neither changes the Tier-1/2/3 roadmap structure.
+| rank | route | theorist category | escapes σ(M)? (my prior) | prior | gating verdict still needed |
+|---|---|---|---|---|---|
+| 1 | **R5 anchor-curvature preconditioner** | **1 — curvature** | YES **iff** it beats Adam's `v_t` (off-diag / lower-noise / cross-rank-shared) | cond. high | **theorist**: beats diagonal Adam, or collapses to noisier-Adam? |
+| 2 | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | YES — variance is outside σ(M) (the mean discards it) | cond. med–high | **theorist**: ACCEPT? + cross-rank-identical & variable-staleness-tolerant? |
+| 3 | **R1 swarm diversity (n + T)** | **2 — exploration** | YES **iff** conversion-positive (moves greedy argmax); else pass@k-only | <20%, likely Route-A | **theorist**: greedy-mode relocation, or pass@k-only? |
+| 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | OUT OF SCOPE of σ(M); valid as a *generalization* claim | low–med | **theorist**: does a gen-edge count, and is the gap well-defined on GRPO/GSM8K? |
+| 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO** — a baseline from `M` (a mean) is σ(M)-measurable | very low | **theorist**: confirm REJECT, or any objective-side escape? |
+
+**Re-ranking triggers (all gated on theorist's ACCEPT/REJECT tags):**
+- **R5 vs R3 for #1**: both are 2nd-moment escapes. R5 is #1 *only if* its curvature beats Adam's
+  diagonal `v_t` (else it collapses to noisier-Adam and drops below R3). R3 has **no Adam-overlap
+  problem** (Adam has no cross-rank-disagreement term), so if theorist ACCEPTs R3 and its async
+  constraints hold, **R3 could take #1** — it's the cleaner category-3 escape. This is the key open
+  ranking question.
+- **R1** escape is contingent on **conversion-positivity**. If theorist rules R1 pass@k-only (not
+  greedy-mode relocation), it stays a secondary/Route-A edge — run the cheap R1-GATE + R4-OOD probes
+  before any expensive arm.
+- **R2** is expected REJECT (σ(M)-measurable); it is retired unless theorist finds an objective-side
+  escape. None of these change the Tier structure of the roadmap.
 
 ---
 
@@ -454,19 +498,37 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
 
 ### Tier 1 — the surpass bets (highest expected information)
 
-1. **R1-GATE: dense × {T, n} surface calibration.** *Cheap kill, never run.* Sweep dense over a
-   small {T ∈ 0.7,1.0,1.2} × {n ∈ 8,16} grid; if **no (T, n) lifts dense above its band**, the
+1. **R5-CHEAP: anchor diagonal-curvature preconditioner** (category 1). *(Gated on theorist
+   confirming the curvature carries structure Adam's `v_t` lacks.)* Start with the **cheapest** variant
+   — a diagonal proxy from `M_t`, `M_{t−1}` (no extra backward) — broadcast it anchor-owned (cross-rank
+   identical) and apply as a preconditioner to the compressed step. **Mandatory control:** matched
+   dense-AdamW, so the comparison isolates *anchor-curvature beyond Adam's own diagonal*. Decisive
+   metric: does val beat the dense band with margin (not just ±0.024)? Diagnostic: cosine between the
+   anchor preconditioner and Adam's `v_t` — high cosine ⇒ collapse to noisier-Adam (kill); low cosine ⇒
+   genuine new structure. Heavier off-diagonal / HVP variants only if the cheap diagonal shows signal
+   **and** stay within the diagnostics-OFF OOM tier.
+2. **R3-2ndMOMENT: cross-rank disagreement-aware step** (category 3). *(Gated on theorist ACCEPT +
+   async constraints.)* Form a per-coordinate **cross-rank second moment** (the swarm's gradient
+   disagreement; the DP axis is uncompressed so per-rank gradients are reachable) and use it to **damp
+   the step where ranks fight, trust it where they agree** (SAM-style). **Mandatory control:** matched
+   dense (which has no disagreement term). Decisive metric: val beats the dense band with margin.
+   **Async guard:** the derived direction must be **cross-rank-identical after aggregation** and stable
+   as staleness varies — verify both, or it diverges the swarm. **No Adam-overlap problem** (Adam has
+   no cross-rank term), so this is the *cleanest* category-3 escape — potentially the top bet if it
+   ACCEPTs.
+3. **R1-GATE: dense × {T, n} surface calibration** (category 2). *Cheap kill, never run.* Sweep dense
+   over a small {T ∈ 0.7,1.0,1.2} × {n ∈ 8,16} grid; if **no (T, n) lifts dense above its band**, the
    diffuse-policy hypothesis is dead before spending on the compressed arm. **Off-axis (n locked) ⇒
    new lineage with matched dense control; justify in the plan.** Decisive metric set:
    rollout_ppl, best-of-group reward, within-group reward variance, **greedy val (bar)**, **pass@k
    coverage curve**. *(Gated on theorist confirming R1 escapes the ceiling.)*
-2. **R1-MAIN: compressed (B2) × {T, n} vs the dense surface.** Only if the gate shows *any* lift.
+4. **R1-MAIN: compressed (B2) × {T, n} vs the dense surface.** Only if the gate shows *any* lift.
    Discriminator: does (compressed − dense) **pass@k advantage grow with k**? Grows ⇒
    compression-specific edge (the dream); flat ⇒ Route-A-only, log as secondary, **not** a surpass.
 
 ### Tier 2 — the generalization edge
 
-3. **R4: structured-regularizer OOD probe.** Measure B2 vs dense on a **held-out / harder eval
+5. **R4: structured-regularizer OOD probe.** Measure B2 vs dense on a **held-out / harder eval
    split** (read-only measurement knob, like `test_freq`; no training change). If B2 ≥ dense OOD
    while train-parity holds, that is a genuine surpass on the axis that matters. *(Gated on
    systems confirming an OOD split is wireable read-only, and theorist confirming the gap is
@@ -474,21 +536,21 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
 
 ### Tier 3 — deployment-realism (parity-preservation, not surpass)
 
-4. **R3: variable-staleness robustness.** **Requires a small build** (verified: `delay_K` is a fixed
-   integer and `AnchorStalenessQueue` serves a deterministic `t − delay_K`; no distribution primitive
-   exists). Extend the queue to draw `K` from a **staleness distribution** (heavy right tail) and
-   confirm B2 **degrades gracefully** (no ignition, parity held within noise). This validates §1.2's
-   "tolerate variable staleness" claim and de-risks the whole decentralized story — *expected parity,
-   not surpass, but load-bearing for the deployment narrative.* (Build must preserve cross-rank
-   identical staleness per refresh, or the swarm diverges — §1.2.)
-5. **Scaling smoke test: `r/H` vs spectrum.** On the *current* model, measure how much
+6. **Variable-staleness robustness** (the *parity-only* sibling of R3 — NOT a surpass route).
+   **Requires a small build** (verified: `delay_K` is a fixed integer and `AnchorStalenessQueue` serves
+   a deterministic `t − delay_K`; no distribution primitive exists). Extend the queue to draw `K` from a
+   **staleness distribution** (heavy right tail) and confirm B2 **degrades gracefully** (no ignition,
+   parity held within noise). This validates §1.2's "tolerate variable staleness" claim and de-risks the
+   whole decentralized story — *expected parity, not surpass, but load-bearing for the deployment
+   narrative.* (Build must preserve cross-rank identical staleness per refresh, or the swarm diverges.)
+7. **Scaling smoke test: `r/H` vs spectrum.** On the *current* model, measure how much
    boundary-gradient energy `r=77` captures (it is the proxy for §2.1). If the captured fraction is
    already marginal at `H=1536`, that predicts `r/H` must rise with model size to hold parity — the
    single most important scaling number to know before any larger-model claim.
 
 ### Conditional — only if comm budget tightens
 
-6. **signed_ema stabilization (1-bit traffic).** *Do not start unless a real budget pressure makes
+8. **signed_ema stabilization (1-bit traffic).** *Do not start unless a real budget pressure makes
    full-width `M` transfer infeasible.* Then: attack the sharpening spiral (the entropy-collapse
    watch P1/P2/P3 + early-gate E1 triggers) *before* claiming the 1-bit-comm win. Today B2 dominates
    it; this item exists only as the bytes-floor escape hatch.
@@ -514,10 +576,20 @@ the point of full-width `M` transfer **and** its sharpening-spiral instability i
 **projected to hold** for longer context (memory-bound only) and is **most at risk** for harder,
 non-stationary datasets and for `r/H` against heavier-tailed spectra at larger models. The
 **surpass-dense** question stays open against a hard theorist ceiling — *you cannot beat dense by
-operating on a stale estimate of dense* — and the only routes that plausibly escape it inject
-information that ceiling lacks: **R1 (swarm rollout diversity, n + T, acting upstream of the codec on
-the data distribution — the vetted lead, prior <20%, gate never run)** and **R4 (compression as a
+operating on a stale estimate of dense; a surpass must inject information that stale dense estimate
+structurally lacks* (theorist's three escape categories: **(a)** curvature/second-order, **(b)**
+conversion-positive new exploration that **moves the greedy mode**, **(c)** multi-rank disagreement that
+is information not noise). Mapped onto these, two routes are the top bets under different risk profiles:
+**R5 (anchor-curvature preconditioner — category (a), the highest ceiling because it is the only route
+injecting structurally-new info, but its escape is *conditional* on the anchor's curvature carrying
+structure Adam's own diagonal `v_t` lacks — off-diagonal, lower-noise, or cross-rank-shared — else it
+collapses to a noisier Adam; its math notably *likes* staleness, since curvature ages slowly)** and
+**R1 (swarm rollout diversity, n + T, category (b), acting upstream of the codec on the data
+distribution — the most-vetted lead, prior <20%, gate never run; its escape is contingent on
+conversion-positivity — moving the greedy mode, not just a pass@k edge)**. **R4 (compression as a
 structured flat-minima regularizer claiming a test-time / OOD generalization edge, conceding the
-training objective entirely)**. R3 (heterogeneous staleness) and R2 (anchor-as-advantage-baseline)
-most likely collapse back to the ceiling and are kept for robustness / completeness, not as surpass
-bets.
+training objective)** is a distinct escape that sidesteps the fixed-point ceiling entirely. R3
+(heterogeneous staleness, category (c)) and R2 (anchor-as-advantage-baseline) most likely collapse back
+to the ceiling and are kept for robustness / completeness, not as surpass bets. **All route validities
+are theorist-gated and awaiting his yes/no** (requested with explicit category mapping); the report's
+per-route slots fold his verdicts in directly.

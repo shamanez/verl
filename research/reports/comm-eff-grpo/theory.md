@@ -11,8 +11,11 @@ magnitude-preserving residual that de-biases the compressed gradient toward the
 *stale dense* gradient; (4) the **`signed_ema`** merger as a multiplicative
 sign-replacement, and a formal contrast of the two; and (5) the
 **stale-reconstruction ceiling** — a proof-sketch that *de-biasing a stale
-estimate of the dense gradient lands at dense, never past it*, which is the
-bridge to the strategist's surpass program.
+estimate of the dense gradient lands at dense, never past it*, why EF reaches
+that ceiling while signed_ema sits below it (a consistency argument matching the
+measured $0.6300 < 0.7271 < 0.7528 \approx$ dense), and what new information a
+method must inject to surpass it — the bridge to the strategist's surpass
+program.
 
 Notation is fixed once: $\theta$ are policy parameters; $g(\theta)$ is the true
 (dense) GRPO mini-batch gradient at $\theta$; $C(\cdot)$ is the PowerSGD codec
@@ -511,7 +514,45 @@ $\sigma$: null), or **de-noising** (control-variate: gated out, $\operatorname{c
 a stale estimate of dense. Each lever is a different $\Phi$ with the same
 information bottleneck $M$; the ceiling binds all of them.
 
-### 5.3 What "surpassing dense" formally requires
+### 5.3 Where the two mergers land *under* the ceiling — and why EF is closer
+
+The ceiling is an *upper* bound ($\le$ dense); it says nothing by itself about
+*how close* a given $\Phi$ gets. The measured ordering
+$0.6300 < \mathbf{0.7271}_{\text{signed\_ema}} < \mathbf{0.7528}_{\text{EF}}
+\approx \text{dense } 0.75\text{–}0.78$ is explained by **how each $\Phi$ uses
+the same $\mathcal F_t$ information** — i.e. by the *consistency* of the estimator,
+which §3.3 and §4.2 already computed:
+
+| | error of $\Phi$ vs dense $g(\theta_t)$ | behavior as $K\to0$ (perfect, fresh anchor) | lands |
+|---|---|---|---|
+| **no-merger** | $-(I-P)g(\theta_t)$ — the **full** persistent codec bias | unchanged (no anchor used) | $0.6300$ (floor) |
+| **signed_ema** | sign flips/zeroing on the $\approx50\%$ disagreeing coords $\Rightarrow$ a **non-vanishing** $O(\|g\|)$ error | error **stays** $\approx50\%$-coord bias — does **not** vanish | $0.7271$ |
+| **EF (B2)** | $-(I-P)\Delta_K g$ — only the **off-subspace gradient drift over $K$** | error $\to 0$ (consistent) | $0.7528 \approx$ dense |
+
+The decisive distinction is **consistency** in the $K\to0$ limit:
+
+- **EF is a *consistent* estimator of the dense update.** Its error
+  $-(I-P)\Delta_K g$ is $\le \|(I-P)g\|\cdot\frac{\|\Delta_K g\|}{\|g\|}$ and
+  $\to 0$ as staleness $\to 0$. So EF approaches the ceiling from below and its
+  residual gap to dense is *second-order small* (the off-subspace part of a
+  5-tick drift). It lands **at** the ceiling, up to a tiny staleness penalty —
+  hence parity, $0.7528 \lesssim$ dense.
+- **signed_ema is an *inconsistent* estimator.** Its error does **not** vanish
+  even with a perfect fresh anchor ($K\to0$): on $\approx50\%$ of coordinates it
+  overwrites the (near-unbiased) compressed sign with a coin-flip sign, a
+  *first-order* $O(\|g\|)$ bias that no amount of freshness removes (§4.2). It is
+  strictly inside the ceiling by a finite margin — it recovers the part of the
+  floor gap where the signs *happen* to agree (clearing $0.6300\to0.7271$,
+  $\approx+0.10$) but forfeits the disagreeing half, capping $\approx0.026$
+  **below** EF and below dense.
+
+So both are bounded by the ceiling ($\le$ dense), but **EF reaches it and
+signed_ema does not**, for the same reason a consistent estimator beats an
+inconsistent one: EF's only residual is *staleness* (vanishing), signed_ema's is
+*structural sign-bias* (non-vanishing). This is the within-bound ordering the
+data shows, derived — not fitted.
+
+### 5.4 What "surpassing dense" formally requires
 
 The ceiling is an *information* statement, so the escape must be an *information*
 injection — a signal $\xi$ that is **not** $\sigma(M)$-measurable (not derivable
@@ -593,18 +634,23 @@ cross-rank second moment.
 5. **Stale-reconstruction ceiling**: any merger that is a deterministic map
    $\Phi(G_{\text{comp}}, M)$ — i.e. $\mathcal F_t$-measurable w.r.t.
    $\sigma(g(\theta_t), g(\theta_{t-K}))$, the stale+current dense gradients — has
-   its error-minimizing fixed point at the **dense** update and cannot surpass it.
-   EXP-31's four nulls (reweight / accumulate / perturb / de-noise) are this
-   ceiling, instantiated. **Surpass requires injecting information outside
-   $\sigma(M)$**: curvature/2nd-order, a *conversion-positive* exploration signal
-   (must move the greedy mode, with a dense$\times\{T,n\}$ control), or — most
-   promisingly — a *cross-rank second-moment* (swarm disagreement-as-signal) term,
-   the one quantity the compressed swarm has and a single dense trajectory lacks.
+   its error-minimizing fixed point at the **dense** update and cannot surpass it
+   ($\le$ dense). **Within** that bound, EF lands *at* it and signed_ema *below*
+   it (the measured $0.6300 < 0.7271 < 0.7528 \approx$ dense) for a consistency
+   reason: EF's residual is *staleness* $-(I-P)\Delta_K g$ (vanishing as $K\to0$,
+   a consistent estimator), signed_ema's residual is *structural sign-bias* on
+   $\approx50\%$ of coords (non-vanishing even at $K\to0$, inconsistent) — §5.3.
+   EXP-31's four nulls (reweight / accumulate / perturb / de-noise) are the bound,
+   instantiated. **Surpass requires injecting information outside $\sigma(M)$**:
+   curvature/2nd-order, a *conversion-positive* exploration signal (must move the
+   greedy mode, with a dense$\times\{T,n\}$ control), or — most promisingly — a
+   *cross-rank second-moment* (swarm disagreement-as-signal) term, the one
+   quantity the compressed swarm has and a single dense trajectory lacks (§5.4).
 
 *Cross-examination status: **CONVERGED with `systems`** on all four points (both
 quantitative predictions confirmed against W&B; the signed_ema number corrected
 to the valid-M $0.7271$; signed_ema instability settled as STRUCTURAL by three
-agreed grounds — see §7.2). `strategist` completed independently; the §5.3
+agreed grounds — see §7.2). `strategist` completed independently; the §5.4
 scaffold stands as their ceiling constraint.*
 
 ---
@@ -681,10 +727,70 @@ exchanged predictions and they confirmed against W&B receipts):
   the **sign-replacement operator**, not the substrate. *One agreed answer:
   STRUCTURAL.*
 
-**`strategist` — completed their section (`generalization.md`) independently**;
-sent no candidate routes for me to adjudicate. The §5.3 pre-judgment scaffold
-(the three admissible escape categories + the hard-reject list) stands as the
-constraint their surpass program is checked against. **Open item**: if strategist
-later proposes a concrete route, it gets tagged ACCEPT/REJECT by
-$\sigma(M)$-membership per §5.3 — no route inside $\sigma(G_{\text{comp}},M)$ can
-clear the ceiling.
+**`strategist` — four candidate surpass routes adjudicated** (R1–R4, relayed via
+team-lead). The §5.4 scaffold is the rubric; verdicts in §7.3. Headline: only two
+routes are even admissible escapes (R1, R4), and both are *conditional* — R1
+because it must demonstrate a compression$\times$exploration *interaction*, R4
+because it *redefines the objective* to OOD generalization. R2 and R3 collapse
+back inside the ceiling.
+
+### 7.3 Surpass-route verdicts (against the $\sigma(M)$ ceiling)
+
+The ceiling test: a route escapes iff it injects information **not** measurable
+w.r.t. $\sigma(g(\theta_t), g(\theta_{t-K}))$ — the stale+current *dense
+gradients at the fixed control surface*. The surpass bar is the apples-to-apples
+dense **band $0.75$–$0.78$** (dense draw $0.7839$), not $0.75$.
+
+**R1 — raise $n$ + rollout temperature on the compressed circuit (matched
+dense$\times\{T,n\}$ control). VERDICT: admissible escape, win conditional on a
+measured interaction.** $n$ and $T$ change *which* gradient is computed (the
+rollout/data distribution $g$ is taken over), so they move $g(\theta_t)$ itself
+— they are **outside** $\sigma(M)$ for the baseline-$(T,n)$ statistic. So R1 is
+**not** a $\Phi(G_{\text{comp}},M)$ reconstruction lever; the hard-reject list
+does not bind it. *But* against the mandatory dense$\times\{T,n\}$ control you
+have defined a **new** ceiling = dense-at-matched-$(T,n)$; R1 beats it **only if
+compression and high-$T/n$ interact** — the compressed circuit must *convert* the
+extra exploration into a better trajectory than dense does at the same $(T,n)$.
+That interaction is the one genuinely untested, compression-specific bet. On the
+greedy bar: val is greedy mean@1, so raising $T/n$ almost surely buys a *pass@k*
+edge; a greedy-mode surpass needs the exploration to be **conversion-positive**
+(§5.4 cat-2). Prior: pass@k-only is most likely — the codec *already* sustains a
+more diffuse policy (ppl $1.40$ vs dense $1.24$) and did **not** convert. Top
+live bet, honest prior modest, control mandatory.
+
+**R4 — compression as a flat-minima regularizer $\to$ test/OOD edge (conceding
+train parity). VERDICT: escapes the ceiling, but changes the objective.** The
+ceiling bounds the *train* gradient / train-objective optimum; it says nothing
+about *test-distribution* risk. The persistent codec bias $(I-P)g$ is a coherent,
+fixed-direction per-step perturbation — *plausibly* a flatness-biasing regularizer
+(though, being coherent rather than stochastic, it is closer to a fixed
+preconditioner than to SGD noise, so flat-minima is **not** guaranteed). It
+escapes because it targets a metric the ceiling doesn't cover — but it is **not**
+a GSM8K-greedy-mean surpass; it *redefines* "done." Caveats: unmeasurable today
+(no OOD eval wired — GSM8K-only); cheapest test = eval-only OOD pass
+(SVAMP/ASDiv/MATH) over existing B2-vs-dense checkpoints; needs a sharpness/Hessian
+measurement. Honest prior: coherent bias is ~50/50 to land in a *worse* basin.
+
+**R2 — anchor $M$ as an advantage-side baseline. VERDICT: collapse — REJECT.**
+The GRPO advantage is **already** optimally baselined by the group mean
+($\hat A_i=(r_i-\text{mean})/\text{std}$, the variance-minimizing constant
+baseline, §1.1). An $M$-derived baseline is $\sigma(M)$-measurable ⇒ inside the
+ceiling. At best it reduces variance — which does **not** move the fixed point of
+an unbiased estimator (same dense optimum). And EXP-31 L1 already gated out:
+$\operatorname{cov}(G_{\text{comp}},M)\approx0$ ⇒ nothing to cancel ⇒ an
+$M$-baseline *raises* variance.
+
+**R3 — heterogeneous (per-worker) staleness. VERDICT: collapse — REJECT.** A
+spread $\{g(\theta_{t-K_j})\}$ is still a set of *dense gradients at various
+lags*, all measurable w.r.t. $\sigma(g(\theta_{t-K_1}),\dots)$ — combining them is
+exactly "accumulating a stale dense estimate" (the $K$-uniform version is EXP-31
+L2 $\delta$-momentum, null). Two extra strikes: the substrate has **no**
+per-worker-staleness axis ($\texttt{delay\_K}$ is one uniform scalar), and it
+presses on the async-realism invariant (one slow anchor, not workers-at-different
+-lags — a different architecture).
+
+**Net:** the only signal genuinely outside $\sigma(M)$ that lives on *this*
+substrate is the **cross-rank second moment** (swarm disagreement, SAM-style;
+§5.4 cat-3). R1 is the top *runnable* near-term bet but conditional on a measured
+interaction; R4 is a clean escape only by redefining the goal to generalization.
+No route gives a *free* greedy-mean surpass.

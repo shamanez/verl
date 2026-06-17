@@ -9,6 +9,14 @@
 # val_before_train=False (val @ steps 25 & 50 only); 55 steps (50 + flush).
 # W&B project = verl_compression_research_beta_sweep_signed_ema.
 #
+# BREAK-GLASS (attempt 2): DISABLE_CUSTOM_ALL_REDUCE=true on every cell. Attempt 1
+# crashed all 3 cells at vLLM KV-cache init with the known
+# `custom_all_reduce.cuh:455 'invalid argument'` CUDA-IPC failure (0 steps). The
+# wrapper translates this env var into the Hydra override
+# `+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=true`
+# (NCCL all-reduce instead — greedy-val-neutral, a controlled var). See memory
+# `vast-vllm-custom-allreduce-ipc-failure` + plan/34.md §Notes-for-runner.
+#
 # `set -u` but NOT `-e`: a crashed/early-stopped cell must NOT abort the
 # remaining cells (each cell is an independent draw; a failure IS data).
 # ----------------------------------------------------------------------------
@@ -25,6 +33,7 @@ run_cell() {
   local rc=0
   PROJECT_NAME=verl_compression_research_beta_sweep_signed_ema \
   TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME="${name}" \
+  DISABLE_CUSTOM_ALL_REDUCE=true \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh \
     trainer.project_name=verl_compression_research_beta_sweep_signed_ema \
     trainer.val_before_train=False \
