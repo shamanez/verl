@@ -661,8 +661,8 @@ caps at dense.** The escape must read a quantity *outside* the stale-dense
 sufficient statistic: curvature, a conversion-positive exploration signal, or a
 cross-rank second moment.
 
-**The diagonal-preconditioner kill-check (shared by the two second-moment
-co-leads, categories 1 and 3).** Categories 1 (curvature) and 3 (cross-rank
+**The diagonal-preconditioner kill-check (shared by the two second-moment escape
+routes, categories 1 and 3).** Categories 1 (curvature) and 3 (cross-rank
 second moment) are the only two that read a quantity dense-**Adam** structurally
 lacks — but they share a single failure mode, and the honest control for both is
 dense-Adam (not dense-SGD), because Adam already applies a *diagonal*
@@ -673,7 +673,7 @@ as a variance-normalized step $g/\sqrt{\operatorname{Var}_r}$. **Any output
 reducible to $D\odot g$ for some diagonal $D$ — however cleverly $D$ is estimated
 (from $M_t-M_{t-1}$, from cross-shard variance, …) — lives inside dense-Adam's
 hypothesis class and collapses** (a different or "better" diagonal is still a
-diagonal). The two co-leads are precisely the **two distinct exits** from that
+diagonal). The two routes are precisely the **two distinct exits** from that
 class:
 
 - **Category 1 (R5) exits via off-diagonal *structure*** — a non-separable
