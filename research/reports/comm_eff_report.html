@@ -111,7 +111,7 @@
     <p style="margin:4px 0">The open research question is whether comm-efficient RL can <em>surpass</em> dense. The converged answer so far is <b>no — not via any anchor-usage lever</b>. The problem is <b>conversion-limited, not generation-limited</b>: the merger reconstructs <em>dense-on-stale</em>, and you cannot beat dense by reweighting, accumulating, perturbing, or de-noising a stale estimate of dense.</p>
   </div>
 
-  <p class="small">Single-draw, seed 0 throughout; greedy <code>mean@1</code> eval noise is <code>±0.024</code>. Numbers below are sourced to run artifacts / WandB ids. This document supersedes the older multi-tab program report (the pre-#29 EXP-16…EXP-27 lab-notebook history and the obsolete 0.7415 "floor" framing are intentionally dropped).</p>
+  <p class="small">Single-draw, seed 0 throughout; greedy <code>mean@1</code> eval noise is <code>±0.024</code>. Numbers below are sourced to run artifacts / WandB ids and use the post-#29 paired-replay evidence boundary for anchor-circuit claims; the obsolete 0.7415 "floor" framing is also dropped.</p>
 </section>
 
 <section id="system">
@@ -196,7 +196,7 @@
   <div class="callout fix">
     <span class="lab">issue #29 · merged as PR #16 (d26176b44)</span>
     <p style="margin:4px 0">The anchor now computes its stale full-gradient reference <code>M</code> against the policy's <b>own generated batch</b> — the same <code>(batch, θ)</code> the fast circuit saw — via <code>replay_paired_batch=true</code> + <code>snapshot_device=cpu</code>. A weight snapshot taken at the first <code>train_batch</code> tick of a global step is exactly the weights vLLM held when it generated that step's rollouts.</p>
-    <p style="margin:4px 0">This makes the residual <code>δ = M_rep − G_comp_ring</code> a pure <b>codec error</b> rather than a batch effect, removing the <b>stale-weights × current-batch confound</b> that polluted every pre-#29 merger measurement. A bitwise canary fingerprint asserts the loaded weights match the recorded historical weights; a relevance probe (masked mean \(|\log\pi_{\text{loaded}} - \log\pi_{\text{ref}}|\)) sits at the engine-noise floor and stays flat when the pairing is correct.</p>
+    <p style="margin:4px 0">This makes the residual <code>δ = M_rep − G_comp_ring</code> a pure <b>codec error</b> rather than a batch effect, removing the <b>stale-weights × current-batch confound</b>. A bitwise canary fingerprint asserts the loaded weights match the recorded historical weights; a relevance probe (masked mean \(|\log\pi_{\text{loaded}} - \log\pi_{\text{ref}}|\)) sits at the engine-noise floor and stays flat when the pairing is correct.</p>
     <p style="margin:4px 0"><b>Every result in this report is post-#29, on this valid-M circuit.</b> The knobs default OFF (<code>replay_paired_batch=false</code>, <code>snapshot_device=gpu</code>) to preserve byte-identity; the B2 launcher turns them on.</p>
   </div>
 </section>
@@ -275,7 +275,7 @@
     <ul style="margin:4px 0 0">
       <li><b>The floor is 0.6300, not 0.7415.</b> The 0.7415 figure (EXP-20, WandB oquyeic3) included the periodic dense <em>clean-step</em> crutch that the anchor circuit explicitly replaced — it is not a realistic plain-PowerSGD floor and is superseded.</li>
       <li><b>"Parity" is nuanced.</b> B2 is at statistical parity with the <em>same-box</em> dense control (0.7506; gap 0.015 &lt; ±0.024), and at <b>~96% / near-parity</b> (−0.031, ~1.3σ) of the higher same-config dense draw (0.7839). "SOTA" here means best comm-efficient method, <em>not</em> a surpass of dense.</li>
-      <li><b>Pre-#29 anchor-gradient rows are intentionally excluded here.</b> EXP-23/25/26/27 used the old invalid-M circuit; those numbers are archival, not current merger evidence.</li>
+      <li><b>The table ranks valid-M methods only.</b> Current merger evidence starts after the paired-replay fix.</li>
     </ul>
   </div>
   <p class="small"><b>EXP-33 status.</b> Complete. The β_anc sweep is config-only on the B2 substrate. C0 (β=0, control) = 0.73844 is in the B2 band [0.716, 0.774]; C1/C2/C3 all tie within ±0.024, with C2's nominal +0.0144 high draw not large enough for promotion. C4 confirms the β=1 cold-M no-op collapse. β=0 remains the default.</p>
@@ -287,7 +287,7 @@
 
   <div class="callout key">
     <span class="lab">evidence hygiene</span>
-    <p style="margin:4px 0">Pre-#29 sign-merger and ef_powersgd measurements used the old invalid-M circuit and are intentionally not used in this post-fix mechanism claim. The conclusion here rests on EXP-30/31/33, where paired replay makes <code>M_rep</code> a valid lagging reference.</p>
+    <p style="margin:4px 0">The conclusion here rests on EXP-30/31/33, where paired replay makes <code>M_rep</code> a valid lagging reference.</p>
   </div>
 
   <h3>The tournament close</h3>
@@ -322,7 +322,7 @@
 
   <div class="foot">
     <hr class="soft" />
-    <p><b>Sources.</b> Run artifacts under <code>research/runs/</code> (EXP-30/31/32/33), <code>research/runs/SUMMARY.md</code>, <code>CODE_WALKTHROUGH.md</code>, the B2 launcher <code>resolved_params</code>, plan <code>.claude/plans/33.md</code>, and WandB ids cited inline. All values single-draw seed 0, greedy mean@1, eval noise ±0.024. Generated 2026-06-17; supersedes the pre-#29 multi-tab program report. Equations render via MathJax (CDN); if offline, the raw TeX is shown.</p>
+    <p><b>Sources.</b> Run artifacts under <code>research/runs/</code> (EXP-30/31/32/33), <code>research/runs/SUMMARY.md</code>, <code>CODE_WALKTHROUGH.md</code>, the B2 launcher <code>resolved_params</code>, plan <code>.claude/plans/33.md</code>, and WandB ids cited inline. All values single-draw seed 0, greedy mean@1, eval noise ±0.024. Generated 2026-06-17; supersedes the older multi-tab program report. Equations render via MathJax (CDN); if offline, the raw TeX is shown.</p>
   </div>
 </section>
 

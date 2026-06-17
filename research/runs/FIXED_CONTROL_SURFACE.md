@@ -92,9 +92,8 @@ they can differ between runs without breaking comparability:
 ## Diagnostics policy — production runs ship with capture OFF (operator directive, 2026-06-11)
 
 Diagnostic instrumentation that **holds tensors in memory** is an OOM hazard and is
-risk-tiered. Provenance: EXP-26 B-ef **r1** OOM'd at step ~42 inside the anchor backward
-with `capture_fresh_anchor=true` co-resident; the **r2** re-run with captures off (plus
-`expandable_segments`) completed cleanly. Tiers:
+risk-tiered. Tensor capture must stay opt-in, bounded, and justified by the active
+plan. Tiers:
 
 1. **Scalar telemetry — always-on safe.** Norms, cosines, byte counters, residual-dose
    `rel_change`, corr-style watch metrics: negligible memory, log them on every run.
@@ -112,7 +111,7 @@ A **production arm** = any run whose val/score lands in a verdict, SUMMARY, or
 comparison table. Default posture for production: `COMM_EFF_CAPTURE_ENABLED=false`
 (the launcher default) — flipping it on requires the tier-2 justification in the plan.
 Standing OOM guards on EVERY run regardless of tier:
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (standard since the r1 OOM),
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`,
 `spectral.ema_device=cpu` (keeps the ~6 GB fp32 M/EF state off-GPU), and the
 18432 actor token budget above while the anchor is on.
 
@@ -122,7 +121,7 @@ Standing OOM guards on EVERY run regardless of tier:
 `examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`** (plan #31 §"THE BASELINE
 SCRIPT"). It is self-contained: it pins the **entire B2 substrate explicitly** (delayed_ef λ=1, β_anc=0,
 PowerSGD r=77, anchor on + owns `Q`, cadence=delay_K=5, clean=0, replay, the OOM guards) and then execs
-the generic `vast_comm_eff_baseline_*.sh` engine — so a **bare run reproduces B2 = the SOTA comm-eff floor
+the generic `vast_comm_eff_baseline_*.sh` engine — so a **bare run reproduces B2 = the SOTA comm-eff reference
 = EXP-31 Cell A** (no knobs to set). Do **not** invoke the generic `vast_comm_eff_baseline_*.sh` directly:
 its `${VAR:-default}` defaults are *where the values live* (and the ground truth of any run is its
 `resolved_params.txt`), but the b2_sota wrapper is the audited entry point and keeps every arm

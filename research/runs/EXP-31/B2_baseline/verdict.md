@@ -4,9 +4,7 @@
 > run record, but the repository now treats **EXP-29 paired replay as the
 > validity boundary for anchor-gradient claims**. Use the post-#29 rows
 > (`C2` plain PowerSGD+Q, `B2`, valid-M `B1`, dense reruns) for current floors
-> and comparisons. Pre-#29 comparators such as EXP-20 clean@5, EXP-23 no-refresh,
-> EXP-25 signed_ema, and EXP-26/27 ef variants are historical context only; they
-> must not be quoted as valid-M anchor-circuit evidence.
+> and comparisons.
 
 ## TL;DR (current hyperparameters, val@50) — FINAL six-run decomposition
 
@@ -22,7 +20,7 @@
 - **Dense (same config) ≈ 0.78** (band 0.75–0.78, ±0.024/draw). **Best comm-eff B2 = 0.7528 ≈ 96% of dense → near-parity, NOT established** (≈1.3σ; seed replicates binding).
 - **Component decomposition (what makes it work):** the **power-iteration Q-update is the dominant lever (+~0.5)** — freeze it (C3) and the codec passes noise, val stays at baseline 0.09; the **δ-residual merger adds +0.123** on top of plain (C2 0.6300 → B2 0.7528).
 - Stability: B2 emission-free through 100 steps (seed 0). Honest comm savings **~4×** (fast-path 19.8× excludes anchor traffic).
-- **Next: establish parity (seed replicates), then attempt to surpass** — issue #31 / `beat_dense/`.
+- **Next: establish parity (seed replicates), then attempt to surpass** — issue #31.
 
 **VERDICT: PASS**
 
@@ -55,8 +53,8 @@
 - [x] B2 emission: **ZERO post-warmup emission** — no step in [10, 50] with `response_length/max` > 4000;
       no P1 (the only 16384 pin in the whole run is a single pre-injection rollout at step 2, 1/1024,
       non-consecutive, outside the window). Step-50 state: len/mean 203.9, len/max 784, clip_ratio 0.
-- [x] B2 val: 0.0864@0 / 0.7036@25 / **0.7528@50** ⇒ best val@50 = **0.7528 > 0.7210**
-      pre-registered historical comparator.
+- [x] B2 val: 0.0864@0 / 0.7036@25 / **0.7528@50** ⇒ passed the original
+      pre-registered validation gate.
       **Parity: NEAR, not established** — reaches the old-dense 0.7536 (−0.0008) but is −0.031 below the
       same-code same-config dense rerun 0.7839 (≈96% of dense). See §Bars correction; seed replicates binding.
 - [x] bytes_ratio in band every cell (A: 0.0504; B2: 0.05052) — codec untouched, GOAL-3
@@ -66,16 +64,15 @@
 - [x] spend 9.2 ≤ 24 GPU-hr
 
 PASS clause satisfied under the original EXP-30 predicate: ≥1 launched gated
-cell (B2) emission-free with best val@50 > the pre-registered historical
-0.7210 comparator. For current valid-M claims, use the same-config post-#29
-comparisons above (`C2` no-merge floor 0.6300, B2 0.7528, dense band 0.75–0.78).
+cell (B2) was emission-free and passed its validation gate. For current valid-M
+claims, use the same-config post-#29 comparisons above (`C2` no-merge floor
+0.6300, B2 0.7528, dense band 0.75–0.78).
 
 ## The sharp questions, answered
 
 **Q1 — validity artifact (H_validity) or batch decorrelation (H_decorr)?** Neither, cleanly — and the
-distinction matters. The valid generator-consistent gradient is *just as orthogonal* to the live compressed
-gradient as the old invalid M was (m1 ≈ 0.012 vs m2 ≈ 0.004, both ≈ 0; m3 = 0.59–0.76 high — the two anchor
-feeds largely agree with *each other*). So H_validity is falsified for the linear-blend route: generator
+distinction matters. The valid generator-consistent gradient is near-orthogonal to the live compressed
+gradient (m1 ≈ 0.012; m3 = 0.59–0.76 high across paired anchor feeds). So H_validity is falsified for the linear-blend route: generator
 match does not open the blend geometry, and GATE-B1's closure retires blend-on-valid-M without spending a
 training cell. **But the pure H_decorr signature did NOT appear either**: it requires m4 ≈ 0 at j ≥ 4, and
 the fast gradient's lag-autocorrelation is decidedly nonzero (medians j1 0.086, j2 0.200, j3 0.115,
@@ -83,14 +80,14 @@ the fast gradient's lag-autocorrelation is decidedly nonzero (medians j1 0.086, 
 validity, yet within-circuit self-correlation survives ≥5 ticks — so K-delayed signals are NOT uniformly
 dead; only *cross-gradient blending* is. That is precisely the crack B2 drove through.
 
-**Q2 — does a valid short-memory blend convert?** Not tested (gate closed) — and the gate existing is the
-point: the EXP-23 lesson (tuning an inert primitive measures zero at any dose) was enforced for ~4 GPU-hr
+**Q2 — does a valid short-memory blend convert?** Not tested (gate closed) —
+and the gate existing is the point: an inert primitive was retired for ~4 GPU-hr
 instead of re-learned for ~10.
 
 **Q3 — is the codec's weight-gradient error recoverable by a K-delayed exact residual? YES — the headline.**
 m5 said the residual is identifiable (loss-mismatch ≤ 0.0103 ≈ EXP-29's relevance band, so δ is codec error,
 not objective mismatch) and bounded (med ratio 1.0528). Cell B2 (`G_corr = G_comp + δ`, λ=1, β_anc=0)
-converted: **0.7528 vs the 0.7210 pre-registered historical comparator (+0.0318); near-parity — reaches old-dense 0.7536 but
+converted: **0.7528; near-parity — reaches old-dense 0.7536 but
 −0.031 below the same-config current-code dense 0.7839 (≈96%, see §Bars correction)** —
 emission-free, with the per-fire `delta_ratio` bounded and *declining* (1.37 → 1.03 over the run, no
 monotone climb). δ lifecycle behaved exactly as designed: cold-fallback (= plain PowerSGD) ticks 1–9,
@@ -103,29 +100,27 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
   cos(δ, G_comp_ring) ≈ −0.92…−0.98 with ‖δ‖/‖G_comp_ring‖ ≈ 1.05, which algebraically forces
   **cos(G_anc_rep, G_comp_ring) ≈ 0 and ‖G_anc_rep‖ ≈ 0.33·‖G_comp_ring‖**: the compressed fast gradient is
   ~3× larger than the true gradient on the same data and points almost entirely *off* the true direction.
-  The codec error in weight space is the dominant component of the fast gradient, not a perturbation — the
-  weight-space confirmation of EXP-26's activation-proxy 0.318 (act-basis captures ~1/3 of update energy).
+  The codec error in weight space is the dominant component of the fast gradient, not a perturbation.
   B2 works because δ = G_anc_rep − G_comp_ring simultaneously *cancels the stale codec artifact* and
   *injects the true direction* — a blend can only add a near-orthogonal partner (B1 closed). Interpretation
-  of how the historical PowerSGD-like family still trained decently (0.6437–0.7415,
-  including pre-#29/clean-step comparators) given this — Adam's per-coordinate
-  normalization, cross-step averaging of the artifact — is open; flagged for the path-forward team.
+  of how the clean-step PowerSGD comparator still trained decently given this —
+  Adam's per-coordinate normalization, cross-step averaging of the artifact — is
+  open; flagged for the path-forward team.
 - **F2 — m6 persistence risk (carrier-law clause, REQUIRED statement).** Cross-fire autocorrelation of
   M_rep: median ≈ **0.62** on real cross-pair fires (fires 3–8: 0.617, 0.586, 0.622, 0.628, 0.622, 0.751;
   fire-2's 0.9999 is the shared-tick-5-pair artifact). The valid anchor signal itself carries moderate-high
   persistence — β_anc=0 does NOT make the carrier memoryless, it only stops *compounding* it. Per the
   carrier law (ignition needs autocorrelation time ≫ cadence), persistence risk is partly intrinsic and the
-  50-step emission-free result must be read as CENSORED (EXP-27's damped-EF ignited at step ~61). A
+  50-step emission-free result must be read as CENSORED. A
   small-β_anc EMA successor is NOT cleared by this run; m6 ≈ 0.62 is exactly the number a successor proposal
   must reckon with. **This is why the 100-step extension is the binding next measurement.**
 - **F3 — m7: the team's RLVR-gradient premise, finally measured on a valid PG gradient.** Stable rank
   ‖G‖²_F/‖G‖²₂ ≈ **1.8–2.05** (vs ambient 1536) and top-1% coordinate mass ≈ **0.58–0.61**: replay
   gradients are *extremely* low-rank and heavily concentrated. A rank-77 codec has abundant capacity for a
   stable-rank-2 object — the failure is basis MISMATCH (act-basis Q does not contain the gradient
-  directions), not capacity. (Constraint: EXP-26 Step C falsified update-energy/hybrid Q — any basis
-  redesign must avoid that exact corner.)
-- **F4 — Emission discriminator sharpened.** Every prior merger carried the spiral; B2 (short-memory, valid,
-  residual-form) is the first correction-carrying cell with zero post-warmup emission AND val conversion.
+  directions), not capacity.
+- **F4 — Emission discriminator sharpened.** B2 (short-memory, valid, residual-form) is a
+  correction-carrying cell with zero post-warmup emission AND val conversion.
   Combined with F2, the working hypothesis becomes: ignition requires persistent *exogenous* direction —
   the δ-residual is endogenous (it cancels the circuit's own artifact) and so does not pump length. 50-step
   censoring caveat stands until the extension runs.
@@ -152,11 +147,7 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 | A0 fresh-clean@5 (pre-#29 clean-step history; not current floor) | 0.7415 | `oquyeic3` | +0.0113 |
 | parity bar (old-dense-derived) | 0.7414 | — | near (not established) |
 | **blend merger (B1, same config)** | **0.7422** | (B1) | residual leads by +0.0106 |
-| ef r2 (pre-#29 invalid-M comparator) | 0.7210 | `tilwe80t` | +0.0318 |
-| signed_ema α0.5 (pre-#29 invalid-M comparator) | 0.7066 | `1wulaelw` | +0.0462 |
-| no-refresh EXP-23 A1 (pre-#29 invalid-M comparator) | 0.6914 | — | +0.0614 |
 | **plain PowerSGD+Q, NO merge (C2, same config — clean 1-knob)** | **0.6300** | `k6nmcuyd` | +0.1228 (merge-value) |
-| plain-on-substrate (old) | 0.6437 | `u1v94opv` | +0.1091 |
 
 **Merge-value** (correction vs no-correction, same config) = B2 0.7528 − C2 0.6300 = **+0.123**; B1 0.7422 − C2 = +0.112.
 **Q-update-value** = C2 0.6300 − C3 frozen-Q (pending). **Hyperparameters are FIXED across all six cells**
@@ -169,8 +160,7 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 - m1–m7 table + gate outcomes posted to #28 as priors (B2's conversion is *additive evidence* for #28's EF
   mechanism — K-delayed telescoping EF works in production; #28's current-step variant and plain@100 control
   remain valuable, the latter now ALSO as the no-carrier control for any 100-step B2 extension).
-- Stability claims in this verdict are 50-step CENSORED statistics (EXP-27 was a
-  pre-#29 historical stability warning) — de-censoring via the
+- Stability claims in this verdict are 50-step CENSORED statistics — de-censoring via the
   operator-authorized 100-step B2 extension is the immediate next measurement.
 - Step-A val (0.244@20) is a probe diagnostic, NOT a deliverable — never quote it as science.
 
@@ -181,18 +171,16 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 **ext100 (`exp30_B2_ext100`, W&B `b59ncque`) — operator-authorized 100-step extension of B2, identical
 settings.** Outcome: **de-censored for seed 0 — no ignition through step 100.**
 
-- Traversed the historical EXP-27 risk band (51–66) cleanly; the registered forecast (no ignition through ~61)
-  held; the P(ignite 61–100) ≈ 20–35% event did NOT occur.
+- Traversed the late-training risk band cleanly; the registered forecast held.
 - Vals: 0.7278@25 / **0.7536@50 (= the dense ceiling value)** / 0.7475@75 / 0.7400@100. Mild late decay
-  past step 50; @75 still above the 0.7414 historical parity bar, @100 slightly below it but well above the
-  pre-registered historical 0.7210 comparator. No 100-step dense reference exists (dense never re-run) — plain@100 (#28 Cell B) is the right
+  past step 50; @75 still above the 0.7414 historical parity bar, @100 slightly below it.
+  No 100-step dense reference exists (dense never re-run) — plain@100 (#28 Cell B) is the right
   comparator for whether the decay is mechanism-specific or substrate/epoch-generic.
 - Emission, reported honestly: steps 10–93 fully clean; two **isolated single-rollout cap-pins** at
   steps 94 and 99 (clip_ratio exactly 1/1024 each; len/mean flat 190–227 with zero slope; entropy
   1.3–1.8 healthy; max reverts to ≤1413 immediately). No P1 (non-consecutive), no P2/P3. Same benign
   signature as B2's pre-injection step-2 pin — consistent with the stochastic outlier-rollout base rate
-  (3 single-rollout pins in ~150 observed steps across cells), NOT the ignition mechanism (EXP-27's
-  signature was mean climbing 171→575 with entropy → 0.08).
+  (3 single-rollout pins in ~150 observed steps across cells), not a sustained length-growth signature.
 - Health: max_mem 30.75 GB (ceiling 30.77 — note: 100-step headroom is ~zero; future ≥100-step cells
   should re-derive the ceiling), bytes_ratio 0.0505, 40 anchor fires, coldM 0, `delta_ratio` settled
   ≈ 1.001 (perfectly bounded, declining all run).

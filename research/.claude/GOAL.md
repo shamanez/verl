@@ -43,9 +43,9 @@ codec**. The full result + why + what's next, and all the numbers, live in
   (`anchor.owns_q`; the fast compressed circuit is a read-only `Q` consumer). This
   **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
   is mechanically **proven by the post-#29 paired-replay path** (EXP-29 infra +
-  EXP-30 canary/relevance/geometry gates). Pre-#29 anchor-gradient runs are archival
-  only and must not be used as valid-M evidence. Judge on **val/score, not
-  grad_norm**. Do not relitigate the substrate.
+  EXP-30 canary/relevance/geometry gates). Only post-#29 valid-M evidence should
+  be used for anchor-circuit claims. Judge on **val/score, not grad_norm**. Do
+  not relitigate the substrate.
 - **Settled result (the current SOTA)** — the merger question is answered: the **`delayed_ef`
   merger (B2)** — error-feedback on the PowerSGD codec residual, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0 —
   reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
