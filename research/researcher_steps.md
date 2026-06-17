@@ -150,6 +150,31 @@ Inside:
 /bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
 ```
 
+### Choosing the Vast.ai account (team vs private)
+
+By default every box provisions + bills the **private** account (`VAST_API_KEY`).
+To run a session on the shared **team** account (`VAST_API_KEY_TEAM`, the
+"Pluralis Research" team) instead, just say so in the loop instruction:
+
+```
+/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it. Use the team account.
+```
+
+…or `Use the private account.` to be explicit. The orchestrator passes
+`vast_account=team|private` to every `experiment-runner` dispatch; the runner
+`export`s `VAST_ACCOUNT` for `vast-provision` and records `vast_account` on the
+ledger row, so `vast-teardown` **and** the automatic teardown Stop hook destroy
+the box with the *same* account's key (a team box is never orphaned under the
+private key, and vice-versa). Nothing else changes — same template, same chain,
+same caps.
+
+Deterministic alternative (e.g. a manual `/vast-provision` outside the loop, or
+to force a whole shell): `export VAST_ACCOUNT=team` before launching `claude`,
+and the skills pick it up directly. A plan may also pin `vast_account: team` in
+its `## Compute budget` block to override the session default for that one
+experiment. Both keys live in `secrets.env` (`VAST_API_KEY` + `VAST_API_KEY_TEAM`);
+the harness never echoes either.
+
 Each tick, the orchestrator advances every approved plan:
 
 | State | Auto-dispatch |

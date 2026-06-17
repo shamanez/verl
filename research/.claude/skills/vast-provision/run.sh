@@ -127,33 +127,48 @@ fi
 # is the documented single store; this lets `/vast-provision` work from any
 # fresh Claude session without an explicit `source` step.
 SECRETS_FILE="${VERL_SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
-if [[ -z "${VAST_API_KEY:-}" && -r "$SECRETS_FILE" ]]; then
-  echo "$PROG: auto-sourcing $SECRETS_FILE" >&2
-  set +u
-  # shellcheck disable=SC1090
-  source "$SECRETS_FILE"
-  set -u
-fi
+# Resolve the Vast.ai account + API key (team vs private) via the shared resolver.
+# VAST_ACCOUNT=team bills the shared "Pluralis Research" team account
+# (VAST_API_KEY_TEAM); default/private uses the personal VAST_API_KEY. The chosen
+# account is stamped on the handle (vast_account) so teardown auths against it.
+# shellcheck disable=SC1090
+source "$SKILL_DIR/../_vast_account.sh"
+vast_load_secrets
+VAST_ACCOUNT="$(vast_account_norm "${VAST_ACCOUNT:-private}")"
+VAST_API_KEY="$(vast_key_for "$VAST_ACCOUNT")"; export VAST_API_KEY
 if [[ -z "${VAST_API_KEY:-}" ]]; then
-  echo "$PROG: VAST_API_KEY not set and not found in $SECRETS_FILE" >&2
+  echo "$PROG: no Vast API key for account=$VAST_ACCOUNT (set VAST_API_KEY / VAST_API_KEY_TEAM in $SECRETS_FILE)" >&2
   exit 1
 fi
-echo "$PROG: auth: using VAST_API_KEY" >&2
+echo "$PROG: auth: using VAST_API_KEY (account=$VAST_ACCOUNT)" >&2
 
 command -v vastai >/dev/null || { echo "$PROG: 'vastai' CLI not on PATH — pip install vastai" >&2; exit 1; }
 command -v jq    >/dev/null || { echo "$PROG: 'jq' not on PATH" >&2; exit 1; }
 
-# ---- pre-flight: ssh key uploaded? ----------------------------------------
-# vastai create instance --ssh creates a box accessible only via keys the
-# user has uploaded to https://cloud.vast.ai/account/. With zero uploaded
-# keys, the instance comes up unreachable; we'd discover that only after
-# the wait_for_ready timeout, ~25 min and several cents in.
-SSH_KEYS_RAW=$(vastai show ssh-keys 2>/dev/null || true)
-if ! grep -q "ssh-" <<<"$SSH_KEYS_RAW"; then
-  echo "$PROG: no SSH key uploaded to your vast.ai account — provisioning would yield an unreachable box." >&2
-  echo "$PROG: upload one via: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" >&2
-  echo "$PROG: or via the console: https://cloud.vast.ai/account/" >&2
-  exit 1
+# ---- pre-flight: ssh key available? ---------------------------------------
+# A `--ssh` box is reachable only via an attached key. PRIVATE accounts use an
+# account-level uploaded key (Vast auto-attaches it to every create). TEAM
+# accounts CANNOT hold account-level keys ("SSH keys can only be created in
+# personal context"), so for team we attach the harness key per-instance right
+# after create (see create loop) — here we only verify a local public key exists.
+if [[ "$VAST_ACCOUNT" == "team" ]]; then
+  if [[ ! -r "$HOME/.ssh/vast_ai_name.pub" && ! -r "$HOME/.ssh/vast_ai.pub" ]]; then
+    echo "$PROG: VAST_ACCOUNT=team needs a local harness public key to attach per-instance" >&2
+    echo "$PROG: (~/.ssh/vast_ai_name.pub or ~/.ssh/vast_ai.pub) — none readable." >&2
+    exit 1
+  fi
+else
+  # vastai create instance --ssh creates a box accessible only via keys the
+  # user has uploaded to https://cloud.vast.ai/account/. With zero uploaded
+  # keys, the instance comes up unreachable; we'd discover that only after
+  # the wait_for_ready timeout, ~25 min and several cents in.
+  SSH_KEYS_RAW=$(vastai show ssh-keys 2>/dev/null || true)
+  if ! grep -q "ssh-" <<<"$SSH_KEYS_RAW"; then
+    echo "$PROG: no SSH key uploaded to your vast.ai account — provisioning would yield an unreachable box." >&2
+    echo "$PROG: upload one via: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" >&2
+    echo "$PROG: or via the console: https://cloud.vast.ai/account/" >&2
+    exit 1
+  fi
 fi
 
 # ---- session id / label / handle dir --------------------------------------
@@ -341,6 +356,20 @@ while IFS= read -r offer; do
 
   echo "$PROG: instance $INSTANCE_ID created, waiting up to ${TIMEOUT}s for running + ssh-routable" >&2
 
+  # TEAM account: account-level keys aren't supported, so Vast attaches nothing
+  # to a team-key create — the box would be unreachable. Attach the harness
+  # key(s) to THIS instance now. (Private boxes get account keys auto-attached.)
+  if [[ "$VAST_ACCOUNT" == "team" ]]; then
+    for pk in "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
+      [[ -r "$pk" ]] || continue
+      if vastai attach ssh "$INSTANCE_ID" "$(cat "$pk")" >/dev/null 2>&1; then
+        echo "$PROG: attached $(basename "$pk") to team instance $INSTANCE_ID" >&2
+      else
+        echo "$PROG: WARNING: failed to attach $(basename "$pk") to $INSTANCE_ID — box may be unreachable" >&2
+      fi
+    done
+  fi
+
   # ---- poll for ready ----
   #
   # The load-bearing readiness signal is `.ports["22/tcp"][0].HostPort`. Both
@@ -489,10 +518,12 @@ except Exception:
     --arg lb  "$LABEL" \
     --arg sid "$SESSION_ID" \
     --arg sl  "$SSH_LOGIN" \
+    --arg va  "$VAST_ACCOUNT" \
     '{schema_version:$sv, instance_id:$iid, offer_id:$oid,
       ssh_host:$sh, ssh_port:$sp, public_ipaddr:$pip,
       gpu_name:$gn, num_gpus:$ng, dph_total:$dph,
-      created_at:$ca, label:$lb, session_id:$sid, ssh_login:$sl}')
+      created_at:$ca, label:$lb, session_id:$sid, ssh_login:$sl,
+      vast_account:$va}')
 
   # ---- atomic handle write ----
   HANDLE_PATH="$HANDLE_DIR/${INSTANCE_ID}.json"

@@ -13,8 +13,17 @@ LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 [[ -f "$LEDGER" ]] || exit 0
 
-# vast-provision and vast-teardown read VAST_API_KEY from env; the vastai CLI reads the same var.
-# Source ~/.config/verl-research/secrets.env at session start to populate it.
+# Teardown auths PER-ROW: a row's vast_account (team|private, default private)
+# selects the key, so a team-account box is destroyed with the team key (else the
+# personal key 404s and the box leaks). The shared resolver loads both keys; if it
+# is somehow absent, fall back to the private VAST_API_KEY (the historical behaviour).
+if [[ -f "$PROJECT_DIR/.claude/skills/_vast_account.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "$PROJECT_DIR/.claude/skills/_vast_account.sh"
+  vast_load_secrets
+else
+  vast_key_for() { printf '%s' "${VAST_API_KEY:-}"; }
+fi
 
 NOW=$(date +%s)
 TEMP=$(mktemp)
@@ -92,12 +101,16 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     # TORN_DOWN) — only a positive not-found does.
     DESTROYED=0
     FAILED=0
+    # Resolve the account this row was provisioned on (default private) and its key,
+    # so a team-account box is torn down with the team key.
+    ROW_ACCT=$(echo "$row" | jq -r '.vast_account // "private"')
+    ROW_KEY=$(vast_key_for "$ROW_ACCT")
     while IFS= read -r iid; do
       [[ -z "$iid" ]] && continue
       # MUST pass -y (without it a non-TTY prompt collapses to "Aborted" yet the
       # CLI still exits 0 — a silent no-op; observed 2026-06-03 on 39132674).
-      DOUT=$(vastai destroy instance "$iid" -y 2>&1); DRC=$?
-      echo "[$(date -Iseconds)] destroy $iid rc=$DRC: $DOUT" >> /tmp/teardown.err
+      DOUT=$(VAST_API_KEY="$ROW_KEY" vastai destroy instance "$iid" -y 2>&1); DRC=$?
+      echo "[$(date -Iseconds)] destroy $iid account=$ROW_ACCT rc=$DRC: $DOUT" >> /tmp/teardown.err
       if (( DRC == 0 )) && ! echo "$DOUT" | grep -qiE 'aborted|traceback|status_code|permission denied|^error'; then
         DESTROYED=$((DESTROYED + 1))                       # clean destroy
       elif echo "$DOUT" | grep -qiE 'not found|no such|does not exist|no longer exists|already (destroyed|gone)'; then
@@ -106,7 +119,7 @@ while IFS= read -r row || [[ -n "$row" ]]; do
         # Ambiguous — verify authoritatively. Only a POSITIVE not-found counts as
         # gone; still-listed OR an auth/network error is a conservative FAILED so
         # we never abandon a live, billing box.
-        CHECK=$(vastai show instance "$iid" --raw 2>&1 || true)
+        CHECK=$(VAST_API_KEY="$ROW_KEY" vastai show instance "$iid" --raw 2>&1 || true)
         if echo "$CHECK" | grep -qiE 'not found|no such|does not exist|404'; then
           DESTROYED=$((DESTROYED + 1))
         else

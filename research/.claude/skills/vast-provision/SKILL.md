@@ -62,10 +62,19 @@ Template record on Vast.ai and is referenced by `templates.json`.
 
 | Var | Purpose | Notes |
 |---|---|---|
-| `VAST_API_KEY` | vast.ai REST credential | Auto-sourced from `~/.config/verl-research/secrets.env` (override path with `VERL_SECRETS_FILE`). Agents calling `/vast-provision` cold do NOT need to `source` first — the skill handles it. |
+| `VAST_API_KEY` | vast.ai REST credential (personal / `account=private`) | Auto-sourced from `~/.config/verl-research/secrets.env` (override path with `VERL_SECRETS_FILE`). Agents calling `/vast-provision` cold do NOT need to `source` first — the skill handles it. |
+| `VAST_ACCOUNT` | account selector `team`\|`private` | Default `private`. `team` → bills the shared "Pluralis Research" team account via `VAST_API_KEY_TEAM`. Resolved by `../_vast_account.sh`; the chosen account is stamped on the handle as `vast_account` so `vast-teardown` + the Stop hook auth against the SAME account. |
+| `VAST_API_KEY_TEAM` | team vast.ai REST credential | Used only when `VAST_ACCOUNT=team`. Auto-sourced from the same secrets file. |
 | `VERL_SECRETS_FILE` | optional path override | Default: `~/.config/verl-research/secrets.env`. |
 | `VERL_VAST_HANDLE_DIR` | optional override | Default: `$CLAUDE_PROJECT_DIR/.claude/state/vast-handles`. |
 | `CLAUDE_PROJECT_DIR` | research dir | Defaults to the dir three levels above this skill. |
+
+**Team-account SSH (`VAST_ACCOUNT=team`):** Vast.ai teams cannot hold account-level
+SSH keys, so the skill skips the account-key precheck and instead runs
+`vastai attach ssh <instance> <key>` for `~/.ssh/vast_ai_name.pub` (+ `~/.ssh/vast_ai.pub`)
+on each instance right after create — so a team box is reachable with the same harness
+keys as a personal box. (Private boxes rely on the account's uploaded keys, auto-attached
+by Vast.) Verified end-to-end: a team box comes up SSH-reachable with `vast_ai_name`.
 
 ## Expected wait time (the skill blocks the calling shell)
 
@@ -208,9 +217,14 @@ Downstream agents (`experiment-runner`) parse these lines via `grep
   "created_at":     "2026-05-25T12:30:00Z",
   "label":          "verl-research:<session-id>",
   "session_id":     "<session-id>",
-  "ssh_login":      "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 12345 root@ssh4.vast.ai -L 8080:localhost:8080"
+  "ssh_login":      "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 12345 root@ssh4.vast.ai -L 8080:localhost:8080",
+  "vast_account":   "private"
 }
 ```
+
+`vast_account` (`team`|`private`) records which Vast.ai account created + bills the box, so
+`vast-teardown` and the teardown Stop hook destroy it with the same account's key. Set by the
+`VAST_ACCOUNT` env at provision time (default `private`).
 
 `ssh_login` is the **paste-ready** connect command — the fixed SSH form every consumer must
 use (`-i ~/.ssh/vast_ai_name` so the right key is offered; `StrictHostKeyChecking=accept-new` so a

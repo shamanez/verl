@@ -22,6 +22,7 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 - `EXP-<ID>` (your prompt names this)
 - Plan: `$PARENT/.claude/plans/<ID>.md`
 - Parent ledger: `$PARENT/.claude/state/runs.jsonl`
+- `vast_account` — `team` or `private` (default **private**). Your dispatch prompt names it when the operator's loop instruction says "use the team account" / "use the private account". It selects which Vast.ai account provisions + bills the box: `team` → the shared "Pluralis Research" team account, `private` → the personal account. You must (a) `export VAST_ACCOUNT=<team|private>` before invoking `vast-provision`, and (b) record `vast_account` on the PROVISIONED ledger row (step 5) so teardown auths against the SAME account. Both keys live in `secrets.env`; the skill + Stop hook resolve them — you only pass the selector.
 
 `$PARENT` resolves to the original research/ directory (not your worktree). Always read/write the ledger and the plan from `$PARENT`, not from your worktree.
 
@@ -60,13 +61,15 @@ Canonical project facts (vast template hash, secrets path, default compute chain
    **Skill contract — DO NOT re-invent provisioning.** The runner must invoke the `vast-provision` skill and **only** that skill. Direct `vastai create instance` calls are forbidden. The skill is the single source of truth for: docker image, container `--shm-size` / `--cap-add`, onstart script (clones `shamanez/verl @ vast-ai-workload` + pip-installs verl `--no-deps`), disk-size default, and the locked research Template. The runner supplies only the per-experiment knobs (query, max-price, count); the skill auto-reads the active Template from `.claude/skills/vast-provision/templates.json` when no `--template-hash` is passed.
 
    For each tier `IDX` in the chain (0-based):
-   1. Invoke the globally-available `vast-provision` skill with that tier's query and the plan's `max_dph`. **Pass `--query`, `--max-price`, `--count`, `--disk-gb`. Do NOT pass `--image` or `--template-hash`** — the skill defaults both from `templates.json`:
+   1. Invoke the globally-available `vast-provision` skill with that tier's query and the plan's `max_dph`. **First `export VAST_ACCOUNT=<team|private>`** (from your `vast_account` input — default `private`) so the skill provisions on the right account; **pass `--query`, `--max-price`, `--count`, `--disk-gb`. Do NOT pass `--image` or `--template-hash`** — the skill defaults both from `templates.json`:
       ```
+      export VAST_ACCOUNT="<team|private>"   # default private; the skill stamps it on the handle
       /vast-provision count=<gpu_count> \
                       query="<chain[IDX]>" \
                       max_price=<max_dph> \
                       disk_gb=200
       ```
+      The stderr line `vast-provision: auth: using VAST_API_KEY (account=<team|private>)` confirms the selected account.
       The stderr line `vast-provision: auto-selected template 'verl-research-vllm020' hash=<HEX> image=verlai/verl:vllm020.dev1` confirms the locked Template was used. If you ever see `auto-selected` missing, something has corrupted `templates.json` — append `MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing` to PROGRESS.md and stop instead of bypassing it.
    2. Capture every `VAST_HANDLE: { ... }` line from stdout. Write each handle JSON into `$PARENT/runs/EXP-<ID>/handles/<instance_id>.json` **and** record the tier index on the handle: append `chosen_tier_idx: <IDX>` and `chosen_tier_query: "<chain[IDX]>"` fields via `jq` before writing.
    3. If ≥1 handle was captured this tier: set `CHOSEN_TIER_IDX=<IDX>`, exit the loop, and proceed to step 5.
@@ -93,13 +96,16 @@ Canonical project facts (vast template hash, secrets path, default compute chain
          --argjson ts "$(date +%s)" --argjson gpus "$TOTAL_GPUS" \
          --argjson dph "$SUM_DPH" --argjson mgh "<max_gpu_hr>" \
          --argjson pgpu "$PER_NODE_GPUS" --argjson tier "$CHOSEN_TIER_IDX" \
-         --arg tq "<chain[CHOSEN_TIER_IDX]>" --slurpfile h /dev/stdin \
+         --arg tq "<chain[CHOSEN_TIER_IDX]>" --arg va "${VAST_ACCOUNT:-private}" \
+         --slurpfile h /dev/stdin \
          '{id:$id, handles:$h[0], started_at:$t, started_at_epoch:$ts,
            max_gpu_hr:$mgh, per_node_gpus:$pgpu, total_gpus:$gpus,
            dph:$dph, chosen_tier_idx:$tier, chosen_tier_query:$tq,
-           status:"PROVISIONED"}' \
+           vast_account:$va, status:"PROVISIONED"}' \
        <<< "$(jq -s . "$PARENT/runs/EXP-<ID>/handles/"*.json)")
    echo "$ROW" >> "$PARENT/.claude/state/runs.jsonl"
+   # vast_account is the account this box was provisioned on — the Stop hook + vast-teardown
+   # read it back to auth against the SAME account (a team box needs the team key to destroy).
    ```
    Note the asymmetry: handle JSON fields are `num_gpus` / `dph_total` (locked schema), but the **ledger row** we write here uses `total_gpus` / `dph` (the legacy ledger field names — the Stop hook's teardown and the sync-metrics hook already read these names). Don't unify them; the boundary is the right place.
 

@@ -39,18 +39,29 @@ if [[ ${#IDS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Auth: single VAST_API_KEY env var. Agent self-sufficiency mirror of
-# vast-provision/run.sh — auto-source the canonical secrets file if env is empty.
+# Auth: team vs private, resolved PER-INSTANCE from the ledger's vast_account
+# field — a team-account box must be destroyed with the team key, else the
+# personal key 404s and the box leaks. The shared resolver loads both keys.
+# An explicit VAST_ACCOUNT env var, if set, forces that account for ALL ids.
 SECRETS_FILE="${VERL_SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
-if [[ -z "${VAST_API_KEY:-}" && -r "$SECRETS_FILE" ]]; then
-  echo "vast-teardown: auto-sourcing $SECRETS_FILE" >&2
-  # shellcheck disable=SC1090
-  source "$SECRETS_FILE"
-fi
-if [[ -z "${VAST_API_KEY:-}" ]]; then
-  echo "vast-teardown: VAST_API_KEY not set and not found in $SECRETS_FILE" >&2
+# shellcheck disable=SC1090
+source "$(dirname "$0")/../_vast_account.sh"
+vast_load_secrets
+if [[ -z "${VAST_API_KEY:-}" && -z "${VAST_API_KEY_TEAM:-}" ]]; then
+  echo "vast-teardown: no Vast API key (VAST_API_KEY / VAST_API_KEY_TEAM) in $SECRETS_FILE" >&2
   exit 1
 fi
+
+# Account a given instance id was provisioned on (default private). VAST_ACCOUNT
+# env, if set, forces that account for every id (manual override).
+acct_for_iid() {
+  local iid="$1" a=""
+  if [[ -n "${VAST_ACCOUNT:-}" ]]; then vast_account_norm "$VAST_ACCOUNT"; return; fi
+  [[ -f "$LEDGER" ]] && a=$(jq -r --arg i "$iid" '
+    select(any(.handles[]?.instance_id // empty; (.|tostring) == $i)) | .vast_account // empty' \
+    "$LEDGER" 2>/dev/null | tail -1)
+  vast_account_norm "${a:-private}"
+}
 
 ERR_LOG="/tmp/teardown.err"
 : > "$ERR_LOG"
@@ -60,8 +71,9 @@ for iid in "${IDS[@]}"; do
   # MUST pass -y: `vastai destroy instance <id>` prompts interactively for
   # confirmation, and when stdin isn't a TTY the prompt collapses to "Aborted"
   # — but the CLI STILL EXITS 0. Without -y the destroy silently does nothing.
-  OUT=$(vastai destroy instance "$iid" -y 2>&1) || true
-  echo "[$iid] $OUT" >>"$ERR_LOG"
+  ACCT=$(acct_for_iid "$iid"); KEY=$(vast_key_for "$ACCT")
+  OUT=$(VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
+  echo "[$iid] account=$ACCT $OUT" >>"$ERR_LOG"
   # Belt-and-braces: even with -y, treat "Aborted" / "error" anywhere in stdout
   # as a hard failure. The CLI's exit code alone is not trustworthy.
   if grep -qiE 'aborted|^error[: ]|status_code' <<<"$OUT"; then
@@ -72,7 +84,7 @@ for iid in "${IDS[@]}"; do
   # `vastai show instance <id>` returns an object while it exists; once
   # destroyed it returns either an HTTP error or no payload.
   sleep 2
-  CHECK=$(vastai show instance "$iid" --raw 2>&1 || true)
+  CHECK=$(VAST_API_KEY="$KEY" vastai show instance "$iid" --raw 2>&1 || true)
   if echo "$CHECK" | grep -qiE 'error|not found|404' \
      || ! echo "$CHECK" | jq -e 'type=="object" and has("id")' >/dev/null 2>&1; then
     DESTROYED+=("$iid")

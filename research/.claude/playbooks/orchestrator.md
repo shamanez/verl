@@ -57,6 +57,14 @@ it too. Your role-specific constraints:
 - Only dispatch on `status:approved` plans. **The human flips that label.**
   Never a runner on `status:planned` — the human gate is sacred.
 - Plan's `kind:` field drives routing (see §"Kind routing" below).
+- **Vast.ai account selector.** If your loop instruction says "use the team
+  account" (or "use the private account"), pass `vast_account=team` (resp.
+  `private`) in every `experiment-runner` dispatch this session. Default is
+  `private`. A plan may also pin `vast_account:` in its `## Compute budget`
+  block (that overrides the session default for that experiment). The runner
+  exports `VAST_ACCOUNT` and records `vast_account` on the ledger row;
+  `vast-teardown` and the teardown Stop hook read it back so a team box is
+  always destroyed with the team key. You never handle keys — only the selector.
 
 ---
 
@@ -175,6 +183,7 @@ You are experiment-runner for EXP-<N>.
 Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree).
 The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true, branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main) and apply target_modules patches; commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
+vast_account=<team|private>. Default private. `export VAST_ACCOUNT=<this>` before provisioning so the box bills the right account, and record `vast_account` on the PROVISIONED ledger row (teardown reads it back).
 Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsync payload, launch in tmux, promote to RUNNING, label `status:running`, append one PROGRESS line, stop. Never call vast-teardown.
 ```
 
