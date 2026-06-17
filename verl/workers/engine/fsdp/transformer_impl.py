@@ -1224,7 +1224,7 @@ class FSDPEngine(BaseEngine):
             config = kw.get("config")
         if config is None:
             raise RuntimeError(
-                "comm_eff anchor C4: could not read 'config' off the fast-path "
+                "comm_eff anchor: could not read 'config' off the fast-path "
                 "loss_function (expected functools.partial(ppo_loss, config=...)). "
                 "The clean-gradient anchor loss needs the actor config for "
                 "agg_loss normalization."

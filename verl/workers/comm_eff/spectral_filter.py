@@ -425,8 +425,8 @@ class SpectralFilter:
         # the stale-anchor EMA. sign(M) is ±1 on warmed entries (anc_norm>eps
         # guarantees a non-trivial M, though individual entries can still be 0 →
         # sign 0, which correctly zeroes only those single coordinates, not the
-        # whole matrix — the matrix-level cold guard above is what prevents the
-        # catastrophic all-zero case).
+        # whole matrix; the matrix-level cold guard above prevents all-zero
+        # replacement before the anchor is warm.
         g_corr = alpha * gm + (1.0 - alpha) * gm.abs() * torch.sign(anc)
         return g_corr.to(g_mask.dtype)
 
@@ -553,7 +553,7 @@ class SpectralFilter:
         Shape-guarded: returns ``None`` (the caller counts a skip and folds in
         the plain delta unchanged) when the source is degenerate — non-finite,
         ~zero-norm, fewer than ``r`` usable directions (``r > min(shape)``), or
-        not 2D — so a pathological target never injects garbage or raises.
+        not 2D — so a degenerate target never injects invalid values or raises.
         """
         if r <= 0:
             return None
@@ -625,7 +625,7 @@ class SpectralFilter:
         cross-rank identical). ``g`` is already detached (it is built from detached
         ``G_comp`` + ``M_rep`` + ring), so the perturbation adds NO autograd history.
 
-        Guards (return ``g`` UNCHANGED, never a silent garbage grad): a non-finite
+        Guards (return ``g`` unchanged): a non-finite
         ‖g‖, a ~zero-norm ‖g‖ (≤ 1e-12 ⇒ nothing to scale against), or a degenerate
         ξ with ‖ξ‖ == 0. ξ is generated on CPU (a ``torch.Generator('cpu')`` is the
         portable, rank-deterministic source — CUDA generators are device-local and
@@ -637,7 +637,7 @@ class SpectralFilter:
             return g
         gnorm = torch.linalg.norm(g.to(torch.float32))
         if not torch.isfinite(gnorm) or float(gnorm.item()) <= 1e-12:
-            return g  # nothing to scale against → no-op (never a silent garbage grad)
+            return g  # nothing to scale against
         seed = self._perturb_seed(name)
         # CPU generator: device-INDEPENDENT + rank-deterministic. A CUDA generator
         # is device-local, so two ranks on different GPUs would draw DIFFERENT ξ and
@@ -679,7 +679,7 @@ class SpectralFilter:
             return float(w)
         if self.current_step < h:
             # The HOLD shelf: full weight. With h=0 this branch is never taken,
-            # so the formula below reduces to the legacy linear-from-0 decay.
+            # so the formula below reduces to linear-from-0 decay.
             return float(w)
         decay_factor = 1.0 - (float(self.current_step - h) / float(d))
         if decay_factor < 0.0:
@@ -705,8 +705,8 @@ class SpectralFilter:
           1 (a constant δ stream drives ``m -> δ``), a re-weighting rather than a
           gain increase.
           The accumulation happens ONLY at refresh ticks (δ is HELD between fires in
-          :meth:`delayed_ef_matrix`; accumulating every tick would re-add the same δ
-          ~5× — explicitly forbidden by the plan).
+          :meth:`delayed_ef_matrix`; accumulating every tick would re-add the same
+          δ across the hold window).
         * HELD tick (``refreshed=False``): the correction is the HELD buffer ``m``
           (NOT re-accumulated). With ``delta_momentum_age_decay`` the APPLIED
           correction is scaled by ``μ ** (current_step − last_refresh_step)`` so a
@@ -825,7 +825,7 @@ class SpectralFilter:
         c_bar = vals[mid] if (nlen % 2 == 1) else 0.5 * (vals[mid - 1] + vals[mid])
 
         lam_t = lam + self.adaptive_lambda_kappa * (c_bar - c_t)
-        # Bounded RAW dose (variable-staleness safety): a stale/garbage M can't spike
+        # Bounded raw dose (variable-staleness safety): a stale or invalid M cannot spike
         # λ_t beyond lambda_cap; the floor 0 forbids a sign-flipping negative dose.
         if lam_t < 0.0:
             lam_t = 0.0
@@ -998,8 +998,8 @@ class SpectralFilter:
     def relative_change(self, g_mask: torch.Tensor, g_proj: torch.Tensor) -> float:
         """Per-target ``||G_proj - G_mask|| / ||G_mask||`` (Frobenius).
 
-        Logged faithfully (NOT clamped) — the codex pin notes this is not
-        provably ≤1 for arbitrary anchors; we report whatever the math yields.
+        Logged faithfully (not clamped): this is not provably ≤1 for arbitrary
+        anchors, so report whatever the math yields.
         """
         gm = g_mask.to(torch.float32)
         gp = g_proj.to(torch.float32)
@@ -1094,7 +1094,7 @@ def apply_spectral_correction_to_params(
     # from state.global_step (the same counter the capture key uses below). Defaults
     # to 0 when the state lacks it (CPU-test ducks) ⇒ γ_t = weight at step 0. With
     # the OFF defaults (weight=1, decay_steps=0) γ_t is a constant 1.0 regardless,
-    # so this assignment is a no-op for every legacy run (off-path parity).
+    # so this assignment is a no-op when the feature is disabled.
     spectral.current_step = int(getattr(state, "global_step", 0) or 0)
     _ring = None
     _ring_entry_grads = None
@@ -1111,7 +1111,7 @@ def apply_spectral_correction_to_params(
             _entry = _ring.get(_tick - _delay_K)
             _ring_entry_grads = _entry[0] if _entry is not None else None
     # Optional capture writer and the unified (gs, tick) key, threaded
-    # from the engine. None ⇒ no dump (the byte-identical path). The optimizer tick
+    # from the engine. None means no dump. The optimizer tick
     # is state.capture_tick() — the SINGLE per-train_batch tick stamped at the start
     # of the fast-path forward — so G_comp/G_corr co-locate with the powersgd-hook
     # A/Â/Q, the anchor M/G_anchor, and the parallel G_dense under ONE key.

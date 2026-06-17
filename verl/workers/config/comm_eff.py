@@ -45,8 +45,8 @@ __all__ = [
 Q_BASIS_FAMILIES = ("act", "grad", "adv", "tail", "hybrid", "ticket")
 
 # The compression codecs ``comm_eff.compression_type`` may select. Exactly one
-# codec is active per run (mutually exclusive). ``dense`` is the byte-identical
-# off-path (equivalent to ``comm_eff.enabled=false`` for the activation path);
+# codec is active per run (mutually exclusive). ``dense`` leaves the activation
+# path uncompressed (equivalent to ``comm_eff.enabled=false`` for that path);
 # ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask; ``powersgd`` is the
 # shared frozen-basis PowerSGD-style projector
 # ``M_hat = (M @ Q) @ Qᵀ`` at the same logical PP byte budget.
@@ -127,7 +127,7 @@ class CommEffAnchorConfig(BaseConfig):
             param's device, today's exact behaviour) or ``"cpu"`` (memory-lean:
             the ``delay_K+1`` full bf16 snapshots move off HBM; the clone load
             casts back via ``.to(p.device, p.dtype)``, a byte-preserving round
-            trip — numerics-neutral). Applies to BOTH the legacy staleness
+            trip — numerics-neutral). Applies to BOTH the staleness
             queue and the paired replay ring. Validated against {gpu, cpu}.
     """
 
@@ -157,7 +157,8 @@ class CommEffSpectralConfig(BaseConfig):
 
     Other modes remain available for controlled comparisons. A cold-M guard
     returns the fast gradient unchanged whenever ``M_anchor`` is unwarmed, so the
-    correction path cannot silently zero a matrix.
+            correction path returns the fast gradient unchanged until the anchor
+            state is warm.
 
     Args:
         enabled (bool): Whether anchor-guided correction of masked gradients
@@ -173,7 +174,7 @@ class CommEffSpectralConfig(BaseConfig):
             skip norms, biases, embeddings and the lm head.
         max_targets (int): Cap on the number of target matrices corrected per
             step. ``-1`` means no cap. The cap applies to both anchor extraction
-            and merger writeback, so non-negative values are diagnostic throttles.
+            and merger writeback.
         ema_device (str): Where the anchor-gradient EMA ``M_anchor`` is stored
             between refreshes — ``"gpu"`` (default, faithful: kept in HBM) or
             ``"cpu"`` (memory-lean: offloaded to pinned CPU, moved to GPU only
@@ -414,8 +415,7 @@ class CommEffPowerSGDConfig(BaseConfig):
             0`` (a quieter, more stable basis). Must be ``>= 1``.
         warm_start (bool): ``True`` (default) carries ``Q`` across steps (warm
             block power iteration — the standard PowerSGD warm start). ``False``
-            re-bootstraps ``Q`` from the per-layer seed every update (cold,
-            diagnostic only).
+            re-bootstraps ``Q`` from the per-layer seed every update.
         compress_recompute (bool): When ``True`` (default) the projector also
             fires on the old-logprob recompute, so BOTH gradient-feeding forwards
             see the same frozen ``Q_t`` ⇒ ``ρ ≈ 1`` (the analogue of the mask's
@@ -431,16 +431,15 @@ class CommEffPowerSGDConfig(BaseConfig):
             ``V_global = Σ_ranks V`` → a bit-identical consensus ``Q`` on every
             rank, differing only per boundary. The collective is made
             deadlock-safe by iterating the fixed
-            ``boundary_indices`` on every rank. ``False`` (diagnostic only) keeps
-            each rank's basis local — only correct if every rank sees identical
-            data, which DP does not.
+            ``boundary_indices`` on every rank. ``False`` keeps each rank's basis
+            local — only correct if every rank sees identical data, which DP
+            does not.
         qr_dtype (str): Dtype for the orthonormalization (``orth``/QR) and the
-            stored basis math — ``"fp32"`` (default, REQUIRED for correctness:
+            stored basis math — ``"fp32"`` (default, required for correctness:
             bf16-QR loses orthogonality, drifts ``QᵀQ`` from ``I``, and is a
-            frequent NaN / ``q_cond`` source) or ``"bf16"`` (diagnostic only,
-            expected to degrade). The projection itself runs in the
-            activation dtype regardless; only the QR/orth + ``V`` accumulation are
-            in ``qr_dtype``.
+            frequent NaN / ``q_cond`` source) or ``"bf16"``. The projection itself
+            runs in the activation dtype regardless; only the QR/orth + ``V``
+            accumulation are in ``qr_dtype``.
         reortho_eps (float): Floor added under the QR when forming the basis, and
             the singular-value floor used in the ``q_cond`` diagnostic, to keep a
             rank-deficient sketch from producing a non-finite condition number.
@@ -508,10 +507,10 @@ class CommEffCaptureConfig(BaseConfig):
             probe backward uses: ``"clean_pg"`` (default) or ``"ppo_clip"``.
             Affects only the dump-only fresh-anchor probe, never the optimizer,
             EMA, or K-stale ``G_anchor`` that feeds ``M``.
-        dump_dtype (str): Dump precision. ``"fp32"`` (default, REQUIRED for the
+        dump_dtype (str): Dump precision. ``"fp32"`` (default, required for the
             fidelity invariant — the reconstruction_rel_error recomputed from the
-            dump must match the logged ~0.024 scalar within 1e-3). ``"bf16"`` is a
-            volume-saving diagnostic only.
+            dump must match the logged scalar within 1e-3). ``"bf16"`` reduces
+            dump volume.
     """
 
     enabled: bool = False
@@ -535,15 +534,15 @@ class CommEffProbeConfig(BaseConfig):
     """Geometry probe for paired anchor replay; off by default.
 
     **Telemetry-only by contract.** When ``geometry_enabled=true`` the harness
-    measures, at every anchor fire on the paired-replay substrate, the
+    measures, at every anchor fire on the paired-replay path, the
     m1-m7 geometry of the generator-consistent anchor gradient ``G_anc_rep``
-    against (a) the old-style generator-MISMATCHED anchor gradient ``G_anc_old``
+    against (a) a current-batch stale-weight anchor gradient ``G_anc_old``
     (a second telemetry backward on the SAME stale-loaded clone with the CURRENT
     batch), (b) the live fast compressed gradient ``G_comp(t)``, (c) the
     fire-aware ring entry ``G_comp_ring(t−K)`` (m5 codec error), (d) its own lag
     history (m4), and (e) the previous fire's ``M_rep`` (m6 persistence). One
-    JSON line per fire is appended to ``<out_dir>/stepA_fires.jsonl`` with the
-    plan's verbatim field names, plus a ``[geometry-probe]`` train-log line.
+    JSON line per fire is appended to ``<out_dir>/stepA_fires.jsonl`` with stable
+    field names, plus a ``[geometry-probe]`` train-log line.
     Nothing is ever fed to the optimizer, the EMA, the sketch V, or Q
     (``anchor_grad_corrected`` stays 0 — the probe invariant).
 
@@ -565,8 +564,8 @@ class CommEffProbeConfig(BaseConfig):
             (the dual backward + DP-reduce) but skip storage and I/O. ``false``
             writes rank-suffixed files (debug only).
         m4_lags (int): Lag depth j=1..m4_lags for the m4 autocorrelation.
-            Default 5; bounded to [1, 5] so the CPU lag buffer respects the
-            plan's ≤6-entry bound (max_lag stored + the in-flight current).
+            Default 5; bounded to [1, 5] so the CPU lag buffer stays small
+            (max_lag stored + the in-flight current).
         per_target_sidecar (bool): Also append the per-target scalar map (the
             196-matrix arrays behind each median) to
             ``<out_dir>/stepA_fires_targets.jsonl``. Scalars only — a few tens
@@ -595,8 +594,7 @@ class CommEffConfig(BaseConfig):
     hooks are registered, no SVD/EMA buffers are allocated, no extra
     all-reduce is issued, and crucially **no RNG is drawn**. Constructing this
     config (which every actor does, since it defaults disabled) must therefore
-    have zero numerical side effects, so a dense GRPO run with the scaffolding
-    merged is bit-for-bit / rel-tol-1e-4 identical to one without it.
+    have zero numerical side effects on the dense GRPO path.
 
     Args:
         enabled (bool): Master switch. ``false`` (default) makes every comm_eff
@@ -605,8 +603,8 @@ class CommEffConfig(BaseConfig):
         compression_type (str): Codec selector, one of
             ``{dense, prf_mask, powersgd}`` (mutually exclusive per run).
             ``dense`` (default) = no activation compression. ``prf_mask`` = the
-            existing PRF mask. ``powersgd`` = the shared frozen-basis projector.
-            For back-compat the legacy ``mask.enabled`` path still selects the
+            PRF mask. ``powersgd`` = the shared frozen-basis projector.
+            For back-compat the ``mask.enabled`` path still selects the
             mask when ``compression_type`` is left at its ``dense`` default, so
             older mask configs behave unchanged; an explicit
             ``compression_type=powersgd`` selects the PowerSGD codec.
@@ -636,8 +634,8 @@ class CommEffConfig(BaseConfig):
     enabled: bool = False
     # Codec selector. Exactly one boundary codec is active per run:
     #   "dense"    -> no activation compression (the boundary forward is
-    #                 byte-identical to dense; equivalent to the activation path
-    #                 of enabled=false). A legacy mask-circuit run is selected
+    #                 equivalent to the uncompressed activation path of
+    #                 enabled=false). A mask-circuit run is selected
     #                 by mask.enabled, NOT by this field, for back-compat.
     #   "prf_mask" -> the per-(token, dim) PRF Bernoulli mask.
     #   "powersgd" -> the shared frozen-basis projector M_hat=(M@Q)@Qᵀ.
@@ -665,7 +663,7 @@ class CommEffConfig(BaseConfig):
         if self.mask.pp_size < 1:
             raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
         # mask_recompute is a strict bool. Validation here turns a YAML
-        # typo ("False" string) or a numeric override into a loud error instead
+        # typo ("False" string) or a numeric override into a clear error instead
         # of a silent truthy/falsy surprise that would mis-route masking.
         if not isinstance(self.mask.mask_recompute, bool):
             raise ValueError(
@@ -696,7 +694,7 @@ class CommEffConfig(BaseConfig):
         if self.anchor.delay_K < 0:
             raise ValueError(f"comm_eff.anchor.delay_K must be >= 0; got {self.anchor.delay_K}")
         # Paired replay flag is a strict bool; YAML strings and numeric overrides
-        # should fail loudly instead of routing the replay ring by accident.
+        # should fail instead of routing the replay ring by accident.
         if not isinstance(self.anchor.replay_paired_batch, bool):
             raise ValueError(
                 f"comm_eff.anchor.replay_paired_batch must be a bool; got "
@@ -806,7 +804,7 @@ class CommEffConfig(BaseConfig):
             )
         if self.spectral.lambda_cap < 0.0:
             raise ValueError(f"comm_eff.spectral.lambda_cap must be >= 0; got {self.spectral.lambda_cap}")
-        # delayed_ef assumes a generator-consistent anchor feed. Fail loud at
+        # delayed_ef assumes a generator-consistent anchor feed. Fail at
         # config time instead of silently mixing unmatched batches and weights.
         if self.spectral.enabled and self.spectral.correction_mode == "delayed_ef":
             if not (self.anchor.enabled and self.anchor.replay_paired_batch):
@@ -851,7 +849,7 @@ class CommEffConfig(BaseConfig):
         if self.clean_cadence < 0:
             raise ValueError(f"comm_eff.clean_cadence must be >= 0; got {self.clean_cadence}")
         # Codec selector. Validated to the closed enum so a typo
-        # (compression_type=powerSGD / powergsd) is a loud error, not a silent
+        # (compression_type=powerSGD / powergsd) is an error, not a silent
         # fall-through to dense.
         if self.compression_type not in COMPRESSION_TYPES:
             raise ValueError(
@@ -886,13 +884,13 @@ class CommEffConfig(BaseConfig):
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
         # Q-basis family. Validated to the closed enum so a typo
-        # (q_basis=gradient) is a loud error, not a silent fall-through to "act".
+        # (q_basis=gradient) is an error, not a silent fall-through to "act".
         if self.powersgd.q_basis not in Q_BASIS_FAMILIES:
             raise ValueError(
                 f"comm_eff.powersgd.q_basis must be one of {Q_BASIS_FAMILIES}; got {self.powersgd.q_basis!r}"
             )
         # Passive screen family list. Every entry must be a
-        # known family; a typo is a loud error (a silently-dropped family would make
+        # known family; a typo is an error (a silently-dropped family would make
         # the screen miss an arm). OmegaConf may pass a ListConfig — iterate it.
         for _fam in list(self.powersgd.q_basis_passive):
             if _fam not in Q_BASIS_FAMILIES:

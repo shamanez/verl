@@ -20,15 +20,13 @@ strict no-op unless ``comm_eff.capture.enabled=true``. The design goals are:
 1. **Zero numerical side effect.** Every captured tensor is ``.detach()``ed,
    cloned, moved to CPU and written to disk. The capture writer NEVER feeds a
    tensor back into the optimizer, the loss, or any in-graph buffer
-   (Correctness invariant "measurement-only probes never feed the optimizer" /
-   "off-path parity"). It is pure I/O.
+   It is pure I/O.
 
 2. **Keyed, self-describing dumps.** Every tensor is keyed by
    ``(global_step, optimizer_tick, role, target_name)`` and saved with its
    ``shape``, ``dtype`` and Frobenius ``norm`` recorded in a per-tick manifest
    row, so the analyst can recompute ``reconstruction_rel_error`` from the dumped
-   ``A`` / ``Â`` and confirm it matches the logged scalar (the "fp32 dump
-   fidelity" invariant).
+   ``A`` / ``Â`` and confirm it matches the logged scalar.
 
 3. **Bounded volume.** The number of captured ticks is capped
    (``max_ticks``); the per-tick target set can be stratified to a few targets
@@ -46,8 +44,8 @@ Disk layout under ``capture_dir``::
 
 The writer is process-local; under DP each rank writes to a ``rank<r>``
 subdirectory so multi-rank dumps never collide. The analyst reads rank-0 by
-default (the substrate makes Q / M bit-identical across ranks; per-rank
-``G_comp`` differs by shard, which the audit accounts for).
+default when the captured tensors are expected to be rank-identical; per-rank
+``G_comp`` differs by shard.
 """
 
 from __future__ import annotations

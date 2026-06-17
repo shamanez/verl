@@ -814,7 +814,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         The activation-mask hook asserts the state's
         ``path_tag == "train"`` before firing, so stamping ``"old_logprob"`` /
         ``"ref_logprob"`` / ``"infer"`` / ``"ckpt"`` here turns any mask leak
-        onto an RL-measurement path into a loud assertion instead of silent
+        onto an RL-measurement path into an assertion instead of silent
         gradient corruption. A strict no-op when comm_eff is disabled (no state)
         — the ``None`` guard keeps the dense GRPO path untouched. The prior tag
         is restored on exit so nesting (e.g. checkpoint forward inside a train
@@ -864,10 +864,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # so the masking forward-hooks fire exclusively on this path. The engine
         # registers hooks on entry to its train forward_backward_batch and removes
         # them on exit, gated on this flag; log_prob / infer / ref / validation /
-        # checkpoint forwards never set it, so they stay byte-identical to dense.
+        # checkpoint forwards never set it, so they stay uncompressed.
         #
         # On a clean step, force mask_active=False so NO mask hooks
-        # register for this train forward — the step takes the byte-identical
+        # register for this train forward — the step takes the uncompressed
         # dense path (no clone, no spectral surgery; it inherits that path's FSDP
         # correctness) and the single optimizer.step() (base.py:178) refreshes
         # AdamW on the true dense gradient. The path_tag stays "train" (the clean
@@ -927,13 +927,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             if dev is not None:
                                 logger.info(
                                     "comm_eff.powersgd: cross-rank Q agreement verified "
-                                    "(max_rel_dev=%.3e, sync_basis=%s) — hard-invariant #4 OK",
+                                    "(max_rel_dev=%.3e, sync_basis=%s)",
                                     dev,
                                     getattr(powersgd, "sync_basis", None),
                                 )
                                 print(
                                     f"[comm_eff] cross-rank Q agreement: max_rel_dev={dev:.3e} "
-                                    f"sync_basis={getattr(powersgd, 'sync_basis', None)} (hard-invariant #4)",
+                                    f"sync_basis={getattr(powersgd, 'sync_basis', None)}",
                                     flush=True,
                                 )
                         except RuntimeError:

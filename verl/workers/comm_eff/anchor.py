@@ -113,7 +113,7 @@ def _canon(name: str) -> str:
     live (per-layer FSDP-wrapped) ``inner_module`` may carry. Matching the
     fallback param/buffer copy by canonical key ensures the clone is seeded with
     the REAL live weights rather than keeping its random init — otherwise
-    ``G_anchor`` is computed from garbage.
+    ``G_anchor`` is computed from the wrong weights.
     """
     name = name.replace("._fsdp_wrapped_module", "")
     if name.startswith("_fsdp_wrapped_module."):
@@ -367,8 +367,8 @@ def verify_canary_on_module(module: torch.nn.Module, canary: dict, canon: Option
     Returns ``(ok, results)`` where ``results`` maps each canary name to the
     recomputed ``(norm, sum)`` (or ``(None, None)`` if the param is missing).
     The caller hard-asserts ``ok`` — a mismatch means the clone did NOT receive
-    the recorded historical weights (storage corruption, a lossy device round
-    trip, or a load that silently skipped the param).
+    the recorded weights (storage corruption, a lossy device round trip, or a
+    load that skipped the param).
     """
     canon = canon or (lambda s: s)
     params = {canon(p_name): p for p_name, p in module.named_parameters()}
@@ -401,16 +401,14 @@ class AnchorReplayRing:
     at the first tick of the batch's global step) and is reported so the engine
     can log it.
 
-    **Fire-aware retention (operator requirement — bounded as a function of
-    cadence x staleness).** The anchor only FIRES on ticks ``t ≡ 0 (mod
+    **Fire-aware retention.** The anchor only fires on ticks ``t ≡ 0 (mod
     cadence)`` and a fire at ``t`` only ever consumes tick ``t − delay_K``, so
-    the ONLY ticks worth storing satisfy ``tick ≡ (−delay_K) mod cadence``
-    (:meth:`tick_retained`). Everything else is rejected at push time — the
-    engine also skips the deep clone for those ticks. Bounds, asserted on every
-    push so a regression blows up loudly instead of leaking RAM:
+    the only ticks worth storing satisfy ``tick ≡ (−delay_K) mod cadence``
+    (:meth:`tick_retained`). Everything else is rejected at push time; the engine
+    also skips the deep clone for those ticks. Bounds are asserted on every push:
 
       * batches:   ``delay_K // cadence + 1`` entries (== ``delay_K + 1`` at
-        cadence=1; 2 at the locked cadence=5/delay_K=5);
+        cadence=1);
       * snapshots: one per global step still referenced by a retained batch,
         plus the current (newest) gs awaiting its batches — ``maxlen + 1``.
 
@@ -739,8 +737,8 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
         # has NON-infixed names; the live inner_module's summoned names may carry
         # the `._fsdp_wrapped_module.` infix (per-layer wrapping). A raw `n in
         # src_params` lookup then misses for every layer and the clone keeps its
-        # RANDOM init weights → G_anchor is garbage. Canon-keying both sides
-        # gives the clone the real live weights even before the snapshot-load.
+        # initial weights. Canon-keying both sides gives the clone the real live
+        # weights even before the snapshot-load.
         with _torch.no_grad():
             src_params = {_canon(n): p for n, p in inner_module.named_parameters()}
             for n, p_dst in clone.named_parameters():
@@ -902,9 +900,8 @@ def paired_cosine(
 ) -> Optional[float]:
     """fp32 cosine between two same-shape tensors; cached norms avoid re-reducing
     multi-GB CPU tensors per pairing. Returns ``None`` (excluded from medians,
-    counted by the caller) when either side is numerically zero — a cosine with
-    the zero vector is undefined, and silently emitting 0.0 would bias the gate
-    statistic."""
+    counted by the caller) when either side is numerically zero because a cosine
+    with the zero vector is undefined."""
     af = a.detach().to(torch.float32).reshape(-1)
     bf = b.detach().to(torch.float32).reshape(-1)
     assert af.numel() == bf.numel(), f"paired_cosine shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}"
@@ -965,9 +962,10 @@ def delta_stats_over_targets(rep: dict, ring: dict, *, ring_norms: Optional[dict
 
 
 def matrix_median(values) -> Optional[float]:
-    """Median over the per-target scalars of ONE fire (the plan's "matrix-median"
-    operationalization: median over the 196 per-matrix values), skipping
-    ``None`` entries. Returns ``None`` when nothing is left."""
+    """Median over one fire's per-target scalars, skipping ``None`` entries.
+
+    Returns ``None`` when nothing is left.
+    """
     import statistics
 
     vals = [v for v in (values.values() if isinstance(values, dict) else values) if v is not None]
@@ -1002,7 +1000,7 @@ def geometry_fire_record(
     """Assemble ONE fire's m1–m7 record (the stepA_fires.jsonl line) plus the
     per-target sidecar map. Pure CPU fp32 math over already-detached maps.
 
-    Field names are the plan's verbatim log/artifact contract:
+    Field names are the stable log/artifact contract:
     ``step, tick, warmup_fallback, m1_matrix_median, m2_matrix_median,
     m3_matrix_median, m4_j1..m4_j{m4_lags}, m5_ratio_matrix_median,
     m5_cos_matrix_median, m6_matrix_median, m7_stable_rank_median,

@@ -65,9 +65,8 @@ __all__ = [
 
 # The exhaustive set of execution-path tags a comm_eff state can carry. The
 # activation mask is allowed to fire on EXACTLY ONE of these (``train``); every
-# other tag is an RL-measurement / serving path that must stay byte-identical to
-# dense GRPO even while masking is enabled. Contamination is a loud failure in
-# the mask hook.
+# other tag is an RL-measurement / serving path that must stay uncompressed even
+# while masking is enabled. Contamination raises in the mask hook.
 #
 #   train        -> actor-train forward/backward (the ONLY masked path)
 #   rollout      -> vLLM/sglang generation (policy rollouts + eval generation)
@@ -140,16 +139,16 @@ def resolve_compression_type(config: Any) -> str:
     effects, no allocation. The resolution is back-compatible:
 
     * an explicit ``compression_type`` of ``prf_mask`` or ``powersgd`` wins;
-    * ``dense`` (the field default) falls back to the LEGACY selector — if the
+    * ``dense`` (the field default) falls back to the mask selector — if the
       mask sub-config is enabled with ``p > 0`` the codec is ``prf_mask``;
       otherwise ``dense``.
 
-    This keeps legacy mask configs working while PowerSGD is selected explicitly.
+    This keeps existing mask configs working while PowerSGD is selected explicitly.
     """
     ctype = getattr(config, "compression_type", "dense") if config is not None else "dense"
     if ctype in ("prf_mask", "powersgd"):
         return ctype
-    # ctype == "dense": honor the legacy mask selector for back-compat.
+    # ctype == "dense": honor the mask selector for back-compat.
     mask_cfg = getattr(config, "mask", None)
     mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
     if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
@@ -159,14 +158,12 @@ def resolve_compression_type(config: Any) -> str:
 
 class FastGradRing:
     """Fire-aware ring of the fast compressed per-target gradients
-    ``G_comp(t)`` — the c512128 retention pattern relocated from the anchor's
-    batch replay ring to WEIGHT-GRADIENT storage.
+    ``G_comp(t)``.
 
     A fire at tick ``t`` only ever consumes tick ``t − delay_K``, and fires sit
     at ``t ≡ 0 (mod cadence)``, so the ONLY ticks worth storing satisfy
-    ``tick ≡ (−delay_K) mod cadence`` (:meth:`tick_retained`) — at the locked
-    cadence=5 / delay_K=5 substrate that is the fire ticks themselves, bounding
-    the ring at ``delay_K // cadence + 1 = 2`` entries. Everything else is
+    ``tick ≡ (−delay_K) mod cadence`` (:meth:`tick_retained`), bounding the ring
+    at ``delay_K // cadence + 1`` entries. Everything else is
     rejected at push time (the caller also pre-checks :meth:`tick_retained` so
     non-replayable ticks never pay the D2H either).
 
@@ -216,9 +213,11 @@ class FastGradRing:
         return True
 
     def get(self, tick: int) -> Optional[tuple]:
-        """Exact-tick lookup → ``(grads, norms)`` or None. NO fallback: the m5 /
-        delayed_ef pairing must be the exact ``t − delay_K`` entry or nothing
-        (a near-miss substitute would silently corrupt the within-pair math)."""
+        """Exact-tick lookup → ``(grads, norms)`` or None.
+
+        No fallback is used: the m5 / delayed_ef pairing must be the exact
+        ``t − delay_K`` entry.
+        """
         return self._entries.get(int(tick))
 
     def pop(self, tick: int) -> None:
@@ -239,17 +238,15 @@ class GradLagBuffer:
     ``G_comp`` for the m4 lag-autocorrelation ``cos(G_comp(t), G_comp(t−j))``,
     j=1..max_lag.
 
-    Bounded at ``max_lag`` stored entries (default 5) + the in-flight current
-    tick the engine holds during the fire computation = the plan's ≤6-entry
-    bound. Pushed EVERY tick (every tick is within ``max_lag`` of some fire at
-    the locked cadence=5, so fire-aware filtering saves nothing here); entries
-    older than ``max_lag`` roll off automatically — the post-fire "free" is the
-    natural eviction. Same ``(grads, norms)`` entry shape + CPU-residency assert
-    as :class:`FastGradRing`. Pure container, CPU-testable.
+    Bounded at ``max_lag`` stored entries (default 5) plus the in-flight current
+    tick the engine holds during the fire computation. Pushed every tick; entries
+    older than ``max_lag`` roll off automatically. Same ``(grads, norms)`` entry
+    shape and CPU-residency assert as :class:`FastGradRing`. Pure container,
+    CPU-testable.
     """
 
     def __init__(self, max_lag: int = 5):
-        assert 1 <= int(max_lag) <= 5, f"max_lag must be in [1, 5] (≤6-entry plan bound), got {max_lag}"
+        assert 1 <= int(max_lag) <= 5, f"max_lag must be in [1, 5], got {max_lag}"
         self.max_lag = int(max_lag)
         self._entries: OrderedDict[int, tuple] = OrderedDict()
 
@@ -449,8 +446,8 @@ class CommEffState:
         # "rollout"; validation -> "val"; ``infer_batch`` -> "infer";
         # checkpoint save/load -> "ckpt". The mask hook asserts the tag is
         # "train" before it fires, so a leak onto any other path raises rather
-        # than silently corrupting the RL-measurement machinery. ``mask_active``
-        # remains the fast gate; ``path_tag`` is the loud cross-check.
+        # than corrupting the RL-measurement machinery. ``mask_active`` remains
+        # the fast gate; ``path_tag`` is the cross-check.
         self.path_tag: Optional[str] = None
 
         # Per-path mask-application counters. The contract: every key except
@@ -474,7 +471,7 @@ class CommEffState:
         self.fsdp_grad_repr: dict = {}
 
         # Per-target ||G_proj - G_mask|| / ||G_mask|| from the most recent
-        # correction. Logged faithfully (never clamped) per the codex pin: not
+        # correction. Logged faithfully (never clamped) because the value is not
         # provably <=1 for arbitrary anchors. Surfaced under comm_eff/spectral/*.
         self.spectral_rel_change: dict = {}
 
@@ -589,23 +586,19 @@ class CommEffState:
                 # THEN decays (0 default ⇒ the existing linear-from-0 schedule).
                 delta_subbasis_hold_steps=int(getattr(spec_cfg, "delta_subbasis_hold_steps", 0)),
                 base_seed=int(getattr(getattr(self.config, "powersgd", None), "seed", 0) or 0),
-                # Zero-mean tunable cross-rank-identical perturbation. The
-                # config-must-mirror-dataclass gotcha — without threading these here
-                # the CLI/yaml σ never reaches the filter and the lever is dead.
+                # Zero-mean tunable cross-rank-identical perturbation.
                 perturb_sigma=float(getattr(spec_cfg, "perturb_sigma", 0.0)),
                 perturb_seed=int(getattr(spec_cfg, "perturb_seed", 0)),
                 # Delta-momentum (normalized EMA, stationary gain exactly 1).
                 # mu=0 skips the branch. The buffer is built
                 # from the DP-mean δ ⇒ cross-rank identical. age_decay fades the held
-                # correction by age (async staleness-degrade). The config-must-mirror-
-                # dataclass gotcha — without threading these here the CLI/yaml μ never
-                # reaches the filter and the lever is dead.
+                # correction by age.
                 delta_momentum_mu=float(getattr(spec_cfg, "delta_momentum_mu", 0.0)),
                 delta_momentum_age_decay=bool(getattr(spec_cfg, "delta_momentum_age_decay", False)),
                 # Adaptive dose (centered gate). mode=off/kappa=0 keeps
                 # lambda_t == delayed_ef_lambda. lambda_t = clamp(lambda + kappa*(c_bar - c_t),
                 # 0, lambda_cap), built from the DP-mean gm + M_rep ⇒ cross-rank
-                # identical. Same mirror-or-it-is-dead gotcha as above.
+                # identical.
                 adaptive_lambda_mode=str(getattr(spec_cfg, "adaptive_lambda_mode", "off")),
                 adaptive_lambda_kappa=float(getattr(spec_cfg, "adaptive_lambda_kappa", 0.0)),
                 lambda_cap=float(getattr(spec_cfg, "lambda_cap", 2.0)),
@@ -798,7 +791,7 @@ class CommEffState:
         """Record one mask-hook fire against the current path tag.
 
         Called by the activation masker from inside a hook. Increments both the
-        legacy aggregate counter (``mask_applications``) and the per-path
+        aggregate counter (``mask_applications``) and the per-path
         counter for ``self.path_tag``. A fire while the tag is anything other
         than ``train`` is a contamination event; the masker asserts against it
         before calling this, but if the assert is ever disabled (``python -O``)
@@ -941,7 +934,7 @@ class CommEffState:
         # (N·r) coords + amortized Q-broadcast vs the dense activation (N·H). Only
         # surfaced once a tick has been measured (last_* > 0). The analyst greps
         # comm/bytes_compressed + comm/bytes_dense_equiv (and the ratio) from the
-        # metrics jsonl / train.log; the names use the plan's `comm/` namespace.
+        # metrics jsonl / train.log; the names use the `comm/` namespace.
         ec = float(getattr(self.powersgd, "last_elems_compressed", 0.0))
         ed = float(getattr(self.powersgd, "last_elems_dense_equiv", 0.0))
         if ed > 0.0:

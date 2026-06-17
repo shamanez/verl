@@ -80,7 +80,7 @@ _MASK31 = 0x7FFFFFFF
 
 # Q-basis families with implemented sketch construction. "act" is the
 # activation-energy basis; the rest are alternate GRPO-related sketch sources.
-# A family not in this set fails loudly at registration.
+# A family not in this set fails at registration.
 IMPLEMENTED_Q_FAMILIES = ("act", "grad", "adv", "tail", "hybrid", "ticket")
 
 
@@ -105,7 +105,7 @@ def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
     """
     work = mat.detach().to(torch.float32)
     # Guard a non-finite sketch up front: an all-zero / NaN V would make QR
-    # return garbage. Replace non-finite entries with 0 before the QR; the
+    # return invalid values. Replace non-finite entries with 0 before the QR; the
     # column-norm check below then catches a fully-empty basis.
     if not torch.isfinite(work).all():
         work = torch.nan_to_num(work, nan=0.0, posinf=0.0, neginf=0.0)
@@ -213,7 +213,7 @@ class PowerSGDActivationCompressor:
         # Live Q-basis family: the content of the sketch orth(V) consumes at
         # fixed rank. "act" is the activation-energy basis (V += M.T @ (M @ Q));
         # other families use alternate GRPO-related sketch sources. register()
-        # fails loudly on unsupported families.
+        # fails on unsupported families.
         self.q_basis = str(q_basis)
         # Passive screen families to accumulate inside the anchor pass, off the
         # live Q, fast path, and optimizer.
@@ -221,9 +221,8 @@ class PowerSGDActivationCompressor:
         # Hybrid family column split (act cols + grad cols == r).
         self.hybrid_act_cols = int(hybrid_act_cols)
         self.hybrid_grad_cols = int(hybrid_grad_cols)
-        # Anchor refresh cadence: the Q broadcast (H*r per
-        # boundary) happens once per ``anchor_cadence`` optimizer ticks in the
-        # owns_q substrate, so its per-tick AMORTIZED element cost is
+        # Anchor refresh cadence: the Q broadcast (H*r per boundary) happens once
+        # per ``anchor_cadence`` optimizer ticks, so its per-tick amortized cost is
         # ``Σ_boundary H·r / anchor_cadence``. (The per-token Y term N·r dominates,
         # so the exact divisor is a small correction, but use the real cadence.)
         self.anchor_cadence = max(1, int(anchor_cadence))
@@ -245,7 +244,7 @@ class PowerSGDActivationCompressor:
         self._adv_weight: Optional[torch.Tensor] = None
         # True while the family harvest (M + G_b stash) is active — set alongside
         # _anchor_sketch_mode ONLY when families are requested (passive or a live
-        # non-"act" family), so the byte-identical "act"-only path stashes nothing.
+        # non-"act" family), so the "act"-only path stashes nothing.
         self._family_harvest = False
         # When True the anchor owns Q. The fast net is then a pure
         # read-only consumer: its end-of-step maybe_update_basis is gated OFF (by
@@ -262,7 +261,7 @@ class PowerSGDActivationCompressor:
         if str(qr_dtype) not in ("fp32", "bf16"):
             raise ValueError(f"powersgd qr_dtype must be one of (fp32, bf16); got {qr_dtype!r}")
         # qr_dtype controls only the orth/QR + sketch math; fp32 is required for
-        # orthogonality. bf16 is a diagnostic knob.
+        # orthogonality; bf16 is available for comparison runs.
         self.qr_dtype = torch.float32 if str(qr_dtype) == "fp32" else torch.bfloat16
         self.reortho_eps = float(reortho_eps)
         self._state = state  # CommEffState, for counters
@@ -332,7 +331,7 @@ class PowerSGDActivationCompressor:
     def _families_active(self) -> bool:
         """True iff ANY family work is requested (passive screen OR a live non-"act"
         family). The "act"-only path keeps this False ⇒ the family harvest (M + G_b
-        stash) is never armed and the codec stays byte-identical to the substrate."""
+        stash) is never armed and the codec does no extra family-harvest work."""
         return bool(self.q_basis_passive) or (self.q_basis != "act")
 
     def reset_tick_comm_counters(self) -> None:
@@ -354,7 +353,7 @@ class PowerSGDActivationCompressor:
         r = self._effective_rank()
         n_boundaries = len(self.boundary_indices) or 1
         # Amortize the Q broadcast over the ANCHOR refresh cadence (the cadence at
-        # which Q is actually re-broadcast in the owns_q substrate). H·r per
+        # which Q is actually re-broadcast in anchor-owned-Q mode). H·r per
         # boundary, divided by the anchor cadence.
         cadence = max(1, int(getattr(self, "anchor_cadence", self.update_cadence)))
         self.tick_elems_compressed += float(n_boundaries) * float(self._hidden_size) * float(r) / float(cadence)
@@ -422,9 +421,9 @@ class PowerSGDActivationCompressor:
             # no_grad block for diagnostics. The old-logprob recompute runs the
             # WHOLE forward under torch.no_grad() (forward_backward_batch
             # forward_only=True), so grad is disabled there ⇒ no sketch. The
-            # gradient-bearing actor-train forward has grad enabled here. (Reading
+            # gradient-bearing actor-train forward has grad enabled here. Reading
             # is_grad_enabled() inside the no_grad block below would always be
-            # False — the bug this fixes.)
+            # False.
             grad_enabled = torch.is_grad_enabled()
 
             # Record H on first fire (needed to bootstrap the basis).
@@ -473,8 +472,7 @@ class PowerSGDActivationCompressor:
                 # (fp32 detached) and register a Tensor.register_hook on the in-graph
                 # boundary output h to capture its activation gradient G_b = dL/dh
                 # during the anchor backward. Both are off the live Q / fast path /
-                # optimizer (the off-path-parity + probes-don't-feed-optimizer hard
-                # gates bind this — M/G_b only ever feed the family sketch dump).
+                # optimizer. M/G_b only ever feed the family sketch dump.
                 if compressor._family_harvest and grad_enabled and compressor._family_dedupe_ok(layer_idx):
                     # The anchor consumes the batch as several micro-batches. Keep
                     # the last nonzero G_b so a recompute or loss-detached all-zero
@@ -491,8 +489,7 @@ class PowerSGDActivationCompressor:
                                 g = grad.detach().reshape(-1, _hs).to(torch.float32)
                                 # Skip an all-zero contribution (a detached / recompute
                                 # pass): it carries no signal and must NOT displace the
-                                # real grad already stashed by another micro-batch. Real
-                                # micro-batches are ~99% nonzero (C1: 99.35%).
+                                # real grad already stashed by another micro-batch.
                                 if bool(torch.count_nonzero(g) == 0):
                                     return None
                                 _c._family_Gb[_li] = g
@@ -699,7 +696,7 @@ class PowerSGDActivationCompressor:
         (rather than averaging) is exactly the pooled direction — no per-rank
         count re-weighting is needed for the basis.
 
-        **Collective safety (deadlock guard).** The all-reduce iterates the FIXED
+        **Collective safety.** The all-reduce iterates the FIXED
         ``sorted(self.boundary_indices)`` on EVERY rank, contributing a correctly
         shaped ZERO sketch for any boundary a rank happens to be missing locally,
         so all ranks issue the identical sequence of collectives. A rank-relative
@@ -708,13 +705,10 @@ class PowerSGDActivationCompressor:
         in lockstep, so a
         symmetric per-boundary collective set is sufficient.
         """
-        # Fail-closed sole-Q-writer invariant: the FAST net must NEVER write Q when the
+        # Sole-Q-writer invariant: the fast path must never write Q when the
         # anchor owns it. The sole call site (engine_workers.py) is gated on
-        # ``fast_owns_q``, so reaching here in anchor_owns_q mode means that gate
-        # leaked — Q would get two writers (fast overwrite vs anchor broadcast),
-        # silently invalidating the stale-anchor experiment. Crash instead of
-        # drifting; this is the durable engine-side equivalent of the probe's
-        # ``powersgd_basis_updates == 0`` check.
+        # ``fast_owns_q``; reaching here in anchor_owns_q mode means that gate
+        # leaked and Q would get two writers.
         assert not getattr(self, "anchor_owns_q", False), (
             "comm_eff.powersgd: maybe_update_basis() entered in anchor_owns_q mode — the "
             "FAST net must NEVER update Q when the anchor owns it. The engine_workers "
@@ -798,8 +792,8 @@ class PowerSGDActivationCompressor:
         :meth:`clear_family_harvest` in the engine's finally)."""
         self._anchor_sketch_mode = bool(on)
         if on:
-            # Arm the family harvest ONLY when families are active; the "act"-only
-            # substrate path keeps this False ⇒ no M/G_b stash, byte-identical.
+            # Arm the family harvest only when families are active; the "act"-only
+            # path keeps this False, so no M/G_b stash is allocated.
             self._family_harvest = self._families_active
             self._family_sketched_this_gen = {}
         else:
@@ -1037,7 +1031,7 @@ class PowerSGDActivationCompressor:
         every family in ``q_basis_passive`` from the harvested anchor-pass M / G_b /
         advantage, WITHOUT touching the live Q / fast path / optimizer.
 
-        **Collective safety (deadlock guard).** Iterates a FIXED
+        **Collective safety.** Iterates a FIXED
         ``sorted(boundary_indices) × FIXED family order`` on EVERY rank, all-reducing
         each family's raw sketch over the DP group (a missing operand contributes a
         correctly-shaped ZERO sketch) so every rank issues the identical sequence of
@@ -1127,10 +1121,9 @@ class PowerSGDActivationCompressor:
         sketch is built from the family's statistic (``_compute_family_V`` on the
         harvested M / G_b / advantage) instead of the act sketch ``self._sketch``,
         and ``_build_family_Q`` does the per-family construction (ticket coordinate
-        selection / hybrid column-join / orth). ``q_basis == "act"`` (default) is
-        BYTE-IDENTICAL to the prior behaviour (consume ``self._sketch``). The fast
-        path stays a read-only consumer either way (the owns_q invariant is
-        untouched — only WHICH directions the anchor-owned Q spans changes).
+        selection / hybrid column-join / orth). ``q_basis == "act"`` (default)
+        consumes ``self._sketch``. The fast path stays a read-only consumer either
+        way; only the directions spanned by anchor-owned Q change.
 
         Collective safety identical to ``maybe_update_basis``: iterate the FIXED
         ``sorted(boundary_indices)`` on every rank, contribute a zero sketch for
@@ -1179,9 +1172,8 @@ class PowerSGDActivationCompressor:
                     if float(Ssum.abs().sum().item()) > 0.0:
                         q_act_warm = orthonormalize(Ssum.to(self.qr_dtype), eps=self.reortho_eps).to(torch.float32)
                 if q_act_warm is None:
-                    # Cold fire (no act sketch yet) — fall back to the live basis so
-                    # the construction is still defined (matches pre-fix behaviour
-                    # only for this single cold tick).
+                    # Cold fire (no act sketch yet): fall back to the live basis so
+                    # the construction is still defined for this tick.
                     q_act_warm = self._basis.get(layer_idx)
 
             if is_act:
@@ -1413,7 +1405,7 @@ class PowerSGDActivationCompressor:
         """Install projection hooks on the boundary decoder blocks (idempotent)."""
         if self._handles:
             return
-        # Fail loudly if an unimplemented Q-basis family is selected
+        # Fail if an unimplemented Q-basis family is selected
         # (live or passive). The implemented families are IMPLEMENTED_Q_FAMILIES
         # {act,grad,adv,tail,hybrid,ticket} (their sketch constructions are built in
         # _compute_family_V / _build_family_Q). Silently falling back to "act" would

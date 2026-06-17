@@ -238,7 +238,7 @@ class ActivationMasker:
         self.base_seed = int(base_seed)
         self.pp_size = int(pp_size)
         # Magnitude-restoration scheme applied to h*mask. `rescale_mode` selects
-        # it; the legacy `rescale` bool is honoured when rescale_mode == "auto".
+        # it; the `rescale` bool is honored when rescale_mode == "auto".
         #   "none"      -> h*mask                             (raw product)
         #   "constant"  -> h*mask/(1-p)                        (inverted dropout; E[h_tilde]=h)
         #   "rms_match" -> h*mask*detach(rms_true/rms_masked)  (per-token EXACT RMS match: the
@@ -370,7 +370,7 @@ class ActivationMasker:
         """Install forward hooks on the boundary decoder blocks (idempotent).
 
         Clears any stale per-token context so a fire before ``set_context`` fails
-        loud rather than reusing the previous forward's identities.
+        explicit rather than reusing the previous forward's identities.
         """
         if self._handles:
             return

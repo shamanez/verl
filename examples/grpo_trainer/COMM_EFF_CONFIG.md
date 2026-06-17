@@ -21,7 +21,7 @@ all-off so `comm_eff.enabled=false` is a dense no-op.
 |---|---|---:|---|
 | `COMM_EFF_ENABLED` | `comm_eff.enabled` | `true` | Turn the comm-eff path on. Set `false` for dense verl behavior. |
 | `COMM_EFF_COMPRESSION_TYPE` | `comm_eff.compression_type` | `powersgd` | Select `powersgd`, `prf_mask`, or `dense`. |
-| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | **DEAD — superseded by the mandatory anchor circuit.** A periodic full-`H` dense step is not communication-efficient and would itself be stale on a real decentralized-PP link; the anchor is its realistic replacement. Leave `0`; kept only as a historical/diagnostic knob, do not re-enable. |
+| `COMM_EFF_CLEAN_CADENCE` | `comm_eff.clean_cadence` | `0` | Periodic uncompressed optimizer steps are disabled by default. Keep `0` for the anchor-based comm-eff path. |
 
 ## PowerSGD Codec
 
@@ -82,9 +82,9 @@ Optional merger extensions:
 | `COMM_EFF_SPECTRAL_DELTA_MOMENTUM_*` | Keep momentum over correction deltas. |
 | `COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_*` | Adjust delayed-EF dose from per-target agreement signals. |
 
-## Legacy Mask Codec
+## PRF Mask Codec
 
-`prf_mask` is kept for reference ablations and should not be mixed with
+`prf_mask` is kept for comparison runs and should not be mixed with
 anchor-owned Q.
 
 ```bash
@@ -98,9 +98,9 @@ bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 |---|---|---:|---|
 | `COMM_EFF_MASK_ENABLED` | `mask.enabled` | `false` | Enable per-token/channel activation masking. |
 | `COMM_EFF_MASK_P` | `mask.p` | `0.9` | Fraction of entries masked. |
-| `COMM_EFF_MASK_RESCALE` | `mask.rescale` | `true` | Inverted-dropout `1/(1-p)` gain. **Keep `true`.** `false` collapses activation RMS and blows up `grad_norm` (~2700 vs ~4.5) via the pre-norm `1/RMS` backward — a closed finding; do not run no-rescale. |
+| `COMM_EFF_MASK_RESCALE` | `mask.rescale` | `true` | Inverted-dropout `1/(1-p)` gain. Keep `true` for stable activation magnitude. |
 | `COMM_EFF_MASK_RECOMPUTE` | `mask.mask_recompute` | `true` | Reuse the mask on old-log-prob recompute. |
-| (n/a — structural) | `mask.rescale_mode` | `auto` | Magnitude-restoration scheme — see below. The legacy `rescale` bool maps through `auto`. |
+| (n/a — structural) | `mask.rescale_mode` | `auto` | Magnitude-restoration scheme — see below. The `rescale` bool maps through `auto`. |
 | `COMM_EFF_MASK_SEED` | `mask.seed` | `0` | PRF seed. |
 | `COMM_EFF_MASK_PP_SIZE` | `mask.pp_size` | `8` | Simulated pipeline boundary count. |
 

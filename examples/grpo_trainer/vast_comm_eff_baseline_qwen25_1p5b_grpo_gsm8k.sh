@@ -13,8 +13,8 @@
 # the anchor circuit on a PowerSGD codec. Every circuit is still an
 # independent env toggle so ablations stay one-liners:
 #
-#   comm-eff master ........ COMM_EFF_ENABLED          (true)     off => byte-identical dense
-#   codec .................. COMM_EFF_COMPRESSION_TYPE (powersgd) the locked compressor
+#   comm-eff master ........ COMM_EFF_ENABLED          (true)     off => dense path
+#   codec .................. COMM_EFF_COMPRESSION_TYPE (powersgd) compression codec
 #   PowerSGD rank .......... COMM_EFF_POWERSGD_RANK    (77)       byte-matched to mask p=0.95 (H=1536)
 #   anchor ................. COMM_EFF_ANCHOR_ENABLED   (true)     stale full-grad reference M
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
@@ -22,8 +22,8 @@
 #   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
 #   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (delayed_ef)  K-delayed codec-residual fold of M into G
 #   merger dose lambda ..... COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA (1.0)        G_corr = G_comp + lambda*(M_rep - G_comp_ring)
-#   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    anchor replaces periodic clean steps
-#   legacy mask ............ COMM_EFF_MASK_ENABLED     (false)    prf_mask codec, reference only
+#   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    periodic uncompressed step
+#   PRF mask ............... COMM_EFF_MASK_ENABLED     (false)    prf_mask codec
 #
 # Base in one line: PowerSGD r=77 plus a continuously
 # maintained, delay_K=5 stale, full-coverage (196 matrices, DP-reduced) anchor
@@ -34,13 +34,9 @@
 # gradient as the K-delayed EXACT codec residual G_corr = G_comp + lambda*delta,
 # delta = M_rep - G_comp_ring, lambda=1, beta_anc=0.
 #
-# Why this base: the anchor is the realistic decentralized-PP
-# setting — a continuously maintained stale anchor replaces the old clean_cadence
-# periodic-dense-step crutch, which was unrealizable (full-H transfer + itself
-# stale on a slow link). The delayed_ef merger recovers a codec residual from the
-# stale anchor. Keep this substrate fixed unless you are deliberately testing a
-# different axis. Grad_norm is a symptom, not the disease (Adam is scale-invariant
-# and verl grad-clips); judge on validation and critic-score, not grad_norm.
+# Keep the model, dataset, rollout shape, and optimizer surface fixed unless the
+# run is explicitly testing one of those axes. The delayed_ef merger estimates a
+# codec residual from the stale anchor; validation metrics should drive comparisons.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -63,9 +59,9 @@
 # Examples:
 #   # delayed_ef is the default. Add optional anchor-usage levers as overrides:
 #   COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=perturb bash <thisfile>
-#   # dense control via the same launcher (master switch off => byte-identical):
+#   # dense control via the same launcher:
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
-#   # legacy prf_mask codec (reference only — NOT the base; cannot anchor-own-Q):
+#   # prf_mask codec comparison run; cannot anchor-own Q:
 #   COMM_EFF_COMPRESSION_TYPE=prf_mask COMM_EFF_MASK_ENABLED=true \
 #     COMM_EFF_ANCHOR_OWNS_Q=false EXPERIMENT_NAME=ce_mask_ref bash <thisfile>
 #
@@ -216,15 +212,15 @@ REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}
 
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method.
-#    The launcher pins the current PowerSGD + anchor delayed-EF baseline while
-#    exposing every research knob as an env override. Field names mirror the
-#    actor config schema; Hydra struct mode rejects unknown keys.
+#    Defaults configure the PowerSGD + anchor delayed-EF path while exposing
+#    comm-eff knobs as env overrides. Field names mirror the actor config schema;
+#    Hydra struct mode rejects unknown keys.
 # ---------------------------------------------------------------------------
 COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
 # --- codec selector: dense | prf_mask | powersgd ---
-# powersgd is the baseline codec and is the only codec compatible with
-# anchor-owned Q. prf_mask is retained for reference ablations; dense disables
-# communication compression.
+# powersgd is the default codec and is the only codec compatible with anchor-owned
+# Q. prf_mask is available for comparison runs; dense disables communication
+# compression.
 COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
 # --- activation mask (reference-only codec; OFF in the PowerSGD anchor base) ---
 COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
@@ -312,7 +308,7 @@ COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # ort
 COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"  # carry Q across steps
 COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"  # project old-logprob too
 COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-reduce V across DP => single shared consensus Q (REQUIRED under DP)
-COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 REQUIRED (INF-14); bf16 diagnostic
+COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 required for stable orthogonalization
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
 if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
@@ -337,7 +333,7 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense => legacy mask-by-flag)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense can fall back to mask.enabled)
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
@@ -389,9 +385,9 @@ EOF
 RUN_DIR="$(dirname "$LOG")"
 EARLY_STOP_SENTINEL="$RUN_DIR/EARLY_STOP_SIGNAL"
 rm -f "$EARLY_STOP_SENTINEL"
-# Patterns mirror the plan's ## Rescue triggers (numeric-only stability + FSDP/
-# spectral safety). \bnan/inf word-boundary guards avoid matching "infer"/
-# "information". The watcher is a no-op until $LOG starts filling.
+# Early-stop patterns catch numeric instability and FSDP/spectral safety errors.
+# \bnan/inf word-boundary guards avoid matching "infer"/"information". The
+# watcher is a no-op until $LOG starts filling.
 EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_params.*(error|Error|assert)|could not convert string to float|aten::copy_.*(mismatch|size)|torch\.distributed\.fsdp.*(error|Error)|(loss|grad_norm|pg_loss|policy_loss|reward)[^A-Za-z].{0,80}\b([Nn]a[Nn]|[Ii]nf)\b|\b([Nn]a[Nn]|[Ii]nf)\b.{0,40}(loss|grad_norm))'
 
 # ---------------------------------------------------------------------------
