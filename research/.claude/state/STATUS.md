@@ -4,7 +4,7 @@
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **RUNNING (cell 3 pending)** | 1×4H200 (i_41292294, **team**) | — | val@50: **b0.25=0.7612, b0.50=0.7635** (both clear +0.024 bar over EXP-32 0.7271; both > B2 0.7528) — 2-cell positive signal β_anc>0 lifts signed_ema; NOISE-FRAGILE (b0.25 val@55 fell to 0.7384). **Cell 3 (β=0.75) still to run.** Results recorded → `runs/EXP-34/RESULTS.md`, pushed to origin@c40387bae. Teardown (team key, 41292294 only) the instant cell 3 metrics sync; analyst runs offline after |
+| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **DONE** | 1×4H200 (i_41292294, **team**, TORN DOWN, 0 live verified) | **REVISE** | β→val@50 curve: 0.7612 / **0.7635 (β=0.50 peak)** / 0.7225 — peaks at β=0.50 (≠ EXP-33 flat delayed_ef). Best clears +0.024 bar (+0.0364 vs 0.7271; > B2 0.7528) but n=1+best-of-3 ⇒ analyst REVISE: replicate β=0.50 before promoting. All other criteria PASS. `runs/EXP-34/verdict.md`. No keep-warm. |
 | 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 stays default; max gap C2 +0.0144 < 0.024 |
 | 32 | signed_ema α=0.5 on valid-M | DONE | (op-managed) | done | val@50 0.7271 < B2 0.7528 |
 

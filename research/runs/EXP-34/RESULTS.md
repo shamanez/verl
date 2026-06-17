@@ -1,6 +1,6 @@
 # EXP-34 — signed_ema(α=0.5) β_anc sweep {0.25, 0.50, 0.75} — RESULTS (INTERIM)
 
-**Status:** INTERIM as of 2026-06-17 ~12:31Z — cells 1 & 2 complete, **cell 3 (β=0.75) still running**.
+**Status:** COMPLETE 2026-06-18 — all 3 cells done; box `41292294` torn down (team key, verified 0 live). **VERDICT: REVISE** (authoritative: `verdict.md`) — best cell β=0.50 val@50=0.7635 clears the +0.024 bar (+0.0364) AND beats the β=0 ref + B2, but rests on n=1 (seed_replicates=1) + best-of-3 selection, so the analyst calls for replicate draws at β=0.50 before promoting. All other criteria PASS (config provenance, one-knob, W&B, account, no NaN/ignition).
 Box: operator-provided team-account Vast instance **41292294** (4×H200). `vast_account=team`.
 W&B project: `verl_compression_research_beta_sweep_signed_ema`.
 
@@ -16,7 +16,7 @@ W&B project: `verl_compression_research_beta_sweep_signed_ema`.
 |---|---|---|---|---|
 | signed_ema_b0p25 | 0.25 | 0.7271 | **0.7612** | 0.7384 |
 | signed_ema_b0p50 | 0.50 | 0.7430 | **0.7635** | (pending) |
-| signed_ema_b0p75 | 0.75 | (pending) | (pending) | (pending) |
+| signed_ema_b0p75 | 0.75 | 0.7028 | **0.7225** | — (torn down at val@50, no val@55 by design) |
 
 **Reference points** (not re-run): EXP-32 signed_ema β=0 val@50 = **0.7271**; B2 delayed_ef SOTA = **0.7528**; dense band ≈ 0.75–0.78 (apples-to-apples draw 0.7839).
 
