@@ -552,6 +552,23 @@ inconsistent one: EF's only residual is *staleness* (vanishing), signed_ema's is
 *structural sign-bias* (non-vanishing). This is the within-bound ordering the
 data shows, derived — not fitted.
 
+The calibrated claim (stated verbatim and identically in `systems.md` §3, to keep
+the two documents word-for-word aligned and to guard against over-reading a
+one-draw difference):
+
+> Both mergers recover most of the $0.123$ floor$\to$dense gap, but by different
+> mechanisms: error-feedback re-injects the exact dropped residual (recovering
+> $\approx$all of it, capped only by a second-order staleness term), whereas
+> signed_ema carries no residual and recovers the gap only indirectly — by
+> suppressing wrong-sign descent on the $\approx50\%$ of coordinates where the
+> stale anchor disagrees (at $\alpha=0.5$ those coordinates are zeroed rather than
+> corrected). Because signed_ema injects no off-subspace information and discards
+> rather than reconstructs the disagreeing half, it caps strictly below
+> error-feedback; the measured $\approx0.026$ shortfall is of the order of the
+> disagreement fraction and is within single-draw noise, so it should be read as
+> "dominated, by a margin consistent with the sign-bias mechanism," not as a
+> precisely-predicted constant.
+
 ### 5.4 What "surpassing dense" formally requires
 
 The ceiling is an *information* statement, so the escape must be an *information*
@@ -602,12 +619,23 @@ must pass:
    is the signal in the *cross-rank second moment*, not the first? Async-realism
    caveats: (a) it must be computed from the **swarm** ranks, not the single slow
    anchor (the anchor is one node and has no within-itself disagreement); (b) the
-   *aggregated* correction must remain cross-rank-identical and tolerate variable
-   staleness. A genuine SAM-style or variance-adaptive term qualifies; isotropic
-   perturbation (EXP-31 L4) does **not** — it is rank-identical *uncorrelated
-   noise*, carrying no disagreement structure, which is exactly why it was null.
-   This is, mathematically, the **most promising** of the three escapes: it is the
-   one signal the compressed swarm has in abundance that a single dense trajectory
+   *aggregated* correction must remain cross-rank-identical (compute the
+   second-moment-derived direction once on an all-reduced sufficient statistic —
+   e.g. $\sum_r g_r$ and $\sum_r g_r\odot g_r$ — then every rank applies the
+   identical direction, exactly as $Q$/$M$ are already broadcast) and tolerate
+   variable staleness (the disagreement *geometry* is slow-varying, so a lagged
+   correction is still useful); and **(c) the second moment must be formed from
+   concurrent per-rank gradients at the *same* $\theta$** — it measures
+   *data-induced* variance (different shards, identical weights). Differencing
+   gradients across *different* $\theta$/lags contaminates data-variance with
+   trajectory drift and collapses back to the heterogeneous-staleness null (a
+   noisier stale-dense estimate, inside $\sigma(M)$); the staleness tolerance is on
+   *applying* the derived correction, not on mixing $\theta$'s into the estimate.
+   A genuine SAM-style or variance-adaptive term qualifies; isotropic perturbation
+   (EXP-31 L4) does **not** — it is rank-identical *uncorrelated noise*, carrying
+   no disagreement structure, which is exactly why it was null. This is,
+   mathematically, the **most promising** of the three escapes: it is the one
+   signal the compressed swarm has in abundance that a single dense trajectory
    structurally lacks.
 
 The disqualifier, stated once: **any $\Phi$ that is a deterministic function of

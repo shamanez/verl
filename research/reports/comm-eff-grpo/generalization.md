@@ -300,13 +300,18 @@ acting.)*
 **Mechanism.** Raise rollouts-per-prompt `n` and/or rollout sampling temperature `T` **on the
 compressed fast circuit**, with a **mandatory matched dense × {T, n} control**.
 
-**Why it escapes the ceiling.** The information injected is **exploration diversity in the
-rollout/data distribution** — it changes *which* gradient is being compressed, not *how* a fixed
-gradient is reconstructed. The ceiling is about gradient-reconstruction fidelity (the codec +
-anchor side); R1 acts **upstream of the codec entirely**, on the data-generating distribution. The
-compression-specific bet is that the diffuse policy a compressed run produces (measured:
-rollout_ppl 1.40 vs dense 1.24) has **steeper d(val)/dn** — more within-group reward variance to
-convert — so at matched (T, n) the compressed run's extra diversity pays where dense's does not.
+**Why it escapes the ORIGINAL ceiling — but lands on a NEW one (theorist's precise ruling).** `n`
+and `T` change *which* gradient is computed: they move `g(θ_t)` **itself**, so they are **outside
+σ(M)** for the baseline-(T,n) σ-algebra. R1 is therefore **not** a `Φ(G_comp, M)` reconstruction
+lever and the hard-reject list does **not** bind it. **HOWEVER**, the mandatory dense × {T,n} control
+**defines a new ceiling = dense-at-matched-(T,n)**, and R1 beats *that* **only if compression and
+high-T/n INTERACT** — the compressed circuit must **convert** the extra exploration into a better
+trajectory than dense does *at the same (T, n)*. That **compression × exploration interaction is the
+one genuinely live, untested, compression-specific bet**; **without** it, compressed-at-high-T simply
+re-lands at dense-at-high-T (ceiling holds at the new operating point). The hope rests on the diffuse
+policy a compressed run produces (measured: rollout_ppl 1.40 vs dense 1.24) having **steeper
+d(val)/dn** — but note this same diffuseness **already failed once** to convert on the greedy bar (the
+PowerSGD null), so the interaction is a hope, not a mechanism.
 
 **The honest caveats (from `surpass-dense-conversion-spine`).**
 - Compression is **TRAIN-ONLY** (`state.py` TRAIN_TAG); rollouts are vLLM with no hooks. So R1
@@ -404,11 +409,12 @@ staleness is the open async question for theorist.
 > staleness-ensemble framing stays REJECT.) Still open for theorist's direct ruling: does the estimate
 > stay cross-rank-identical after aggregation + tolerate *variable* staleness? Direct per-route tag
 > pending.]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS BUILD]** — no cross-rank
-> second-moment / disagreement state exists; the anchor maintains only `M` (the mean) + `Q`. Forming a
+> **[systems: feasibility — NEEDS BUILD (systems-confirmed): `delay_K` is a fixed scalar
+> (`comm_eff.py:136`) and `AnchorStalenessQueue` serves a deterministic `t−K` (`anchor.py:243-258`); the
+> circuit is cross-rank-identical by mandate. No cross-rank second-moment state exists; forming a
 > per-coordinate cross-rank variance needs a new all-reduce of the second moment (the DP axis is
-> uncompressed, so the raw per-rank gradients are reachable) + a variance-aware writeback. Heavier than a
-> merger knob; awaiting systems' confirmation.
+> uncompressed, so per-rank gradients are reachable) + a variance-aware writeback. Heavier than a merger
+> knob.]**
 
 ---
 
@@ -473,9 +479,10 @@ is the rare route whose math *likes* the async-realism constraints.
 > ESCAPES *only* if anchor-curvature beats Adam's own `v_t` via off-diagonal / lower-noise /
 > cross-rank-shared structure (else collapses to a noisier Adam — the AdamW-`v_t` overlap is the binding
 > constraint). Direct per-route confirmation pending.]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS NEW CODE — no curvature
-> state exists; the anchor maintains only `M` (gradient EMA) + `Q` (basis). A diagonal proxy is cheap
-> (no extra backward — reuse `M_t`, `M_{t−1}`); a HVP or block estimate is heavier and risks the
+> **[systems: feasibility — NEEDS NEW CODE; verdict pending (R5 was not among systems' four ruled
+> routes), but the load-bearing substrate fact is systems-corroborated: the anchor maintains only `M`
+> (gradient EMA) + `Q` (basis) — no curvature/second-moment state. A diagonal proxy is cheap (no extra
+> backward — reuse `M_t`, `M_{t−1}`); a HVP or block estimate is heavier and risks the
 > production-diagnostics-OFF OOM tier.]**
 
 ---

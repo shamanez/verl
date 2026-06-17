@@ -437,41 +437,43 @@ only if its sharpening instability is solved first.</p>
 <p>The ceiling closes every operation on a stale dense estimate. A surpass route must inject information that is
 <b>structurally absent</b> from $\sigma(M)$. The theorist's three admissible categories: <b>(a)</b> genuine
 curvature / second-order structure; <b>(b)</b> conversion-positive exploration that moves the <i>greedy</i> mode;
-<b>(c)</b> a cross-rank second moment (swarm disagreement-as-signal). The two genuine <i>fixed-point</i> bets both
-inject a second moment $\sigma(M)$ lacks — <b>R5</b> (anchor curvature) and the reframed <b>R3</b> (cross-rank
-disagreement); R3 may edge R5 because AdamW already supplies a diagonal $v_t$ that R5 must beat, but has no cross-rank
-term at all. The candidate routes, with theorist's now-delivered per-route verdict:</p>
+<b>(c)</b> a cross-rank second moment (swarm disagreement-as-signal). After theorist's per-route ruling, <b>R3</b>
+(the reframed cross-rank disagreement) is the <b>#1 lead and the only route theorist rates mathematically
+promising</b> — it injects a second moment $\sigma(M)$ lacks and, unlike R5, has <b>no Adam-overlap</b> (Adam has no
+cross-rank term), so its escape is unconditional on the optimizer; only an async sub-constraint remains. <b>R5</b>
+(anchor curvature) is the admissible-but-heavy #2 — it escapes <b>only with non-diagonal</b> curvature (a diagonal
+proxy merely duplicates AdamW's own $v_t$ and collapses). The candidate routes, with theorist's per-route verdict:</p>
 
 <table>
   <thead><tr><th>rank</th><th>route</th><th>category</th><th>escapes $\sigma(M)$?</th><th>verdict / open gate</th></tr></thead>
   <tbody>
     <tr>
       <td>1</td>
-      <td><b>R5</b> anchor-curvature preconditioner</td>
-      <td>(a) curvature</td>
-      <td><span class="tag t-cond">conditional</span></td>
-      <td>Escapes <b>iff</b> the anchor curvature carries structure AdamW's own diagonal $v_t$ lacks (off-diagonal / lower-noise / cross-rank-shared) — else it collapses to "a noisier Adam." Empirical gate; its math <i>likes</i> staleness (curvature ages slowly).</td>
-    </tr>
-    <tr>
-      <td>2</td>
       <td><b>R3</b> cross-rank second moment (SAM-style)</td>
       <td>(c) disagreement</td>
       <td><span class="tag t-escape">accept</span></td>
-      <td>The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$, which holds only the gradient <i>means</i>. <b>No Adam-overlap</b> (Adam has no cross-rank term) ⇒ may be the <i>cleanest</i> escape and could take #1. Open: stays cross-rank-identical + variable-staleness-tolerant after aggregation.</td>
+      <td><b>Theorist's only route rated mathematically promising.</b> The swarm's cross-rank <i>variance</i> (disagreement) is outside $\sigma(M)$ and has <b>no Adam analogue</b> (Adam's $v_t$ is a within-rank temporal moment, not cross-shard) ⇒ escape unconditional on the optimizer. Feasible / needs-build (moderate): one extra all-reduce of $g^2$ at the existing anchor DP-reduce site, no invariant bump. Open: the estimate is the anchor's <i>stale</i> cross-shard variance — must stay cross-rank-identical after aggregation and tolerate variable staleness.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><b>R5</b> anchor-curvature preconditioner</td>
+      <td>(a) curvature</td>
+      <td><span class="tag t-cond">conditional / heavy</span></td>
+      <td>Admissible but heavy. Escapes <b>only with non-diagonal</b> curvature — a diagonal proxy (however estimated) merely duplicates AdamW's own diagonal $v_t$ and collapses back inside the ceiling. Control = dense-<b>Adam</b>, not dense-SGD. Its math <i>likes</i> staleness (curvature ages slowly).</td>
     </tr>
     <tr>
       <td>3</td>
       <td><b>R1</b> swarm rollout diversity ($n$ + $T$)</td>
       <td>(b) exploration</td>
       <td><span class="tag t-escape">escapes</span> <span class="tag t-cond">pass@k-only</span></td>
-      <td>$n$/$T$ act upstream of the codec (outside $\sigma(M)$) ⇒ genuinely escapes the fixed-data ceiling; but almost surely a pass@k edge, not a greedy-mode surpass (the codec already runs more diffuse and didn't convert). Cheapest to test; dense$\times\{T,n\}$ control mandatory.</td>
+      <td>$n$/$T$ act upstream of the codec (outside $\sigma(M)$) ⇒ genuinely escapes the fixed-data ceiling; but theorist rates it "likely yields only pass@k," not a greedy-mode surpass (the codec already runs more diffuse and didn't convert). Cheapest to test; dense$\times\{T,n\}$ control mandatory.</td>
     </tr>
     <tr>
       <td>4</td>
       <td><b>R4</b> compression as a flat-minima regularizer</td>
       <td>— (test-time)</td>
       <td><span class="tag t-cond">out of scope</span></td>
-      <td>The fixed-point ceiling bounds the <i>train</i> objective, not test risk — R4 concedes train-parity and claims a <b>test-time / OOD</b> edge. Not a GSM8K-greedy surpass; needs an OOD eval (cheapest: eval-only over existing B2/dense checkpoints).</td>
+      <td>The fixed-point ceiling bounds the <i>train</i> objective, not test risk — R4 concedes train-parity and claims a <b>test-time / OOD</b> edge (theorist scoping confirmation pending). Not a GSM8K-greedy surpass; cheapest probe is eval-only over existing B2/dense checkpoints.</td>
     </tr>
     <tr>
       <td>5</td>
@@ -494,16 +496,17 @@ cross-rank <i>second moment</i> (§5).</p>
 is to dense.</p>
 <p><b>Tier 1 — the surpass bets (highest expected information).</b></p>
 <ol>
-  <li><b>R5-cheap: anchor diagonal-curvature preconditioner</b> (category a). Cheapest variant first — a diagonal
-  proxy from $M_t, M_{t-1}$ (no extra backward), broadcast anchor-owned, applied as a preconditioner. <b>Decisive
-  diagnostic:</b> cosine between the anchor preconditioner and Adam's $v_t$ — high ⇒ collapse to noisier-Adam (kill);
-  low ⇒ genuine new structure. <i>Gated on theorist confirming it carries structure Adam lacks.</i></li>
-  <li><b>R3-2ndmoment: cross-rank disagreement-aware step</b> (category c). Form a per-coordinate cross-rank second
-  moment (the swarm's gradient disagreement; the DP axis is uncompressed, so per-rank gradients are reachable) and
-  <b>damp the step where ranks fight, trust it where they agree</b> (SAM-style). Matched dense control (which has no
-  disagreement term). <b>No Adam-overlap</b> ⇒ the cleanest category-(c) escape, potentially the top bet. Async guard:
-  the direction must be cross-rank-identical after aggregation and stable as staleness varies, or it diverges the
-  swarm.</li>
+  <li><b>R3-2ndmoment: cross-rank disagreement-aware step</b> (category c) — <b>theorist's #1, the only route rated
+  mathematically promising.</b> Form a per-coordinate cross-rank second moment (the anchor backward runs on an
+  un-sharded per-rank clone, so each rank's full-shaped data-shard gradient is reachable — one extra all-reduce of
+  $g^2$ at the existing DP-reduce site, no invariant bump) and <b>damp the step where ranks fight, trust it where they
+  agree</b> (SAM-style). Matched dense control (which has no disagreement term). <b>No Adam-overlap</b> ⇒ escape
+  unconditional on the optimizer. Async guard: the direction must be cross-rank-identical after aggregation and stable
+  as staleness varies, or it diverges the swarm.</li>
+  <li><b>R5-cheap: anchor-curvature preconditioner</b> (category a). <b>Escape requires non-diagonal curvature</b> — a
+  diagonal proxy duplicates AdamW's $v_t$ and collapses, so the control is dense-<b>Adam</b>. <b>Decisive
+  diagnostic:</b> cosine between the proxy and Adam's $v_t$ — high ⇒ kill (a diagonal proxy is not worth running).
+  <i>Gated on theorist confirming a non-diagonal proxy carries structure Adam lacks.</i></li>
   <li><b>R1-gate: dense $\times\{T,n\}$ surface calibration</b> (category b). A cheap kill that has <i>never been
   run</i>. If no $(T,n)$ lifts dense above its band, the diffuse-policy hypothesis is dead before spending on the
   compressed arm. Track the pass@k coverage curve, not just greedy val.</li>
@@ -527,27 +530,28 @@ comm-budget pressure makes full-width $M$ transfer infeasible.</p>
 opposite ends, and their answers <b>converge on one class of signal</b> — a second moment $\sigma(M)$ lacks — which
 the team then sharpened into two distinct top bets:</p>
 <ul>
-  <li><code>theorist</code> proves the only mathematically clean escape categories and names the
-  <b>cross-rank second moment</b> — the swarm's gradient <i>disagreement</i>, $\tfrac{1}{R}\sum_r (g_r - \bar g)(g_r - \bar g)^\top$
-  — as the <i>most promising</i>, because it is the one quantity both the dense mean and the anchor (itself a
-  DP-mean) structurally discard.</li>
-  <li><code>strategist</code> ranks the <b>R5 anchor-curvature preconditioner</b> #1 and warns it only escapes if it
-  beats Adam's <i>own</i> diagonal $v_t$.</li>
+  <li><code>theorist</code> proves the escape categories and rates the <b>cross-rank second moment</b> — the swarm's
+  gradient <i>disagreement</i> $\tfrac{1}{R}\sum_r (g_r-\bar g)(g_r-\bar g)^\top$ — as <b>the only route currently
+  rated mathematically promising</b>: the one quantity both the dense mean and the anchor (a DP-mean) discard, with no
+  Adam analogue.</li>
+  <li><code>strategist</code> independently ranks it <b>#1</b> on feasibility + the no-Adam-overlap argument, with the
+  <b>R5 curvature preconditioner #2</b> (admissible but heavy, and only if non-diagonal).</li>
 </ul>
 <div class="keypt">
   <strong>The convergence — and the sharper conclusion.</strong> Both specialists land on the same <i>class</i> of
   signal: inject a <b>second moment</b> that $\sigma(M)$ (which holds only gradient <i>means</i>) lacks. The team's
-  final view separates two realizations and ranks them:
+  final view, after theorist's ruling, ranks the two realizations:
   <ul style="margin:8px 0 0">
-    <li><b>R5 — anchor curvature</b> (a <i>temporal</i> second moment, e.g. from $M_t, M_{t-1}$): competes directly
-    with AdamW's <i>own</i> diagonal $v_t$, so it escapes only if it carries structure Adam lacks (off-diagonal,
-    lower-noise, or cross-rank-shared) — the <b>Adam-overlap hurdle</b>.</li>
-    <li><b>R3-reframed — cross-rank disagreement</b> (a <i>spatial</i> second moment; descend where swarm ranks agree,
-    damp where they fight, SAM-style): Adam has <b>no cross-rank term at all</b>, so there is <b>no overlap
-    hurdle</b> — mathematically the <b>cleanest</b> escape, and it could outrank R5.</li>
+    <li><b>R3 — cross-rank disagreement</b> (a <i>spatial</i> second moment; descend where swarm ranks agree, damp
+    where they fight, SAM-style): Adam has <b>no cross-rank term at all</b>, so <b>no overlap hurdle</b> — theorist's
+    <b>#1, the only route rated mathematically promising</b>. Feasible with one extra all-reduce of $g^2$ at the
+    anchor's DP-reduce site; the one open question is the async constraint (cross-rank-identical + staleness-tolerant).</li>
+    <li><b>R5 — anchor curvature</b> (a <i>temporal</i> second moment, e.g. from $M_t, M_{t-1}$): #2, admissible but
+    heavy — it competes with AdamW's <i>own</i> diagonal $v_t$, so it escapes <b>only if non-diagonal</b> (a diagonal
+    proxy duplicates Adam and collapses). The control is dense-<b>Adam</b>, not dense-SGD.</li>
   </ul>
   <p style="margin:8px 0 0">Both are async-friendly: a second moment ages slowly, degrades gracefully, and is
-  anchor-owned hence cross-rank-identical.</p>
+  anchor-owned hence cross-rank-identical. If R5's non-diagonal variant also confirms, the two are co-leads — run both.</p>
 </div>
 <p>This also sharpens the disqualifier: R3 (heterogeneous staleness) feels async-native but is the
 <i>wrong</i> instance of category (c) — averaging over staleness is still averaging stale dense estimates, so it
@@ -569,12 +573,13 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   <li><b>Parity is noise-bounded.</b> B2's band (0.735–0.754) overlaps the bottom of the dense band (0.75–0.78); the
   apples-to-apples dense draw (0.7839) is <i>above</i> B2. "Parity" means within $\pm$0.024/draw, not B2 $\ge$ dense
   pointwise — which is why surpass is a real, open target.</li>
-  <li><b>Route verdicts are theorist-stamped</b> (delivered after the section drafts and folded into
-  <code>theory.md</code> §7.2–7.3): R2 is rejected as $\sigma(M)$-measurable; R3 was <b>reframed</b> — its
-  heterogeneous-staleness form is rejected, but the <b>cross-rank second moment</b> it now denotes is accepted
-  (genuinely outside $\sigma(M)$); R1 escapes but is almost certainly pass@k-only; R4 escapes only by redefining the
-  objective (test-time / OOD). The two genuine fixed-point bets are <b>R5</b> (anchor curvature, conditional on an
-  empirical win over AdamW's $v_t$) and <b>R3-reframed</b> (cross-rank disagreement, no Adam-overlap).</li>
+  <li><b>Route verdicts are theorist-stamped</b> (delivered after the section drafts, folded into
+  <code>theory.md</code> §7.2–7.3): <b>R3-reframed (cross-rank disagreement) is ACCEPT and theorist's #1</b> — the
+  only route rated mathematically promising, with one open async sub-question; <b>R5 (anchor curvature) is #2</b>,
+  admissible but heavy and escaping only with <b>non-diagonal</b> curvature (a diagonal proxy duplicates AdamW's
+  $v_t$); <b>R1</b> escapes but is almost certainly pass@k-only; <b>R4</b> is out of scope of the $\sigma(M)$ ceiling
+  (a test-time claim; theorist scoping confirmation pending); <b>R2</b> is a clean reject. The original
+  heterogeneous-staleness idea is itself rejected.</li>
 </ul>
 
 
@@ -589,15 +594,17 @@ collapses. The information is in the <b>spatial</b> (cross-shard) spread, not th
   unstable — keep it only as a 1-bit-comm escape hatch.</p>
   <p style="margin-bottom:0"><b>What is open.</b> Surpassing dense. The stale-reconstruction ceiling proves no merger
   reading only a stale dense estimate can beat dense. The escape is to inject a <b>second moment</b> that estimate
-  lacks — and the team's two top bets are <b>R5</b> (anchor curvature, conditional on beating AdamW's own diagonal
-  $v_t$) and <b>R3-reframed</b> (the swarm's <b>cross-rank disagreement</b>, SAM-style — which Adam has no term for,
-  so the cleaner escape). Run them cheap first alongside the never-run dense$\times\{T,n\}$ R1 gate, always against a
-  matched dense control, and judge on the dense <i>band</i> with margin — not a single draw.</p>
+  lacks — and theorist's ruling leaves <b>one route rated mathematically promising: R3-reframed</b>, the swarm's
+  <b>cross-rank disagreement</b> (SAM-style), which Adam has no term for and which is feasible with one extra
+  all-reduce at the anchor. <b>R5</b> (anchor curvature) is the heavy #2 — viable only with non-diagonal curvature.
+  Run both cheap, alongside the never-run dense$\times\{T,n\}$ R1 gate, against a matched dense control, and judge on
+  the dense <i>band</i> with margin — not a single draw.</p>
 </div>
-<p><b>Immediate next step:</b> run the three cheap, gating Tier-1 probes in parallel — the <b>R5</b> diagonal-curvature
-proxy (diagnostic: its cosine with Adam's $v_t$ — high ⇒ kill), the <b>R3</b> cross-rank-disagreement step (the
-no-Adam-overlap escape, possibly the cleanest), and the never-run <b>R1</b> dense$\times\{T,n\}$ gate — each against a
-matched dense control, judged on the dense band with margin. Together they decide whether a surpass is reachable at all.</p>
+<p><b>Immediate next step:</b> run the cheap, gating Tier-1 probes in parallel — the <b>R3</b> cross-rank-disagreement
+step (theorist's #1; one extra all-reduce at the anchor, no invariant bump), the <b>R5</b> non-diagonal curvature
+proxy (diagnostic: its cosine with Adam's $v_t$ — high ⇒ kill; a diagonal proxy is not worth running), and the
+never-run <b>R1</b> dense$\times\{T,n\}$ gate — each against a matched dense control, judged on the dense band with
+margin. Together they decide whether a surpass is reachable at all.</p>
 
 <footer>
   <p><b>Provenance.</b> This report synthesizes three cross-examined section documents in this directory:
