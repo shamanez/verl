@@ -688,6 +688,19 @@ it collapses to dense-Adam; if no — off-diagonal coupling, or a fixed-point-
 changing objective — it is an admissible escape.* This is why R5 and R3 are
 genuinely distinct surpass routes yet share one disqualifier.
 
+**Ranking asymmetry (R3 leads, R5 second).** The two routes are *not* symmetric
+once past the shared kill-check. R3's escape, given its locked recipe (same-$\theta$
+cross-shard variance driving an *objective-level* penalty / min-max), changes the
+fixed point **by construction** — $\min_\theta[L+\lambda\mathcal R(\operatorname{Var}_r)]$
+provably has a different optimum than the $\mathbb E[g]$ optimum, so the *escape*
+itself is structural, not contingent (only the size of the GSM8K-greedy win
+remains empirical). R5's escape is admissible but its *benefit* is contingent even
+granted off-diagonal structure: there is no theorem that a non-diagonal curvature
+preconditioner lands in a *better* basin than dense-Adam — it may land in the same
+or worse one, and the finite-difference $M_t-M_{t-1}$ estimate is noisy. So R3 is
+the **lead** (provable escape + locked recipe), R5 is **second** (admissible but
+empirical-benefit). Both still rank above every category-(b)/in-$\sigma(M)$ route.
+
 ---
 
 ## 6. Summary of the load-bearing results
