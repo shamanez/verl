@@ -272,11 +272,17 @@ candidate below is tagged against.
 - **EXP-33 β_anc sweep** {0, .25, .5, .75, 1}: 0.738 / 0.740 / 0.753 / 0.722 / degenerate.
   β∈[0,0.5] flat free-averaging; β=0.5 nominal best but inside ±0.024 noise; β=1 cold-`M`
   collapse. β=0 stays default.
-- Also dead: constant λ>1, naive `M`-EMA, sign-replacement, Step-C/forward-Q, **generation-side
-  mask/Gaussian as a surpass lever** (train-only ⇒ repeats the PowerSGD null), anchor-lead,
-  delta-subbasis.
+- Also dead (with the *why*, confirmed by `systems`): **constant λ>1** (dose escalation); **naive
+  `M`-EMA** (β>0 just averages staleness); **sign-replacement** — closed *structurally*, not just
+  dominated: **50.4% sign-disagreement at the first warm step**, flat, **not fixable by α / delay_K /
+  β**; **Step-C / forward-Q** — *anti-converts* because vLLM **rollouts run uncompressed**, so `Q` must
+  preserve train↔rollout consistency; **generation-side compression** — out of scope by design
+  (rollouts uncompressed); **anchor-lead / delay-compensation** — violates async-realism (anchor always
+  lags); **delta-subbasis** (frozen null); **`ef_powersgd` damped (EXP-27)** — STOP, ignites
+  length-explosion at step ~61 with no val gain over its 0.7210 parent.
 
-These are all operations on the stale dense estimate. The ceiling explains *why* they are null.
+These are all operations on the stale dense estimate (σ(M)-measurable). The ceiling explains *why* they
+are null.
 
 ### 4.3 The candidate routes (each must escape §4.1)
 
@@ -405,17 +411,23 @@ staleness is the open async question for theorist.
 (the objective side), explicitly *different* from EXP-31's control-variate which gated the
 *gradient*.
 
-**Why it probably doesn't escape.** In GRPO the advantage is already **group-mean-normalized**, so
-a baseline is a control variate on top of that — and a *stale* baseline injects only a stale
-estimate of the same quantity ⇒ likely collapses to the ceiling (and EXP-31's gradient-side
-control-variate already failed with cov≈0). Kept only to ask theorist whether *any* objective-side
-use of the anchor escapes; absent a positive answer it is **retired**.
+**Why it probably doesn't escape — now with a concrete type-mismatch (systems).** In GRPO the advantage
+is **already a group-relative (leave-one-out-style) baseline over the n=8 rollouts** — the within-group
+mean *is* the variance-reduction baseline. So the question is what a stale `M` adds *on top*. **And `M`
+is a gradient-space object** (a per-matrix EMA over the 196 decoder weight matrices), **not a return /
+advantage estimate** — it does not naturally produce a per-sequence scalar baseline. There is a
+**type-mismatch** that any wiring must bridge, and once bridged the most likely result is **re-deriving
+the existing group baseline** (σ(M)-measurable ⇒ ceiling). Kept only to ask theorist whether *any*
+objective-side use escapes; absent a positive answer it is **retired**.
 
-> **[theorist: validity — unvetted (theorist); my prior: COLLAPSES — a stale baseline on the
-> group-mean-normalized GRPO advantage is bias/variance on a stale estimate of the same quantity; key
-> open question for theorist: does *any* objective-side anchor use escape the ceiling?]**
-> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS NEW CODE (advantage-side
-> hook does not exist; the only anchor combiners today are gradient-side mergers in `spectral_filter.py`)]**
+> **[theorist: validity — unvetted (theorist); my prior: COLLAPSES — a baseline derived from `M` (a
+> gradient mean) is σ(M)-measurable; key open question: does *any* objective-side anchor use escape, or
+> does it just re-derive the existing n=8 group-LOO baseline?]**
+> **[systems: feasibility — WIREABLE but mechanism UNDERSPECIFIED (systems, confirmed). Genuinely not yet
+> tested and distinct from EXP-31's L1 gradient control-variate (cov≈0, skipped). BUT: the GRPO advantage
+> is already a group-LOO baseline, and `M` is gradient-space (per-matrix EMA, not a per-sequence scalar)
+> ⇒ a type-mismatch to bridge + the async cross-rank-identical/staleness constraint. Lower-confidence-
+> feasible than R1; theorist must rule it is not just the existing group baseline.]**
 
 ---
 
@@ -579,17 +591,22 @@ non-stationary datasets and for `r/H` against heavier-tailed spectra at larger m
 operating on a stale estimate of dense; a surpass must inject information that stale dense estimate
 structurally lacks* (theorist's three escape categories: **(a)** curvature/second-order, **(b)**
 conversion-positive new exploration that **moves the greedy mode**, **(c)** multi-rank disagreement that
-is information not noise). Mapped onto these, two routes are the top bets under different risk profiles:
-**R5 (anchor-curvature preconditioner — category (a), the highest ceiling because it is the only route
-injecting structurally-new info, but its escape is *conditional* on the anchor's curvature carrying
-structure Adam's own diagonal `v_t` lacks — off-diagonal, lower-noise, or cross-rank-shared — else it
-collapses to a noisier Adam; its math notably *likes* staleness, since curvature ages slowly)** and
-**R1 (swarm rollout diversity, n + T, category (b), acting upstream of the codec on the data
-distribution — the most-vetted lead, prior <20%, gate never run; its escape is contingent on
-conversion-positivity — moving the greedy mode, not just a pass@k edge)**. **R4 (compression as a
-structured flat-minima regularizer claiming a test-time / OOD generalization edge, conceding the
-training objective)** is a distinct escape that sidesteps the fixed-point ceiling entirely. R3
-(heterogeneous staleness, category (c)) and R2 (anchor-as-advantage-baseline) most likely collapse back
-to the ceiling and are kept for robustness / completeness, not as surpass bets. **All route validities
-are theorist-gated and awaiting his yes/no** (requested with explicit category mapping); the report's
-per-route slots fold his verdicts in directly.
+is information not noise). The formal test: a route surpasses **iff it injects information outside
+σ(M) = σ(g(θ_t), g(θ_{t−K}))** — the stale + current dense-gradient *means*. The **two genuine
+fixed-point bets both inject a second moment** σ(M) lacks: **R5 (anchor-curvature preconditioner,
+category (a)** — conditional on the curvature carrying structure AdamW's own diagonal `v_t` lacks:
+off-diagonal, lower-noise, or cross-rank-shared, else it collapses to a noisier Adam; its math notably
+*likes* staleness, since curvature ages slowly**)** and **R3, reframed (cross-rank second moment /
+disagreement-as-signal, SAM-style, category (c)** — descend where swarm ranks agree, damp where they
+fight; the cross-rank *variance* is information the mean `M` discards, and unlike R5 it has **no
+Adam-overlap problem**, so it may be the *cleanest* category-(c) escape and could take the top slot if
+theorist ACCEPTs it and its async constraints hold**)**. **R1 (swarm rollout diversity, n + T,
+category (b))** is the only compression-*specific* exploration bet but likely a pass@k edge unless it
+relocates the greedy argmax; **R4 (compression as a structured flat-minima regularizer)** is a distinct
+*test-time / OOD* generalization claim the fixed-point ceiling does not adjudicate; **R2
+(anchor-as-advantage-baseline)** is the lone σ(M)-measurable REJECT. *(Note: my first R3 framing — a
+heterogeneous-staleness ensemble — is itself REJECT, just noisier stale-dense; only the cross-rank-2nd-
+moment reframe escapes. Its parity-only sibling, variable-staleness robustness, stays on the roadmap as
+deployment-realism, not a surpass.)* **All route validities are theorist-gated and awaiting his
+ACCEPT/REJECT** (sent with explicit σ(M)-membership arguments); the report's per-route slots fold his
+verdicts in directly.
