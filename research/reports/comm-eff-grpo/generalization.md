@@ -415,25 +415,35 @@ cross-data-shard disagreement is the one quantity both the dense mean **and** th
 DP-mean) discard. This is **not** the isotropic perturbation EXP-31 L4 ran (uncorrelated noise, REJECT)
 — the signal is *structured* cross-shard disagreement.
 
-**Async-realism caveat.** The derived robust direction **must stay cross-rank-identical after
-aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**;
-the variance is produced *by* an all-reduce so it is bit-identical across ranks by construction (no
-invariant bump, unlike the rejected staleness-ensemble version). It is `delay_K`-stale (anchor circuit).
+**Async-realism — RESOLVED (theorist's sub-ruling, both YES, with one implementation constraint).**
+(1) **Cross-rank-identical after aggregation: YES, by construction.** All-reduce the 2nd-moment
+*sufficient statistics* (`Σ_r g_r` and `Σ_r g_r⊙g_r` for a diagonal disagreement-variance, or sketched
+cross-terms for a low-rank version), compute the correction from the **reduced** (hence rank-invariant)
+stats, then every rank applies the **same** direction — exactly the pattern `Q`/`M` already use; no new
+collective beyond the all-reduce. (2) **Variable-staleness-tolerant: YES** — the disagreement *geometry*
+(where shards agree vs fight) is slow-varying, so a stale estimate is still useful and the *application*
+of the correction can lag.
 
-**The tension that could undercut R3's "no Adam-overlap" edge (flag for theorist).** A naïve SAM-style
-"damp where shards disagree" downweights exactly the high-variance coordinates — which is **a
-variance-normalized step ≈ a diagonal preconditioner by another name**. If R3 collapses to that, it
-**re-inherits R5's AdamW-`v_t` overlap problem** (Adam already variance-normalizes per-coordinate), and
-its claim to be a *distinct* category-3 escape weakens. R3 stays distinct **only if** the
-cross-shard-disagreement signal is used as something more than a per-coordinate scale — e.g. a genuine
-robustness/min-max objective, not just `g / √(var)`. **This is the open validity question that decides
-whether R3 truly clears the ceiling independently of R5.**
+**⚠ THE CONSTRAINT that separates ACCEPT from silent-collapse (bake it in).** The 2nd moment **MUST be
+computed from CONCURRENT per-rank gradients at the SAME θ** — it measures **data-induced** variance
+(different shards, same weights). **Do NOT difference gradients across different θ / different lags** —
+that contaminates data-variance with trajectory-**drift** and is exactly the heterogeneous-staleness
+object that REJECTs (inside σ(M)). So: **same-θ cross-shard 2nd moment = the real cat-3 signal (outside
+σ(M)); cross-θ "spread" = noisier-stale-dense (REJECT).** The async tolerance is on the *application* of
+the derived correction, **not** on mixing θ's into the estimate.
 
-> **[theorist: validity — ACCEPT (theorist, DIRECT): explicitly named as "the mathematically-most-
-> promising route I'd ADD" — the one signal genuinely outside σ(M) that lives on THIS substrate (the DP
-> swarm); variance is not a function of the gradient means (his §5.4 cat-3). (The staleness-ensemble
-> framing stays REJECT.) The remaining gate is the async constraint: the estimate must stay
-> cross-rank-identical after aggregation + tolerate variable staleness.]**
+**Distinctness vs R5's diagonal trap — RESOLVED.** With the same-θ constraint **plus** using the
+disagreement at the *objective* level (a robustness/min-max objective, not a `g/√var` per-coordinate
+scale — which would be a diagonal preconditioner that re-inherits R5's Adam-overlap), R3 is a genuine,
+**distinct** cat-3 escape. **Theorist's verdict: with these constraints R3 is the UNCONDITIONAL lead.**
+
+> **[theorist: validity — ACCEPT, UNCONDITIONAL LEAD (theorist, DIRECT; cat-3). The cross-shard 2nd
+> moment is info `M` (a DP-mean) structurally discards ⇒ outside σ(M). Async sub-ruling RESOLVED both
+> YES: cross-rank-identical (compute the correction from all-reduced sufficient stats, apply the same
+> direction) + variable-staleness-tolerant (disagreement geometry is slow-varying; application can lag).
+> **The constraint that makes it ACCEPT not collapse: same-θ concurrent gradients only** (data-variance);
+> differencing across θ/lags = the rejected heterogeneous-staleness object. With same-θ + objective-level
+> use (not `g/√var`), R3 is the unconditional lead.]**
 > **[systems: feasibility — FEASIBLE / NEEDS-BUILD (moderate) — systems code-verified. The per-rank
 > full-shaped gradients exist at `transformer_impl.py:1069-1082`, immediately before the SUM/`dp_world`
 > mean that forms `M` ⇒ the cross-coordinate variance is **one extra all-reduce of `g_r²`** there + an
@@ -490,13 +500,17 @@ curvature proxy extracts exactly that discarded 2nd-order structure ⇒ it injec
 
 **THE decisive control — it's dense-ADAM, not dense-SGD (theorist's whole-ballgame caveat).** AdamW
 (verl default; `_generated_ppo_trainer.yaml`) **already uses `v_t` = a diagonal second moment = a
-diagonal preconditioner.** So a **DIAGONAL** curvature proxy from the anchor **just duplicates `v_t` ⇒
-collapses to dense-Adam (DEAD END).** *(This is the inverse of how I first framed it — the cheap
-diagonal proxy is the kill-case, not the starting point.)* **R5 escapes ONLY if it ships curvature Adam
-cannot represent:**
-1. **Off-diagonal / true-Hessian** curvature (Adam is diagonal-only); **or**
-2. the **`H·Δθ` trajectory-direction term used as a NON-diagonal** preconditioner / momentum-correction
-   that a coordinate-wise `v_t` cannot represent.
+diagonal preconditioner.** So a **plain per-shard DIAGONAL** curvature proxy from the anchor **just
+duplicates `v_t` ⇒ collapses to dense-Adam (DEAD END).** *(This is the inverse of how I first framed it —
+the cheap diagonal proxy is the kill-case, not the starting point.)* **R5 escapes ONLY via one of
+theorist's three admissible sub-cases — curvature Adam's diagonal `v_t` cannot represent:**
+1. **(i) Off-diagonal / true-Hessian** curvature — Adam is diagonal-only (**the cleanest escape**); the
+   `H·Δθ`=`M_t−M_{t−1}` trajectory term used as a **NON-diagonal** preconditioner/momentum-correction is
+   the cheap way to reach this;
+2. **(ii) Lower-noise, full-coverage DP-reduced** second moment — Adam's `v_t` is per-shard/noisy (a
+   *variance-reduction* of a thing Adam has ⇒ weaker escape);
+3. **(iii) Cross-rank-SHARED** curvature — Adam's `v_t` is rank-local (the swarm's per-shard states
+   can't form a shared estimate).
 **R5 = admissible category-(a) escape IFF non-diagonal.** Extra caveats: the finite-difference is
 **noisy** (two stale gradients differenced) ⇒ needs damping/clipping; and the win — "preconditioned
 descent finds a better basin than dense-Adam" — is an **empirical bet, not a theorem**.
@@ -506,12 +520,13 @@ DP-mean ⇒ cross-rank-identical, and curvature is **slow-varying** ⇒ tolerate
 anchor is the *natural* site (it already runs a full-coverage dense backward at cadence; differencing
 successive `M`'s is ~free, no extra comm). So R5's math *likes* the async constraints.
 
-> **[theorist: validity — ESCAPES (theorist, DIRECT; category 1) IFF NON-DIAGONAL. `(M_t − M_{t−1}) ≈
-> H·Δθ` is a finite-difference HVP = 2nd-order structure the first-order trajectory discards. BUT the
-> real control is dense-**Adam** (already has diagonal `v_t`), so a **diagonal** proxy DUPLICATES `v_t`
-> and collapses — the escape requires **off-diagonal / true-Hessian** curvature OR `H·Δθ` as a
-> **non-diagonal** preconditioner. Async-admissible (lagging snapshots, DP-mean, slow-varying). Noisy ⇒
-> damp/clip; win is empirical.]**
+> **[theorist: validity — ACCEPT-NARROWED (theorist, DIRECT; category 1). `(M_t − M_{t−1}) ≈ H·Δθ` is a
+> finite-difference HVP = 2nd-order structure the first-order trajectory discards. BUT the real control
+> is dense-**Adam** (already has diagonal `v_t`), so a plain per-shard **diagonal** proxy DUPLICATES `v_t`
+> ⇒ REJECT. ACCEPT iff one of the three: **(i) off-diagonal/true-Hessian** (cleanest; reachable via
+> `H·Δθ`-as-non-diagonal), **(ii) lower-noise full-coverage DP-reduced** 2nd moment (weaker — variance-
+> reduction of a thing Adam has), **(iii) cross-rank-shared** curvature (Adam's `v_t` is rank-local).
+> Async-admissible (lagging snapshots, DP-mean, slow-varying). Noisy ⇒ damp/clip; win is empirical.]**
 > **[systems: feasibility — NEEDS-BUILD (MODERATE, not greenfield) — systems-confirmed. The anchor
 > maintains only `M` (grad EMA, `ema_device=cpu`) + `Q` — no preconditioner/curvature/Fisher state. BUT
 > a **partial primitive already exists**: `powersgd_activation.py`'s basis-family sketches already
@@ -530,20 +545,24 @@ successive `M`'s is ~free, no extra comm). So R5's math *likes* the async constr
 
 ### 4.4 Route ranking (all theorist verdicts in; remaining gates are empirical — see §4.3 slots)
 
-Ordered by **(promise of a *real* surpass) × (feasibility)**. **R3 and R5 are CO-#1** for a
-*train-objective* surpass (theorist): they are the only two routes that inject information **dense-ADAM
-structurally lacks** — R3 the cross-shard 2nd moment (category c), R5 non-diagonal curvature
-(category a). Both are theorist-ACCEPT and systems-FEASIBLE (moderate build).
+Ordered by **(promise of a *real* surpass) × (feasibility)**. **R3 and R5 are the two
+*train-objective* surpass bets** (theorist): the only two routes that inject information **dense-ADAM
+structurally lacks** — R3 the cross-shard 2nd moment (category c), R5 non-diagonal curvature (category
+a). **R3 is the UNCONDITIONAL lead** (theorist resolved its gate — see below); **R5 is #2**, still
+conditional on a beyond-diagonal requirement. Both are theorist-ACCEPT, systems-FEASIBLE (moderate).
 
-**The shared kill-check across both co-leads — the diagonal trap.** The honest control is **dense-Adam**,
-which already carries a diagonal second moment (`v_t`). So **any version of R3 or R5 that reduces to a
-per-coordinate diagonal scale collapses** (it just duplicates `v_t`): R5-as-a-**diagonal**-proxy and
-R3-as-`g/√var` are the *same* dead end. Each escapes **only by going beyond a diagonal**: R5 via
-**off-diagonal / `H·Δθ`-non-diagonal** curvature; R3 via the disagreement driving a genuine
-**robustness/min-max objective**, not a coordinate-wise scale. *(This unifies the two open validity
-questions into one rule.)* **R1** is the only compression-*specific* exploration bet (category 2) but
-likely a pass@k edge, not a greedy surpass. **R4** is a separate *test-time* generalization claim the
-fixed-point ceiling does not adjudicate. **R2**
+**The shared kill-check — the diagonal trap (and why R3 clears it while R5's clearance is still
+empirical).** The honest control is **dense-Adam**, which carries a diagonal second moment (`v_t`). So
+**any version of R3 or R5 that reduces to a per-coordinate diagonal collapses** (duplicates `v_t`):
+R5-as-a-**diagonal**-proxy and R3-as-`g/√var` are the *same* dead end. Each must go **beyond a
+diagonal** — R5 via **off-diagonal / `H·Δθ`-non-diagonal** curvature; R3 via the disagreement driving a
+**robustness/min-max objective**, not a coordinate-wise scale. **The asymmetry that ranks them:** R3
+additionally has a *clean* recipe to be distinct — the **same-θ constraint** (concurrent gradients,
+data-variance not trajectory-drift) — that theorist confirms makes it the **unconditional** lead; R5's
+"is the curvature genuinely off-diagonal vs a re-skinned `v_t`?" stays an **empirical** open bet.
+**R1** is the only compression-*specific* exploration bet (category 2) but likely a pass@k edge, not a
+greedy surpass. **R4** is a separate *test-time* generalization claim the fixed-point ceiling does not
+adjudicate. **R2**
 is the lone σ(M)-measurable REJECT among the candidates.
 
 **Best-by-criterion (theorist's framing — the practical reading of the rank):** the routes win on
@@ -563,8 +582,8 @@ which **is** R3. **Curriculum** is admissible but generic — it changes the dat
 
 | rank | route | theorist category | escapes σ(M)? | prior | gating verdict still needed |
 |---|---|---|---|---|---|
-| **co-1** | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT (theorist, DIRECT)**; injects info dense-Adam lacks | cond. med–high | **diagonal trap**: must be a robustness/min-max *objective*, NOT `g/√var` (else = Adam's diagonal). + async guard + systems build |
-| **co-1** | **R5 anchor-curvature preconditioner** | **1 — curvature** | **YES — ACCEPT (theorist, DIRECT) IFF NON-DIAGONAL**; `M_t−M_{t−1}≈H·Δθ` | cond. high | **diagonal trap**: a diagonal proxy duplicates Adam's `v_t` ⇒ dead end; needs off-diagonal/`H·Δθ`-non-diagonal. Noisy ⇒ damp |
+| **1** | **R3 cross-rank 2nd moment (SAM-style)** | **3 — disagreement** | **YES — ACCEPT, UNCONDITIONAL LEAD (theorist, DIRECT)**; async gate RESOLVED | med–high | recipe locked: **same-θ** concurrent gradients (not cross-θ) + robustness *objective* (not `g/√var`); systems build (1 all-reduce) |
+| **2** | **R5 anchor-curvature preconditioner** | **1 — curvature** | **YES — ACCEPT IFF NON-DIAGONAL (theorist, DIRECT)**; `M_t−M_{t−1}≈H·Δθ` | cond. high | **diagonal trap (empirical)**: a diagonal proxy duplicates Adam's `v_t` ⇒ dead end; needs off-diagonal / full-coverage-lower-noise / cross-rank-shared. Noisy ⇒ damp |
 | 3 | **R1 swarm diversity (n + T)** | **2 — exploration** | ADMISSIBLE (theorist: "likely pass@k only"); greedy surpass **iff** conversion-positive | <20%, likely Route-A | direction settled; open: does it relocate the greedy argmax, or pass@k-only? |
 | 4 | **R4 compression-as-regularizer** | — (test-time, not fixed-point) | **ESCAPES by SCOPE-CHANGE (theorist)**; redefines goal to OOD/test, NOT the GSM8K greedy bar | low–med (~50/50 basin) | settled (scope-change); gate on OOD eval **+** sharpness/Hessian-trace measurement |
 | 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO — REJECT (theorist**: "everything deterministic-in-(G_comp,M) is capped"**)** | very low | settled REJECT; retired unless an objective-side escape is found |
@@ -688,19 +707,20 @@ operating on a stale estimate of dense; a surpass must inject information that s
 structurally lacks* (theorist's three escape categories: **(a)** curvature/second-order, **(b)**
 conversion-positive new exploration that **moves the greedy mode**, **(c)** multi-rank disagreement that
 is information not noise). The formal test: a route surpasses **iff it injects information outside
-σ(M) = σ(g(θ_t), g(θ_{t−K}))** — the stale + current dense-gradient *means*. The **two genuine
-fixed-point bets both inject a second moment** σ(M) lacks. **The lead is R3, reframed (cross-rank
-second moment / disagreement-as-signal, SAM-style, category (c)** — descend where swarm ranks agree,
-damp where they fight; the cross-rank *variance* is information the mean `M` discards. Theorist has
-**confirmed it ACCEPTs** (the one genuinely-outside-σ(M) signal), and unlike R5 it has **no Adam-overlap
-problem**, so it is the cleanest escape — *the remaining gate is purely the async constraint* (stays
-cross-rank-identical after aggregation + tolerates variable staleness)**)**. **Second is R5
-(anchor-curvature preconditioner, category (a)** — conditional on the curvature carrying structure
-AdamW's own diagonal `v_t` lacks: off-diagonal, lower-noise, or cross-rank-shared, else it collapses to
-a noisier Adam; its math notably *likes* staleness, since curvature ages slowly**)** — if confirmed, R3
-and R5 are co-leads, two independent 2nd-moment escapes. **R1 (swarm rollout diversity, n + T,
-category (b))** is the only compression-*specific* exploration bet but likely a pass@k edge unless it
-relocates the greedy argmax; **R4 (compression as a structured flat-minima regularizer)** is a distinct
+σ(M) = σ(g(θ_t), g(θ_{t−K}))** — the stale + current dense-gradient *means*. **R3 and R5 are CO-#1 for a
+train-objective surpass — the only two routes that inject information dense-ADAM structurally lacks:**
+**R3 (cross-rank second moment / disagreement-as-signal, SAM-style, category (c)** — descend where the
+swarm's data-shards agree, damp where they fight; the cross-shard *variance* is what the mean `M`
+discards**)** and **R5 (anchor NON-diagonal curvature, category (a)** — the finite-difference HVP
+`M_t − M_{t−1} ≈ H·Δθ`, second-order structure the first-order trajectory throws away**)**. Both share
+**one decisive kill-check, the diagonal trap:** the honest control is **dense-Adam**, which already
+carries a diagonal `v_t`, so **any version that reduces to a per-coordinate diagonal collapses** —
+R5-as-a-diagonal-proxy and R3-as-`g/√var` are the *same* dead end. Each escapes only by going beyond a
+diagonal: R5 via off-diagonal / `H·Δθ`-non-diagonal curvature, R3 via the disagreement driving a genuine
+robustness/min-max *objective*. Both are theorist-ACCEPT, systems-FEASIBLE (moderate build), and
+async-favorable. **R1 (swarm rollout diversity, n + T, category (b))** is the #1 near-term *runnable*
+bet (escapes upstream onto a new dense-at-(T,n) ceiling) but likely a pass@k edge unless it relocates
+the greedy argmax; **R4 (compression as a structured flat-minima regularizer)** is a distinct
 *test-time / OOD* generalization claim the fixed-point ceiling does not adjudicate; **R2
 (anchor-as-advantage-baseline)** is the lone σ(M)-measurable REJECT. *(Note: my first R3 framing — a
 heterogeneous-staleness ensemble — is itself REJECT, just noisier stale-dense; only the cross-rank-2nd-
