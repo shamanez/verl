@@ -416,21 +416,34 @@ DP-mean) discard. This is **not** the isotropic perturbation EXP-31 L4 ran (unco
 — the signal is *structured* cross-shard disagreement.
 
 **Async-realism caveat.** The derived robust direction **must stay cross-rank-identical after
-aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**.
-Whether a cross-rank-2nd-moment estimate remains well-defined when ranks report at *different*
-staleness is the open async question for theorist.
+aggregation** (a per-instance buffer diverges the swarm — §1.2) and **tolerate variable staleness**;
+the variance is produced *by* an all-reduce so it is bit-identical across ranks by construction (no
+invariant bump, unlike the rejected staleness-ensemble version). It is `delay_K`-stale (anchor circuit).
+
+**The tension that could undercut R3's "no Adam-overlap" edge (flag for theorist).** A naïve SAM-style
+"damp where shards disagree" downweights exactly the high-variance coordinates — which is **a
+variance-normalized step ≈ a diagonal preconditioner by another name**. If R3 collapses to that, it
+**re-inherits R5's AdamW-`v_t` overlap problem** (Adam already variance-normalizes per-coordinate), and
+its claim to be a *distinct* category-3 escape weakens. R3 stays distinct **only if** the
+cross-shard-disagreement signal is used as something more than a per-coordinate scale — e.g. a genuine
+robustness/min-max objective, not just `g / √(var)`. **This is the open validity question that decides
+whether R3 truly clears the ceiling independently of R5.**
 
 > **[theorist: validity — ACCEPT (theorist, DIRECT): explicitly named as "the mathematically-most-
 > promising route I'd ADD" — the one signal genuinely outside σ(M) that lives on THIS substrate (the DP
 > swarm); variance is not a function of the gradient means (his §5.4 cat-3). (The staleness-ensemble
 > framing stays REJECT.) The remaining gate is the async constraint: the estimate must stay
 > cross-rank-identical after aggregation + tolerate variable staleness.]**
-> **[systems: feasibility — NEEDS BUILD (systems-confirmed): `delay_K` is a fixed scalar
-> (`comm_eff.py:136`) and `AnchorStalenessQueue` serves a deterministic `t−K` (`anchor.py:243-258`); the
-> circuit is cross-rank-identical by mandate. No cross-rank second-moment state exists; forming a
-> per-coordinate cross-rank variance needs a new all-reduce of the second moment (the DP axis is
-> uncompressed, so per-rank gradients are reachable) + a variance-aware writeback. Heavier than a merger
-> knob.]**
+> **[systems: feasibility — FEASIBLE / NEEDS-BUILD (moderate) — systems code-verified. The per-rank
+> full-shaped gradients exist at `transformer_impl.py:1069-1082`, immediately before the SUM/`dp_world`
+> mean that forms `M` ⇒ the cross-coordinate variance is **one extra all-reduce of `g_r²`** there + an
+> M-shaped variance buffer (`ema_device=cpu`, doubles `M`'s ~6 GB CPU to ~12 GB host RAM, not HBM) + a
+> variance-aware writeback **at the existing spectral-merger spot** (`spectral_filter.py:~1159-1167`).
+> **No invariant bump** (variance from an all-reduce is bit-identical across ranks, like `M`/seeded-SVD
+> `Q`). One collective per fire (every 5 ticks, amortized like `M`). **Reachable, wireable, cheap,
+> invariant-safe.** Two structural caveats: (1) it is the **anchor's cross-DATA-shard variance and is
+> `delay_K`-stale**, not fresh fast-path disagreement (the FSDP fast path has no per-rank full gradient);
+> (2) the variance-normalization-vs-preconditioner tension above — flag for theorist.]**
 
 ---
 
@@ -511,10 +524,15 @@ is the rare route whose math *likes* the async-realism constraints.
 
 Ordered by **(promise of a *real* surpass) × (feasibility)**. The two genuine *fixed-point* bets are
 the **reframed R3** and **R5** — both inject a **second moment** (cross-rank disagreement / curvature)
-outside σ(M), theorist categories 3 and 1. **R3 is now ranked #1**: theorist has **confirmed it ACCEPTs**
-(the one genuinely-outside-σ(M) signal) and — unlike R5 — it has **no AdamW-`v_t` overlap problem** to
-clear, so its escape is *unconditional on optimizer overlap* (only its async constraints remain open).
-**R5** stays a strong #2, conditional on beating Adam's diagonal `v_t`. **R1** is the only
+outside σ(M), theorist categories 3 and 1. **R3 is ranked #1** (theorist-ACCEPT, "the
+mathematically-most-promising route"; systems-FEASIBLE, moderate build) — but with **one caveat that
+qualifies its "no Adam-overlap" edge**: if its variance-aware step collapses to a *variance-normalized*
+update (`g/√var`), that **is** a diagonal preconditioner and R3 re-inherits R5's AdamW-`v_t` overlap
+problem. R3 stays a *distinct* escape only if the disagreement signal drives a genuine
+robustness/min-max objective, not just a per-coordinate scale (the open validity question — see R3's
+slot). With that resolved, R3 still leads (its disagreement signal is structurally outside σ(M) where
+R5's must out-compete an existing diagonal). **R5** stays a strong #2, conditional on beating Adam's
+diagonal `v_t`. **R1** is the only
 compression-*specific* exploration bet (category 2) but likely a pass@k edge, not a greedy surpass.
 **R4** is a separate *test-time* generalization claim the fixed-point ceiling does not adjudicate. **R2**
 is the lone σ(M)-measurable REJECT among the candidates.
@@ -542,10 +560,12 @@ which **is** R3. **Curriculum** is admissible but generic — it changes the dat
 | 5 | R2 anchor-as-advantage-baseline | — (objective-side) | **NO — REJECT (theorist**: "everything deterministic-in-(G_comp,M) is capped"**)** | very low | settled REJECT; retired unless an objective-side escape is found |
 
 **Re-ranking triggers (R3 verdict in; others gated on theorist's direct tags):**
-- **R3 took #1** because theorist confirmed it ACCEPTs AND it has **no Adam-overlap problem** (Adam has
-  no cross-rank-disagreement term) — so its escape is unconditional on optimizer overlap; only its async
-  constraints (cross-rank-identical after aggregation, variable-staleness-tolerant) remain to verify. If
-  those async constraints *fail*, R3 drops and R5 reclaims #1.
+- **R3 took #1** (theorist ACCEPT + systems FEASIBLE). Two conditions still gate it: (i) the **async
+  constraint** (cross-rank-identical after aggregation — *systems confirms this holds*, the variance is
+  built by an all-reduce — + variable-staleness tolerance, since the signal is `delay_K`-stale anchor
+  data-shard variance); (ii) the **distinctness condition** — it must NOT collapse to a variance-
+  normalized step (`g/√var`), which would re-inherit R5's Adam-overlap problem. If R3 collapses to a
+  diagonal preconditioner OR the staleness tolerance fails, it drops toward R5.
 - **R5** is #2, conditional: it stays a top bet *only if* its curvature beats Adam's diagonal `v_t`
   (else it collapses to noisier-Adam). If confirmed, R3 and R5 are co-leads (two independent 2nd-moment
   escapes — run both).
@@ -565,15 +585,18 @@ val every 25 steps, with a **matched dense control** wherever the comparison is 
 
 ### Tier 1 — the surpass bets (highest expected information)
 
-1. **R3-2ndMOMENT: cross-rank disagreement-aware step** (category 3) — **the lead bet (theorist
-   ACCEPT-confirmed)**. Form a per-coordinate **cross-rank second moment** (the swarm's gradient
-   disagreement; the DP axis is uncompressed so per-rank gradients are reachable) and use it to **damp
-   the step where ranks fight, trust it where they agree** (SAM-style). **Mandatory control:** matched
-   dense (which has no disagreement term). Decisive metric: val beats the dense band with margin.
-   **Async guard (the remaining gate):** the derived direction must be **cross-rank-identical after
-   aggregation** and stable as staleness varies — verify both, or it diverges the swarm. **No
-   Adam-overlap problem** (Adam has no cross-rank term) ⇒ the *cleanest* category-3 escape, which is why
-   it leads.
+1. **R3-2ndMOMENT: cross-rank disagreement-aware step** (category 3) — **the lead bet (theorist ACCEPT,
+   systems FEASIBLE/moderate)**. Build (systems-verified): **one extra all-reduce of `g_r²`** at
+   `transformer_impl.py:~1069-1082` (the anchor's per-DATA-shard full gradients, just before the mean
+   that forms `M`) → an M-shaped variance buffer (`ema_device=cpu`) → a variance-aware writeback at the
+   existing spectral-merger spot (`spectral_filter.py:~1159-1167`). Use the cross-shard variance to
+   **damp the step where shards fight, trust it where they agree** (SAM-style). **Mandatory control:**
+   matched dense (no disagreement term). Decisive metric: val beats the dense band with margin.
+   **Gate 1 — async:** cross-rank-identical (systems confirms: variance is built by an all-reduce) +
+   tolerate that the signal is `delay_K`-stale (anchor circuit). **Gate 2 — distinctness (the
+   kill-check):** it must NOT reduce to a variance-normalized step `g/√var` (= a diagonal preconditioner
+   ⇒ re-inherits R5's Adam-overlap); keep it a genuine robustness/min-max objective. Clears both ⇒ the
+   cleanest category-3 escape and the lead.
 2. **R5-CHEAP: anchor diagonal-curvature preconditioner** (category 1). *(Gated on theorist
    confirming the curvature carries structure Adam's `v_t` lacks.)* **Build is moderate, not greenfield**
    — `powersgd_activation.py`'s basis sketches already compute a cross-rank-reduced diagonal grad second
