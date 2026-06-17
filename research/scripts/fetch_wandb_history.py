@@ -4,7 +4,7 @@ verl logs only to console+wandb (`trainer.logger=["console","wandb"]`), so the
 per-step training-signal curves the analyst needs (`critic/score/mean`,
 `actor/pg_loss`, `actor/grad_norm`, `actor/comm_eff/*`) live in WandB, not on the
 box. This pulls a run's complete `scan_history()` and writes one JSON object per
-logged step to `runs/EXP-<ID>/metrics/<name>.jsonl`, so the curve-match survives
+logged step to `runs/<run-id>/metrics/<name>.jsonl`, so the curve-match survives
 box teardown and analyze.py / diff_against_baseline.py can read it.
 
 Usage:
@@ -12,12 +12,12 @@ Usage:
     python research/scripts/fetch_wandb_history.py \
         --project comm_eff_curve_match_m4 \
         --run-name curvematch_dense_ref_50step \
-        --out runs/EXP-18/metrics/curvematch_dense_ref_50step.jsonl
+        --out runs/current/metrics/curvematch_dense_ref_50step.jsonl
 
     # by wandb run id (the 8-char hash) — unambiguous
     python research/scripts/fetch_wandb_history.py \
         --project comm_eff_curve_match_m4 --run-id abcd1234 \
-        --out runs/EXP-18/metrics/foo.jsonl
+        --out runs/current/metrics/foo.jsonl
 
 Writes the JSONL (chronological, one row per `_step`) plus a sidecar
 `<out>.config.json` holding the run's config + summary + state for provenance.

@@ -8,7 +8,7 @@ anything else requires a separate, explicit justification — same bar as the
 model/loss/hardware controls in `CLAUDE.md §1`. This file extends those three with the
 *training* hyperparameters + the locked comm-eff substrate.
 
-Why this exists: small RL deltas (the EXP-20 arms differ by ±0.005 val-acc) are
+Why this exists: small RL deltas can differ by only a few thousandths of val-acc and are
 only interpretable if the rest of the run is byte-for-byte comparable. Silent
 drift in batch size / cadence / steps between experiments destroys that. Pin it
 once, here, and read it off for every launch.
@@ -29,7 +29,7 @@ once, here, and read it off for every launch.
 | **rollout.gpu_memory_utilization** | **0.4** | |
 | **max_prompt_length** | **1024** | |
 | **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
-| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25). **NON-BINDING under static batching**: with `ppo_micro_batch_size_per_gpu=1` + `use_dynamic_bsz=False`, each micro-batch is exactly 1 sequence (≤16384+prompt ≈ 16.6K < 18432), so this cap NEVER triggers and does NOT affect the result — 18432 vs 36864 is mathematically identical here. **Keep 18432 on EXP-30-style comparison cells INCLUDING the dense reference** so the dense baseline is apples-to-apples (only the codec/merger varies); raising to 36864 on an anchor-OFF ablation is allowed but then it is NOT one-knob vs the comm-eff cells |
+| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25). **NON-BINDING under static batching**: with `ppo_micro_batch_size_per_gpu=1` + `use_dynamic_bsz=False`, each micro-batch is exactly 1 sequence (≤16384+prompt ≈ 16.6K < 18432), so this cap NEVER triggers and does NOT affect the result — 18432 vs 36864 is mathematically identical here. **Keep 18432 on B2-style comparison cells INCLUDING the dense reference** so the dense baseline is apples-to-apples (only the codec/merger varies); raising to 36864 on an anchor-OFF ablation is allowed but then it is NOT one-knob vs the comm-eff cells |
 | **total_training_steps** | **55** (→100 extended) | **55 = 50 + a 5-step WandB-flush buffer**: with `test_freq=25` the val@50 checkpoint syncs mid-run (steps 51–55) instead of being the un-flushed final action (fixes the lost-final-val problem). **The comparison number is still val@50** — identical to the 50-step baselines; the extra 5 steps are not used for the comparison. Extend to 100 for a winner. |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
 | **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
@@ -57,14 +57,13 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 | `anchor.cadence` / `delay_K` | `5` / `5` | refresh + staleness, in optimizer ticks |
 | `clean_cadence` | `0` | DEAD — the anchor replaced the periodic dense step |
 | `spectral.correction_mode` | `delayed_ef` | **the SOTA merger (B2)** — K-delayed codec residual / error-feedback, `λ=1`, `β_anc=0` |
-| `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` (EXP-29) — part of the B2 substrate |
+| `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` — part of the B2 substrate |
 | vLLM `disable_custom_all_reduce` | `true` | **required** for the box to init (CUDA-IPC under the mp executor); greedy-val-neutral → a controlled var, not a knob |
 
 **The variable axis — how the anchor `M` is USED** (issue #31). The *merger primitive* is settled —
 **`delayed_ef` (B2) is the SOTA** (error-feedback on the codec residual; parity with dense —
-`SUMMARY.md`). The open axis is now the **anchor-gradient-usage levers** on top of B2 — a 4-lever
-tournament (perturbation / δ-momentum / adaptive-dose / control-variate), target val@50 → 0.80, all with
-the codec/Q/batch/generation locked. Authoritative: `.claude/plans/31.md`.
+`SUMMARY.md`). The later anchor-usage and beta sweeps are closed; the compact planning handoff is
+`.claude/plans/SUMMARY.md`.
 
 **Reference codecs (NOT the base; ablation only):** the dense control
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
@@ -72,12 +71,12 @@ the codec/Q/batch/generation locked. Authoritative: `.claude/plans/31.md`.
 
 **☆ DENSE BASELINE (val@50) — CORRECTED 2026-06-13.** The dense "ceiling" is **run-variance-dominated**;
 report it as a **band ≈ 0.75–0.78**, not a single point (rollout nondeterminism ≈ ±0.024/draw even at
-seed 0). Two draws on record: **current-code, same-static-batch-config rerun `exp30_dense_rerun`
-(`73ntu76u`) = 0.7839** — the APPLES-TO-APPLES baseline for any EXP-30-config comm-eff cell (proof: all
+seed 0). Two draws on record: **current-code, same-static-batch-config dense rerun
+(`73ntu76u`) = 0.7839** — the APPLES-TO-APPLES baseline for any B2-config comm-eff cell (proof: all
 comm_eff counters 0) — and the old-code `5e2jpho9` = 0.7536 (historical). Always compare a comm-eff cell
-to a dense run sharing its code + hyperparameters; the current-code rerun confirmed our EXP-29/30 merges
+to a dense run sharing its code + hyperparameters; the current-code rerun confirmed our valid-M merges
 did **not** regress dense (≥ old). Dense is **never re-run for production**, but an apples-to-apples dense
-control alongside a comm-eff sweep is sanctioned and was operator-directed in EXP-30.
+control alongside a comm-eff sweep is sanctioned.
 
 ## Measurement knobs (NOT control variables — may vary freely)
 
@@ -118,18 +117,17 @@ Standing OOM guards on EVERY run regardless of tier:
 ## How to launch on this surface
 
 **THE canonical launcher every cell runs on top of is
-`examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`** (plan #31 §"THE BASELINE
-SCRIPT"). It is self-contained: it pins the **entire B2 substrate explicitly** (delayed_ef λ=1, β_anc=0,
+`examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`**. It is self-contained: it pins the **entire B2 substrate explicitly** (delayed_ef λ=1, β_anc=0,
 PowerSGD r=77, anchor on + owns `Q`, cadence=delay_K=5, clean=0, replay, the OOM guards) and then execs
 the generic `vast_comm_eff_baseline_*.sh` engine — so a **bare run reproduces B2 = the SOTA comm-eff reference
-= EXP-31 Cell A** (no knobs to set). Do **not** invoke the generic `vast_comm_eff_baseline_*.sh` directly:
+= the B2 reference** (no knobs to set). Do **not** invoke the generic `vast_comm_eff_baseline_*.sh` directly:
 its `${VAR:-default}` defaults are *where the values live* (and the ground truth of any run is its
 `resolved_params.txt`), but the b2_sota wrapper is the audited entry point and keeps every arm
 one-knob-from-B2. You override only the run length + the ONE axis you're varying (an anchor-usage lever —
 all default OFF ⇒ bitwise B2):
 
 ```bash
-# B2 = the SOTA comm-eff base = EXP-31 Cell A — a BARE run, 50 steps, val every 25 (nothing else to set):
+# B2 = the SOTA comm-eff base — a BARE run, 50 steps, val every 25 (nothing else to set):
 TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
   bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
 
@@ -149,9 +147,8 @@ COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=55 TEST_FREQ=25 EXPERIMENT_NAME=dens
 
 Pass `TOTAL_TRAINING_STEPS` (55, then 100 for an extended winner) + `TEST_FREQ=25` per launch. The full B2
 substrate is baked into the b2_sota launcher — do **not** re-type it; the ground truth of any run is its
-`resolved_params.txt` (the SOTA = `runs/EXP-31/B2_baseline/resolved_params_B2.txt`). The four anchor-usage
-levers + their exact knobs are enumerated in `.claude/plans/31.md` (L4 perturbation already wired;
-L2 δ-momentum / L3 adaptive-dose / L1 control-variate add merger code on `exp/31-*`).
+`resolved_params.txt` (the SOTA settings are summarized in `runs/SUMMARY.md`). Closed anchor-usage
+levers and their tested knobs are summarized in `.claude/plans/SUMMARY.md`.
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).

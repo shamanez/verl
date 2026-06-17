@@ -5,7 +5,7 @@ Default: prints a JSON summary of {currently_running_dph, today_spent, month_spe
 Usage:
     python research/scripts/check_budget.py                       # all-time summary
     python research/scripts/check_budget.py --month               # restrict to current month
-    python research/scripts/check_budget.py runs/EXP-<ID>         # one experiment only
+    python research/scripts/check_budget.py runs/<run-id>         # one run only
     python research/scripts/check_budget.py --cap-check           # exit 2 if monthly cap exceeded
 
 Reads `.claude/state/runs.jsonl` (one JSON object per line). Each row carries:
@@ -73,7 +73,7 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scope", nargs="?", default=None,
-                    help="optional single experiment dir (runs/EXP-<ID>) to inspect")
+                    help="optional single run dir to inspect")
     ap.add_argument("--ledger", type=Path, default=default_ledger)
     ap.add_argument("--budget", type=Path, default=default_budget)
     ap.add_argument("--month", action="store_true",
@@ -84,8 +84,8 @@ def main() -> int:
 
     rows = _load_ledger(args.ledger)
     if args.scope:
-        target_id = Path(args.scope).name.removeprefix("EXP-")
-        rows = [r for r in rows if r.get("id", "").removeprefix("EXP-") == target_id]
+        target_id = "".join(ch for ch in Path(args.scope).name if ch.isdigit())
+        rows = [r for r in rows if "".join(ch for ch in r.get("id", "") if ch.isdigit()) == target_id]
 
     now = time.time()
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0,

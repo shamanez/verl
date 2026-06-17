@@ -16,8 +16,8 @@ Outputs (into the run dir, next to verdict.md):
                          single source of truth for "what actually ran"
 
 Usage:
-  python research/scripts/capture_resolved_config.py runs/EXP-<ID>
-  python research/scripts/capture_resolved_config.py runs/EXP-<ID>/train.log
+  python research/scripts/capture_resolved_config.py runs/<run-id>
+  python research/scripts/capture_resolved_config.py runs/<run-id>/train.log
 """
 import shlex
 import sys

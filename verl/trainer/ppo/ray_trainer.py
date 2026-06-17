@@ -597,7 +597,7 @@ class RayPPOTrainer:
         return batch_reward
 
     def _validate(self, merged: bool = False):
-        # EXP-6 mask-contamination invariant: validation must run mask-free even
+        # Mask-contamination invariant: validation must run mask-free even
         # while comm_eff.mask.enabled=true. This holds structurally, not by
         # accident: _validate only drives rollout generation (generate_sequences)
         # and reward scoring — it never calls update_actor, so the actor engine's
@@ -606,7 +606,7 @@ class RayPPOTrainer:
         # comm_eff path_tag is never "train" on this path. Any recompute_log_prob
         # here routes through compute_log_prob, which stamps the "old_logprob"
         # tag, so the mask hook's assert would trip on a leak. val/test_score is
-        # therefore identical mask-on vs mask-off (a headline EXP-6 criterion).
+        # therefore identical mask-on vs mask-off.
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -1264,7 +1264,7 @@ class RayPPOTrainer:
 
     def _compute_old_log_prob(self, batch: DataProto):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-        # EXP-14: stamp the trainer step BEFORE to_tensordict so the comm_eff
+        # Step-stamp guard: stamp the trainer step BEFORE to_tensordict so the comm_eff
         # worker's old-logprob recompute sees the same global_step as the matching
         # update_actor and can run unmasked on a clean step (both gradient-feeding
         # forwards clean ⇒ IS ratio r≈1). A comm_eff-private meta key (NOT bare
@@ -1308,7 +1308,7 @@ class RayPPOTrainer:
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
-        # EXP-8 anchor data flow: the rollout-EXPANDED GRPO batch assembled here
+        # Anchor data flow: the rollout-expanded GRPO batch assembled here
         # (mini_batch_size = ppo_mini_batch_size * rollout.n, carrying responses /
         # response_mask / old_log_probs / advantages / optional ref_log_prob)
         # flows unchanged into update_actor -> train_mini_batch -> per-mini-batch
@@ -1321,7 +1321,7 @@ class RayPPOTrainer:
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
-        # EXP-14: stamp the trainer step so the comm_eff worker can gate the
+        # Step-stamp guard: stamp the trainer step so the comm_eff worker can gate the
         # periodic clean (unmasked) optimizer step. to_tensordict() carries
         # meta_info into the worker `data`; engine_workers.update_actor reads it
         # back via tu.get(data, "comm_eff_global_step"). A comm_eff-private key

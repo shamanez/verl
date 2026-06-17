@@ -11,7 +11,7 @@ Do NOT use data_source="math_dapo" for Big-Math: math_dapo's default verify path
 is_correct_minerva, which searches for an "Answer:" regex token and ignores \\boxed{}.
 It only accidentally scores +1 when a very short numeric answer appears in the last
 300-char tail AND the normalization round-trip happens to be lossless. Confirmed broken
-on 2026-06-01 (EXP-18: all rollouts scored -1.0 despite correct \\boxed{} outputs).
+on 2026-06-01 (all rollouts scored -1.0 despite correct \\boxed{} outputs).
 
 Source columns: problem (str), answer (str, verified final answer), source,
 domain (list), llama8b_solve_rate (float, difficulty proxy; lower = harder).

@@ -1,7 +1,7 @@
 """Analyse a finished experiment and emit a verdict.md skeleton.
 
 Called by the analyst subagent as:
-    python research/scripts/analyze.py runs/EXP-<ID> --emit verdict.md
+    python research/scripts/analyze.py runs/<run-id> --emit verdict.md
 
 Default behaviour (sufficient for M0 smoke):
 - If `done.flag` exists in the run dir, treat the run as complete.
@@ -81,7 +81,7 @@ def main() -> int:
         print(f"analyze: not a directory: {run_dir}", file=sys.stderr)
         return 2
 
-    exp_id = run_dir.name.removeprefix("EXP-") or run_dir.name
+    exp_id = run_dir.name
     done = (run_dir / "done.flag").exists()
     metrics_dir = run_dir / "metrics"
     metric_files = sorted(metrics_dir.glob("*.jsonl")) if metrics_dir.is_dir() else []
@@ -117,7 +117,7 @@ def main() -> int:
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     lines: list[str] = []
-    lines.append(f"# Verdict EXP-{exp_id} — {ts}")
+    lines.append(f"# Verdict {exp_id} — {ts}")
     lines.append("")
     lines.append("## Result")
     lines.append(f"VERDICT: {verdict}")

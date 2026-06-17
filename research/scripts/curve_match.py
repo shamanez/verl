@@ -1,6 +1,6 @@
 """Per-step training-signal CURVE MATCH between a candidate run and the dense reference.
 
-The EXP-18/M4 headline PASS metric (plan §"Match metric", §"Analyst predicate") is
+The curve-match headline metric is
 NOT an endpoint comparison — it is the per-step distance between two curves over
 steps 1..N:
 
@@ -14,9 +14,9 @@ training step and computes the trajectory-tracking metric the verdict needs.
 
 Usage:
     python research/scripts/curve_match.py \
-        --candidate runs/EXP-18/metrics/curvematch_anchorinject_c5_d5.jsonl \
-        --dense     runs/EXP-18/metrics/curvematch_dense_ref_50step.jsonl \
-        [--floor    runs/EXP-18/metrics/curvematch_spectral_baseline_c5_d5.jsonl] \
+        --candidate runs/current/metrics/curvematch_anchorinject_c5_d5.jsonl \
+        --dense     runs/current/metrics/curvematch_dense_ref_50step.jsonl \
+        [--floor    runs/current/metrics/curvematch_spectral_baseline_c5_d5.jsonl] \
         [--metric critic/score/mean] [--max-step 50] [--tol 0.05]
 
 Reads JSONL produced by fetch_wandb_history.py (rows carry `step` + scalar metrics).

@@ -1,8 +1,0 @@
-{
-  "exit_state": "TIMEOUT",
-  "recommendation": "continue_monitoring",
-  "elapsed_s": 2421,
-  "poll_count": 72,
-  "timestamp": "2026-06-16T09:39:15Z",
-  "note": "See monitor-detail.log for full trace"
-}

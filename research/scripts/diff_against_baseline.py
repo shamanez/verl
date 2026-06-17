@@ -1,7 +1,7 @@
 """Compare an experiment's metrics against a baseline run's metrics.
 
 Usage:
-    python research/scripts/diff_against_baseline.py runs/EXP-<ID> --baseline EXP-<NN>
+    python research/scripts/diff_against_baseline.py runs/<run-id> --baseline <baseline-id>
 
 Reads `metrics/*.jsonl` for both, computes:
 - delta on the final row's numeric keys
@@ -53,7 +53,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--baseline", required=True,
-                    help="EXP-<NN> or path to runs/EXP-<NN>")
+                    help="baseline id or path")
     ap.add_argument("--metric-file", default="train.jsonl",
                     help="which metrics/*.jsonl to compare (default train.jsonl)")
     args = ap.parse_args()

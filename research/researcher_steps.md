@@ -88,7 +88,7 @@ Common body fields (planner reads them; defaults from `.claude/project.yaml`):
 kind: experiment
 milestone: M3
 baseline_run: baseline                 # the dense control (= comm-eff OFF); or 'none'
-depends_on: [EXP-N]                    # required for ablation
+depends_on: [run-N]                    # required for ablation
 budget_gpu_hr: 96
 budget_dph_max: 24.0
 code_change: false                     # auto-true for kind:implementation
@@ -247,7 +247,7 @@ research/
 ├── LOG.md                  newest-first PASS/STOP entries
 ├── PROGRESS.md             append-only structured audit
 ├── runs/
-│   ├── EXP-<N>/                    per-experiment dirs (runtime artifacts)
+│   ├── <run-id>/                   runtime artifact dirs
 │   └── SUMMARY.md                  durable record: baseline, method, knobs, tried-so-far
 ├── scripts/                        analyze.py, check_budget.py, diff_against_baseline.py
 └── .claude/

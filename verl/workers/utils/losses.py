@@ -57,7 +57,7 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data.
 
-    EXP-8 anchor reuse (GUARD 1): the comm_eff anchor circuit reuses THIS exact
+    Anchor reuse guard: the comm_eff anchor circuit reuses THIS exact
     GRPO actor-loss over the rollout-expanded batch (``response_mask``,
     ``old_log_probs``, ``advantages``, optional ``ref_log_prob``) for its
     unmasked K-stale forward/backward — it is NOT a supervised next-token loss.

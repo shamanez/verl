@@ -247,10 +247,10 @@
   <p>The anchor is the only updater of <code>Q</code>: its stale-weight forward harvests boundary activations into <code>V</code>, sets <code>Q ← orth(V)</code>, and broadcasts <code>Q</code> (and <code>M</code>) DP-wide (receipt-verified). The fast circuit's basis update is fail-closed. <code>q_basis=act</code> is the only production basis — gradient/adv/tail/hybrid bases anti-converge, because rollouts run uncompressed so the update-energy basis is the wrong one.</p>
   <h4>β_anc EMA, and why β = 0</h4>
   <div class="eq">\[ M_{\mathrm{anchor}}(t) = \beta_{\mathrm{anc}}\,M_{\mathrm{anchor}}(t-1) + (1-\beta_{\mathrm{anc}})\,G_{\mathrm{anchor}}(t), \qquad \beta_{\mathrm{anc}}=0 \Rightarrow M_{\mathrm{rep}}(t)=G_{\mathrm{anchor}}(t) \]</div>
-  <p>The design invariant is <b>freshness &gt; variance-reduction</b>. The anchor gradient is a stale / off-policy signal, so an EMA only compounds staleness, and the GRPO clip already caps it (unlike SFT's fixed target). The in-progress EXP-33 sweep (§4) is the direct test: so far β=0 and β=0.25 tie, and no β&gt;0 cell improves on β=0.</p>
+  <p>The design invariant is <b>freshness &gt; variance-reduction</b>. The anchor gradient is a stale / off-policy signal, so an EMA only compounds staleness, and the GRPO clip already caps it (unlike SFT's fixed target). The beta sweep (§4) is the direct test: β=0.5 is only a nominal high draw, and no β&gt;0 cell improves on β=0 beyond noise.</p>
   <h4>the cold-M guard</h4>
   <div class="eq">\[ \lVert M_{\mathrm{anchor}}\rVert \le \epsilon \;\Rightarrow\; G_{\mathrm{corr}} = G_{\mathrm{comp}}\quad(\text{no-op, not zeroed}) \]</div>
-  <p>Until <code>M</code> warms, every merger returns <code>G_comp</code> unchanged. This is the mechanism by which <code>β=1</code> (which freezes the EMA at its zero cold-start forever) degenerates exactly to plain PowerSGD — the predicted 0.6300 floor collapse of EXP-33 C4.</p>
+  <p>Until <code>M</code> warms, every merger returns <code>G_comp</code> unchanged. This is the mechanism by which <code>β=1</code> (which freezes the EMA at its zero cold-start forever) degenerates exactly to plain PowerSGD — the predicted 0.6300 floor collapse in the degenerate beta bracket.</p>
 </section>
 
 <section id="results">
@@ -259,26 +259,26 @@
   <table>
     <thead><tr><th>Config</th><th>val@50</th><th>verdict</th><th>source</th></tr></thead>
     <tbody>
-      <tr><td>No-merger floor — plain PowerSGD, Q-updated</td><td class="num">0.6300</td><td><span class="tag wip">floor</span></td><td class="src">WandB k6nmcuyd · EXP-30 C2</td></tr>
+      <tr><td>No-merger floor — plain PowerSGD, Q-updated</td><td class="num">0.6300</td><td><span class="tag wip">floor</span></td><td class="src">WandB k6nmcuyd</td></tr>
       <tr><td><b>B2 / delayed_ef</b> (λ=1, β=0) — the stable system</td><td class="num">0.7528 <span class="src">/ 0.7354 live</span></td><td><span class="tag par">parity</span></td><td class="src">WandB u9okvgzz / fy920fty</td></tr>
-      <tr><td>Dense control (reference)</td><td class="num">0.7506 <span class="src">same-box</span> · 0.7839 <span class="src">same-config</span></td><td><span class="tag ok">the bar</span></td><td class="src">EXP-31 verdict; band 0.75–0.78</td></tr>
-      <tr><td>EXP-31 anchor-usage tournament — 4 levers (val@25)</td><td class="num">≤ 0.7157 <span class="src">vs B2 live@25 0.7202</span></td><td><span class="tag null">all NULL → STOP</span></td><td class="src">EXP-31 verdict</td></tr>
-      <tr><td>EXP-33 C0 · β=0 (control)</td><td class="num">0.73844</td><td><span class="tag ok">PASS (in band)</span></td><td class="src">b0p00/train.log</td></tr>
-      <tr><td>EXP-33 C1 · β=0.25</td><td class="num">0.73995</td><td><span class="tag par">tie with C0</span></td><td class="src">b0p25/train.log</td></tr>
-      <tr><td>EXP-33 C2 · β=0.5</td><td class="num">0.75284</td><td><span class="tag par">nominal high, within noise</span></td><td class="src">b0p50/train.log</td></tr>
-      <tr><td>EXP-33 C3 · β=0.75</td><td class="num">0.72176</td><td><span class="tag par">tie / mild down</span></td><td class="src">b0p75/train.log</td></tr>
-      <tr><td>EXP-33 C4 · β=1 (degenerate bracket)</td><td class="num">0.44807@25 / 0.56406@30</td><td><span class="tag wip">cold-M collapse</span></td><td class="src">b1p00/train.log</td></tr>
+      <tr><td>Dense control (reference)</td><td class="num">0.7506 <span class="src">same-box</span> · 0.7839 <span class="src">same-config</span></td><td><span class="tag ok">the bar</span></td><td class="src">band 0.75–0.78</td></tr>
+      <tr><td>Anchor-usage tournament — 4 levers (val@25)</td><td class="num">≤ 0.7157 <span class="src">vs B2 live@25 0.7202</span></td><td><span class="tag null">all NULL → STOP</span></td><td class="src">de-bloated summary</td></tr>
+      <tr><td>Beta C0 · β=0 (control)</td><td class="num">0.73844</td><td><span class="tag ok">PASS (in band)</span></td><td class="src">de-bloated summary</td></tr>
+      <tr><td>Beta C1 · β=0.25</td><td class="num">0.73995</td><td><span class="tag par">tie with C0</span></td><td class="src">de-bloated summary</td></tr>
+      <tr><td>Beta C2 · β=0.5</td><td class="num">0.75284</td><td><span class="tag par">nominal high, within noise</span></td><td class="src">de-bloated summary</td></tr>
+      <tr><td>Beta C3 · β=0.75</td><td class="num">0.72176</td><td><span class="tag par">tie / mild down</span></td><td class="src">de-bloated summary</td></tr>
+      <tr><td>Beta C4 · β=1 (degenerate bracket)</td><td class="num">0.44807@25 / 0.56406@30</td><td><span class="tag wip">cold-M collapse</span></td><td class="src">de-bloated summary</td></tr>
     </tbody>
   </table>
   <div class="callout warn">
     <span class="lab">number hygiene — three things to keep straight</span>
     <ul style="margin:4px 0 0">
-      <li><b>The floor is 0.6300, not 0.7415.</b> The 0.7415 figure (EXP-20, WandB oquyeic3) included the periodic dense <em>clean-step</em> crutch that the anchor circuit explicitly replaced — it is not a realistic plain-PowerSGD floor and is superseded.</li>
+      <li><b>The floor is 0.6300, not 0.7415.</b> The 0.7415 figure included the periodic dense <em>clean-step</em> crutch that the anchor circuit explicitly replaced — it is not a realistic plain-PowerSGD floor and is superseded.</li>
       <li><b>"Parity" is nuanced.</b> B2 is at statistical parity with the <em>same-box</em> dense control (0.7506; gap 0.015 &lt; ±0.024), and at <b>~96% / near-parity</b> (−0.031, ~1.3σ) of the higher same-config dense draw (0.7839). "SOTA" here means best comm-efficient method, <em>not</em> a surpass of dense.</li>
       <li><b>The table ranks valid-M methods only.</b> Current merger evidence starts after the paired-replay fix.</li>
     </ul>
   </div>
-  <p class="small"><b>EXP-33 status.</b> Complete. The β_anc sweep is config-only on the B2 substrate. C0 (β=0, control) = 0.73844 is in the B2 band [0.716, 0.774]; C1/C2/C3 all tie within ±0.024, with C2's nominal +0.0144 high draw not large enough for promotion. C4 confirms the β=1 cold-M no-op collapse. β=0 remains the default.</p>
+  <p class="small"><b>Beta sweep status.</b> Complete. The β_anc sweep is config-only on the B2 substrate. C0 (β=0, control) = 0.73844 is in the B2 band [0.716, 0.774]; C1/C2/C3 all tie within ±0.024, with C2's nominal +0.0144 high draw not large enough for promotion. C4 confirms the β=1 cold-M no-op collapse. β=0 remains the default.</p>
 </section>
 
 <section id="whyparity">
@@ -287,11 +287,11 @@
 
   <div class="callout key">
     <span class="lab">evidence hygiene</span>
-    <p style="margin:4px 0">The conclusion here rests on EXP-30/31/33, where paired replay makes <code>M_rep</code> a valid lagging reference.</p>
+    <p style="margin:4px 0">The conclusion here rests on post-fix valid-M measurements, where paired replay makes <code>M_rep</code> a valid lagging reference.</p>
   </div>
 
   <h3>The tournament close</h3>
-  <p>The EXP-31 anchor-usage tournament tested the complete set of ways to <em>use</em> <code>M</code> without changing the codec, Q, batch, or generation — each as B2 + exactly one knob, with an adversarial 8-agent code review returning GO (so the nulls are trustworthy). Against the same-box reference <code>B2_live@25 = 0.7202</code>, all four levers are NULL for surpass:</p>
+  <p>The anchor-usage tournament tested the complete set of ways to <em>use</em> <code>M</code> without changing the codec, Q, batch, or generation — each as B2 + exactly one knob, with an adversarial 8-agent code review returning GO (so the nulls are trustworthy). Against the same-box reference <code>B2_live@25 = 0.7202</code>, all four levers are NULL for surpass:</p>
   <ul class="small">
     <li><b>L4 perturbation</b> (σ=0.01 noise on δ): 0.7157 — AdamW rescales isotropic noise away; a regularization control, no anchor-usage path.</li>
     <li><b>L2 δ-momentum</b>: μ=0.5 → 0.7089 (parity), μ=0.9 → 0.5701 (regress −0.15) — momentum on a stale reconstruction gives back the lag dense never had.</li>
@@ -309,10 +309,10 @@
   </div>
   <h3>The immediate work</h3>
   <ul>
-    <li><b>Finish the EXP-33 β curve</b> (C2 → C3 → C4) to close out the freshness-vs-averaging question and write the verdict over all five cells.</li>
+    <li><b>Close the beta curve</b> to settle the freshness-vs-averaging question over all five cells.</li>
   </ul>
   <h3>The one compression-specific surpass bet left</h3>
-  <p>On the <em>generation</em> side: raise rollout <code>n</code> and rollout <b>temperature</b> so training diversity relocates the greedy mode — run <b>with a mandatory dense × {T, n} control</b>, otherwise any gain is a generic-RL effect rather than a comm-eff effect. This is a generation-side change outside the EXP-31 mandate; it needs a new plan and an operator decision on the locked surface.</p>
+  <p>On the <em>generation</em> side: raise rollout <code>n</code> and rollout <b>temperature</b> so training diversity relocates the greedy mode — run <b>with a mandatory dense × {T, n} control</b>, otherwise any gain is a generic-RL effect rather than a comm-eff effect. This is a generation-side change outside the anchor-usage mandate; it needs a new plan and an operator decision on the locked surface.</p>
   <ul class="small">
     <li>Honest prior: <b>&lt;20%</b> for a true greedy <code>mean@1</code> surpass.</li>
     <li>Likely outcome: an eval-diversity <code>pass@k</code> edge only, not a greedy-mean win.</li>
@@ -322,7 +322,7 @@
 
   <div class="foot">
     <hr class="soft" />
-    <p><b>Sources.</b> Run artifacts under <code>research/runs/</code> (EXP-30/31/32/33), <code>research/runs/SUMMARY.md</code>, <code>CODE_WALKTHROUGH.md</code>, the B2 launcher <code>resolved_params</code>, plan <code>.claude/plans/33.md</code>, and WandB ids cited inline. All values single-draw seed 0, greedy mean@1, eval noise ±0.024. Generated 2026-06-17; supersedes the older multi-tab program report. Equations render via MathJax (CDN); if offline, the raw TeX is shown.</p>
+    <p><b>Sources.</b> De-bloated records in <code>research/runs/SUMMARY.md</code>, <code>research/.claude/plans/SUMMARY.md</code>, <code>CODE_WALKTHROUGH.md</code>, merged code, git history, and WandB ids cited inline. All values single-draw seed 0, greedy mean@1, eval noise ±0.024. Generated 2026-06-17; supersedes the older multi-tab program report. Equations render via MathJax (CDN); if offline, the raw TeX is shown.</p>
   </div>
 </section>
 

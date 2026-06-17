@@ -9,8 +9,8 @@ per-step curve from the local log the monitor rsynced.
 
 Usage:
     python research/scripts/parse_train_log.py \
-        runs/EXP-18/train_curvematch_dense_ref_50step.log \
-        --out runs/EXP-18/metrics/curvematch_dense_ref_50step.jsonl
+        runs/current/train_curvematch_dense_ref_50step.log \
+        --out runs/current/metrics/curvematch_dense_ref_50step.jsonl
 
 Emits one JSON object per step with `step` (= training/global_step, else the
 leading step:N) and every numeric `key:value` pair on that line. Idempotent;
