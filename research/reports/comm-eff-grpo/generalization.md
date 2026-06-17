@@ -256,8 +256,11 @@ These are all operations on the stale dense estimate. The ceiling explains *why*
 ### 4.3 The candidate routes (each must escape §4.1)
 
 Each route is annotated with **[theorist: validity]** and **[systems: feasibility]** verdicts.
-*(Verdicts pending at first draft — folded in below as received; routes without both verdicts are
-marked "unvetted".)*
+*(Status at this writing: peer verdicts were requested early and repeatedly but had not landed by
+finalization; per the cross-exam protocol, theorist/systems slots that did not return are marked
+**"unvetted (\<peer\>)"** with my stated prior, and any feasibility fact I could verify directly from
+the code is labeled **"code check by strategist"**. These should be confirmed by the peers before
+acting.)*
 
 ---
 
@@ -293,8 +296,13 @@ convert — so at matched (T, n) the compressed run's extra diversity pays where
 outcome is "Route-A-only" (a real pass@k edge, greedy ties). This is the prior team's vetted lead
 and the only compression-*specific* bet.
 
-> **[theorist: validity — PENDING]**
-> **[systems: feasibility — PENDING]**
+> **[theorist: validity — unvetted (theorist); my prior: ESCAPES — it acts upstream of the codec on
+> the rollout/data distribution, changing *which* gradient is compressed, not how a fixed one is
+> reconstructed; honest deliverable is likely a pass@k coverage edge (Route A), greedy-mode relocation
+> (Route B) is the high bar]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: RUNNABLE via launcher
+> overrides as a new lineage (n + rollout T), with a matched dense × {T,n} control; off the locked
+> "generation" axis ⇒ requires the separate justification the conversion spine already supplies]**
 
 ---
 
@@ -320,8 +328,10 @@ subset) to even be measurable, and the project's fixed control is GSM8K. Feasibi
 whether an OOD eval split is wireable as a *measurement-only* knob (validation is read-only, so this
 may be sanctioned like `test_freq`).
 
-> **[theorist: validity — PENDING]** *(does GRPO-on-GSM8K make the generalization gap ill-defined?)*
-> **[systems: feasibility — PENDING; code check by strategist: WIREABLE read-only]** — `val_files` is a
+> **[theorist: validity — unvetted (theorist); my prior: ESCAPES — it concedes the training objective
+> and claims a *test-time / OOD* generalization edge, a different claim than matching the dense gradient;
+> open question for theorist: does GRPO-on-GSM8K make the generalization gap ill-defined?]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: WIREABLE read-only]** — `val_files` is a
 > config path (`_generated_ppo_trainer.yaml`); pointing it at a different test parquet (GSM-hard / a MATH
 > subset) is a **measurement-only knob** (validation is read-only, no training change — same class as
 > `test_freq`). The only build is *preparing* the OOD parquet + a matching reward fn; no trainer-code
@@ -342,8 +352,9 @@ the ceiling likely **holds**. Its value is more as a **robustness/parity-preserv
 realistic variable lag than as a surpass route. **It is the most deployment-native item**, so it
 belongs on the roadmap even if it is parity-only.
 
-> **[theorist: validity — PENDING]** *(strong prior: collapses to ceiling)*
-> **[systems: feasibility — PENDING; code check by strategist: NEEDS BUILD]** — `delay_K` is a **single
+> **[theorist: validity — unvetted (theorist); my prior: COLLAPSES — averaging over staleness is still
+> averaging stale dense estimates ⇒ a (noisier) stale dense estimate; value is robustness, not surpass]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS BUILD]** — `delay_K` is a **single
 > integer** in `comm_eff.py` (`delay_K: int`, B2=5) and `AnchorStalenessQueue.get_stale` returns the
 > deterministic `t − delay_K` snapshot (retaining only `delay_K+1` snapshots). There is **no jitter /
 > distribution / per-worker staleness** primitive today — the substrate supports only **fixed uniform
@@ -364,19 +375,28 @@ estimate of the same quantity ⇒ likely collapses to the ceiling (and EXP-31's 
 control-variate already failed with cov≈0). Kept only to ask theorist whether *any* objective-side
 use of the anchor escapes; absent a positive answer it is **retired**.
 
-> **[theorist: validity — PENDING]** *(does any objective-side anchor use escape, or B/V collapse to ceiling?)*
-> **[systems: feasibility — PENDING]**
+> **[theorist: validity — unvetted (theorist); my prior: COLLAPSES — a stale baseline on the
+> group-mean-normalized GRPO advantage is bias/variance on a stale estimate of the same quantity; key
+> open question for theorist: does *any* objective-side anchor use escape the ceiling?]**
+> **[systems: feasibility — unvetted (systems); code check by strategist: NEEDS NEW CODE (advantage-side
+> hook does not exist; the only anchor combiners today are gradient-side mergers in `spectral_filter.py`)]**
 
 ---
 
-### 4.4 Route ranking (pre-verdict; re-ranked after peers respond)
+### 4.4 Route ranking (my priors; peer verdicts unvetted at finalization — see §4.3 slots)
 
-| rank | route | escapes ceiling? | prior | gating verdict needed |
+| rank | route | escapes ceiling? (my prior) | prior | gating verdict still needed |
 |---|---|---|---|---|
-| 1 | **R1 swarm diversity (n + T)** | YES (acts upstream of codec, on data dist) | <20%, likely Route-A | theorist: is greedy-mode relocation possible or pass@k-only? |
-| 2 | **R4 compression-as-regularizer** | YES (test-time, concedes train objective) | low–med | theorist: gen-gap well-defined? systems: OOD split? |
-| 3 | R3 heterogeneous-staleness | WEAK (likely noisier stale-dense) | low | theorist prior: collapses; value = robustness |
-| 4 | R2 anchor-as-advantage-baseline | NO (likely B/V collapse) | very low | theorist: any objective-side escape? |
+| 1 | **R1 swarm diversity (n + T)** | YES (acts upstream of codec, on data dist) | <20%, likely Route-A | **theorist**: greedy-mode relocation possible, or pass@k-only? |
+| 2 | **R4 compression-as-regularizer** | YES (test-time edge, concedes train objective) | low–med | **theorist**: is the gen-gap well-defined on GRPO/GSM8K? |
+| 3 | R3 heterogeneous-staleness | WEAK (likely noisier stale-dense) | low | **theorist**: confirm collapse; value = robustness, not surpass |
+| 4 | R2 anchor-as-advantage-baseline | NO (likely B/V collapse) | very low | **theorist**: does *any* objective-side anchor use escape? |
+
+**Re-ranking trigger:** if theorist rules R1 can only deliver a pass@k edge (not greedy-mode
+relocation), R1 and R4 effectively tie — both become "edge on a different axis than the locked greedy
+bar" — and the program should run **both** measurement-cheap probes (R1-GATE, R4 OOD) before either
+expensive arm. If theorist finds an objective-side escape for R2, it jumps the ranking (it would be the
+first route to inject info on the *objective* side). Neither changes the Tier-1/2/3 roadmap structure.
 
 ---
 

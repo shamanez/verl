@@ -361,21 +361,28 @@ holds Goal 4 "pending a surpass". B2 is the reference; no surpass found.
 
 ## 6. Cross-examination (theorist, strategist) — folding in
 
-**Status at first write:** cross-exam messages sent to `theorist` (does the bias/variance
-math predict floor < signed_ema < B2 ≈ dense, and is signed_ema instability structural?)
-and `strategist` (closed null-lever list + savings). Replies pending; this section will
-be updated. If a teammate is unresponsive after my own work is done, the open question is
-noted here and I proceed (per task instruction).
+**Status:** I have sent `theorist` all four measured data points with receipts (the
+0.6300→0.7528 jump, signed_ema 0.7271/0.354, the 42:1-SNR biased-compression measurement,
+and the 50.4%-at-first-warm-step sign-disagreement), plus a clean-step-floor correction
+(the old 0.7414 "psgd ties dense" is the *clean-step* config, not the realistic floor —
+do not anchor the math to it). I have sent `strategist` the closed null-lever list +
+savings. Theorist independently proposed STRUCTURAL for signed_ema; we agree. The
+remaining exchange is theorist's **formal bias/variance derivation**, which I will cite
+once it lands. Per task instruction, I have not blocked on it — the report stands on the
+agreed mechanism and the measured numbers.
 
-- **[PENDING — theorist]** Does the bias/variance decomposition predict BOTH the EF
-  parity jump (0.6300→0.7528) AND signed_ema's shortfall (0.7271)? Proposed shared
-  mechanism: EF returns the dropped codec energy **asymptotically unbiasedly** (it adds
-  the exact residual δ), while signed_ema injects a **non-vanishing sign-bias** (keeps
-  compressed magnitude, borrows a ~coin-flip stale sign). *To be confirmed/corrected.*
-- **[PENDING — theorist]** STRUCTURAL vs tuning for signed_ema instability — §4 asserts
-  structural; needs theorist's sign-off for ONE agreed answer.
+- **[CONVERGED — theorist, derivation pending]** Both sides hold the same mechanism:
+  EF returns the dropped codec energy **asymptotically unbiasedly** (it adds the exact
+  residual δ on the same (batch, θ) — and the drop is a *deterministic* low-energy bias,
+  SNR 42:1, fixed subspace), so it recovers parity; signed_ema injects a **non-vanishing
+  sign-bias** on ~half the coordinates (keeps compressed magnitude, borrows a ~coin-flip
+  stale sign), which neither shrinks with α nor with fresher `M`. Predicted ordering
+  `floor 0.6300 < signed_ema 0.7271 < B2 0.7528 ≈ dense` — matches measurement. *Awaiting
+  theorist's written derivation to cite verbatim; will revise only if it dissents.*
+- **[CONVERGED — theorist]** STRUCTURAL vs tuning for signed_ema instability → **STRUCTURAL**
+  (see §4 "Agreed answer"). This is the one agreed answer the report needed.
 - **[PENDING — strategist]** Acknowledgement of the closed null-lever list so it is not
-  resurrected; their surpass thesis.
+  resurrected; their surpass thesis. *(Sent; no reply yet — does not block this section.)*
 
 ---
 

@@ -595,10 +595,49 @@ cross-rank second moment.
    promisingly — a *cross-rank second-moment* (swarm disagreement-as-signal) term,
    the one quantity the compressed swarm has and a single dense trajectory lacks.
 
-*Cross-examination status (folded below in §7 once `systems`/`strategist` reply).*
+*Cross-examination status: predictions + the ceiling were sent to `systems` and
+`strategist` early; their replies are folded into §7 as they arrive. The
+anticipated-objection subsection §7.1 stands on the math alone.*
 
 ---
 
-## 7. Cross-examination log
+## 7. Cross-examination
 
-*(populated as peers respond — see SendMessage thread)*
+### 7.1 Anticipated objections and standing answers
+
+**O1 — "B2 keeps the fresh kept-subspace $Pg(\theta_t)$, so it's a fresh/stale
+*hybrid*, not purely stale. Can the hybrid beat dense?"** No. The hybrid
+$Pg(\theta_t)+(I-P)g(\theta_{t-K})$ is still $\mathcal F_t$-measurable with
+$\mathcal F_t=\sigma(g(\theta_t),g(\theta_{t-K}))$ — the ceiling's sufficient
+statistic was *deliberately* defined to include **both** gradients precisely so
+the hybrid falls inside it. The fresh kept-subspace is what makes the staleness
+penalty $-(I-P)\Delta_K g$ second-order (hence parity), not a route past dense.
+
+**O2 — "B2's central band (0.735–0.754) may sit a hair below dense-this-box
+(0.7506). Does 'parity' overstate?"** The math predicts B2 $=$ dense $-$ a small,
+**non-negative** staleness penalty $-(I-P)\Delta_K g$ — i.e. B2 should land *at or
+just below* dense, never above. A central tendency a hair under dense, inside
+single-draw noise ($\pm0.024$), is *exactly* the prediction, and is the honest
+meaning of "parity." If B2 ever measured *above* dense beyond noise, my model
+would be **wrong** — that has not happened, which is corroboration, not a gap.
+
+**O3 — "signed_ema $\alpha=0.5$ survived 50 steps in some runs — is it really
+unstable?"** That survival is **censored**: the EXP-27 post-mortem found
+$\alpha=0.5$ already in the early spiral at its endpoint (consecutive cap-pins at
+steps 47–48). The math says $\alpha=0.5$ only *zeroes* the disagreeing
+coordinates rather than reversing them — it removes the strongest sharpening
+term but still discards half the gradient's sign information, so it is the
+least-bad, not stable. Stability is a censored observation; do not read 50-step
+survival as safety.
+
+**O4 — "Is the $\sim50\%$ sign-disagreement maybe a staleness/EMA artifact that a
+fresher anchor would fix?"** No (this is the structural-vs-tuning question
+settled with `systems`). It is $\approx50.4\%$ at the *first warm step* (fresh
+$M$, near-zero EMA depth, $K{=}4$) and flat/uniform across all layers — the
+coin-flip agreement of two estimators of a **near-zero-mean** GRPO per-coordinate
+gradient. No $K$, $\beta$, or $\alpha$ removes it; sign-replacement is the wrong
+operator for a near-zero-mean signal.
+
+### 7.2 Live cross-examination log
+
+*(populated as `systems` / `strategist` respond — see SendMessage thread)*
