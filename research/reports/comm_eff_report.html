@@ -262,12 +262,12 @@
       <tr><td>No-merger floor — plain PowerSGD, Q-updated</td><td class="num">0.6300</td><td><span class="tag wip">floor</span></td><td class="src">WandB k6nmcuyd · EXP-30 C2</td></tr>
       <tr><td><b>B2 / delayed_ef</b> (λ=1, β=0) — the stable system</td><td class="num">0.7528 <span class="src">/ 0.7354 live</span></td><td><span class="tag par">parity</span></td><td class="src">WandB u9okvgzz / fy920fty</td></tr>
       <tr><td>Dense control (reference)</td><td class="num">0.7506 <span class="src">same-box</span> · 0.7839 <span class="src">same-config</span></td><td><span class="tag ok">the bar</span></td><td class="src">EXP-31 verdict; band 0.75–0.78</td></tr>
-      <tr><td>signed_ema α=0.5 — sign-merger <em>(pre-#29, invalid-M)</em></td><td class="num">0.7066</td><td><span class="tag bad">dominated + unstable</span></td><td class="src">EXP-25 · SUMMARY</td></tr>
       <tr><td>EXP-31 anchor-usage tournament — 4 levers (val@25)</td><td class="num">≤ 0.7157 <span class="src">vs B2 live@25 0.7202</span></td><td><span class="tag null">all NULL → STOP</span></td><td class="src">EXP-31 verdict</td></tr>
       <tr><td>EXP-33 C0 · β=0 (control)</td><td class="num">0.73844</td><td><span class="tag ok">PASS (in band)</span></td><td class="src">b0p00/train.log</td></tr>
       <tr><td>EXP-33 C1 · β=0.25</td><td class="num">0.73995</td><td><span class="tag par">tie with C0</span></td><td class="src">b0p25/train.log</td></tr>
-      <tr><td>EXP-33 C2/C3 · β=0.5 / 0.75</td><td class="num">in progress</td><td><span class="tag wip">pending</span></td><td class="src">plan #33 (resume from C2)</td></tr>
-      <tr><td>EXP-33 C4 · β=1 (degenerate bracket)</td><td class="num">→ 0.6300 predicted</td><td><span class="tag wip">cold-M collapse</span></td><td class="src">plan #33</td></tr>
+      <tr><td>EXP-33 C2 · β=0.5</td><td class="num">0.75284</td><td><span class="tag par">nominal high, within noise</span></td><td class="src">b0p50/train.log</td></tr>
+      <tr><td>EXP-33 C3 · β=0.75</td><td class="num">0.72176</td><td><span class="tag par">tie / mild down</span></td><td class="src">b0p75/train.log</td></tr>
+      <tr><td>EXP-33 C4 · β=1 (degenerate bracket)</td><td class="num">0.44807@25 / 0.56406@30</td><td><span class="tag wip">cold-M collapse</span></td><td class="src">b1p00/train.log</td></tr>
     </tbody>
   </table>
   <div class="callout warn">
@@ -275,30 +275,19 @@
     <ul style="margin:4px 0 0">
       <li><b>The floor is 0.6300, not 0.7415.</b> The 0.7415 figure (EXP-20, WandB oquyeic3) included the periodic dense <em>clean-step</em> crutch that the anchor circuit explicitly replaced — it is not a realistic plain-PowerSGD floor and is superseded.</li>
       <li><b>"Parity" is nuanced.</b> B2 is at statistical parity with the <em>same-box</em> dense control (0.7506; gap 0.015 &lt; ±0.024), and at <b>~96% / near-parity</b> (−0.031, ~1.3σ) of the higher same-config dense draw (0.7839). "SOTA" here means best comm-efficient method, <em>not</em> a surpass of dense.</li>
-      <li><b>signed_ema 0.7066 is a pre-#29 / invalid-M (EXP-25) number.</b> The valid-M closure attempt (EXP-32) did not produce a clean completed read (it stalled), so there is no post-fix signed_ema val@50 on record. The β=0 conclusion rests on the clean EXP-33 sweep and the mechanism in §5, not on EXP-32.</li>
+      <li><b>Pre-#29 anchor-gradient rows are intentionally excluded here.</b> EXP-23/25/26/27 used the old invalid-M circuit; those numbers are archival, not current merger evidence.</li>
     </ul>
   </div>
-  <p class="small"><b>EXP-33 status.</b> The β_anc sweep is config-only on the B2 substrate. C0 (β=0, control) = 0.73844 is in the B2 band [0.716, 0.774]; C1 (β=0.25) = 0.73995 ties it (+0.0015, within noise) — freshness / free-averaging supported so far. The falsify-bar is <code>0.7624</code> (= C0 + 0.024); no cell has approached it. The sweep is paused (operator out of Vast credits, box crashed); resume from C2 (β=0.5, which died at gs=4 and never produced a valid read), then C3, then C4. Issue #33 stays open.</p>
+  <p class="small"><b>EXP-33 status.</b> Complete. The β_anc sweep is config-only on the B2 substrate. C0 (β=0, control) = 0.73844 is in the B2 band [0.716, 0.774]; C1/C2/C3 all tie within ±0.024, with C2's nominal +0.0144 high draw not large enough for promotion. C4 confirms the β=1 cold-M no-op collapse. β=0 remains the default.</p>
 </section>
 
 <section id="whyparity">
-  <h2><span class="n">5</span>Why blending doesn&rsquo;t outperform sign or error-feedback</h2>
-  <p class="lead">Because the merger reconstructs <em>dense-on-stale</em>, and that is the whole defect. Compression noise is not the limiter (plain PowerSGD already ties dense), so every anchor-usage lever is bounded by the staleness of <code>M</code>. The correction <code>δ = M_rep − G_comp_ring</code> rebuilds the dense gradient from a stale snapshot — and <b>you cannot beat dense by reweighting, accumulating, perturbing, or de-noising a stale estimate of dense.</b> Every parity result is the same ceiling reached by a different route.</p>
-
-  <h3>Blend — the only "live" correction, still caps at parity</h3>
-  <p>Among the combiners, blend (an η-weighted mix of the stale-full anchor gradient and the compressed gradient) was the only genuinely <em>live</em> correction rather than an inert projection: on a fixed anchor it scored ~0.81 vs the old SVD/Tikhonov reweight's ~0.14 (which reconstructed almost nothing, <code>G_filt ≈ 0</code>, and was removed). But blend still caps at parity for the same structural reason — whatever it blends in <em>is</em> the stale dense estimate, so it asymptotes to dense-minus-lag. Blend beats reweight; against dense itself it has no headroom. It can match (parity), not beat.</p>
-
-  <h3>Sign-merger — SL-validated, but a sign-SGD sharpening spiral in GRPO</h3>
-  <div class="eq">\[ \texttt{signed\_ema:}\quad G_{\mathrm{corr}} = \alpha\,G + (1-\alpha)\,|G|\,\mathrm{sign}(M) \]</div>
-  <p>Replacing the live update <em>direction</em> with the stale anchor's sign is validated in supervised settings, but in no-KL/no-entropy GRPO it degenerates into a sign-SGD sharpening spiral. The stale-anchor sign disagrees with the live gradient on ~50% of magnitude-weighted coordinates — a <em>structural</em> coin-flip, not a staleness artifact — destroying the per-coordinate sign-cancellation that regularizes the step. The proximate killer is a response-length reward-hack that <b>ignites</b> only under sign-reversal (entropy collapse is a follower, not the trigger). The dose response is monotone net-harmful (α=0.5 → 0.7066, α=0.3 → 0.6164, α=0 → 0.3541): best at the least-correction edge, dominated by B2, and unstable.</p>
-
-  <h3>Error-feedback — re-adds dropped mass, but ignites late (lag-not-dose)</h3>
-  <div class="eq">\[ \texttt{ef\_powersgd:}\quad e_t = \mathrm{clip}\!\Big(\eta\,e_{t-1} + \big(M - \tfrac{\langle G,M\rangle}{\lVert G\rVert^2}G\big),\ c\lVert G\rVert\Big),\qquad G_{\mathrm{corr}} = G + e_t \]</div>
-  <p>Error-feedback is direction-preserving (no sign term): it carries the detached, clipped off-subspace residual of <code>M</code> forward and re-adds the mass the codec dropped. It was the best realistic result in its lineage (~0.7210, parity-not-surpass) — but damped EF still <b>ignites ~step 61</b> into the same length explosion. Damping only <em>delays</em> ignition; the failure is driven by the accumulated <em>lag</em> of the stale carrier, not the <em>dose</em> of correction.</p>
+  <h2><span class="n">5</span>Why anchor-usage levers cap at parity</h2>
+  <p class="lead">Because the post-#29 merger reconstructs <em>dense-on-stale</em>. The correction <code>δ = M_rep − G_comp_ring</code> rebuilds the dense gradient from a delayed but matched <code>(batch, weights)</code> pair — and <b>you cannot beat dense by reweighting, accumulating, perturbing, or de-noising a stale estimate of dense.</b> Every post-fix parity result reaches the same ceiling by a different route.</p>
 
   <div class="callout key">
-    <span class="lab">the instability discriminator</span>
-    <p style="margin:4px 0"><b>Merger-carrier presence</b> — not entropy level, not gradient noisiness. Dense (lowest entropy, no carrier) is the most stable; both carrier families ignite. Whether you flip signs (signed_ema) or accumulate residual mass (ef), routing the policy update through a stale anchor-derived carrier is what destabilizes the no-KL/no-entropy GRPO surface. <code>delayed_ef</code> holds parity stably precisely because it injects the <em>exact</em> residual on an identical (batch, weights) pair, rather than a reweighted / sign-replaced / accumulated proxy.</p>
+    <span class="lab">evidence hygiene</span>
+    <p style="margin:4px 0">Pre-#29 sign-merger and ef_powersgd measurements used the old invalid-M circuit and are intentionally not used in this post-fix mechanism claim. The conclusion here rests on EXP-30/31/33, where paired replay makes <code>M_rep</code> a valid lagging reference.</p>
   </div>
 
   <h3>The tournament close</h3>

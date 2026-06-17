@@ -31,10 +31,30 @@ lasting record is **here + git history + W&B + the merged code**.
   collapses). β=0 holds as the default. No nameable non-blocked knob with a credible path to ≥0.78 remains
   on either the anchor-usage or β_anc axes. See §EXP-31 tournament and §EXP-33 below.
 
-Everything below B2 in the table (EXP-20/23/25/26/27/29) is **superseded history**, folded into this file
-(detailed run dirs de-bloated 2026-06-15; full detail in git history + W&B + the merged code).
+## Evidence boundary: #29 paired replay
 
-## The settled communication-efficient base (as of issue #25, 2026-06-09)
+**EXP-29 is the validity boundary for anchor-gradient claims.** PR #16
+(`d26176b44`, branch `exp/29-anchor-onpolicy-replay`) added the paired replay
+ring, CPU snapshots, fire-aware retention, and relevance/canary checks that make
+the anchor gradient `M_rep` comparable to the retained fast gradient at the same
+`(batch, theta)` point.
+
+Consequences for reading old numbers:
+
+- **Post-#29 valid-M evidence starts at EXP-30.** Current SOTA, floor, merger,
+  and anchor-usage claims must use EXP-30/31/33 or later.
+- **EXP-20 is okay to quote only as clean-step history.** It used a periodic
+  dense clean step, not the valid paired-replay anchor-gradient circuit. It is not
+  a current no-merger floor and not evidence about anchor-gradient usage.
+- **EXP-23/25/26/27 anchor-gradient results are archival only.** They predate
+  paired replay, so their `M` carried stale/current-batch confounds. Do not use
+  those numbers to rank current valid-M mergers, define floors, or support
+  mechanism claims about the fixed anchor circuit.
+
+Historical run directories through EXP-30 were de-bloated 2026-06-15; full
+detail remains in git history, W&B, and merged code.
+
+## The settled communication-efficient base (as of issue #29, 2026-06-12)
 
 The comm-eff training base is the **anchor circuit on a PowerSGD codec**. Two
 properties are now **mandatory** for every comm-eff run and define the substrate:
@@ -60,47 +80,35 @@ circuit is wired in the verl source is `CODE_WALKTHROUGH.md`.
 
 ## Runs
 
-| id | milestone | what | result (val@50 GSM8K) | record |
+| id | evidence status | what | result (val@50 GSM8K) | record |
 |---|---|---|---|---|
-| **baseline** | M1 | Dense GRPO, Qwen2.5-1.5B-Instruct, GSM8K — verl unmodified (the control = comm-eff OFF) | **0.7536** (the bar) | W&B `5e2jpho9` |
-| EXP-20 | M6 | PowerSGD r=77 (byte-matched) + fresh clean@5 — the prior comm-eff PASS | 0.7415 | W&B `oquyeic3` |
-| EXP-23 | M6 | PowerSGD r=77, **no** re-anchor (the floor); inject/blend stale-anchor mergers (STOP) | 0.6914 (floor) | W&B; erratum `a46fd0191` |
-| **EXP-25** | M6 | **Anchor circuit default** — full-coverage DP-reduced stale `M` (R1) + anchor-owns-`Q` (R2) + sign-replacement merger (R3), α swept | **0.7066** (best, α=0.5) — **STOP** | code on `vast-ai-workload`; issue #25 |
-| EXP-26 | M6 | Real-gradient geometry audit + ef_powersgd merger; Step-C (gradient-tuned forward Q) **falsified** by recon collapse | 0.7210 (ef best) — REVISE→closed | folded here; W&B pruned; LOG.md |
-| EXP-27 | M6 | Damped ef_powersgd (clip/decay 0.5) to 100 steps — ignition test | 0.7202 (**ignited @~66**, length-explosion) — STOP | folded here; W&B `qa6sll3h`; LOG.md |
-| EXP-29 | M6 | On-policy anchor **replay** (`replay_paired_batch` + `snapshot_device` knobs) — the valid-M infra B2 uses | infra PASS (no val bar) | merged PR #16 `d26176b44`; now part of the B2 substrate |
-| **EXP-30** | M6 | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay (geometry-gated) | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; verdict + B2 ground truth migrated to `runs/EXP-31/B2_baseline/` |
-| **EXP-31 (sub-basis)** | M6 | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
-| **EXP-31 (tournament)** | M6 | 4-lever anchor-usage tournament (L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate) on B2 substrate | **NULL across all levers** — **STOP** | box i_41048644 4×H200; W&B fy920fty/ybemd5ux/knlzxh2x/kzohyuod/wmpmmdj1; verdict `runs/EXP-31/verdict.md` |
-| **EXP-33** | M6 | β_anc EMA sweep {0, 0.25, 0.50, 0.75, 1.00} on B2 delayed_ef substrate — first direct β-curve on the valid-M circuit | **FLAT free-averaging region** (all β∈[0,0.75] within ±0.024; C2 β=0.5 nominal peak 0.75284 NOT a SOTA promotion; C4 β=1 cold-M collapse) — **PASS (measurement)** | box i_41194490 4×H200 (torn down); WandB `verl_compression_research_beta_sweep`; verdict `runs/EXP-33/verdict.md` |
+| **baseline** | dense control | Dense GRPO, Qwen2.5-1.5B-Instruct, GSM8K — verl unmodified (the control = comm-eff OFF) | **0.7536** historical; same-box band later pinned around 0.75–0.78 | W&B `5e2jpho9`; later dense reruns |
+| EXP-20 | **pre-#29, no anchor-gradient claim** | PowerSGD r=77 + fresh clean@5 | 0.7415 — clean-step history only; **not** current floor | W&B `oquyeic3` |
+| EXP-23 | **pre-#29 / invalid-M archive** | PowerSGD r=77, no re-anchor; inject/blend stale-anchor mergers | 0.6914 — archival only; **not** valid-M floor | W&B; erratum `a46fd0191` |
+| EXP-25 | **pre-#29 / invalid-M archive** | Early anchor plumbing + sign-replacement sweep | 0.7066 best — archival only; do not rank current mergers from it | issue #25; git history |
+| EXP-26 | **pre-#29 / invalid-M archive** | Geometry audit + `ef_powersgd`; gradient-tuned forward Q falsified by recon collapse | 0.7210 — archival comparator only | folded here; W&B pruned; LOG.md |
+| EXP-27 | **pre-#29 / invalid-M archive** | Damped `ef_powersgd` ignition test | 0.7202, ignited around step ~66 — archival stability warning only | W&B `qa6sll3h`; LOG.md |
+| EXP-29 | **validity fix / infra** | On-policy anchor replay: `replay_paired_batch` + `snapshot_device=cpu` + canary/relevance probes | infra PASS, no val bar | merged PR #16 `d26176b44`; now part of B2 |
+| **EXP-30** | **post-#29 valid-M evidence** | K-delayed codec residual (B2, delayed_ef λ=1, β_anc=0) + valid anchor M via on-policy replay | **0.7528** (B2 @50) — **PASS = SOTA** | PR #17 merged `ca5f4b002`; B2 ground truth migrated to `runs/EXP-31/B2_baseline/` |
+| **EXP-31 (sub-basis)** | **post-#29 valid-M evidence** | Stale-anchor rank-2 sub-basis merger: additive off-principal correction into δ, forward Q untouched; dense reframe (dense-here=0.7506) | **0.7400** (B2/Cell A) — **PARITY (operator-accepted)** | branch `exp/31-subbasis-merger` (unmerged); verdict `runs/EXP-31/verdict.md` |
+| **EXP-31 (tournament)** | **post-#29 valid-M evidence** | 4-lever anchor-usage tournament (L4 perturbation / L2 δ-momentum / L3 adaptive dose / L1 control-variate) on B2 substrate | **NULL across all levers** — **STOP** | box i_41048644 4×H200; W&B fy920fty/ybemd5ux/knlzxh2x/kzohyuod/wmpmmdj1; verdict `runs/EXP-31/verdict.md` |
+| **EXP-33** | **post-#29 valid-M evidence** | β_anc EMA sweep {0, 0.25, 0.50, 0.75, 1.00} on B2 delayed_ef substrate — first direct β-curve on the valid-M circuit | **FLAT free-averaging region** (all β∈[0,0.75] within ±0.024; C2 β=0.5 nominal peak 0.75284 NOT a SOTA promotion; C4 β=1 cold-M collapse) — **PASS (measurement)** | box i_41194490 4×H200 (torn down); WandB `verl_compression_research_beta_sweep`; verdict `runs/EXP-33/verdict.md` |
 
-## EXP-25 — what we learned (issue #25, VERDICT = STOP)
+## Pre-#29 archive: what EXP-25 can and cannot tell us
 
-**The substrate is proven; the merger is not.** R1 (full-coverage, DP-reduced,
-correct-scale `M`) and R2 (anchor-owns-`Q`, fast net never writes `Q`) both passed
-their on-box probe gates — the anchor circuit is mechanically correct and is the
-**realistic** setting (continuously-maintained stale anchor, no clean step). But
-R3, the **sign-replacement** merger `G = α·G_noisy + (1−α)·|G_noisy|·sign(M)`, **does not
-beat — or even match — plain PowerSGD**:
+EXP-25 predates the EXP-29 paired-replay fix. It is therefore **not evidence
+about the current valid-M anchor-gradient circuit**. Keep only the narrow
+historical facts:
 
-- Dose-response is **monotonic and net-harmful**: α=0.5 → 0.7066, α=0.3 → 0.6164,
-  α=0.0 → 0.3541. More signed correction ⇒ worse. The best arm sits at the
-  least-correction edge, below the PowerSGD-only reference (0.7415).
-- **Mechanism:** the stale-anchor sign disagrees with the live gradient on ~50% of
-  magnitude-weighted coords (structural, ≈√2 `rel_change`, not staleness), so
-  replacing the live update *direction* with `sign(M)` destroys the per-coordinate
-  sign-cancellation that regularizes the GRPO step. The proximate val-killer is a
-  **response-length reward-hack** that ignites only under sign-reversal (α<0.5)
-  on the no-KL/no-entropy surface — not low entropy per se.
+- The early plumbing around full-coverage target extraction, DP reduction, and
+  anchor-owned `Q` motivated the EXP-29 replay fix.
+- The sign-replacement sweep did not solve the task on the old invalid-M circuit.
+- Its values (0.7066 / 0.6164 / 0.3541) should **not** be used to rank current
+  valid-M mergers, define the current floor, or support mechanism claims about
+  the fixed anchor.
 
-So we **cannot surpass dense** with this merger, and it is **falsified**. The
-honest reading: this is a **good research base to start from** — the realistic
-circuit is wired and proven — and the open question narrows to the **merger /
-gradient-correction primitive**.
-
-Scientific detail: the EXP-25 deep writeups (`COLLAPSE_GRADIENT_FLOW_ANALYSIS.md`,
-`DEEP_FINDINGS.md`, `ENTROPY_COLLAPSE_FINDINGS.md`) were de-bloated 2026-06-15 — their essence is
-the paragraph above + the memory entries; the full text is in git history.
+The old deep writeups were de-bloated 2026-06-15; treat them as lab-notebook
+history unless a later post-#29 run re-establishes the same claim.
 
 
 ## EXP-31 — the parity result (issue #31, VERDICT = PARITY, operator-accepted 2026-06-14)

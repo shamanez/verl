@@ -42,20 +42,19 @@ codec**. The full result + why + what's next, and all the numbers, live in
   `M` that is **the only thing that updates the projection basis `Q`**
   (`anchor.owns_q`; the fast compressed circuit is a read-only `Q` consumer). This
   **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
-  is mechanically **proven** (EXP-25 R1+R2 probe gates green). Judge on **val/score,
-  not grad_norm**. Do not relitigate the substrate.
+  is mechanically **proven by the post-#29 paired-replay path** (EXP-29 infra +
+  EXP-30 canary/relevance/geometry gates). Pre-#29 anchor-gradient runs are archival
+  only and must not be used as valid-M evidence. Judge on **val/score, not
+  grad_norm**. Do not relitigate the substrate.
 - **Settled result (the current SOTA)** — the merger question is answered: the **`delayed_ef`
   merger (B2)** — error-feedback on the PowerSGD codec residual, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0 —
   reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
   the comm-eff SOTA; its exact settings are `runs/EXP-31/B2_baseline/resolved_params_B2.txt`. **Goals 1–3 (stable /
   parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**
-- **Frontier (issue #31)** — the single open axis is now **how the stale anchor `M` is USED to BEAT
-  dense, not just match it.** B2 caps at parity because it reconstructs the dense gradient on stale data;
-  a first amplification lever (sub-basis) confirmed parity is the amplification ceiling. The active
-  program is a **4-lever tournament** — perturbation / δ-momentum / adaptive-dose / control-variate — all
-  changing only anchor-gradient *usage* (codec/Q/batch/generation **locked**), target **val@50 ≈ 0.80**.
-  This is RL with no recipe — found **empirically**: propose a usage, run it, take early val@25/@50
-  decisions, refine. Authoritative plan: `.claude/plans/31.md`.
+- **Closed frontier axes (issues #31/#33)** — the post-#29 anchor-usage and β_anc
+  sweeps are closed. Perturbation, δ-momentum, adaptive dose, control-variate
+  gating, sub-basis amplification, and mild β averaging all failed to beat B2
+  beyond eval noise. B2 remains the reference; see `research/runs/SUMMARY.md`.
 - **Async-realism constraint (drives the levers)** — the substrate's fixed `delay_K=5` lock-step is a
   *simulation*; the real target is a single **SLOW** anchor node serving a fast **SWARM** over the
   network ⇒ the anchor is **always lagging, never leads**. Admissible levers use it as a *lagging*

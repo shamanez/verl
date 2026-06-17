@@ -1,5 +1,13 @@
 # EXP-30 Verdict
 
+> Evidence hygiene note (2026-06-17): this verdict is preserved as the EXP-30
+> run record, but the repository now treats **EXP-29 paired replay as the
+> validity boundary for anchor-gradient claims**. Use the post-#29 rows
+> (`C2` plain PowerSGD+Q, `B2`, valid-M `B1`, dense reruns) for current floors
+> and comparisons. Pre-#29 comparators such as EXP-20 clean@5, EXP-23 no-refresh,
+> EXP-25 signed_ema, and EXP-26/27 ef variants are historical context only; they
+> must not be quoted as valid-M anchor-circuit evidence.
+
 ## TL;DR (current hyperparameters, val@50) — FINAL six-run decomposition
 
 | run | what it isolates | val@50 | Δ vs prev |
@@ -47,7 +55,8 @@
 - [x] B2 emission: **ZERO post-warmup emission** — no step in [10, 50] with `response_length/max` > 4000;
       no P1 (the only 16384 pin in the whole run is a single pre-injection rollout at step 2, 1/1024,
       non-consecutive, outside the window). Step-50 state: len/mean 203.9, len/max 784, clip_ratio 0.
-- [x] B2 val: 0.0864@0 / 0.7036@25 / **0.7528@50** ⇒ best val@50 = **0.7528 > 0.7210** floor.
+- [x] B2 val: 0.0864@0 / 0.7036@25 / **0.7528@50** ⇒ best val@50 = **0.7528 > 0.7210**
+      pre-registered historical comparator.
       **Parity: NEAR, not established** — reaches the old-dense 0.7536 (−0.0008) but is −0.031 below the
       same-code same-config dense rerun 0.7839 (≈96% of dense). See §Bars correction; seed replicates binding.
 - [x] bytes_ratio in band every cell (A: 0.0504; B2: 0.05052) — codec untouched, GOAL-3
@@ -56,7 +65,10 @@
       verified (ef_decay/clip 0.0, signed_ema not live, β_anc=0, max_targets=−1, replay=true, snapshot=cpu)
 - [x] spend 9.2 ≤ 24 GPU-hr
 
-PASS clause satisfied: ≥1 launched gated cell (B2) emission-free with best val@50 > 0.7210.
+PASS clause satisfied under the original EXP-30 predicate: ≥1 launched gated
+cell (B2) emission-free with best val@50 > the pre-registered historical
+0.7210 comparator. For current valid-M claims, use the same-config post-#29
+comparisons above (`C2` no-merge floor 0.6300, B2 0.7528, dense band 0.75–0.78).
 
 ## The sharp questions, answered
 
@@ -78,7 +90,7 @@ instead of re-learned for ~10.
 **Q3 — is the codec's weight-gradient error recoverable by a K-delayed exact residual? YES — the headline.**
 m5 said the residual is identifiable (loss-mismatch ≤ 0.0103 ≈ EXP-29's relevance band, so δ is codec error,
 not objective mismatch) and bounded (med ratio 1.0528). Cell B2 (`G_corr = G_comp + δ`, λ=1, β_anc=0)
-converted: **0.7528 vs the 0.7210 best-realistic floor (+0.0318); near-parity — reaches old-dense 0.7536 but
+converted: **0.7528 vs the 0.7210 pre-registered historical comparator (+0.0318); near-parity — reaches old-dense 0.7536 but
 −0.031 below the same-config current-code dense 0.7839 (≈96%, see §Bars correction)** —
 emission-free, with the per-fire `delta_ratio` bounded and *declining* (1.37 → 1.03 over the run, no
 monotone climb). δ lifecycle behaved exactly as designed: cold-fallback (= plain PowerSGD) ticks 1–9,
@@ -95,7 +107,8 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
   weight-space confirmation of EXP-26's activation-proxy 0.318 (act-basis captures ~1/3 of update energy).
   B2 works because δ = G_anc_rep − G_comp_ring simultaneously *cancels the stale codec artifact* and
   *injects the true direction* — a blend can only add a near-orthogonal partner (B1 closed). Interpretation
-  of how plain PowerSGD still trains decently (0.6437–0.7415 family) given this — Adam's per-coordinate
+  of how the historical PowerSGD-like family still trained decently (0.6437–0.7415,
+  including pre-#29/clean-step comparators) given this — Adam's per-coordinate
   normalization, cross-step averaging of the artifact — is open; flagged for the path-forward team.
 - **F2 — m6 persistence risk (carrier-law clause, REQUIRED statement).** Cross-fire autocorrelation of
   M_rep: median ≈ **0.62** on real cross-pair fires (fires 3–8: 0.617, 0.586, 0.622, 0.628, 0.622, 0.751;
@@ -136,12 +149,12 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 |---|---|---|---|
 | **dense — current code, same config (APPLES-TO-APPLES)** | **0.7839** | `73ntu76u` | **−0.0311 (≈96%)** |
 | dense — old code (historical) | 0.7536 | `5e2jpho9` | −0.0008 |
-| A0 fresh-clean@5 | 0.7415 | `oquyeic3` | +0.0113 |
+| A0 fresh-clean@5 (pre-#29 clean-step history; not current floor) | 0.7415 | `oquyeic3` | +0.0113 |
 | parity bar (old-dense-derived) | 0.7414 | — | near (not established) |
 | **blend merger (B1, same config)** | **0.7422** | (B1) | residual leads by +0.0106 |
-| ef r2 floor | 0.7210 | `tilwe80t` | +0.0318 |
-| signed_ema α0.5 | 0.7066 | `1wulaelw` | +0.0462 |
-| no-refresh floor (EXP-23 A1) | 0.6914 | — | +0.0614 |
+| ef r2 (pre-#29 invalid-M comparator) | 0.7210 | `tilwe80t` | +0.0318 |
+| signed_ema α0.5 (pre-#29 invalid-M comparator) | 0.7066 | `1wulaelw` | +0.0462 |
+| no-refresh EXP-23 A1 (pre-#29 invalid-M comparator) | 0.6914 | — | +0.0614 |
 | **plain PowerSGD+Q, NO merge (C2, same config — clean 1-knob)** | **0.6300** | `k6nmcuyd` | +0.1228 (merge-value) |
 | plain-on-substrate (old) | 0.6437 | `u1v94opv` | +0.1091 |
 
@@ -156,7 +169,8 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 - m1–m7 table + gate outcomes posted to #28 as priors (B2's conversion is *additive evidence* for #28's EF
   mechanism — K-delayed telescoping EF works in production; #28's current-step variant and plain@100 control
   remain valuable, the latter now ALSO as the no-carrier control for any 100-step B2 extension).
-- Stability claims in this verdict are 50-step CENSORED statistics (EXP-27 lesson) — de-censoring via the
+- Stability claims in this verdict are 50-step CENSORED statistics (EXP-27 was a
+  pre-#29 historical stability warning) — de-censoring via the
   operator-authorized 100-step B2 extension is the immediate next measurement.
 - Step-A val (0.244@20) is a probe diagnostic, NOT a deliverable — never quote it as science.
 
@@ -167,11 +181,11 @@ first valid pair at tick 10, refresh-at-fire/hold-between thereafter; `coldM_fal
 **ext100 (`exp30_B2_ext100`, W&B `b59ncque`) — operator-authorized 100-step extension of B2, identical
 settings.** Outcome: **de-censored for seed 0 — no ignition through step 100.**
 
-- Traversed the EXP-27 ignition band (51–66) cleanly; the registered forecast (no ignition through ~61)
+- Traversed the historical EXP-27 risk band (51–66) cleanly; the registered forecast (no ignition through ~61)
   held; the P(ignite 61–100) ≈ 20–35% event did NOT occur.
 - Vals: 0.7278@25 / **0.7536@50 (= the dense ceiling value)** / 0.7475@75 / 0.7400@100. Mild late decay
-  past step 50; @75 still above the 0.7414 parity bar, @100 slightly below it but well above the 0.7210
-  floor. No 100-step dense reference exists (dense never re-run) — plain@100 (#28 Cell B) is the right
+  past step 50; @75 still above the 0.7414 historical parity bar, @100 slightly below it but well above the
+  pre-registered historical 0.7210 comparator. No 100-step dense reference exists (dense never re-run) — plain@100 (#28 Cell B) is the right
   comparator for whether the decay is mechanism-specific or substrate/epoch-generic.
 - Emission, reported honestly: steps 10–93 fully clean; two **isolated single-rollout cap-pins** at
   steps 94 and 99 (clip_ratio exactly 1/1024 each; len/mean flat 190–227 with zero slope; entropy
