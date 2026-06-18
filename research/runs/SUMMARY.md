@@ -3,6 +3,22 @@
 Durable record (full run dirs de-bloated; provenance = this file + each run's
 `verdict.md` + W&B + git history + merged code).
 
+## Accelerated base — the default loop (EXP-36, 2026-06-18)
+
+`examples/grpo_trainer/vast_comm_eff_accel_base_*.sh` is now the canonical base for
+future tests: accel surface (resp 2048, dynamic-bsz, rollout TP=1, gpu_mem_util 0.55,
+ppo_max_token 24576, 50 steps, val@25/50) + `signed_ema(α=0.25, β_anc=0.50)` + the
+proven math-neutral `diagnostics=false` speed knob, on the locked PowerSGD r=77 anchor
+substrate. **Faster:** ~25 min/50 steps (comm-eff), ~11.5 min (dense) — vs ~2 h on the
+old 16384 surface; 0.75 mem-util gave no speedup (dropped).
+
+Accel-surface val@50 (n=1, NOISY): **dense 0.7657** > **comm-eff signed_ema(0.25,0.50)
+0.7362** (gap −0.030 on the identical @0.55 surface; comm-eff spans 0.70–0.75 across 3
+draws). dense@0.75=0.7695 ≈ dense@0.55 (the 0.55 surface costs dense ~nothing).
+`diagnostics=false` verified math-neutral (static review + EXP-36B; see
+`runs/EXP-36B/NEUTRALITY_REVIEW.md`). Issue #36. The "Current SOTA" below is the
+ORIGINAL 16384 surface (α=0.5) — a different, slower surface.
+
 ## Current SOTA — `signed_ema` (α=0.5, **β_anc=0.50**)
 
 **GSM8K greedy val@50 = 0.7635** — the highest we have measured. Above the prior
