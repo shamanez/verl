@@ -1,37 +1,35 @@
 # Post-Experiment Summary Plan
 
-Use this instead of the deleted execution plans. Those plans were run artifacts;
-this file is the compact handoff for future planning.
+Compact handoff for future planning (execution plans are run artifacts and get
+deleted after each issue; this file persists). Results live in
+`research/runs/SUMMARY.md` + each run's `verdict.md` + W&B.
 
-## Default Method
+## Current best config (leading SOTA — provisional)
 
 | item | value |
 |---|---|
-| method | **B2 `delayed_ef` error feedback** |
-| codec | PowerSGD `r=77`, activation basis |
-| anchor | owns `Q`, paired replay, CPU snapshot |
-| cadence | `delay_K=5` |
-| merger | `G_corr = G_comp + lambda * (M_rep - G_comp_ring)` |
-| `lambda` | `1.0` |
-| default `beta_anc` | `0.0` |
-| communication | bytes ratio about `0.0505` |
+| method | **`signed_ema`, α=0.5, `beta_anc=0.50`** |
+| val@50 | **0.7635** (highest measured; > B2 0.7528; dense band 0.75–0.78) |
+| status | **provisional — EXP-34 verdict REVISE** (single draw + best-of-3; ties B2 within ±0.024 noise; clears the bar only over the signed_ema β=0 ref). Confirm with a β=0.50 replicate before promoting. |
+| substrate | PowerSGD `r=77` + anchor (owns Q, `cadence=delay_K=5`, paired replay, CPU snapshot), `clean_cadence=0`, full coverage, `disable_custom_all_reduce=true` |
+| comm | bytes ratio ≈ `0.0505` |
 
-B2 is the confirmed comm-efficient reference: dense-parity within eval noise, no
-length ignition, and no promoted successor.
+**Established baseline (replicated):** B2 = same substrate, merger `delayed_ef`
+(`λ=1`, `beta_anc=0`) → val@50 **0.7528**. signed_ema β=0.50 differs ONLY in the merger.
 
-## Tested Knobs
+## Tested knobs
 
-| knob family | tested values | keep in mind |
+| knob family | tested values | takeaway |
 |---|---|---|
-| `beta_anc` | `0`, `0.25`, `0.5`, `0.75`, `1` | `0.5` is the nominal best draw, but inside noise; default stays `0` |
-| signed EMA | `alpha=0.5` | the only signed-EMA point worth comparing; not promoted over B2 |
-| delta momentum | `mu=0.5`, `mu=0.9` | null/regress |
-| adaptive lambda | ratio/cosine `k=1` | null |
-| perturbation | `sigma=0.01` | null |
-| sub-basis | rank-2 tail variants | early boost only, no surpass |
+| merger | `delayed_ef` (B2) vs `signed_ema` | signed_ema β=0 = 0.7271 (< B2); **+β_anc lifts it** |
+| `beta_anc` on `signed_ema` | `0.25`, `0.50`, `0.75` | **non-flat, peaks at 0.50** (0.7612 / 0.7635 / 0.7225) — EXP-34 |
+| `beta_anc` on `delayed_ef` | `0`–`1` | flat 0–0.75; β=1 cold-M collapse — EXP-33 |
+| δ-momentum / adaptive-λ / perturbation / control-variate / sub-basis | various | all null vs B2 — EXP-31 |
 
-## Planning Rule
+## Planning rule
 
-New experiments should start from **B2 unchanged** and vary one knob. Do not
-rebuild old plan files or import invalid anchor-gradient claims. If a future run
-uses beta=0.5, label it as a nominal tie candidate, not as the default.
+The immediate next experiment is the **β=0.50 replicate** (2–3 draws on `signed_ema`
+α=0.5 β=0.50, take the mean) to confirm or retract the SOTA claim. Until that lands,
+**B2 remains the safe replicated base**; if confirmed, promote `signed_ema` α=0.5
+β=0.50 to the locked base. Start from one of these unchanged and vary a single knob;
+do not rebuild deleted plan files or import invalid (pre-paired-replay) anchor claims.

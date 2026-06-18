@@ -1,71 +1,47 @@
 # Research Runs Summary
 
-Durable record after de-bloat. Full run directories are intentionally gone; use
-this file, `research/LOG.md`, W&B, git history, and merged code for provenance.
+Durable record (full run dirs de-bloated; provenance = this file + each run's
+`verdict.md` + W&B + git history + merged code).
 
-## Evidence Boundary
+## Current SOTA — `signed_ema` (α=0.5, **β_anc=0.50**)
 
-**The paired-replay fix is the validity boundary for anchor-circuit claims.**
-Current comm-efficient PP/GRPO claims use only valid-M measurements where `M_rep`
-is paired with the retained fast gradient at the same `(batch, theta)`. The old
-clean-step result is kept only as clean-step history and is not a current floor
-or anchor-gradient result.
+**GSM8K greedy val@50 = 0.7635** — the highest we have measured. Above the prior
+B2 `delayed_ef` baseline (0.7528) and inside the dense band (0.75–0.78), at ~5%
+fast-path gradient communication (PowerSGD r=77).
 
-## Current Best Method
+> **Status: provisional (EXP-34 verdict = REVISE).** It is a single draw + best-of-3
+> selection. The margin over the `signed_ema` β=0 reference (0.7271) is **+0.036** and
+> clears the +0.024 noise bar; the margin over B2 (+0.011) is *within* ±0.024 noise (a
+> tie at the top, not a clean surpass of B2). Confirm with a **β=0.50 replicate (2–3
+> draws, take the mean)** before treating it as a hard surpass.
 
-| rank | method | status | best read |
-|---|---|---|---|
-| 1 | **B2 `delayed_ef` error feedback** | **confirmed SOTA comm-eff method** | val@50 **0.7528** in the first valid-M proof; reproduced in the 0.735-0.754 band |
-| 2 | `signed_ema` | candidate/legacy merger, not promoted | alpha=0.5 is the only signed-EMA setting worth tracking; no durable post-#29 verdict promoted it |
-| control | no merger, PowerSGD+Q | realistic floor | val@50 **0.6300** |
-| dense | full gradient | reference band | val@50 about **0.75-0.78** |
-
-**Interpretation:** B2 reaches dense parity within single-draw eval noise at about
-5% fast-path gradient communication. No tested anchor-usage or beta lever gives a
-credible dense surpass.
-
-## Canonical B2 Settings
+### Best hyperparameters (the SOTA config)
 
 | knob | value |
 |---|---|
-| codec | PowerSGD, rank `r=77`, activation basis |
-| anchor | enabled, owns `Q`, full target coverage |
-| replay fix | `replay_paired_batch=true`, `snapshot_device=cpu` |
-| cadence | `cadence=delay_K=5` |
-| merger | `correction_mode=delayed_ef` |
-| residual | `G_corr = G_comp + lambda * (M_rep - G_comp_ring)` |
-| `lambda` | `1.0` |
-| `beta_anc` default | `0.0` |
-| clean step | `clean_cadence=0` |
-| comm | bytes ratio about `0.0504-0.0506` |
+| codec | PowerSGD `rank=77`, `q_basis=act` |
+| anchor | enabled, owns `Q`, `cadence=5`, `delay_K=5`, `replay_paired_batch=true`, `snapshot_device=cpu` |
+| **merger** | **`correction_mode=signed_ema`, `signed_ema_alpha=0.5`, `beta_anc=0.50`** |
+| coverage | `spectral.max_targets=-1` (all 196 matrices), `ema_device=cpu`, `clean_cadence=0` |
+| vLLM | `disable_custom_all_reduce=true` (NCCL all-reduce; box-compat, greedy-val-neutral) |
+| training | Qwen2.5-1.5B-Instruct + GSM8K, GRPO (no KL, no entropy), batch 128 / mini 64, lr `1e-6`, rollout `n=8`, response 16384 |
+| measurement | `total_training_steps=50`, `test_freq=25`, `val_before_train=False` (val @ 25, 50) |
+| comm | bytes ratio ≈ `0.0504` |
 
-## Parameters Tested
+It differs from the prior B2 baseline ONLY in the merger: B2 = same substrate with
+`correction_mode=delayed_ef`, `λ=1`, `beta_anc=0` → val@50 **0.7528** (established,
+replicated lineage). Adding `beta_anc=0.50` under `signed_ema` is what lifts it.
 
-| axis | values tested | result |
-|---|---|---|
-| `beta_anc` on B2 | `0.00`, `0.25`, `0.50`, `0.75`, `1.00` | flat for `0.00-0.75`; `1.00` cold-M collapse |
-| nominal beta draw | `0.50` | highest single draw: **0.75284**, but only +0.0144 over beta=0 control, inside +/-0.024 noise |
-| default beta | `0.00` | still default; beta=0.5 is a nominal tie, not a promotion |
-| delta momentum | `mu=0.5`, `mu=0.9` | null/regress |
-| adaptive lambda | ratio `k=1`, cosine `k=1` | null |
-| perturbation | `sigma=0.01` | null |
-| control variate | gated | skipped/null; covariance gate failed |
-| sub-basis correction | rank-2 tail variants | early boost, no surpass |
-| signed EMA | `alpha=0.5` | keep as the signed-EMA reference setting; not promoted over B2 |
+## What we tested (short)
 
-## Run Index
+- **Substrate** — PowerSGD r=77 on the mandatory anchor circuit (owns Q, delay_K=5): reaches dense parity at ~5% gradient comm. Locked.
+- **Merger family** — `delayed_ef` (B2, 0.7528) vs `signed_ema`. `signed_ema` at β_anc=0 = 0.7271 (below B2); adding anchor-EMA `β_anc` lifts it.
+- **β_anc sweep on `signed_ema`** (EXP-34): 0.25 → 0.7612, **0.50 → 0.7635 (peak)**, 0.75 → 0.7225. Non-flat, peaks at 0.50 — unlike `delayed_ef`, where β_anc was flat (EXP-33: 0.738–0.753 across 0–0.75, β=1 cold-M collapse).
+- **Other anchor-usage levers** — perturbation, δ-momentum, adaptive-λ, control-variate, sub-basis: all null vs B2 (EXP-31).
+- **Reference floors** — no-merger PowerSGD = 0.6300; dense full-gradient = 0.75–0.78.
 
-| id | role | durable result |
-|---|---|---|
-| paired-replay fix | validity | paired replay + CPU snapshots made valid-M measurements possible |
-| B2 proof | method proof | `delayed_ef`, lambda=1, beta=0 reached **0.7528** and became SOTA |
-| anchor-usage tournament | lever sweep | L2/L3/L4/L1 levers failed to beat B2 |
-| beta sweep | beta axis | beta=0.5 was nominal best draw, beta=0 remains default |
+## Bottom line
 
-## Bottom Line
-
-Use **B2 `delayed_ef` with lambda=1, beta=0** as the reference. It is okay to
-mention beta=0.5 as the best single beta draw, but only with the caveat that it is
-a noise-bounded tie and did not replace beta=0. `signed_ema alpha=0.5` is the only
-signed-EMA setting worth keeping in future comparisons, but it is not the current
-best method.
+`signed_ema` (α=0.5, **β_anc=0.50**) is the current best config — val@50 **0.7635**,
+provisional pending a β=0.50 replicate. B2 (`delayed_ef`, β=0) is the established
+replicated baseline at parity (0.7528). Both hit dense parity at ~5% gradient comm.

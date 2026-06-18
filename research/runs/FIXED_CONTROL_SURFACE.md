@@ -56,14 +56,16 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 | `anchor.owns_q` | `true` | the anchor is the ONLY thing that updates `Q` |
 | `anchor.cadence` / `delay_K` | `5` / `5` | refresh + staleness, in optimizer ticks |
 | `clean_cadence` | `0` | DEAD — the anchor replaced the periodic dense step |
-| `spectral.correction_mode` | `delayed_ef` | **the SOTA merger (B2)** — K-delayed codec residual / error-feedback, `λ=1`, `β_anc=0` |
+| `spectral.correction_mode` | `delayed_ef` (replicated base) | B2 baseline merger — error-feedback, `λ=1`, `β_anc=0`, val@50 **0.7528**. **Current leading result (provisional): `signed_ema` α=0.5 `beta_anc=0.50` → val@50 0.7635** (EXP-34, verdict REVISE — pending a β=0.50 replicate; see `runs/SUMMARY.md`). Until that confirms, `delayed_ef` stays the locked control base. |
 | `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` — part of the B2 substrate |
 | vLLM `disable_custom_all_reduce` | `true` | **required** for the box to init (CUDA-IPC under the mp executor); greedy-val-neutral → a controlled var, not a knob |
 
-**The variable axis — how the anchor `M` is USED** (issue #31). The *merger primitive* is settled —
-**`delayed_ef` (B2) is the SOTA** (error-feedback on the codec residual; parity with dense —
-`SUMMARY.md`). The later anchor-usage and beta sweeps are closed; the compact planning handoff is
-`.claude/plans/SUMMARY.md`.
+**The variable axis — how the anchor `M` is USED.** Current **leading result: `signed_ema` α=0.5
+`beta_anc=0.50` → val@50 0.7635** (EXP-34) — the highest measured, edging B2 `delayed_ef` (0.7528)
+but **provisional** (verdict REVISE: single draw + best-of-3, within ±0.024 noise of B2; pending a
+β=0.50 replicate). `delayed_ef` (B2) remains the established, replicated dense-parity baseline. EXP-34
+showed `beta_anc` is NON-flat on `signed_ema` (peaks at 0.50), unlike the flat `delayed_ef` β curve
+(EXP-33). Anchor-usage levers (EXP-31) were all null. Compact planning handoff: `.claude/plans/SUMMARY.md`.
 
 **Reference codecs (NOT the base; ablation only):** the dense control
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
