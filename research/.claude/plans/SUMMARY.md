@@ -1,35 +1,35 @@
 # Post-Experiment Summary Plan
 
-Compact handoff for future planning (execution plans are run artifacts and get
-deleted after each issue; this file persists). Results live in
-`research/runs/SUMMARY.md` + each run's `verdict.md` + W&B.
+Compact handoff for future planning. Execution plan files are deleted after each
+issue; this file persists. Results live in `research/runs/SUMMARY.md` + each run's
+`verdict.md` + W&B.
 
-## Current best config (leading SOTA — provisional)
+## Current base (the default loop)
 
 | item | value |
 |---|---|
-| method | **`signed_ema`, α=0.5, `beta_anc=0.50`** |
-| val@50 | **0.7635** (highest measured; > B2 0.7528; dense band 0.75–0.78) |
-| status | **provisional — EXP-34 verdict REVISE** (single draw + best-of-3; ties B2 within ±0.024 noise; clears the bar only over the signed_ema β=0 ref). Confirm with a β=0.50 replicate before promoting. |
-| substrate | PowerSGD `r=77` + anchor (owns Q, `cadence=delay_K=5`, paired replay, CPU snapshot), `clean_cadence=0`, full coverage, `disable_custom_all_reduce=true` |
-| comm | bytes ratio ≈ `0.0505` |
+| launcher | `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` |
+| method | `signed_ema`, α=0.25, β_anc=0.50 |
+| surface | accel: resp 2048, dyn-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, diagnostics off |
+| substrate | PowerSGD r=77 + anchor (owns Q, cadence/delay_K=5, clean=0, paired replay, `disable_custom_all_reduce`) |
+| speed | ~25 min train / ~28 min wall per 50-step run |
+| val@50 (n=1) | comm-eff **0.7362** (EXP-36B) vs dense **0.7657** (EXP-36C); bytes ratio ≈0.0505 |
 
-**Established baseline (replicated):** B2 = same substrate, merger `delayed_ef`
-(`λ=1`, `beta_anc=0`) → val@50 **0.7528**. signed_ema β=0.50 differs ONLY in the merger.
+## Tested knobs (closed)
 
-## Tested knobs
-
-| knob family | tested values | takeaway |
-|---|---|---|
-| merger | `delayed_ef` (B2) vs `signed_ema` | signed_ema β=0 = 0.7271 (< B2); **+β_anc lifts it** |
-| `beta_anc` on `signed_ema` | `0.25`, `0.50`, `0.75` | **non-flat, peaks at 0.50** (0.7612 / 0.7635 / 0.7225) — EXP-34 |
-| `beta_anc` on `delayed_ef` | `0`–`1` | flat 0–0.75; β=1 cold-M collapse — EXP-33 |
-| δ-momentum / adaptive-λ / perturbation / control-variate / sub-basis | various | all null vs B2 — EXP-31 |
+| knob family | takeaway |
+|---|---|
+| merger | `signed_ema` is the core; `delayed_ef` (β=0) is the legacy replicated ref |
+| `beta_anc` on signed_ema | non-flat, peaks 0.50 (EXP-34, old surface) |
+| `signed_ema_alpha` | peaks 0.25 = 0.7528 (EXP-35 α-sweep, old surface); α=0.0 does NOT ignite |
+| δ-momentum / adaptive-λ / perturbation / control-variate / sub-basis | all null vs baseline (EXP-31) |
 
 ## Planning rule
 
-The immediate next experiment is the **β=0.50 replicate** (2–3 draws on `signed_ema`
-α=0.5 β=0.50, take the mean) to confirm or retract the SOTA claim. Until that lands,
-**B2 remains the safe replicated base**; if confirmed, promote `signed_ema` α=0.5
-β=0.50 to the locked base. Start from one of these unchanged and vary a single knob;
-do not rebuild deleted plan files or import invalid (pre-paired-replay) anchor claims.
+Start from the accel base launcher **unchanged** and vary a SINGLE knob — the merger
+(`spectral.correction_mode` and its α / β_anc). Everything else is locked
+(`runs/FIXED_CONTROL_SURFACE.md`). Every run must finish under ~25 min train.
+
+Do **not** reintroduce the dropped vLLM speed knobs (gpu_mem 0.75 / `chunked_prefill` /
+`forward_prefetch`): they gave no speedup and added rollout noise. Do not rebuild deleted
+plan files or import invalid (pre-paired-replay) anchor claims.

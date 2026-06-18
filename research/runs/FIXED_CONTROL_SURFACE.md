@@ -7,9 +7,9 @@ The locked base is now the **accelerated comm-eff loop** via
 ppo_max_token 24576, 50 steps, test_freq 25, no val-before-train) + **signed_ema**
 (α=0.25, β_anc=0.50) core merger + **diagnostics=false** speed knob (math-neutral,
 EXP-36B/NEUTRALITY_REVIEW.md), on the unchanged **PowerSGD r=77 anchor substrate**.
-~25 min / 50 steps. Reference points (n=1): accel-surface dense ≈0.7695; comm-eff
-signed_ema(0.25,0.50) noisy ≈0.70–0.75. The **only** axis that may vary between arms
-is the **merger** (the ☆ section). Anything else needs separate justification —
+~25 min train / ~28 min wall per 50-step run. Reference points (n=1, this surface):
+dense ≈0.7657 (EXP-36C); comm-eff signed_ema(0.25,0.50) ≈0.7362 (EXP-36B). The **only**
+axis that may vary between arms is the **merger** (the ☆ section). Anything else needs separate justification —
 same bar as `CLAUDE.md §1`. Values live in the launcher, not duplicated here.
 
 Why this exists: small RL deltas can differ by only a few thousandths of val-acc and are
@@ -74,14 +74,13 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
 (`mask.p`; cannot anchor-own-`Q`, so run it with `anchor.owns_q=false`).
 
-**☆ DENSE BASELINE (val@50) — CORRECTED 2026-06-13.** The dense "ceiling" is **run-variance-dominated**;
-report it as a **band ≈ 0.75–0.78**, not a single point (rollout nondeterminism ≈ ±0.024/draw even at
-seed 0). Two draws on record: **current-code, same-static-batch-config dense rerun
-(`73ntu76u`) = 0.7839** — the APPLES-TO-APPLES baseline for any B2-config comm-eff cell (proof: all
-comm_eff counters 0) — and the old-code `5e2jpho9` = 0.7536 (historical). Always compare a comm-eff cell
-to a dense run sharing its code + hyperparameters; the current-code rerun confirmed our valid-M merges
-did **not** regress dense (≥ old). Dense is **never re-run for production**, but an apples-to-apples dense
-control alongside a comm-eff sweep is sanctioned.
+**☆ DENSE BASELINE (val@50).** The dense "ceiling" is **run-variance-dominated**; report it
+as a **band ≈ 0.75–0.78**, not a single point (rollout nondeterminism ≈ ±0.024/draw even at
+seed 0). On the **current accel surface @0.55**, the dense control (comm-eff OFF) is
+**EXP-36C = 0.7657** (val@25 0.7627; all comm_eff counters 0) — the apples-to-apples
+reference for an accel-surface comm-eff cell. Always compare a comm-eff cell to a dense run
+sharing its code + surface. Dense is **never re-run for production**, but an apples-to-apples
+dense control alongside a comm-eff sweep is sanctioned.
 
 ## Measurement knobs (NOT control variables — may vary freely)
 
@@ -133,7 +132,7 @@ the run length + the ONE axis you're varying.
 EXPERIMENT_NAME=accel_repro \
   bash examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
 
-# dense reference on the accel surface (≈0.7695) — one-knob OFF on the GENERIC launcher
+# dense reference on the accel surface (≈0.7657, EXP-36C) — one-knob OFF on the GENERIC launcher
 # (the accel base force-enables comm-eff), mirroring the accel surface envs:
 COMM_EFF_ENABLED=false USE_DYNAMIC_BSZ=True MAX_RESPONSE_LENGTH=2048 ROLLOUT_TP=1 \
   ROLLOUT_GPU_MEM_UTIL=0.55 PPO_MAX_TOKEN_LEN_PER_GPU=24576 \
@@ -142,9 +141,8 @@ COMM_EFF_ENABLED=false USE_DYNAMIC_BSZ=True MAX_RESPONSE_LENGTH=2048 ROLLOUT_TP=
 ```
 
 Pass `TOTAL_TRAINING_STEPS` (50, then 100 for an extended winner) per launch; the rest is
-baked in. Ground truth of any run is its `resolved_params.txt`. The legacy 16K/static B2
-launcher (`vast_comm_eff_b2_sota_*.sh`) remains for apples-to-apples comparison with the old
-surface. Closed anchor-usage levers: `.claude/plans/SUMMARY.md`.
+baked in. Ground truth of any run is its `resolved_params.txt`. Closed anchor-usage levers:
+`.claude/plans/SUMMARY.md`.
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).
