@@ -602,6 +602,10 @@ class CommEffState:
                 adaptive_lambda_mode=str(getattr(spec_cfg, "adaptive_lambda_mode", "off")),
                 adaptive_lambda_kappa=float(getattr(spec_cfg, "adaptive_lambda_kappa", 0.0)),
                 lambda_cap=float(getattr(spec_cfg, "lambda_cap", 2.0)),
+                # When False, skip per-step spectral DIAGNOSTIC overhead
+                # (per-matrix rel_change compute+sync+print). Default True =
+                # byte-identical. Nothing the optimizer sees changes.
+                diagnostics=bool(getattr(spec_cfg, "diagnostics", True)),
             )
             logger.info(
                 "comm_eff: spectral filter built (beta_anc=%s ema_device=%s correction_mode=%s "

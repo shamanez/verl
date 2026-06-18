@@ -1359,6 +1359,17 @@ class FSDPEngine(BaseEngine):
         replay_mode = bool(getattr(anchor_cfg, "replay_paired_batch", False))
         _snap_device_str = str(getattr(anchor_cfg, "snapshot_device", "gpu"))
         _snap_dev = torch.device("cpu") if _snap_device_str == "cpu" else None
+        # Spectral DIAGNOSTIC gate. When False, skip the per-step diagnostic
+        # overhead: the anchor-canary stdout line (the assert STAYS — it is a
+        # load-bearing bitwise staleness guard, NOT diagnostics), the replay
+        # relevance probe (a diagnostic forward), and the relevance print.
+        # Default True = current behavior, byte-identical. Read off the SAME
+        # spectral sub-config the rest of this method uses; spec_cfg is set just
+        # below, so read it from state.config here for early use.
+        _spec_cfg_for_diag = getattr(state.config, "spectral", None)
+        comm_eff_spectral_diagnostics = (
+            bool(getattr(_spec_cfg_for_diag, "diagnostics", True)) if _spec_cfg_for_diag is not None else True
+        )
 
         # Lazily build the staleness queue on the state (survives across steps).
         # CommEffState is a plain class with a __dict__, so a direct setattr is
@@ -1659,16 +1670,20 @@ class FSDPEngine(BaseEngine):
             # this is not capture machinery). A mismatch = the loaded clone is
             # NOT the recorded snapshot — hard fail.
             if _fire_canary:
+                # LOAD-BEARING: the verify + assert below are the bitwise
+                # staleness guard and run UNCONDITIONALLY. Only the stdout echo
+                # is diagnostic and is gated by spectral.diagnostics.
                 _can_ok, _can_got = verify_canary_on_module(anchor_module, _fire_canary, canon=_canon)
-                print(
-                    f"[comm_eff][anchor-canary] step={step} match={_can_ok} "
-                    + " ".join(
-                        f"{n}: push(norm={_fire_canary[n][0]!r},sum={_fire_canary[n][1]!r}) "
-                        f"clone(norm={_can_got[n][0]!r},sum={_can_got[n][1]!r})"
-                        for n in sorted(_fire_canary.keys())
-                    ),
-                    flush=True,
-                )
+                if comm_eff_spectral_diagnostics:
+                    print(
+                        f"[comm_eff][anchor-canary] step={step} match={_can_ok} "
+                        + " ".join(
+                            f"{n}: push(norm={_fire_canary[n][0]!r},sum={_fire_canary[n][1]!r}) "
+                            f"clone(norm={_can_got[n][0]!r},sum={_can_got[n][1]!r})"
+                            for n in sorted(_fire_canary.keys())
+                        ),
+                        flush=True,
+                    )
                 assert _can_ok, (
                     f"comm_eff anchor-canary MISMATCH at step={step}: the clone's loaded weights "
                     f"differ from the values recorded at snapshot-push time "
@@ -1723,7 +1738,13 @@ class FSDPEngine(BaseEngine):
             # trajectories with the loaded stale weights against the log-probs
             # stored WITH them — flat-not-growing across fires proves the
             # loaded weights are the batch's generator. Detached/scalar-only.
-            if replay_mode:
+            # DIAGNOSTIC: the wrap adds a re-score forward; when
+            # spectral.diagnostics is False we use the UNWRAPPED anchor loss so
+            # no diagnostic forward runs. The anchor backward feeding M/G_anchor
+            # is identical either way (the wrap only re-scores + accumulates,
+            # never changes the returned loss). _relevance_acc stays empty ⇒ the
+            # relevance print below is naturally skipped.
+            if replay_mode and comm_eff_spectral_diagnostics:
                 anchor_loss_function = self._wrap_anchor_loss_with_replay_relevance(
                     anchor_loss_function, _relevance_acc
                 )
@@ -1806,7 +1827,9 @@ class FSDPEngine(BaseEngine):
         # Relevance diagnostic for this fire: loaded-weights re-score vs the
         # log-probs stored with the replayed trajectories. Greppable evidence
         # line; the analyst checks it stays FLAT (not growing) across fires.
-        if replay_mode and _relevance_acc:
+        # When spectral.diagnostics is False the wrap above is skipped so
+        # _relevance_acc is empty; the explicit gate documents the intent.
+        if replay_mode and comm_eff_spectral_diagnostics and _relevance_acc:
             _ref_key = _relevance_acc[0][0]
             _rel_cnt = sum(c for _k, _s, c in _relevance_acc)
             _rel_mad = sum(s for _k, s, _c in _relevance_acc) / max(_rel_cnt, 1)

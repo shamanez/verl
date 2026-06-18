@@ -205,11 +205,26 @@ class CommEffSpectralConfig(BaseConfig):
             correction with a matching ``anchor.cadence`` so the
             correction always uses a freshly-refreshed anchor EMA instead of a
             stale one on the in-between steps. Must be ``>= 1``.
+        diagnostics (bool): When ``False``, skip the per-step spectral
+            DIAGNOSTIC overhead — the per-matrix ``relative_change()``
+            compute+GPU→CPU ``.item()`` sync, the per-matrix/per-merge
+            diagnostic prints, and the anchor-fire relevance probe (a diagnostic
+            forward). ``True`` (default) = current behavior, byte-identical.
+            Neutral: nothing the optimizer sees changes — the optimizer-visible
+            ``g_corr`` writeback, the bitwise anchor canary assert, and the
+            aggregate W&B counters (``anchor_backwards`` / ``bytes_ratio`` /
+            ``merger_coldM_fallbacks`` / ``spectral_corrections``) are preserved
+            in both states. Set ``False`` only for runtime efficiency.
     """
 
     enabled: bool = False
     beta_anc: float = 0.95
     cadence: int = 1
+    # When False, skip the per-step spectral DIAGNOSTIC overhead (per-matrix
+    # rel_change compute+sync+print and the anchor relevance probe). Default
+    # True = current behavior, byte-identical. Neutral: nothing the optimizer
+    # sees changes; the canary assert and aggregate counters are preserved.
+    diagnostics: bool = True
     target_substr: list = field(
         default_factory=lambda: [
             "q_proj",
@@ -688,6 +703,15 @@ class CommEffConfig(BaseConfig):
         # config error, not a silent disable; mirrors anchor.cadence >= 1.
         if self.spectral.cadence < 1:
             raise ValueError(f"comm_eff.spectral.cadence must be >= 1; got {self.spectral.cadence}")
+        # diagnostics is a strict bool (same rationale as the other comm_eff
+        # flags). It gates only DIAGNOSTIC overhead; a YAML typo ("False" string)
+        # or a numeric override should fail loudly instead of silently leaving
+        # the per-step rel_change syncs / relevance probe on or off.
+        if not isinstance(self.spectral.diagnostics, bool):
+            raise ValueError(
+                f"comm_eff.spectral.diagnostics must be a bool; got "
+                f"{type(self.spectral.diagnostics).__name__} ({self.spectral.diagnostics!r})"
+            )
         # Anchor cadence/staleness.
         if self.anchor.cadence < 1:
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
