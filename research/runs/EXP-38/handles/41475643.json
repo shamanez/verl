@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "instance_id": 41475643,
+  "label": "EXP-38",
+  "ssh_host": "104.202.252.41",
+  "ssh_port": 20177,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 20177 root@104.202.252.41",
+  "num_gpus": 4,
+  "gpu_name": "H200",
+  "gpu_ram": 143771,
+  "dph_total": 12.165570175438596,
+  "machine_id": 68490,
+  "vast_account": "team",
+  "tmux_session": "exp-38-104_202_252_41",
+  "provisioned_by": "operator-manual (reused from EXP-37)",
+  "note": "EF analog of EXP-37: ef_powersgd ef_decay=0.9 ef_clip=1.0 (EXP-26 M6 record), cadence/delay 20/20, 100 steps."
+}
