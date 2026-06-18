@@ -1,25 +1,25 @@
-# Research Status — 2026-06-17 (EXP-34 RUNNING)
+# Research Status — 2026-06-18T14:15:14+10:00 (EXP-35 RUNNING)
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | **DONE** | 1×4H200 (i_41292294, **team**, TORN DOWN, 0 live verified) | **REVISE** | β→val@50 curve: 0.7612 / **0.7635 (β=0.50 peak)** / 0.7225 — peaks at β=0.50 (≠ EXP-33 flat delayed_ef). Best clears +0.024 bar (+0.0364 vs 0.7271; > B2 0.7528) but n=1+best-of-3 ⇒ analyst REVISE: replicate β=0.50 before promoting. All other criteria PASS. `runs/EXP-34/verdict.md`. No keep-warm. |
-| 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 stays default; max gap C2 +0.0144 < 0.024 |
-| 32 | signed_ema α=0.5 on valid-M | DONE | (op-managed) | done | val@50 0.7271 < B2 0.7528 |
+| 35 | signed_ema α-sweep {0,.25,.5,.75,1} @ β_anc=0.50 (accel 4×H200: dyn-bsz + TP=1 + resp 2048) | **RUNNING** (monitor bg) | 1×4H200 (i_41420622, **team**) | — | reused operator box; 5-cell sequential sweep in one tmux (c3→c1→c2→c4→c5). c3 (α=0.5) active ~global_step 6/50, GPUs bursting 96–99%, no errors. |
+| 34 | signed_ema α=0.5 β_anc sweep {0.25,0.50,0.75} | DONE | (torn down) | REVISE | β=0.50 peak val@50 0.7635 (clears +0.024 bar) but n=1 → replicate. EXP-35 follows up on the α axis at that β=0.50 peak. |
+| 33 | β_anc sweep on B2 delayed_ef | DONE | (torn down) | PASS | flat free-averaging; β=0 default |
 
-## EXP-34 detail
+## EXP-35 detail
 
-- **Box**: operator-provided team-account instance **41292294** (4×H200, $12.69/hr). NOT harness-provisioned; do NOT reprovision. Both `~/.ssh/vast_ai` + `~/.ssh/vast_ai_name` reach it.
-- **Account**: `vast_account=team` on ledger + handle → teardown auths with team key. ⚠️ Team account also holds unrelated box **41267389** (1×H100, NOT ours) — teardown must target 41292294 ONLY.
-- **Cells** (back-to-back, one tmux): `signed_ema_b0p25` (β=0.25) → `signed_ema_b0p50` (β=0.50) → `signed_ema_b0p75` (β=0.75). signed_ema α=0.5 fixed; B2 substrate fixed; 55 steps; val@25/50 (`val_before_train=False`).
-- **W&B**: project `verl_compression_research_beta_sweep_signed_ema`, entity shamanework-pl.
-- **Heartbeat**: `runs/EXP-34/metrics/incoming.log` (sync-metrics tails box `/workspace/train.log`; both SSH keys verified to reach box).
-- **Headline bar**: `best_cell_val@50 − 0.7271 > 0.024` (i.e. > 0.7511) ⇒ PASS. Reference points: EXP-32 signed_ema β=0 = **0.7271**; B2 delayed_ef SOTA = **0.7528** (context only). Prior (EXP-33 flat β curve + converged thesis) favors NULL/closure STOP.
-- **Teardown**: the instant aggregate `done.flag` + all 3 cells' metrics sync to laptop → dispatch `vast-teardown` (team key, instance 41292294 ONLY). NO keep-warm (operator directive).
+- **Box**: operator-provided warm **4×H200**, instance **41420622**, **team account**, direct SSH `-i ~/.ssh/vast_ai -p 40264 root@84.8.106.109 -L 8080:localhost:8080`. Reused / do-not-provision; do NOT teardown without operator order. dph ≈ $12.88/hr.
+- **Driver**: `tmux exp-35-84_8_106_109` → `/workspace/runs/EXP-35/launch.sh` (5-cell sweep wrapper, pid 2144) → c3 launcher (pid 2150). Remaining cells c1/c2/c4/c5 auto-run back-to-back after c3 — box stays GPU-busy for the whole sweep.
+- **Cells** (run order): `exp-35-c3-a050` (α=0.5, control/surface-validation gate, target val@50 ∈ [0.7395,0.7875]) → `exp-35-c1-a000` (α=0.0, sign-SGD endpoint, ignition risk) → `exp-35-c2-a025` (α=0.25) → `exp-35-c4-a075` (α=0.75) → `exp-35-c5-a100` (α=1.0, no-merger PowerSGD floor ~0.63).
+- **Surface**: signed_ema correction, β_anc=0.50, B2 substrate (PowerSGD r77, anchor owns_q, replay_paired_batch, disable_custom_all_reduce). 50 steps/cell, test_freq=25 (val@25 + val@50), val_before_train=False.
+- **W&B**: project `verl_compression_research_alpha_sweep_signed_ema`, entity shamanework-pl.
+- **Monitor**: `training-log-monitor` dispatched in background (agent a41af464…), 30 s cadence; returns terminal report on cell-transition / done / stall / error. Heartbeat: `runs/EXP-35/metrics/incoming.log`.
+- **Why no parallel job**: the 4-GPU FSDP run legitimately owns all 4 GPUs (bursts to 96–99%, free_cache_engine swings mem 13↔90GB); #35 is the only open issue. GPUs are driven by the existing sweep — nothing idle, nothing else approved to launch.
 
 ## Last tick
-2026-06-17 · running=[34] · analyzing=[] · logging=[] · blocked=[] · monitor=bg(a2e8d17)
+2026-06-18T14:15:14+10:00 · running=[35] · analyzing=[] · logging=[] · blocked=[] · monitor=bg(a41af464)
 
 ## Budget
-$/hr now: 12.69 (1 box) · EXP-34 cap: 96 GPU-hr / $24-per-instance · expected ~12–18 GPU-hr
+$/hr now: $12.88 (1 box, team) · run started 14:05 (~10 min ago) · max_gpu_hr cap: 60

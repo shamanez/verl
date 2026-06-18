@@ -1,0 +1,12 @@
+experiment: EXP-35
+kind: ablation (signed_ema alpha sweep on accelerated 4xH200 surface)
+box: reused operator 4xH200 (instance 41420622, team account)
+locked_token_budget: PPO_MAX_TOKEN_LEN_PER_GPU=24576  # shared across all 5 cells (one-knob); justification: card-independent footprint, plan's H100 design point ~70GB fits 143GB H200 with ~73GB margin. No separate step-0 probe — C3 runs first and the monitor reads its first anchor-firing-step max_memory_reserved_gb + util as the inline mem-calibration evidence.
+acceleration_stack: USE_DYNAMIC_BSZ=True, MAX_RESPONSE_LENGTH=2048, ROLLOUT_TP=1, ROLLOUT_GPU_MEM_UTIL=0.55, LOG_PROB/REF token_len=32768
+run_order_and_cells:
+  - {name: exp-35-c3-a050, signed_ema_alpha: 0.5,  role: "control/surface-validation-gate (target val@50 in [0.7395,0.7875])", order: 1}
+  - {name: exp-35-c1-a000, signed_ema_alpha: 0.0,  role: "degenerate sign-SGD endpoint (ignition risk)", order: 2}
+  - {name: exp-35-c2-a025, signed_ema_alpha: 0.25, role: "interior", order: 3}
+  - {name: exp-35-c4-a075, signed_ema_alpha: 0.75, role: "interior", order: 4}
+  - {name: exp-35-c5-a100, signed_ema_alpha: 1.0,  role: "no-merger PowerSGD floor (~0.63)", order: 5}
+fixed: {beta_anc: 0.50, correction_mode: signed_ema, TOTAL_TRAINING_STEPS: 50, TEST_FREQ: 25, val_before_train: False, TRAIN_BATCH_SIZE: 128, PPO_MINI_BATCH_SIZE: 64, project: verl_compression_research_alpha_sweep_signed_ema}

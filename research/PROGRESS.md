@@ -28,3 +28,5 @@ Current working state:
 [2026-06-18T01:11:58+10:00] [analyst #34] verdict=REVISE
 [2026-06-18T13:35:24+10:00] [research-planner #35] plan written
 [2026-06-18T13:36:09+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-06-18T14:08:04+10:00] [experiment-runner #35] REUSED 4xH200 box 41420622 (team); 5-cell signed_ema alpha sweep launched in tmux exp-35-84_8_106_109; tok_budget=24576; C3 control first.
+[2026-06-18T14:15:14+10:00] [orchestrator] tick: running=[35:c3-a050 healthy, full 5-cell sweep queued in-tmux] analyzing=[] logging=[] blocked=[] | reused team 4xH200 i_41420622, dispatched training-log-monitor(bg). c3 ~global_step6/50, GPUs bursting 96-99%, no errors. No second job (4-GPU FSDP owns all GPUs; #35 is sole open issue).
