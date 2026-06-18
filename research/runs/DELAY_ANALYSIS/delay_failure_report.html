@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why comm-eff GRPO fails at 20/20 anchor latency</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f7f6f2; --ink:#1c1c1a; --ink2:#55554f; --ink3:#86857d;
+    --line:#e3e1d8; --line2:#cfcdc2;
+    --dense:#0f6e56;   --dense-fill:#e1f5ee;
+    --good:#185fa5;    --good-fill:#e6f1fb;
+    --bad:#a32d2d;     --bad-fill:#fcebeb;
+    --amber:#854f0b;   --amber-fill:#faeeda;
+    --purple:#534ab7;  --purple-fill:#eeedfe;
+    --floor:#5f5e5a;
+    --maxw:920px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    line-height:1.62; font-size:16px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:48px 28px 80px;}
+  header.doc{border-bottom:2px solid var(--ink); padding-bottom:22px; margin-bottom:30px;}
+  .eyebrow{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3); font-weight:600;}
+  h1{font-size:29px; line-height:1.2; font-weight:600; margin:10px 0 8px;}
+  .sub{color:var(--ink2); font-size:15.5px; margin:0;}
+  .meta{margin-top:14px; font-size:13px; color:var(--ink3); display:flex; flex-wrap:wrap; gap:6px 20px;}
+  .meta b{color:var(--ink2); font-weight:600;}
+
+  h2{font-size:20px; font-weight:600; margin:46px 0 14px; padding-top:8px;}
+  .secnum{color:var(--ink3); font-weight:600; margin-right:10px;}
+  h3{font-size:16.5px; font-weight:600; margin:26px 0 8px;}
+  p{margin:0 0 14px;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px;
+    background:var(--panel); padding:1px 5px; border-radius:4px; border:1px solid var(--line);}
+  em{color:var(--ink); font-style:italic;}
+  strong{font-weight:600;}
+
+  .callout{
+    background:var(--panel); border:1px solid var(--line2); border-left:5px solid var(--ink);
+    border-radius:8px; padding:20px 24px; margin:6px 0 14px;
+  }
+  .callout h2{margin-top:0;}
+  .callout .lead{font-size:16.5px;}
+  .verdict-strip{display:flex; flex-wrap:wrap; gap:12px; margin:18px 0 4px;}
+  .vchip{flex:1 1 230px; background:var(--bg); border:1px solid var(--line2); border-radius:8px; padding:13px 16px;}
+  .vchip .q{font-size:13px; color:var(--ink2); margin:0 0 4px; font-weight:600;}
+  .vchip .a{font-size:15px; margin:0; font-weight:600;}
+  .vchip.primary{border-left:4px solid var(--bad);}
+  .vchip.primary .a{color:var(--bad);}
+  .vchip.secondary{border-left:4px solid var(--amber);}
+  .vchip.secondary .a{color:var(--amber);}
+
+  table{border-collapse:collapse; width:100%; margin:12px 0 18px; font-size:14px;}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line);}
+  thead th{border-bottom:2px solid var(--line2); color:var(--ink2); font-weight:600; font-size:13px;}
+  tbody tr:hover{background:var(--panel);}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums; font-family:ui-monospace,Menlo,monospace; font-size:13px;}
+  .row-dense td{background:var(--dense-fill);}
+  .row-good td{background:var(--good-fill);}
+  .row-bad td{background:var(--bad-fill);}
+  .tag{display:inline-block; font-size:11px; font-weight:600; padding:1px 8px; border-radius:20px; vertical-align:1px;}
+  .tag.dense{background:var(--dense-fill); color:var(--dense);}
+  .tag.good{background:var(--good-fill); color:var(--good);}
+  .tag.bad{background:var(--bad-fill); color:var(--bad);}
+  .tag.pred{background:var(--purple-fill); color:var(--purple);}
+
+  figure{margin:18px 0 8px;}
+  figcaption{font-size:13px; color:var(--ink3); margin-top:10px; text-align:center;}
+  .chartcard{background:var(--bg); border:1px solid var(--line2); border-radius:10px; padding:18px 14px 8px;}
+
+  ul.clean{margin:6px 0 16px; padding-left:22px;}
+  ul.clean li{margin:6px 0;}
+
+  .rec{border:1px solid var(--line2); border-radius:9px; padding:16px 18px 12px; margin:0 0 14px; background:var(--bg);}
+  .rec .head{display:flex; align-items:baseline; gap:10px; margin-bottom:6px;}
+  .rec .rank{font-size:12px; font-weight:700; color:#fff; border-radius:5px; padding:2px 9px; flex:0 0 auto;}
+  .rec .title{font-size:16px; font-weight:600;}
+  .rec.r1{border-left:5px solid var(--good);} .rec.r1 .rank{background:var(--good);}
+  .rec.r2{border-left:5px solid var(--purple);} .rec.r2 .rank{background:var(--purple);}
+  .rec.r3{border-left:5px solid var(--dense);} .rec.r3 .rank{background:var(--dense);}
+  .rec.r4{border-left:5px solid var(--amber);} .rec.r4 .rank{background:var(--amber);}
+  .rec.ruled{border-left:5px solid var(--bad); background:var(--bad-fill);} .rec.ruled .rank{background:var(--bad);}
+  .rec .kv{font-size:13.5px; color:var(--ink2); margin:6px 0 2px;}
+  .rec .kv b{color:var(--ink); font-weight:600;}
+  .rec p{font-size:14.5px; margin:6px 0 4px;}
+  .cost{font-size:12.5px; color:var(--ink3);}
+
+  .pred-box{background:var(--purple-fill); border:1px solid #cecbf6; border-radius:9px; padding:16px 20px; margin:14px 0;}
+  .pred-box h3{margin-top:0; color:var(--purple);}
+  .footnote{font-size:13px; color:var(--ink3); border-top:1px solid var(--line); margin-top:42px; padding-top:16px;}
+  .attrib-bar{display:flex; height:30px; border-radius:6px; overflow:hidden; margin:8px 0 4px; border:1px solid var(--line2);}
+  .attrib-bar .seg{display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; color:#fff;}
+  .seg.delay{background:var(--bad);} .seg.cad{background:var(--amber);}
+  .attrib-legend{font-size:12.5px; color:var(--ink2); display:flex; gap:18px; margin-bottom:6px;}
+  .attrib-legend span{display:flex; align-items:center; gap:6px;}
+  .sw{width:11px; height:11px; border-radius:3px; display:inline-block;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <div class="eyebrow">Communication-efficient GRPO &middot; Delay analysis</div>
+  <h1>Why increasing anchor latency from 5/5 to 20/20 breaks comm-eff GRPO training</h1>
+  <p class="sub">A two-hypothesis verdict (stale anchor gradient&nbsp;M vs. infrequent Q correction), the empirical evidence, mechanism, and ranked recommendations.</p>
+  <div class="meta">
+    <span><b>Prepared for</b> Head of Research</span>
+    <span><b>Date</b> 2026-06-18</span>
+    <span><b>Model / data</b> Qwen2.5-1.5B-Instruct &middot; GSM8K (accel surface)</span>
+    <span><b>Source runs</b> EXP-36B / EXP-36C / EXP-37 (+ EXP-38 predicted)</span>
+  </div>
+</header>
+
+<!-- ============ 1. EXEC SUMMARY ============ -->
+<div class="callout">
+  <h2 style="font-size:18px;"><span class="secnum">1</span>Executive summary</h2>
+  <p class="lead">Raising the anchor latency from <strong>5/5 to 20/20</strong> optimizer ticks (a 10-global-step staleness window) cost <strong>~0.088 val@50</strong> (0.7362&nbsp;&rarr;&nbsp;0.6482) and triggered a late training collapse: a length spiral over steps 93&ndash;100 drove val from 0.6482 down to <strong>0.4435</strong> &mdash; <em>below</em> the no-merger PowerSGD floor of 0.6300. The latency genuinely ran (<code>anchor_backwards = 10</code>), so this is a real result, not a config artifact.</p>
+  <p style="margin-bottom:6px;">The root cause is <strong>primarily anchor-gradient (M) staleness &mdash; the <code>delay_K</code> axis &mdash; not Q-refresh infrequency</strong>. Both analysts independently weight <code>delay_K</code> at roughly <strong>70&ndash;80% of the val drop and ~90% of the ignition</strong>; Q-cadence contributes a real but bounded <strong>~20&ndash;35%</strong>. The two knobs are gated by the <em>same</em> firing call in the code, so EXP-37 alone cannot fully separate them &mdash; which makes a small decoupling experiment the single highest-value next step. Concrete, ranked recommendations follow in &sect;6, and the recommended runs in &sect;7.</p>
+</div>
+
+<div class="verdict-strip">
+  <div class="vchip primary">
+    <p class="q">Is the anchor gradient M too stale?</p>
+    <p class="a">YES &mdash; primary cause (~70&ndash;80% val, ~90% ignition)</p>
+  </div>
+  <div class="vchip secondary">
+    <p class="q">Is the Q correction too infrequent?</p>
+    <p class="a">Contributes, but SECONDARY (~20&ndash;35%)</p>
+  </div>
+</div>
+
+<!-- ============ 2. QUESTION & SETUP ============ -->
+<h2><span class="secnum">2</span>The question &amp; setup</h2>
+<p>In this fork the dense gradient at the pipeline boundary is replaced by a <strong>compressed fast gradient</strong> <code>G_comp</code> (PowerSGD-projected), periodically corrected by an <strong>anchor</strong>: a no-hook clone of the model that runs forward/backward from a <em>stale weight snapshot</em> <code>&theta;<sub>t&minus;K</sub></code> and produces a full-coverage dense gradient <code>M</code>. A merger (here <code>signed_ema</code>) folds <code>M</code> into <code>G_comp</code> each step. Two knobs control the anchor's lag:</p>
+<ul class="clean">
+  <li><strong><code>delay_K</code></strong> &mdash; how stale M is. M is the dense gradient at <code>&theta;<sub>t&minus;K</sub></code> on the data <em>those</em> weights generated (paired replay).</li>
+  <li><strong><code>cadence</code></strong> &mdash; how often the anchor fires: it refreshes M, re-fits the PowerSGD basis Q, and re-bases the held correction.</li>
+</ul>
+<p>Both are counted in <strong>optimizer ticks, not global steps</strong>. With the locked surface (<code>train_batch=128</code>, <code>ppo_mini=64</code>) there are <strong>2 ticks per global step</strong>, so <strong>20 ticks = 10 global steps</strong> of staleness and a refresh every 10 global steps &mdash; 4&times; the lag of the 5/5 baseline. EXP-37 changed <em>only</em> these two knobs (5/5&nbsp;&rarr;&nbsp;20/20) relative to the good baseline EXP-36B, and extended the horizon to 100 steps to probe the back half.</p>
+
+<!-- ============ 3. EVIDENCE ============ -->
+<h2><span class="secnum">3</span>The evidence</h2>
+<p>The contrast is immediate: the dense control and the 5/5 comm-eff baseline track each other within ~0.03 and stay flat; the 20/20 run starts ~0.14 lower and then <em>collapses</em> in the back half.</p>
+
+<figure>
+<div class="chartcard">
+<svg viewBox="0 0 880 430" width="100%" role="img" aria-label="Validation accuracy versus training step for three runs. Dense control EXP-36C holds about 0.763 to 0.766. The 5/5 comm-eff baseline EXP-36B holds about 0.726 to 0.736 through step 50. The 20/20 run EXP-37 starts at 0.592 at step 25, rises to 0.648 at step 50, then collapses to 0.490 at step 75 and 0.444 at step 100, falling below the no-merger floor of 0.63.">
+  <title>Validation curves: dense vs 5/5 vs 20/20 anchor latency</title>
+  <!-- plot geometry: x 0..100 maps to px 90..830 ; y 0.40..0.80 maps to px 360..40 -->
+  <!-- y gridlines + labels -->
+  <g font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#86857d">
+    <!-- 0.80 -->
+    <line x1="90" y1="40"  x2="830" y2="40"  stroke="#e3e1d8"/><text x="80" y="44"  text-anchor="end">0.80</text>
+    <!-- 0.75 -->
+    <line x1="90" y1="85"  x2="830" y2="85"  stroke="#e3e1d8"/><text x="80" y="89"  text-anchor="end">0.75</text>
+    <!-- 0.70 -->
+    <line x1="90" y1="130" x2="830" y2="130" stroke="#e3e1d8"/><text x="80" y="134" text-anchor="end">0.70</text>
+    <!-- 0.65 -->
+    <line x1="90" y1="175" x2="830" y2="175" stroke="#e3e1d8"/><text x="80" y="179" text-anchor="end">0.65</text>
+    <!-- 0.60 -->
+    <line x1="90" y1="220" x2="830" y2="220" stroke="#e3e1d8"/><text x="80" y="224" text-anchor="end">0.60</text>
+    <!-- 0.55 -->
+    <line x1="90" y1="265" x2="830" y2="265" stroke="#e3e1d8"/><text x="80" y="269" text-anchor="end">0.55</text>
+    <!-- 0.50 -->
+    <line x1="90" y1="310" x2="830" y2="310" stroke="#e3e1d8"/><text x="80" y="314" text-anchor="end">0.50</text>
+    <!-- 0.45 -->
+    <line x1="90" y1="355" x2="830" y2="355" stroke="#e3e1d8"/><text x="80" y="359" text-anchor="end">0.45</text>
+  </g>
+  <!-- no-merger floor 0.63 -> y = 360 - (0.63-0.40)/0.40*320 = 360-184 = 176 -->
+  <line x1="90" y1="176" x2="830" y2="176" stroke="#5f5e5a" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="826" y="170" text-anchor="end" font-family="ui-monospace,Menlo,monospace" font-size="11.5" fill="#5f5e5a">no-merger PowerSGD floor 0.6300</text>
+
+  <!-- x axis -->
+  <line x1="90" y1="360" x2="830" y2="360" stroke="#cfcdc2" stroke-width="1.5"/>
+  <g font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#86857d" text-anchor="middle">
+    <text x="90"  y="382">0</text>
+    <text x="275" y="382">25</text>
+    <text x="460" y="382">50</text>
+    <text x="645" y="382">75</text>
+    <text x="830" y="382">100</text>
+  </g>
+  <text x="460" y="408" text-anchor="middle" font-size="13" fill="#55554f">training step</text>
+  <text x="26" y="200" text-anchor="middle" font-size="13" fill="#55554f" transform="rotate(-90 26 200)">validation accuracy</text>
+
+  <!-- helper: y(v)=360-(v-0.40)/0.40*320 ; x(s)=90+s/100*740 -->
+  <!-- DENSE EXP-36C: val@25 0.7627 (y=70.16), val@50 0.7657 (y=67.74). Draw flat band 25..50 then dashed extrapolation. -->
+  <polyline points="275,70 460,67.7" fill="none" stroke="#0f6e56" stroke-width="3"/>
+  <polyline points="460,67.7 830,67.7" fill="none" stroke="#0f6e56" stroke-width="2" stroke-dasharray="3 6" opacity="0.5"/>
+  <circle cx="275" cy="70"   r="4.5" fill="#0f6e56"/>
+  <circle cx="460" cy="67.7" r="4.5" fill="#0f6e56"/>
+
+  <!-- GOOD 5/5 EXP-36B: val@25 0.7263 (y=98.96), val@50 0.7362 (y=91.04). stops at 50. -->
+  <polyline points="275,99 460,91" fill="none" stroke="#185fa5" stroke-width="3"/>
+  <circle cx="275" cy="99" r="4.5" fill="#185fa5"/>
+  <circle cx="460" cy="91" r="4.5" fill="#185fa5"/>
+  <text x="468" y="86" font-size="11.5" fill="#185fa5" font-family="ui-monospace,Menlo,monospace">stops @50 (pre-spiral)</text>
+
+  <!-- BAD 20/20 EXP-37: val@25 0.5921 (y=246.32), val@50 0.6482 (y=201.44), val@75 0.4898 (y=328.16), val@100 0.4435 (y=365.2 -> clamp 360) -->
+  <polyline points="275,246.3 460,201.4 645,328.2 830,360" fill="none" stroke="#a32d2d" stroke-width="3"/>
+  <circle cx="275" cy="246.3" r="4.5" fill="#a32d2d"/>
+  <circle cx="460" cy="201.4" r="4.5" fill="#a32d2d"/>
+  <circle cx="645" cy="328.2" r="4.5" fill="#a32d2d"/>
+  <circle cx="830" cy="360"   r="4.5" fill="#a32d2d"/>
+
+  <!-- ignition annotation -->
+  <line x1="613" y1="40" x2="613" y2="360" stroke="#a32d2d" stroke-width="1" stroke-dasharray="3 4" opacity="0.45"/>
+  <text x="617" y="54" font-size="11.5" fill="#a32d2d" font-family="ui-monospace,Menlo,monospace">length spiral ignites (~step 93)</text>
+
+  <!-- legend -->
+  <g font-family="-apple-system,Helvetica,sans-serif" font-size="13">
+    <rect x="560" y="290" width="262" height="60" rx="6" fill="#ffffff" stroke="#e3e1d8"/>
+    <line x1="572" y1="306" x2="598" y2="306" stroke="#0f6e56" stroke-width="3"/>
+    <text x="606" y="310" fill="#1c1c1a">EXP-36C dense (ceiling)</text>
+    <line x1="572" y1="324" x2="598" y2="324" stroke="#185fa5" stroke-width="3"/>
+    <text x="606" y="328" fill="#1c1c1a">EXP-36B 5/5 comm-eff</text>
+    <line x1="572" y1="342" x2="598" y2="342" stroke="#a32d2d" stroke-width="3"/>
+    <text x="606" y="346" fill="#1c1c1a">EXP-37 20/20 comm-eff</text>
+  </g>
+</svg>
+</div>
+<figcaption>Validation accuracy vs. training step. The 20/20 run (red) sits well below both references from the first checkpoint and then collapses through the no-merger floor after the back-half length spiral ignites.</figcaption>
+</figure>
+
+<h3>Validation accuracy</h3>
+<table>
+  <thead>
+    <tr><th>Run</th><th>Config</th><th class="num">val@25</th><th class="num">val@50</th><th class="num">val@75</th><th class="num">val@100</th></tr>
+  </thead>
+  <tbody>
+    <tr class="row-dense"><td>EXP-36C <span class="tag dense">dense ceiling</span></td><td>dense control, accel</td><td class="num">0.7627</td><td class="num">0.7657</td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr>
+    <tr class="row-good"><td>EXP-36B <span class="tag good">good baseline</span></td><td>signed_ema, <b>5/5</b></td><td class="num">0.7263</td><td class="num">0.7362</td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr>
+    <tr class="row-bad"><td>EXP-37 <span class="tag bad">the failure</span></td><td>signed_ema, <b>20/20</b></td><td class="num">0.5921</td><td class="num">0.6482</td><td class="num">0.4898</td><td class="num">0.4435</td></tr>
+  </tbody>
+</table>
+<p style="font-size:14px; color:var(--ink2);">All three share the merger (<code>signed_ema</code>, &alpha;=0.25, &beta;<sub>anc</sub>=0.50), codec (PowerSGD r=77), and surface; EXP-37 differs <em>only</em> in <code>cadence</code>/<code>delay_K</code> (20/20 vs 5/5) and horizon (100 vs 50 steps). val@50 degradation = <strong>0.0880</strong>, above the 0.05 "remains near base" bar &rarr; headline gate failed.</p>
+
+<h3>The back-half spiral (steps 93&ndash;100)</h3>
+<p>EXP-37 was stable through ~step 58 (end of epoch 0), then ignited a textbook length-hack spiral. Note the canonical ordering &mdash; <strong>length runs away first, entropy follows</strong>:</p>
+<table>
+  <thead><tr><th>Signal</th><th>Onset</th><th>Trajectory (steps 93&rarr;100)</th><th>Reading</th></tr></thead>
+  <tbody>
+    <tr><td><code>response_length/mean</code></td><td>step ~93</td><td class="num">189 &rarr; 251 &rarr; 373 &rarr; 581 &rarr; 683</td><td>length ratchet (the driver)</td></tr>
+    <tr><td><code>pg_clipfrac</code></td><td>back half</td><td class="num">0.028 &rarr; 0.125 (peaks ~0.24)</td><td>off-policy length hack</td></tr>
+    <tr><td><code>actor/entropy</code></td><td>trails length</td><td class="num">0.81 &rarr; 0.42</td><td>collapse (a follower)</td></tr>
+  </tbody>
+</table>
+<p>The terminal val (<strong>0.4435</strong>) falls <em>below</em> the no-merger PowerSGD floor of 0.6300. That is the load-bearing fact: at K=20 the merger is not merely inert &mdash; it is <strong>actively destructive</strong>, worse than dropping the anchor correction entirely.</p>
+
+<!-- ============ 4. MECHANISM ============ -->
+<h2><span class="secnum">4</span>Mechanism &amp; theory</h2>
+<p>Stale M biases the update through two compounding terms, and the bias rectifies into a length spiral. The chain has four links.</p>
+
+<h3>4.1&nbsp;&nbsp;Why stale M biases the step &mdash; a linear term plus a super-linear term</h3>
+<p>Treat M as a delayed estimate of the true current gradient. The staleness error <code>e<sub>K</sub> = g(&theta;<sub>t</sub>) &minus; g(&theta;<sub>t&minus;K</sub>)</code> decomposes into:</p>
+<ul class="clean">
+  <li><strong>Weight drift (linear in K):</strong> bounded by <code>L<sub>H</sub> &middot; K &middot; &eta; &middot; &#8214;u&#8214;</code> &mdash; the gradient simply moved as the weights moved. Purely geometrically, K=20 has <strong>4&times;</strong> the drift of K=5.</li>
+  <li><strong>Off-policy distribution shift (super-linear in K):</strong> under GRPO the loss has no fixed objective &mdash; M was computed on data sampled from a <em>different</em> policy <code>&pi;<sub>&theta;<sub>t&minus;K</sub></sub></code>. Importance-weight variance grows ~<code>exp(D<sub>KL</sub>)</code>; the GRPO clip converts that variance into a steadily growing systematic <strong>bias</strong>. This is the term that makes 20/20 qualitatively worse than a linear extrapolation of 5/5 would predict.</li>
+</ul>
+<p>Because Adam + grad-clip make the update <em>direction</em> load-bearing, the relevant quantity is the angular error. As <code>&#8214;e<sub>K</sub>&#8214;</code> grows toward <code>&#8214;g(&theta;<sub>t</sub>)&#8214;</code>, the merger increasingly points uphill on individual coordinates &mdash; the coordinate-level source of the ~50% sign-disagreement in <code>signed_ema</code>.</p>
+
+<h3>4.2&nbsp;&nbsp;Why it becomes a LENGTH spiral &mdash; a tangential ratchet</h3>
+<p>The merger's correction is, by construction, <strong>orthogonal to the live gradient</strong> (the off-subspace residual, or the sign-flipped magnitude on disagreeing coordinates). An orthogonal force does no first-order work against the loss &mdash; it is a <strong>persistent tangential push along the reward-flat manifold</strong>. "Correct-but-longer" is exactly such a reward-flat ridge: emitting more tokens barely changes verifier reward. With no KL and no entropy term, nothing brakes motion along it. Crucially, token-mean loss normalization makes each token's gradient <em>weaker</em> as sequences lengthen, so the brake on further growth weakens as length grows (<code>dF/d&#8467; &gt; 0</code>) &mdash; the signature of a <strong>positive-feedback loop</strong>. <em>Staleness sets the gain of this loop:</em> larger K means a larger per-step tangential dose, moving the system from sub-critical (K=5: ratchet present but censored at the 50-step horizon) to super-critical (K=20: ignites within 100 steps).</p>
+
+<h3>4.3&nbsp;&nbsp;Why the onset is LATE (steps 50&ndash;100), not immediate</h3>
+<p>The spiral is the <em>integral</em> of a small biased force, not an instantaneous instability. It must accumulate past a token-mean amplification threshold before it self-sustains. Two things back-load the damage to epoch 1: (i) cumulative drift <code>&#8214;&theta;<sub>t</sub>&minus;&theta;<sub>0</sub>&#8214;</code> is largest then, maximizing the off-policy term exactly when the second epoch begins; and (ii) the held correction is re-applied across the long cadence window, integrating later (more mis-aimed) fires. EXP-37's stability through ~step 58 and ignition in epoch 1 is exactly this threshold-crossing signature.</p>
+
+<h3>4.4&nbsp;&nbsp;The information-ceiling (&sigma;(M)) argument &mdash; staleness can only degrade</h3>
+<p>Any deterministic correction <code>&Phi;(G_comp, M)</code> is measurable with respect to <code>&sigma;(M) = &sigma;(g(&theta;<sub>t</sub>), g(&theta;<sub>t&minus;K</sub>))</code> and is therefore <strong>capped at dense</strong>. A K-stale M is, by the data-processing inequality, a <em>noisier channel observation</em> of the current gradient than a fresh M &mdash; mutual information <code>I(M<sub>K</sub>; g(&theta;<sub>t</sub>))</code> is monotonically non-increasing in K. Staleness adds no curvature, no exploration, no cross-rank signal; it only corrupts the dense reconstruction. So the <em>best</em> outcome of any latency setting is "approach dense from below," and the worst &mdash; observed at K=20 &mdash; is "fall below the no-merger floor." <strong>There is no value of K that helps.</strong> The practical question for the async north-star (one slow anchor, fast swarm, lag always present) is therefore <em>robustness</em> to staleness, never exploitation of it.</p>
+
+<!-- ============ 5. TWO-HYPOTHESIS VERDICT ============ -->
+<h2><span class="secnum">5</span>The two-hypothesis verdict</h2>
+<p>The operator asked two explicit questions. Both analysts &mdash; one owning the staleness axis, one owning the codec/cadence axis &mdash; converge on the same weighting.</p>
+
+<div class="verdict-strip">
+  <div class="vchip primary">
+    <p class="q">H1 &mdash; Is the anchor gradient M too stale? (<code>delay_K</code>)</p>
+    <p class="a">YES &middot; PRIMARY</p>
+    <p style="font-size:13px; color:var(--ink2); margin:6px 0 0;">~70&ndash;80% of the val drop, ~90% of the ignition. The off-policy distribution-shift term (&sect;4.1) is a pure function of K, and the ratchet gain (&sect;4.2) scales with <code>&#8214;e<sub>K</sub>&#8214; &prop; K</code>. The "lag-not-dose" history (EXP-27) says the spiral is driven by lag &mdash; and <code>delay_K</code> <em>is</em> the lag.</p>
+  </div>
+  <div class="vchip secondary">
+    <p class="q">H2 &mdash; Is the Q correction too infrequent? (<code>cadence</code>)</p>
+    <p class="a">CONTRIBUTES &middot; SECONDARY</p>
+    <p style="font-size:13px; color:var(--ink2); margin:6px 0 0;">~20&ndash;35%. A frozen Q injects a <em>bounded, self-healing</em> error: <code>warm_start</code> pulls Q one power-iteration step toward the current subspace at each fire, and the activation geometry is slow-varying, so a 10-step-stale Q is still a good projector. Cadence is the <em>clock</em>, not the <em>engine</em>.</p>
+  </div>
+</div>
+
+<h3>Weighted attribution of the 0.088 val drop + spiral</h3>
+<div class="attrib-legend">
+  <span><span class="sw" style="background:var(--bad)"></span>delay_K / M-staleness</span>
+  <span><span class="sw" style="background:var(--amber)"></span>cadence / Q-codec</span>
+</div>
+<div class="attrib-bar">
+  <div class="seg delay" style="width:75%;">delay_K &mdash; ~70&ndash;80%</div>
+  <div class="seg cad" style="width:25%;">cadence &mdash; ~20&ndash;35%</div>
+</div>
+<p style="font-size:13.5px; color:var(--ink3); margin-top:4px;">Ranges reflect the two analysts' independent estimates; the bar shows the consensus midpoint.</p>
+
+<h3>The structural confound</h3>
+<p>EXP-37 alone <em>cannot</em> cleanly separate the two, because in the code <code>cadence</code> and <code>delay_K</code> are gated by the <strong>same per-tick counter through the same <code>anchor_should_fire(step, cadence)</code> call</strong> (<code>transformer_impl.py:1474</code>): the Q-update, M-refresh, and broadcast all happen in one fire block. Raising both to 20 together means "Q frozen 4&times; longer" and "M 4&times; staler" are inseparable in this single run. This is precisely why the decoupling experiment (&sect;7) is the highest-value next step.</p>
+
+<h3>The clean cadence fingerprint</h3>
+<p>There <em>is</em> one isolable cadence signature already in the data: a <strong><code>pg_clipfrac</code> spike at every Q-refresh step</strong> (10, 20, &hellip;, 100). Each fire jumps the projector Q discontinuously, mismatching the importance ratio for one step &mdash; clipfrac of ~0.10&ndash;0.19 at refresh steps vs. a ~0.004&ndash;0.03 floor between them. These spikes are bigger precisely <em>because</em> the jumps are rarer at cadence 20. This is the cleanest, already-available pure-cadence readout, and it should reappear at the same steps in any same-codec run regardless of merger family.</p>
+
+<!-- ============ 6. RECOMMENDATIONS ============ -->
+<h2><span class="secnum">6</span>Practical recommendations</h2>
+<p>Ranked by expected payoff per unit cost, all respecting the async constraint (the anchor must remain a <em>lagging</em> reference; corrections must be cross-rank-identical and degrade gracefully as the anchor ages).</p>
+
+<div class="rec r1">
+  <div class="head"><span class="rank">1</span><span class="title">Staleness-aware held-&delta; dose decay</span></div>
+  <p class="kv"><b>Knob:</b> <code>delta_momentum_age_decay</code> (already in <code>delayed_ef</code>) &middot; <b>value:</b> &mu; &asymp; 0.85&ndash;0.90</p>
+  <p>Scale the held correction by <code>&mu;<sup>age</sup></code> as it ages, fading a stale &delta; toward zero before the next fire. At K=20, <code>0.88<sup>20</sup> &asymp; 0.08</code>, so the correction is strongest right after a fresh fire and near-zero just before the next &mdash; directly capping the integrated tangential dose (the ratchet gain in &sect;4.2) without touching K or the two-circuit structure. Cross-rank-identical and graceful-by-age, so async-admissible. <em>Note:</em> age-decay was mildly harmful as a freshness lever at 5/5 (it discards good fresh signal), but at K=20 the late-window &delta; is <em>bad</em> signal &mdash; a falsifiable sub-prediction that it helps where it hurt.</p>
+  <p class="cost">Cost: config-only, no substrate change. Test inside the decoupling run.</p>
+</div>
+
+<div class="rec r2">
+  <div class="head"><span class="rank">2</span><span class="title">Decouple <code>q_cadence</code> from <code>delay_K</code></span></div>
+  <p class="kv"><b>Knob:</b> NEW <code>q_cadence</code> &middot; <b>value:</b> q_cadence=5 (or per-tick) while delay_K=20</p>
+  <p>Refresh Q cheaply and often even while M stays stale. The Q update is just <code>orth(V)</code> on the fast-path activation sketch plus a small <code>H&times;r</code> broadcast &mdash; <strong>it needs no stale backward</strong>, so refreshing Q more often is nearly free relative to the anchor pass that produces M. This both shrinks the per-refresh projector-jump shock and tests the cadence hypothesis directly. <strong>Engineering flag to systems:</strong> the replay ring keys its fire-aware retention on <code>cadence</code> (<code>anchor.py:426</code>, <code>_keep_residue = (&minus;delay_K) % cadence</code>); a split cadence requires the ring to key on the <em>M-refresh</em> cadence, not the Q one. This is the one real subtlety, and it is what makes the &sect;7 "delay-only" cell expressible.</p>
+  <p class="cost">Cost: new knob (off the locked surface) + ring re-key. Q-refresh itself is nearly free.</p>
+</div>
+
+<div class="rec r3">
+  <div class="head"><span class="rank">3</span><span class="title">Keep <code>beta_anc = 0</code></span></div>
+  <p class="kv"><b>Knob:</b> <code>beta_anc</code> &middot; <b>value:</b> 0 (do not add EMA to "smooth" a noisy stale M)</p>
+  <p>It is tempting to smooth a noisy stale M with an EMA, but EMA <em>compounds</em> staleness &mdash; averaging old gradients makes M even more lagging, and GRPO's clip tolerates far less of that than SFT. &beta;&isin;[0,0.5] is a flat free-averaging region at 5/5, but at K=20 any &beta;&gt;0 pushes the marginal staleness into the harmful regime. Fight staleness with dose decay (#1), not smoothing.</p>
+  <p class="cost">Cost: none &mdash; this is the current default; the recommendation is to <em>not</em> change it.</p>
+</div>
+
+<div class="rec r4">
+  <div class="head"><span class="rank">4</span><span class="title">Adaptive-&lambda; ratio mode with a low cap</span></div>
+  <p class="kv"><b>Knob:</b> <code>adaptive_lambda_mode="ratio"</code>, low <code>lambda_cap</code> &middot; <b>value:</b> cap &asymp; 0.5</p>
+  <p>Gate the dose on measured staleness: <code>c<sub>t</sub> = &#8214;&delta;&#8214;/&#8214;gm&#8214;</code> is a direct proxy &mdash; a large residual relative to the live gradient means the anchor is badly aged, so the dose should drop. A low <code>lambda_cap</code> ensures a staleness spike <em>cannot</em> spike the dose. Bounded, variable-staleness-safe, cross-rank-identical &mdash; the safety belt to #1.</p>
+  <p class="cost">Cost: config-only. Complements #1; can run in the same cell.</p>
+</div>
+
+<div class="rec ruled">
+  <div class="head"><span class="rank" style="background:var(--bad)">&times;</span><span class="title">Ruled out</span></div>
+  <p style="font-size:14.5px; margin:6px 0;"><strong>Delay-compensation / extrapolation / lead.</strong> Predicting <code>g(&theta;<sub>t</sub>)</code> from the stale gradient (Nesterov-style lead) is forbidden by the async target: the anchor is a single slow node that can <em>never</em> lead the fast swarm. Admissible levers use the anchor as a lagging reference only.</p>
+  <p style="font-size:14.5px; margin:6px 0 2px;"><strong>Chasing rank r.</strong> EXP-20 showed reconstruction error is flat across r&isin;[77,102] &mdash; the codec is <em>not</em> coverage-starved, so raising r buys little and costs comm linearly. Do not lead with it.</p>
+</div>
+
+<!-- ============ 7. NEXT EXPERIMENTS ============ -->
+<h2><span class="secnum">7</span>Recommended next experiments</h2>
+<h3>7.1&nbsp;&nbsp;The 2&times;2 decoupling run</h3>
+<p>On the accel surface, 100 steps, same <code>signed_ema</code> (&alpha;=0.25, &beta;=0.50), holding everything else at EXP-37's config. This is the experiment that settles the structural confound.</p>
+<table>
+  <thead><tr><th>Cell</th><th class="num">delay_K</th><th class="num">cadence</th><th>Isolates</th><th>Predicted result</th></tr></thead>
+  <tbody>
+    <tr><td>A (= EXP-36B)</td><td class="num">5</td><td class="num">5</td><td>control</td><td>stable, val@50 &asymp; 0.736</td></tr>
+    <tr class="row-bad"><td><b>B</b> (delay-only) <span class="tag bad">most informative</span></td><td class="num">20</td><td class="num">5</td><td><b>delay_K at fixed Q-refresh</b></td><td>ignites + val drop &asymp; EXP-37 (&asymp;0.64&ndash;0.68)</td></tr>
+    <tr><td>C (cadence-only)</td><td class="num">5</td><td class="num">20</td><td>stale Q at fixed staleness</td><td>mostly stable, modest drop (&asymp;0.71&ndash;0.73)</td></tr>
+    <tr><td>D (= EXP-37)</td><td class="num">20</td><td class="num">20</td><td>both (already have it)</td><td>0.5921 / 0.6482 / collapse</td></tr>
+  </tbody>
+</table>
+<p><strong>Cell B is the single most informative run</strong> &mdash; if budget allows only one extra cell, run it. It has a <em>short</em> held-&delta; window (refresh every 5 ticks) but <em>large</em> per-&delta; magnitude, so if it reproduces the ignition, the gain is unambiguously the <code>delay_K</code> magnitude &mdash; vindicating recommendation #1's <code>&mu;<sup>age</sup></code> decay. Decision logic: <strong>B&asymp;D</strong> confirms delay_K is the culprit; <strong>C&asymp;D</strong> would flip the verdict to cadence; a ~half-and-half split means both axes need fixing. Note that Cell B is only <em>expressible</em> after recommendation #2's <code>q_cadence</code> decoupling lands.</p>
+
+<h3>7.2&nbsp;&nbsp;The live EF-at-20/20 confirmation (re-run EXP-38)</h3>
+<div class="pred-box">
+  <h3>Falsifiable prediction (PREDICTED, not yet observed)</h3>
+  <p style="margin-bottom:8px;">EXP-38 (<code>ef_powersgd</code>, best params 0.9/1.0, at 20/20) was correctly configured and launched, but its Vast box was destroyed by a concurrent-session race <em>before step 1</em> &mdash; <strong>there is no live result yet.</strong> Both analysts predict EF <strong>ignites earlier and/or harder than <code>signed_ema</code>'s step-93 onset</strong>, because EF's residual <code>&delta; = M &minus; G_comp</code> is a <em>coherent, fixed-direction</em> tangential force with no sign-cancellation brake (whereas the random half of <code>signed_ema</code>'s sign-disagreements partially cancel across coordinates).</p>
+  <p style="margin-bottom:0;"><strong>Predicted:</strong> ignition before step ~70 (vs ~93), val@25 in the 0.55&ndash;0.62 band, terminal collapse below the 0.63 floor, and the <em>same</em> per-refresh clipfrac spikes at steps 10/20/&hellip;/100. The EXP-26/27 history supports this: <code>ef_powersgd</code> at clip=1.0 already ignited a length explosion at 5/5, and damped EF (0.5/0.5) still ignited at step ~61 ("damping delays, not prevents"). <strong>Refuted if</strong> EF stays clean past step 93 or its val@25 &ge; 0.70.</p>
+</div>
+<p>Re-running EXP-38 cleanly is the cheap confirmation of the "carrier shapes the spiral, staleness sets the ceiling" thesis: if EF ignites earlier <em>and</em> its val is comparable to EXP-37, that jointly confirms staleness degrades the reconstruction equally across mergers while the merger family only sets the ignition timing.</p>
+
+<!-- ============ 8. CAVEATS ============ -->
+<h2><span class="secnum">8</span>Caveats</h2>
+<ul class="clean">
+  <li><strong>n=1 draws.</strong> Every val number is a single run. Rollout nondeterminism is ~&plusmn;0.024 (the dense draw band), so differences below that are within noise. The EXP-37 effects (0.088 drop, collapse to 0.4435) are far outside it; the cell-to-cell <em>predictions</em> in &sect;7 should be read with the &plusmn;0.024 band in mind.</li>
+  <li><strong>EXP-38 is predicted, not observed.</strong> The earlier-ignition claim for EF rests on the EXP-26/27 ignition history and mechanism, not a live 20/20 EF run. It is presented as a falsifiable prediction and must be confirmed by a clean re-run.</li>
+  <li><strong>The structural confound limits EXP-37's standalone attribution.</strong> Because <code>cadence</code> and <code>delay_K</code> share the same firing gate, the 70&ndash;80% / 20&ndash;35% split is a <em>theory-grounded</em> attribution, not a measured decomposition. The &sect;7 decoupling run (especially Cell B) is what converts it from estimate to measurement.</li>
+  <li><strong>Comm-cost accounting.</strong> The reported <code>bytes_ratio &asymp; 0.0502</code> counts only the fast-path Y + amortized Q; the full-dense M broadcast is a known-uncounted term and is not the total communication cost.</li>
+</ul>
+
+<div class="footnote">
+  Synthesis of two independent analyses &mdash; M-staleness theory (member 1) and Q-cadence/codec (member 2) &mdash; against the EXP-36B / EXP-36C / EXP-37 record and the EXP-37 STOP verdict. All mechanism claims are grounded in the comm-eff source (<code>spectral_filter.py</code>, <code>transformer_impl.py</code>, <code>anchor.py</code>, <code>powersgd_activation.py</code>) and the standing research memory. Prepared 2026-06-18.
+</div>
+
+</div>
+</body>
+</html>
