@@ -1,12 +1,16 @@
 # Fixed Control Surface — GSM8K comm-eff experiments
 
-**Status: LOCKED (operator directive, 2026-06-04; substrate extended 2026-06-09 / #25).**
-Every experiment in this project holds these constant. As of issue #25 the comm-eff
-**substrate** (PowerSGD r=77 + a mandatory anchor that owns `Q`) is also locked, and the
-**only** axis that may vary between arms is the **merger** (the ☆ section). Changing
-anything else requires a separate, explicit justification — same bar as the
-model/loss/hardware controls in `CLAUDE.md §1`. This file extends those three with the
-*training* hyperparameters + the locked comm-eff substrate.
+**Status: LOCKED (operator directive, 2026-06-04; substrate #25; accelerated base 2026-06-18).**
+The locked base is now the **accelerated comm-eff loop** via
+`examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`:
+**accel surface** (resp 2048, dynamic-bsz, rollout TP=1, gpu_mem_util 0.55,
+ppo_max_token 24576, 50 steps, test_freq 25, no val-before-train) + **signed_ema**
+(α=0.25, β_anc=0.50) core merger + **diagnostics=false** speed knob (math-neutral,
+EXP-36B/NEUTRALITY_REVIEW.md), on the unchanged **PowerSGD r=77 anchor substrate**.
+~25 min / 50 steps. Reference points (n=1): accel-surface dense ≈0.7695; comm-eff
+signed_ema(0.25,0.50) noisy ≈0.70–0.75. The **only** axis that may vary between arms
+is the **merger** (the ☆ section). Anything else needs separate justification —
+same bar as `CLAUDE.md §1`. Values live in the launcher, not duplicated here.
 
 Why this exists: small RL deltas can differ by only a few thousandths of val-acc and are
 only interpretable if the rest of the run is byte-for-byte comparable. Silent
@@ -23,18 +27,18 @@ once, here, and read it off for every launch.
 | **Learning rate** | `1e-6` | AdamW (verl default betas) |
 | **train_batch_size** | **128** prompts | ×`rollout.n`=8 ⇒ 1024 sequences/step |
 | **ppo_mini_batch_size** | **64** | |
-| **ppo_micro_batch_size_per_gpu** | **1** | static batching (`use_dynamic_bsz=False`) for trackability |
+| **use_dynamic_bsz** | **True** (accel base) | token-balanced dynamic batching (the per-element mask is packing-invariant) |
 | **rollout.n** | **8** | rollouts per prompt |
-| **rollout.tensor_model_parallel_size** | **2** | vLLM TP |
-| **rollout.gpu_memory_utilization** | **0.4** | |
+| **rollout.tensor_model_parallel_size** | **1** (accel base) | vLLM TP |
+| **rollout.gpu_memory_utilization** | **0.55** (accel base) | |
 | **max_prompt_length** | **1024** | |
-| **max_response_length** | **16384** | the 16K-response headroom that forces multi-GPU |
-| **ppo_max_token_len_per_gpu** | **18432** actor / **36864** log_prob+ref | actor halved (anchor's ~3 GB no-hook clone/rank must fit — launcher default since #25). **NON-BINDING under static batching**: with `ppo_micro_batch_size_per_gpu=1` + `use_dynamic_bsz=False`, each micro-batch is exactly 1 sequence (≤16384+prompt ≈ 16.6K < 18432), so this cap NEVER triggers and does NOT affect the result — 18432 vs 36864 is mathematically identical here. **Keep 18432 on B2-style comparison cells INCLUDING the dense reference** so the dense baseline is apples-to-apples (only the codec/merger varies); raising to 36864 on an anchor-OFF ablation is allowed but then it is NOT one-knob vs the comm-eff cells |
+| **max_response_length** | **2048** (accel base) | accel surface — short responses for fast turnaround (was 16384) |
+| **ppo_max_token_len_per_gpu** | **24576** actor (accel base) / **36864** log_prob+ref | actor budget under dynamic-bsz on the accel surface |
 | **total_training_steps** | **50** (→100 extended) | **50, NOT 55** (operator 2026-06-17: no end-of-training val@55). verl validates at `is_last_step OR global_steps % test_freq == 0` (`ray_trainer.py:1720-1721`), so `total=55, test_freq=25` fired a 3rd val at step 55 (is_last_step); `total=50` makes the last step coincide with the test_freq val ⇒ **val@25 / val@50 ONLY**. val@50 flush is handled by the launcher's `wandb sync` final-flush daemon + the authoritative local train.log (the old 5-step buffer is obsolete). **Comparison number = val@50**, identical across total=50/55 (same step-50 model). Extend to 100 (a test_freq multiple → no spurious val) for a winner. |
 | **total_epochs** | **2+** | a ceiling sized to reach the step target (≈59 steps/epoch) |
 | **comm-eff substrate** (LOCKED — see ☆ below) | anchor on + owns `Q`, cadence 5 / delay_K 5, `clean_cadence`=0 | the anchor is **mandatory** and is the **only** thing that updates `Q`; it refreshes `M`+`Q` every 5 ticks from stale, delayed weights and REPLACES any periodic dense clean step (do **not** assume a `clean_cadence`) |
 | **save_freq** | **50** | |
-| **val_before_train** | **True** | the step-0 val point |
+| **val_before_train** | **False** (accel base) | skip step-0 val (untrained base is constant) |
 | **calculate_log_probs** | **True** | train-inference mismatch diagnostic; rollout CORRECTION stays OFF (old_log_prob always recomputed) |
 | **Hardware** | 4×H200 (pref) or 8×H100 | Vast `verl-research-vllm020`; `max_dph=24` |
 | **seeds** | comm_eff `seed=0` (mask + powersgd) | |
