@@ -17,3 +17,5 @@ Current working state:
 - The vLLM speed knobs (gpu_mem 0.75 / chunked_prefill / forward_prefetch) were tried and
   dropped — no speedup, added noise.
 - Prior bulky run directories and execution plans are removed.
+[2026-06-18T21:33:50+10:00] [research-planner #37] plan written
+[2026-06-18T21:34:12+10:00] [triage] dispatched 1 planner (#37), skipped #35 (status:done)
