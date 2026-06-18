@@ -1,0 +1,14 @@
+{
+  "fig1_val_curves.png": {
+    "caption": "GSM8K validation accuracy vs training step: the identical signed_ema merger holds near the dense ceiling at anchor latency K=5 (stops measured at step 50, pre-spiral) but collapses below the no-merger floor at K=20, falling from 0.648 at step 50 to 0.444 by step 100 as the length spiral ignites around step 93.",
+    "alt_text": "Line chart of validation accuracy versus step showing dense (~0.766, flat) and K=5 (~0.736) staying high while the K=20 curve rises then collapses from 0.648 to 0.444 below the 0.6300 no-merger floor."
+  },
+  "fig2_collapse_mechanism.png": {
+    "caption": "Mechanism of the K=20 collapse (EXP-37, steps 1-100): the response-length mean ratchets from ~251 to 683 tokens over the back half (steps ~93-100), policy entropy declines in lockstep from 5.78 to 0.42 nats as a follower rather than the trigger, and the PG clip fraction spikes to ~0.10-0.19 at every tenth step (the Q-refresh cadence fingerprint) versus ~0.004-0.05 between refreshes.",
+    "alt_text": "Three stacked time-series panels for the K=20 run: response length climbing sharply at the end, entropy steadily falling, and clip fraction showing periodic spikes at every Q-refresh step."
+  },
+  "fig3_staleness_schematic.png": {
+    "caption": "Schematic mechanism (illustrative, axes not measured): staleness error norm grows with anchor latency K as the sum of a linear weight-drift term and a super-linear off-policy distribution-shift term, so K=5 sits in the sub-critical stable region while K=20 crosses the ignition threshold into the super-critical regime.",
+    "alt_text": "Conceptual plot of staleness error versus latency K showing a linear drift curve, a super-linear off-policy curve, and their steep total, with a stable green band at K=5 and a red ignition band at K=20 above a dashed threshold line."
+  }
+}
