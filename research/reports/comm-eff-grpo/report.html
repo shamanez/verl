@@ -529,6 +529,17 @@ comm-budget pressure makes full-width $M$ transfer infeasible.</p>
 
 <!-- ===================== 4. SYNTHESIS ===================== -->
 <h2 id="synthesis"><span class="num">5</span>Synthesis — where the two specialists converge</h2>
+
+<div class="theorem">
+  <span class="lbl">The D⊙g test — the whole surpass analysis in one line</span>
+  <p style="margin-top:8px">Is a route's correction reducible to $D\odot g$ for some per-coordinate diagonal $D$?
+  <b>Yes</b> ⇒ it collapses to dense-AdamW (a better diagonal is still a diagonal — Adam already carries $v_t$) ⇒
+  <b>reject</b>. <b>No</b> ⇒ admissible, and there are exactly <b>two doors out of the diagonal class</b>: <b>R5</b> =
+  off-diagonal <i>structure</i> (true / off-diagonal Hessian), and <b>R3</b> = a different <i>objective</i> (a
+  variance-penalty / SAM term whose fixed point is provably <i>not</i> dense's $\mathbb{E}[g]$). Every closed lever
+  (EXP-31/33, sign-replacement, the $g/\sqrt{\mathrm{var}}$ step) fails the test the same way; R3 and R5 are the only
+  two that pass — sharing this one kill-check, the <b>diagonal trap</b>.</p>
+</div>
 <p>The math (<code>theorist</code>) and the strategy (<code>strategist</code>) arrived at the surpass question from
 opposite ends, and their answers <b>converge on one class of signal</b> — a second moment $\sigma(M)$ lacks — which
 the team then sharpened into two distinct top bets:</p>
