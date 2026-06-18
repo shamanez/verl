@@ -1,14 +1,15 @@
-# Q-Cadence / Codec Analysis — why comm-eff GRPO degrades at cadence/delay 20/20
+# Q-Cadence / Codec Analysis — why the comm-eff EMA method degrades at K=20
 
 **Analyst:** member 2 (Q-cadence / codec).
 **Assigned hypothesis:** *"the Q correction / PowerSGD basis refresh is too infrequent."*
+**Method under study:** the EMA merger `signed_ema` (α=0.25, β_anc=0.50) only.
 **Scope:** the PowerSGD basis `Q` and its refresh cadence (`anchor.cadence`), grounded in the
-codec source + the EXP-36B / EXP-37 record. The merger-staleness axis (`delay_K`, M) is my
-teammate's; I argue the confound split explicitly in §6.
+codec source + the EXP-36B (K=5) / EXP-37 (K=20) record. The merger-staleness axis (`delay_K`, M)
+is my teammate's; I argue the confound split explicitly in §6.
 
 **Verdict in one line:** the cadence hypothesis is **partially true but NOT the dominant cause.**
 A frozen `Q` injects a *bounded, self-healing* reconstruction error that does not by itself explain
-the −0.088 val@50 drop or the late spiral. The dominant damage at 20/20 comes from **M-staleness
+the −0.088 val@50 drop or the late spiral. The dominant damage at K=20 comes from **M-staleness
 (delay_K) feeding the merger**, which cadence *amplifies* through two specific, code-visible
 mechanisms: (a) a **per-refresh subspace-rotation discontinuity** that shows up as a clipfrac spike
 at every Q-refresh (steps 10/20/.../100 in EXP-37), and (b) a **longer hold window** over which the
@@ -46,8 +47,8 @@ How `Q` lives and is refreshed, end to end:
   This counter advances once per `train_batch` = once per optimizer/mini-batch tick (verl does
   one `optimizer_step` per `train_batch`), NOT per global step. With the locked surface
   (`train_batch=128`, `ppo_mini=64`) there are **2 ticks per global step**, so:
-  - `cadence=20` ⇒ `Q` refreshed **every 10 global steps**.
-  - `cadence=5` ⇒ `Q` refreshed **every 2.5 global steps** (4× more often).
+  - `cadence=20` (K=20) ⇒ `Q` refreshed **every 10 global steps**.
+  - `cadence=5` (K=5) ⇒ `Q` refreshed **every 2.5 global steps** (4× more often).
   - **Empirically confirmed in EXP-37:** `actor/comm_eff/anchor_q_updates` increments at exactly
     steps 10, 20, 30, …, 100 (q_upd 0→1 at s10, …, 9→10 at s100). 10 refreshes over 100 steps.
 - **`anchor.cadence` default = 20, `delay_K` default = 20** (`transformer_impl.py:1338-1339`).
@@ -55,15 +56,10 @@ How `Q` lives and is refreshed, end to end:
   **EXP-37 raised BOTH to 20 together** (resolved_params: `anchor.cadence=20`, `anchor.delay_K=20`).
 
 **Merger coupling (`spectral_filter.py`):**
-- **signed_ema** (EXP-36B / EXP-37): `G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)`
+- **signed_ema** (EXP-36B / EXP-37, the only method under study): `G_corr = α·G_noisy + (1−α)·|G_noisy|·sign(M)`
   (`spectral_filter.py:403-440`). Magnitude from `G_noisy` (= the **Q-projected** fast gradient
   `G_comp`), **sign from M** (the stale anchor EMA). The merger does not index `Q` directly, but
   `G_noisy` *is* the Q-projection, so a stale `Q` enters through the magnitude term.
-- **ef_powersgd** (EXP-38): `comp_t = M_anchor − P_{G_comp}(M_anchor)` (the part of M the current
-  Q-projected `G_comp` does NOT span), norm-clipped, `G_corr = G_comp + e_t`, no sign
-  (`spectral_filter.py:446-507`).
-- **delayed_ef** (legacy B2 0.7528): `delta = M_rep − G_comp_ring(t−K)`, refreshed at fires, held
-  between (`spectral_filter.py:22-27, 142-145`).
 
 ---
 
@@ -112,8 +108,7 @@ geometrically in the eigengap). Consequence:
 
 This is why the cadence hypothesis is *bounded* in impact. Contrast with **M-staleness**, which has
 no such self-healing inner loop on the fast path between fires — the merger holds a fixed stale
-correction (`delayed_ef` literally `_delayed_ef_held`, `spectral_filter.py:237-244`; signed_ema's
-`sign(M)` is whatever the last fire wrote).
+correction (signed_ema's `sign(M)` is whatever the last fire wrote, reused for the whole window).
 
 ### 1.4 Energy LOST vs BIAS injected — they are different objects
 - **Energy lost** = `E_drift`: directions in `U_t` that `Q_τ` no longer spans ⇒ that gradient
@@ -145,7 +140,7 @@ These are genuinely distinct knobs that EXP-37 merged:
   delay_K=20 (10 global steps) the activation subspace `Q` is fit to is 10 steps behind the live one.
 - **(B)** is the *cadence* effect proper: how long that already-stale aim is reused.
 
-**Which dominates at 20/20?** The activation **subspace `U`** is far more slowly-varying than the
+**Which dominates at K=20?** The activation **subspace `U`** is far more slowly-varying than the
 gradient **sign pattern**. Activation second-moment geometry (what `Q` tracks) is dominated by the
 token-embedding / residual-stream statistics, which barely move across 10 steps at lr=1e-6 — the
 ~2% reconstruction floor was *flat* across a wide window in EXP-20. So both (A) and (B) are **small
@@ -154,7 +149,7 @@ activation directions well (the eigengap is large and slow). **The cadence/delay
 *codec* is second-order.** The damage that matters is to **M** (the gradient *mean/sign*, my
 teammate's axis), which moves fast and whose staleness the merger folds in directly.
 
-> **Conclusion for §2:** at 20/20, neither (A) nor (B) meaningfully breaks the *codec*. A 10-step
+> **Conclusion for §2:** at K=20, neither (A) nor (B) meaningfully breaks the *codec*. A 10-step
 > stale, 10-step frozen `Q` is still a good projector. The cadence hypothesis fails to explain the
 > magnitude of the regression *on its own*.
 
@@ -193,7 +188,7 @@ amplifies this through the **hold window**:
 - signed_ema applies `sign(M_τ)` and `|Q_τ-projected g|` for the **entire** `cadence`-tick window.
   Both the stale sign *and* the frozen projector are reused for 10 steps at cadence 20 vs 2.5 at
   cadence 5. So a *single bad M/Q estimate persists 4× longer*. If `sign(M_τ)` is wrong on a subset
-  of coordinates (the memory's structural ~50% sign-disagreement at warm steps,
+  of coordinates (the memory's structural sign-disagreement at warm steps,
   no-merger-floor memory §instability), that wrong sign is hammered into the same coordinates for 10
   consecutive steps — a far stronger push toward a degenerate (length-hack) basin than 2.5 steps of
   it before a correction.
@@ -226,58 +221,7 @@ step and removes the periodic re-alignment, bringing ignition within the 100-ste
 
 ---
 
-## 4. Falsifiable predictions for EXP-38 (ef_powersgd, ef_decay=0.9/ef_clip=1.0, at 20/20)
-
-EXP-38 swaps signed_ema for **ef_powersgd** at the same 20/20 cadence/delay. The mechanistic
-difference: ef has **no sign term** and is **direction-preserving** —
-`comp_t = M_anchor − P_{G_comp}(M_anchor)`, `e_t = decay·e_t + clip(comp_t)`, `G_corr = G_comp + e_t`
-(`spectral_filter.py:446-507`). It folds the **codec residual** (the off-Q_τ part of M) against the
-**same frozen `Q`** as signed_ema (the projection `P_{G_comp}` uses the live Q-projected `G_comp`).
-
-**Prediction 4a (does infrequent Q hurt EF more or less than signed_ema?): EF is hurt LESS by the
-*cadence/Q* axis but is NOT immune, and is hurt MORE by the *error-feedback accumulation* axis at
-long holds.** Reasoning:
-
-- **Less Q-sensitive on direction:** EF preserves `G_comp`'s direction and only *adds* the off-subspace
-  residual. A staler `Q_τ` means a larger off-Q_τ residual `comp_t` (more energy outside the frozen
-  basis), but EF is *designed* to re-inject exactly that — so a frozen `Q` partly **feeds** EF rather
-  than starving it. EF has no `sign(M)` to get *wrong*, so it avoids the coherent wrong-sign hammering
-  that is signed_ema's cadence-amplified failure (§3.2). On the *coverage/energy* axis EF should track
-  better than signed_ema at 20/20.
-- **More EF-accumulation risk at long holds:** `e_t` is a *decayed accumulator* (`ef_decay=0.9`) of
-  the residual, refreshed against M only at fires (M is delay_K-stale, held between). With
-  `ef_clip=1.0` (the un-damped dose) the residual can accumulate per-step for the **entire 10-step
-  hold** before the next M refresh re-bases it. At cadence 5 (EXP-26 record, val 0.7210) EF re-bases
-  every 2.5 steps; at cadence 20 the accumulator runs ~4× longer between re-basings against a frozen
-  `Q`. The EXP-26/27 lineage already showed `ef_clip=1.0` **ignites a length explosion** (decay-0.9
-  full-dose ignited ~step 29–42; even damped 0.5/0.5 ignited ~step 61). The 20/20 hold makes the
-  accumulator-against-frozen-basis run longer between resets.
-
-**Concrete EXP-38 predictions (falsifiable):**
-
-- **P1 (most likely):** EXP-38 **ignites a length explosion and STOPs**, *earlier* and/or *harder*
-  than EXP-37's step-90 onset — because `ef_clip=1.0` is the known ignition-prone dose AND the 20/20
-  hold lets the residual accumulator run undamped for 10-step windows. Expect a cap-pin / len-mean
-  spiral by **~steps 40–70** (between the parent EF's ~30–42 full-dose and EXP-37's ~90).
-- **P2 (val, if it survives to a val point):** **val@25 ≥ EXP-37's 0.5921** and plausibly higher
-  (EF's better coverage / no wrong-sign hammering), but **val degrades after ignition**, so val@50/75
-  likely below EXP-37's 0.6482/0.4898 if it ignites earlier. If it does NOT ignite (less likely), EF
-  at 20/20 should *beat* signed_ema at 20/20 on val (no sign-hammer), landing somewhere between the
-  no-merger floor 0.6300 and the cadence-5 EF record 0.7210, but **below** the 5/5 results.
-- **P3 (cadence signature):** the **per-refresh clipfrac spike at steps 10/20/.../100 will still be
-  present** (it is a `Q`-discontinuity artifact independent of merger family — both project against the
-  same broadcast `Q`). If EXP-38 shows the spike at the same steps, that confirms it is a pure-cadence
-  (projector-jump) effect, not a merger effect. **This is the single cleanest cadence-isolation
-  readout already available without a new run.**
-
-If P1 is **false** (EF stable to 100 at 20/20 with no spiral), that would *falsify* the "long-hold
-amplifies the merger" mechanism and shift weight toward "the wrong-sign term is signed_ema-specific
-and EF's direction-preservation is robust to cadence" — still consistent with my thesis that the
-*codec/Q* is not the dominant failure.
-
----
-
-## 5. Practical recommendations (Q / cadence axis specifically)
+## 4. Practical recommendations (Q / cadence axis specifically)
 
 Ranked by expected payoff per unit cost, with the async constraint front of mind
 (**a single slow anchor serves a fast swarm; the anchor ALWAYS lags; corrections must be
@@ -304,7 +248,7 @@ operator as off the locked surface, justified as the decoupling experiment.
 Two cells, same surface, EXP-37 merger (signed_ema 0.25/0.50), 100 steps:
 - **Cell A: `cadence=5, delay_K=20`** — frequent `Q`, stale `M`. Isolates **delay_K** harm.
 - **Cell B: `cadence=20, delay_K=5`** — rare `Q`, fresh `M`. Isolates **cadence** harm.
-Plus the two anchors already run: **5/5 (EXP-36B, 0.7362)** and **20/20 (EXP-37, 0.6482)**.
+Plus the two anchors already run: **K=5 (EXP-36B, 0.7362)** and **K=20 (EXP-37, 0.6482)**.
 **Decision rule:** if **Cell B ≈ 0.73 and Cell A ≈ 0.65**, cadence is benign and delay_K owns the
 regression (my prediction). If **Cell A ≈ 0.73 and Cell B ≈ 0.65**, cadence owns it (hypothesis
 confirmed). Mixed ⇒ interaction (most likely a partial split ~25/75 cadence/delay_K).
@@ -326,7 +270,7 @@ replacing `Q` outright), or **Grassmann-average** the old and new `Q` (`Q_new = 
 orth(V))`, γ<1). This shrinks the per-refresh `ρ`-shock (smaller clipfrac spike) without paying for a
 more frequent stale fwd/bwd. **Cost:** ~free (one extra `orth` of a blended `H×r`); cross-rank-identical
 if γ is fixed. **Risk:** slows `Q`'s tracking of `U_t` — only worth it if the spikes (R-Q3-relevant)
-turn out to carry real lost gradient signal (verify via P3 in §4).
+turn out to carry real lost gradient signal (verify via the recon-error log in R-Q6).
 
 ### R-Q4 — Raise rank r (weak lever; do NOT lead with it).
 A larger `r` lowers `E_off^floor` and *also* `E_drift` (more directions captured ⇒ slower relative
@@ -352,7 +296,7 @@ diagnostic cell or a re-run with `spectral.diagnostics=true`.)
 
 ---
 
-## 6. The confound — what I attribute to cadence vs delay_K
+## 5. The confound — what I attribute to cadence vs delay_K
 
 **The confound is structural and unavoidable in EXP-37:** `anchor.cadence` and `anchor.delay_K` are
 gated by the *same* `state.anchor_step` counter through the *same* `anchor_should_fire` call
@@ -382,7 +326,7 @@ opposite, my analysis is falsified and cadence is the lever.
 
 ---
 
-## 7. Summary for the report-author
+## 6. Summary for the report-author
 
 - **Hypothesis status: partially supported, NOT dominant.** Infrequent `Q` is a real cost but
   bounded and self-healing (warm-start + one power-step per fire + slow activation geometry). It does
@@ -393,11 +337,10 @@ opposite, my analysis is falsified and cadence is the lever.
   coherent sharpening (wrong `sign(M)` for signed_ema) is applied uninterrupted. Longer holds ratchet
   entropy down harder per window (2.33→0.42 over 9 windows) until it crosses the length-hack ignition
   threshold ~step 90. Cadence is the *clock*, the merger is the *engine*.
-- **EXP-38 (EF at 20/20) prediction:** likely **ignites earlier/harder** (ef_clip=1.0 is the known
-  ignition dose; 10-step holds let the residual accumulator run undamped longer) — but EF is **less**
-  Q/cadence-sensitive on the *direction* axis (no wrong-sign term), so if it survives it should beat
-  signed_ema at 20/20. The **per-refresh clipfrac spike should reappear at the same steps** (pure
-  cadence artifact) — the cleanest already-available confirmation.
+- **K=5 vs K=20:** the same signed_ema method is stable at K=5 (val@50 0.7362) and collapses at K=20
+  (val@50 0.6482, then a length spiral to val@100 0.4435, below the no-merger floor 0.6300). The codec
+  is robust to the K=20 stale Q; the destabilizer is the merger folding the K=20-stale M, with cadence
+  setting the hold length.
 - **Top action: R-Q1 (decouple `q_cadence` from `delay_K`) + R-Q2 (2×2 decoupling run).** Refreshing
   `Q` is nearly free (no stale backward), so testing "frequent Q + stale M" is cheap and is the single
   experiment that settles the confound. Predicted: it recovers **little** ⇒ confirms delay_K, not
@@ -408,5 +351,5 @@ opposite, my analysis is falsified and cadence is the lever.
 
 *All file:line refs against the working tree at analysis time (vast-ai-workload, comm_eff/ mtime
 2026-06-18). EXP-37 timeline extracted from `research/runs/EXP-37/train.log`; configs from
-`EXP-37/resolved_params.txt` (cadence 20 / delay_K 20 / signed_ema 0.25,0.50 / r=77 / sync_basis=true)
-and `EXP-38/handles/41475643.json` (ef_powersgd 0.9/1.0, 20/20, 100 steps).*
+`EXP-37/resolved_params.txt` (cadence 20 / delay_K 20 / signed_ema 0.25,0.50 / r=77 / sync_basis=true).
+EXP-36B (cadence 5 / delay_K 5 / signed_ema 0.25,0.50) is the K=5 control.*
