@@ -60,16 +60,15 @@ launcher `${VAR:-default}`; the ground truth of any run is its `resolved_params.
 | `anchor.owns_q` | `true` | the anchor is the ONLY thing that updates `Q` |
 | `anchor.cadence` / `delay_K` | `5` / `5` | refresh + staleness, in optimizer ticks |
 | `clean_cadence` | `0` | DEAD — the anchor replaced the periodic dense step |
-| `spectral.correction_mode` | `delayed_ef` (replicated base) | B2 baseline merger — error-feedback, `λ=1`, `β_anc=0`, val@50 **0.7528**. **Current leading result (provisional): `signed_ema` α=0.5 `beta_anc=0.50` → val@50 0.7635** (EXP-34, verdict REVISE — pending a β=0.50 replicate; see `runs/SUMMARY.md`). Until that confirms, `delayed_ef` stays the locked control base. |
-| `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` — part of the B2 substrate |
+| `spectral.correction_mode` | `signed_ema` (accel base default) | core merger — α=0.25, `β_anc=0.50`. Prior `delayed_ef` (λ=1, β_anc=0, val@50 0.7528) is the legacy replicated control. |
+| `spectral.diagnostics` | `false` (accel base) | proven math-neutral speed knob (EXP-36B/NEUTRALITY_REVIEW.md) — skips per-step rel_change syncs + diag prints, optimizer path unchanged |
+| `replay_paired_batch` / `snapshot_device` | `true` / `cpu` | valid on-policy anchor `M` — part of the substrate |
 | vLLM `disable_custom_all_reduce` | `true` | **required** for the box to init (CUDA-IPC under the mp executor); greedy-val-neutral → a controlled var, not a knob |
 
-**The variable axis — how the anchor `M` is USED.** Current **leading result: `signed_ema` α=0.5
-`beta_anc=0.50` → val@50 0.7635** (EXP-34) — the highest measured, edging B2 `delayed_ef` (0.7528)
-but **provisional** (verdict REVISE: single draw + best-of-3, within ±0.024 noise of B2; pending a
-β=0.50 replicate). `delayed_ef` (B2) remains the established, replicated dense-parity baseline. EXP-34
-showed `beta_anc` is NON-flat on `signed_ema` (peaks at 0.50), unlike the flat `delayed_ef` β curve
-(EXP-33). Anchor-usage levers (EXP-31) were all null. Compact planning handoff: `.claude/plans/SUMMARY.md`.
+**The variable axis — how the anchor `M` is USED.** The accel base merger is `signed_ema`
+(α=0.25, β_anc=0.50). Anchor-usage levers (EXP-31) were all null; `beta_anc` is NON-flat on
+`signed_ema` (peaks ~0.50) vs the flat `delayed_ef` β curve (EXP-33). Compact planning handoff:
+`.claude/plans/SUMMARY.md`.
 
 **Reference codecs (NOT the base; ablation only):** the dense control
 (`comm_eff.enabled=false`, the learning ceiling) and the legacy `prf_mask`
@@ -118,44 +117,34 @@ comparison table. Default posture for production: `COMM_EFF_CAPTURE_ENABLED=fals
 Standing OOM guards on EVERY run regardless of tier:
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`,
 `spectral.ema_device=cpu` (keeps the ~6 GB fp32 M/EF state off-GPU), and the
-18432 actor token budget above while the anchor is on.
+accel actor token budget above while the anchor is on.
 
 ## How to launch on this surface
 
 **THE canonical launcher every cell runs on top of is
-`examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh`**. It is self-contained: it pins the **entire B2 substrate explicitly** (delayed_ef λ=1, β_anc=0,
-PowerSGD r=77, anchor on + owns `Q`, cadence=delay_K=5, clean=0, replay, the OOM guards) and then execs
-the generic `vast_comm_eff_baseline_*.sh` engine — so a **bare run reproduces B2 = the SOTA comm-eff reference
-= the B2 reference** (no knobs to set). Do **not** invoke the generic `vast_comm_eff_baseline_*.sh` directly:
-its `${VAR:-default}` defaults are *where the values live* (and the ground truth of any run is its
-`resolved_params.txt`), but the b2_sota wrapper is the audited entry point and keeps every arm
-one-knob-from-B2. You override only the run length + the ONE axis you're varying (an anchor-usage lever —
-all default OFF ⇒ bitwise B2):
+`examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`** — the
+accelerated comm-eff base. It pins the whole surface + substrate + signed_ema(0.25,0.50)
++ diagnostics=false explicitly, then execs the generic `vast_comm_eff_baseline_*.sh`
+engine, so a **bare run reproduces the accel base** (nothing else to set). Override only
+the run length + the ONE axis you're varying.
 
 ```bash
-# B2 = the SOTA comm-eff base — a BARE run, 50 steps, val every 25 (nothing else to set):
-TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_repro \
-  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
+# accel comm-eff base — bare run, 50 steps, val@25 (nothing else to set):
+EXPERIMENT_NAME=accel_repro \
+  bash examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
 
-# the issue-#31 variable axis = anchor-gradient USAGE on top of B2 (e.g. the built L4 perturbation lever):
-COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=L4_perturb_0p03 \
-  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh   # all 4 levers OFF = bitwise B2
-
-# disable_custom_all_reduce=true is the B2 wrapper DEFAULT (locked-surface controlled var; the bare
-# run above already sets it). Override =false ONLY to opt out on a box that does not hit the crash:
-DISABLE_CUSTOM_ALL_REDUCE=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=b2_custom_ar \
-  bash examples/grpo_trainer/vast_comm_eff_b2_sota_qwen25_1p5b_grpo_gsm8k.sh
-
-# dense reference (band ≈ 0.75–0.78) — one-knob OFF, shares the comm-eff code path (NOT via b2_sota,
-# which force-enables comm-eff): set the master switch on the GENERIC launcher.
-COMM_EFF_ENABLED=false TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 EXPERIMENT_NAME=dense_ref \
+# dense reference on the accel surface (≈0.7695) — one-knob OFF on the GENERIC launcher
+# (the accel base force-enables comm-eff), mirroring the accel surface envs:
+COMM_EFF_ENABLED=false USE_DYNAMIC_BSZ=True MAX_RESPONSE_LENGTH=2048 ROLLOUT_TP=1 \
+  ROLLOUT_GPU_MEM_UTIL=0.55 PPO_MAX_TOKEN_LEN_PER_GPU=24576 \
+  TOTAL_TRAINING_STEPS=50 TEST_FREQ=25 VAL_BEFORE_TRAIN=False EXPERIMENT_NAME=dense_ref \
   bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 ```
 
-Pass `TOTAL_TRAINING_STEPS` (50, then 100 for an extended winner) + `TEST_FREQ=25` per launch. The full B2
-substrate is baked into the b2_sota launcher — do **not** re-type it; the ground truth of any run is its
-`resolved_params.txt` (the SOTA settings are summarized in `runs/SUMMARY.md`). Closed anchor-usage
-levers and their tested knobs are summarized in `.claude/plans/SUMMARY.md`.
+Pass `TOTAL_TRAINING_STEPS` (50, then 100 for an extended winner) per launch; the rest is
+baked in. Ground truth of any run is its `resolved_params.txt`. The legacy 16K/static B2
+launcher (`vast_comm_eff_b2_sota_*.sh`) remains for apples-to-apples comparison with the old
+surface. Closed anchor-usage levers: `.claude/plans/SUMMARY.md`.
 
 See also: `CLAUDE.md §1` (model/loss/hardware controls), `examples/grpo_trainer/VAST_README.md`
 (launcher stability contract), `research/.claude/project.yaml` (`default_compute`, provisioning).
