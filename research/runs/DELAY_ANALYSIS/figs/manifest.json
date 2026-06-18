@@ -4,7 +4,7 @@
     "alt_text": "Line chart of validation accuracy versus step showing dense (~0.766, flat) and K=5 (~0.736) staying high while the K=20 curve rises then collapses from 0.648 to 0.444 below the 0.6300 no-merger floor."
   },
   "fig2_collapse_mechanism.png": {
-    "caption": "Mechanism of the K=20 collapse (EXP-37, steps 1-100): the response-length mean ratchets from ~251 to 683 tokens over the back half (steps ~93-100), policy entropy declines in lockstep from 5.78 to 0.42 nats as a follower rather than the trigger, and the PG clip fraction spikes to ~0.10-0.19 at every tenth step (the Q-refresh cadence fingerprint) versus ~0.004-0.05 between refreshes.",
+    "caption": "Mechanism of the K=20 collapse (EXP-37, steps 1-100): the response-length mean ratchets from ~251 to 683 tokens in the final ignition window (steps ~91-100); policy entropy falls across the run from 5.78 (step 1) to 0.42 (step 100), the bulk at merger onset (~step 11), and during the spiral (steps ~92-100) it continues ~0.7->0.42 as a follower rather than the trigger; PG clip fraction spikes at every Q-refresh (cadence fingerprint; see section 5), with a ~0.004-0.06 floor between refreshes once the merger engages (after the ~10-step warmup), rising toward the back half.",
     "alt_text": "Three stacked time-series panels for the K=20 run: response length climbing sharply at the end, entropy steadily falling, and clip fraction showing periodic spikes at every Q-refresh step."
   },
   "fig3_staleness_schematic.png": {

@@ -19,9 +19,10 @@ hard-won priors and cross-checked against current code.
   generated *different data* than the current policy, so the stale gradient is not merely an old
   estimate of the same objective — it is an estimate of a **different (off-policy) objective**.
 - The staleness error is the mechanism that **converts a bounded correction into a positive-feedback
-  length spiral**. The merger injects a persistent, reward-flat **tangential** force (signed_ema:
-  via `sign(M)` on the coordinates where stale and fresh disagree). The injected force does not push
-  the policy toward higher reward — it pushes it along the "correct-but-longer" direction.
+  length spiral**. The merger injects a persistent, **partially sign-reversed** force (signed_ema:
+  via `sign(M)` on the coordinates where stale and fresh disagree) whose net projection onto the
+  reward gradient is small/negative and whose large component lies along the reward-flat
+  "correct-but-longer" direction, which absorbs it.
   Increasing K **increases the disagreement rate**, raising the per-step dose of that tangential
   push — the lag-driven ignition lever.
 - **Late onset** (steps ~50–100, not immediate) is structurally expected: the spiral is a
@@ -167,16 +168,19 @@ establish:
 - The cross-run discriminator is **MERGER-CARRIER PRESENCE**: plain PowerSGD on the same substrate
   is clean for 50 steps; the merger (folding stale M into the fast grad) is the killer.
 
-EXP-37's anatomy matches exactly: stable through ~step 58, then `response_length/mean`
-189→251→373→581→683 across steps 93–100, pg-clip 0→24%, entropy collapsing 0.81→0.42. This is the
+EXP-37's anatomy matches exactly: roughly stable through the first epoch (with degradation building
+before the back half), then `response_length/mean` 189→251→373→581→683 across steps 93–100, pg-clip
+0→24%, entropy collapsing 0.81→0.42 in the spiral window. This is the
 canonical length ratchet, now appearing at K=20 where it was *absent* (or censored-marginal) at
 K=5.
 
 ### 2.2 The mechanism: staleness turns a bounded correction into a tangential ratchet
 
-The implemented signed_ema correction injects a force that is **by construction tangential to the
-live gradient** on the coordinates where `sign(M) ≠ sign(G_comp)`. A tangential force does **no work
-against the loss** to first order — it is a **persistent push along the reward-flat manifold**. On a
+On the coordinates where `sign(M) ≠ sign(G_comp)` the implemented signed_ema correction injects a
+**partially sign-reversed force** — not a zero-work tangential one. Its net projection onto the
+reward gradient is **small or slightly negative** (the flipped coordinates do *negative* first-order
+work there), while its **large component lies along reward-flat (length-manifold) directions** that
+absorb it. The net effect is a **persistent push along the reward-flat manifold**. On a
 no-KL / no-entropy GRPO surface there is nothing to brake motion along that manifold. The
 "correct-but-longer" direction is exactly such a reward-flat ridge: emitting more tokens barely
 changes the verifier reward but is reachable by a sustained tangential drift. The drift
@@ -219,12 +223,13 @@ reasons for the delay, all consistent with a ratchet model:
    the 50-step horizon (its instability is **censored**, per `[[entropy-collapse-alpha0-signed-ema]]`:
    α=0.5 at K=5 was already spiraling at steps 47–48).
 
-2. **Epoch boundary / data re-exposure.** EXP-37 is stable through ~step 58 = end of epoch 0, then
-   ignites in epoch 1. Two epochs over GSM8K means the policy re-sees the same prompts; by epoch 1
-   the cumulative drift `‖θ_t − θ_0‖` is large, so the **distribution-shift term `Δ_dist`** (§1.3)
-   is at its largest, maximizing `‖e_K‖` exactly when the second epoch begins. The K-stale anchor
-   is now lagging a policy that has moved substantially, so the correction is at its most
-   mis-aimed.
+2. **Cumulative drift / data re-exposure.** With 100 steps over 2 epochs the epoch boundary is
+   **step 50** (not 58 — degradation is already visible before then in the data). Two epochs over
+   GSM8K means the policy re-sees the same prompts; deeper into the run the cumulative drift
+   `‖θ_t − θ_0‖` is large, so the **distribution-shift term `Δ_dist`** (§1.3) is at its largest,
+   maximizing `‖e_K‖` in the back half. The K-stale anchor is now lagging a policy that has moved
+   substantially, so the correction is at its most mis-aimed. (This back-loading is a corollary of
+   the integral-threshold argument in (1), not an independent epoch-boundary trigger.)
 
 3. **Held-correction warm-up of the bias.** Although `β_anc=0` removes M's own memory, the held
    correction transport over the (now 20-tick) cadence window means a **single** mis-aimed fire's
@@ -244,10 +249,10 @@ by injecting information **outside** σ(M) (curvature, conversion-positive explo
 
 Staleness interacts with this ceiling in a strictly **downward** direction:
 
-- **A K-stale M carries strictly less information about `g(θ_t)` than a fresh M.** Formally, by the
-  data-processing inequality, `g(θ_{t−K})` is a noisy (drifted + off-policy) channel observation of
-  `g(θ_t)`; increasing K increases the channel noise (`‖e_K‖`), so the mutual information
-  `I(M_K ; g(θ_t))` is **monotonically non-increasing in K**. The correction can at best
+- **A K-stale M is a strictly noisier estimate of `g(θ_t)` than a fresh M.** Under our drift +
+  off-policy model `g(θ_{t−K})` is a noisy (drifted + off-policy) observation of `g(θ_t)`, and
+  increasing K increases that noise (`‖e_K‖`), so the recoverable dense information about
+  `g(θ_t)` is **expected to be (weakly) decreasing in K**. The correction can at best
   reconstruct the dense direction it can still see through the staleness channel; everything K
   corrupts is unrecoverable by any `Φ`.
 
@@ -350,10 +355,11 @@ theory-based attribution:
 | **Stale/coarse Q basis (PowerSGD codec quality)** | **cadence (dominant)** | Q is updated only at fires (`anchor_owns_q`, `transformer_impl.py:2061–2100`). Refreshing every 10 global steps (cadence=20) lets the codec subspace drift from the gradient's actual dominant subspace, raising compression error. This is member 2's axis. |
 | **Magnitude of the ~0.088 val drop** | **mostly delay_K** | The reconstruction-quality degradation (§3 σ(M) channel) is dominated by `‖e_K‖`, which is delay_K-driven. Coarser Q (cadence) adds compression noise but the no-merger floor work (`[[no-merger-floor-0p63-not-0p74]]`) shows the codec alone is not catastrophic; the **merger carrying a badly-stale M** is. |
 
-**Bottom-line attribution:** I assign roughly **70–80% of the val degradation and ~90% of the
-ignition** to **delay_K** (the staleness of M and its off-policy data), and the remainder to
-**cadence** (stale Q + extended held-correction window). The ignition is almost entirely a staleness
-(lag) phenomenon; the val drop is mostly staleness with a cadence/codec contribution.
+**Bottom-line attribution:** I assign roughly **70–80% of the val degradation** to **delay_K** (the
+staleness of M and its off-policy data) and the remainder to **cadence** (stale Q + extended
+held-correction window). Ignition is primarily **lag-driven** (a staleness phenomenon); what the
+single run cannot resolve is whether the *magnitude* (delay_K) or the *hold-length* (cadence) sets
+the ignition **timing** — the decoupling run (§6) settles that sub-question.
 
 ---
 
