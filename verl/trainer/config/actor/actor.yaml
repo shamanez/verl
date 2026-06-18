@@ -395,6 +395,13 @@ comm_eff:
     # corrections use a freshly-refreshed anchor EMA.
     cadence: 1
 
+    # When false, skip the per-step spectral DIAGNOSTIC overhead (per-matrix
+    # rel_change compute + GPU->CPU sync + diagnostic prints, and the anchor
+    # relevance probe). true (default) = current behavior, byte-identical.
+    # Neutral: nothing the optimizer sees changes; the canary assert and the
+    # aggregate counters are preserved. Set false only for runtime efficiency.
+    diagnostics: true
+
     # EMA decay for the anchor-gradient running matrix M_anchor.
     beta_anc: 0.95
 

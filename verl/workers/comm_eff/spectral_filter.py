@@ -117,8 +117,16 @@ class SpectralFilter:
         adaptive_lambda_mode: str = "off",
         adaptive_lambda_kappa: float = 0.0,
         lambda_cap: float = 2.0,
+        diagnostics: bool = True,
     ):
         self.beta_anc = float(beta_anc)
+        # When False, skip the per-step DIAGNOSTIC overhead (per-matrix
+        # relative_change() compute+GPU->CPU sync + diagnostic prints; the
+        # anchor relevance probe is gated in the engine). Default True =
+        # byte-identical to prior behavior. Nothing the optimizer sees changes:
+        # the g_corr writeback, the canary assert, and the aggregate counters
+        # are preserved in both states.
+        self.diagnostics = bool(diagnostics)
         # Storage layer default: gpu. Validation happens in
         # CommEffConfig.__post_init__ so by the time the
         # filter is built the values are known-good — assert defensively anyway.
@@ -348,14 +356,15 @@ class SpectralFilter:
         complement = anc - coeff * gm
         scale = gm_norm / (anc_norm + eps)
         g_corr = gm + self.inject_gamma * scale * complement
-        # Diagnostic: cosine(G_mask, M_anchor) — measures orthogonality on the LIVE anchor.
-        cos = (coeff * gm_norm / (anc_norm + eps)).item()
-        inj_ratio = (torch.linalg.norm(self.inject_gamma * scale * complement) / (gm_norm + eps)).item()
-        print(
-            f"[comm_eff][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
-            f"gamma={self.inject_gamma} scale={scale.item():.4f} ||inj||/||G_mask||={inj_ratio:.4f}",
-            flush=True,
-        )
+        if self.diagnostics:
+            # Diagnostic: cosine(G_mask, M_anchor) — measures orthogonality on the LIVE anchor.
+            cos = (coeff * gm_norm / (anc_norm + eps)).item()
+            inj_ratio = (torch.linalg.norm(self.inject_gamma * scale * complement) / (gm_norm + eps)).item()
+            print(
+                f"[comm_eff][inject] {name} cos(G_mask,M_anchor)={cos:.4f} "
+                f"gamma={self.inject_gamma} scale={scale.item():.4f} ||inj||/||G_mask||={inj_ratio:.4f}",
+                flush=True,
+            )
         return g_corr.to(g_mask.dtype)
 
     def blend_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
@@ -381,13 +390,14 @@ class SpectralFilter:
         eta = self.blend_eta
         scale = gm_norm / (anc_norm + eps)
         g_corr = (1.0 - eta) * gm + eta * scale * anc
-        # Diagnostic: cosine(G_mask, M_anchor) on the LIVE anchor + magnitude ratio.
-        cos = ((gm * anc).sum() / (gm_norm * anc_norm + eps)).item()
-        print(
-            f"[comm_eff][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
-            f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
-            flush=True,
-        )
+        if self.diagnostics:
+            # Diagnostic: cosine(G_mask, M_anchor) on the LIVE anchor + magnitude ratio.
+            cos = ((gm * anc).sum() / (gm_norm * anc_norm + eps)).item()
+            print(
+                f"[comm_eff][blend] {name} eta={eta} cos(G_mask,M_anchor)={cos:.4f} "
+                f"||G_corr||/||G_mask||={(torch.linalg.norm(g_corr) / (gm_norm + eps)).item():.4f}",
+                flush=True,
+            )
         return g_corr.to(g_mask.dtype)
 
     def signed_ema_matrix(self, name: str, g_mask: torch.Tensor) -> torch.Tensor:
@@ -1142,7 +1152,11 @@ def apply_spectral_correction_to_params(
             repr_log.update(discovery_meta)
             state.fsdp_grad_repr = repr_log
             logger.warning("comm_eff FSDP grad-repr discovery: %s", repr_log)
-            print(f"[comm_eff][FSDP-DISCOVERY] {repr_log}", flush=True)
+            # The stdout DISCOVERY line is a pure diagnostic echo of state.fsdp_grad_repr
+            # (which is preserved + surfaced into metrics unconditionally above);
+            # gate only the print. Fires once per run regardless.
+            if getattr(spectral, "diagnostics", True):
+                print(f"[comm_eff][FSDP-DISCOVERY] {repr_log}", flush=True)
             instrumented = True
 
         # Dump G_comp, the merger input: the fast compressed
@@ -1194,14 +1208,19 @@ def apply_spectral_correction_to_params(
                 global_step=_cap_gs,
                 optimizer_tick=_cap_tick,
             )
-        rel = spectral.relative_change(full, g_proj)
-        state.spectral_rel_change[name] = rel
-        print(
-            f"[comm_eff][spectral] {name} correction_mode={_mode} "
-            f"rel_change=||G_proj-G_mask||/||G_mask||={rel:.6f} "
-            f"shape={logical_shape} grad_type={container_meta.get('grad_container_type')}",
-            flush=True,
-        )
+        # DIAGNOSTIC ONLY: the per-matrix rel_change compute is a GPU->CPU
+        # .item() sync (~196/step) that nothing the optimizer sees consumes.
+        # Gated by spectral.diagnostics (default True = byte-identical). The
+        # g_corr writeback below is UNCONDITIONAL.
+        if getattr(spectral, "diagnostics", True):
+            rel = spectral.relative_change(full, g_proj)
+            state.spectral_rel_change[name] = rel
+            print(
+                f"[comm_eff][spectral] {name} correction_mode={_mode} "
+                f"rel_change=||G_proj-G_mask||/||G_mask||={rel:.6f} "
+                f"shape={logical_shape} grad_type={container_meta.get('grad_container_type')}",
+                flush=True,
+            )
         with torch.no_grad():
             writeback(grad, g_proj)
 
@@ -1217,31 +1236,35 @@ def apply_spectral_correction_to_params(
     _mode = getattr(spectral, "correction_mode", "signed_ema")
     if _mode == "signed_ema":
         cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
+        # Aggregate counter: preserved in both states (NOT diagnostic).
         if hasattr(state, "merger_coldM_fallbacks"):
             state.merger_coldM_fallbacks = cold
-        print(
-            f"[comm_eff][merger] correction_mode=signed_ema alpha={spectral.signed_ema_alpha} "
-            f"corrected={corrected} merger_coldM_fallbacks={cold} "
-            f"(cold==corrected ⇒ M still cold this step; cold==0 ⇒ M fully warm)",
-            flush=True,
-        )
+        if getattr(spectral, "diagnostics", True):
+            print(
+                f"[comm_eff][merger] correction_mode=signed_ema alpha={spectral.signed_ema_alpha} "
+                f"corrected={corrected} merger_coldM_fallbacks={cold} "
+                f"(cold==corrected ⇒ M still cold this step; cold==0 ⇒ M fully warm)",
+                flush=True,
+            )
     elif _mode == "ef_powersgd":
         # Surface the merger's per-step cold-M fallback plus the
         # shape-mismatch residual-reset count so the probe can grep them. With
         # ef_decay=ef_clip=0 (the limiting case) G_corr==G_comp on every target.
         cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
         resets = int(getattr(spectral, "residual_reset_on_shape_mismatch", 0))
+        # Aggregate counters: preserved in both states (NOT diagnostic).
         if hasattr(state, "merger_coldM_fallbacks"):
             state.merger_coldM_fallbacks = cold
         if hasattr(state, "residual_reset_on_shape_mismatch"):
             state.residual_reset_on_shape_mismatch = resets
-        print(
-            f"[comm_eff][merger] correction_mode=ef_powersgd ef_decay={spectral.ef_decay} "
-            f"ef_clip={spectral.ef_clip} corrected={corrected} merger_coldM_fallbacks={cold} "
-            f"residual_reset_on_shape_mismatch={resets} "
-            f"(ef_decay==ef_clip==0 ⇒ G_corr==G_comp, the plain-PowerSGD limiting case)",
-            flush=True,
-        )
+        if getattr(spectral, "diagnostics", True):
+            print(
+                f"[comm_eff][merger] correction_mode=ef_powersgd ef_decay={spectral.ef_decay} "
+                f"ef_clip={spectral.ef_clip} corrected={corrected} merger_coldM_fallbacks={cold} "
+                f"residual_reset_on_shape_mismatch={resets} "
+                f"(ef_decay==ef_clip==0 ⇒ G_corr==G_comp, the plain-PowerSGD limiting case)",
+                flush=True,
+            )
     elif _mode == "delayed_ef":
         # Push this tick's collected raw G_comp into the fire-aware
         # ring (post-walk, so the same-tick get never saw it), then surface the
@@ -1255,62 +1278,69 @@ def apply_spectral_correction_to_params(
         cold = int(getattr(spectral, "merger_coldM_fallbacks", 0))
         refreshed = int(getattr(spectral, "delayed_ef_refreshed", 0))
         held = int(getattr(spectral, "delayed_ef_held", 0))
+        # Aggregate counter: preserved in both states (NOT diagnostic).
         if hasattr(state, "merger_coldM_fallbacks"):
             state.merger_coldM_fallbacks = cold
-        _ratio_line = ""
-        if refreshed and _ring_entry_grads is not None:
-            import statistics as _st
+        # Everything below (the per-fire ||δ|| ratio scan + the sub-basis/perturb
+        # readouts + the summary line) is DIAGNOSTIC ONLY: it feeds only the
+        # print and includes per-ring-grad GPU->CPU .item() syncs. The ring
+        # push/pop and the cold-M counter above are UNCONDITIONAL. Gated by
+        # spectral.diagnostics (default True = byte-identical).
+        if getattr(spectral, "diagnostics", True):
+            _ratio_line = ""
+            if refreshed and _ring_entry_grads is not None:
+                import statistics as _st
 
-            _ratios = []
-            for _n, _d in spectral._delayed_ef_delta.items():
-                _g = _ring_entry_grads.get(_n)
-                if _g is None:
-                    continue
-                _gn = float(torch.linalg.norm(_g.to(torch.float32)).item())
-                if _gn > 1e-12:
-                    _ratios.append(float(torch.linalg.norm(_d.to(torch.float32)).item()) / _gn)
-            if _ratios:
-                _ratio_line = f" delta_ratio_median={_st.median(_ratios):.6f}"
-        # Surface the additive-sub-basis activity. applied/skipped
-        # count per-target sub-basis folds; subbasis_energy_ratio (median
-        # ||delta_subbasis||/||delta|| over applied targets) is the geometry
-        # scalar. All zero or absent when delta_subbasis_rank=0.
-        import statistics as _st2
+                _ratios = []
+                for _n, _d in spectral._delayed_ef_delta.items():
+                    _g = _ring_entry_grads.get(_n)
+                    if _g is None:
+                        continue
+                    _gn = float(torch.linalg.norm(_g.to(torch.float32)).item())
+                    if _gn > 1e-12:
+                        _ratios.append(float(torch.linalg.norm(_d.to(torch.float32)).item()) / _gn)
+                if _ratios:
+                    _ratio_line = f" delta_ratio_median={_st.median(_ratios):.6f}"
+            # Surface the additive-sub-basis activity. applied/skipped
+            # count per-target sub-basis folds; subbasis_energy_ratio (median
+            # ||delta_subbasis||/||delta|| over applied targets) is the geometry
+            # scalar. All zero or absent when delta_subbasis_rank=0.
+            import statistics as _st2
 
-        _sb_applied = int(getattr(spectral, "delayed_ef_subbasis_applied", 0))
-        _sb_skipped = int(getattr(spectral, "delayed_ef_subbasis_skipped", 0))
-        _sb_ratios = list(getattr(spectral, "_subbasis_energy_ratios", []) or [])
-        _sb_ratio_med = _st2.median(_sb_ratios) if _sb_ratios else float("nan")
-        # Sub-basis weight gamma_t applied this step after
-        # the linear decay over delta_subbasis_decay_steps). 1.0 on the OFF default
-        # (weight=1, decay_steps=0); 0.0 means the sub-basis branch was skipped.
-        _sb_gamma = spectral._subbasis_gamma() if getattr(spectral, "delta_subbasis_rank", 0) > 0 else 0.0
-        # Zero-mean perturbation sigma plus how many targets it
-        # was applied to THIS step. σ=0 (OFF) ⇒ perturb_applied==0 (the line reads
-        # the perturbation never fired).
-        _pt_sigma = float(getattr(spectral, "perturb_sigma", 0.0))
-        _pt_applied = int(getattr(spectral, "delayed_ef_perturb_applied", 0))
-        print(
-            f"[comm_eff][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
-            f"corrected={corrected} refreshed={refreshed} held={held} "
-            f"merger_coldM_fallbacks={cold} ring_entries={len(_ring) if _ring is not None else 0}"
-            f"{_ratio_line} "
-            f"subbasis_rank={getattr(spectral, 'delta_subbasis_rank', 0)} "
-            f"subbasis_family={getattr(spectral, 'delta_subbasis_family', 'tail')} "
-            f"subbasis_weight={getattr(spectral, 'delta_subbasis_weight', 1.0)} "
-            f"subbasis_decay_steps={getattr(spectral, 'delta_subbasis_decay_steps', 0)} "
-            f"subbasis_hold_steps={getattr(spectral, 'delta_subbasis_hold_steps', 0)} "
-            f"subbasis_step={getattr(spectral, 'current_step', 0)} "
-            f"subbasis_gamma={_sb_gamma:.6f} "
-            f"subbasis_applied={_sb_applied} subbasis_skipped={_sb_skipped} "
-            f"subbasis_energy_ratio={_sb_ratio_med:.6f} "
-            f"perturb_sigma={_pt_sigma} perturb_seed={getattr(spectral, 'perturb_seed', 0)} "
-            f"perturb_applied={_pt_applied} "
-            f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between; "
-            f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly; "
-            f"perturb_sigma==0 ⇒ g_corr unperturbed)",
-            flush=True,
-        )
+            _sb_applied = int(getattr(spectral, "delayed_ef_subbasis_applied", 0))
+            _sb_skipped = int(getattr(spectral, "delayed_ef_subbasis_skipped", 0))
+            _sb_ratios = list(getattr(spectral, "_subbasis_energy_ratios", []) or [])
+            _sb_ratio_med = _st2.median(_sb_ratios) if _sb_ratios else float("nan")
+            # Sub-basis weight gamma_t applied this step after
+            # the linear decay over delta_subbasis_decay_steps). 1.0 on the OFF default
+            # (weight=1, decay_steps=0); 0.0 means the sub-basis branch was skipped.
+            _sb_gamma = spectral._subbasis_gamma() if getattr(spectral, "delta_subbasis_rank", 0) > 0 else 0.0
+            # Zero-mean perturbation sigma plus how many targets it
+            # was applied to THIS step. σ=0 (OFF) ⇒ perturb_applied==0 (the line reads
+            # the perturbation never fired).
+            _pt_sigma = float(getattr(spectral, "perturb_sigma", 0.0))
+            _pt_applied = int(getattr(spectral, "delayed_ef_perturb_applied", 0))
+            print(
+                f"[comm_eff][delayed_ef] tick={_tick} lambda={spectral.delayed_ef_lambda} "
+                f"corrected={corrected} refreshed={refreshed} held={held} "
+                f"merger_coldM_fallbacks={cold} ring_entries={len(_ring) if _ring is not None else 0}"
+                f"{_ratio_line} "
+                f"subbasis_rank={getattr(spectral, 'delta_subbasis_rank', 0)} "
+                f"subbasis_family={getattr(spectral, 'delta_subbasis_family', 'tail')} "
+                f"subbasis_weight={getattr(spectral, 'delta_subbasis_weight', 1.0)} "
+                f"subbasis_decay_steps={getattr(spectral, 'delta_subbasis_decay_steps', 0)} "
+                f"subbasis_hold_steps={getattr(spectral, 'delta_subbasis_hold_steps', 0)} "
+                f"subbasis_step={getattr(spectral, 'current_step', 0)} "
+                f"subbasis_gamma={_sb_gamma:.6f} "
+                f"subbasis_applied={_sb_applied} subbasis_skipped={_sb_skipped} "
+                f"subbasis_energy_ratio={_sb_ratio_med:.6f} "
+                f"perturb_sigma={_pt_sigma} perturb_seed={getattr(spectral, 'perturb_seed', 0)} "
+                f"perturb_applied={_pt_applied} "
+                f"(lambda==0 ⇒ G_corr==G_comp exactly; delta refreshes at fires, held between; "
+                f"subbasis_rank==0 OR gamma==0 ⇒ correction==delta exactly; "
+                f"perturb_sigma==0 ⇒ g_corr unperturbed)",
+                flush=True,
+            )
 
     if corrected:
         logger.info("comm_eff: spectral correction applied to %d target matrices", corrected)
