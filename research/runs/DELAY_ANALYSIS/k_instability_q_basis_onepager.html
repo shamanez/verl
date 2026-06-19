@@ -194,7 +194,7 @@
 
   .figure-grid {
     display: grid;
-    grid-template-columns: minmax(260px, 0.86fr) minmax(0, 1.14fr);
+    grid-template-columns: 1fr;
     gap: 12px;
     align-items: start;
   }
@@ -220,32 +220,32 @@
 <main>
   <header>
     <div class="eyebrow">Comm-efficient GRPO one-pager</div>
-    <h1>When K grows, learning becomes stale and off-policy. Q still stays usable.</h1>
-    <p class="subtitle">The short version: increasing K makes the anchor gradient older and less on-policy. That stale anchor signal can destabilize GRPO, while the PowerSGD Q basis still tracks the activation subspace well after its first real correction.</p>
+    <h1>Bigger K makes learning stale. Q still compresses.</h1>
+    <p class="subtitle">K=20 collapses because the anchor gradient is older and more off-policy. Q is not the main failure: after its first update, Q error stays low.</p>
   </header>
 
   <section class="hero-grid">
     <div class="claim">
       <h2>Main claim</h2>
-      <p><strong>K hurts because it ages the learning signal, not because Q catastrophically fails.</strong> At K=20 the anchor gradient is computed from an older weight snapshot and data from an older policy. The merger then reuses that stale direction over a longer window, so small wrong-sign biases can accumulate into unstable behavior.</p>
-      <p>Q is different: it is a compression basis for activations. Once it gets its first anchor-owned update, its reconstruction error drops sharply and stays low enough that the late policy collapse is not a Q-basis collapse.</p>
+      <p><strong>K hurts by aging the learning signal.</strong> At K=20, the anchor gradient comes from older weights and older policy samples. The merger then reuses that stale direction long enough for wrong-sign bias to accumulate.</p>
+      <p>Q is only an activation compression basis. It can stay good while the policy gets worse.</p>
     </div>
 
     <div class="chips">
       <div class="chip blue">
         <div class="label">K=5</div>
-        <div class="value">stable</div>
-        <p>Shorter lag, fresher anchor gradient, Q refresh every 2.5 global steps.</p>
+        <div class="value">recovers</div>
+        <p>Fresher anchor gradient; validation ends near 0.735.</p>
       </div>
       <div class="chip red">
         <div class="label">K=20</div>
-        <div class="value">unstable</div>
-        <p>About 4x older anchor signal, longer held correction window, late length spiral.</p>
+        <div class="value">collapses</div>
+        <p>Staler anchor gradient; validation falls to 0.444.</p>
       </div>
       <div class="chip green">
         <div class="label">Q error</div>
-        <div class="value">heals</div>
-        <p>High at bootstrap, then &approx;0.04 after the first Q update in both runs.</p>
+        <div class="value">low</div>
+        <p>High at bootstrap, then &approx;0.04 after first update.</p>
       </div>
     </div>
   </section>
@@ -253,17 +253,17 @@
   <section class="section-grid">
     <article class="note delay">
       <h3>1. K increases staleness</h3>
-      <p>The anchor computes <code>M</code> at old weights <code>&theta;<sub>t-K</sub></code>, then the live model applies it at <code>&theta;<sub>t</sub></code>. Larger K means more weight drift before the correction is used.</p>
+      <p>The anchor computes <code>M</code> at old weights, then the live model applies it later. Larger K means more drift.</p>
     </article>
 
     <article class="note offpolicy">
       <h3>2. K increases off-policyness</h3>
-      <p>GRPO data is policy-generated. A K-stale anchor sees samples from <code>pi(theta_{t-K})</code>, not the current <code>pi(theta_t)</code>. The gradient is therefore for a shifted objective, and clipping can turn that shift into bias.</p>
+      <p>GRPO samples come from the policy. A stale anchor learns from <code>pi(theta_{t-K})</code>, not today&apos;s policy.</p>
     </article>
 
     <article class="note q">
       <h3>3. Q tracks activations, not reward</h3>
-      <p>PowerSGD Q minimizes activation reconstruction error. It has no signal about answer quality, reward, KL, or length. So Q can stay healthy while the policy becomes worse.</p>
+      <p>PowerSGD Q tracks activation geometry. It does not know answer quality, reward, KL, or length.</p>
     </article>
   </section>
 
@@ -271,44 +271,44 @@
     <article class="note delay">
       <h3>Why anchor gradients hurt</h3>
       <ul>
-        <li><code>M</code> may point in the right dense subspace but the wrong current direction.</li>
-        <li>The signed merger adopts stale signs, so wrong signs become coherent update directions.</li>
-        <li>The same stale correction is held across the cadence window, so bias integrates.</li>
+        <li><code>M</code> can point in an old direction.</li>
+        <li>The merger copies stale signs.</li>
+        <li>The stale correction is reused, so bias builds.</li>
       </ul>
     </article>
 
     <article class="note offpolicy">
       <h3>Why GRPO is sensitive</h3>
       <ul>
-        <li>Rewards are sparse and sequence-level, so small directional bias can hide early.</li>
-        <li>Longer responses can sit on reward-flat directions, creating a length ratchet.</li>
-        <li>No KL or entropy brake means the ratchet can self-reinforce late in training.</li>
+        <li>Rewards are sparse and sequence-level.</li>
+        <li>Longer answers can look reward-flat.</li>
+        <li>No KL/entropy brake lets length drift grow.</li>
       </ul>
     </article>
 
     <article class="note q">
       <h3>Why Q is not the collapse</h3>
       <ul>
-        <li>Bootstrap Q error is high because the basis is not learned yet.</li>
-        <li>After the first Q update, error drops sharply in both K=5 and K=20.</li>
-        <li>Late K=20 collapse shows only mild Q-error rise, far below bootstrap.</li>
+        <li>Bootstrap Q error is high.</li>
+        <li>First Q update drops it sharply.</li>
+        <li>Late K=20 collapse only mildly raises it.</li>
       </ul>
     </article>
   </section>
 
   <section class="figure-grid">
     <figure>
-      <img src="figs/fig3_staleness_schematic.png" alt="Schematic showing staleness error growing with K as linear weight drift plus super-linear off-policy distribution shift.">
-      <figcaption><strong>K mechanism.</strong> Larger K increases weight drift and off-policy distribution shift, pushing K=20 into the unstable region while K=5 remains sub-critical.</figcaption>
+      <img src="figs/score_val_k5_recovery_vs_k20_collapse.png" alt="Observed score and validation comparison showing K=5 recovering while K=20 collapses.">
+      <figcaption><strong>Observed learning.</strong> K=5 (<code>pns1le3x</code>) recovers and ends near val 0.735. K=20 (<code>fxo8chsv</code>) drifts down and ends near val 0.444.</figcaption>
     </figure>
 
     <figure>
       <img src="figs/q_error_with_clipfrac_and_length.png" alt="Q telemetry showing Q reconstruction error dropping after first update, clip fraction spikes at refresh steps, and K=20 response length instability late in training.">
-      <figcaption><strong>Q sanity check.</strong> Q error drops after the first anchor-owned correction and remains low relative to bootstrap. The policy can collapse because stale anchor learning is bad, not because Q stopped compressing activations.</figcaption>
+      <figcaption><strong>Q sanity check.</strong> Q error drops after the first anchor-owned correction and remains low. The policy collapses because stale anchor learning is bad, not because Q stopped compressing activations.</figcaption>
     </figure>
   </section>
 
-  <p class="bottom-line">Bottom line: increasing K makes the anchor gradient older, more off-policy, and more dangerous to reuse. Q still does its compression job after the first correction, but PowerSGD Q cannot judge whether the learned policy is good.</p>
+  <p class="bottom-line">Bottom line: K=20 makes anchor learning stale and off-policy. Q still compresses, but Q cannot tell whether the policy is learning the right thing.</p>
 </main>
 </body>
 </html>
