@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "instance_id": 41680420,
+  "label": "EXP-37B",
+  "ssh_host": "84.8.106.109",
+  "ssh_port": 40206,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 40206 root@84.8.106.109 -L 8080:localhost:8080",
+  "num_gpus": 4,
+  "gpu_name": "H200",
+  "gpu_ram": 143771,
+  "dph_total": 12.878654970760232,
+  "vast_account": "team",
+  "tmux_session": "exp-37b-84_8_106_109",
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true",
+  "provisioned_by": "operator-manual",
+  "note": "Operator pre-provisioned on TEAM account (instance 41680420, 84.8.106.109). Box accepts BOTH ~/.ssh/vast_ai and ~/.ssh/vast_ai_name (sync-metrics/monitor use vast_ai_name). Set up by Claude 2026-06-20: secrets.env (HF+WandB only) installed, GSM8K parquet pre-prepped (train 7473/test 1319), /workspace/runs/EXP-37B created, launch.sh rsynced. NOT yet registered in runs.jsonl and NOT launched (operator-managed lifecycle, per 'do not run' instruction)."
+}
