@@ -227,7 +227,14 @@
 
 <p style="margin-top:14px;"><strong>The structural confound.</strong> EXP-37 alone cannot cleanly separate the two: <code>cadence</code> and <code>delay_K</code> are gated by the <em>same</em> per-tick counter through the <em>same</em> <code>anchor_should_fire(step, cadence)</code> call &mdash; Q-update, M-refresh, and broadcast all happen in one fire block. Raising K to 20 makes &ldquo;Q frozen 4&times; longer&rdquo; and &ldquo;M 4&times; staler&rdquo; inseparable in this run. Hence the attribution above is theory-grounded, not measured &mdash; and the decoupling run (&sect;6) is what converts it.</p>
 
-<p><strong>The one isolable cadence signature.</strong> A <code>pg_clipfrac</code> spike at every Q-refresh step (10, 20, &hellip;, 100): ~0.10&ndash;0.19 at refreshes vs a ~0.004&ndash;0.06 floor between, once the merger engages (after the ~10-step warmup, where it sits ~0.19&ndash;0.30) and rising toward the back half (Figure 2, bottom panel). Each fire jumps Q discontinuously, mismatching the importance ratio for one step; the spikes are larger precisely <em>because</em> the jumps are rarer at cadence 20. This is the cleanest already-available pure-cadence readout.</p>
+<p><strong>The one isolable cadence signature.</strong> A <code>pg_clipfrac</code> spike at every Q-refresh step (10, 20, &hellip;, 100): ~0.10&ndash;0.19 at refreshes vs a ~0.004&ndash;0.06 floor between, once the merger engages (after the ~10-step warmup, where it sits ~0.19&ndash;0.30) and rising toward the back half (Figure 2, bottom panel). Each fire jumps Q discontinuously, mismatching the importance ratio for one step; the spikes are larger precisely <em>because</em> the jumps are rarer at cadence 20. This is the cleanest already-available pure-cadence readout. The scalar Q telemetry confirms this: Q remains well-conditioned and low-error after the first update, so cadence contributes as a refresh shock/hold-length effect, not as a catastrophic PowerSGD compression failure.</p>
+
+<figure>
+<div class="chartcard">
+<img src="../Q_BASIS_ANALYSIS/figs/q_error_with_clipfrac_and_length.png" alt="Three-panel Q telemetry plot showing Q reconstruction error dropping after first update for K=5 and K=20, clip fraction spikes at Q refresh steps, and K=20-only response length instability near the end of training.">
+</div>
+<figcaption><strong>Figure 4.</strong> Q telemetry sanity check. Q reconstruction error is high only during bootstrap, then drops after the first anchor-owned Q update in both K=5 and K=20. During the K=20 length collapse, Q error rises only mildly and remains far below bootstrap, so the failure is not Q-basis or activation-compression collapse. The middle panel shows cadence shocks via clipfrac; the bottom panel shows the K=20-only response-length spiral.</figcaption>
+</figure>
 
 <!-- ============ 6. NEXT STEPS ============ -->
 <h2><span class="secnum">6</span>Ranked next steps</h2>
