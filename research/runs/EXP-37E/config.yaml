@@ -1,0 +1,26 @@
+# EXP-37E — ERROR-FEEDBACK merger (ef_powersgd) best-proven params at latency 20/20, 100 steps.
+# Operator-directed sibling of issue #37. "Just to check what happens" with EF at high latency.
+experiment: EXP-37E
+issue: 37
+kind: experiment
+milestone: M6
+code_change: false
+wandb_project: verl_compression_research_accel_rebaseline   # overlays EXP-37/37B/37C/37D/36B/36C
+baseline_run: EXP-26   # best-proven EF (ef_powersgd) was EXP-26 B_ef_r2 val@50 0.7210 at 5/5; this = same EF at 20/20
+cells:
+  - id: 1
+    name: ef-powersgd-cad20-delay20-100step
+    experiment_name: exp-37e-ef-powersgd-cad20-delay20-100step
+    launcher: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
+    env: {PROJECT_NAME: verl_compression_research_accel_rebaseline, EXPERIMENT_NAME: exp-37e-ef-powersgd-cad20-delay20-100step, TOTAL_TRAINING_STEPS: 100, TEST_FREQ: 25}
+    merger: ef_powersgd            # best-proven EF (EXP-26 B_ef_r2, M6 record 0.7210)
+    anchor: cadence=20 delay_K=20  # high latency (user request) — overrides accel-base 5/5
+    trailing_hydra_args:           # banner LIES (echoes signed_ema/0.50/5/5) — verify resolved cmd
+      - actor_rollout_ref.actor.comm_eff.spectral.correction_mode=ef_powersgd
+      - actor_rollout_ref.actor.comm_eff.spectral.ef_clip=1.0
+      - actor_rollout_ref.actor.comm_eff.spectral.ef_decay=0.9
+      - actor_rollout_ref.actor.comm_eff.spectral.beta_anc=0.95
+      - actor_rollout_ref.actor.comm_eff.anchor.cadence=20
+      - actor_rollout_ref.actor.comm_eff.anchor.delay_K=20
+# Latency realized at 20/20: anchor_backwards==10. First Q+M at tick 20 = step 10.
+# EXP-26 alarm: even best EF had a sibling realization ignite at 5/5 -> 20/20 is a stress test.
