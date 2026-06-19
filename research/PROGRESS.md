@@ -31,3 +31,9 @@ EXP-37 exp-37-cad20-delay20 DONE 2026-06-18T12:40Z 100steps val@25=0.592 val@50=
 [2026-06-19T15:47:28Z] [monitor/EXP-37B] EXP-37B COMPLETE. 100/100 steps. val@25=0.7384 val@50=0.6808 val@75=0.6983 val@100=0.7346. anchor_backwards=40 (target met). back-half=STABLE (transient length excursion steps79-85, fully recovered by step88). No errors. tmux dead, train.log synced to runs/EXP-37B/. Dispatch EXP-37C.
 [2026-06-20T01:58:53+10:00] [operator-correction] EXP-37C latency 5/5 -> 20/20 (cadence=20, delay_K=20) + beta_anc=0.0. Killed the 5/5 attempt (was only at vLLM init, no steps), freed GPUs (0 MiB verified), relaunched. Resolved cmd confirms beta_anc=0.0/cadence=20/delay_K=20/comm_eff.enabled=true (banner lies). anchor_backwards target=10 (not 40) at 20/20. WandB name=exp-37c-cad20-delay20-beta0-100step. EXP-37B closed out: WandB pns1le3x backfilled to step100 (val@100=0.7346, was underselling at val@75 0.6982); analyst dispatched. Chain unchanged: 37C(20/20,beta0) -> 37D(dense) -> teardown(team).
 [2026-06-20T02:03:10+10:00] [analyst #37] verdict=PASS
+## EXP-37C monitor: 2026-06-19 (session c7a130ef)
+Run: exp-37c-cad20-delay20-beta0-100step | config: signed_ema, beta_anc=0.0, cadence=20, delay_K=20, 100 steps
+Status at TIMEOUT (21min wall, step 52/100): tmux ALIVE, training in progress, val@25=0.6808, val@50=0.5368
+Collapse: onset step 35, peak step 41 (resp_mean=779, clip=0.32), PARTIAL RECOVERY by step 50 (resp_mean=136, clip=0.0)
+anchor_backwards: 5 fires by step 50 (steps 10,20,30,40,50) = exactly cadence=20 target
+Verdict (first-half): COLLAPSE at step 35 (earlier than EXP-37's ~step 61), with PARTIAL SELF-RECOVERY; val@25→50 degraded 68%→54%
