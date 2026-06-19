@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "instance_id": 41680420,
+  "label": "EXP-37C",
+  "ssh_host": "84.8.106.109",
+  "ssh_port": 40206,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 40206 root@84.8.106.109 -L 8080:localhost:8080",
+  "num_gpus": 4,
+  "gpu_name": "H200",
+  "gpu_ram": 143771,
+  "dph_total": 12.878654970760232,
+  "vast_account": "team",
+  "tmux_session": "exp-37c-84_8_106_109",
+  "chosen_tier_idx": 0,
+  "chosen_tier_query": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true",
+  "provisioned_by": "operator-manual",
+  "note": "REUSED operator team box 41680420 (84.8.106.109:40206) from EXP-37B for the beta_anc=0 sibling. Back-to-back reuse (no concurrent /loop session). EXP-37B flipped COMPLETE before this row goes RUNNING.",
+  "reused": true
+}
