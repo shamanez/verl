@@ -1,0 +1,22 @@
+# EXP-37B run config — single cell, config-only on the LOCKED accel comm-eff base.
+# Materialised from .claude/plans/37.md (issue #37). NO code change, NO sweep.
+experiment: EXP-37B
+issue: 37
+kind: experiment
+milestone: M6
+code_change: false
+wandb_project: verl_compression_research_accel_rebaseline   # overlays EXP-37/36B/36C
+cells:
+  - id: 1
+    name: signed_ema-cad5-delay5-100step
+    experiment_name: exp-37b-cad5-delay5-100step
+    launcher: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
+    env:                          # the ONLY overrides; everything else is the locked accel base
+      PROJECT_NAME: verl_compression_research_accel_rebaseline
+      EXPERIMENT_NAME: exp-37b-cad5-delay5-100step
+      TOTAL_TRAINING_STEPS: 100   # the whole point: 50->100 to cross the epoch-2 boundary (~step 58)
+      TEST_FREQ: 25               # val@25/50/75/100
+    anchor: cadence=5 delay_K=5   # accel-base DEFAULT — NOT overridden (EXP-37 was 20/20)
+    trailing_hydra_args: none     # passing none avoids a stray-override -> REVISE
+# Expected latency realization (sanity gate): 100 steps x 2 ticks/step = 200 ticks,
+# cadence 5 => anchor_backwards == 40, anchor_q_updates == 40, anchor_q_broadcasts == 40.
