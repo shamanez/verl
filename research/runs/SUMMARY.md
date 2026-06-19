@@ -32,10 +32,11 @@ Dense leads the single comm-eff draw by ~0.030 on the identical @0.55 surface
 
 - **Substrate** — PowerSGD r=77 on the mandatory anchor circuit reaches dense parity at
   ~5% gradient comm. Locked.
-- **Merger** — `delayed_ef` (β_anc=0) is the legacy replicated reference; `signed_ema` is
-  the current core. The (α=0.25, β_anc=0.50) config comes from two old-surface sweeps:
+- **Merger** — `signed_ema` is the normal method for all forward research. The
+  active baseline is (α=0.25, β_anc=0.50), selected from two old-surface sweeps:
   β_anc peaked at 0.50 (EXP-34); α peaked at 0.25 = 0.7528 (EXP-35), and α=0.0 does NOT
-  ignite.
+  ignite. Keep the proven compatibility parameters (`λ=1`, `β_anc=0`) available only
+  as a quiet reference floor, not as a planning target.
 - **Anchor-usage levers** (perturbation, δ-momentum, adaptive-λ, control-variate,
   sub-basis) — all null vs baseline (EXP-31).
 - **Reference floors** — no-merger PowerSGD = 0.6300; dense full-gradient band = 0.75–0.78.
@@ -44,5 +45,5 @@ Dense leads the single comm-eff draw by ~0.030 on the identical @0.55 surface
 
 The accelerated comm-eff base (`signed_ema` α=0.25, β_anc=0.50, @0.55, diagnostics off)
 is the default loop: val@50 ≈ 0.736 (n=1) vs dense ≈ 0.766, at ~5% gradient comm and
-~25 min/run. Vary only the merger; every other knob is locked
+~25 min/run. Future research should stay on EMA-family mergers; every other knob is locked
 (`FIXED_CONTROL_SURFACE.md`).
