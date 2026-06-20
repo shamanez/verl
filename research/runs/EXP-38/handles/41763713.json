@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "instance_id": 41763713,
+  "label": "EXP-38",
+  "ssh_host": "198.145.108.57",
+  "ssh_port": 28774,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 28774 root@198.145.108.57 -L 8080:localhost:8080",
+  "num_gpus": 4,
+  "gpu_name": "H200",
+  "gpu_ram": 143771,
+  "dph_total": 13.739035087719298,
+  "vast_account": "team",
+  "tmux_session": "exp-38-198_145_108_57",
+  "provisioned_by": "operator-manual",
+  "note": "Operator-provided team box for EXP-38 dense drift probe. RUNNING ledger row + heartbeat deferred until the 75-step capture launches (gate-debug phase runs without a row so the teardown Stop hook cannot reap mid-debug)."
+}

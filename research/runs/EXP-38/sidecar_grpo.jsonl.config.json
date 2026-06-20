@@ -1,0 +1,1260 @@
+{
+  "run_name": "exp-38-dense-drift-probe",
+  "run_id": "mhegvmbs",
+  "state": "running",
+  "entity": "shamanework-pl",
+  "project": "verl_compression_research_accel_rebaseline",
+  "config": {
+    "data": {
+      "seed": null,
+      "shuffle": true,
+      "use_shm": false,
+      "audio_key": "audios",
+      "image_key": "images",
+      "tokenizer": null,
+      "val_files": "/root/data/gsm8k/test.parquet",
+      "video_key": "videos",
+      "custom_cls": {
+        "name": null,
+        "path": null
+      },
+      "prompt_key": "prompt",
+      "truncation": "error",
+      "train_files": "/root/data/gsm8k/train.parquet",
+      "reward_fn_key": "data_source",
+      "val_batch_size": null,
+      "return_raw_chat": true,
+      "val_max_samples": -1,
+      "image_patch_size": 14,
+      "tool_config_path": null,
+      "train_batch_size": 128,
+      "max_prompt_length": 1024,
+      "train_max_samples": -1,
+      "trust_remote_code": false,
+      "function_tool_path": null,
+      "return_full_prompt": false,
+      "validation_shuffle": false,
+      "max_response_length": 2048,
+      "return_raw_input_ids": false,
+      "dataloader_num_workers": 8,
+      "filter_overlong_prompts": true,
+      "return_multi_modal_inputs": true,
+      "filter_overlong_prompts_workers": 1
+    },
+    "critic": {
+      "fsdp": {
+        "qat": {
+          "mode": "w4a16",
+          "enable": false,
+          "_target_": "verl.workers.config.QATEngineConfig",
+          "group_size": 16,
+          "ignore_patterns": [
+            "lm_head",
+            "embed_tokens",
+            "re:.*mlp.gate$"
+          ],
+          "activation_observer": "static_minmax",
+          "quantization_config_path": null
+        },
+        "seed": 42,
+        "dtype": "bfloat16",
+        "_target_": "verl.workers.config.FSDPEngineConfig",
+        "strategy": "fsdp",
+        "fsdp_size": -1,
+        "model_dtype": "fp32",
+        "wrap_policy": {
+          "min_num_params": 0
+        },
+        "forward_only": false,
+        "param_offload": false,
+        "offload_policy": false,
+        "use_orig_params": false,
+        "forward_prefetch": false,
+        "full_determinism": false,
+        "optimizer_offload": false,
+        "use_torch_compile": true,
+        "entropy_checkpointing": false,
+        "reshard_after_forward": true,
+        "ulysses_sequence_parallel_size": 1,
+        "entropy_from_logits_with_chunking": false
+      },
+      "model": {
+        "mtp": {
+          "enable": false,
+          "method": "mtp",
+          "_target_": "verl.workers.config.MtpConfig",
+          "enable_train": false,
+          "detach_encoder": false,
+          "enable_rollout": false,
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_steps": 3,
+          "num_speculative_tokens": 1,
+          "speculative_eagle_topk": 1,
+          "mtp_loss_scaling_factor": 0.1,
+          "speculative_num_draft_tokens": 4
+        },
+        "lora": {
+          "rank": 0,
+          "type": "lora",
+          "alpha": 32,
+          "dtype": null,
+          "merge": false,
+          "dropout": 0,
+          "adapter_path": null,
+          "target_modules": [
+            "linear_qkv",
+            "linear_proj",
+            "linear_fc1",
+            "linear_fc2"
+          ],
+          "exclude_modules": [],
+          "a2a_experimental": false,
+          "dropout_position": "pre",
+          "lora_A_init_method": "xavier",
+          "lora_B_init_method": "zero",
+          "freeze_vision_model": true,
+          "freeze_language_model": true,
+          "freeze_vision_projection": true
+        },
+        "path": "~/models/deepseek-llm-7b-chat",
+        "use_shm": false,
+        "_target_": "verl.workers.config.HFModelConfig",
+        "lora_rank": 0,
+        "tiled_mlp": {
+          "enabled": false,
+          "num_shards": 4
+        },
+        "use_liger": false,
+        "lora_alpha": 16,
+        "external_lib": null,
+        "hf_config_path": null,
+        "target_modules": "all-linear",
+        "tokenizer_path": null,
+        "exclude_modules": null,
+        "lora_adapter_path": null,
+        "trust_remote_code": false,
+        "use_fused_kernels": false,
+        "use_remove_padding": true,
+        "custom_chat_template": null,
+        "fused_kernel_options": {
+          "impl_backend": "torch"
+        },
+        "enable_activation_offload": false,
+        "enable_gradient_checkpointing": true
+      },
+      "optim": {
+        "lr": 1e-05,
+        "betas": [
+          0.9,
+          0.999
+        ],
+        "_target_": "verl.workers.config.FSDPOptimizerConfig",
+        "clip_grad": 1,
+        "optimizer": "AdamW",
+        "num_cycles": 0.5,
+        "min_lr_ratio": 0,
+        "warmup_style": null,
+        "weight_decay": 0.01,
+        "optimizer_impl": "torch.optim",
+        "lr_warmup_steps": -1,
+        "lr_scheduler_type": "constant",
+        "zero_indexed_step": true,
+        "total_training_steps": 75,
+        "lr_warmup_steps_ratio": 0,
+        "override_optimizer_config": null
+      },
+      "enable": null,
+      "shuffle": false,
+      "_target_": "verl.workers.config.FSDPCriticConfig",
+      "profiler": {
+        "tool": null,
+        "ranks": [],
+        "enable": false,
+        "_target_": "verl.utils.profiler.ProfilerConfig",
+        "all_ranks": false,
+        "save_path": "outputs/profile",
+        "tool_config": {
+          "npu": {
+            "level": "level0",
+            "_target_": "verl.utils.profiler.config.NPUToolConfig",
+            "analysis": true,
+            "contents": [],
+            "discrete": false
+          },
+          "nsys": {
+            "_target_": "verl.utils.profiler.config.NsightToolConfig",
+            "discrete": false
+          },
+          "torch": {
+            "_target_": "verl.utils.profiler.config.TorchProfilerToolConfig",
+            "contents": [],
+            "discrete": false
+          },
+          "torch_memory": {
+            "_target_": "verl.utils.profiler.config.TorchMemoryToolConfig",
+            "stack_depth": 32,
+            "trace_alloc_max_entries": 100000
+          },
+          "precision_debugger": {
+            "steps": null,
+            "stages": null,
+            "strict": false,
+            "_target_": "verl.utils.profiler.config.PrecisionDebuggerToolConfig",
+            "config_path": null
+          }
+        }
+      },
+      "strategy": "fsdp",
+      "grad_clip": 1,
+      "rollout_n": 8,
+      "checkpoint": {
+        "_target_": "verl.trainer.config.CheckpointConfig",
+        "async_save": false,
+        "load_contents": [
+          "model",
+          "optimizer",
+          "extra"
+        ],
+        "save_contents": [
+          "model",
+          "optimizer",
+          "extra"
+        ]
+      },
+      "ppo_epochs": 1,
+      "loss_agg_mode": "token-mean",
+      "cliprange_value": 0.5,
+      "use_dynamic_bsz": true,
+      "data_loader_seed": 42,
+      "ppo_mini_batch_size": 64,
+      "ppo_micro_batch_size": null,
+      "forward_micro_batch_size": null,
+      "ppo_max_token_len_per_gpu": 32768,
+      "ppo_micro_batch_size_per_gpu": null,
+      "forward_max_token_len_per_gpu": 32768,
+      "ulysses_sequence_parallel_size": 1,
+      "forward_micro_batch_size_per_gpu": null
+    },
+    "reward": {
+      "_target_": "verl.workers.config.RewardConfig",
+      "num_workers": 8,
+      "reward_model": {
+        "enable": false,
+        "nnodes": 1,
+        "rollout": {
+          "n": 1,
+          "mtp": null,
+          "name": "???",
+          "dtype": "bfloat16",
+          "top_k": -1,
+          "top_p": 1,
+          "_target_": "verl.workers.config.RolloutConfig",
+          "do_sample": true,
+          "ignore_eos": false,
+          "load_format": "auto",
+          "temperature": 1,
+          "limit_images": null,
+          "max_num_seqs": 1024,
+          "quantization": null,
+          "enforce_eager": true,
+          "max_model_len": null,
+          "prompt_length": 2048,
+          "disaggregation": {
+            "enabled": false,
+            "ib_device": null,
+            "bootstrap_port": null,
+            "decode_replicas": 1,
+            "prefill_replicas": 1,
+            "transfer_backend": "nixl",
+            "decode_tensor_model_parallel_size": null
+          },
+          "layered_summon": false,
+          "response_length": 2048,
+          "disable_log_stats": true,
+          "free_cache_engine": true,
+          "scheduling_policy": "fcfs",
+          "data_parallel_size": 1,
+          "multi_stage_wake_up": false,
+          "skip_tokenizer_init": false,
+          "expert_parallel_size": 1,
+          "enable_prefix_caching": true,
+          "enable_chunked_prefill": true,
+          "gpu_memory_utilization": 0.5,
+          "max_num_batched_tokens": 8192,
+          "cudagraph_capture_sizes": null,
+          "quantization_config_file": null,
+          "tensor_model_parallel_size": 2,
+          "pipeline_model_parallel_size": 1
+        },
+        "_target_": "verl.workers.config.RewardModelConfig",
+        "model_path": null,
+        "n_gpus_per_node": 4,
+        "enable_resource_pool": false
+      },
+      "reward_manager": {
+        "name": "naive",
+        "module": {
+          "name": "custom_reward_manager",
+          "path": null,
+          "_target_": "verl.trainer.config.config.ModuleConfig"
+        },
+        "source": "register",
+        "_target_": "verl.workers.config.reward.RewardManagerConfig"
+      },
+      "sandbox_fusion": {
+        "url": null,
+        "_target_": "verl.workers.config.SandboxFusionConfig",
+        "max_concurrent": 64,
+        "memory_limit_mb": 1024
+      },
+      "custom_reward_function": {
+        "name": "compute_score",
+        "path": null
+      }
+    },
+    "trainer": {
+      "device": "cuda",
+      "logger": [
+        "console",
+        "wandb"
+      ],
+      "nnodes": 1,
+      "val_only": false,
+      "save_freq": 50,
+      "test_freq": 25,
+      "resume_mode": "auto",
+      "project_name": "verl_compression_research_accel_rebaseline",
+      "total_epochs": 2,
+      "balance_batch": true,
+      "critic_warmup": 0,
+      "experiment_name": "exp-38-dense-drift-probe",
+      "n_gpus_per_node": 4,
+      "default_hdfs_dir": null,
+      "resume_from_path": null,
+      "rollout_data_dir": null,
+      "val_before_train": false,
+      "default_local_dir": "checkpoints/verl_compression_research_accel_rebaseline/exp-38-dense-drift-probe",
+      "esi_redundant_time": 0,
+      "log_val_generations": 0,
+      "validation_data_dir": null,
+      "total_training_steps": 75,
+      "max_actor_ckpt_to_keep": null,
+      "max_critic_ckpt_to_keep": null,
+      "del_local_ckpt_after_load": false,
+      "ray_wait_register_center_timeout": 300
+    },
+    "algorithm": {
+      "lam": 1,
+      "gamma": 1,
+      "pf_ppo": {
+        "weight_pow": 2,
+        "reweight_method": "pow"
+      },
+      "kl_ctrl": {
+        "type": "fixed",
+        "horizon": 10000,
+        "kl_coef": 0.001,
+        "_target_": "verl.trainer.config.KLControlConfig",
+        "target_kl": 0.1
+      },
+      "_target_": "verl.trainer.config.AlgoConfig",
+      "kl_penalty": "kl",
+      "use_pf_ppo": false,
+      "adv_estimator": "grpo",
+      "use_kl_in_reward": false,
+      "rollout_correction": {
+        "loss_type": "ppo_clip",
+        "rollout_is": null,
+        "rollout_rs": null,
+        "bypass_mode": false,
+        "rollout_is_threshold": 2,
+        "rollout_rs_threshold": null,
+        "rollout_is_batch_normalize": false
+      },
+      "norm_adv_by_std_in_grpo": true
+    },
+    "ray_kwargs": {
+      "ray_init": {
+        "num_cpus": null
+      },
+      "timeline_json_file": null
+    },
+    "distillation": {
+      "nnodes": 0,
+      "enabled": false,
+      "_target_": "verl.workers.config.DistillationConfig",
+      "teacher_key": "data_source",
+      "teacher_models": {
+        "teacher_model": {
+          "key": null,
+          "_target_": "verl.workers.config.DistillationTeacherModelConfig",
+          "inference": {
+            "name": "vllm",
+            "dtype": "bfloat16",
+            "_target_": "verl.workers.config.RolloutConfig",
+            "load_format": "auto",
+            "temperature": 1,
+            "limit_images": null,
+            "max_num_seqs": 1024,
+            "enforce_eager": true,
+            "max_model_len": null,
+            "prompt_length": 1024,
+            "response_length": 2048,
+            "disable_log_stats": true,
+            "free_cache_engine": true,
+            "data_parallel_size": 1,
+            "skip_tokenizer_init": true,
+            "expert_parallel_size": 1,
+            "enable_prefix_caching": true,
+            "enable_chunked_prefill": true,
+            "gpu_memory_utilization": 0.5,
+            "max_num_batched_tokens": 8192,
+            "cudagraph_capture_sizes": null,
+            "tensor_model_parallel_size": 2
+          },
+          "model_path": null,
+          "num_replicas": 0
+        }
+      },
+      "n_gpus_per_node": 8,
+      "distillation_loss": {
+        "topk": 32,
+        "_target_": "verl.workers.config.DistillationLossConfig",
+        "loss_mode": "k3",
+        "clip_ratio": 0.2,
+        "clip_ratio_low": 0.2,
+        "loss_max_clamp": null,
+        "clip_ratio_high": 0.2,
+        "policy_loss_mode": "vanilla",
+        "use_task_rewards": true,
+        "log_prob_min_clamp": null,
+        "use_policy_gradient": false,
+        "distillation_loss_coef": 1
+      }
+    },
+    "model_engine": "dp",
+    "transfer_queue": {
+      "enable": false,
+      "backend": {
+        "MooncakeStore": {
+          "protocol": "tcp",
+          "auto_init": false,
+          "device_name": "",
+          "local_hostname": "localhost",
+          "metadata_server": "localhost:50123",
+          "local_buffer_size": 1073741824,
+          "global_segment_size": 4294967296,
+          "master_server_address": "localhost:50124"
+        },
+        "SimpleStorage": {
+          "total_storage_size": 100000,
+          "num_data_storage_units": 8
+        },
+        "storage_backend": "SimpleStorage"
+      },
+      "metrics": {
+        "port": 0,
+        "enabled": false
+      }
+    },
+    "global_profiler": {
+      "tool": null,
+      "steps": null,
+      "_target_": "verl.utils.profiler.ProfilerConfig",
+      "save_path": "outputs/profile",
+      "global_tool_config": {
+        "nsys": {
+          "_target_": "verl.utils.profiler.config.NsightToolConfig",
+          "discrete": false,
+          "worker_nsight_options": {
+            "kill": "none",
+            "trace": "cuda,nvtx,cublas,ucx",
+            "capture-range": "cudaProfilerApi",
+            "cuda-graph-trace": "graph",
+            "capture-range-end": null,
+            "cuda-memory-usage": "true"
+          },
+          "controller_nsight_options": {
+            "trace": "cuda,nvtx,cublas,ucx",
+            "cuda-graph-trace": "graph",
+            "cuda-memory-usage": "true"
+          }
+        },
+        "torch_memory": {
+          "stacks": "all",
+          "context": "all",
+          "stack_depth": 32,
+          "trace_alloc_max_entries": 100000
+        },
+        "precision_debugger": {
+          "steps": null,
+          "stages": null,
+          "strict": false,
+          "_target_": "verl.utils.profiler.config.PrecisionDebuggerToolConfig",
+          "config_path": null
+        }
+      },
+      "profile_continuous_steps": false
+    },
+    "actor_rollout_ref": {
+      "ref": {
+        "_target_": "verl.workers.config.FSDPActorConfig",
+        "profiler": {
+          "tool": null,
+          "ranks": [],
+          "enable": false,
+          "_target_": "verl.utils.profiler.ProfilerConfig",
+          "all_ranks": false,
+          "save_path": "outputs/profile",
+          "tool_config": {
+            "npu": {
+              "level": "level0",
+              "_target_": "verl.utils.profiler.config.NPUToolConfig",
+              "analysis": true,
+              "contents": [],
+              "discrete": false
+            },
+            "nsys": {
+              "_target_": "verl.utils.profiler.config.NsightToolConfig",
+              "discrete": false
+            },
+            "torch": {
+              "_target_": "verl.utils.profiler.config.TorchProfilerToolConfig",
+              "contents": [],
+              "discrete": false
+            },
+            "torch_memory": {
+              "_target_": "verl.utils.profiler.config.TorchMemoryToolConfig",
+              "stack_depth": 32,
+              "trace_alloc_max_entries": 100000
+            },
+            "precision_debugger": {
+              "steps": null,
+              "stages": null,
+              "strict": false,
+              "_target_": "verl.utils.profiler.config.PrecisionDebuggerToolConfig",
+              "config_path": null
+            }
+          }
+        },
+        "strategy": "fsdp",
+        "rollout_n": 8,
+        "fsdp_config": {
+          "qat": {
+            "mode": "w4a16",
+            "enable": false,
+            "_target_": "verl.workers.config.QATEngineConfig",
+            "group_size": 16,
+            "ignore_patterns": [
+              "lm_head",
+              "embed_tokens",
+              "re:.*mlp.gate$"
+            ],
+            "activation_observer": "static_minmax",
+            "quantization_config_path": null
+          },
+          "seed": 42,
+          "dtype": "bfloat16",
+          "_target_": "verl.workers.config.FSDPEngineConfig",
+          "strategy": "fsdp",
+          "fsdp_size": -1,
+          "model_dtype": "fp32",
+          "wrap_policy": {
+            "min_num_params": 0
+          },
+          "forward_only": true,
+          "param_offload": true,
+          "offload_policy": false,
+          "use_orig_params": false,
+          "forward_prefetch": false,
+          "full_determinism": false,
+          "optimizer_offload": false,
+          "use_torch_compile": true,
+          "entropy_checkpointing": false,
+          "reshard_after_forward": true,
+          "ulysses_sequence_parallel_size": 1,
+          "entropy_from_logits_with_chunking": false
+        },
+        "router_replay": {
+          "mode": "disabled",
+          "_target_": "verl.workers.config.RouterReplayConfig",
+          "record_file": null,
+          "replay_file": null
+        },
+        "use_torch_compile": true,
+        "entropy_checkpointing": false,
+        "log_prob_use_dynamic_bsz": true,
+        "log_prob_micro_batch_size": null,
+        "log_prob_max_token_len_per_gpu": 36864,
+        "ulysses_sequence_parallel_size": 1,
+        "entropy_from_logits_with_chunking": false,
+        "log_prob_micro_batch_size_per_gpu": 1
+      },
+      "actor": {
+        "qat": {
+          "mode": "w4a16",
+          "enable": false,
+          "group_size": 16,
+          "ignore_patterns": [
+            "lm_head",
+            "embed_tokens",
+            "re:.*mlp.gate$"
+          ],
+          "activation_observer": "static_minmax",
+          "quantization_config_path": null
+        },
+        "optim": {
+          "lr": 1e-06,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "_target_": "verl.workers.config.FSDPOptimizerConfig",
+          "clip_grad": 1,
+          "optimizer": "AdamW",
+          "num_cycles": 0.5,
+          "min_lr_ratio": 0,
+          "warmup_style": null,
+          "weight_decay": 0.01,
+          "optimizer_impl": "torch.optim",
+          "lr_warmup_steps": -1,
+          "lr_scheduler_type": "constant",
+          "zero_indexed_step": true,
+          "total_training_steps": 75,
+          "lr_warmup_steps_ratio": 0,
+          "override_optimizer_config": null
+        },
+        "shuffle": false,
+        "tau_neg": 1.05,
+        "tau_pos": 1,
+        "_target_": "verl.workers.config.FSDPActorConfig",
+        "comm_eff": {
+          "mask": {
+            "p": 0.9,
+            "seed": 0,
+            "enabled": false,
+            "pp_size": 8,
+            "rescale": true,
+            "_target_": "verl.workers.config.CommEffMaskConfig",
+            "rescale_mode": "auto",
+            "mask_recompute": true
+          },
+          "probe": {
+            "m4_lags": 5,
+            "out_dir": "",
+            "_target_": "verl.workers.config.CommEffProbeConfig",
+            "rank0_only": true,
+            "geometry_enabled": false,
+            "per_target_sidecar": true
+          },
+          "anchor": {
+            "owns_q": true,
+            "cadence": 5,
+            "delay_K": 5,
+            "enabled": true,
+            "_target_": "verl.workers.config.CommEffAnchorConfig",
+            "snapshot_device": "cpu",
+            "replay_paired_batch": true
+          },
+          "capture": {
+            "enabled": false,
+            "_target_": "verl.workers.config.CommEffCaptureConfig",
+            "min_tick": 0,
+            "max_ticks": 10,
+            "dump_dtype": "fp32",
+            "rank0_only": true,
+            "capture_dir": "/workspace/captures",
+            "capture_g_dense": false,
+            "fresh_anchor_loss": "clean_pg",
+            "stratified_targets": 0,
+            "capture_fresh_anchor": false
+          },
+          "enabled": false,
+          "_target_": "verl.workers.config.CommEffConfig",
+          "powersgd": {
+            "rank": 77,
+            "seed": 0,
+            "enabled": true,
+            "pp_size": 8,
+            "q_basis": "act",
+            "_target_": "verl.workers.config.CommEffPowerSGDConfig",
+            "qr_dtype": "fp32",
+            "sync_basis": true,
+            "warm_start": true,
+            "reortho_eps": 1e-06,
+            "update_cadence": 1,
+            "hybrid_act_cols": -1,
+            "q_basis_passive": [],
+            "hybrid_grad_cols": -1,
+            "compress_recompute": true
+          },
+          "spectral": {
+            "cadence": 1,
+            "ef_clip": 0,
+            "enabled": true,
+            "r_delta": 0,
+            "_target_": "verl.workers.config.CommEffSpectralConfig",
+            "beta_anc": 0.5,
+            "ef_decay": 0,
+            "blend_eta": 0.5,
+            "ema_device": "cpu",
+            "lambda_cap": 2,
+            "diagnostics": false,
+            "max_targets": -1,
+            "inject_gamma": 1,
+            "perturb_seed": 0,
+            "perturb_sigma": 0,
+            "target_substr": [
+              "q_proj",
+              "k_proj",
+              "v_proj",
+              "o_proj",
+              "gate_proj",
+              "up_proj",
+              "down_proj"
+            ],
+            "correction_mode": "signed_ema",
+            "signed_ema_alpha": 0.25,
+            "delayed_ef_lambda": 1,
+            "delta_momentum_mu": 0,
+            "delta_subbasis_rank": 0,
+            "adaptive_lambda_mode": "off",
+            "adaptive_lambda_kappa": 0,
+            "delta_subbasis_family": "tail",
+            "delta_subbasis_weight": 1,
+            "delta_momentum_age_decay": false,
+            "delta_subbasis_hold_steps": 0,
+            "delta_subbasis_decay_steps": 0
+          },
+          "drift_probe": {
+            "enabled": true,
+            "_target_": "verl.workers.config.CommEffDriftProbeConfig",
+            "rank0_only": true,
+            "capture_dir": "/workspace/verl/drift_captures",
+            "capture_theta": true,
+            "capture_g_dense": true,
+            "snapshot_cadence_N": 5,
+            "stratified_targets": 2,
+            "horizon_global_steps": 75,
+            "capture_update_vector": true
+          },
+          "clean_cadence": 0,
+          "boundary_probe": {
+            "enabled": true,
+            "_target_": "verl.workers.config.CommEffBoundaryProbeConfig",
+            "rank0_only": true,
+            "capture_dir": "/workspace/verl/drift_captures",
+            "snapshot_cadence_N": 5,
+            "token_subsample_cap": 2048
+          },
+          "compression_type": "powersgd"
+        },
+        "profiler": {
+          "tool": null,
+          "ranks": [],
+          "enable": false,
+          "_target_": "verl.utils.profiler.ProfilerConfig",
+          "all_ranks": false,
+          "save_path": "outputs/profile",
+          "tool_config": {
+            "npu": {
+              "level": "level0",
+              "_target_": "verl.utils.profiler.config.NPUToolConfig",
+              "analysis": true,
+              "contents": [],
+              "discrete": false
+            },
+            "nsys": {
+              "_target_": "verl.utils.profiler.config.NsightToolConfig",
+              "discrete": false
+            },
+            "torch": {
+              "_target_": "verl.utils.profiler.config.TorchProfilerToolConfig",
+              "contents": [],
+              "discrete": false
+            },
+            "torch_memory": {
+              "_target_": "verl.utils.profiler.config.TorchMemoryToolConfig",
+              "stack_depth": 32,
+              "trace_alloc_max_entries": 100000
+            },
+            "precision_debugger": {
+              "steps": null,
+              "stages": null,
+              "strict": false,
+              "_target_": "verl.utils.profiler.config.PrecisionDebuggerToolConfig",
+              "config_path": null
+            }
+          }
+        },
+        "strategy": "fsdp",
+        "grad_clip": 1,
+        "rollout_n": 8,
+        "checkpoint": {
+          "strict": true,
+          "_target_": "verl.trainer.config.CheckpointConfig",
+          "async_save": false,
+          "load_contents": [
+            "model",
+            "optimizer",
+            "extra"
+          ],
+          "save_contents": [
+            "model",
+            "optimizer",
+            "extra"
+          ]
+        },
+        "clip_ratio": 0.2,
+        "ppo_epochs": 1,
+        "fsdp_config": {
+          "qat": {
+            "mode": "w4a16",
+            "enable": false,
+            "_target_": "verl.workers.config.QATEngineConfig",
+            "group_size": 16,
+            "ignore_patterns": [
+              "lm_head",
+              "embed_tokens",
+              "re:.*mlp.gate$"
+            ],
+            "activation_observer": "static_minmax",
+            "quantization_config_path": null
+          },
+          "seed": 42,
+          "dtype": "bfloat16",
+          "_target_": "verl.workers.config.FSDPEngineConfig",
+          "strategy": "fsdp",
+          "fsdp_size": -1,
+          "model_dtype": "fp32",
+          "wrap_policy": {
+            "min_num_params": 0
+          },
+          "forward_only": false,
+          "param_offload": false,
+          "offload_policy": false,
+          "use_orig_params": true,
+          "forward_prefetch": false,
+          "full_determinism": false,
+          "optimizer_offload": false,
+          "use_torch_compile": true,
+          "entropy_checkpointing": false,
+          "reshard_after_forward": true,
+          "ulysses_sequence_parallel_size": 1,
+          "entropy_from_logits_with_chunking": false
+        },
+        "policy_loss": {
+          "_target_": "verl.workers.config.PolicyLossConfig",
+          "loss_mode": "vanilla",
+          "clip_cov_lb": 1,
+          "clip_cov_ub": 5,
+          "ppo_kl_coef": 0.1,
+          "kl_cov_ratio": 0.0002,
+          "clip_cov_ratio": 0.0002
+        },
+        "use_kl_loss": false,
+        "clip_ratio_c": 3,
+        "kl_loss_coef": 0.001,
+        "kl_loss_type": "low_var_kl",
+        "entropy_coeff": 0,
+        "loss_agg_mode": "token-mean",
+        "router_replay": {
+          "mode": "disabled",
+          "_target_": "verl.workers.config.RouterReplayConfig",
+          "record_file": null,
+          "replay_file": null
+        },
+        "clip_ratio_low": 0.2,
+        "clip_ratio_high": 0.2,
+        "use_dynamic_bsz": true,
+        "data_loader_seed": 42,
+        "calculate_entropy": false,
+        "loss_scale_factor": null,
+        "use_fused_kernels": false,
+        "use_torch_compile": true,
+        "use_prefix_grouper": false,
+        "use_remove_padding": true,
+        "freeze_vision_tower": false,
+        "ppo_mini_batch_size": 64,
+        "ppo_micro_batch_size": null,
+        "entropy_checkpointing": false,
+        "calculate_sum_pi_squared": false,
+        "ppo_max_token_len_per_gpu": 24576,
+        "ppo_micro_batch_size_per_gpu": 1,
+        "ulysses_sequence_parallel_size": 1,
+        "entropy_from_logits_with_chunking": false
+      },
+      "model": {
+        "mtp": {
+          "enable": false,
+          "method": "mtp",
+          "_target_": "verl.workers.config.MtpConfig",
+          "enable_train": false,
+          "detach_encoder": false,
+          "enable_rollout": false,
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_steps": 3,
+          "num_speculative_tokens": 1,
+          "speculative_eagle_topk": 1,
+          "mtp_loss_scaling_factor": 0.1,
+          "speculative_num_draft_tokens": 4
+        },
+        "lora": {
+          "rank": 0,
+          "type": "lora",
+          "alpha": 32,
+          "dtype": null,
+          "merge": false,
+          "dropout": 0,
+          "adapter_path": null,
+          "target_modules": [
+            "linear_qkv",
+            "linear_proj",
+            "linear_fc1",
+            "linear_fc2"
+          ],
+          "exclude_modules": [],
+          "a2a_experimental": false,
+          "dropout_position": "pre",
+          "lora_A_init_method": "xavier",
+          "lora_B_init_method": "zero",
+          "freeze_vision_model": true,
+          "freeze_language_model": true,
+          "freeze_vision_projection": true
+        },
+        "path": "Qwen/Qwen2.5-1.5B-Instruct",
+        "use_shm": false,
+        "_target_": "verl.workers.config.HFModelConfig",
+        "lora_rank": 0,
+        "tiled_mlp": {
+          "enabled": false,
+          "num_shards": 4
+        },
+        "use_liger": false,
+        "lora_alpha": 16,
+        "external_lib": null,
+        "hf_config_path": null,
+        "target_modules": "all-linear",
+        "tokenizer_path": null,
+        "exclude_modules": null,
+        "lora_adapter_path": null,
+        "trust_remote_code": false,
+        "use_fused_kernels": false,
+        "use_remove_padding": true,
+        "custom_chat_template": null,
+        "fused_kernel_options": {
+          "impl_backend": "torch"
+        },
+        "enable_activation_offload": false,
+        "enable_gradient_checkpointing": true
+      },
+      "rollout": {
+        "n": 8,
+        "mtp": {
+          "enable": false,
+          "method": "mtp",
+          "_target_": "verl.workers.config.MtpConfig",
+          "enable_train": false,
+          "detach_encoder": false,
+          "enable_rollout": false,
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_steps": 3,
+          "num_speculative_tokens": 1,
+          "speculative_eagle_topk": 1,
+          "mtp_loss_scaling_factor": 0.1,
+          "speculative_num_draft_tokens": 4
+        },
+        "qat": {
+          "mode": "w4a16",
+          "enable": false,
+          "_target_": "verl.workers.config.QATEngineConfig",
+          "group_size": 16,
+          "ignore_patterns": [
+            "lm_head",
+            "embed_tokens",
+            "re:.*mlp.gate$"
+          ],
+          "activation_observer": "static_minmax",
+          "quantization_config_path": null
+        },
+        "mode": "async",
+        "name": "vllm",
+        "skip": {
+          "action": "cache",
+          "enable": false,
+          "_target_": "verl.workers.config.SkipConfig",
+          "dump_dir": "~/.verl/rollout_dump",
+          "max_dump_step": 1
+        },
+        "agent": {
+          "_target_": "verl.workers.config.AgentLoopConfig",
+          "num_workers": 8,
+          "default_agent_loop": "single_turn_agent",
+          "custom_async_server": {
+            "name": null,
+            "path": null,
+            "_target_": "verl.workers.config.CustomAsyncServerConfig"
+          },
+          "agent_loop_config_path": null
+        },
+        "dtype": "bfloat16",
+        "top_k": -1,
+        "top_p": 1,
+        "trace": {
+          "backend": null,
+          "_target_": "verl.workers.config.TraceConfig",
+          "token2text": false,
+          "project_name": "verl_compression_research_accel_rebaseline",
+          "experiment_name": "exp-38-dense-drift-probe",
+          "max_samples_per_step_per_worker": null
+        },
+        "nnodes": 0,
+        "_target_": "verl.workers.config.RolloutConfig",
+        "profiler": {
+          "tool": null,
+          "ranks": [],
+          "enable": false,
+          "_target_": "verl.utils.profiler.ProfilerConfig",
+          "all_ranks": false,
+          "save_path": "outputs/profile",
+          "tool_config": {
+            "npu": {
+              "level": "level0",
+              "_target_": "verl.utils.profiler.config.NPUToolConfig",
+              "analysis": true,
+              "contents": [],
+              "discrete": false
+            },
+            "torch": {
+              "_target_": "verl.utils.profiler.config.TorchProfilerToolConfig",
+              "contents": [],
+              "discrete": false
+            },
+            "precision_debugger": {
+              "steps": null,
+              "stages": null,
+              "strict": false,
+              "_target_": "verl.utils.profiler.config.PrecisionDebuggerToolConfig",
+              "config_path": null
+            }
+          }
+        },
+        "do_sample": true,
+        "ignore_eos": false,
+        "multi_turn": {
+          "enable": false,
+          "format": "hermes",
+          "_target_": "verl.workers.config.MultiTurnConfig",
+          "max_user_turns": null,
+          "tool_config_path": null,
+          "function_tool_path": null,
+          "max_parallel_calls": 1,
+          "max_assistant_turns": null,
+          "num_repeat_rollouts": null,
+          "max_tool_response_length": 256,
+          "tool_response_truncate_side": "middle",
+          "use_inference_chat_template": false,
+          "tokenization_sanity_check_mode": "strict"
+        },
+        "prometheus": {
+          "file": "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml",
+          "port": 9090,
+          "enable": false,
+          "_target_": "verl.workers.config.PrometheusConfig",
+          "served_model_name": "Qwen/Qwen2.5-1.5B-Instruct"
+        },
+        "val_kwargs": {
+          "n": 1,
+          "top_k": -1,
+          "top_p": 1,
+          "_target_": "verl.workers.config.SamplingConfig",
+          "do_sample": false,
+          "temperature": 0
+        },
+        "load_format": "dummy",
+        "temperature": 1,
+        "max_num_seqs": 1024,
+        "quantization": null,
+        "enforce_eager": false,
+        "engine_kwargs": {
+          "vllm": {
+            "disable_custom_all_reduce": true
+          }
+        },
+        "logprobs_mode": "processed_logprobs",
+        "max_model_len": null,
+        "prompt_length": 1024,
+        "disaggregation": {
+          "enabled": false,
+          "ib_device": null,
+          "bootstrap_port": null,
+          "decode_replicas": 1,
+          "prefill_replicas": 1,
+          "transfer_backend": "nixl",
+          "decode_tensor_model_parallel_size": null
+        },
+        "layered_summon": false,
+        "n_gpus_per_node": 4,
+        "response_length": 2048,
+        "over_sample_rate": 0,
+        "checkpoint_engine": {
+          "backend": "naive",
+          "_target_": "verl.workers.config.CheckpointEngineConfig",
+          "custom_backend_module": null,
+          "update_weights_bucket_megabytes": 4096
+        },
+        "disable_log_stats": true,
+        "free_cache_engine": true,
+        "scheduling_policy": "fcfs",
+        "data_parallel_size": 1,
+        "calculate_log_probs": true,
+        "multi_stage_wake_up": false,
+        "skip_tokenizer_init": true,
+        "expert_parallel_size": 1,
+        "enable_prefix_caching": true,
+        "enable_chunked_prefill": false,
+        "gpu_memory_utilization": 0.55,
+        "max_num_batched_tokens": 8192,
+        "cudagraph_capture_sizes": null,
+        "log_prob_use_dynamic_bsz": true,
+        "quantization_config_file": null,
+        "log_prob_micro_batch_size": null,
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "enable_rollout_routing_replay": false,
+        "log_prob_max_token_len_per_gpu": 36864,
+        "log_prob_micro_batch_size_per_gpu": 1
+      },
+      "nccl_timeout": 600,
+      "hybrid_engine": true
+    }
+  },
+  "summary": {
+    "_runtime": 1299.343664994,
+    "_step": 64,
+    "_timestamp": 1781932903.6584086,
+    "actor/comm_eff/anchor_backwards": 0,
+    "actor/comm_eff/anchor_batch_fraction": 1,
+    "actor/comm_eff/anchor_grad_corrected": 0,
+    "actor/comm_eff/anchor_mask_applications": 0,
+    "actor/comm_eff/anchor_optimizer_steps": 0,
+    "actor/comm_eff/anchor_q_broadcasts": 0,
+    "actor/comm_eff/anchor_q_updates": 0,
+    "actor/comm_eff/anchor_rewards_recomputed": 0,
+    "actor/comm_eff/anchor_rollouts_generated": 0,
+    "actor/comm_eff/clean_steps": 0,
+    "actor/comm_eff/family_screen_builds": 0,
+    "actor/comm_eff/mask_applications": 0,
+    "actor/comm_eff/merger_coldM_fallbacks": 0,
+    "actor/comm_eff/powersgd_applications": 0,
+    "actor/comm_eff/powersgd_basis_updates": 0,
+    "actor/comm_eff/spectral_corrections": 0,
+    "actor/entropy": 0.12707647681236267,
+    "actor/grad_norm": 0.3340276926755905,
+    "actor/loss": 0.011397732887417078,
+    "actor/lr": 1e-06,
+    "actor/perf/cpu_memory_used_gb": 104.87645721435548,
+    "actor/perf/max_memory_allocated_gb": 36.207984924316406,
+    "actor/perf/max_memory_reserved_gb": 46.533203125,
+    "actor/pg_clipfrac": 0.0005340041789168026,
+    "actor/pg_clipfrac_lower": 0,
+    "actor/pg_loss": 0.01139773425529711,
+    "actor/ppo_kl": -3.246361819719823e-05,
+    "critic/advantages/max": 2.4748666286468506,
+    "critic/advantages/mean": -0.011395998299121857,
+    "critic/advantages/min": -2.4748666286468506,
+    "critic/returns/max": 2.4748666286468506,
+    "critic/returns/mean": -0.011395998299121857,
+    "critic/returns/min": -2.4748666286468506,
+    "critic/rewards/max": 1,
+    "critic/rewards/mean": 0.8466796875,
+    "critic/rewards/min": 0,
+    "critic/score/max": 1,
+    "critic/score/mean": 0.8466796875,
+    "critic/score/min": 0,
+    "global_seqlen/balanced_max": 79677,
+    "global_seqlen/balanced_min": 79675,
+    "global_seqlen/max": 81058,
+    "global_seqlen/mean": 79676.25,
+    "global_seqlen/min": 77603,
+    "global_seqlen/minmax_diff": 3455,
+    "num_turns/max": 2,
+    "num_turns/mean": 2,
+    "num_turns/min": 2,
+    "perf/mfu/actor": 0.250998537075344,
+    "perf/mfu/actor_infer": 0.2389402856300986,
+    "perf/throughput": 4564.076832222395,
+    "perf/time_per_step": 17.457254320848733,
+    "perf/total_num_tokens": 318705,
+    "prompt_length/clip_ratio": 0,
+    "prompt_length/max": 180,
+    "prompt_length/mean": 106.796875,
+    "prompt_length/min": 62,
+    "response/aborted_ratio": 0,
+    "response_length/clip_ratio": 0,
+    "response_length/max": 764,
+    "response_length/mean": 204.4384765625,
+    "response_length/min": 61,
+    "response_length_non_aborted/clip_ratio": 0,
+    "response_length_non_aborted/max": 764,
+    "response_length_non_aborted/mean": 204.4384765625,
+    "response_length_non_aborted/min": 61,
+    "rollout_corr/chi2_seq": 0.2194019556045532,
+    "rollout_corr/chi2_token": 0.0008987188339233398,
+    "rollout_corr/k3_kl": 0.0004420288896653801,
+    "rollout_corr/kl": 0.00044046822586096823,
+    "rollout_corr/log_ppl_abs_diff": 0.001773871132172644,
+    "rollout_corr/log_ppl_diff": 0.0004672963987104594,
+    "rollout_corr/log_ppl_diff_max": 0.010557204484939575,
+    "rollout_corr/log_ppl_diff_min": -0.008633062243461609,
+    "rollout_corr/ppl_ratio": 1.0004700422286987,
+    "rollout_corr/rollout_log_ppl": 0.11469781398773192,
+    "rollout_corr/rollout_ppl": 1.1250696182250977,
+    "rollout_corr/training_log_ppl": 0.1151650995016098,
+    "rollout_corr/training_ppl": 1.1256039142608645,
+    "timing_per_token_ms/adv": 0.0002757075888988515,
+    "timing_per_token_ms/gen": 0.02993564730569595,
+    "timing_per_token_ms/update_actor": 0.014710597599766569,
+    "timing_s/adv": 0.08786938712000847,
+    "timing_s/agent_loop/compute_score/max": 0.21648446610197425,
+    "timing_s/agent_loop/compute_score/mean": 0.04612975146892495,
+    "timing_s/agent_loop/compute_score/min": 0.007594834081828594,
+    "timing_s/agent_loop/generate_sequences/max": 4.334882324095815,
+    "timing_s/agent_loop/generate_sequences/mean": 2.636269260151039,
+    "timing_s/agent_loop/generate_sequences/min": 0.7331548449583352,
+    "timing_s/agent_loop/num_preempted/max": -1,
+    "timing_s/agent_loop/num_preempted/mean": -1,
+    "timing_s/agent_loop/num_preempted/min": -1,
+    "timing_s/agent_loop/slowest/compute_score": 0.014249870087951422,
+    "timing_s/agent_loop/slowest/generate_sequences": 4.334882324095815,
+    "timing_s/agent_loop/slowest/num_preempted": -1,
+    "timing_s/agent_loop/slowest/prompt_length": 107,
+    "timing_s/agent_loop/slowest/response_length": 764,
+    "timing_s/agent_loop/slowest/tool_calls": 0,
+    "timing_s/agent_loop/tool_calls/max": 0,
+    "timing_s/agent_loop/tool_calls/mean": 0,
+    "timing_s/agent_loop/tool_calls/min": 0,
+    "timing_s/gen": 6.266878085210919,
+    "timing_s/old_log_prob": 2.8558359290473163,
+    "timing_s/reward": 2.445373684167862e-05,
+    "timing_s/save_checkpoint": 7.457081372849643,
+    "timing_s/start_profile": 0.00013842014595866203,
+    "timing_s/step": 17.457254320848733,
+    "timing_s/stop_profile": 0.00014697574079036713,
+    "timing_s/testing": 11.240334640722722,
+    "timing_s/update_actor": 4.688341008033603,
+    "timing_s/update_weights": 3.3034514519385993,
+    "training/epoch": 1,
+    "training/global_step": 64,
+    "training/rollout_actor_probs_pearson_corr": 0.9983522891998292,
+    "training/rollout_probs_diff_max": 0.24135419726371765,
+    "training/rollout_probs_diff_mean": 0.00305192987434566,
+    "training/rollout_probs_diff_std": 0.010479725897312164,
+    "training/rollout_probs_diff_valid": 1,
+    "val-aux/num_turns/max": 2,
+    "val-aux/num_turns/mean": 2,
+    "val-aux/num_turns/min": 2,
+    "val-aux/openai/gsm8k/reward/mean@1": 0.7664897649734648,
+    "val-core/openai/gsm8k/acc/mean@1": 0.7664897649734648
+  }
+}
