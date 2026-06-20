@@ -28,7 +28,7 @@
 3. **B4 — JOINT GSM8K↔Big-Math comparative HTML** (the headline science): does the dense-gradient staleness budget / activation low-rank-ness / nature-of-learning DIFFER between an easy (GSM8K) and a hard (Big-Math) task? Dataset-tagged, tensors NEVER merged.
 4. analyst verdict → log-writer → draft PR (`exp/38-dense-drift-probe` → `vast-ai-workload`).
 
-**The full step-by-step is in the plan's "⏭️ NEXT BIG THING" section.** Everything here is laptop-only and free — the capture phase is DONE.
+**The full COLD-START step-by-step is the plan's "⏭️ NEXT BIG THING — ANALYSIS RUNBOOK (cold-start, self-contained)" section** (`.claude/plans/38.md`): scientific frame + exact commands + the Big-Math epoch-2 gotcha + the B4 joint-report recipe + deliverable acceptance + hard rules. A fresh agent can run the whole analysis from it. Everything is laptop-only and free — the capture phase is DONE.
 
 ---
 
