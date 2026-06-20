@@ -1,29 +1,27 @@
-# EXP-37E — delayed_ef merger (B2, the best NON-signed_ema method) at latency 20/20, 100 steps.
-# Operator-directed sibling of issue #37. "Just to check what happens" to B2 at high latency.
-# CORRECTED from ef_powersgd -> delayed_ef (operator caught a stale-memory error: EXP-26
-# ef_powersgd 0.7210 was SUPERSEDED by EXP-30 B2 delayed_ef 0.7528 = best realistic comm-eff).
+# EXP-37E — delayed_ef merger (B2 family) at latency 20/20, beta_anc=0.5, 100 steps.
+# Operator-directed sibling of issue #37. Tests the best non-signed_ema method (delayed_ef,
+# EXP-30 B2 val@50 0.7528 near-dense) at high latency, with a half-life-smoothed M_rep.
 experiment: EXP-37E
 issue: 37
 kind: experiment
 milestone: M6
 code_change: false
-wandb_project: verl_compression_research_accel_rebaseline   # overlays EXP-37/37B/37C/37D/36B/36C
-baseline_run: EXP-30   # B2 delayed_ef (issue #30) val@50 0.7528 @5/5 (near-dense); this = same B2 at 20/20
+wandb_project: verl_compression_research_accel_rebaseline
+baseline_run: EXP-30   # delayed_ef B2 (issue #30) val@50 0.7528 @5/5 beta_anc=0; this = delayed_ef @20/20 beta_anc=0.5
 cells:
   - id: 1
-    name: delayed-ef-cad20-delay20-100step
-    experiment_name: exp-37e-delayed-ef-cad20-delay20-100step
+    name: delayed-ef-cad20-delay20-beta05-100step
+    experiment_name: exp-37e-delayed-ef-cad20-delay20-beta05-100step
     launcher: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
-    env: {PROJECT_NAME: verl_compression_research_accel_rebaseline, EXPERIMENT_NAME: exp-37e-delayed-ef-cad20-delay20-100step, TOTAL_TRAINING_STEPS: 100, TEST_FREQ: 25}
-    merger: delayed_ef             # B2 best-proven (EXP-30, 0.7528 = best non-signed_ema, 0.0008 under dense)
-    anchor: cadence=20 delay_K=20  # high latency (user request) — overrides accel-base 5/5
-    trailing_hydra_args:           # banner LIES (echoes signed_ema/0.50/5/5) — verify resolved cmd
+    env: {PROJECT_NAME: verl_compression_research_accel_rebaseline, EXPERIMENT_NAME: exp-37e-delayed-ef-cad20-delay20-beta05-100step, TOTAL_TRAINING_STEPS: 100, TEST_FREQ: 25}
+    merger: delayed_ef
+    anchor: cadence=20 delay_K=20    # high latency (operator request)
+    beta_anc: 0.5                    # operator choice: signed_ema collapsed sharply at beta_anc=0 (EXP-37C)
+    trailing_hydra_args:             # banner LIES (echoes signed_ema/5/5) — verify resolved cmd
       - actor_rollout_ref.actor.comm_eff.spectral.correction_mode=delayed_ef
       - actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda=1.0
-      - actor_rollout_ref.actor.comm_eff.spectral.beta_anc=0.0
+      - actor_rollout_ref.actor.comm_eff.spectral.beta_anc=0.5
       - actor_rollout_ref.actor.comm_eff.anchor.cadence=20
       - actor_rollout_ref.actor.comm_eff.anchor.delay_K=20
-# Merger: delta(t)=M_rep-G_comp_ring(t-K); G_corr=G_comp+lambda*delta (lambda=1, beta_anc=0 => M_rep=latest G_anchor).
-# Carrier law (issue #30): B2's stability came from beta_anc=0 (short delta hold); 20/20 stretches the
-# held-delta autocorrelation to ~20 ticks -> tests if near-dense B2 survives 4x its proven 5/5 latency.
+# Merger: M_rep=EMA_0.5(G_anchor); delta(t)=M_rep-G_comp_ring(t-K); G_corr=G_comp+lambda*delta (lambda=1).
 # Latency realized at 20/20: anchor_backwards==10. First M_rep+Q+delta at tick 20 = step 10.
