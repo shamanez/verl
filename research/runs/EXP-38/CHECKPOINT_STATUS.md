@@ -76,9 +76,11 @@ WandB (cloud, always available): `shamanework-pl/verl_compression_research_accel
 ## 🧪 TWO-DATASET PLAN (operator's idea — keep STRICTLY separate)
 
 - **GSM8K** — `openai/gsm8k` — **DONE (this run, EXP-38)**. Data under `runs/EXP-38/`, tagged `DATASET.json:gsm8k`.
-- **Big-Math** — `gshasiri/Big-Math-RL-Verified-filtered` — **TODO, in a NEW session**: re-run the same
-  75-step dense drift+boundary probe on Big-Math, download all its data into a **SEPARATE** experiment dir
-  (e.g. `runs/EXP-39/` with its own `DATASET.json:big-math`), then run the dataset-tagged analysis.
+- **Big-Math** — `gshasiri/Big-Math-RL-Verified-filtered` — **TODO (EXP-38 ARM B; operator-manual)**: re-run the
+  same 75-step dense drift+boundary probe on Big-Math (deltas: resp 16384, validation OFF), download all its data
+  into the pre-built **`runs/EXP-38/big-math/`** arm (NOT a new experiment dir — **EXP-38 ONLY, do NOT create
+  EXP-39**), then run the dataset-tagged analysis. Run it operator-manual (out-of-band), like this GSM8K arm —
+  the orchestrator loop cannot drive a second run under an already-torn-down EXP-ID. Contract: plan §"ARM B — Big-Math continuation (v3)".
 - **Joint analysis** — once both exist, produce a combined/comparative report. The analysis engine stamps
   the dataset on the report title, header badge, findings JSON, and output filename
   (`exp38-dense-drift-<dataset>.html`) so the two are **never confused**.
