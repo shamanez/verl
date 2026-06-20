@@ -277,8 +277,12 @@ def boundary_rank_detail(idx, role, root):
     return out
 
 
-def boundary_subspace_drift(idx, role, root, r=R_LOCKED):
-    """Per boundary: subspace overlap o(t,t-k) vs k + a time series of o(t,t-k0)."""
+def boundary_subspace_drift(idx, role, root, r=R_LOCKED, r_list=(1, 5, R_LOCKED)):
+    """Per boundary: top-r subspace overlap o(t,t-k) vs lag k, PLUS the same overlap
+    at smaller ranks r in {1,5,77} (the boundary activation is ~rank-1, so the top-1/5
+    overlap of the ENERGETIC subspace is more decision-relevant than the noise-padded
+    top-77), the principal angles (smallest/largest) between the top-r subspaces, and
+    an overlap time series at the smallest available lag (for periodicity)."""
     out = {}
     if role not in idx:
         return out
@@ -288,10 +292,20 @@ def boundary_subspace_drift(idx, role, root, r=R_LOCKED):
         gsmap = {t: gs for t, gs, _ in series}
         tset = set(ticks)
         per_k = {k: [] for k in LAGS}
+        per_k_multi = {rr: {k: [] for k in LAGS} for rr in r_list}
+        pa_first = {k: [] for k in LAGS}  # smallest principal angle (deg) — most-aligned dir
+        pa_last = {k: [] for k in LAGS}   # largest principal angle (deg) — least-aligned dir
         for t in ticks:
             for k in LAGS:
                 if (t - k) in tset:
-                    per_k[k].append(subspace_overlap(subs[t], subs[t - k]))
+                    A, B = subs[t], subs[t - k]
+                    per_k[k].append(subspace_overlap(A, B))
+                    for rr in r_list:
+                        per_k_multi[rr][k].append(subspace_overlap(A[:rr], B[:rr]))
+                    ang = principal_angles_deg(A, B)
+                    if ang.size:
+                        pa_first[k].append(float(ang.min()))
+                        pa_last[k].append(float(ang.max()))
         # overlap time series at the smallest available lag (for periodicity).
         base_k = next((k for k in LAGS if per_k[k]), None)
         ts = []
@@ -299,7 +313,17 @@ def boundary_subspace_drift(idx, role, root, r=R_LOCKED):
             for t in ticks:
                 if (t - base_k) in tset:
                     ts.append((gsmap[t], subspace_overlap(subs[t], subs[t - base_k])))
-        out[tgt] = {"per_k": per_k, "series": ts, "base_k": base_k}
+        # adjacent-snapshot overlap series: o(snapshot_i, snapshot_{i-1}) over ALL captured
+        # snapshots (~20 pts) — robust periodicity signal where the fixed-lag series is too
+        # short (consecutive ticks exist only at steps 1-3). NB the snapshot spacing in ticks
+        # is uneven (dense early, every-5-steps later), so this is the snapshot-sequence view.
+        ordered = sorted(ticks)
+        adj = []
+        for i in range(1, len(ordered)):
+            adj.append((gsmap[ordered[i]], subspace_overlap(subs[ordered[i]], subs[ordered[i - 1]])))
+        out[tgt] = {"per_k": per_k, "per_k_multi": per_k_multi,
+                    "pa_first": pa_first, "pa_last": pa_last,
+                    "series": ts, "adj_series": adj, "base_k": base_k}
     return out
 
 
@@ -314,6 +338,113 @@ def autocorr_fft(series_vals):
     fp = np.abs(np.fft.rfft(x)) ** 2
     fr = np.fft.rfftfreq(x.size, d=1.0)
     return list(range(len(ac))), ac.tolist(), fr.tolist(), fp.tolist()
+
+
+def dominant_period(series_vals):
+    """Dominant non-DC period (in snapshot-index units) + its share of AC power +
+    a crude smooth-vs-periodic flag. Returns dict (or None if too short)."""
+    x = np.asarray(series_vals, dtype=np.float64)
+    n = x.size
+    if n < 6:
+        return None
+    x = x - x.mean()
+    fp = np.abs(np.fft.rfft(x)) ** 2
+    fr = np.fft.rfftfreq(n, d=1.0)
+    if len(fp) <= 1 or fp[1:].sum() <= 0:
+        return None
+    k = 1 + int(np.argmax(fp[1:]))  # skip DC
+    frac = float(fp[k] / fp[1:].sum())
+    period = float(1.0 / fr[k]) if fr[k] > 0 else None
+    # "periodic" if a single non-DC frequency dominates the AC power; else "smooth/aperiodic".
+    return {"period": period, "power_frac": frac, "n": n,
+            "verdict": "periodic" if frac >= 0.5 else "smooth/aperiodic"}
+
+
+# ----------------------------------------------------------------------------- #
+# capture-schedule bookkeeping (per-lag sample counts + the early/late confound)
+# ----------------------------------------------------------------------------- #
+def pairs_per_lag(idx, role="g_dense"):
+    """Per lag k: pairs PER matrix, total values feeding the median, and the
+    global-step RANGE the pairs span. The accel capture schedule dumps consecutive
+    ticks ONLY at steps 1-3 (ticks 0-5), so small lags (k<=5) are sampled almost
+    entirely in EARLY training while k>=10 span mid/late — a confound to surface,
+    not hide. Tick sets are identical across matrices (rank-stable selection)."""
+    info = {k: {"pairs_per_matrix": 0, "n_values": 0, "gs_lo": None, "gs_hi": None} for k in LAGS}
+    if role not in idx or not idx[role]:
+        return info
+    targets = list(idx[role])
+    n_mat = len(targets)
+    series0 = idx[role][targets[0]]
+    ticks0 = [t for t, _, _ in series0]
+    gs0 = {t: gs for t, gs, _ in series0}
+    tset0 = set(ticks0)
+    for t in ticks0:
+        for k in LAGS:
+            if (t - k) in tset0:
+                info[k]["pairs_per_matrix"] += 1
+                lo, hi = sorted((gs0[t - k], gs0[t]))
+                info[k]["gs_lo"] = lo if info[k]["gs_lo"] is None else min(info[k]["gs_lo"], lo)
+                info[k]["gs_hi"] = hi if info[k]["gs_hi"] is None else max(info[k]["gs_hi"], hi)
+    for k in LAGS:
+        info[k]["n_values"] = info[k]["pairs_per_matrix"] * n_mat
+    return info
+
+
+# ----------------------------------------------------------------------------- #
+# H2 timescale comparison (behaviour-signal drift vs the smooth weight drift)
+# ----------------------------------------------------------------------------- #
+def _half_lag(norm):
+    """Smallest lag at which a normalized [0,1] drift curve reaches 0.5 (linear
+    interp between points). Smaller = the quantity front-loads its drift = faster."""
+    ks = sorted(norm)
+    if not ks:
+        return None
+    if norm[ks[0]] >= 0.5:
+        return float(ks[0])
+    prev_k, prev_v = ks[0], norm[ks[0]]
+    for k in ks[1:]:
+        v = norm[k]
+        if v >= 0.5:
+            return float(prev_k + (0.5 - prev_v) * (k - prev_k) / (v - prev_v)) if v != prev_v else float(k)
+        prev_k, prev_v = k, v
+    return float(ks[-1])  # sentinel: never reaches 0.5 within range -> slowest
+
+
+def behaviour_drift_vs_lag(grpo, keys, lags_steps=(1, 2, 5, 10, 20)):
+    """Per behaviour signal: lag-k drift D(k)=median_t |x_t - x_{t-k}| (GLOBAL-STEP
+    lag), normalized to its own max-lag value, + the half-drift lag. Used to test
+    H2: does any rollout/logprob/response signal realize its drift on a comparable-
+    or-faster timescale than the (smooth, cumulative) weight drift?"""
+    out = {}
+    for key in keys:
+        ser = grpo.get(key)
+        if not ser:
+            continue
+        d = {int(s): float(v) for s, v in ser}
+        steps = sorted(d)
+        drift, n = {}, {}
+        for k in lags_steps:
+            diffs = [abs(d[s] - d[s - k]) for s in steps if (s - k) in d]
+            if diffs:
+                drift[k] = float(np.median(diffs))
+                n[k] = len(diffs)
+        if len(drift) < 2:
+            continue
+        base = drift[max(drift)]
+        norm = {k: (drift[k] / base if base > 0 else 0.0) for k in drift}
+        out[key] = {"drift": drift, "norm": norm, "n": n, "half_lag": _half_lag(norm)}
+    return out
+
+
+def weight_drift_normalized(wper_k):
+    """Median weight-drift curve normalized to its max-lag value, on a GLOBAL-STEP
+    lag axis (tick lag / TICKS_PER_STEP), + the half-drift lag. The H2 baseline."""
+    med = {k: float(np.median(v)) for k, v in wper_k.items() if v}
+    if len(med) < 2:
+        return {"norm": {}, "half_lag": None, "median": med}
+    base = med[max(med)]
+    norm = {k / TICKS_PER_STEP: (med[k] / base if base > 0 else 0.0) for k in med}
+    return {"norm": norm, "half_lag": _half_lag(norm), "median": med}
 
 
 # ----------------------------------------------------------------------------- #
