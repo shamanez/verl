@@ -1,0 +1,9 @@
+{
+  "dataset": "big-math",
+  "dataset_hf": "gshasiri/Big-Math-RL-Verified-filtered",
+  "status": "PLACEHOLDER — NOT YET RUN. This is the pre-named home for the future Big-Math sibling run.",
+  "experiment_id": "EXP-38 / big-math arm",
+  "intended_run": "Same 75-step dense GRPO temporal-drift + boundary probe as the gsm8k arm, on Qwen2.5-1.5B-Instruct, accel surface, comm_eff OFF, drift_probe + boundary_probe ON. Reuse exp/38-dense-drift-probe instrumentation + scripts/exp38_drift_analysis.py (dataset-aware).",
+  "where_to_put_data": "When the Big-Math run completes (in a NEW session), download its captures/sidecars/train.log into THIS directory mirroring ../gsm8k/ (captures/rank0/manifest.jsonl + tick_*/<role>/*.pt, sidecar_grpo.jsonl, sidecar_layernorms.jsonl, train.log). Then run: python3 research/scripts/exp38_drift_analysis.py research/runs/EXP-38/big-math  (dataset auto-read from this DATASET.json) -> research/reports/comm-eff-grpo/exp38-dense-drift-big-math.html",
+  "DO_NOT_MIX": "Big-Math data lives ONLY here, GSM8K data lives ONLY in ../gsm8k/. NEVER merge tensors or drift curves across the two datasets. The joint/comparative report keeps them in clearly-separated, dataset-tagged sections."
+}

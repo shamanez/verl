@@ -31,19 +31,29 @@
 ### To run step 1+2 when unblocked (single command, dataset auto-detected from DATASET.json):
 ```bash
 cd /Users/shamane/Documents/verl/research
-python3 scripts/exp38_drift_analysis.py runs/EXP-38
+python3 scripts/exp38_drift_analysis.py runs/EXP-38/gsm8k     # note the dataset subdir
 #   → writes research/reports/comm-eff-grpo/exp38-dense-drift-gsm8k.html
 #   → writes research/reports/comm-eff-grpo/exp38-dense-drift-gsm8k_findings.json
-# GRPO signals are auto-read from runs/EXP-38/sidecar_grpo.jsonl (already fetched).
+# GRPO signals are auto-read from runs/EXP-38/gsm8k/sidecar_grpo.jsonl (already fetched).
 ```
 
 ---
 
 ## 📂 WHERE THE DATA IS (crystal clear — all on THIS laptop)
 
-Root: `/Users/shamane/Documents/verl/research/runs/EXP-38/`
+**Dataset-keyed layout** under `/Users/shamane/Documents/verl/research/runs/EXP-38/` — the two datasets
+live in SEPARATE subdirs so they can never be confused:
 
-| Path | What | Size |
+```
+runs/EXP-38/
+  CHECKPOINT_STATUS.md          <- this file (covers both arms)
+  gsm8k/                        <- GSM8K data (DONE — this run)
+  big-math/                     <- Big-Math data (PLACEHOLDER for the future sibling run; see big-math/README.md)
+```
+
+GSM8K artifacts, all under `runs/EXP-38/gsm8k/`:
+
+| Path (under `runs/EXP-38/gsm8k/`) | What | Size |
 |---|---|---|
 | `captures/rank0/manifest.jsonl` | manifest — 1 row per dumped tensor (role, target, tick, global_step, shape, norm, path) | 1071 rows |
 | `captures/rank0/tick_<gs>_<tick>/<role>/<name>.pt` | the fp32 tensors: roles `theta` / `g_dense` / `update_vector` (15 matrices) + `boundary_h` / `boundary_grad_h` (3 boundaries) | **16.15 GB** |
@@ -53,12 +63,11 @@ Root: `/Users/shamane/Documents/verl/research/runs/EXP-38/`
 | `box_run/` | provenance copy of the on-box run dir (train.log, done.flag, boot.log) | small |
 | `handles/41763713.json` | the (now destroyed) Vast box handle | — |
 | `DATASET.json` | **the dataset stamp = gsm8k** | — |
-| `CHECKPOINT_STATUS.md` | this file | — |
 
-**⚠️ The 16 GB `captures/` are gitignored (local-only) and are now the SOLE copy** (the box is
+**⚠️ The 16 GB `gsm8k/captures/` are gitignored (local-only) and are now the SOLE copy** (the box is
 destroyed). They live only at the path above. Do **not** `git clean -fdx` this tree, and consider a
-backup before the analysis if the laptop is at risk. Everything else (scripts, this doc, ledger,
-PROGRESS, the `exp/38` branch) is in git.
+backup before the analysis if the laptop is at risk. Everything else (scripts, this doc, the small
+sidecars/handle, the `exp/38` branch) is in git.
 
 WandB (cloud, always available): `shamanework-pl/verl_compression_research_accel_rebaseline/runs/mhegvmbs`.
 

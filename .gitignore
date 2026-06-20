@@ -146,3 +146,7 @@ research/refs/*.pdf
 research/runs/*/captures/
 research/runs/*/metrics/onbox/
 research/runs/*/metrics/incoming.log
+# Dataset-keyed subdir layout (e.g. runs/EXP-38/<dataset>/captures/) — same ignore, one level deeper
+research/runs/*/*/captures/
+research/runs/*/*/metrics/onbox/
+research/runs/*/*/metrics/incoming.log
