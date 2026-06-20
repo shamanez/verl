@@ -383,23 +383,37 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir", help="runs/EXP-38")
     ap.add_argument("--captures", default=None, help="capture dir (default <run_dir>/captures)")
-    ap.add_argument("--out", default="research/reports/comm-eff-grpo/exp38-dense-drift.html")
+    ap.add_argument("--dataset", default=None,
+                    help="dataset tag (gsm8k|big-math|...). Auto-read from <run_dir>/DATASET.json if present, "
+                         "else 'gsm8k'. STAMPED on the report + findings + output filename so two datasets "
+                         "are NEVER confused.")
+    ap.add_argument("--out", default=None,
+                    help="output HTML (default research/reports/comm-eff-grpo/exp38-dense-drift-<dataset>.html)")
     ap.add_argument("--wandb-run", default=None)
     args = ap.parse_args()
+    # Resolve the dataset tag: CLI > DATASET.json > 'gsm8k'. This is the anti-mixing guard.
+    dataset = args.dataset
+    if dataset is None:
+        dj = os.path.join(args.run_dir, "DATASET.json")
+        if os.path.exists(dj):
+            dataset = json.load(open(dj)).get("dataset", "gsm8k")
+        else:
+            dataset = "gsm8k"
+    out = args.out or f"research/reports/comm-eff-grpo/exp38-dense-drift-{dataset}.html"
     cap = args.captures or os.path.join(args.run_dir, "captures")
     rows, root = load_manifest(cap)
     rows = filter_present(rows, root)
     idx = index_by_role(rows)
-    print(f"[exp38] manifest rows={len(rows)} roles={sorted(idx.keys())}")
+    print(f"[exp38] dataset={dataset} manifest rows={len(rows)} roles={sorted(idx.keys())}")
     for role in idx:
         ntgt = len(idx[role])
         nt = sum(len(v) for v in idx[role].values())
         print(f"  role={role:16s} targets={ntgt:3d} dumps={nt}")
     # The full computation + HTML render is invoked from build_report (added once
     # the real manifest shape is confirmed against the first captures).
-    from exp38_report import build_report  # noqa: E402  (sibling module, written after data lands)
+    from exp38_report import build_report  # noqa: E402  (sibling module)
 
-    build_report(args.run_dir, cap, root, rows, idx, args.out, args.wandb_run)
+    build_report(args.run_dir, cap, root, rows, idx, out, args.wandb_run, dataset)
 
 
 if __name__ == "__main__":

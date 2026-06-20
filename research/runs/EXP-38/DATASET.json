@@ -1,0 +1,12 @@
+{
+  "dataset": "gsm8k",
+  "dataset_hf": "openai/gsm8k",
+  "dataset_note": "GSM8K grade-school math. verl-preprocessed to /root/data/gsm8k/{train,test}.parquet on the box (7473 train / 1319 test). This is the ONLY dataset used in EXP-38.",
+  "experiment_id": "EXP-38",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "surface": "accel (response 2048, use_dynamic_bsz, rollout TP=1, gpu_mem_util 0.55, ppo_max_token 24576, train_batch 128, ppo_mini 64, n=8, lr 1e-6, total_epochs 2)",
+  "run_kind": "dense GRPO (comm_eff.enabled=false) temporal-drift capture, 75 global steps = 150 optimizer ticks",
+  "wandb": "shamanework-pl/verl_compression_research_accel_rebaseline/runs/mhegvmbs",
+  "vals": {"v25": 0.7520849128127369, "v50": 0.7664897649734648, "v75": 0.7687642153146323},
+  "DO_NOT_MIX": "All EXP-38 captures/sidecars/logs under runs/EXP-38/ are GSM8K ONLY. A future Big-Math run (gshasiri/Big-Math-RL-Verified-filtered) MUST live under a SEPARATE experiment dir with its own DATASET.json. The joint analysis keeps the two datasets in clearly-separated, dataset-tagged sections and NEVER merges tensors across datasets."
+}
