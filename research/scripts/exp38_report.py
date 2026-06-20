@@ -65,6 +65,14 @@ def build_report(run_dir, cap, root, rows, idx, out_path, wandb_run, dataset="gs
 
     plots = {}
     findings = {"dataset": dataset}
+    dataset_key = str(dataset).lower()
+    has_epoch2_boundary = dataset_key == "gsm8k"
+    findings["epoch2_step"] = EPOCH2_STEP if has_epoch2_boundary else None
+    findings["epoch2_note"] = (
+        "GSM8K crosses epoch 2 around global step 58."
+        if has_epoch2_boundary
+        else "No epoch-2 boundary is crossed in this 75-step Big-Math run."
+    )
 
     # ---------- gradient drift vs lag (H1) ----------
     gper_k, gper_matrix = A.gradient_drift_vs_lag(idx, root)
@@ -141,7 +149,8 @@ def build_report(run_dir, cap, root, rows, idx, out_path, wandb_run, dataset="gs
             xs = sorted(bystep)
             ax.plot(xs, [np.median(bystep[s]) for s in xs], "k-o", lw=2, label="median rank-for-90% energy")
             ax.axhline(R_LOCKED, color="#c0392b", ls="--", label=f"PowerSGD r={R_LOCKED}")
-            ax.axvline(EPOCH2_STEP, color="#e67e22", ls=":", label="epoch-2 (~step 58)")
+            if has_epoch2_boundary:
+                ax.axvline(EPOCH2_STEP, color="#e67e22", ls=":", label="epoch-2 (~step 58)")
             ax.set_xlabel("global step")
             ax.set_ylabel("rank")
             ax.set_title("Dense gradient effective rank over training")
@@ -150,10 +159,11 @@ def build_report(run_dir, cap, root, rows, idx, out_path, wandb_run, dataset="gs
 
         plots["grad_rank"] = _fig(_p_grank)
         # epoch-boundary shift + low-rank-vs-r summary
-        pre = [r["rank90"] for recs in grank.values() for r in recs if r["global_step"] <= EPOCH2_STEP]
-        post = [r["rank90"] for recs in grank.values() for r in recs if r["global_step"] > EPOCH2_STEP]
-        findings["grad_rank90_pre_epoch2"] = _med(pre)
-        findings["grad_rank90_post_epoch2"] = _med(post)
+        if has_epoch2_boundary:
+            pre = [r["rank90"] for recs in grank.values() for r in recs if r["global_step"] <= EPOCH2_STEP]
+            post = [r["rank90"] for recs in grank.values() for r in recs if r["global_step"] > EPOCH2_STEP]
+            findings["grad_rank90_pre_epoch2"] = _med(pre)
+            findings["grad_rank90_post_epoch2"] = _med(post)
         findings["grad_rank90_median"] = _med([r["rank90"] for recs in grank.values() for r in recs])
 
     # ---------- boundary activation: low-rank + subspace drift + periodicity (H3) ----------
@@ -296,7 +306,8 @@ def build_report(run_dir, cap, root, rows, idx, out_path, wandb_run, dataset="gs
                 if grpo.get(k):
                     xs, ys = zip(*sorted(grpo[k]))
                     (ax if "reward" in k else ax2).plot(xs, ys, "-o", color=col, label=k, ms=3)
-            ax.axvline(EPOCH2_STEP, color="#e67e22", ls=":")
+            if has_epoch2_boundary:
+                ax.axvline(EPOCH2_STEP, color="#e67e22", ls=":")
             ax.set_xlabel("global step")
             ax.set_ylabel("reward mean", color="#27ae60")
             ax2.set_ylabel("response length mean", color="#c0392b")
@@ -499,6 +510,40 @@ def _write_html(out_path, run_dir, rows, idx, plots, findings, grpo_present, dat
                         and not (isinstance(f.get("boundary_h_top1_energy_share_median"), float)
                                  and math.isnan(f["boundary_h_top1_energy_share_median"]))
                         and f["boundary_h_top1_energy_share_median"] >= 0.5)
+    has_epoch2_boundary = f.get("epoch2_step") is not None
+    response_cap = "16384" if str(dataset).lower() == "big-math" else "2048"
+    if has_epoch2_boundary:
+        pre_epoch = f.get("grad_rank90_pre_epoch2")
+        post_epoch = f.get("grad_rank90_post_epoch2")
+        shifted = (
+            pre_epoch is not None
+            and post_epoch is not None
+            and not (isinstance(pre_epoch, float) and math.isnan(pre_epoch))
+            and not (isinstance(post_epoch, float) and math.isnan(post_epoch))
+            and abs(pre_epoch - post_epoch) > 5
+        )
+        grad_rank_caption = (
+            "Dense-gradient stable rank + median rank-for-90%-energy over training, vs r=77 "
+            "and the GSM8K epoch-2 boundary."
+        )
+        grad_epoch_sentence = (
+            f"Across the GSM8K epoch-2 boundary (~step 58): pre ≈ {_safe(pre_epoch,1)}, "
+            f"post ≈ {_safe(post_epoch,1)} — "
+            f"{'a visible shift at the epoch boundary' if shifted else 'no large shift at the epoch boundary'}."
+        )
+        grpo_caption = "Dense GRPO trajectory — reward and response-length over training (GSM8K epoch-2 boundary marked)."
+        v2b_epoch = f"; pre/post epoch-2 ≈ {_safe(pre_epoch,1)}/{_safe(post_epoch,1)}"
+    else:
+        grad_rank_caption = (
+            "Dense-gradient stable rank + median rank-for-90%-energy over training, vs r=77 "
+            "(no Big-Math epoch-2 split)."
+        )
+        grad_epoch_sentence = (
+            "Big-Math does not cross an epoch boundary in this 75-step run (train cap 20000 gives "
+            "about 156 steps per epoch), so no epoch-2 split is reported."
+        )
+        grpo_caption = "Dense GRPO trajectory — reward and response-length over training (no epoch-2 boundary for this dataset)."
+        v2b_epoch = "; no epoch-2 split for this dataset"
     grad_lowrank = (f.get("grad_rank90_median") is not None and f["grad_rank90_median"] <= R_LOCKED * 1.15)
     o20 = ov.get(20)
     q_freezable = (o20 is not None and not (isinstance(o20, float) and math.isnan(o20)) and o20 >= 0.9)
@@ -544,7 +589,7 @@ def _write_html(out_path, run_dir, rows, idx, plots, findings, grpo_present, dat
 <p class="sub">How fast does the on-policy GRPO learning signal drift in time — in gradient space, the
 boundary-activation subspace, and rollout/behaviour space — and what does that imply for the next
 communication-efficient pipeline-parallel GRPO method? <b>This report covers the {ds} dataset ONLY.</b></p>
-<p class="sub">Qwen2.5-1.5B-Instruct · {ds} · accel surface (resp 2048, dynamic-bsz, TP1) · <b>dense</b>
+<p class="sub">Qwen2.5-1.5B-Instruct · {ds} · accel surface (response cap {response_cap}, dynamic-bsz, TP1) · <b>dense</b>
 (comm_eff OFF) · 75 global steps = 150 optimizer ticks · n=1 trajectory · lag axis in optimizer ticks
 (2 ticks/global-step ⇒ k≈5 ≙ the stable 5/5 anchor, k≈20 ≙ the broken 20/20 anchor, k≈40 ≙ beyond).</p>
 
@@ -598,10 +643,9 @@ term SFT also has. {'Because gap 1 alone already de-correlates sharply by k≈20
 """)
 
     parts.append(f"""<h2><span class="num">3</span>Gradient effective rank over training (nature of learning)</h2>
-{_img(plots,'grad_rank','Dense-gradient stable rank + median rank-for-90%-energy over training, vs r=77 and the epoch-2 boundary.')}
+{_img(plots,'grad_rank',grad_rank_caption)}
 <p>Median dense-gradient rank-for-90%-energy ≈ <b>{_safe(f.get('grad_rank90_median'),1)}</b> (vs the locked
-PowerSGD rank r={R_LOCKED}). Across the GSM8K epoch-2 boundary (~step 58): pre ≈ {_safe(f.get('grad_rank90_pre_epoch2'),1)},
-post ≈ {_safe(f.get('grad_rank90_post_epoch2'),1)} — {'a visible shift at the epoch boundary' if (f.get('grad_rank90_pre_epoch2') and f.get('grad_rank90_post_epoch2') and abs(f['grad_rank90_pre_epoch2']-f['grad_rank90_post_epoch2'])>5) else 'no large shift at the epoch boundary'}.
+PowerSGD rank r={R_LOCKED}). {grad_epoch_sentence}
 {'The dense gradient is effectively low-rank (≤ r), so a rank-r codec captures most of its energy.' if grad_lowrank else 'The dense gradient is higher-rank than r — a rank-r gradient codec discards real energy.'}</p>
 """)
 
@@ -623,7 +667,7 @@ right compression primitive.</p>
 """)
 
     parts.append(f"""<h2><span class="num">6</span>GRPO-signal correlation (H2: gradient-space vs behaviour-space danger)</h2>
-{_img(plots,'grpo','Dense GRPO trajectory — reward and response-length over training (epoch-2 boundary marked).')}
+{_img(plots,'grpo',grpo_caption)}
 <p>Weight drift is necessarily smooth and monotone; the discriminating question (H2) is whether a
 rollout/logprob/response-behaviour signal drifts on a comparable-or-faster timescale. The captured GRPO
 signals ({', '.join('<code>'+html.escape(k)+'</code>' for k in list(grpo_present)[:6]) if grpo_present else 'none found — fetch WandB history into runs/EXP-38/sidecar_grpo.jsonl'}) are
@@ -669,7 +713,7 @@ The boundary-activation subspace {'rotates measurably with lag (a genuine codec-
 <p class="q">(v2-A) Is the boundary activation low-rank, and how fast does its top-r subspace rotate?</p>
 <p>rank-90% ≈ {_safe(f.get('boundary_h_rank90_median'),1)} (vs r={R_LOCKED}, H={HIDDEN}); subspace overlap o(t,t−20)={_safe(ov.get(20),3)} (§4), periodicity in §4.</p>
 <p class="q">(v2-B) Is the dense gradient low-rank, and how does its rank evolve?</p>
-<p>rank-90% median ≈ {_safe(f.get('grad_rank90_median'),1)}; pre/post epoch-2 ≈ {_safe(f.get('grad_rank90_pre_epoch2'),1)}/{_safe(f.get('grad_rank90_post_epoch2'),1)} (§3).</p>
+<p>rank-90% median ≈ {_safe(f.get('grad_rank90_median'),1)}{v2b_epoch} (§3).</p>
 <p class="q">(v2-synthesis) Activation space, gradient space, or both — and should the anchor be a slow Q calibrator?</p>
 <p>See §9.</p>
 </div>
