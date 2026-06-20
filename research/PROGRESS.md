@@ -47,3 +47,4 @@ Verdict (first-half): COLLAPSE at step 35 (earlier than EXP-37's ~step 61), with
 [2026-06-20T13:15:38+10:00] [research-planner #38] plan written
 [2026-06-20T13:16:25+10:00] [triage] dispatched 1 planner (#38), 0 issues already planned
 [2026-06-20T13:35:06+10:00] [research-planner #38] plan revised to v2 (75-step horizon + boundary-activation subspace probe + gradient-rank/future-research bundle + mandatory HTML deliverable)
+[2026-06-20T13:37:39+10:00] [operator] EXP-38 plan v2 (boundary-subspace + gradient-rank + 75 steps + strong HTML deliverable) committed ca54caf2 + pushed; issue #38 flipped status:approved per operator. Ready for orchestrator (NOT auto-launched — awaiting orchestrator /loop).
