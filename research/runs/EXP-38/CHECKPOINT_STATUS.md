@@ -28,8 +28,13 @@ tear down the GPU, then **STOP and wait** for the command to start analysis.
       - **Epoch-2 boundary crossed** — captures at gs 60/65/70/75 (epoch-2 ≈ step 58).
       - Matrices span depth × type: layers {6,13,20} attention (q/k/v/o) + layer 13 MLP (gate/up/down).
       - GRPO signals (reward, response_length, entropy, pg_clipfrac, ppo_kl, advantages) present for all 75 steps.
-- [ ] **All tensors downloaded to laptop** — IN PROGRESS (rsync of 16 GB to `runs/EXP-38/captures/`).
-- [ ] **GPU torn down** — pending full download + completeness confirm.
+- [x] **All artifacts downloaded to laptop + COMPLETENESS verified** — `runs/EXP-38/captures/` =
+      **1071/1071 `.pt` present, 0 missing, 16.15 GB**; manifest cross-check clean; integrity spot-loaded
+      (5 roles × early/mid/late ticks, all finite, correct shapes); `sidecar_layernorms.jsonl` (21 rows),
+      `sidecar_grpo.jsonl` (75 rows, all steps), `train.log` (514 KB) all local.
+- [x] **GPU torn down** — Vast team box `41763713` destroyed; **API-verified gone (0 live team instances)**;
+      ledger row flipped `TORN_DOWN` (skill missed the hand-written row format → flipped manually, per the
+      known ledger-can-lie gotcha). No GPU is now running.
 
 ## ⏸️ HELD for operator command (do NOT start until "go")
 
