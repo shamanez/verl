@@ -23,7 +23,7 @@
 
 ## ⏳ TO DO NEXT (HELD — do NOT start until operator says "go"; analyze GSM8K + Big-Math jointly)
 
-1. **B3 — Big-Math offline analysis + HTML** (laptop, free): `python3 scripts/exp38_drift_analysis.py runs/EXP-38/big-math` → `research/reports/comm-eff-grpo/exp38-dense-drift-big-math.html` (+ `_findings.json`).
+1. **B3 — Big-Math offline analysis + HTML** (laptop, free): `python3 scripts/exp38_drift_analysis.py runs/EXP-38/big-math --out reports/dense-run-behaviour/exp38-dense-drift-big-math.html` (+ `_findings.json`). **ALL EXP-38 analysis outputs (HTML, findings, plots, aux docs) go in `reports/dense-run-behaviour/`** — the dedicated output home.
 2. **ARM A (GSM8K) analysis** — same engine on `../gsm8k` (also HELD; see `../CHECKPOINT_STATUS.md`).
 3. **B4 — JOINT GSM8K↔Big-Math comparative HTML** (the headline science): does the dense-gradient staleness budget / activation low-rank-ness / nature-of-learning DIFFER between an easy (GSM8K) and a hard (Big-Math) task? Dataset-tagged, tensors NEVER merged.
 4. analyst verdict → log-writer → draft PR (`exp/38-dense-drift-probe` → `vast-ai-workload`).
