@@ -48,6 +48,8 @@ td.na{color:#bbb}
 ul{margin:8px 0 8px 2px;padding-left:20px}
 li{margin:5px 0}
 .kv{font-size:13.5px;color:#444;background:#f6f6f8;border-radius:8px;padding:10px 14px;margin:10px 0}
+.note{font-size:13.5px;color:#5a5a5a;background:#fff;border:1px dashed #cfcfcf;border-radius:8px;padding:9px 13px;margin:10px 0}
+.note b{color:#333}
 .foot{color:#999;font-size:12.5px;margin-top:40px;border-top:1px solid var(--line);padding-top:14px}
 .big{font-weight:700}
 .gap{color:var(--mut)}
@@ -69,7 +71,8 @@ li{margin:5px 0}
 <li><code>rollout_log_probs</code>: what vLLM recorded while generating, using a clean full-rank forward at the generator weights.</li>
 <li><code>old_log_probs</code> (the "actor" probs): what the FSDP actor gets when it re-forwards the same tokens.</li>
 </ul>
-<p>In this fork the actor re-forward is <b>not</b> clean. The code states <code>old_log_probs</code> "are from the MASKED path" (<code>transformer_impl.py:1209</code>), and the codec "gets the same mask in the old-logprob recompute and the actor-train forward" (<code>activation_mask.py:24</code>). For these EXP-37 runs the codec is PowerSGD activation projection at <code>rank=77</code> out of <code>hidden_size=1536</code>, about 5 percent of the dimensions kept. So:</p>
+<p>In this fork the actor re-forward is <b>not</b> clean. The fast circuit no longer uses random activation masking; the codec is PowerSGD-style low-rank projection (config: <code>mask.enabled=false</code>, <code>powersgd.enabled=true</code>, <code>rank=77</code>). A forward hook replaces each boundary block's hidden-state output <code>M</code> with its rank-77 projection <code>M_hat = (M @ Q) @ Q.T</code> (<code>powersgd_activation.py:173</code>), keeping only 77 of 1536 dimensions, about 5 percent. The actor recomputes <code>old_log_probs</code> through this projected forward, while vLLM generated through the clean full-rank forward, so the two disagree. So:</p>
+<p class="note"><b>Terminology.</b> The verl code calls the compressed fast forward the "masked path" (for example <code>transformer_impl.py:1209</code>: "old_log_probs are from the MASKED path", versus the anchor's "UNMASKED forward"). That is a generic label for "codec on" versus "codec off", inherited from when PRF masking was the codec. In these runs it means the PowerSGD projection, not random masking, which is disabled.</p>
 <p class="kv"><b>rollout_corr here = vLLM full-rank forward vs the actor's rank-77 projected forward.</b> It is a meter for how much the codec distorts the policy's own forward pass.</p>
 <p>The tab keys:</p>
 <ul>
