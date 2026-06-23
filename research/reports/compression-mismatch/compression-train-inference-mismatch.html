@@ -118,12 +118,16 @@
 <!-- ============ 0. HEADLINE VERDICT ============ -->
 <div class="headline">
 <p><strong>Verdict.</strong> The train&ndash;inference mismatch that our activation compression introduces is
-<strong>large in raw magnitude but tolerable, and it is already corrected.</strong> It is a <em>constant codec
+<strong>large in raw magnitude but tolerable &mdash; and the loss barely sees it.</strong> It is a <em>constant codec
 tax</em> on the trainer's forward pass &mdash; the compressed actor re-forward disagrees with the uncompressed vLLM
 generator (Pearson corr drops from <code>1.0</code> dense to <code>0.1&ndash;0.3</code>; surprise-KL rises from
 <code>&approx;0</code> to <code>4&ndash;20</code>) &mdash; yet that gap is <strong>statistically identical in the stable
-run and the collapsing run</strong>, so it provably does <em>not</em> drive the failure. It is neutralized at the loss
-by the standard RLVR fix: using the true vLLM rollout log-probs as the importance-sampling reference.</p>
+run and the collapsing run</strong>, so it provably does <em>not</em> drive the failure. The deeper reason it is benign:
+the GRPO ratio is computed between two passes through the <em>same</em> compressed forward
+(<code>recompute=true</code>, <code>bypass_mode=false</code>), so the codec distortion is <strong>common-mode and
+cancels</strong> in the ratio (&sect;2.6) &mdash; the very mechanism dense verl already relies on for the engine gap. The
+forward gap is a <em>diagnostic</em>, not a force on the gradient; compression's only real cost is a small backward-gradient
+tax (the ~0.04 parity gap).</p>
 <p>The thing that actually breaks the method is a <strong>different</strong> mismatch &mdash; the
 <strong>staleness of the slow anchor circuit's gradient</strong> (an off-policy, <em>biased</em> gradient for a
 defunct policy, transplanted with no IS correction). That is a property of the communication-saving mechanism
@@ -135,7 +139,7 @@ pipeline-parallel <em>inference</em>), flagged in &sect;2.5.</p>
 </div>
 
 <div class="verdict-grid">
-  <div class="vc tol"><p class="q">Compression&rarr;train-inference mismatch (the asked question)</p><p class="a">TOLERABLE &amp; corrected &mdash; not fundamental</p></div>
+  <div class="vc tol"><p class="q">Compression&rarr;train-inference mismatch (the asked question)</p><p class="a">TOLERABLE &mdash; common-mode in the loss, not fundamental</p></div>
   <div class="vc block"><p class="q">What is actually fundamental-ish</p><p class="a">Anchor-gradient staleness (a separate axis)</p></div>
   <div class="vc cond"><p class="q">Conditions for tolerability</p><p class="a">vLLM-logprob IS reference + K &lt; &tau; + uncompressed rollouts</p></div>
   <div class="vc risk"><p class="q">Trajectory-corruption risk today</p><p class="a">Low (rollouts uncompressed); high only under compressed PP inference</p></div>
@@ -274,13 +278,13 @@ policy moves. That is why it shows up as a constant tax (&sect;3.2).</p>
 <h3>2.3 &mdash; The decisive contrast: bias vs. variance</h3>
 <p>This is the heart of the matter and the reason Gap A is benign while Gap B is not.</p>
 <div class="callout note">
-<p><strong>Gap A converts the mismatch into variance you can cancel.</strong> Textbook off-policy correction reweights
-the data drawn from the behavior policy (<code>&pi;<sup>gen</sup></code>) so the estimator stays
-<em>unbiased</em> for <code>&nabla;J(&theta;<sub>t</sub>)</code>. You pay variance, but you estimate the
-<em>current</em> gradient. Our trainer does exactly this: it uses the true vLLM <code>rollout_log_probs</code> as the
-importance-ratio reference, so the large forward gap is reweighted away rather than baked into the step. (A small
-residual remains &mdash; the estimator is unbiased for the <em>compressed</em> policy we optimize, while we deploy the
-<em>uncompressed</em> one &mdash; but it is bounded and non-compounding; this is the codec tax, &sect;4.3.)</p>
+<p><strong>Gap A is kept out of the update entirely &mdash; not even paid for in variance.</strong> The textbook
+off-policy move reweights by an IS ratio against the behavior policy. Our trainer does something cheaper and stronger: it
+<em>recomputes</em> <code>old_log_prob</code> through the same compressed forward, so the GRPO ratio
+<code>&pi;<sup>comp</sup>(&theta;)/&pi;<sup>comp</sup>(&theta;<sub>old</sub>)</code> is <strong>common-mode</strong> and the
+codec distortion cancels <em>before</em> any reweighting (&sect;2.6). The vLLM logprob is available as a truncated-IS
+reference but is switched off in these runs and not needed. The only residual is a bounded perturbation on the
+<em>backward</em> gradient &mdash; the codec tax (&sect;4.3) &mdash; not an off-policy bias in the ratio.</p>
 </div>
 <div class="callout warn">
 <p><strong>Gap B converts the mismatch into bias you cannot cancel.</strong> The anchor gradient is a clean,
@@ -324,6 +328,51 @@ coherence), and a lossy boundary makes per-stage drift accumulate along the sequ
 &mdash; not the current one &mdash; is where compression-induced mismatch could flip from tolerable to fatal. It is out
 of scope for the present trainer but is the key risk to gate before moving generation onto the compressed path.</p>
 </div>
+
+<h3>2.6 &mdash; Why a forward gap this large does <em>not</em> collapse training (the common-mode answer)</h3>
+<p><strong>The paradox, stated sharply.</strong> Our logged forward gap (<code>rollout_corr</code> KL
+<code>4&ndash;20</code>, Pearson <code>0.1&ndash;0.3</code>) is <em>orders of magnitude larger</em> than the FP8
+(KL&nbsp;&approx;10<sup>&minus;2</sup>) and INT8 (KL&nbsp;&approx;10<sup>&minus;1</sup>) rollout mismatches that the
+literature documents collapsing runs (&sect;4). The naive theory &mdash; "a logprob difference makes training off-policy,
+and a gap this big must diverge" &mdash; predicts collapse. Yet <code>K=5</code> trains to 0.74, near dense 0.78. The
+resolution is <em>where the gap enters the loss</em>: it does not.</p>
+<p><strong>The GRPO ratio is recompute/recompute, so the codec is common-mode.</strong> EXP-37E config (verified in
+<code>train.log</code>): <code>recompute=true</code>, <code>bypass_mode=false</code>, <code>rollout_is=null</code>. So
+<code>old_log_prob</code> is recomputed by the actor's <em>own</em> (compressed) forward &mdash; not taken from vLLM &mdash;
+and the policy-gradient ratio is <code>exp(log_prob &minus; old_log_prob)</code> with <strong>both terms through the same
+compressed forward</strong> (<code>core_algos.py:1335</code>). The codec distortion therefore appears in numerator and
+denominator alike and <strong>cancels</strong>: at the first inner step <code>log_prob &equiv; old_log_prob</code>, so the
+ratio is exactly 1 regardless of how far the compressed forward sits from vLLM (verl issue&nbsp;#2088 documents this
+identity for the recompute path). The ratio measures the policy's <em>update in compressed space</em>, never the absolute
+compressed-vs-vLLM gap.</p>
+<div class="twocol">
+  <div class="pane a">
+    <div class="mode">what we run &mdash; stable</div>
+    <h4>Recompute / 3-policy (<code>bypass=false</code>)</h4>
+    <p>ratio = <code>&pi;<sup>comp</sup>(&theta;)&thinsp;/&thinsp;&pi;<sup>comp</sup>(&theta;<sub>old</sub>)</code>. Codec is
+    common-mode &rarr; cancels. The <code>rollout_corr</code> gap never reaches the gradient. <strong>Same structure dense
+    verl uses for the FSDP&ne;vLLM engine gap.</strong></p>
+  </div>
+  <div class="pane b">
+    <div class="mode">what collapses in the literature</div>
+    <h4>Bypass / 2-policy (<code>bypass=true</code>)</h4>
+    <p>ratio = <code>&pi;<sup>comp</sup>(&theta;)&thinsp;/&thinsp;&pi;<sup>vLLM</sup></code>. The full forward gap enters the
+    ratio undamped &rarr; needs TIS/clipping and still leaves a residual. This path is <strong>OFF</strong> here.</p>
+  </div>
+</div>
+<p><strong>So is it a "train&ndash;inference mismatch" or "just noise"?</strong> In the loss it is <em>neither</em>: not an
+engine off-policy mismatch (common-mode cancels it), and not literal stochastic noise (the codec is a deterministic,
+structured projection). It is a <em>structured, bounded perturbation that the recompute ratio renders inert</em>. What
+compression actually costs is a perturbation on the <em>backward</em> gradient <code>G<sub>comp</sub></code> &mdash; a small
+tilt of the descent direction, which the anchor/merger targets and which surfaces as the ~0.04 codec tax (&sect;4.3):
+slower convergence, not instability. So the user's intuition is right in effect &mdash; for the loss this behaves more like
+a bounded gradient perturbation than like the engine train&ndash;inference mismatch &mdash; with the precise mechanism being
+common-mode cancellation, not stochastic averaging.</p>
+<p><strong>Empirical corroboration.</strong> If the forward gap drove the dynamics it would track the failure; it does not
+(&sect;3.2): <code>rollout_corr</code> is statistically identical in stable <code>K=5</code> and collapsing
+<code>K=20</code>. The run that <em>does</em> collapse fails through Gap B (gradient staleness), which never appears in the
+forward-mismatch meter. The forward mismatch is loud on the dashboard and silent in the optimizer; the gradient staleness
+is the reverse.</p>
 
 <!-- ============ 3. EMPIRICAL ============ -->
 <h2><span class="num">3</span>Empirical evidence &mdash; EXP-37 and the dense-drift probe</h2>
@@ -494,21 +543,27 @@ activation at the boundary is <strong>rank-1</strong> (top-1 direction holds 99%
 the right primitive and r=77 is over-provisioned for the <em>forward</em> link &mdash; further evidence that the
 forward-side compression (Gap A) is cheap to get right, while the gradient-side staleness (Gap B) is the hard part.</p>
 
-<h3>3.4 &mdash; The correction is in the code, and it is the standard RLVR fix</h3>
-<p>The importance-ratio reference is the true vLLM behavior policy, not the projected actor forward:</p>
+<h3>3.4 &mdash; What the code actually does: recompute (common-mode), not a vLLM-referenced ratio</h3>
+<p>It is tempting to assume the trainer defends against Gap A with an importance-sampling reference to vLLM. In these runs
+it does something simpler that needs no such defense (&sect;2.6). Verified EXP-37E settings:
+<code>recompute=true</code>, <code>rollout_correction.bypass_mode=false</code>,
+<code>rollout_correction.rollout_is=null</code>:</p>
 <ul>
-<li><code>core_algos.py:2347</code> &mdash; <code>negative_approx_kl = log_prob &minus; rollout_log_prob</code> (ratio taken
-against the vLLM rollout policy).</li>
-<li><code>core_algos.py:2436</code> &mdash; bypass mode sets <code>old_log_prob = rollout_log_prob</code> (the trainer's
-behavior reference <em>is</em> the generator's logprobs).</li>
-<li><code>transformer_impl.py:1237&ndash;1238</code> &mdash; the anchor pass scores against
-<code>rollout_log_probs</code> (vLLM at the generator weights) preferred, <code>old_log_probs</code> fallback; it uses
-<code>anchor_pg_loss</code> with ratio&nbsp;&equiv;&nbsp;1 precisely so the compressed-path <code>old_log_probs</code>
-don't corrupt <code>G<sub>anchor</sub></code>.</li>
+<li><code>core_algos.py:1335&ndash;1338</code> &mdash; the GRPO ratio is <code>exp(log_prob &minus; old_log_prob)</code> with
+<code>old_log_prob</code> recomputed by the actor's compressed forward (not vLLM). Both terms share the codec &rArr;
+<strong>common-mode cancellation</strong>. The rollout-IS weight multiplies in only <em>if provided</em>
+(<code>:1363&ndash;1364</code>), and here it is <code>null</code> &mdash; so the vLLM gap never enters the loss.</li>
+<li><code>transformer_impl.py:1208&ndash;1210</code> &mdash; confirms the fast-path <code>old_log_probs</code> are "from the
+MASKED path" (the compressed forward), which is exactly what makes the ratio common-mode.</li>
+<li>The true vLLM <code>rollout_log_probs</code> <em>are</em> computed (<code>calculate_log_probs=True</code>, logged 201&times;
+in EXP-37E) but used only for (i) the <code>rollout_corr</code> diagnostic and (ii) the anchor loss, which runs
+<code>anchor_pg_loss</code> with ratio&nbsp;&equiv;&nbsp;1 against them (<code>transformer_impl.py:1237</code>) so the
+compressed <code>old_log_probs</code> can't corrupt <code>G<sub>anchor</sub></code>.</li>
 </ul>
-<p>In EXP-37E the <code>rollout_corr</code> family is logged 201&times;, i.e. the true rollout logprobs are stored and
-available as the reference every step. This is the same mechanism the broader RLVR literature uses for the
-vLLM&ne;FSDP gap (&sect;4).</p>
+<p>The standard RLVR truncated-IS fix (<code>bypass</code>/<code>rollout_is</code>; verl PR&nbsp;#2953; TRL activates TIS
+by default) is therefore <strong>available but unused</strong> here &mdash; the recompute structure already keeps Gap A out
+of the gradient. This is the same protective design the broader RLVR stack relies on for the vLLM&ne;FSDP gap (&sect;4); our
+compression merely makes the recomputed forward sit a little further from vLLM, which the common-mode ratio absorbs.</p>
 
 <!-- ============ 4. PRIOR WORK ============ -->
 <h2><span class="num">4</span>Prior work &mdash; situating our two gaps against the literature</h2>
@@ -643,6 +698,24 @@ B is a gradient transplanted from a defunct policy into the current step, DP-mea
 <code>K</code>, not any reweighting, is the binding knob. It is the part of our problem the external literature does not
 yet cover.</p>
 
+<h3>4.4 &mdash; Is there a "tolerable amount" of mismatch in the literature? Yes &mdash; but it is about alignment, not a KL number</h3>
+<p>The literature does <em>not</em> give a universal KL threshold below which training is safe. The consistent message is
+that tolerability is <strong>configuration-dependent</strong> and that <em>alignment</em> between the train and inference
+paths matters more than the raw divergence: NVIDIA's NeMo-RL treats a token multiplicative-probability-error band
+(&lt;&nbsp;1.03&ndash;1.05) as "safe"; FP8 rollouts typically cost &lt;1% when handled and "perform well when the model is
+strong and the task is simple" (LMSYS); and the robust fixes either <em>align</em> the engines (FP16, batch-invariant
+kernels, unified-FP8 &rarr; KL&nbsp;&rarr;&nbsp;0) or <em>reweight</em> the residual (TIS/MIS/GSPO), <em>extending</em> the
+tolerable band rather than living under a fixed cap. Qi et al.'s deployment-gap result shows IS can push tolerance up but
+never fully closes a forward gap.</p>
+<p>Mapping to us: the literature's "tolerable band" is measured on the <em>sampling/ratio</em> mismatch. Our forward gap is
+far above that band <em>as a raw number</em>, yet we are <strong>more</strong> tolerant than the band would suggest, because
+our protective structure is stronger than IS reweighting &mdash; the recompute ratio makes the gap <em>common-mode</em>
+(&sect;2.6) and sampling is clean. In the literature's own terms we have maximal <em>alignment on the loss-bearing
+ratio</em> (the trainer and its own "behavior" reference are the same compressed engine) even though the train-vs-generator
+<em>forward</em> is badly misaligned &mdash; and alignment-on-the-ratio is precisely what the literature says actually
+matters. So "how much mismatch is tolerable" is the wrong axis for us; "does the mismatch enter the loss-bearing ratio" is
+the right one, and ours does not.</p>
+
 <!-- ============ 5. VERDICT ============ -->
 <h2><span class="num">5</span>Verdict, conditions, and corrections</h2>
 <div class="callout ok">
@@ -654,8 +727,9 @@ staleness &mdash; which is a consequence of the communication-saving mechanism, 
 </div>
 <h3>Conditions under which it stays tolerable</h3>
 <ol>
-<li><strong>Use the true sampler logprobs as the IS reference</strong> (vLLM <code>rollout_log_probs</code>, not the
-projected <code>old_log_probs</code>). This is the default and it handles Gap A despite the large forward gap.</li>
+<li><strong>Recompute <code>old_log_prob</code> in the (compressed) trainer &mdash; keep <code>bypass_mode=false</code>.</strong>
+This makes the GRPO ratio common-mode, so the codec cancels and the large forward gap never enters the gradient (&sect;2.6).
+Truncated-IS to the vLLM logprob is available as a further safeguard but is not required here.</li>
 <li><strong>Keep anchor latency <code>K</code> below the policy-drift horizon <code>&tau;</code></strong> (Gap B). On
 GSM8K, <code>K=5</code> (cos&nbsp;&approx;0.18) is stable; <code>K=20</code> (cos&nbsp;&approx;0) fails. <code>&tau;</code>
 is <strong>task-dependent</strong> &mdash; near-zero on hard tasks (Big-Math), so K must be set per task.</li>
