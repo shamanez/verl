@@ -118,16 +118,16 @@
 <!-- ============ 0. HEADLINE VERDICT ============ -->
 <div class="headline">
 <p><strong>Verdict.</strong> The train&ndash;inference mismatch that our activation compression introduces is
-<strong>large in raw magnitude but tolerable &mdash; and the loss barely sees it.</strong> It is a <em>constant codec
+<strong>large in raw magnitude but tolerable &mdash; GRPO absorbs it <em>uncorrected</em>, at a bounded cost.</strong> It is a <em>constant codec
 tax</em> on the trainer's forward pass &mdash; the compressed actor re-forward disagrees with the uncompressed vLLM
 generator (Pearson corr drops from <code>1.0</code> dense to <code>0.1&ndash;0.3</code>; surprise-KL rises from
 <code>&approx;0</code> to <code>4&ndash;20</code>) &mdash; yet that gap is <strong>statistically identical in the stable
-run and the collapsing run</strong>, so it provably does <em>not</em> drive the failure. The deeper reason it is benign:
-the GRPO ratio is computed between two passes through the <em>same</em> compressed forward
-(<code>recompute=true</code>, <code>bypass_mode=false</code>), so the codec distortion is <strong>common-mode and
-cancels</strong> in the ratio (&sect;2.6) &mdash; the very mechanism dense verl already relies on for the engine gap. The
-forward gap is a <em>diagnostic</em>, not a force on the gradient; compression's only real cost is a small backward-gradient
-tax (the ~0.04 parity gap).</p>
+run and the collapsing run</strong>, so it provably does <em>not</em> drive the failure. Two things make it tolerable
+(&sect;2.6): (i) the GRPO ratio is recompute/recompute, so the codec is <strong>common-mode</strong> and cannot explode the
+inner ratio &mdash; the mechanism dense verl already relies on; and (ii) crucially, recompute does <em>not</em> remove the
+train&ndash;inference mismatch (the data is still vLLM-sampled), so we run with it <strong>uncorrected</strong> &mdash; and
+GRPO absorbs it because sampling is clean and the behavior policy is the <em>good, deployed</em> uncompressed model. It
+costs the ~0.04 parity gap, not a collapse. The standard corrector (truncated-IS) is available but unused here.</p>
 <p>The thing that actually breaks the method is a <strong>different</strong> mismatch &mdash; the
 <strong>staleness of the slow anchor circuit's gradient</strong> (an off-policy, <em>biased</em> gradient for a
 defunct policy, transplanted with no IS correction). That is a property of the communication-saving mechanism
@@ -139,7 +139,7 @@ pipeline-parallel <em>inference</em>), flagged in &sect;2.5.</p>
 </div>
 
 <div class="verdict-grid">
-  <div class="vc tol"><p class="q">Compression&rarr;train-inference mismatch (the asked question)</p><p class="a">TOLERABLE &mdash; common-mode in the loss, not fundamental</p></div>
+  <div class="vc tol"><p class="q">Compression&rarr;train-inference mismatch (the asked question)</p><p class="a">TOLERATED uncorrected &mdash; bounded ~0.04 cost, not fundamental</p></div>
   <div class="vc block"><p class="q">What is actually fundamental-ish</p><p class="a">Anchor-gradient staleness (a separate axis)</p></div>
   <div class="vc cond"><p class="q">Conditions for tolerability</p><p class="a">vLLM-logprob IS reference + K &lt; &tau; + uncompressed rollouts</p></div>
   <div class="vc risk"><p class="q">Trajectory-corruption risk today</p><p class="a">Low (rollouts uncompressed); high only under compressed PP inference</p></div>
@@ -246,8 +246,9 @@ whole analysis, because the question asks about the first while the program's fa
     actor's <em>rank-77 projected</em> forward. The codec makes the trainer a <strong>different network</strong> than
     the sampler. This is exactly the classic RLVR train&ndash;inference (sampler&ne;trainer) gap, except the
     perturbation source is <em>internal compression</em> rather than a different inference kernel.</p>
-    <p><strong>Character:</strong> a large but roughly <em>stationary</em> forward distortion; IS-correctable against
-    the clean vLLM reference down to a small, bounded residual tax (&sect;4.3). <span class="tag est">Established</span></p>
+    <p><strong>Character:</strong> a large but roughly <em>stationary</em> forward distortion; left <em>uncorrected</em>
+    here (no TIS) yet absorbed by GRPO as a small, bounded residual bias &mdash; the codec tax (&sect;2.6, &sect;4.3).
+    <span class="tag est">Established</span></p>
   </div>
   <div class="pane b">
     <div class="mode">the actual failure axis</div>
@@ -278,13 +279,13 @@ policy moves. That is why it shows up as a constant tax (&sect;3.2).</p>
 <h3>2.3 &mdash; The decisive contrast: bias vs. variance</h3>
 <p>This is the heart of the matter and the reason Gap A is benign while Gap B is not.</p>
 <div class="callout note">
-<p><strong>Gap A is kept out of the update entirely &mdash; not even paid for in variance.</strong> The textbook
-off-policy move reweights by an IS ratio against the behavior policy. Our trainer does something cheaper and stronger: it
-<em>recomputes</em> <code>old_log_prob</code> through the same compressed forward, so the GRPO ratio
-<code>&pi;<sup>comp</sup>(&theta;)/&pi;<sup>comp</sup>(&theta;<sub>old</sub>)</code> is <strong>common-mode</strong> and the
-codec distortion cancels <em>before</em> any reweighting (&sect;2.6). The vLLM logprob is available as a truncated-IS
-reference but is switched off in these runs and not needed. The only residual is a bounded perturbation on the
-<em>backward</em> gradient &mdash; the codec tax (&sect;4.3) &mdash; not an off-policy bias in the ratio.</p>
+<p><strong>Gap A is an off-policy bias too &mdash; but a bounded one.</strong> Recomputing <code>old_log_prob</code> in the
+same compressed forward makes the <em>inner</em> ratio common-mode, so the codec cannot <em>explode</em> it (&sect;2.6). The
+underlying off-policyness is <em>not</em> cancelled, though: the data is vLLM-sampled and the residual
+<code>&pi;<sup>comp</sup>/&pi;<sup>gen</sup></code> weight is left uncorrected here (no TIS) &mdash; a genuine
+train&ndash;inference bias. The difference from Gap&nbsp;B is that Gap&nbsp;A's bias is <strong>bounded and correctable in
+principle</strong> (clean trajectories, benign polarity, and a per-token IS handle exists), so GRPO absorbs it at the
+~0.04 cost; Gap&nbsp;B's bias is <strong>unbounded past <code>K&gt;&tau;</code> and has no IS handle</strong> (next).</p>
 </div>
 <div class="callout warn">
 <p><strong>Gap B converts the mismatch into bias you cannot cancel.</strong> The anchor gradient is a clean,
@@ -329,50 +330,70 @@ coherence), and a lossy boundary makes per-stage drift accumulate along the sequ
 of scope for the present trainer but is the key risk to gate before moving generation onto the compressed path.</p>
 </div>
 
-<h3>2.6 &mdash; Why a forward gap this large does <em>not</em> collapse training (the common-mode answer)</h3>
+<h3>2.6 &mdash; Why a forward gap this large does <em>not</em> collapse training</h3>
 <p><strong>The paradox, stated sharply.</strong> Our logged forward gap (<code>rollout_corr</code> KL
 <code>4&ndash;20</code>, Pearson <code>0.1&ndash;0.3</code>) is <em>orders of magnitude larger</em> than the FP8
-(KL&nbsp;&approx;10<sup>&minus;2</sup>) and INT8 (KL&nbsp;&approx;10<sup>&minus;1</sup>) rollout mismatches that the
-literature documents collapsing runs (&sect;4). The naive theory &mdash; "a logprob difference makes training off-policy,
-and a gap this big must diverge" &mdash; predicts collapse. Yet <code>K=5</code> trains to 0.74, near dense 0.78. The
-resolution is <em>where the gap enters the loss</em>: it does not.</p>
-<p><strong>The GRPO ratio is recompute/recompute, so the codec is common-mode.</strong> EXP-37E config (verified in
-<code>train.log</code>): <code>recompute=true</code>, <code>bypass_mode=false</code>, <code>rollout_is=null</code>. So
-<code>old_log_prob</code> is recomputed by the actor's <em>own</em> (compressed) forward &mdash; not taken from vLLM &mdash;
-and the policy-gradient ratio is <code>exp(log_prob &minus; old_log_prob)</code> with <strong>both terms through the same
-compressed forward</strong> (<code>core_algos.py:1335</code>). The codec distortion therefore appears in numerator and
-denominator alike and <strong>cancels</strong>: at the first inner step <code>log_prob &equiv; old_log_prob</code>, so the
-ratio is exactly 1 regardless of how far the compressed forward sits from vLLM (verl issue&nbsp;#2088 documents this
-identity for the recompute path). The ratio measures the policy's <em>update in compressed space</em>, never the absolute
-compressed-vs-vLLM gap.</p>
-<div class="twocol">
-  <div class="pane a">
-    <div class="mode">what we run &mdash; stable</div>
-    <h4>Recompute / 3-policy (<code>bypass=false</code>)</h4>
-    <p>ratio = <code>&pi;<sup>comp</sup>(&theta;)&thinsp;/&thinsp;&pi;<sup>comp</sup>(&theta;<sub>old</sub>)</code>. Codec is
-    common-mode &rarr; cancels. The <code>rollout_corr</code> gap never reaches the gradient. <strong>Same structure dense
-    verl uses for the FSDP&ne;vLLM engine gap.</strong></p>
-  </div>
-  <div class="pane b">
-    <div class="mode">what collapses in the literature</div>
-    <h4>Bypass / 2-policy (<code>bypass=true</code>)</h4>
-    <p>ratio = <code>&pi;<sup>comp</sup>(&theta;)&thinsp;/&thinsp;&pi;<sup>vLLM</sup></code>. The full forward gap enters the
-    ratio undamped &rarr; needs TIS/clipping and still leaves a residual. This path is <strong>OFF</strong> here.</p>
-  </div>
+(KL&nbsp;&approx;10<sup>&minus;2</sup>) and INT8 (KL&nbsp;&approx;10<sup>&minus;1</sup>) rollout mismatches the literature
+documents collapsing runs (&sect;4). The naive theory &mdash; "a logprob difference makes training off-policy, and a gap
+this big must diverge" &mdash; predicts collapse. Yet <code>K=5</code> trains to 0.74, near dense 0.78. The answer has two
+parts, and the second is the one that matters.</p>
+<p><strong>Part 1 &mdash; recompute keeps the <em>explicit</em> PPO ratio from exploding (common-mode).</strong> EXP-37E
+config (verified): <code>recompute=true</code>, <code>bypass_mode=false</code>, <code>rollout_is=null</code>. So
+<code>old_log_prob</code> is recomputed by the actor's own compressed forward, and the inner ratio
+<code>exp(log_prob &minus; old_log_prob)</code> runs both terms through that <em>same</em> compressed forward
+(<code>core_algos.py:1335</code>). The codec distortion is therefore <strong>common-mode</strong> in the inner ratio and
+cancels (ratio&nbsp;=&nbsp;1 at inner-step&nbsp;0; verl issue&nbsp;#2088). This is what prevents the ratio-explosion failure
+mode (QuRL's IS-weight&nbsp;&rarr;&nbsp;10<sup>5</sup>): the codec cannot inflate
+<code>&pi;<sub>&theta;</sub>/&pi;<sub>&theta;old</sub></code>. <strong>But this is only the ratio numerics &mdash; it is
+<em>not</em> the whole train&ndash;inference story.</strong></p>
+<div class="callout warn">
+<p><strong>Part 2 &mdash; recompute does NOT remove the train&ndash;inference mismatch (this is the important part).</strong>
+Recomputing <code>old_log_prob</code> in the trainer is exactly what every standard GRPO stack (verl, slime) already does
+&mdash; and the field <em>still</em> has a large, heavily-discussed train&ndash;inference-mismatch problem, which is
+<em>why</em> TIS / MIS / GSPO and the rollout-correction toolkits exist. The reason: the trajectories were
+<em>sampled by vLLM</em> (<code>&pi;<sup>gen</sup></code>), but the ratio is anchored to the recomputed behavior
+<code>&pi;<sup>comp</sup>(&theta;<sub>old</sub>)</code>, with the implicit importance weight
+<code>&pi;<sup>comp</sup>(&theta;<sub>old</sub>)&thinsp;/&thinsp;&pi;<sup>gen</sup></code> <strong>silently assumed to be
+1</strong>. That weight <em>is</em> the train&ndash;inference mismatch &mdash; here it is large (the KL 4&ndash;20) and
+<strong>left uncorrected</strong> (<code>rollout_is=null</code>: no TIS). So we are not "cancelling the mismatch away"; we
+are <strong>running with an uncorrected, compression-inflated train&ndash;inference mismatch</strong>, and the policy
+gradient <code>E<sub>&pi;<sup>gen</sup></sub>[A&middot;&nabla;log&nbsp;&pi;<sup>comp</sup>]</code> is genuinely biased
+relative to the true on-policy gradient. You were right to insist on this.</p>
 </div>
-<p><strong>So is it a "train&ndash;inference mismatch" or "just noise"?</strong> In the loss it is <em>neither</em>: not an
-engine off-policy mismatch (common-mode cancels it), and not literal stochastic noise (the codec is a deterministic,
-structured projection). It is a <em>structured, bounded perturbation that the recompute ratio renders inert</em>. What
-compression actually costs is a perturbation on the <em>backward</em> gradient <code>G<sub>comp</sub></code> &mdash; a small
-tilt of the descent direction, which the anchor/merger targets and which surfaces as the ~0.04 codec tax (&sect;4.3):
-slower convergence, not instability. So the user's intuition is right in effect &mdash; for the loss this behaves more like
-a bounded gradient perturbation than like the engine train&ndash;inference mismatch &mdash; with the precise mechanism being
-common-mode cancellation, not stochastic averaging.</p>
-<p><strong>Empirical corroboration.</strong> If the forward gap drove the dynamics it would track the failure; it does not
-(&sect;3.2): <code>rollout_corr</code> is statistically identical in stable <code>K=5</code> and collapsing
-<code>K=20</code>. The run that <em>does</em> collapse fails through Gap B (gradient staleness), which never appears in the
-forward-mismatch meter. The forward mismatch is loud on the dashboard and silent in the optimizer; the gradient staleness
-is the reverse.</p>
+<p><strong>Why we tolerate it uncorrected &mdash; four reasons it lands as a bounded cost, not a collapse:</strong></p>
+<ul>
+<li><strong>Same residual dense verl already tolerates &mdash; just larger.</strong> Dense GRPO also recomputes in FSDP,
+also runs without TIS by default, and also carries the (smaller) vLLM&ne;FSDP mismatch; vanilla GRPO + clipping absorbs it.
+Our codec inflates the residual, so it is a question of <em>degree</em> &mdash; and at <code>K=5</code> it sits inside the
+tolerable band (cost = the ~0.04 parity gap, &sect;4.3), not past it.</li>
+<li><strong>Trajectories and rewards are clean.</strong> Compression touches only the trainer forward, never sampling
+(&sect;2.5). The mismatch perturbs the <em>credit-assignment weight</em>, not the validity of the text or the verifier
+reward &mdash; the "garbage-in" failure mode of a lossy <em>sampler</em> (FP8/INT4) is structurally absent.</li>
+<li><strong>The behavior policy is the GOOD policy (the precision reversal).</strong> Here the sampler
+<code>&pi;<sup>gen</sup></code> is the <em>uncompressed</em> model &mdash; exactly what we deploy &mdash; while the lossy side
+is the trainer. The off-policy data is therefore drawn from a <em>better, deployment-matched</em> policy, and the gradient
+pulls the shared weights toward its high-reward completions. In FP8-rollout the polarity is reversed (the sampler is the
+<em>degraded</em> policy), which is why the same uncorrected mismatch is far more dangerous there.</li>
+<li><strong>GRPO is robust to it.</strong> Group-relative advantage depends on the <em>ranking</em> of completions within a
+group, which survives even when absolute probs differ (Pearson 0.1&ndash;0.3 still preserves the good-vs-bad ordering);
+dual-clip and the <code>&plusmn;20</code> log-ratio clamp (<code>core_algos.py:1337</code>) bound the per-token
+contribution.</li>
+</ul>
+<p><strong>So: a "train&ndash;inference mismatch" or "just noise"?</strong> It is a <em>genuine, uncorrected
+train&ndash;inference mismatch</em> &mdash; recompute does not make it go away, and the literature's whole TIS/toolkit
+discussion applies to us too. What is special is not that the mismatch is absent but that its <em>consequences are
+bounded</em>: common-mode keeps the explicit ratio from exploding, clean sampling keeps trajectories valid, and the benign
+polarity (sampler = the good deployed policy) means the residual shows up as the small, non-compounding ~0.04 codec tax
+rather than a divergent force. In <em>effect</em> it behaves like a bounded perturbation; in <em>mechanism</em> it is an
+uncorrected off-policy bias that GRPO happens to absorb at this magnitude.</p>
+<p><strong>Empirical corroboration &amp; the honest caveat.</strong> If the forward gap drove the dynamics it would track
+the failure; it does not (&sect;3.2): <code>rollout_corr</code> is statistically identical in stable <code>K=5</code> and
+collapsing <code>K=20</code> &mdash; the collapse is Gap&nbsp;B (gradient staleness), invisible to the forward-mismatch
+meter. But "tolerated" is not "free" or "guaranteed": the literature documents <em>silent, long-horizon</em> drift from an
+uncorrected mismatch (degradation over hundreds&ndash;thousands of steps; &sect;4.1), and our evidence is 100 steps at
+response-length 2048. If the gap, the horizon, or task hardness grows, the standard correction we currently omit &mdash;
+truncated-IS to the vLLM logprob (<code>rollout_is</code>) &mdash; is exactly the lever to reach for. We are tolerating the
+mismatch, not immune to it.</p>
 
 <!-- ============ 3. EMPIRICAL ============ -->
 <h2><span class="num">3</span>Empirical evidence &mdash; EXP-37 and the dense-drift probe</h2>
@@ -560,10 +581,12 @@ in EXP-37E) but used only for (i) the <code>rollout_corr</code> diagnostic and (
 <code>anchor_pg_loss</code> with ratio&nbsp;&equiv;&nbsp;1 against them (<code>transformer_impl.py:1237</code>) so the
 compressed <code>old_log_probs</code> can't corrupt <code>G<sub>anchor</sub></code>.</li>
 </ul>
-<p>The standard RLVR truncated-IS fix (<code>bypass</code>/<code>rollout_is</code>; verl PR&nbsp;#2953; TRL activates TIS
-by default) is therefore <strong>available but unused</strong> here &mdash; the recompute structure already keeps Gap A out
-of the gradient. This is the same protective design the broader RLVR stack relies on for the vLLM&ne;FSDP gap (&sect;4); our
-compression merely makes the recomputed forward sit a little further from vLLM, which the common-mode ratio absorbs.</p>
+<p>The standard RLVR truncated-IS fix (<code>rollout_is</code>; verl PR&nbsp;#2953; TRL activates TIS by default) is
+therefore <strong>available but switched off</strong> here. Recompute makes the inner ratio common-mode (no explosion), but
+&mdash; as the field's TIS/MIS/GSPO literature stresses &mdash; recompute does <em>not</em> remove the
+train&ndash;inference mismatch: the vLLM-sampled data is still scored against the recomputed compressed behavior, an
+uncorrected residual (&sect;2.6). We run with that residual &mdash; larger than dense's but the same kind &mdash; and GRPO
+absorbs it at the ~0.04 cost; <code>rollout_is</code> is the lever if it ever needs correcting.</p>
 
 <!-- ============ 4. PRIOR WORK ============ -->
 <h2><span class="num">4</span>Prior work &mdash; situating our two gaps against the literature</h2>
@@ -710,11 +733,14 @@ never fully closes a forward gap.</p>
 <p>Mapping to us: the literature's "tolerable band" is measured on the <em>sampling/ratio</em> mismatch. Our forward gap is
 far above that band <em>as a raw number</em>, yet we are <strong>more</strong> tolerant than the band would suggest, because
 our protective structure is stronger than IS reweighting &mdash; the recompute ratio makes the gap <em>common-mode</em>
-(&sect;2.6) and sampling is clean. In the literature's own terms we have maximal <em>alignment on the loss-bearing
-ratio</em> (the trainer and its own "behavior" reference are the same compressed engine) even though the train-vs-generator
-<em>forward</em> is badly misaligned &mdash; and alignment-on-the-ratio is precisely what the literature says actually
-matters. So "how much mismatch is tolerable" is the wrong axis for us; "does the mismatch enter the loss-bearing ratio" is
-the right one, and ours does not.</p>
+(&sect;2.6) and sampling is clean. In the literature's own terms we hold the <em>explicit inner ratio</em>
+aligned (trainer and its own recomputed "behavior" reference share the compressed engine, so the ratio stays common-mode)
+even though the train-vs-generator <em>forward</em> is badly misaligned. That does not erase the mismatch &mdash; the
+vLLM&ndash;trainer residual is still there and uncorrected &mdash; but it keeps the mismatch from <em>amplifying</em>
+through the ratio. So the useful question for us is not "how big is the KL" but "does it explode the explicit ratio (no
+&mdash; common-mode) and is the residual off-policyness bounded and benign (yes &mdash; clean sampling, good-policy
+sampler)?" &mdash; which is why a raw KL of 4&ndash;20 is survivable where the literature's smaller quantization KLs are
+not.</p>
 
 <!-- ============ 5. VERDICT ============ -->
 <h2><span class="num">5</span>Verdict, conditions, and corrections</h2>
