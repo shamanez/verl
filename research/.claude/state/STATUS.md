@@ -1,25 +1,21 @@
-# Research Status — idle
-
-No experiment in flight. The orchestrator rewrites this file each tick when running.
-
-## Focus
-
-Two priorities, both **GPU-free offline kill-gates** (no Vast.ai run until a gate passes):
-
-1. **Solve the k-collapse by projecting the weights** (Priority 1 / milestone M4) —
-   `reports/priority-1-anchor-staleness-k-collapse.html`.
-2. **Reduce the compression-induced train–inference mismatch (Gap A)** (Priority 2 / milestone M6) —
-   `reports/priority-2-compression-train-inference-mismatch.html`.
-
-## Baseline (the problem state)
-
-`signed_ema` (α=0.25, β_anc=0.50) on the fast 1K surface at HIGH anchor latency
-(cadence/delay_K = 20/20, the k-collapse regime), PowerSGD r=77 anchor substrate.
-Values: `runs/FIXED_CONTROL_SURFACE.md`.
+# Research Status — 2026-06-25
 
 ## Issue pipeline
 
-(none in flight)
+| EXP | Title | State | Vast runs | Verdict | Notes |
+|---|---|---|---|---|---|
+| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | RUNNING (monitor active) | external 4×H200 i_42465843 (team) | — | probe PASSED 10/10 hard invariants; cells A(5/5 disabled)→B(fixed_linear 20/20) launched, 100 steps each, monitor dispatched |
 
 ## Last tick
-(idle) · running=[] · analyzing=[] · logging=[] · blocked=[]
+2026-06-25 · running=[41] · analyzing=[] · logging=[] · blocked=[]
+
+## EXP-41 progress
+- ✅ Attach (external, team, box 42465843, 4×H200) — RUNNING ledger row written by runner
+- ✅ Fire-forcing invariant probe (cadence=delay_K=1, fixed_linear) — ALL 10 hard gates PASS (runs/EXP-41/probe-invariants.md). No commit-hotfix loop needed.
+- 🔄 Cell A (onsurface-5over5-reference, lookahead disabled, 100 steps) — running
+- ⏳ Cell B (lookahead fixed_linear 20/20, 100 steps) — chained after A
+- ⏳ Cell C (learned_linear) — CONDITIONAL: only if analyst finds B clean-but-underlifted
+- ⏳ analyst → verdict.md → teardown (team account) → log-writer
+
+## Budget
+External operator-provided box (dph recorded 0 on ledger). max_gpu_hr cap 96. Teardown the moment science is captured.
