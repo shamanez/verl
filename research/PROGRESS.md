@@ -21,14 +21,16 @@ Reference val@50 (n=1, this surface): dense **0.7657** (EXP-36C) · comm-eff `si
 
 The anchor gradient is taken on `delay_K`-stale weights and **rotates to orthogonal by k≈10–20**
 (GSM8K cos `0.51 → 0.18@k5 → 0.02@k10 → −0.01@k20`; norm ratio ≈ 1.0 ⇒ *pure rotation*, magnitude
-intact; sign → coin-flip). Fix: don't consume it stale — **project the weight trajectory forward**
-(AsyncPP/Nesterov look-ahead, arXiv:2505.01099) and realign the gradient. Two upgrades over the
-fixed-linear rule: **(1) linear → learned** projection (the only route that can *surpass* dense —
-captures curvature, beyond a diagonal Adam rescale), **(2) error feedback** using the anchor's periodic
-refresh as delayed ground truth.
+intact; sign → coin-flip). **Fix — extrapolate the anchor's _weights_ forward, not its gradient**
+(Nesterov-style): predict the future weights θ̂≈θ_t and compute the gradient **at θ̂**, so g(θ̂)≈g(θ_t)
+for free. Two upgrades over AsyncPP's fixed-linear look-ahead (arXiv:2505.01099): **(1) linear →
+learned, per-block weight-projection** (captures curvature → the only route that can *surpass* dense,
+beyond a diagonal Adam rescale), **(2) supervision from the fast circuit** — the true weights θ_t that
+arrive at each sync are ground truth; the residual θ_t−θ̂ trains the projector online so it sharpens.
 
-- **Next step (GPU-free) — the kill-gate:** on stored `(θ, g)` pairs, does any rung lift cos@k5 from
-  0.18 to **≥ 0.40**, AND is the lift **off-diagonal** (not the diagonal trap)? No → STOP, zero GPU.
+- **Next step (GPU-free) — the kill-gate:** on stored `(θ, g)` pairs, can a per-block projector predict
+  θ_t, and does the gradient at the predicted weights lift cos@k5 from 0.18 to **≥ 0.40** **off-diagonal**
+  (not the diagonal trap)? No → STOP, zero GPU.
   ⚠️ The EXP-38 captures that feed this gate were de-bloated — **re-import from backup before running it.**
 - Summary: `reports/priority-1-anchor-staleness-k-collapse.html`.
 
