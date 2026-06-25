@@ -30,6 +30,7 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 
 1. **Parse the plan.** Extract:
    - `## Compute budget` block → `gpu_count`, `gpu_filter_chain` (yaml list of tier query strings, in preference order), `max_dph`, `max_gpu_hr`, `max_parallel`. `per_node_gpus` is **implicit per tier** (read from each handle's `.gpu_count` field after provisioning, not from the plan).
+     - `attach_box:` (optional) — if present (or your dispatch names an operator-provided box), take the **attach path (step 3b)** and do NOT provision.
    - `## Experiment design` → sweep_grid, baselines, ablations, seed_replicates, fanout_max.
    - `code_change:` boolean and `target_modules:` list.
    - `## Notes for runner` paragraph.
@@ -55,6 +56,14 @@ Canonical project facts (vast template hash, secrets path, default compute chain
    - Bundle the branch: `git bundle create $PARENT/runs/EXP-<ID>/exp.bundle "exp/<ID>-<slug>"`.
 
    If `code_change: false`, skip this step entirely — never touch `verl/` source.
+
+3b. **Attach path — skip provisioning entirely (operator-provided box).** If the plan's `## Compute budget` has an `attach_box:` block (or your dispatch names an external box), do **NOT** provision. Run the `vast-attach` skill with those params — it writes the external handle to `$PARENT/runs/EXP-<ID>/handles/<id>.json` **and** registers a `status:"RUNNING", external:true` ledger row:
+   ```bash
+   export VAST_ACCOUNT="<team|private>"
+   bash "$PARENT/.claude/skills/vast-attach/run.sh" --exp-id "EXP-<ID>" \
+        --instance-id <id> --ssh-host <host> --ssh-port <port> --num-gpus <N> --account "<team|private>"
+   ```
+   Then **skip steps 4, 5 and 9** (nothing to provision; the row is already RUNNING+external) and go straight to step 6 (payload sync) → 7 (launch) → 8 (liveness) → 10 (label) → 11 (PROGRESS). **Never tear it down:** external boxes belong to the operator — the teardown hook and `vast-teardown` both skip `external:true` rows. If `attach_box` is absent, ignore this step and provision normally below.
 
 4. **Provision Vast.ai by walking `gpu_filter_chain`.** The chain encodes operator preference (cheapest viable tier first). The runner walks it in order; the **first tier that captures ≥1 handle wins** and the walk stops.
 

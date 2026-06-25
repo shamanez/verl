@@ -8,11 +8,13 @@ LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 REASON="manual"
 IDS=()
 HANDLE_PATHS=()
+FORCE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reason)   REASON="$2"; shift 2 ;;
     --handles)  HANDLE_PATHS+=("$2"); shift 2 ;;
+    --force|--include-external) FORCE=1; shift ;;
     -h|--help)
       sed -n '1,40p' "$(dirname "$0")/SKILL.md"
       exit 0 ;;
@@ -68,6 +70,15 @@ ERR_LOG="/tmp/teardown.err"
 DESTROYED=()
 FAILED=()
 for iid in "${IDS[@]}"; do
+  # EXTERNAL (operator-owned) boxes: refuse unless --force. vast-attach marks them
+  # external:true so neither the orchestrator nor a stray teardown can destroy a box
+  # the operator brought and still wants.
+  if [[ "$FORCE" != "1" && -f "$LEDGER" ]] \
+     && jq -e --arg i "$iid" 'select(any(.handles[]?.instance_id // empty; (.|tostring)==$i)) | .external == true' "$LEDGER" >/dev/null 2>&1; then
+    echo "[$iid] EXTERNAL (operator-owned) — refused without --force" >>"$ERR_LOG"
+    echo "vast-teardown: $iid is EXTERNAL (operator-owned) — skipped. Pass --force to override." >&2
+    continue
+  fi
   # MUST pass -y: `vastai destroy instance <id>` prompts interactively for
   # confirmation, and when stdin isn't a TTY the prompt collapses to "Aborted"
   # — but the CLI STILL EXITS 0. Without -y the destroy silently does nothing.

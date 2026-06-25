@@ -191,6 +191,63 @@ Each tick, the orchestrator advances every approved plan:
 96 GPU-hr total**, walking the 4×H200 → 8×H100 fallback chain unless
 the plan overrides it.
 
+---
+
+## 3b. Fast path — attach an already-running box (skip provisioning)
+
+Got a box already up (a warm box from a prior run, or one you provisioned by hand)?
+Skip the ~1–3 min provision + ~5–8 min warm-up and start immediately. The
+`vast-attach` skill registers it as an **EXTERNAL** handle: the harness can use it,
+but the teardown hook and `vast-teardown` will **never** auto-destroy it — its
+lifecycle stays yours.
+
+```bash
+cd /Users/shamane/Documents/verl/research
+
+# Real Vast box — the API fills in ssh/gpu details from just the instance id:
+bash .claude/skills/vast-attach/run.sh --instance-id 41680420 --account team
+
+# …or give them explicitly (any box, Vast or not):
+bash .claude/skills/vast-attach/run.sh \
+  --instance-id 41680420 --ssh-host 84.8.106.109 --ssh-port 40206 --num-gpus 4 --account team
+```
+
+This writes `runs/ATTACH-<id>/handles/<id>.json` plus a `RUNNING`+`external` ledger row.
+
+### Mode 1 — drive it by hand (fastest; interactive `claude`)
+
+```bash
+claude
+```
+Then hand the box to the session:
+```
+A running Vast box is attached at runs/ATTACH-<id>/handles/<id>.json (EXTERNAL — do NOT tear it
+down). SSH in using its ssh_login; make sure /workspace/verl is on vast-ai-workload and current
+(git fetch && git checkout vast-ai-workload && git pull --ff-only), then launch the baseline in a
+tmux and tail the first 50 lines of train.log to confirm it's stepping:
+  bash examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
+Report once steps are flowing. Never call vast-teardown on this box.
+```
+> Purest manual run: add `--no-register` to `vast-attach` (or skip the skill entirely and just
+> SSH in). With no ledger row the harness is completely unaware of the box, so nothing can touch it.
+
+### Mode 2 — let the autonomous loop use it
+
+Put an `attach_box:` block in the plan's `## Compute budget` (you or the planner set it):
+```yaml
+attach_box: { instance_id: 41680420, ssh_host: 84.8.106.109, ssh_port: 40206, num_gpus: 4, account: team }
+```
+Approve the plan as usual. The orchestrator's `experiment-runner` sees `attach_box`, calls
+`vast-attach` instead of provisioning (step 3b), then rsyncs + launches normally. Everything
+downstream (monitor → analyst → log-writer) is unchanged, and the box is never auto-torn-down.
+
+### Tearing down an attached box
+
+It will **not** happen automatically. When you're done:
+```bash
+bash .claude/skills/vast-teardown/run.sh --force <instance_id>   # or just destroy it on vast.ai
+```
+
 ## 4. Monitor
 
 ```bash
@@ -223,6 +280,8 @@ python scripts/check_budget.py --month
 | Budget cap exceeded | Edit `budget.json` or pause |
 | Vast instance not torn down | `bash .claude/skills/vast-teardown/run.sh <instance_id>` |
 | Emergency stop | `touch ~/.claude-kill-switch` (resume: `rm ~/.claude-kill-switch`) |
+| Use an already-running box (skip provisioning) | `bash .claude/skills/vast-attach/run.sh --instance-id <id> [...]` — see §3b. EXTERNAL, never auto-torn-down |
+| Attached (external) box still up after work | intentional — `bash .claude/skills/vast-teardown/run.sh --force <id>` to remove |
 
 ---
 
@@ -257,7 +316,7 @@ research/
     ├── agents/                     research-planner, experiment-runner, analyst, log-writer, training-log-monitor
     ├── plans/                      TEMPLATE.md, <N>.md per issue
     ├── hooks/                      kill-switch, protect-upstream, sync-metrics, teardown-finished-runs, commit-on-stop
-    ├── skills/                     vast-provision, vast-teardown, de-bloat
+    ├── skills/                     vast-provision, vast-attach, vast-teardown, de-bloat
     └── state/                      STATUS.md, runs.jsonl, .last-orchestrator-tick
 
 verl/examples/grpo_trainer/
@@ -293,7 +352,10 @@ jq -c . .claude/state/runs.jsonl
 # Cost
 python scripts/check_budget.py --month
 
-# Manual teardown
+# Attach an already-running box (skip provisioning; EXTERNAL, never auto-torn-down)
+bash .claude/skills/vast-attach/run.sh --instance-id <id> --account team
+
+# Manual teardown ( --force to also destroy an EXTERNAL/attached box )
 bash .claude/skills/vast-teardown/run.sh <instance_id>
 
 # Kill switch

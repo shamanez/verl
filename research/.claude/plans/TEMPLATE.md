@@ -133,6 +133,7 @@ max_gpu_hr:       96                      # total across all cells (runner abort
 max_parallel:     1                       # how many cells may run concurrently
 wall_clock_hr:    12                      # soft deadline for analyst's first read
 iterations:       3                       # max REVISE child-experiment depth on this lineage
+attach_box:       none                    # optional BRING-YOUR-OWN-BOX. Skip provisioning and use an already-running operator box. Set to {instance_id, ssh_host, ssh_port, num_gpus, account} → runner calls vast-attach (experiment-runner step 3b); the box is EXTERNAL and is NEVER auto-torn-down. `none` = provision normally.
 ```
 
 The chain above is the planner default. The runner walks it in order and stops at the first tier with ≥1 offer ≤ `max_dph`; it records the chosen tier in the PROVISIONED ledger row so the analyst can attribute results. `per_node_gpus` is implicit in each tier's `num_gpus=` clause — the runner reads the actual count from each handle JSON to set `NGPUS_PER_NODE`.

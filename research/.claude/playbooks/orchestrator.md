@@ -189,6 +189,7 @@ Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree
 The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true, branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main) and apply target_modules patches; commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
 vast_account=<team|private>. Default private. `export VAST_ACCOUNT=<this>` before provisioning so the box bills the right account, and record `vast_account` on the PROVISIONED ledger row (teardown reads it back).
+attach_box: if the plan's `## Compute budget` names `attach_box:` (an operator-provided already-running box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b). The box is EXTERNAL and must NEVER be torn down.
 Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsync payload, launch in tmux, promote to RUNNING, label `status:running`, append one PROGRESS line, stop. Never call vast-teardown.
 ```
 
@@ -320,7 +321,10 @@ $/hr now: <X> · spent today: $<Y> · monthly cap remaining: $<Z>
   always go through the skill so the ledger row is flipped to `TORN_DOWN`. For
   every case you don't explicitly handle, the `teardown-finished-runs` Stop
   hook is the automatic backstop (verdict / stale heartbeat / budget /
-  PROVISIONED-stale), firing after each tick.
+  PROVISIONED-stale), firing after each tick. **Exempt: `external:true`
+  (operator-attached, via `vast-attach`) boxes** — both the hook and the skill
+  skip them by design. If a monitor recommends teardown for an external box,
+  surface it to the operator with a PROGRESS line instead of destroying it.
 - If a `gh` call errors, log it and skip that issue for this tick. Do not
   abort the whole tick.
 - If `runs.jsonl` is malformed, append the malformed line to

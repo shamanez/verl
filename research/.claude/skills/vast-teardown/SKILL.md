@@ -19,8 +19,12 @@ $CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh <instance_id> [<instance
 Or pass a path to a handle JSON file (the runner emits these under `research/runs/EXP-<ID>/handles/`):
 
 ```
-$CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh --handles research/runs/EXP-7/handles/
+$CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh --handles research/runs/<run>/handles/
 ```
+
+**EXTERNAL boxes are protected.** An instance whose ledger row is `external:true`
+(attached via the `vast-attach` skill) is **refused** — the operator owns its
+lifecycle. Pass `--force` (alias `--include-external`) to override and destroy it anyway.
 
 ## Behavior
 
