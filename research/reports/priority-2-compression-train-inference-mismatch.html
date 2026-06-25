@@ -31,7 +31,7 @@
 </head>
 <body>
 <div class="wrap">
-  <span class="tag">Priority 2 · issue #40 · milestone M6</span>
+  <span class="tag">Priority 2 · milestone M6</span>
   <h1>Reducing the compression-induced train&ndash;inference mismatch (&ldquo;Gap A&rdquo;)</h1>
   <p class="sub">Distilled from the 2026-06-23 compression-mismatch study. The forward-pass codec distorts the recomputed log-probs vs vLLM&rsquo;s rollout log-probs &mdash; how much does it matter, and how do we shrink it?</p>
 
@@ -59,10 +59,10 @@
   </ul>
 
   <h2>The lever — shrink / correct Gap A</h2>
-  <p class="lever">The standard corrector is <b>truncated importance sampling against the vLLM rollout log-probs</b>, currently <b>available but unused</b> (<code>old_log_prob</code> is recomputed common-mode, not vLLM-referenced). Either reduce the forward-pass distortion directly, or switch the corrector on, to drive the ~0.04 codec tax toward zero. Issue #40&rsquo;s FP8 rollout-only probe isolates the precision component of this gap.</p>
+  <p class="lever">The standard corrector is <b>truncated importance sampling against the vLLM rollout log-probs</b>, currently <b>available but unused</b> (<code>old_log_prob</code> is recomputed common-mode, not vLLM-referenced). Either reduce the forward-pass distortion directly, or switch the corrector on, to drive the ~0.04 codec tax toward zero. A planned FP8 rollout-only probe isolates the precision component of this gap.</p>
 
   <div class="foot">
-    Sources: compression-mismatch study (folded here), 2026-06-23; issue <a href="https://github.com/shamanez/verl-compression-research/issues/40">#40</a> (open, M6). Links to Priority 1 (Gap B = anchor staleness).
+    Sources: compression-mismatch study (folded here), 2026-06-23 (milestone M6). Links to Priority 1 (Gap B = anchor staleness).
   </div>
 </div>
 </body>

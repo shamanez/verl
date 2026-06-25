@@ -17,7 +17,7 @@ Reference val@50 (n=1, this surface): dense **0.7657** (EXP-36C) · comm-eff `si
 
 ## The two priorities
 
-### 1 — Solve the k-collapse by projecting the weights · issue #39 (M4)
+### 1 — Solve the k-collapse by projecting the weights (milestone M4)
 
 The anchor gradient is taken on `delay_K`-stale weights and **rotates to orthogonal by k≈10–20**
 (GSM8K cos `0.51 → 0.18@k5 → 0.02@k10 → −0.01@k20`; norm ratio ≈ 1.0 ⇒ *pure rotation*, magnitude
@@ -34,14 +34,14 @@ arrive at each sync are ground truth; the residual θ_t−θ̂ trains the projec
   ⚠️ The EXP-38 captures that feed this gate were de-bloated — **re-import from backup before running it.**
 - Summary: `reports/priority-1-anchor-staleness-k-collapse.html`.
 
-### 2 — Reduce the compression-induced train–inference mismatch · issue #40 (M6)
+### 2 — Reduce the compression-induced train–inference mismatch (milestone M6)
 
 The codec's forward-pass distortion ("Gap A") makes the recomputed log-probs differ from vLLM's.
 Verdict (2026-06-23): Gap A is a **bounded ~0.04 tax, constant in stable and collapsing runs, and GRPO
 absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor staleness (= Priority 1).
 
 - **Lever:** shrink the forward distortion / switch on the **truncated-IS corrector** (available but
-  unused — `old_log_prob` is recomputed common-mode, not vLLM-referenced). #40's FP8 rollout-only probe
+  unused — `old_log_prob` is recomputed common-mode, not vLLM-referenced). A planned FP8 rollout-only probe
   isolates the precision component.
 - Summary: `reports/priority-2-compression-train-inference-mismatch.html`.
 
@@ -49,4 +49,4 @@ absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor
 
 - **Substrate locked:** PowerSGD r=77 + a mandatory anchor that owns `Q`; the two-circuit structure is mandatory.
 - **Goals 1–3 met:** stable / parity / savings (≈5% gradient-comm). Goal 4 (one canonical launcher) is pending a surpass.
-- **Closed frontier (issues #31/#33):** anchor-usage levers + β_anc sweeps all null beyond eval noise; B2 `delayed_ef` is the parity floor.
+- **Closed frontier:** anchor-usage levers + β_anc sweeps all null beyond eval noise; B2 `delayed_ef` is the parity floor.

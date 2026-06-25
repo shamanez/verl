@@ -1,6 +1,6 @@
 # Fixed Control Surface — GSM8K comm-eff experiments
 
-**Status: LOCKED (operator directive, 2026-06-04; substrate #25; accelerated base 2026-06-18).**
+**Status: LOCKED (operator directive, 2026-06-04; substrate locked 2026-06-09; accelerated base 2026-06-18).**
 The locked base is now the **accelerated comm-eff loop** via
 `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`:
 **accel surface** (resp 2048, dynamic-bsz, rollout TP=1, gpu_mem_util 0.55,
@@ -45,7 +45,7 @@ once, here, and read it off for every launch.
 
 ## ☆ The locked substrate + the variable axis (the merger)
 
-As of issue #25 the comm-eff base is the **anchor circuit on a PowerSGD codec**, and the
+The comm-eff base is the **anchor circuit on a PowerSGD codec**, and the
 substrate is **locked**. The single axis that may vary between arms is now the **merger**
 (how the anchor `M` corrects the fast gradient).
 

@@ -42,8 +42,8 @@ codec**. The full result + why + what's next, and all the numbers, live in
   `M` that is **the only thing that updates the projection basis `Q`**
   (`anchor.owns_q`; the fast compressed circuit is a read-only `Q` consumer). This
   **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
-  is mechanically **proven by the post-#29 paired-replay path** (EXP-29 infra +
-  EXP-30 canary/relevance/geometry gates). Only post-#29 valid-M evidence should
+  is mechanically **proven by the paired-replay path** (EXP-29 infra +
+  EXP-30 canary/relevance/geometry gates). Only post-paired-replay valid-M evidence should
   be used for anchor-circuit claims. Judge on **val/score, not grad_norm**. Do
   not relitigate the substrate.
 - **Settled result (the current SOTA)** — the merger question is answered: the **`delayed_ef`
@@ -51,7 +51,7 @@ codec**. The full result + why + what's next, and all the numbers, live in
   reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
   the comm-eff SOTA; its exact settings are `runs/EXP-31/B2_baseline/resolved_params_B2.txt`. **Goals 1–3 (stable /
   parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**
-- **Closed frontier axes (issues #31/#33)** — the post-#29 anchor-usage and β_anc
+- **Closed frontier axes** — the anchor-usage and β_anc
   sweeps are closed. Perturbation, δ-momentum, adaptive dose, control-variate
   gating, sub-basis amplification, and mild β averaging all failed to beat B2
   beyond eval noise. B2 remains the reference; see `research/runs/SUMMARY.md`.
@@ -66,7 +66,7 @@ codec**. The full result + why + what's next, and all the numbers, live in
 The base is a working comm-eff trainer at parity; the two open fronts are both about the
 **anchor ↔ fast-circuit coupling**:
 
-1. **Solve the k-collapse by projecting the weights** — issue #39 (M4). The stale anchor gradient
+1. **Solve the k-collapse by projecting the weights** (milestone M4). The stale anchor gradient
    rotates to orthogonal by k≈10–20 (GSM8K cos 0.51→0.18@k5→0.02@k10→−0.01@k20; norm ratio ≈1.0 ⇒
    *pure rotation*, magnitude intact). Fix = **extrapolate the anchor's _weights_ forward** (Nesterov-style — the gradient is computed at the
    look-ahead weights θ̂≈θ_t, *not* a patched gradient), via a **learned per-block weight-projection**
@@ -74,7 +74,7 @@ The base is a working comm-eff trainer at parity; the two open fronts are both a
    beating AsyncPP's fixed-linear rule, arXiv:2505.01099). Gated by a GPU-free offline kill-test
    (weight-prediction → does g(θ̂) recover cos@k5 ≥0.40, off-diagonal). Summary:
    `reports/priority-1-anchor-staleness-k-collapse.html`.
-2. **Reduce the compression-induced train–inference mismatch** — issue #40 (M6). The codec's
+2. **Reduce the compression-induced train–inference mismatch** (milestone M6). The codec's
    forward-pass distortion ("Gap A") is a bounded ~0.04 tax GRPO absorbs; shrink it (the truncated-IS
    corrector is available but unused). Summary:
    `reports/priority-2-compression-train-inference-mismatch.html`.
@@ -95,7 +95,7 @@ maintained continuously and folded into the fast compressed gradient — and it 
 owns the projection basis `Q`. The merger that converts the anchor into a **dense-matching** update is
 settled — `delayed_ef` (error-feedback on the codec residual), and the current operating merger is the
 EMA-family `signed_ema`. The open questions are now the **two priorities above**: projecting the stale
-anchor forward to fix the k-collapse (#39) and reducing the compression-induced mismatch (#40). See
+anchor forward to fix the k-collapse and reducing the compression-induced mismatch. See
 `SUMMARY.md`.
 
 ## Why code changes are in scope

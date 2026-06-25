@@ -128,7 +128,7 @@ This skill spends real money. The defaults are the safety floor:
 - `--cancel-unavail` is passed to every `vastai create`, so if the scheduler can't place us, vast.ai returns an error instead of leaving a stopped-but-billing instance.
 
 > The skill **never** forwards `VAST_API_KEY` (or any laptop env) onto
-> the provisioned instance. Issue #1's stripped-secrets discipline is
+> the provisioned instance. The stripped-secrets discipline is
 > preserved here at the boundary.
 
 External CLIs required on the laptop: `vastai`, `jq`. `uuidgen` if

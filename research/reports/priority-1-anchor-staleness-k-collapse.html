@@ -31,9 +31,9 @@
 </head>
 <body>
 <div class="wrap">
-  <span class="tag">Priority 1 · issue #39 · milestone M4</span>
+  <span class="tag">Priority 1 · milestone M4</span>
   <h1>The k-collapse — extrapolate the anchor&rsquo;s <em>weights</em> forward (Nesterov-style), don&rsquo;t patch its gradient</h1>
-  <p class="sub">Distilled from the EXP-37 latency&times;merger map and the EXP-38 dense-drift probe (#38). Full run dirs de-bloated; numbers below are the durable record.</p>
+  <p class="sub">Distilled from the EXP-37 latency&times;merger map and the EXP-38 dense-drift probe. Full run dirs de-bloated; numbers below are the durable record.</p>
 
   <div class="tldr">
     <p style="margin-top:0"><b>The problem.</b> The anchor computes its full gradient on <code>delay_K</code>-stale weights θ<sub>t&minus;K</sub>. That gradient <b>rotates to orthogonal by k&nbsp;&asymp;&nbsp;10&ndash;20</b> (cosine <b>0.51&nbsp;&rarr;&nbsp;0.18 @k=5 &rarr; ~0 @k=10 &rarr; &minus;0.01 @k=20</b>); norm is preserved, so it is a <b>pure rotation</b>. By k&nbsp;&asymp;&nbsp;10&ndash;20 it is unusable. EXP-37 confirmed it operationally: stable at cadence/delay <code>5/5</code>, <b>breaks at <code>20/20</code></b>.</p>
@@ -71,7 +71,7 @@
   <p class="gate">On the stored <code>(θ, g)</code> pairs: (1) can a per-block projector predict θ<sub>t</sub> from the trajectory (low weight-prediction error)? (2) does the gradient at the predicted weights lift <b>cos@k5 from 0.18 to &ge; 0.40</b>, and is the lift <b>off-diagonal</b> (a genuine rotation, not a per-coordinate rescale &mdash; the &ldquo;diagonal trap&rdquo;)? If no rung clears it &rarr; <b>STOP, zero GPU.</b> Conditional bar if it passes: look-ahead-anchor merger &ge; B2 <code>delayed_ef</code> (&asymp;0.74) at ~5% gradient-comm; stretch = surpass dense (&asymp;0.766).</p>
 
   <div class="foot">
-    Sources: issues <a href="https://github.com/shamanez/verl-compression-research/issues/38">#38</a> (closed) &amp; <a href="https://github.com/shamanez/verl-compression-research/issues/39">#39</a> (open); arXiv:2505.01099. Admissibility: extrapolating the anchor&rsquo;s <i>own</i> trajectory is weight-space <b>trajectory-continuation</b> (admissible); the supervision is retrospective (past syncs), not forecasting the swarm. Operator decision still required before GPU spend. ⚠️ The EXP-38 <code>(θ, g)</code> captures that feed the kill-gate were de-bloated — re-import from backup before running it.
+    Sources: the EXP-38 dense-drift probe + the AsyncPP paper (arXiv:2505.01099). Admissibility: extrapolating the anchor&rsquo;s <i>own</i> trajectory is weight-space <b>trajectory-continuation</b> (admissible); the supervision is retrospective (past syncs), not forecasting the swarm. Operator decision still required before GPU spend. ⚠️ The EXP-38 <code>(θ, g)</code> captures that feed the kill-gate were de-bloated — re-import from backup before running it.
   </div>
 </div>
 </body>

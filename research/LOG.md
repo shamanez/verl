@@ -18,8 +18,8 @@ Use method names + settings, not old run labels.
 
 Work the **two priorities only**, both from the EMA/2K base above, one knob at a time:
 
-1. **Project the weights to fix the k-collapse** — issue #39 (M4); start with the GPU-free offline
+1. **Project the weights to fix the k-collapse** (milestone M4) — start with the GPU-free offline
    cosine-lift kill-gate before any GPU spend.
-2. **Reduce the compression-induced train–inference mismatch (Gap A)** — issue #40 (M6).
+2. **Reduce the compression-induced train–inference mismatch (Gap A)** (milestone M6).
 
 Do not import old anchor-gradient claims or run labels into new plans.
