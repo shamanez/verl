@@ -57,13 +57,13 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 
    If `code_change: false`, skip this step entirely — never touch `verl/` source.
 
-3b. **Attach path — skip provisioning entirely (operator-provided box).** If the plan's `## Compute budget` has an `attach_box:` block (or your dispatch names an external box), do **NOT** provision. Run the `vast-attach` skill with those params — it writes the external handle to `$PARENT/runs/EXP-<ID>/handles/<id>.json` **and** registers a `status:"RUNNING", external:true` ledger row:
+3b. **Attach path — skip provisioning entirely (operator-provided box).** If the plan's `## Compute budget` has an `attach_box:` block, OR your dispatch passes `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=…` (the session's pre-attached box), do **NOT** provision. Run the `vast-attach` skill with those params — it writes the external handle **and** registers a `status:"RUNNING", external:true` ledger row. **You are in a worktree, so point the skill at `$PARENT`** (`CLAUDE_PROJECT_DIR="$PARENT"`) — otherwise the handle + row land in the throw-away worktree and the orchestrator/monitor never see them:
    ```bash
-   export VAST_ACCOUNT="<team|private>"
-   bash "$PARENT/.claude/skills/vast-attach/run.sh" --exp-id "EXP-<ID>" \
-        --instance-id <id> --ssh-host <host> --ssh-port <port> --num-gpus <N> --account "<team|private>"
+   CLAUDE_PROJECT_DIR="$PARENT" VAST_ACCOUNT="<team|private>" \
+     bash "$PARENT/.claude/skills/vast-attach/run.sh" --exp-id "EXP-<ID>" \
+       --instance-id <id> --ssh-host <host> --ssh-port <port> --num-gpus <N> --account "<team|private>"
    ```
-   Then **skip steps 4, 5 and 9** (nothing to provision; the row is already RUNNING+external) and go straight to step 6 (payload sync) → 7 (launch) → 8 (liveness) → 10 (label) → 11 (PROGRESS). **Never tear it down:** external boxes belong to the operator — the teardown hook and `vast-teardown` both skip `external:true` rows. If `attach_box` is absent, ignore this step and provision normally below.
+   This writes `$PARENT/runs/EXP-<ID>/handles/<id>.json` and appends the RUNNING+external row to `$PARENT/.claude/state/runs.jsonl`. Then **skip steps 4, 5 and 9** (nothing to provision; the row is already RUNNING+external) and go straight to step 6 (payload sync) → 7 (launch) → 8 (liveness) → 10 (label) → 11 (PROGRESS). **Never tear it down:** external boxes belong to the operator — the teardown hook and `vast-teardown` both skip `external:true` rows. **Box already busy?** If a `RUNNING`/`PROVISIONED` row already references this `instance_id`, do NOT launch onto it — append `BOX_BUSY: <id> — EXP-<ID> waiting` to `$PARENT/PROGRESS.md` and stop (one box runs one experiment at a time). If neither a plan `attach_box` nor a dispatch `attach_box=` is present, ignore this step and provision normally below.
 
 4. **Provision Vast.ai by walking `gpu_filter_chain`.** The chain encodes operator preference (cheapest viable tier first). The runner walks it in order; the **first tier that captures ≥1 handle wins** and the walk stops.
 

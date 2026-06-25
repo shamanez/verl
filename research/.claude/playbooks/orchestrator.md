@@ -46,6 +46,12 @@ These hold every tick, regardless of how you were invoked:
      `gpu_filter_chain`. The only two sanctioned tiers are 4×H200 (preferred)
      and 8×H100 — there is no consumer-card or 4×H100 fallback in the research
      loop.
+     - **External-box exception:** if the unusable box is `external:true`
+       (operator-attached via `vast-attach`), do **NOT** tear it down and do
+       **NOT** re-provision — there is no chain to walk; the operator gave a
+       specific box. Append `MANUAL_REVIEW_NEEDED: external box <id> unusable
+       (<reason>) — EXP-<N>` to PROGRESS.md and stop that experiment. The operator
+       fixes or replaces the box.
 
 ## Operating context
 
@@ -65,6 +71,20 @@ it too. Your role-specific constraints:
   exports `VAST_ACCOUNT` and records `vast_account` on the ledger row;
   `vast-teardown` and the teardown Stop hook read it back so a team box is
   always destroyed with the team key. You never handle keys — only the selector.
+- **Pre-attached box selector ("bring-your-own-box").** If your loop instruction
+  names an already-running box — e.g. *"use box instance_id=41680420
+  ssh_host=84.8.106.109 ssh_port=40206 num_gpus=4"* — then for the next eligible
+  experiment do **not** provision: pass those params as
+  `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=<sel>` to the
+  `experiment-runner` dispatch. The runner attaches (step 3b) instead of
+  provisioning; the box is **EXTERNAL** → never torn down. Rules:
+  - **One box runs ONE experiment at a time.** Before dispatching a runner onto the
+    attached box, scan the ledger: if any `RUNNING`/`PROVISIONED` row references that
+    `instance_id`, the box is **BUSY** — skip starting another experiment on it this
+    tick (its GPUs are fully used by the live run). When that run verdicts, the box is
+    idle again and the next eligible experiment may reuse it.
+  - **A plan's own `attach_box:` wins** over the session directive for that experiment.
+  - **Account** comes from the account selector above; it is recorded on the row.
 
 ---
 
@@ -189,7 +209,7 @@ Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree
 The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true, branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main) and apply target_modules patches; commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
 vast_account=<team|private>. Default private. `export VAST_ACCOUNT=<this>` before provisioning so the box bills the right account, and record `vast_account` on the PROVISIONED ledger row (teardown reads it back).
-attach_box: if the plan's `## Compute budget` names `attach_box:` (an operator-provided already-running box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b). The box is EXTERNAL and must NEVER be torn down.
+attach_box: if the plan's `## Compute budget` names `attach_box:`, OR this dispatch passes `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=…` (the session's pre-attached box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b), pointing the skill at $PARENT. The box is EXTERNAL and must NEVER be torn down; if a RUNNING/PROVISIONED row already references its instance_id, it is BUSY — do not launch a second experiment onto it.
 Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsync payload, launch in tmux, promote to RUNNING, label `status:running`, append one PROGRESS line, stop. Never call vast-teardown.
 ```
 
@@ -302,6 +322,10 @@ $/hr now: <X> · spent today: $<Y> · monthly cap remaining: $<Z>
   touching it crosses the human gate.
 - Never dispatch a second runner for an issue already `RUNNING` or
   `PROVISIONED`.
+- Never run two experiments on the same **external** (attached) box at once — one
+  box serves one experiment at a time. Before attaching, scan the ledger for a
+  `RUNNING`/`PROVISIONED` row on that `instance_id`; if present, the box is busy, so
+  skip this tick.
 - Never dispatch `analyst` if a `verdict.md` already exists.
 - Never dispatch `log-writer` if a `LOG.md` entry for this `EXP-<N>`
   already exists at the top of the file.

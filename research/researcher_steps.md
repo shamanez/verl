@@ -231,15 +231,30 @@ Report once steps are flowing. Never call vast-teardown on this box.
 > Purest manual run: add `--no-register` to `vast-attach` (or skip the skill entirely and just
 > SSH in). With no ledger row the harness is completely unaware of the box, so nothing can touch it.
 
-### Mode 2 — let the autonomous loop use it
+### Mode 2 — run the autonomous orchestrator loop against your box
 
-Put an `attach_box:` block in the plan's `## Compute budget` (you or the planner set it):
+Two ways, both leave the box EXTERNAL (never auto-torn-down):
+
+**(a) Session directive — name the box in the loop instruction** (simplest; mirrors the
+account selector). The orchestrator attaches your box for the next eligible experiment
+instead of provisioning:
+```
+/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it. Use the team account.
+Use box instance_id=41680420 ssh_host=84.8.106.109 ssh_port=40206 num_gpus=4 this session
+instead of provisioning — it is EXTERNAL (never tear it down), one experiment at a time on it.
+```
+The loop runs an approved experiment on that box (provision → SKIPPED; attach → train → monitor →
+analyze → log) and never destroys it. One box serves one experiment at a time; when a run verdicts,
+the next approved experiment reuses the idle box.
+
+**(b) Per-plan — pin the box in a specific plan's `## Compute budget`** (precise; overrides (a)):
 ```yaml
 attach_box: { instance_id: 41680420, ssh_host: 84.8.106.109, ssh_port: 40206, num_gpus: 4, account: team }
 ```
-Approve the plan as usual. The orchestrator's `experiment-runner` sees `attach_box`, calls
-`vast-attach` instead of provisioning (step 3b), then rsyncs + launches normally. Everything
-downstream (monitor → analyst → log-writer) is unchanged, and the box is never auto-torn-down.
+Approve the plan as usual; the runner attaches that box for that experiment.
+
+Either way the box is EXTERNAL: the teardown hook and `vast-teardown` skip it. Tear it down
+yourself when done (see below).
 
 ### Tearing down an attached box
 
