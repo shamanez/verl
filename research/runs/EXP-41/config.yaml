@@ -1,0 +1,78 @@
+# EXP-41 — M4: linear weight extrapolation for a look-ahead anchor at delay_K=20.
+# Materialized by experiment-runner from .claude/plans/41.md (revision 2).
+# The launch script reads the cell block by name; each cell is a FRESH python
+# training process chained back-to-back on ONE provisioned box.
+#
+# Canonical launcher: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
+# (signed_ema 0.25/0.50 + PowerSGD r=77 anchor substrate + resp 1024 baked).
+# Cadence/delay_K + the NEW lookahead knobs are overridden via the launcher's
+# trailing Hydra passthrough ("$@" -> main_ppo, last-wins). Re-exporting
+# COMM_EFF_ANCHOR_CADENCE is CLOBBERED by the launcher's own `export`, so the
+# Hydra arg is the ONLY reliable override.
+
+experiment: EXP-41
+branch: exp/41-lookahead-anchor
+code_change: true
+
+substrate_locked:                 # held FIXED across probe + all cells
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  dataset: GSM8K
+  rl_loss: vanilla GRPO (no-KL, no-entropy)
+  max_response_length: 1024       # fast 1K surface (NOT 2048/16K)
+  compression: powersgd r=77, anchor owns Q, clean_cadence=0
+  replay_paired_batch: true
+  snapshot_device: cpu
+  merger: signed_ema(alpha=0.25, beta_anc=0.50)
+  batch: 128 / mini 64 / lr 1e-6 / rollout.n 8
+  gpu_mem_util: 0.55
+  ppo_max_token_len_per_gpu: 24576
+
+# ---- the fire-forcing CORRECTNESS-INVARIANT PROBE (runs FIRST, foreground) ----
+# At cadence=delay_K=1 the anchor fires every tick, so ~3-4 global steps retain
+# the look-ahead history a fire consumes and let the fixed-linear identity be
+# checked (theta_hat == 2*theta[t-1]-theta[t-2]). lookahead ENABLED, fixed_linear.
+# The full cells stay at 5/5 (A) and 20/20 (B) — the probe latency override is
+# probe-only and never reaches a scored run. diagnostics ON for the probe so the
+# source-snapshot canary + per-fire lines print.
+probe:
+  name: fire-forcing-invariant-probe
+  lookahead_anchor: enabled
+  lookahead_mode: fixed_linear
+  anchor_cadence: 1
+  anchor_delay_K: 1
+  total_training_steps: 4
+  test_freq: 100                  # no val inside the tiny probe
+  diagnostics: true
+
+# ---- scored cells (chained back-to-back, ONE tmux, SAME box) ------------------
+cells:
+  - id: A
+    name: onsurface-5over5-reference
+    desc: LOW-latency reference (lookahead DISABLED, 5/5); val@100 band + raw-stale anchor_align_cos baseline.
+    lookahead_anchor: disabled
+    lookahead_mode: disabled
+    anchor_cadence: 5
+    anchor_delay_K: 5
+    total_training_steps: 100
+    test_freq: 25
+  - id: B
+    name: lookahead-fixed-linear-20over20
+    depends_on: A
+    desc: fixed-linear theta_hat=2*theta[t-20]-theta[t-40] (FROZEN); PASS=no-collapse + anchor_align_cos lift + reaches A band.
+    lookahead_anchor: enabled
+    lookahead_mode: fixed_linear
+    anchor_cadence: 20
+    anchor_delay_K: 20
+    total_training_steps: 100
+    test_freq: 25
+
+# cell C (learned_linear_with_fixed_linear_cold_start, 20/20) is CONDITIONAL —
+# only run if the analyst finds B clean-but-underlifted. The orchestrator handles
+# C as a follow-up; experiment-runner does NOT run it here.
+conditional_cell_C:
+  id: C
+  lookahead_anchor: enabled
+  lookahead_mode: learned_linear_with_fixed_linear_cold_start
+  anchor_cadence: 20
+  anchor_delay_K: 20
+  run_by: orchestrator-followup-only
