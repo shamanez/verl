@@ -81,6 +81,11 @@ verdict files, and the issue's GitHub label.
 - `implementation` → no Vast.ai launch. After human flips
   `status:approved`, dispatch `log-writer` to draft the PR if any code
   change is recorded.
+- `analysis` → **no Vast.ai provisioning, no training, no monitor.** After the
+  human flips `status:approved`, dispatch **`analyst`** directly to run the
+  plan's `## Verification commands` (the GPU-free kill-gate) locally and write a
+  GO/NO-GO `verdict.md`; then `log-writer` as usual. Never dispatch
+  `experiment-runner` or `training-log-monitor` for an `analysis` kind.
 - `experiment` / `ablation` / (default) → use the table below.
 
 | State | Detection | Next dispatch |

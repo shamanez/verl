@@ -29,6 +29,8 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 
 1. **Verify completion**: confirm `runs/EXP-<ID>/done.flag` exists OR the tmux session is dead AND `metrics/train.jsonl` is non-empty. If neither holds, the experiment is still running — append `RESULTS_NOT_READY: EXP-<ID>` to PROGRESS.md and stop.
 
+   **`kind: analysis` exception:** there is NO Vast run — skip this completion check entirely. Run the plan's `## Verification commands` (the GPU-free kill-gate) directly and emit the verdict against the plan's numeric gate: **PASS = GO** (gate cleared), **STOP = NO-GO** (gate failed → kill the line, zero GPU), **REVISE = inconclusive** (name what to tighten in the analysis).
+
 2. **Read the plan's `## Analyst predicate`** verbatim. Read its `## Success criteria` and `## Verification commands`.
 
 3. **Run the verification commands** exactly as written. They typically include:

@@ -20,10 +20,13 @@ The `research-planner` subagent fills this template by parsing the GitHub issue 
 | `implementation` | **true** (required) | NO | n/a | plan is the deliverable; draft PR after human approval |
 | `brainstorm` | no | NO | n/a | plan is the deliverable; iterate as comments; promote to `experiment` later by editing kind |
 | `literature` | no | NO | n/a | plan/issue is the deliverable; the operator handles any derivation review manually |
+| `analysis` | maybe | **NO (local, GPU-free)** | runs the plan's kill-gate commands locally, emits GO/NO-GO | verdict (GO=PASS / NO-GO=STOP) + LOG entry; no provisioning, no training, no monitor |
 
 If `kind:` is missing in the issue body, the planner defaults to `experiment`.
 
 **Routing trap — new code that must RUN to be validated.** Use `kind: experiment` (or `ablation`) **with `code_change: true`**, NOT `kind: implementation`. The `implementation` kind never launches on Vast — it only drafts a PR — so it cannot prove the patch actually *runs* (no NaN/OOM, correct numerics, clean integration with the training backend). Reserve `implementation` for changes whose correctness is fully established by review + local checks. **If the hypothesis can only be confirmed by a training run, the kind is `experiment`/`ablation` even when the patch is large.** Those plans set `code_change: true` and MUST fill `## Correctness invariants` below.
+
+**Offline kill-gates → `kind: analysis`.** When the next step is a *GPU-free offline study* that runs code and emits a numeric go/no-go — e.g. the Priority-1 cosine-lift weight-projection gate or the Priority-2 mismatch probe — use `kind: analysis`, NOT `experiment`. It runs locally (no Vast provisioning, no GRPO training, no `training-log-monitor`); the `## Verification commands` ARE the kill-gate and `## Success criteria` carries the numeric GO/NO-GO threshold. If the study genuinely needs a GPU, it's an `experiment`, not an `analysis`.
 
 ## Hypothesis
 <One paragraph. Falsifiable. Contains numeric thresholds. Example: "At setting X with knob Y, observed metric M_target / M_baseline <= 0.10 within `wall_clock_hr` hours, while validation loss stays within 0.05 of baseline at step 5000.">

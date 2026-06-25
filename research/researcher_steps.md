@@ -81,6 +81,7 @@ On `shamanez/verl-compression-research`:
 | `implementation` (`code_change: true`, no Vast launch) | NO | plan is the deliverable; draft PR after approval |
 | `brainstorm` | NO | plan is the deliverable; iterate as comments |
 | `literature` | NO | plan/issue is the deliverable |
+| `analysis` (offline kill-gate) | NO (local, GPU-free) | GO/NO-GO verdict + LOG entry; analyst runs the kill-gate locally |
 
 Common body fields (planner reads them; defaults from `.claude/project.yaml`):
 
@@ -261,7 +262,8 @@ research/
 
 verl/examples/grpo_trainer/
 ├── vast_baseline_qwen25_1p5b_grpo_gsm8k.sh             dense reference launcher
-└── vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh    comm-eff reference launcher
+├── vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh  THE comm-eff baseline (signed_ema, 20/20 collapse regime, resp 1024)
+└── vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh    generic comm-eff engine
 
 verl/CLAUDE.md                      fork-specific agent instructions
 ```

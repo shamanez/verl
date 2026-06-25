@@ -9,7 +9,7 @@ allowed-tools: Bash
 Keeps the harness repo lean. After an experiment's issue is **fully done** (verdict
 written, PR merged if any, instance torn down), this skill collapses that experiment's
 heavyweight footprint into a single concise row in `runs/SUMMARY.md` and removes the rest
-— exactly the manual cleanup applied to EXP-4/EXP-5, made repeatable and safe.
+— made repeatable and safe.
 
 ## Usage
 
@@ -34,9 +34,11 @@ It does **not** commit or push — review `git status` and `runs/SUMMARY.md`, th
 
 ## Hard guards (it refuses rather than risk the baseline or live work)
 
-- **Never the baseline.** ids `baseline` / `3` / `EXP-3` are the permanent dense control
-  and are always left intact — refused by name. (The baseline is defined as **comm-eff OFF**
-  and keeps no standalone `runs/baseline/` run dir or plan file.)
+- **Never the baseline.** ids `baseline` / `3` / `EXP-3` are a legacy dense-control guard,
+  always refused by name. (The current baseline is the launcher
+  `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`, not a run dir;
+  the dense control is just **comm-eff OFF**. de-bloat only touches `runs/EXP-*`, so no
+  baseline artifact is at risk regardless.)
 - **Never a live experiment.** Refuses if the id has a `RUNNING` or `PROVISIONED` ledger row
   (tear it down first — that's `vast-teardown`'s job).
 - **Never an undone experiment.** Refuses if the run dir exists but there is no
