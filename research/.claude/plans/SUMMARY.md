@@ -4,32 +4,33 @@ Compact handoff for future planning. Execution plan files are deleted after each
 issue; this file persists. Results live in `research/runs/SUMMARY.md` + each run's
 `verdict.md` + W&B.
 
-## Current base (the default loop)
+## Current base (the baseline = the problem state)
 
 | item | value |
 |---|---|
 | launcher | `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` |
 | method | `signed_ema`, α=0.25, β_anc=0.50 |
-| surface | accel: resp 2048, dyn-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, diagnostics off |
-| substrate | PowerSGD r=77 + anchor (owns Q, cadence/delay_K=5, clean=0, paired replay, `disable_custom_all_reduce`) |
-| speed | ~25 min train / ~28 min wall per 50-step run |
-| val@50 (n=1) | comm-eff **0.7362** (EXP-36B) vs dense **0.7657** (EXP-36C); bytes ratio ≈0.0505 |
+| surface | fast 1K: resp 1024, dyn-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, diagnostics off |
+| substrate | PowerSGD r=77 + anchor (owns Q, clean=0, paired replay, `disable_custom_all_reduce`) |
+| anchor latency | cadence/delay_K = **20/20** — the k-collapse regime (Priority 1); the baseline collapses here |
 
-## Tested knobs (closed)
+At LOW latency (5/5) the same merger reached parity (val@50 ≈ 0.736 vs dense ≈ 0.766,
+n=1, older 2K surface); the open problem is holding parity at realistic high latency.
+
+## Settled knobs (do not re-sweep)
 
 | knob family | takeaway |
 |---|---|
-| merger | `signed_ema` is the core; `delayed_ef` (β=0) is the legacy replicated ref |
-| `beta_anc` on signed_ema | non-flat, peaks 0.50 (EXP-34, old surface) |
-| `signed_ema_alpha` | peaks 0.25 = 0.7528 (EXP-35 α-sweep, old surface); α=0.0 does NOT ignite |
-| δ-momentum / adaptive-λ / perturbation / control-variate / sub-basis | all null vs baseline (EXP-31) |
+| merger | `signed_ema` is the core merger family |
+| `beta_anc` on signed_ema | non-flat, peaks ≈ 0.50 |
+| `signed_ema_alpha` | peaks ≈ 0.25; α=0.0 does NOT ignite |
+| δ-momentum / adaptive-λ / perturbation / control-variate / sub-basis | all null vs baseline |
 
 ## Planning rule
 
-Start from the accel base launcher **unchanged** and vary a SINGLE knob — the merger
-(`spectral.correction_mode` and its α / β_anc). Everything else is locked
-(`runs/FIXED_CONTROL_SURFACE.md`). Every run must finish under ~25 min train.
+Start from the base launcher **unchanged** and vary a SINGLE knob. Everything else is
+locked (`runs/FIXED_CONTROL_SURFACE.md`). The two active fronts are **GPU-free offline
+kill-gates** — `../../reports/priority-1-anchor-staleness-k-collapse.html` and
+`../../reports/priority-2-compression-train-inference-mismatch.html`; gate before any GPU spend.
 
-Do **not** reintroduce the dropped vLLM speed knobs (gpu_mem 0.75 / `chunked_prefill` /
-`forward_prefetch`): they gave no speedup and added rollout noise. Do not rebuild deleted
-plan files or import invalid (pre-paired-replay) anchor claims.
+Do not import invalid (pre-paired-replay) anchor claims or rebuild deleted plan files.

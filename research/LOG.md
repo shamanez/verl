@@ -6,11 +6,13 @@ Use method names + settings, not old run labels.
 ## Current state (2026-06-25)
 
 - **Basic setup / operating base:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) — on the
-  **2K accel surface** (resp 2048, dynamic-bsz, TP=1, gpu_mem 0.55, 50 steps), on the locked
-  **PowerSGD r=77 anchor substrate** (anchor owns `Q`, cadence/delay_K=5, clean=0, paired replay).
-  `delayed_ef` (λ=1, β_anc=0) is kept only as a parity floor / compatibility reference, not a planning target.
-- **Reference val@50 (n=1, accel surface):** dense 0.7657 (EXP-36C) · comm-eff `signed_ema` 0.7362 (EXP-36B).
-- **Status:** stable + parity at ≈5% gradient-comm (Goals 1–3 met); the bar to beat is dense ≈0.75–0.78.
+  **fast 1K surface** (resp 1024, dynamic-bsz, TP=1, gpu_mem 0.55, 50 steps) at HIGH anchor latency
+  (cadence/delay_K = **20/20**, the k-collapse regime), on the locked **PowerSGD r=77 anchor
+  substrate** (anchor owns `Q`, clean=0, paired replay).
+- **Baseline = the problem state:** at 20/20 the method collapses (Priority 1). At LOW latency (5/5)
+  the same merger reached parity (val@50 ≈ 0.736 vs dense ≈ 0.766, n=1, older 2K surface).
+- **Status:** stable + parity at ≈5% gradient-comm at LOW latency (Goals 1–3 met); holding it at
+  realistic high latency is the open problem.
 - Repo de-bloated to the two active priorities — runs + prior reports removed; durable record =
   `runs/SUMMARY.md` + the two `reports/*.html` summaries + W&B + git.
 

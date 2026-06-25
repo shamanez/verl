@@ -33,33 +33,30 @@ With the method switched off, training is byte-identical to unmodified verl.
 ## Where we are
 
 The comm-eff base is **settled and realistic**: the **anchor circuit on a PowerSGD
-codec**. The full result + why + what's next, and all the numbers, live in
-`research/runs/SUMMARY.md` (the single source of truth — not restated here). In brief:
+codec**. The full result + why + what's next live in `research/runs/SUMMARY.md`
+(the single source of truth — not restated here). In brief:
 
 - **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
-- **Settled comm-eff base** — PowerSGD r=77 + a mandatory **anchor**: a
-  continuously-maintained, `delay_K=5`-stale, full-coverage, DP-reduced gradient EMA
-  `M` that is **the only thing that updates the projection basis `Q`**
-  (`anchor.owns_q`; the fast compressed circuit is a read-only `Q` consumer). This
-  **replaces** the old unrealistic `clean_cadence` periodic-dense-step. The substrate
-  is mechanically **proven by the paired-replay path** (EXP-29 infra +
-  EXP-30 canary/relevance/geometry gates). Only post-paired-replay valid-M evidence should
-  be used for anchor-circuit claims. Judge on **val/score, not grad_norm**. Do
+- **Settled substrate** — PowerSGD r=77 + a mandatory **anchor**: a
+  continuously-maintained, stale, full-coverage, DP-reduced gradient `M` that is
+  **the only thing that updates the projection basis `Q`** (`anchor.owns_q`; the
+  fast compressed circuit is a read-only `Q` consumer). This **replaces** the old
+  unrealistic `clean_cadence` periodic-dense-step. The substrate is mechanically
+  **proven by the paired-replay path**. Judge on **val/score, not grad_norm**. Do
   not relitigate the substrate.
-- **Settled result (the current SOTA)** — the merger question is answered: the **`delayed_ef`
-  merger (B2)** — error-feedback on the PowerSGD codec residual, `G_corr = G_comp + λ·δ`, λ=1, β_anc=0 —
-  reaches **val@50 ≈ 0.74–0.75 = PARITY with dense at ~5% gradient-comm cost** (EXP-30, PASS). This is
-  the comm-eff SOTA; its exact settings are `runs/EXP-31/B2_baseline/resolved_params_B2.txt`. **Goals 1–3 (stable /
-  parity / savings) are met; Goal 4 (one canonical launcher) is pending a surpass.**
-- **Closed frontier axes** — the anchor-usage and β_anc
-  sweeps are closed. Perturbation, δ-momentum, adaptive dose, control-variate
-  gating, sub-basis amplification, and mild β averaging all failed to beat B2
-  beyond eval noise. B2 remains the reference; see `research/runs/SUMMARY.md`.
-- **Async-realism constraint (drives the levers)** — the substrate's fixed `delay_K=5` lock-step is a
-  *simulation*; the real target is a single **SLOW** anchor node serving a fast **SWARM** over the
-  network ⇒ the anchor is **always lagging, never leads**. Admissible levers use it as a *lagging*
-  reference, tolerate **variable staleness**, and stay **cross-rank-identical**. (⇒ no delay-compensation
-  / anchor-lead.) The **two-circuit** structure is mandatory — it is the practical-future-use point.
+- **The merger is the EMA family** — `signed_ema` (α=0.25, β_anc=0.50). At LOW
+  anchor latency (cadence/delay_K = 5/5) the comm-eff run reaches **parity with
+  dense at ~5% gradient-comm cost** ⇒ Goals 1–3 (stable / parity / savings) are
+  met at low latency. Goal 4 (one canonical launcher) is open.
+- **The baseline is the PROBLEM STATE.** It runs at HIGH anchor latency
+  (cadence/delay_K = 20/20), where the method **collapses** (the k-collapse). That
+  is intentional: the baseline sits in the regime the two priorities must fix.
+- **Async-realism constraint (drives the levers)** — the real target is a single
+  **SLOW** anchor node serving a fast **SWARM** over the network ⇒ the anchor is
+  **always lagging, never leads**. Admissible levers use it as a *lagging*
+  reference, tolerate **variable staleness**, and stay **cross-rank-identical**.
+  (⇒ no delay-compensation / anchor-lead.) The **two-circuit** structure is
+  mandatory — it is the practical-future-use point.
 
 ### Current priorities (2026-06-25) — the only things in active scope
 
@@ -80,8 +77,9 @@ The base is a working comm-eff trainer at parity; the two open fronts are both a
    `reports/priority-2-compression-train-inference-mismatch.html`.
 
 **Basic setup / operating base for both:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) —
-on the **2K accel surface** (resp 2048, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps), on the
-locked PowerSGD r=77 anchor substrate. Exact values: `runs/FIXED_CONTROL_SURFACE.md`.
+on the **fast 1K surface** (resp 1024, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps) at HIGH
+anchor latency (cadence/delay_K = 20/20, the k-collapse regime), on the locked PowerSGD r=77 anchor
+substrate. Exact values: `runs/FIXED_CONTROL_SURFACE.md`.
 
 ## Why the anchor (the motivating logic)
 
@@ -92,11 +90,10 @@ full-rank clean step is **not communication-efficient** (full-H transfer) and, o
 real decentralized-PP link, would itself be stale. The anchor circuit is the realistic
 realization of that idea: a **low-frequency, stale, full-gradient reference**
 maintained continuously and folded into the fast compressed gradient — and it also
-owns the projection basis `Q`. The merger that converts the anchor into a **dense-matching** update is
-settled — `delayed_ef` (error-feedback on the codec residual), and the current operating merger is the
-EMA-family `signed_ema`. The open questions are now the **two priorities above**: projecting the stale
-anchor forward to fix the k-collapse and reducing the compression-induced mismatch. See
-`SUMMARY.md`.
+owns the projection basis `Q`. The operating merger is the EMA-family `signed_ema`.
+The open questions are now the **two priorities above**: projecting the stale
+anchor forward to fix the k-collapse, and reducing the compression-induced mismatch.
+See `SUMMARY.md`.
 
 ## Why code changes are in scope
 

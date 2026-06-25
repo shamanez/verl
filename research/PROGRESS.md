@@ -6,14 +6,16 @@ North-star + "done" definition: `.claude/GOAL.md`.
 
 ## Basic setup (operating base for both priorities)
 
-The **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) — on the **2K accel surface**: response 2048,
-dynamic-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, on the locked
-**PowerSGD r=77 anchor substrate** (anchor owns `Q`, cadence/delay_K=5, clean=0, paired replay,
-`disable_custom_all_reduce=true`). ~25 min train / ~28 min wall per 50-step run. A bare run reproduces
-it: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`. Exact values live in
-`runs/FIXED_CONTROL_SURFACE.md` (not duplicated here).
+The **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) — on the **fast 1K surface**: response 1024,
+dynamic-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, at HIGH anchor
+latency (cadence/delay_K = **20/20**, the k-collapse regime), on the locked **PowerSGD r=77 anchor
+substrate** (anchor owns `Q`, clean=0, paired replay, `disable_custom_all_reduce=true`). A bare run
+reproduces it: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`. Exact
+values live in `runs/FIXED_CONTROL_SURFACE.md` (not duplicated here).
 
-Reference val@50 (n=1, this surface): dense **0.7657** (EXP-36C) · comm-eff `signed_ema` **0.7362** (EXP-36B).
+The baseline runs at high latency on purpose — that is where the method collapses (Priority 1). At
+LOW latency (5/5) the same merger reached parity (val@50 ≈ 0.736 vs dense ≈ 0.766, n=1, older 2K
+surface), so parity is reachable; the open problem is holding it at realistic high latency.
 
 ## The two priorities
 
@@ -48,5 +50,5 @@ absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor
 ## Settled background (do not relitigate)
 
 - **Substrate locked:** PowerSGD r=77 + a mandatory anchor that owns `Q`; the two-circuit structure is mandatory.
-- **Goals 1–3 met:** stable / parity / savings (≈5% gradient-comm). Goal 4 (one canonical launcher) is pending a surpass.
-- **Closed frontier:** anchor-usage levers + β_anc sweeps all null beyond eval noise; B2 `delayed_ef` is the parity floor.
+- **Goals 1–3 met at low latency:** stable / parity / savings (≈5% gradient-comm). Goal 4 (one canonical launcher) is open.
+- **Merger family settled:** `signed_ema`; prior anchor-usage + β_anc sweeps were all null beyond eval noise.
