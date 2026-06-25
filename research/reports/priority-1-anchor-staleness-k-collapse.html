@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Priority 1 — The k-collapse: project the stale anchor gradient</title>
+<style>
+  :root{--ink:#1a1d24;--mut:#5b6472;--line:#e4e7ec;--accent:#b3261e;--ok:#1a7f5a;--bg:#fff;--chip:#f4f6f8}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:780px;margin:0 auto;padding:40px 28px 64px}
+  .tag{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+  h1{font-size:25px;line-height:1.25;margin:0 0 4px}
+  .sub{color:var(--mut);margin:0 0 24px;font-size:14px}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:30px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  p{margin:10px 0}
+  .tldr{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .tldr b{color:var(--accent)}
+  table{border-collapse:collapse;width:100%;margin:8px 0;font-variant-numeric:tabular-nums}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  thead th{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+  tr.hot td{color:var(--accent);font-weight:600}
+  code{background:var(--chip);padding:1px 5px;border-radius:4px;font-size:13px}
+  ul{margin:10px 0;padding-left:20px}li{margin:5px 0}
+  .gate{border-left:3px solid var(--ok);padding:4px 0 4px 14px;color:var(--ink)}
+  .foot{margin-top:34px;font-size:13px;color:var(--mut);border-top:1px solid var(--line);padding-top:12px}
+  .foot a{color:var(--mut)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="tag">Priority 1 · issue #39 · milestone M4</span>
+  <h1>The k-collapse — un-rotate the stale anchor gradient by projecting the weights forward</h1>
+  <p class="sub">Distilled from the EXP-37 latency&times;merger map and the EXP-38 dense-drift probe (#38). Full run dirs de-bloated; numbers below are the durable record.</p>
+
+  <div class="tldr">
+    <p style="margin-top:0"><b>The problem.</b> The anchor circuit computes its full gradient on <code>delay_K</code>-stale weights. That gradient <b>goes orthogonal fast</b>: its cosine to the live gradient decays <b>0.51&nbsp;&rarr;&nbsp;0.18 (@k=5, our operating delay) &rarr; ~0 (@k=10) &rarr; &minus;0.01 (@k=20)</b>. Magnitude is preserved and sign becomes a coin-flip, so it is a <b>pure rotation, not a decay</b> &mdash; by k&nbsp;&asymp;&nbsp;10&ndash;20 the anchor is unusable. EXP-37 confirmed this operationally: the anchor circuit is stable at cadence/delay <code>5/5</code> but <b>breaks at <code>20/20</code></b>.</p>
+    <p style="margin-bottom:0"><b>The fix.</b> Don&rsquo;t consume the stale gradient as-is &mdash; <b>project the weight trajectory forward</b> (continue the anchor&rsquo;s own momentum) and realign the gradient there, so it approximates the gradient at the <i>current</i> weights.</p>
+  </div>
+
+  <h2>The drift, quantified (GSM8K dense gradient vs lag k)</h2>
+  <table>
+    <thead><tr><th>lag k (ticks)</th><th>cosine (direction)</th><th>sign agreement</th><th>norm ratio</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>0.51</td><td>0.63</td><td>0.89</td></tr>
+      <tr class="hot"><td>5 &nbsp;(operating delay_K)</td><td>0.18</td><td>0.54</td><td>0.92</td></tr>
+      <tr><td>10</td><td>0.02</td><td>0.51</td><td>1.01</td></tr>
+      <tr class="hot"><td>20</td><td>&minus;0.01</td><td>0.50</td><td>0.98</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px;color:var(--mut)">Big-Math is the <b>stress case</b>: near-orthogonal even at k=1 (cos&nbsp;0.018). Report tasks separately, never average.</p>
+
+  <h2>Why it&rsquo;s fixable</h2>
+  <ul>
+    <li><b>Un-rotate, not rescale</b> &mdash; norm ratio &asymp; 1.0 at every lag; only the direction is wrong.</li>
+    <li><b>Curvature is the signal</b> &mdash; a tiny weight move (<code>&#8214;&Delta;&theta;&#8214; &asymp; 0.0009</code> at k=1) already rotates the gradient to 0.51 cosine &rArr; high local curvature; the rotation is essentially a Hessian-vector product <code>H&middot;&Delta;&theta;</code>.</li>
+    <li><b>Low-dimensional target</b> &mdash; gradient stable-rank &asymp; 3, rank90 &asymp; 50 &rArr; a tractable subspace to model.</li>
+  </ul>
+
+  <h2>The two upgrades over the fixed-linear baseline</h2>
+  <p>Seeded by Pluralis&rsquo;s <i>Nesterov Method for Asynchronous Pipeline Parallel Optimization</i> (arXiv:2505.01099), which does delay-correction with a <b>fixed, linear, hyperparameter-free</b> weight-space look-ahead. Our two upgrades:</p>
+  <ul>
+    <li><b>Linear &rarr; learned projection</b> of the gradient dynamics &mdash; the only route that can <i>surpass</i> dense, because it captures curvature (beyond a diagonal Adam rescale). A deterministic function of past gradients is &sigma;(M)-measurable &rArr; caps at parity.</li>
+    <li><b>Error feedback</b> &mdash; the anchor&rsquo;s periodic refresh is delayed ground truth; the residual <code>r = g_true &minus; &gcirc;</code> both trains the projection online and is accumulated so projection bias can&rsquo;t compound (same trick as the B2 <code>delayed_ef</code> merger, one level up).</li>
+  </ul>
+
+  <h2>Kill-gate (GPU-free, the next step)</h2>
+  <p class="gate">On the stored <code>(&theta;, g)</code> pairs, does any projection rung lift <b>cos@k5 from 0.18 to &ge; 0.40</b>, <b>and</b> is the lift <b>off-diagonal</b> (a genuine rotation, not a per-coordinate rescale &mdash; the &ldquo;diagonal trap&rdquo;)? If no rung clears it &rarr; <b>STOP, zero GPU spent</b>. Conditional bar if it passes: projected-anchor merger &ge; B2 <code>delayed_ef</code> (&asymp;0.74) at ~5% gradient-comm; stretch = surpass dense (&asymp;0.766).</p>
+
+  <div class="foot">
+    Sources: issues <a href="https://github.com/shamanez/verl-compression-research/issues/38">#38</a> (closed) &amp; <a href="https://github.com/shamanez/verl-compression-research/issues/39">#39</a> (open); arXiv:2505.01099. Admissibility note: weight-space <i>trajectory-continuation</i> is admissible under the async constraint (the anchor continues its own observed momentum, it does not forecast the swarm); forecasting the swarm is not. Operator decision required before GPU spend.
+  </div>
+</div>
+</body>
+</html>
