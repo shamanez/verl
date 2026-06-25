@@ -52,3 +52,5 @@ absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor
 - **Substrate locked:** PowerSGD r=77 + a mandatory anchor that owns `Q`; the two-circuit structure is mandatory.
 - **Goals 1–3 met at low latency:** stable / parity / savings (≈5% gradient-comm). Goal 4 (one canonical launcher) is open.
 - **Merger family settled:** `signed_ema`; prior anchor-usage + β_anc sweeps were all null beyond eval noise.
+[2026-06-25T14:51:50+10:00] [research-planner #41] plan written
+[2026-06-25T14:52:22+10:00] [triage] dispatched 1 planners, 0 issues already planned
