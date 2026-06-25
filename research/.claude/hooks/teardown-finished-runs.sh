@@ -36,11 +36,6 @@ TORN_ANY=0
 # runner crashes between handle capture and successful launch.
 while IFS= read -r row || [[ -n "$row" ]]; do
   [[ -z "$row" ]] && continue
-  # EXTERNAL (operator-provided) boxes are NEVER auto-torn-down — pass through
-  # untouched (vast-attach marks them external:true; the operator owns lifecycle).
-  if [[ "$(echo "$row" | jq -r '.external // false')" == "true" ]]; then
-    echo "$row" >> "$TEMP"; continue
-  fi
   STATUS=$(echo "$row" | jq -r '.status // "UNKNOWN"')
   case "$STATUS" in
     RUNNING|PROVISIONED) ;;

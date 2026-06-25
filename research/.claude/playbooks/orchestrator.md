@@ -46,12 +46,13 @@ These hold every tick, regardless of how you were invoked:
      `gpu_filter_chain`. The only two sanctioned tiers are 4×H200 (preferred)
      and 8×H100 — there is no consumer-card or 4×H100 fallback in the research
      loop.
-     - **External-box exception:** if the unusable box is `external:true`
-       (operator-attached via `vast-attach`), do **NOT** tear it down and do
-       **NOT** re-provision — there is no chain to walk; the operator gave a
-       specific box. Append `MANUAL_REVIEW_NEEDED: external box <id> unusable
-       (<reason>) — EXP-<N>` to PROGRESS.md and stop that experiment. The operator
-       fixes or replaces the box.
+     - **External-box exception (env-failure only):** if the unusable box is
+       `external:true` (operator-attached via `vast-attach`), **tear it down** via
+       `vast-teardown` (teardown is a must) but do **NOT** auto-re-provision a
+       replacement — there is no chain to walk; the operator hand-picked the box.
+       Append `MANUAL_REVIEW_NEEDED: external box <id> unusable (<reason>) — EXP-<N>`
+       to PROGRESS.md and stop that experiment. The operator provides another box or
+       lets the harness provision.
 
 ## Operating context
 
@@ -77,12 +78,13 @@ it too. Your role-specific constraints:
   experiment do **not** provision: pass those params as
   `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=<sel>` to the
   `experiment-runner` dispatch. The runner attaches (step 3b) instead of
-  provisioning; the box is **EXTERNAL** → never torn down. Rules:
+  provisioning. The box is **EXTERNAL** (provenance only) and **is torn down after its
+  experiment completes, exactly like a provisioned box** (teardown is a must). Rules:
   - **One box runs ONE experiment at a time.** Before dispatching a runner onto the
     attached box, scan the ledger: if any `RUNNING`/`PROVISIONED` row references that
-    `instance_id`, the box is **BUSY** — skip starting another experiment on it this
-    tick (its GPUs are fully used by the live run). When that run verdicts, the box is
-    idle again and the next eligible experiment may reuse it.
+    `instance_id`, the box is **BUSY** — skip this tick (its GPUs are fully used by the
+    live run). Note: the box is torn down at its run's verdict, so it does NOT persist
+    for a later experiment — the operator re-attaches a box if they want another run.
   - **A plan's own `attach_box:` wins** over the session directive for that experiment.
   - **Account** comes from the account selector above; it is recorded on the row.
 
@@ -209,7 +211,7 @@ Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree
 The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true, branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main) and apply target_modules patches; commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
 vast_account=<team|private>. Default private. `export VAST_ACCOUNT=<this>` before provisioning so the box bills the right account, and record `vast_account` on the PROVISIONED ledger row (teardown reads it back).
-attach_box: if the plan's `## Compute budget` names `attach_box:`, OR this dispatch passes `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=…` (the session's pre-attached box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b), pointing the skill at $PARENT. The box is EXTERNAL and must NEVER be torn down; if a RUNNING/PROVISIONED row already references its instance_id, it is BUSY — do not launch a second experiment onto it.
+attach_box: if the plan's `## Compute budget` names `attach_box:`, OR this dispatch passes `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=…` (the session's pre-attached box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b), pointing the skill at $PARENT. The box is EXTERNAL (provenance only) and IS torn down after its run like any box; if a RUNNING/PROVISIONED row already references its instance_id, it is BUSY — do not launch a second experiment onto it.
 Provision via vast-provision skill, register a PROVISIONED row IMMEDIATELY, rsync payload, launch in tmux, promote to RUNNING, label `status:running`, append one PROGRESS line, stop. Never call vast-teardown.
 ```
 
@@ -345,10 +347,11 @@ $/hr now: <X> · spent today: $<Y> · monthly cap remaining: $<Z>
   always go through the skill so the ledger row is flipped to `TORN_DOWN`. For
   every case you don't explicitly handle, the `teardown-finished-runs` Stop
   hook is the automatic backstop (verdict / stale heartbeat / budget /
-  PROVISIONED-stale), firing after each tick. **Exempt: `external:true`
-  (operator-attached, via `vast-attach`) boxes** — both the hook and the skill
-  skip them by design. If a monitor recommends teardown for an external box,
-  surface it to the operator with a PROGRESS line instead of destroying it.
+  PROVISIONED-stale), firing after each tick. **Teardown is a MUST — it applies to
+  `external:true` (operator-attached, via `vast-attach`) boxes exactly as to
+  provisioned ones; nothing is exempt.** The only external-specific rule is in
+  constraint #4: on an env-failure of an external box, tear it down but do NOT
+  auto-re-provision a replacement.
 - If a `gh` call errors, log it and skip that issue for this tick. Do not
   abort the whole tick.
 - If `runs.jsonl` is malformed, append the malformed line to

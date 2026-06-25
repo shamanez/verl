@@ -197,9 +197,9 @@ the plan overrides it.
 
 Got a box already up (a warm box from a prior run, or one you provisioned by hand)?
 Skip the ~1–3 min provision + ~5–8 min warm-up and start immediately. The
-`vast-attach` skill registers it as an **EXTERNAL** handle: the harness can use it,
-but the teardown hook and `vast-teardown` will **never** auto-destroy it — its
-lifecycle stays yours.
+`vast-attach` skill registers it as an **EXTERNAL** handle (provenance: the harness
+didn't provision it). It is **still torn down** after its run completes or on request —
+teardown is a must; `external` is not an exemption.
 
 ```bash
 cd /Users/shamane/Documents/verl/research
@@ -221,19 +221,21 @@ claude
 ```
 Then hand the box to the session:
 ```
-A running Vast box is attached at runs/ATTACH-<id>/handles/<id>.json (EXTERNAL — do NOT tear it
-down). SSH in using its ssh_login; make sure /workspace/verl is on vast-ai-workload and current
-(git fetch && git checkout vast-ai-workload && git pull --ff-only), then launch the baseline in a
-tmux and tail the first 50 lines of train.log to confirm it's stepping:
+A running Vast box is attached at runs/ATTACH-<id>/handles/<id>.json. SSH in using its ssh_login;
+make sure /workspace/verl is on vast-ai-workload and current (git fetch && git checkout
+vast-ai-workload && git pull --ff-only), then launch the baseline in a tmux and tail the first 50
+lines of train.log to confirm it's stepping:
   bash examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh
-Report once steps are flowing. Never call vast-teardown on this box.
+Report once steps are flowing. When the run is done — or when I say stop — TEAR THE BOX DOWN:
+  bash .claude/skills/vast-teardown/run.sh <instance_id>
 ```
 > Purest manual run: add `--no-register` to `vast-attach` (or skip the skill entirely and just
-> SSH in). With no ledger row the harness is completely unaware of the box, so nothing can touch it.
+> SSH in). With no ledger row the harness never tracks it — so **you** must tear it down when done
+> (`bash .claude/skills/vast-teardown/run.sh <id>`, or destroy it on vast.ai).
 
 ### Mode 2 — run the autonomous orchestrator loop against your box
 
-Two ways, both leave the box EXTERNAL (never auto-torn-down):
+Two ways. Either way the box is **EXTERNAL** (provenance only) and is **torn down after its run**, like any box:
 
 **(a) Session directive — name the box in the loop instruction** (simplest; mirrors the
 account selector). The orchestrator attaches your box for the next eligible experiment
@@ -241,11 +243,12 @@ instead of provisioning:
 ```
 /bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it. Use the team account.
 Use box instance_id=41680420 ssh_host=84.8.106.109 ssh_port=40206 num_gpus=4 this session
-instead of provisioning — it is EXTERNAL (never tear it down), one experiment at a time on it.
+instead of provisioning — it is EXTERNAL (provenance only; still torn down after its run), one
+experiment at a time on it.
 ```
 The loop runs an approved experiment on that box (provision → SKIPPED; attach → train → monitor →
-analyze → log) and never destroys it. One box serves one experiment at a time; when a run verdicts,
-the next approved experiment reuses the idle box.
+analyze → log), then **tears the box down at the run's verdict** (teardown is a must). One box runs
+one experiment at a time; it does NOT persist for a later run — re-attach a box for another.
 
 **(b) Per-plan — pin the box in a specific plan's `## Compute budget`** (precise; overrides (a)):
 ```yaml
@@ -253,14 +256,16 @@ attach_box: { instance_id: 41680420, ssh_host: 84.8.106.109, ssh_port: 40206, nu
 ```
 Approve the plan as usual; the runner attaches that box for that experiment.
 
-Either way the box is EXTERNAL: the teardown hook and `vast-teardown` skip it. Tear it down
-yourself when done (see below).
+Either way the box is torn down after its experiment completes (or on request) — teardown is a
+must; `external` is provenance, not protection.
 
 ### Tearing down an attached box
 
-It will **not** happen automatically. When you're done:
+It happens **automatically** after the run (verdict written / heartbeat stale), exactly like a
+provisioned box. To tear it down sooner — or for a `--no-register` box the harness isn't tracking —
+do it yourself (no `--force` needed):
 ```bash
-bash .claude/skills/vast-teardown/run.sh --force <instance_id>   # or just destroy it on vast.ai
+bash .claude/skills/vast-teardown/run.sh <instance_id>   # or just destroy it on vast.ai
 ```
 
 ## 4. Monitor
@@ -295,8 +300,8 @@ python scripts/check_budget.py --month
 | Budget cap exceeded | Edit `budget.json` or pause |
 | Vast instance not torn down | `bash .claude/skills/vast-teardown/run.sh <instance_id>` |
 | Emergency stop | `touch ~/.claude-kill-switch` (resume: `rm ~/.claude-kill-switch`) |
-| Use an already-running box (skip provisioning) | `bash .claude/skills/vast-attach/run.sh --instance-id <id> [...]` — see §3b. EXTERNAL, never auto-torn-down |
-| Attached (external) box still up after work | intentional — `bash .claude/skills/vast-teardown/run.sh --force <id>` to remove |
+| Use an already-running box (skip provisioning) | `bash .claude/skills/vast-attach/run.sh --instance-id <id> [...]` — see §3b. EXTERNAL (provenance); torn down after its run like any box |
+| Attached box still up after work | tear it down — `bash .claude/skills/vast-teardown/run.sh <id>` (also auto-torn-down on verdict/stale) |
 
 ---
 
@@ -367,10 +372,10 @@ jq -c . .claude/state/runs.jsonl
 # Cost
 python scripts/check_budget.py --month
 
-# Attach an already-running box (skip provisioning; EXTERNAL, never auto-torn-down)
+# Attach an already-running box (skip provisioning; EXTERNAL provenance, still torn down after its run)
 bash .claude/skills/vast-attach/run.sh --instance-id <id> --account team
 
-# Manual teardown ( --force to also destroy an EXTERNAL/attached box )
+# Manual teardown (any box, including attached/external — teardown is a must)
 bash .claude/skills/vast-teardown/run.sh <instance_id>
 
 # Kill switch

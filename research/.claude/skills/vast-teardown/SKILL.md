@@ -22,9 +22,8 @@ Or pass a path to a handle JSON file (the runner emits these under `research/run
 $CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh --handles research/runs/<run>/handles/
 ```
 
-**EXTERNAL boxes are protected.** An instance whose ledger row is `external:true`
-(attached via the `vast-attach` skill) is **refused** — the operator owns its
-lifecycle. Pass `--force` (alias `--include-external`) to override and destroy it anyway.
+This tears down **any** instance id you give it — including operator-attached
+(`external:true`) boxes. Teardown is a must; nothing is exempt.
 
 ## Behavior
 

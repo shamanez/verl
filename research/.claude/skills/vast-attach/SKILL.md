@@ -1,15 +1,15 @@
 ---
 name: vast-attach
-description: Register an ALREADY-RUNNING, operator-provided Vast.ai box as an EXTERNAL handle the harness can use without provisioning — and that the teardown hook + vast-teardown skill will NEVER auto-destroy. Companion to vast-provision for the "bring-your-own-box" fast path.
+description: Register an ALREADY-RUNNING, operator-provided Vast.ai box as an EXTERNAL handle the harness can use without provisioning (skip the provision+warmup tax). external is PROVENANCE only — the box is still torn down after its run or on request, like any box. Companion to vast-provision for the "bring-your-own-box" fast path.
 allowed-tools: Bash
 ---
 
 # vast-attach
 
 Skip the ~1–3 min provision + ~5–8 min warm-up: hand the harness a box you already
-have running and start immediately. The box is marked **`external: true`** on both
-the handle JSON and the ledger row, so **neither** teardown path will destroy it —
-its lifecycle is yours.
+have running and start immediately. The box is marked **`external: true`** (provenance:
+the harness didn't provision it) — but it is **still torn down** after its run completes
+or on request. Teardown is a must; external is not an exemption.
 
 ## Usage
 
@@ -44,21 +44,28 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
 2. Unless `--no-register`, appends a ledger row `status:"RUNNING", external:true`
    so the orchestrator/monitor/analyst can see it — but the teardown machinery skips it.
 
-## The external contract (why this is safe)
+## The external flag (provenance, NOT teardown protection)
 
-- The **teardown Stop hook** (`teardown-finished-runs.sh`) passes `external:true`
-  rows straight through — it never destroys them, even on verdict / stale-heartbeat /
-  budget.
-- The **vast-teardown skill** refuses an instance id whose ledger row is
-  `external:true` unless you pass `--force` (`--include-external`).
-- ⇒ An attached box stays up across as many experiments as you want; **you** tear
-  it down (`vast-teardown --force <id>`, or just destroy it on Vast directly).
+`external: true` only records that the operator ATTACHED this box (the harness did
+not provision it). **It does not exempt the box from teardown** — teardown is a must:
+
+- The **teardown Stop hook** tears an external box down on the same triggers as a
+  provisioned one (verdict written / heartbeat stale / budget exceeded).
+- The **vast-teardown skill** destroys an external box like any other (no `--force`).
+- The one external-specific behaviour: on an **env-failure**, the harness does NOT
+  auto-provision a replacement (you hand-picked a box; there's no SKU chain to walk) —
+  it tears the box down and surfaces `MANUAL_REVIEW_NEEDED` instead.
+
+Want a box the harness will NOT track or tear down? Use `--no-register` (or skip the
+skill and just SSH in): with no ledger row the harness never sees it, and **you** own
+its teardown entirely.
 
 ## When to use
 
 - You already have a warm box (manual provision, or held from a prior run) and want
-  to start training/analysis NOW without paying the provision+warmup tax.
-- You want one long-lived box to serve several back-to-back experiments.
+  to start training/analysis NOW without paying the provision+warmup tax. The box is
+  torn down after its run completes (or on request); to keep it across runs, use
+  `--no-register` and manage (and tear down) it yourself.
 
 For a brand-new box the harness should own and auto-tear-down, use `vast-provision`
 instead — not this.

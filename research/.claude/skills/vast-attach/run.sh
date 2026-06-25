@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # vast-attach — register an ALREADY-RUNNING, operator-provided box as an EXTERNAL
-# handle the harness can use WITHOUT provisioning and WITHOUT ever auto-destroying it.
+# handle the harness can use WITHOUT provisioning (skip the provision+warmup tax).
 # Companion to vast-provision. See SKILL.md.
 #
-# The box is marked external:true on BOTH the handle JSON and the ledger row, so the
-# teardown Stop hook AND the vast-teardown skill refuse to destroy it (the operator
-# owns its lifecycle). Output mirrors vast-provision (a VAST_HANDLE: {...} line) so the
-# experiment-runner's rsync+launch path is unchanged.
+# external:true is PROVENANCE (the harness didn't provision it), NOT teardown
+# protection: the box is STILL torn down after its run, or on request, like any box.
+# Output mirrors vast-provision (a VAST_HANDLE: {...} line) so the experiment-runner's
+# rsync+launch path is unchanged.
 set -euo pipefail
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
@@ -87,6 +87,6 @@ if [[ "$REGISTER" == "1" ]]; then
   fi
 fi
 
-echo "vast-attach: EXTERNAL box $INSTANCE_ID ($NUM_GPUS×$GPU_NAME, account=$ACCOUNT) attached as $EXP_ID — NEVER auto-torn-down." >&2
+echo "vast-attach: attached EXTERNAL box $INSTANCE_ID ($NUM_GPUS×$GPU_NAME, account=$ACCOUNT) as $EXP_ID — torn down after its run, or on request, like any box." >&2
 echo "vast-attach: ssh  -> $SSH_LOGIN" >&2
 echo "vast-attach: handle -> runs/$EXP_ID/handles/$INSTANCE_ID.json" >&2
