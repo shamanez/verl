@@ -1,20 +1,25 @@
 # Research Log
 
-The detailed historical log has been folded into `runs/SUMMARY.md`, W&B, git
-history, and merged code. The next phase should use method names and settings,
-not old run labels.
+The detailed historical log is folded into `runs/SUMMARY.md`, W&B, git history, and merged code.
+Use method names + settings, not old run labels.
 
-## Current State
+## Current state (2026-06-25)
 
-- **Current leading method (provisional SOTA):** `signed_ema` α=0.5, **`beta_anc=0.50`** → greedy GSM8K val@50 **0.7635** — highest measured, in the dense band. Status **REVISE** (single draw + best-of-3; ties the compatibility reference within ±0.024 noise; pending a β=0.50 replicate to confirm).
-- **Normal research path:** EMA-family mergers, with `signed_ema` as the default. Keep the working reference parameters (`lambda=1`, `beta_anc=0`) only for compatibility checks and floors, not as a future planning target.
-- **Shared substrate:** PowerSGD `r=77`, anchor owns `Q`, paired replay, CPU snapshot, cadence/delay `5`, `clean_cadence=0`, `disable_custom_all_reduce=true`; bytes ratio ≈ `0.0505`.
-- **Dense reference:** about `0.75-0.78` greedy GSM8K val@50.
-- **`beta_anc`:** NON-flat on `signed_ema` (peaks at 0.50: 0.7612 / 0.7635 / 0.7225, EXP-34); keep EMA behavior as the active research signal.
+- **Basic setup / operating base:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) — on the
+  **2K accel surface** (resp 2048, dynamic-bsz, TP=1, gpu_mem 0.55, 50 steps), on the locked
+  **PowerSGD r=77 anchor substrate** (anchor owns `Q`, cadence/delay_K=5, clean=0, paired replay).
+  `delayed_ef` (λ=1, β_anc=0) is kept only as a parity floor / compatibility reference, not a planning target.
+- **Reference val@50 (n=1, accel surface):** dense 0.7657 (EXP-36C) · comm-eff `signed_ema` 0.7362 (EXP-36B).
+- **Status:** stable + parity at ≈5% gradient-comm (Goals 1–3 met); the bar to beat is dense ≈0.75–0.78.
+- Repo de-bloated to the two active priorities — runs + prior reports removed; durable record =
+  `runs/SUMMARY.md` + the two `reports/*.html` summaries + W&B + git.
 
-## Next-Phase Rule
+## Next-phase rule
 
-Next experiment = the **β=0.50 replicate** (2–3 draws on `signed_ema` α=0.5 β=0.50) to
-confirm or retract the SOTA. Until it lands, start from the current EMA baseline; if
-confirmed, promote `signed_ema` α=0.5 β=0.50. Vary one knob at a time; do not import old
-anchor-gradient claims or run labels into new plans.
+Work the **two priorities only**, both from the EMA/2K base above, one knob at a time:
+
+1. **Project the weights to fix the k-collapse** — issue #39 (M4); start with the GPU-free offline
+   cosine-lift kill-gate before any GPU spend.
+2. **Reduce the compression-induced train–inference mismatch (Gap A)** — issue #40 (M6).
+
+Do not import old anchor-gradient claims or run labels into new plans.

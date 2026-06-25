@@ -61,6 +61,26 @@ codec**. The full result + why + what's next, and all the numbers, live in
   reference, tolerate **variable staleness**, and stay **cross-rank-identical**. (⇒ no delay-compensation
   / anchor-lead.) The **two-circuit** structure is mandatory — it is the practical-future-use point.
 
+### Current priorities (2026-06-25) — the only things in active scope
+
+The base is a working comm-eff trainer at parity; the two open fronts are both about the
+**anchor ↔ fast-circuit coupling**:
+
+1. **Solve the k-collapse by projecting the weights** — issue #39 (M4). The stale anchor gradient
+   rotates to orthogonal by k≈10–20 (GSM8K cos 0.51→0.18@k5→0.02@k10→−0.01@k20; norm ratio ≈1.0 ⇒
+   *pure rotation*, magnitude intact). Fix = **weight-space projection** (AsyncPP/Nesterov look-ahead,
+   arXiv:2505.01099) with two upgrades over the fixed-linear rule — **learned** projection + **error
+   feedback** — gated by a GPU-free offline cosine-lift kill-test. Summary:
+   `reports/priority-1-anchor-staleness-k-collapse.html`.
+2. **Reduce the compression-induced train–inference mismatch** — issue #40 (M6). The codec's
+   forward-pass distortion ("Gap A") is a bounded ~0.04 tax GRPO absorbs; shrink it (the truncated-IS
+   corrector is available but unused). Summary:
+   `reports/priority-2-compression-train-inference-mismatch.html`.
+
+**Basic setup / operating base for both:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) —
+on the **2K accel surface** (resp 2048, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps), on the
+locked PowerSGD r=77 anchor substrate. Exact values: `runs/FIXED_CONTROL_SURFACE.md`.
+
 ## Why the anchor (the motivating logic)
 
 A compressed/masked gradient is **biased + noisy**; the decisive earlier finding was
@@ -71,8 +91,10 @@ real decentralized-PP link, would itself be stale. The anchor circuit is the rea
 realization of that idea: a **low-frequency, stale, full-gradient reference**
 maintained continuously and folded into the fast compressed gradient — and it also
 owns the projection basis `Q`. The merger that converts the anchor into a **dense-matching** update is
-settled — `delayed_ef` (error-feedback on the codec residual); the open question is now **how to use the
-anchor to SURPASS dense** (issue #31). See `SUMMARY.md`.
+settled — `delayed_ef` (error-feedback on the codec residual), and the current operating merger is the
+EMA-family `signed_ema`. The open questions are now the **two priorities above**: projecting the stale
+anchor forward to fix the k-collapse (#39) and reducing the compression-induced mismatch (#40). See
+`SUMMARY.md`.
 
 ## Why code changes are in scope
 

@@ -1,52 +1,50 @@
-# Progress
+# Progress — focused on two priorities (2026-06-25)
 
-Historical tick-by-tick orchestration output has been de-bloated. The next phase
-starts from the compact handoff:
+Repo de-bloated to the two active fronts. Durable record:
+`runs/SUMMARY.md` · `runs/FIXED_CONTROL_SURFACE.md` · the two summaries in `reports/` · W&B · git history.
+North-star + "done" definition: `.claude/GOAL.md`.
 
-- `research/runs/SUMMARY.md`
-- `research/.claude/plans/SUMMARY.md`
-- `research/runs/FIXED_CONTROL_SURFACE.md`
+## Basic setup (operating base for both priorities)
 
-Current working state:
+The **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) — on the **2K accel surface**: response 2048,
+dynamic-bsz, rollout TP=1, gpu_mem 0.55, ppo_max_token 24576, 50 steps, val@25/50, on the locked
+**PowerSGD r=77 anchor substrate** (anchor owns `Q`, cadence/delay_K=5, clean=0, paired replay,
+`disable_custom_all_reduce=true`). ~25 min train / ~28 min wall per 50-step run. A bare run reproduces
+it: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`. Exact values live in
+`runs/FIXED_CONTROL_SURFACE.md` (not duplicated here).
 
-- The **accelerated comm-eff loop** is the locked base: `signed_ema(α=0.25, β_anc=0.50)`,
-  accel surface @ gpu_mem 0.55, `diagnostics=false`, PowerSGD r=77 anchor substrate.
-  Launcher: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`.
-- ~25 min train / ~28 min wall per 50-step run. Reference val@50 (n=1): comm-eff 0.7362
-  (EXP-36B) vs dense 0.7657 (EXP-36C).
-- The vLLM speed knobs (gpu_mem 0.75 / chunked_prefill / forward_prefetch) were tried and
-  dropped — no speedup, added noise.
-- Prior bulky run directories and execution plans are removed.
-[2026-06-18T21:33:50+10:00] [research-planner #37] plan written
-[2026-06-18T21:34:12+10:00] [triage] dispatched 1 planner (#37), skipped #35 (status:done)
-[2026-06-18T21:43:33+10:00] [orchestrator #37] EXP-37 launched DIRECTLY on operator-provisioned team box i_41475643 (4×H200, $12.17/hr); cadence/delay 20/20 verified (trailing Hydra args win over bare-export 5); 100 steps, signed_ema(0.25,0.50). tmux exp-37-104_202_252_41. Dispatching background monitor.
-EXP-37 exp-37-cad20-delay20 DONE 2026-06-18T12:40Z 100steps val@25=0.592 val@50=0.648 val@75=0.490 val@100=0.444 anchor_fires=10 stability=STOP(val@50<0.6862,late_len_excursion_steps93-100) wandb=fxo8chsv
-[2026-06-18T22:48:22+10:00] [orchestrator] EXP-37 COMPLETE (100 steps, val@50 0.6482 < gate 0.6862, back-half length-escalation s93-100 → STOP-class; anchor_backwards=10 latency realized). Dispatched: EXP-37 analyst + 2-member delay-failure analysis team (staleness-theorist, cadence-analyst); report-lead pending.
-[2026-06-18T22:50:32+10:00] [analyst #37] verdict=STOP
-[2026-06-18T22:54:44+10:00] [orchestrator] Team box i_41475643 torn down 12:46Z by the vast-teardown SKILL invoked from a CONCURRENT /loop session 2d9239b8 (PID 68399), which reaped the finished EXP-37 box ~2min after this session had reused it. Lesson: box reuse across concurrent /loop sessions is a teardown race (memory: box-reuse-race-across-loop-sessions). Ledger: 41475643 rows -> TORN_DOWN.
-[2026-06-18T23:01:39+10:00] [orchestrator] OPERATOR: switch off all H200s. VERIFIED 0 live instances on BOTH team + private accounts (i_41475643 already destroyed by concurrent session). No teardown needed; no money leaking. Ledger clean (no RUNNING/PROVISIONED rows). Delivered delay-failure HTML report.
-[2026-06-20T00:49:38+10:00] [orchestrator/operator] EXP-37B LAUNCHED on team box 41680420 (4xH200, 84.8.106.109:40206). Single cell exp-37b-cad5-delay5-100step: signed_ema(0.25,0.50) accel base, anchor cadence=5/delay_K=5 (NOT 20/20), 100 steps, test_freq=25, project verl_compression_research_accel_rebaseline. Banner verified 5/5 + 100 steps + epochs=2. Monitor dispatched (bg).
-[2026-06-20T01:39:19+10:00] [operator-directive] DO NOT teardown box 41680420 after EXP-37B. CHAIN EXP-37C (same specs, beta_anc=0.0) on the SAME box. Sequence: EXP-37B done -> backfill tail -> flip EXP-37B COMPLETE + register EXP-37C RUNNING (same box, fresh heartbeat) -> launch EXP-37C (trailing hydra spectral.beta_anc=0.0; verify via resolved cmd NOT banner) -> dispatch EXP-37C monitor -> EXP-37B analyst (parallel). Teardown ONLY after EXP-37C done, with TEAM account. EXP-37C staged+md5-verified on box.
-[2026-06-20T01:47:07+10:00] [operator-directive] EXP-37D ADDED to the chain: DENSE (comm-eff OFF) 100 steps on the accel surface, same box 41680420. FULL CHAIN now: EXP-37B (running, signed_ema beta0.50) -> EXP-37C (signed_ema beta_anc=0.0) -> EXP-37D (dense, comm_eff.enabled=false). All back-to-back, reuse-on-COMPLETE, NO teardown between. Teardown ONLY after EXP-37D done, TEAM account. 37D launch=accel base + trailing comm_eff.enabled=false (banner LIES 'master:true'; verify enabled=false via resolved cmd+WandB). 37D apples-to-apples w/ EXP-36C (yabc92t5, dense@50 0.7657, same surface ppo_max_token 24576/TP1/mem0.55/resp2048). 37D staged+md5-verified on box. Purpose: does GSM8K epoch-2 revisit (~step58->100) wobble dense too, isolating dataset-revisit from compressed-merger instability.
-[2026-06-19T15:47:28Z] [monitor/EXP-37B] EXP-37B COMPLETE. 100/100 steps. val@25=0.7384 val@50=0.6808 val@75=0.6983 val@100=0.7346. anchor_backwards=40 (target met). back-half=STABLE (transient length excursion steps79-85, fully recovered by step88). No errors. tmux dead, train.log synced to runs/EXP-37B/. Dispatch EXP-37C.
-[2026-06-20T01:58:53+10:00] [operator-correction] EXP-37C latency 5/5 -> 20/20 (cadence=20, delay_K=20) + beta_anc=0.0. Killed the 5/5 attempt (was only at vLLM init, no steps), freed GPUs (0 MiB verified), relaunched. Resolved cmd confirms beta_anc=0.0/cadence=20/delay_K=20/comm_eff.enabled=true (banner lies). anchor_backwards target=10 (not 40) at 20/20. WandB name=exp-37c-cad20-delay20-beta0-100step. EXP-37B closed out: WandB pns1le3x backfilled to step100 (val@100=0.7346, was underselling at val@75 0.6982); analyst dispatched. Chain unchanged: 37C(20/20,beta0) -> 37D(dense) -> teardown(team).
-[2026-06-20T02:03:10+10:00] [analyst #37] verdict=PASS
-## EXP-37C monitor: 2026-06-19 (session c7a130ef)
-Run: exp-37c-cad20-delay20-beta0-100step | config: signed_ema, beta_anc=0.0, cadence=20, delay_K=20, 100 steps
-Status at TIMEOUT (21min wall, step 52/100): tmux ALIVE, training in progress, val@25=0.6808, val@50=0.5368
-Collapse: onset step 35, peak step 41 (resp_mean=779, clip=0.32), PARTIAL RECOVERY by step 50 (resp_mean=136, clip=0.0)
-anchor_backwards: 5 fires by step 50 (steps 10,20,30,40,50) = exactly cadence=20 target
-Verdict (first-half): COLLAPSE at step 35 (earlier than EXP-37's ~step 61), with PARTIAL SELF-RECOVERY; val@25→50 degraded 68%→54%
-[2026-06-20T02:58:04+10:00] [chain] EXP-37C DONE (20/20, beta_anc=0): OSCILLATING instability val@25/50/75/100=0.6808/0.5368/0.7013/0.3457 (collapse@35->recover@75 0.70->RE-COLLAPSE@100 0.346); anchor_backwards=10 (20/20 realized). WandB u16ui4vx backfilled to step100 (was overselling at val@75 0.70). 37C analyst dispatched. EXP-37D (dense) LAUNCHED on same box (comm_eff.enabled=false verified in resolved cmd; monitor dispatched). Chain: 37B(PASS,stable) -> 37C(oscillating collapse) -> 37D(dense, running) -> teardown(team) after 37D. NOTE: pkill -f self-match footgun hit during 37C->37D handoff (my ssh shell matched 'ray::'/'main_ppo' patterns); box was actually clean, relaunched 37D OK.
-[2026-06-20T03:01:38+10:00] [analyst #37C] verdict=STOP (sibling of #37; 20/20-latency signed_ema beta_anc=0 OSCILLATING instability: collapse 35-41 -> recover val@75=0.70 -> re-collapse val@100=0.3457; contrasts EXP-37 terminal-monotonic & EXP-37B 5/5 STABLE; high-latency not viable for either beta; issue #37 label left status:pass)
-[2026-06-20T03:06:15+10:00] [operator-directive] EXP-37E ADDED (LAST run): ef_powersgd best-proven (EXP-26 B_ef_r2 config: clip=1.0/decay=0.9/beta_anc=0.95, M6 record 0.7210) at latency 20/20, 100 steps. FULL CHAIN: 37B(5/5,b0.5,PASS) -> 37C(20/20,b0,STOP oscillate) -> 37D(dense,running) -> 37E(EF 20/20) -> END. END-OF-CHAIN (operator-requested, separate agents): (1) WandB-completeness agent — verify 37B/37C/37D/37E all have 100 steps, backfill last 1-2 from local train.log if missing; (2) teardown box 41680420 via vast-teardown skill TEAM account; (3) teardown-VERIFY agent — confirm instance gone via 'vastai show instances' (team key) + /tmp/teardown.err per [[vast-teardown-ledger-can-lie]]. 37E staged+md5-verified on box.
-[2026-06-20T04:57:25+10:00] [chain-END] Box 41680420 REMOVED BY OPERATOR (verified gone, team live count 0). EXP-37D (dense) COMPLETE before removal: val@25/50/75/100=0.7521/0.7665/0.7771/0.7832 — STABLE + MONOTONIC through epoch-2 boundary => instability is COMPRESSION-SPECIFIC, not epoch/dataset-revisit (answers the original Q). 37D train.log LOST (monitor killed pre-rsync) but SALVAGED from incoming.log heartbeat (runs/EXP-37D/train-salvaged.log) + WandB 04uozfpx backfilled to step100 val@100=0.7832. Ledger: 37D TORN_DOWN. End-of-chain AUDIT agent spawned (teardown-verify + WandB-completeness for 37B/37C/37D). EXP-37E (EF best-proven @20/20) STAGED but NOT RUN — box gone, needs a new box. AWAITING operator decision on 37E.
-[2026-06-20T12:12:25+10:00] [operator-correction] EXP-37E merger CORRECTED ef_powersgd -> delayed_ef. Operator caught stale-memory error: 'best non-signed_ema' = EXP-30 B2 delayed_ef val@50 0.7528 (near-dense, 0.0008 under dense 0.7536), NOT EXP-26 ef_powersgd 0.7210 (superseded). issue #30 = EXP-30 = the B2 delayed_ef diagram. 37E config: correction_mode=delayed_ef, delayed_ef_lambda=1.0, beta_anc=0.0, cadence=20, delay_K=20. Re-staged (launch.sh/config). Handle now 'pending' (box 41680420 removed; awaiting new box from operator). Carrier-law test: B2 stability came from beta_anc=0; 20/20 stretches held-delta autocorr to ~20 ticks.
-[2026-06-20T12:20:08+10:00] [chain] EXP-37E LAUNCHED on NEW team box 41753455 (145.241.107.153:40670, 4xH200, dph 15.25). delayed_ef merger (STRICTLY delayed_ef per operator; NO ef_powersgd), beta_anc=0.5 (operator choice — signed_ema collapsed sharply at beta_anc=0 in EXP-37C), lambda=1.0, latency 20/20, 100 steps. Resolved cmd verified: correction_mode=delayed_ef/beta_anc=0.5/delayed_ef_lambda=1.0/cadence=20/delay_K=20/enabled=true (banner lies). Secrets injected (HF+WandB, no VAST leak); GSM8K auto-preprocessed (7473/1319). Monitor dispatched (rsync early+often). anchor_backwards target=10. On done: backfill WandB + teardown box 41753455 (team) + teardown-verify. NOTE prior box 41680420 removed by operator.
-[2026-06-20T13:06:08+10:00] [SERIES COMPLETE] EXP-37 latency-x-merger study DONE. Box 41753455 torn down (team, verified 0 live). Results (GSM8K, Qwen2.5-1.5B, 100 steps, accel surface): 37D dense 0.7832 STABLE | 37B signed_ema 5/5 0.7346 STABLE | 37C signed_ema 20/20 b0 OSCILLATING-collapse 0.35 | 37 signed_ema 20/20 b0.5 TERMINAL-collapse | 37E delayed_ef 20/20 b0.5 0.6080 DEGRADATION (no ignition; sub-baseline plateau ~0.61, entropy high/rising, grad_norm grew 2->55, NO length explosion). FINDING: 5/5 stable, 20/20 breaks BOTH merger families; two symptoms one cause (sign-replace ignites / additive stalls; cause=K>tau off-policy staleness). Dense stable => instability is compression-specific not epoch. Verdict report: research/reports/comm-eff-grpo/why-grpo-fails-sft-works.html. Final-audit + report-finalize agents running.
-[2026-06-20T13:15:38+10:00] [research-planner #38] plan written
-[2026-06-20T13:16:25+10:00] [triage] dispatched 1 planner (#38), 0 issues already planned
-[2026-06-20T13:35:06+10:00] [research-planner #38] plan revised to v2 (75-step horizon + boundary-activation subspace probe + gradient-rank/future-research bundle + mandatory HTML deliverable)
-[2026-06-20T13:37:39+10:00] [operator] EXP-38 plan v2 (boundary-subspace + gradient-rank + 75 steps + strong HTML deliverable) committed ca54caf2 + pushed; issue #38 flipped status:approved per operator. Ready for orchestrator (NOT auto-launched — awaiting orchestrator /loop).
-[2026-06-20T15:11:03+10:00] [orchestrator/EXP-38] code_change instrumentation MERGED-READY on exp/38-dense-drift-probe (ef0a3e7): off-parity gate PASS (no drift dir, comm_eff counters 0, byte-identical dense), on-path validated (all 5 roles capture, FSDP summon + boundary h/grad_h hooks work, max_mem 35.6<=36.3 baseline). 75-step capture RUNNING on team box 41763713 (198.145.108.57); val@25=0.7521 == EXP-37D dense val@25 (probes confirmed measurement-only). Monitor live (aa6520fe). Analysis+HTML pipeline written+validated (indexing on real manifest, metrics on synthetic). Next: full rsync + WandB backfill + teardown + analysis → research/reports/comm-eff-grpo/exp38-dense-drift.html.
-[2026-06-20T15:42:50+10:00] [EXP-38 CHECKPOINT] 75-step dense capture COMPLETE + SYNCED + box torn down. val@25/50/75=0.7521/0.7665/0.7688 (dense, monotonic; probes measurement-only). Local: 1071/1071 .pt (16.15GB, 0 missing, integrity-verified), manifest + sidecar_layernorms(21) + sidecar_grpo(75, WandB mhegvmbs step75 backfilled) + train.log. SUFFICIENCY CONFIRMED: lags k{1,2,5,10,20,40} all sampleable (k5:2 k20:13 k40:11 pairs), epoch-2 crossed (gs60-75), 15 matrices x 3 boundaries. Team box 41763713 DESTROYED (API-verified 0 live; ledger flipped manually). exp/38 @ ef0a3e7 pushed (off-parity PASS, on-path validated). ANALYSIS HELD per operator — awaiting go-ahead. Engine ready: scripts/exp38_drift_analysis.py + exp38_report.py (validated e2e).
+Reference val@50 (n=1, this surface): dense **0.7657** (EXP-36C) · comm-eff `signed_ema` **0.7362** (EXP-36B).
+
+## The two priorities
+
+### 1 — Solve the k-collapse by projecting the weights · issue #39 (M4)
+
+The anchor gradient is taken on `delay_K`-stale weights and **rotates to orthogonal by k≈10–20**
+(GSM8K cos `0.51 → 0.18@k5 → 0.02@k10 → −0.01@k20`; norm ratio ≈ 1.0 ⇒ *pure rotation*, magnitude
+intact; sign → coin-flip). Fix: don't consume it stale — **project the weight trajectory forward**
+(AsyncPP/Nesterov look-ahead, arXiv:2505.01099) and realign the gradient. Two upgrades over the
+fixed-linear rule: **(1) linear → learned** projection (the only route that can *surpass* dense —
+captures curvature, beyond a diagonal Adam rescale), **(2) error feedback** using the anchor's periodic
+refresh as delayed ground truth.
+
+- **Next step (GPU-free) — the kill-gate:** on stored `(θ, g)` pairs, does any rung lift cos@k5 from
+  0.18 to **≥ 0.40**, AND is the lift **off-diagonal** (not the diagonal trap)? No → STOP, zero GPU.
+  ⚠️ The EXP-38 captures that feed this gate were de-bloated — **re-import from backup before running it.**
+- Summary: `reports/priority-1-anchor-staleness-k-collapse.html`.
+
+### 2 — Reduce the compression-induced train–inference mismatch · issue #40 (M6)
+
+The codec's forward-pass distortion ("Gap A") makes the recomputed log-probs differ from vLLM's.
+Verdict (2026-06-23): Gap A is a **bounded ~0.04 tax, constant in stable and collapsing runs, and GRPO
+absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor staleness (= Priority 1).
+
+- **Lever:** shrink the forward distortion / switch on the **truncated-IS corrector** (available but
+  unused — `old_log_prob` is recomputed common-mode, not vLLM-referenced). #40's FP8 rollout-only probe
+  isolates the precision component.
+- Summary: `reports/priority-2-compression-train-inference-mismatch.html`.
+
+## Settled background (do not relitigate)
+
+- **Substrate locked:** PowerSGD r=77 + a mandatory anchor that owns `Q`; the two-circuit structure is mandatory.
+- **Goals 1–3 met:** stable / parity / savings (≈5% gradient-comm). Goal 4 (one canonical launcher) is pending a surpass.
+- **Closed frontier (issues #31/#33):** anchor-usage levers + β_anc sweeps all null beyond eval noise; B2 `delayed_ef` is the parity floor.
