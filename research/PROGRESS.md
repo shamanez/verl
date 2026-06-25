@@ -54,3 +54,4 @@ absorbs it** — not the cause of collapse. The real blocker is "Gap B" = anchor
 - **Merger family settled:** `signed_ema`; prior anchor-usage + β_anc sweeps were all null beyond eval noise.
 [2026-06-25T14:51:50+10:00] [research-planner #41] plan written
 [2026-06-25T14:52:22+10:00] [triage] dispatched 1 planners, 0 issues already planned
+[2026-06-25T15:04:59+10:00] [research-planner #41] plan revised — closed 7 code-grounded review must-fixes (alignment-lift telemetry spec, new look-ahead snapshot ring, fire-forcing probe, source-snapshot canary, corrected verification keys, off-diagonal demoted to diagnostic); all file:line claims re-verified vs source
