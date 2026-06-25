@@ -20,23 +20,21 @@
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
 #   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
 #   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
-#   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (delayed_ef)  K-delayed codec-residual fold of M into G
-#   merger dose lambda ..... COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA (1.0)        G_corr = G_comp + lambda*(M_rep - G_comp_ring)
+#   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (signed_ema)  folds anchor M into G via a signed EMA
+#   merger EMA decay ....... COMM_EFF_SPECTRAL_BETA_ANC         (0.50)        anchor-gradient EMA decay
 #   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    periodic uncompressed step
 #   PRF mask ............... COMM_EFF_MASK_ENABLED     (false)    prf_mask codec
 #
-# Base in one line: PowerSGD r=77 plus a continuously
-# maintained, delay_K=5 stale, full-coverage (196 matrices, DP-reduced) anchor
-# gradient M, refreshed every 5 ticks from a no-hook isolated clone; the anchor
-# OWNS the PowerSGD basis Q (computes Q<-orth(V) from its stale-forward
-# activations and broadcasts it — the fast circuit is a read-only consumer,
-# fail-closed from ever writing Q); the delayed_ef merger folds M into the fast
-# gradient as the K-delayed EXACT codec residual G_corr = G_comp + lambda*delta,
-# delta = M_rep - G_comp_ring, lambda=1, beta_anc=0.
+# Base in one line: PowerSGD r=77 plus a continuously maintained, stale,
+# full-coverage (196 matrices, DP-reduced) anchor gradient M, refreshed every
+# `cadence` ticks from a no-hook isolated clone; the anchor OWNS the PowerSGD
+# basis Q (computes Q<-orth(V) from its stale-forward activations and broadcasts
+# it — the fast circuit is a read-only consumer, fail-closed from ever writing
+# Q); the signed_ema merger folds M into the fast gradient via a signed EMA
+# (alpha, beta_anc).
 #
 # Keep the model, dataset, rollout shape, and optimizer surface fixed unless the
-# run is explicitly testing one of those axes. The delayed_ef merger estimates a
-# codec residual from the stale anchor; validation metrics should drive comparisons.
+# run is explicitly testing one of those axes. Validation metrics drive comparisons.
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
@@ -57,8 +55,8 @@
 # a reference-only ablation) frees the clone and you can raise it back to 36864.
 #
 # Examples:
-#   # delayed_ef is the default. Add optional anchor-usage levers as overrides:
-#   COMM_EFF_SPECTRAL_PERTURB_SIGMA=0.03 EXPERIMENT_NAME=perturb bash <thisfile>
+#   # signed_ema is the default merger. Override run length / name as needed:
+#   TOTAL_TRAINING_STEPS=100 EXPERIMENT_NAME=ce_100 bash <thisfile>
 #   # dense control via the same launcher:
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
 #   # prf_mask codec comparison run; cannot anchor-own Q:
@@ -245,15 +243,16 @@ COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
 # --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
-COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"        # anchor EMA decay; 0 = use the latest fire's M (delayed_ef)
+COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.50}"       # anchor-gradient EMA decay (signed_ema baseline)
+COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}"   # signed_ema mixing weight
 # Correction cadence in optimizer ticks.
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload full-coverage M (OOM guard)
 # Cap target matrices per correction. -1 means no cap.
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
-# delayed_ef computes G_corr = G_comp + lambda*(M_rep - G_comp_ring).
-COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-delayed_ef}"
-# delayed_ef dose; 0.0 is the plain PowerSGD limiting case.
+# signed_ema folds the anchor M into the fast gradient via a signed EMA.
+COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"
+# Legacy dose knob, retained for the plain-PowerSGD limiting case (lambda=0.0); unused by signed_ema.
 COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
 COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # force when correction_mode=inject
 COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # weight when correction_mode=blend
@@ -351,7 +350,7 @@ cat <<EOF
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA
+  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC (legacy: delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA)
   ef_powersgd:         ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP
   subbasis:            delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA
   subbasis schedule:   delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS
@@ -458,6 +457,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
   actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
   actor_rollout_ref.actor.comm_eff.spectral.correction_mode="$COMM_EFF_SPECTRAL_CORRECTION_MODE" \
+  actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha="$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA" \
   actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda="$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" \
   actor_rollout_ref.actor.comm_eff.spectral.inject_gamma="$COMM_EFF_SPECTRAL_INJECT_GAMMA" \
   actor_rollout_ref.actor.comm_eff.spectral.blend_eta="$COMM_EFF_SPECTRAL_BLEND_ETA" \
