@@ -7,8 +7,10 @@
 # (the EXP-42 controlled surface) — so the resolved_params diff across cells contains
 # ONLY the 3 lookahead keys (success criterion).
 #
-# Surface (overrides the launcher's defaults to the k-collapse EXP-42 surface):
-#   anchor cadence=20 delay_K=20, max_response=1024, total_steps=50, test_freq=25.
+# Surface (overrides the launcher's defaults to the EXP-42 surface):
+#   anchor cadence=10 delay_K=10 (shorter staleness => less k-collapse, cleaner read
+#   on projection vs raw-stale vs no-projection), max_response=1024, total_steps=100,
+#   test_freq=25 (val@25/50/75/100).
 # Launcher defaults already match the rest: signed_ema (correction_mode), beta_anc=0.50,
 # signed_ema_alpha=0.25, powersgd.rank=77, owns_q=true, clean_cadence=0,
 # replay_paired_batch=true, snapshot_device=cpu, ema_device=cpu, max_targets=-1 (196),
@@ -36,10 +38,10 @@ INTERNAL_LOG="$OUT/train_${CELL}_internal.log"
 
 echo "=== EXP-42 $CELL: lookahead_anchor=$LA_ANCHOR mode=$LA_MODE strength=$LA_STR grad_proj=ON ==="
 LOG="$INTERNAL_LOG" \
-COMM_EFF_ANCHOR_CADENCE=20 \
-COMM_EFF_ANCHOR_DELAY_K=20 \
+COMM_EFF_ANCHOR_CADENCE=10 \
+COMM_EFF_ANCHOR_DELAY_K=10 \
 MAX_RESPONSE_LENGTH=1024 \
-TOTAL_TRAINING_STEPS=50 \
+TOTAL_TRAINING_STEPS=100 \
 TEST_FREQ=25 \
 EXPERIMENT_NAME="$EXPN" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \

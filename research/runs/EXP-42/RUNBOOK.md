@@ -25,8 +25,9 @@ rsync -az -e "$SSH-without-the-cmd" runs/EXP-42/{drive.sh,run_cell.sh,smoke.sh,p
 $SSH "tmux new -d -s exp42 'bash /workspace/runs/EXP-42/drive.sh'"
 ```
 `drive.sh` runs: **smoke (≈3 min, the FSDP/backend hard gate)** → if clean → **run1
-(fixed_linear@0.50)** → **run2 (learned@0.50)** → **run3 (no projection)**, each 50
-steps @ 1024 ctx, full batch, strictly sequential. Watch: `tail -f /workspace/runs/EXP-42/drive.status`.
+(fixed_linear@0.50)** → **run2 (learned@0.50)** → **run3 (no projection)**, each 100
+steps @ 1024 ctx, anchor delay_K=cadence=10, full batch, strictly sequential.
+Watch: `tail -f /workspace/runs/EXP-42/drive.status`.
 
 ## STEP C — monitor from the laptop (while drive.sh runs)
 - training-log-monitor subagent, 30s cadence, watching `drive.status` + the current cell's
@@ -45,7 +46,7 @@ python research/scripts/analyze.py runs/EXP-42 --emit verdict.md   # or dispatch
 - **HEADLINE:** median `grad_proj_gain` for run1 & run2. **STOP if ≤ 0 for BOTH** (the projection
   premise is falsified at the gradient level — the deepest finding; a clean STOP with a measured
   gain profile is a SUCCESSFUL outcome of this plan).
-- Secondary (conversion): `val@50` of each vs run3 + collapse check (`response_length/mean ≤ 2×`
+- Secondary (conversion): `val@100` (final) of each vs run3 + collapse check (`response_length/mean ≤ 2×`
   its first-25-step mean).
 
 ## STEP E — report + teardown
@@ -56,7 +57,7 @@ Report to operator. **Do NOT tear down the box — ASK first** (operator owns it
 - One command (`drive.sh`) → no human-in-the-loop gaps between smoke and the 3 runs.
 - The smoke (cadence=2/delay_K=2) reaches a PROJECTING fire — the +2-backward path — in ~2 min,
   so the risky path is validated cheaply BEFORE the long runs (in a real run it would not project
-  until ~step 20, wasting 10+ min before the gate could fire).
+  until ~step 10 (delay_K=cadence=10), wasting time before the gate could fire).
 - The 3 real runs (full batch, 1024 ctx) saturate all 4 H200s back-to-back.
 
 ## Teardown-safety (in effect)
