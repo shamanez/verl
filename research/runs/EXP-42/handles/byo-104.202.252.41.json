@@ -1,0 +1,14 @@
+{
+  "schema_version": "1",
+  "instance_id": "byo-104.202.252.41",
+  "ssh_host": "104.202.252.41",
+  "ssh_port": 20167,
+  "num_gpus": 4,
+  "gpu_name": "H200",
+  "gpu_ram": 143771,
+  "dph_total": 0,
+  "ssh_login": "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 20167 root@104.202.252.41",
+  "label": "EXP-42",
+  "vast_account": "private",
+  "external": true
+}
