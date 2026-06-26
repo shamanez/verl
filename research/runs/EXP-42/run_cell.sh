@@ -43,6 +43,8 @@ COMM_EFF_ANCHOR_DELAY_K=10 \
 MAX_RESPONSE_LENGTH=1024 \
 TOTAL_TRAINING_STEPS=100 \
 TEST_FREQ=25 \
+USE_DYNAMIC_BSZ=True \
+VAL_BEFORE_TRAIN=False \
 EXPERIMENT_NAME="$EXPN" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor=$LA_ANCHOR \

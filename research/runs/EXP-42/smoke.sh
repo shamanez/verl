@@ -35,6 +35,7 @@ VAL_BEFORE_TRAIN=False \
 TRAIN_BATCH_SIZE=16 \
 PPO_MINI_BATCH_SIZE=8 \
 ROLLOUT_N=4 \
+USE_DYNAMIC_BSZ=True \
 EXPERIMENT_NAME="exp42-smoke-${MODE}" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor=$LA_ANCHOR \
