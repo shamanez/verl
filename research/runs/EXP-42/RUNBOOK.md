@@ -115,5 +115,31 @@ Box attached via `vast-attach --no-register` (no box ledger row) + per-cell rows
 auto-torn-down. Teardown happens only on explicit operator OK.
 
 ---
-## Locked params (finalized from the OOM/offload analysis)
-<!-- FINALIZED-BELOW: PPO_MAX_TOKEN_LEN_PER_GPU per GPU type + snapshot_device/ema_device decision -->
+## Locked params (finalized 2026-06-26 from the OOM/offload analysis + operator choice)
+
+Operator choice: **ema stays on CPU, strictly no smoke** — trade ~0.5–1 s/step (the
+per-step EMA H2D transfer) for zero added HBM and no OOM gate. The ONLY non-default knobs
+are batching + initial-val; everything memory-related stays at the safe, already-run
+defaults, so dynamic batching is the single new variable (well-trodden in verl; budget
+18432 < the fast ref's 24576 ⇒ low OOM risk).
+
+| Knob | Locked value | Env var | Note |
+|---|---|---|---|
+| batching | `True` | `USE_DYNAMIC_BSZ` | the 2.7× win; results-invariant (per-element mask packing-invariant) |
+| initial val | `False` | `VAL_BEFORE_TRAIN` | skip step-0 eval; val@25/50/75/100 unaffected |
+| token budget (4×H200) | `18432` | `PPO_MAX_TOKEN_LEN_PER_GPU` | launcher default; active under dynamic_bsz; **ceiling ~20480 with anchor ON** |
+| snapshot_device | `cpu` | (default) | per-fire only; **required by the grad_proj guard** — do not move |
+| ema_device | `cpu` | (default) | KEPT on CPU per operator (OOM-safe, no smoke); per-step transfer accepted |
+| vLLM mem util | `0.4` | `ROLLOUT_GPU_MEM_UTIL` | launcher default; conservative (the prior healthy run used it) |
+
+- These map to: `run_cell.sh` exports `USE_DYNAMIC_BSZ=True` + `VAL_BEFORE_TRAIN=False`;
+  all memory knobs inherit the launcher defaults (cpu/cpu/18432/0.4). No other overrides.
+- **Expected:** ~55–65 s/step (a touch above the 48–52 ema-on-GPU estimate, since the EMA
+  stays on CPU), ~55–70 min/cell, **~3–3.5 h for all 3 cells** (vs ~12 h unoptimized).
+- **8×H100 fallback** (only if no H200; anchor-ON is marginal there): set
+  `PPO_MAX_TOKEN_LEN_PER_GPU=10240` (drop to 8192 if a fire-tick OOMs) and
+  `ROLLOUT_GPU_MEM_UTIL=0.38`; keep ema/snapshot on CPU. **Do not mix GPU types within one
+  3-cell run** (different budgets/devices would break cell-to-cell comparability).
+- **No-smoke residual risk:** the dynamic-batching + grad-proj +2-backward path was never
+  gate-validated; the training-log-monitor must confirm no OOM/NaN by ~step 10 (the first
+  projecting fire). If it OOMs, lower `PPO_MAX_TOKEN_LEN_PER_GPU` (e.g. 16384) and relaunch.
