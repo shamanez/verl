@@ -106,29 +106,36 @@ from verl.workers.config.comm_eff import CommEffConfig
 # CommEffConfig is a FROZEN dataclass; build via dataclasses.replace so the
 # top-level __post_init__ (where the grad_proj validation lives) re-runs with the
 # overridden nested values.
-def build(replay=True):
+def build(replay=True, snapshot_device="cpu", geometry=False, correction_mode="signed_ema"):
     base = CommEffConfig()
     return dc.replace(
         base,
         enabled=True,
-        anchor=dc.replace(base.anchor, enabled=True, replay_paired_batch=replay),
-        spectral=dc.replace(base.spectral, enabled=True, correction_mode="signed_ema"),
-        probe=dc.replace(base.probe, grad_proj_enabled=True),
+        anchor=dc.replace(base.anchor, enabled=True, replay_paired_batch=replay, snapshot_device=snapshot_device),
+        spectral=dc.replace(base.spectral, enabled=True, correction_mode=correction_mode),
+        probe=dc.replace(base.probe, grad_proj_enabled=True, geometry_enabled=geometry),
     )
 
 try:
-    build(replay=True)  # signed_ema active + replay + grad_proj => MUST pass
+    build()  # signed_ema active + replay + cpu + grad_proj => MUST pass
     check("cfg.grad_proj OK with signed_ema active (NOT forced to merger=none)", True)
 except Exception as e:
     check("cfg.grad_proj OK with signed_ema active (NOT forced to merger=none)", False, repr(e))
 
-try:
-    build(replay=False)
-    check("cfg.grad_proj REQUIRES replay_paired_batch (raises when off)", False, "no error raised")
-except ValueError as e:
-    check("cfg.grad_proj REQUIRES replay_paired_batch (raises when off)", "replay_paired_batch" in str(e))
-except Exception as e:
-    check("cfg.grad_proj REQUIRES replay_paired_batch (raises when off)", False, repr(e))
+for label, kw, needle in [
+    ("cfg.grad_proj REQUIRES replay_paired_batch", dict(replay=False), "replay_paired_batch"),
+    ("cfg.grad_proj REQUIRES snapshot_device=cpu", dict(snapshot_device="gpu"), "snapshot_device"),
+    # correction_mode=none so geometry's own inert-merger check passes and MY
+    # mutual-exclusion guard is the one that fires.
+    ("cfg.grad_proj MUTUALLY EXCLUSIVE with geometry", dict(geometry=True, correction_mode="none"), "mutually exclusive"),
+]:
+    try:
+        build(**kw)
+        check(label + " (raises)", False, "no error raised")
+    except ValueError as e:
+        check(label + " (raises)", needle in str(e), str(e)[:80])
+    except Exception as e:
+        check(label + " (raises)", False, repr(e))
 
 # ---- cfg: OmegaConf structured-config accepts the override key -------------
 try:
