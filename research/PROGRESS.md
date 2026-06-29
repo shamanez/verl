@@ -84,3 +84,4 @@ Cell A (cadence 5/5, lookahead DISABLED) at step 31/100 at monitor exit. Clean t
 [2026-06-29T12:58:10+10:00] teardown EXP-EXP-42-run1 reason=no-heartbeat-ever-60min destroyed=0
 
 - [2026-06-29T09:13:40Z] EXP-42 BOTH regimes COMPLETE (monitor): regimeA codec-off 80steps val@80=0.7695 / 160 sketches; regimeB codec-only PowerSGD r=77 80steps val@80=0.0788 (collapsed, allowed) / 160 sketches / recon_rel_error~0.97 / powersgd_applications>>0 vs A=0. Both done.flag rc=1 = benign atexit teardown (not failure). Artifacts synced to runs/EXP-42/{regimeA,regimeB}/. -> dispatch_analyst.
+[2026-06-29T20:49:12+10:00] teardown EXP-EXP-42 reason=no-heartbeat-30min destroyed=1
