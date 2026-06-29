@@ -85,5 +85,15 @@ GRPO run (regime A) from the dense decoder sketch:
   The trajectory is locally close to linear and curves by the K=10 horizon, which is the mechanism
   behind the overshoot. Attention is slightly more linear than MLP at fine scale (0.81 vs 0.74);
   linearity is uniform across layer depth.
+- Paper vs this run: the cited RLVR-linearity paper (arXiv:2601.04537, per lookahead.py) reports
+  linear weight extrapolation holding about 600 steps at R squared about 0.9. By the analogous
+  metric here (weight_proj_ratio crossover) linear extrapolation holds only about 5 global steps
+  (10 ticks) in this run. The gap is large. Likely causes: this run is only 80 steps from an
+  already-tuned model with tiny noise-dominated motion (0.057 percent drift), and the two linearity
+  metrics may differ (global line fit / low-rank subspace in the paper versus local consecutive-step
+  R squared here). arXiv:2601.04537 is at the edge of the assistant knowledge cutoff, so its figures
+  are taken from the code citation, not an independent reading.
+
 A deeper GPU-free follow-up (low-rank structure, per-matrix projectability, optimal-coefficient
-sweep) is specified in runs/EXP-42/NEW_SESSION_PROMPT.md. No further GPU training will be run.
+sweep, and a like-for-like global-line-fit linearity to compare with the paper) is specified in
+runs/EXP-42/NEW_SESSION_PROMPT.md. No further GPU training will be run.

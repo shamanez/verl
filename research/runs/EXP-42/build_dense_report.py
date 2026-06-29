@@ -341,6 +341,26 @@ def build(run_dir, regime, out_html, fragment=False):
              f"the K=10 scale, where linearity has already broken down, which is the mechanism behind "
              f"the overshoot we measured. The single-scale 'weights move linearly' headline is true "
              f"locally but scale-dependent: it should be stated with the scale attached.</p>")
+    P.append(f"<p><b>How many steps does linear extrapolation hold: paper versus this run.</b> "
+             f"The RLVR-linearity paper our method cites (arXiv:2601.04537, as quoted in "
+             f"lookahead.py) reports that linear weight extrapolation holds for about 600 training "
+             f"steps (R squared about 0.9). By the directly analogous metric here, the "
+             f"weight_proj_ratio crossover, linear extrapolation stops helping after about "
+             f"{hstar_steps:.0f} global steps ({hstar} ticks) in this run. That is far short of 600. "
+             f"Two things to keep in mind before reading this as a contradiction. First, this run is "
+             f"only {len(m['ticks'])//TICKS_PER_STEP} steps long and starts from an already "
+             f"instruction-tuned model, so the weights barely move (about {total_drift*100:.3f} "
+             f"percent total drift) and the small per-step motion is easily dominated by rollout "
+             f"sampling noise, which destroys step-to-step direction persistence quickly. A longer "
+             f"run from a less converged start, with larger directed motion, is where a 600-step "
+             f"linear regime would plausibly appear, and we did not run that. Second, the comparison "
+             f"assumes the two papers measure linearity the same way: the about-0.9 / 600-step figure "
+             f"may be a global straight-line fit over the whole trajectory or a low-rank-subspace "
+             f"statement, which is not the same as the local consecutive-step direction R squared "
+             f"used here. A like-for-like check (global line fit and effective rank of the "
+             f"displacement subspace) is the right GPU-free next analysis. NOTE: arXiv:2601.04537 is "
+             f"dated at the edge of this assistant's knowledge, so the paper figures here are taken "
+             f"from the code citation, not from an independent reading of the paper.</p>")
 
     P.append("<h2>Scope and provenance</h2><ul>")
     P.append(f"<li>Source: {esc(regime)} per-tick weight sketch, runs/EXP-42/{esc(regime)}/weights "
