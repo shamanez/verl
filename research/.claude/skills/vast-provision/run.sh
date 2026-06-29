@@ -152,9 +152,9 @@ command -v jq    >/dev/null || { echo "$PROG: 'jq' not on PATH" >&2; exit 1; }
 # personal context"), so for team we attach the harness key per-instance right
 # after create (see create loop) — here we only verify a local public key exists.
 if [[ "$VAST_ACCOUNT" == "team" ]]; then
-  if [[ ! -r "$HOME/.ssh/vast_ai_name.pub" && ! -r "$HOME/.ssh/vast_ai.pub" ]]; then
+  if [[ ! -r "$HOME/.ssh/Vast-Team.pub" && ! -r "$HOME/.ssh/vast_ai_name.pub" && ! -r "$HOME/.ssh/vast_ai.pub" ]]; then
     echo "$PROG: VAST_ACCOUNT=team needs a local harness public key to attach per-instance" >&2
-    echo "$PROG: (~/.ssh/vast_ai_name.pub or ~/.ssh/vast_ai.pub) — none readable." >&2
+    echo "$PROG: (~/.ssh/Vast-Team.pub, vast_ai_name.pub, or vast_ai.pub) — none readable." >&2
     exit 1
   fi
 else
@@ -456,7 +456,7 @@ while IFS= read -r offer; do
   # key(s) to THIS instance now. (Private boxes get account keys auto-attached.)
   if [[ "$VAST_ACCOUNT" == "team" ]]; then
     ATTACHED=0
-    for pk in "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
+    for pk in "$HOME/.ssh/Vast-Team.pub" "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
       [[ -r "$pk" ]] || continue
       if vastai attach ssh "$INSTANCE_ID" "$(cat "$pk")" >/dev/null 2>&1; then
         echo "$PROG: attached $(basename "$pk") to team instance $INSTANCE_ID" >&2
@@ -608,7 +608,7 @@ except Exception:
     # Team boxes: the per-instance key may have raced container start — re-attach once and retry.
     if [[ "$VAST_ACCOUNT" == "team" ]]; then
       echo "$PROG: SSH probe failed; re-attaching key to $INSTANCE_ID and retrying ..." >&2
-      for pk in "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
+      for pk in "$HOME/.ssh/Vast-Team.pub" "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
         [[ -r "$pk" ]] && vastai attach ssh "$INSTANCE_ID" "$(cat "$pk")" >/dev/null 2>&1 || true
       done
       _ssh_probe "$SSH_HOST" "$SSH_PORT" && SSH_OK=1
