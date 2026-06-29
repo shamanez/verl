@@ -2,6 +2,9 @@
   "verl-research-vllm020": {
     "hash_id": "3b0f8b726ac3036d6c007bfa13b6d75f",
     "id": 447527,
+    "team_hash_id": "bec9abcdd1daedb4e070a8b5669bc0c2",
+    "team_template_id": 472082,
+    "team_hash_note": "Team-account (558152) copy of this template — pass --template-hash team_hash_id when VAST_ACCOUNT=team (the private hash above is NOT accessible to the team account).",
     "image": "verlai/verl:vllm020.dev1",
     "verl_repo": "https://github.com/shamanez/verl.git",
     "verl_branch": "vast-ai-workload",

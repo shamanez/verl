@@ -85,13 +85,20 @@ A box that never passes the probe is destroyed and the next candidate is tried.
 
 **Team-account templates (a real gotcha).** A Vast.ai **Template is owned by the account
 that created it and is NOT visible to other accounts** (incl. a team you belong to). The
-locked `verl-research-vllm020` template (hash `3b0f…6d75f`, id 447527) was created by the
-PRIVATE account (538739), so `VAST_ACCOUNT=team` create returns HTTP 400
-`invalid template hash or id or template not accessible by user` (observed EXP-41). The skill
-now **fails fast** on that error (no candidate-loop churn) and prints the remedy. Choose one:
-- **(a)** Re-run with `VAST_ACCOUNT=private` (the template's owner account).
-- **(b)** Recreate the template under the team account so team create works — from this repo's
-  `templates.json` + `onstart.verl-vllm020.sh`, e.g.:
+locked `verl-research-vllm020` template (hash `3b0f…6d75f`, id 447527) is owned by the PRIVATE
+account (538739), so `VAST_ACCOUNT=team` create against THAT hash returns HTTP 400
+`invalid template hash or id or template not accessible by user` (observed EXP-41); the skill
+now **fails fast** on that error (no candidate-loop churn) and prints the remedy.
+
+**Resolved for the team account (2026-06-29):** a team-owned copy now exists —
+`Verl-research-vllm020`, hash **`bec9abcdd1daedb4e070a8b5669bc0c2`** (id 472082, identical image +
+Docker Options), recorded as `team_hash_id` in `templates.json`. For a team run pass
+`--template-hash bec9abcdd1daedb4e070a8b5669bc0c2`. (NB: the CLI has **no** `show templates`; list
+owned templates with `vastai search templates 'creator_id in [<account_id>]' --raw`.) If that copy
+is ever missing, either:
+- **(a)** Re-run with `VAST_ACCOUNT=private` (the template's owner account); or
+- **(b)** Recreate it under the team account from this repo's `templates.json` +
+  `onstart.verl-vllm020.sh`, e.g.:
   ```bash
   source .claude/skills/_vast_account.sh; vast_load_secrets
   VAST_API_KEY="$(vast_key_for team)" vastai create template \
