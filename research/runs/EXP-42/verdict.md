@@ -70,3 +70,20 @@ fixed_linear and learned_linear are identical to 4 decimal places at every opera
 - runs/EXP-42/sweep_narrow.json (raw sweep), narrow_findings.md (interim notes).
 - Code: exp/42-weight-accuracy @ 531dd5e9 (instrument + select_all extension). promote_launcher_as:
   none (this is a measurement, not a promoted launcher).
+
+## Dense-run weight-behavior report (operator follow-up, GPU-free)
+runs/EXP-42/report_dense.html (builder runs/EXP-42/build_dense_report.py) characterises the normal
+GRPO run (regime A) from the dense decoder sketch:
+- Weight change: median relative drift reaches about 0.057 percent of the initial norm by step 80.
+  GRPO at lr 1e-6 on an already-instruction-tuned 1.5B model is a tiny, gentle motion; what matters
+  for projection is the direction of that small motion.
+- Projectability: crossover h* = 10 ticks (about 5 global steps), ratio 0.972 at the operating
+  horizon. You can linearly project about 5 steps ahead before the projection stops helping.
+- Performance: val 0.7702 at step 40, 0.7695 at step 80 (flat, near-converged).
+- RLVR-linear test: PARTIALLY, and scale-dependent. Per-matrix linearity R squared is 0.80 at one
+  tick (in the ballpark of the about-0.9 RLVR-linear claim) and decays to 0.32 at the K=10 scale.
+  The trajectory is locally close to linear and curves by the K=10 horizon, which is the mechanism
+  behind the overshoot. Attention is slightly more linear than MLP at fine scale (0.81 vs 0.74);
+  linearity is uniform across layer depth.
+A deeper GPU-free follow-up (low-rank structure, per-matrix projectability, optimal-coefficient
+sweep) is specified in runs/EXP-42/NEW_SESSION_PROMPT.md. No further GPU training will be run.
