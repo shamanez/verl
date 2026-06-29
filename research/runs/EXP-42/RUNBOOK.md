@@ -2,9 +2,10 @@
 
 > **REFRAMED 2026-06-29.** EXP-42 now measures **weight-projection accuracy** (does `θ̂` land
 > closer to `θ_now` than raw-stale `θ[t−K]`), as a function of how many steps ahead we predict,
-> in two regimes (plain GRPO / GRPO+activation-compression). The *gradient* study moved to
-> **[EXP-43](../../.claude/plans/43.md)**. Plan: [`.claude/plans/42.md`](../../.claude/plans/42.md).
-> The old 3-cell gradient scaffold here is superseded — it belongs to EXP-43.
+> at the **K=10** operating point, in two regimes (plain GRPO / GRPO+activation-compression). A
+> *gradient* study is deferred to a separate future session (not planned here). Plan:
+> [`.claude/plans/42.md`](../../.claude/plans/42.md). The old 3-cell gradient scaffold here is
+> superseded (it was the prior gradient study).
 
 **Strategy (operator: LIMIT Vast spend):** GPUs **collect everything** — the box trains and emits
 a tiny per-tick **weight sketch** (~320 MB/regime) + exact on-box headline scalars at the
@@ -15,9 +16,9 @@ tear down; the full sweep replays on the MacBook.**
 
 - Branch: `exp/42-weight-accuracy` (NEW, off `vast-ai-workload`). Instrument:
   `comm_eff.probe.weight_traj` (per-tick count-sketch + per-matrix mean + exact calib scalars).
-- Single-GPU is a **documented deviation** from the 4≤num_gpus≤8 fixed control — **get operator
-  sign-off on the `num_gpus=1 gpu_name=H200` vast filter before provisioning** (or attach an
-  operator-provided 1×H200 via `vast-attach`).
+- Single-GPU is an **operator-authorized deviation** (2026-06-29) from the 4≤num_gpus≤8 fixed
+  control — full permission to fit this to a single H200. **Try 1×H200 first; fall back to 1×B200
+  (~192 GB) ONLY if H200 OOMs.** Prefer attaching an operator-provided box via `vast-attach`.
 
 ---
 ## HF + WandB auth (REQUIRED — set BEFORE launch; NEVER echo secret values)
@@ -94,8 +95,9 @@ python research/scripts/analyze.py runs/EXP-42 --emit verdict.md
   full-dump), NOT a GPU re-run.
 - emits `weight_proj_ratio` & `dir_cos` vs horizon h (ticks), fixed & learned, regime A & B, with
   per-matrix p10/p50/p90 and the crossover horizon h\*.
-- **HEADLINE answer:** at h=K=10 (and K=20), is median `weight_proj_ratio < 1` and `dir_cos > 0`?
-  This GATES whether [EXP-43](../../.claude/plans/43.md) (gradients) launches at all.
+- **HEADLINE answer:** at h=K=10 (α=1; plus under/over-shoot h∈{5,20}), is median
+  `weight_proj_ratio < 1` and `dir_cos > 0`? This decides whether a future gradient-accuracy study
+  is worth planning.
 
 ## STEP F — report + teardown
 Report to operator. **Do NOT tear down the box — ASK first** (operator owns it). After teardown,
@@ -105,18 +107,20 @@ de-bloat per the close-out duty (keep the report + verdict + SUMMARY entry; dele
 ## Locked params
 | Knob | Value | Note |
 |---|---|---|
-| GPUs | **1× H200** | documented deviation; resp=1024 defuses the 16K headroom rule |
+| GPUs | **1× H200** (1× B200 only on OOM) | operator-authorized; resp=1024 defuses the 16K headroom rule |
 | base launcher | accel surface | resp=1024, USE_DYNAMIC_BSZ=True, ROLLOUT_TP=1, mem_util=0.55, token budget 24576 |
+| operating point | **K=10** | anchor delay_K = cadence = 10 (test at 10, NOT 20) |
 | regime A | `COMM_EFF_ENABLED=false` | byte-identical dense path |
 | regime B | `enabled=true type=powersgd rank=77`, `ANCHOR_ENABLED=false SPECTRAL_ENABLED=false` | codec only (no anchor/merger — avoids circularity) |
-| instrument | `probe.weight_traj.enabled=true` k=4096 | per-tick count-sketch + mean + exact calib @ (Δ,h)∈{(10,10),(20,20)} |
-| steps | 80 (=160 ticks) | spans h≤40 ticks with ~100 anchor points |
+| instrument | `probe.weight_traj.enabled=true` k=4096 | per-tick count-sketch + mean + exact on-box headline @ Δ=10, h∈{5,10,20} |
+| steps | 80 (=160 ticks) | spans h≤30 ticks with ~115 anchor points |
 | test_freq | 40 | val@40/80 = convergence sanity only; val is NOT the metric |
 | snapshot/ema device | cpu | OOM-safe |
 
 - **Expected wall-clock (rough):** single-H200 ≈ 3.5–4× slower/step than 4×H200 (~190 s/step) ⇒
   ~4 h/regime ⇒ **~8–9 h for both** + provisioning. Budget envelope 14 h. Regime B ≈ A (no anchor
-  clone). If OOM: lower `PPO_MAX_TOKEN_LEN_PER_GPU` (24576→16384) and/or `ROLLOUT_GPU_MEM_UTIL` 0.55→0.45.
+  clone). **To fit H200 (full permission):** if OOM, lower `PPO_MAX_TOKEN_LEN_PER_GPU`
+  (24576→16384→…) and/or `ROLLOUT_GPU_MEM_UTIL` (0.55→0.45); only if it STILL OOMs, provision 1×B200.
 
 ## Teardown-safety
 Attach via `vast-attach --no-register` + empty `handles[]` ⇒ the teardown Stop hook finds no

@@ -8,8 +8,10 @@ Focused on **two priorities**. Detail + evidence: `PROGRESS.md`. North-star: `.c
    **Current step (EXP-42, reframed 2026-06-29):** before any gradient claim, MEASURE how accurately
    `θ̂=(1+α)θ[t−K]−αθ[t−2K]` projects the WEIGHTS vs raw-stale, as a function of steps-ahead, in 2
    regimes (plain GRPO / +activation-compression), fixed vs learned. Cheap by design — ordinary
-   training on **one 1×H200** emits a tiny per-tick weight sketch; the look-ahead is replayed
-   **offline on the MacBook**. This gates EXP-43 (gradient accuracy). Plans: `.claude/plans/{42,43}.md`.
+   training on **one 1×H200** (1×B200 only on OOM) emits a tiny per-tick weight sketch + exact
+   on-box headline; the full horizon sweep + report run **on the MacBook** from the download. Tested
+   at the **K=10** operating point. A gradient-accuracy follow-up is deferred to a separate future
+   session (not planned here). Plan: `.claude/plans/42.md`.
 2. **Reduce the compression-induced train–inference mismatch (Gap A)** (milestone M6). Bounded ~0.04
    tax; shrink it / switch on truncated-IS. `reports/priority-2-compression-train-inference-mismatch.html`.
 
