@@ -594,6 +594,12 @@ class CommEffWeightTrajConfig(BaseConfig):
     k: int = 4096
     out_dir: str = ""
     dump_dtype: str = "fp32"
+    # EXP-42 completeness extension. False (default) = the 196 decoder matrices
+    # the projector extrapolates. True = sketch EVERY 1-D/2-D param (decoder
+    # linears + the projector-EXCLUDED token embeddings / RMSNorm gains / attn
+    # biases), so the offline sweep can measure linear-projection accuracy on the
+    # excluded params too (tests the prior-work exclusion claim).
+    select_all: bool = False
     calib_deltas: list = field(default_factory=lambda: [10])
     calib_horizons: list = field(default_factory=lambda: [10])
     calib_stride: int = 0
@@ -942,6 +948,11 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.probe.weight_traj.rank0_only must be a bool; got "
                 f"{type(wt.rank0_only).__name__} ({wt.rank0_only!r})"
+            )
+        if not isinstance(wt.select_all, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.select_all must be a bool; got "
+                f"{type(wt.select_all).__name__} ({wt.select_all!r})"
             )
         if wt.k < 1:
             raise ValueError(f"comm_eff.probe.weight_traj.k must be >= 1; got {wt.k}")

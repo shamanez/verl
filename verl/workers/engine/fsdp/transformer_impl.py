@@ -2589,6 +2589,7 @@ class FSDPEngine(BaseEngine):
         from verl.workers.comm_eff.capture import select_weight_traj_targets
 
         substrs = getattr(observer, "target_substrs", None)
+        select_all = bool(getattr(observer, "select_all", False))
         _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         _world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
         rank0_only = bool(getattr(observer, "rank0_only", True))
@@ -2629,11 +2630,13 @@ class FSDPEngine(BaseEngine):
                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
                 materialized = []
                 for _name, _p in inner.named_parameters():
-                    if not any(s in _name for s in (substrs or ())):
+                    # select_all (EXP-42 completeness) takes EVERY param; otherwise
+                    # pre-filter to the substr set before the (cheap) full_tensor().
+                    if not select_all and not any(s in _name for s in (substrs or ())):
                         continue
                     _full = _p.full_tensor() if isinstance(_p, DTensor) else _p
                     materialized.append((_name, _full))
-                for _cn, _full in select_weight_traj_targets(materialized, substrs):
+                for _cn, _full in select_weight_traj_targets(materialized, substrs, select_all=select_all):
                     # copy to CPU/fp32: the live param tensor is reused by the
                     # optimizer step that follows — an aliased store would race.
                     weights[_cn] = _full.detach().to(device="cpu", dtype=torch.float32, copy=True)

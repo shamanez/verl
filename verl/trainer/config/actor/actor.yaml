@@ -640,6 +640,13 @@ comm_eff:
       # difference reconstruction) or "fp16" (absolute magnitudes only).
       dump_dtype: fp32
 
+      # EXP-42 completeness extension. false (default) => the 196 decoder matrices
+      # the projector extrapolates. true => sketch EVERY 1-D/2-D param (decoder
+      # linears + the projector-EXCLUDED token embeddings / RMSNorm gains / attn
+      # biases), so the offline sweep can measure projection accuracy on the
+      # excluded params too (a direct test of the prior-work exclusion claim).
+      select_all: false
+
       # Spacings Δ (ticks) the on-box EXACT calibration evaluates. The full
       # horizon sweep is done offline from the sketch; this is the fp32 ground
       # truth the sketch is validated against. Operating point: Δ=10.

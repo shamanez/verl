@@ -63,6 +63,27 @@ HORIZON_GRID = (1, 2, 3, 5, 8, 10, 13, 20, 30)
 SPACING_GRID = (5, 10)  # Δ between the two source snapshots (= anchor cadence)
 METHODS = ("fixed_linear", "learned_linear")
 
+# Parameter GROUPS for the completeness extension (EXP-42 select_all runs). The
+# projector projects only ``decoder``; ``embed``/``norm``/``bias`` are the params
+# it EXCLUDES — grouping lets the sweep report whether linear projection would
+# help or hurt on each excluded family (a direct test of the exclusion claim).
+GROUP_ORDER = ("decoder", "embed", "norm", "bias", "other")
+
+
+def group_of(name: str) -> str:
+    """Map a parameter name to its family. Order matters: a bias on a decoder
+    linear is a ``bias`` (1-D), not a ``decoder`` matrix."""
+    n = name.lower()
+    if n.endswith(".bias") or ".bias" in n:
+        return "bias"
+    if "embed" in n or "lm_head" in n:
+        return "embed"
+    if "norm" in n:  # input_layernorm / post_attention_layernorm / model.norm (RMSNorm gains)
+        return "norm"
+    if any(s in n for s in DEFAULT_SUBSTRS):
+        return "decoder"
+    return "other"
+
 
 # ====================================================================== #
 # Predictor re-implementation (parity target for lookahead.py)
@@ -243,10 +264,15 @@ def sweep_regime(weights_dir: str, *, deltas=SPACING_GRID, horizons=HORIZON_GRID
                     }
                     prev_fire = f
 
+        grp = {nm: group_of(nm) for nm in names}
         for method in methods:
             for h in horizons:
                 alpha = float(h) / float(delta)
                 w1_all, dcos_all = [], []
+                # per-group pooled (matrix×anchor) ratios + per-matrix ratio lists
+                w1_by_grp = {g: [] for g in GROUP_ORDER}
+                dcos_by_grp = {g: [] for g in GROUP_ORDER}
+                w1_mat = {nm: [] for nm in names}
                 # valid anchors s: need θ[s-Δ], θ[s], θ[s+h] all present
                 for s in ticks:
                     if (s - delta) not in idx or (s + h) not in idx:
@@ -263,11 +289,35 @@ def sweep_regime(weights_dir: str, *, deltas=SPACING_GRID, horizons=HORIZON_GRID
                         den = float(np.linalg.norm(d_tgt))
                         if den <= 0.0:
                             continue
-                        w1_all.append(float(np.linalg.norm(proj)) / den)
+                        ratio = float(np.linalg.norm(proj)) / den
+                        g = grp[nm]
+                        w1_all.append(ratio)
+                        w1_by_grp[g].append(ratio)
+                        w1_mat[nm].append(ratio)
                         no = float(np.linalg.norm(d_old))
                         if no > 0.0:
                             ip = float(np.dot(d_old, d_tgt))
-                            dcos_all.append(-ip / (no * den))
+                            dc = -ip / (no * den)
+                            dcos_all.append(dc)
+                            dcos_by_grp[g].append(dc)
+                # per-matrix median ratio -> percentiles ACROSS matrices (the
+                # "where does projection help vs hurt" deliverable), overall + per group.
+                permat_med = {nm: float(np.median(v)) for nm, v in w1_mat.items() if v}
+                def _permatrix_stats(name_filter):
+                    vals = [permat_med[nm] for nm in permat_med if name_filter(nm)]
+                    return {"n_mat": len(vals), "p10": _pct(vals, 10), "p50": _pct(vals, 50), "p90": _pct(vals, 90)}
+                by_group = {}
+                for g in GROUP_ORDER:
+                    if not w1_by_grp[g]:
+                        continue
+                    by_group[g] = {
+                        "n": len(w1_by_grp[g]),
+                        "w1_p10": _pct(w1_by_grp[g], 10),
+                        "w1_p50": _pct(w1_by_grp[g], 50),
+                        "w1_p90": _pct(w1_by_grp[g], 90),
+                        "dir_cos_p50": _pct(dcos_by_grp[g], 50),
+                        "permatrix": _permatrix_stats(lambda nm, _g=g: grp[nm] == _g),
+                    }
                 results[(method, delta, h)] = {
                     "alpha": alpha,
                     "n": len(w1_all),
@@ -275,9 +325,13 @@ def sweep_regime(weights_dir: str, *, deltas=SPACING_GRID, horizons=HORIZON_GRID
                     "w1_p50": _pct(w1_all, 50),
                     "w1_p90": _pct(w1_all, 90),
                     "dir_cos_p50": _pct(dcos_all, 50),
+                    "permatrix": _permatrix_stats(lambda nm: True),
+                    "by_group": by_group,
                 }
+    groups_present = sorted({group_of(nm) for nm in names}, key=lambda g: GROUP_ORDER.index(g) if g in GROUP_ORDER else 99)
     return {"results": results, "n_ticks": n, "ticks_contiguous": bool(contiguous),
-            "n_matrices": len(names), "k": k}
+            "n_matrices": len(names), "k": k, "groups_present": groups_present,
+            "group_counts": {g: sum(1 for nm in names if group_of(nm) == g) for g in groups_present}}
 
 
 def crossover_horizon(results: dict, method: str, delta: int, horizons=HORIZON_GRID):
@@ -345,12 +399,44 @@ def render_html(regimes: dict, calib: dict, deltas=SPACING_GRID, horizons=HORIZO
                 if cell is None:
                     continue
                 verdict = "HELPS" if cell["w1_p50"] < 1.0 else "no help"
+                pm = cell.get("permatrix", {})
+                pm_str = (f", per-matrix p50={pm.get('p50', float('nan')):.4f} "
+                          f"[{pm.get('p10', float('nan')):.3f},{pm.get('p90', float('nan')):.3f}] over {pm.get('n_mat', 0)} mat"
+                          if pm else "")
                 parts.append(
                     f"<li><b>{esc(rname)}</b> / {esc(method)} / h={h}: "
                     f"w1_p50={cell['w1_p50']:.4f} ({verdict}), dir_cos={cell['dir_cos_p50']:.4f}, "
-                    f"n={cell['n']}</li>"
+                    f"n={cell['n']}{pm_str}</li>"
                 )
     parts.append("</ul>")
+
+    # per-GROUP operating point (completeness extension; only when >1 group present)
+    multi = any(len(sweep.get("groups_present", [])) > 1 for sweep in regimes.values())
+    if multi:
+        parts.append("<h2>Per-group operating point — does linear projection help on the EXCLUDED params?</h2>")
+        parts.append("<p>decoder = the 196 the projector extrapolates; embed/norm/bias = the params it EXCLUDES. "
+                     "w1_p50&lt;1 ⇒ projection would land closer than raw-stale on that family.</p>")
+        for rname, sweep in regimes.items():
+            counts = sweep.get("group_counts", {})
+            parts.append(f"<h4>{esc(rname)} — matrices per group: {esc(counts)}</h4>")
+            parts.append("<table border=1 cellpadding=3><tr><th>group</th><th>method</th><th>h</th>"
+                         "<th>w1_p50</th><th>helps?</th><th>dir_cos</th><th>per-matrix p50 [p10,p90]</th><th>n_mat</th></tr>")
+            for g in sweep.get("groups_present", []):
+                for method in METHODS:
+                    for h in (5, 10, 20):
+                        cell = sweep["results"].get((method, 10, h))
+                        bg = (cell or {}).get("by_group", {}).get(g)
+                        if bg is None:
+                            continue
+                        pm = bg.get("permatrix", {})
+                        helps = "HELPS" if bg["w1_p50"] < 1.0 else "no"
+                        parts.append(
+                            f"<tr><td>{esc(g)}</td><td>{esc(method)}</td><td>{h}</td>"
+                            f"<td>{bg['w1_p50']:.4f}</td><td>{helps}</td><td>{bg['dir_cos_p50']:.4f}</td>"
+                            f"<td>{pm.get('p50', float('nan')):.4f} [{pm.get('p10', float('nan')):.3f},{pm.get('p90', float('nan')):.3f}]</td>"
+                            f"<td>{pm.get('n_mat', 0)}</td></tr>"
+                        )
+            parts.append("</table>")
     # crossover table
     parts.append("<h2>Crossover horizon h* (largest h with median ratio &lt;1)</h2><table border=1 cellpadding=4><tr><th>regime</th><th>method</th><th>Δ</th><th>h*</th></tr>")
     for rname, sweep in regimes.items():

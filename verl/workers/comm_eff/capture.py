@@ -372,22 +372,39 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
 WEIGHT_TRAJ_DEFAULT_SUBSTRS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
 
-def select_weight_traj_targets(named_params, target_substrs=None) -> list:
-    """Return ``[(canon_name, tensor), ...]`` for the decoder weight matrices.
+def select_weight_traj_targets(named_params, target_substrs=None, select_all: bool = False) -> list:
+    """Return ``[(canon_name, tensor), ...]`` for the weight-trajectory matrices.
 
-    Pure selection — no device moves, no clones, no FSDP. A parameter is selected
-    iff its name contains one of ``target_substrs`` (default
-    :data:`WEIGHT_TRAJ_DEFAULT_SUBSTRS`) AND its tensor is 2-D. Names are
-    canonicalised (FSDP wrap-infix stripped) so the selection is identical off a
-    summoned live module or a plain clone. On Qwen2.5-1.5B (28 layers) this is
-    exactly the 196 decoder matrices the projector extrapolates.
+    Pure selection — no device moves, no clones, no FSDP. Names are canonicalised
+    (FSDP wrap-infix stripped) so the selection is identical off a summoned live
+    module or a plain clone.
+
+    Two modes:
+
+    * ``select_all=False`` (default — the projector's set): a parameter is
+      selected iff its name contains one of ``target_substrs`` (default
+      :data:`WEIGHT_TRAJ_DEFAULT_SUBSTRS`) AND its tensor is 2-D. On Qwen2.5-1.5B
+      (28 layers) this is exactly the 196 decoder matrices the projector
+      extrapolates.
+    * ``select_all=True`` (EXP-42 completeness extension): select EVERY 1-D / 2-D
+      float parameter — the 196 decoder linears PLUS the params the projector
+      EXCLUDES (token embeddings, RMSNorm gains, attention biases). Lets the
+      offline sweep measure what linear weight projection WOULD do on the
+      excluded params (a direct test of the prior-work exclusion claim). The
+      count-sketch / metric math is shape-agnostic (it operates on flat
+      weight-DIFFERENCE vectors), so 1-D params are handled identically.
     """
     substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
     out = []
     for name, p in named_params:
+        dim = getattr(p, "dim", lambda: 0)()
+        if select_all:
+            if dim in (1, 2):
+                out.append((_canon(name), p))
+            continue
         if not any(s in name for s in substrs):
             continue
-        if getattr(p, "dim", lambda: 0)() != 2:
+        if dim != 2:
             continue
         out.append((_canon(name), p))
     return out
@@ -455,6 +472,7 @@ class WeightTrajObserver:
         k: int = 4096,
         dump_dtype: str = "fp32",
         target_substrs=None,
+        select_all: bool = False,
         calib_deltas=(10,),
         calib_horizons=(10,),
         calib_stride: int = 0,
@@ -469,6 +487,11 @@ class WeightTrajObserver:
         self._np_dtype = np.float32 if dump_dtype == "fp32" else np.float16
         self.dump_dtype = dump_dtype
         self.target_substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
+        # EXP-42 completeness extension: when True the observer sketches EVERY
+        # 1-D/2-D param (decoder linears + the projector-excluded embeddings /
+        # RMSNorm gains / biases), so the offline sweep can measure projection
+        # accuracy on the excluded params too. False = the 196-matrix projector set.
+        self.select_all = bool(select_all)
         self.calib_deltas = tuple(int(x) for x in calib_deltas)
         self.calib_horizons = tuple(int(x) for x in calib_horizons)
         # Exact-calib grid = deltas × horizons (the on-box ground truth that the
@@ -503,7 +526,7 @@ class WeightTrajObserver:
             self.calib_path = os.path.join(self.out_dir, "calib.jsonl")
         print(
             f"[comm_eff][weight_traj] observer out_dir={self.out_dir} k={self.k} "
-            f"dump_dtype={self.dump_dtype} calib_grid={self.calib_grid} "
+            f"dump_dtype={self.dump_dtype} select_all={self.select_all} calib_grid={self.calib_grid} "
             f"calib_stride={self.calib_stride} calib_max_snapshots={self.calib_max_snapshots} "
             f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive}",
             flush=True,
@@ -717,6 +740,7 @@ def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int
     substrs = getattr(spectral, "target_substr", None) if spectral is not None else None
     return WeightTrajObserver(
         out_dir=str(getattr(wt, "out_dir", "") or ""),
+        select_all=bool(getattr(wt, "select_all", False)),
         k=int(getattr(wt, "k", 4096)),
         dump_dtype=str(getattr(wt, "dump_dtype", "fp32")),
         target_substrs=substrs,
