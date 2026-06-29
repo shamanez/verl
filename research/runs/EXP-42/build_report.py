@@ -30,10 +30,24 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
+# Palette (cool-neutral instrument readout). Regime colour IS the data encoding.
+INK = "#14181f"
+MUTED = "#5b6573"
+GRID = "#e3e6eb"
+HELP = "#1a7f37"
+HURT = "#b42318"
 HORIZONS = (1, 2, 3, 5, 8, 10, 13, 20, 30)
-REGIME_LABEL = {"regimeA": "regime A (plain GRPO, codec off)",
-                "regimeB": "regime B (PowerSGD r=77, codec only)"}
-REGIME_COLOR = {"regimeA": "#1f77b4", "regimeB": "#d62728"}
+REGIME_LABEL = {"regimeA": "regime A  plain GRPO, codec off",
+                "regimeB": "regime B  PowerSGD r=77, codec only"}
+REGIME_COLOR = {"regimeA": "#1f5fae", "regimeB": "#b42318"}
+
+plt.rcParams.update({
+    "font.size": 10, "axes.edgecolor": MUTED, "axes.labelcolor": INK,
+    "text.color": INK, "xtick.color": MUTED, "ytick.color": MUTED,
+    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "figure.facecolor": "white", "axes.facecolor": "white", "axes.titlesize": 10,
+})
 
 
 def _cells(reg, method, delta):
@@ -139,17 +153,48 @@ def esc(x):
     return html.escape(str(x))
 
 
-def build(sweep_json_path, out_path, title):
+def build(sweep_json_path, out_path, title, fragment=False):
     d = json.load(open(sweep_json_path))
     regimes = {k: d[k] for k in d if isinstance(d[k], dict) and "results" in d[k]}
 
     P = []
+    P.append("<header>")
+    P.append("<div class='eyebrow'>EXP-42 / M4 / weight-space measurement</div>")
     P.append(f"<h1>{esc(title)}</h1>")
-    P.append("<p class='sub'>Weight-projection accuracy of the look-ahead anchor as a function of "
-             "how many optimizer ticks ahead it predicts, measured directly in weight space, in two "
-             "regimes. This is the primitive the whole look-ahead method rests on: does the projected "
-             "weight theta_hat land closer to the current weight theta_now than doing nothing (the "
-             "raw-stale weight theta_stale)?</p>")
+    P.append("<p class='thesis'>How accurately does the look-ahead anchor predict the WEIGHTS it "
+             "extrapolates? The predictor takes theta_hat = theta_stale + alpha (theta_stale - "
+             "theta_old). The one question underneath the whole method: does theta_hat land closer to "
+             "the current weight theta_now than simply reusing the stale weight theta_stale? Measured "
+             "directly in weight space, per matrix, across horizons, in a clean regime and a "
+             "compressed regime.</p>")
+    chips = []
+    for rname, reg in regimes.items():
+        chips.append(f"<span class='chip'>{esc(rname)}: {reg.get('n_matrices')} matrices, "
+                     f"{reg.get('n_ticks')} ticks</span>")
+    chips.append("<span class='chip'>count-sketch k = 4096</span>")
+    chips.append("<span class='chip'>single H200, MacBook analysis</span>")
+    P.append("<div class='chips'>" + "".join(chips) + "</div>")
+    P.append("</header>")
+
+    # data-driven key-result callout (the answer at the operating horizon)
+    P.append("<section class='callout'><h2 class='callout-h'>The answer at the operating horizon "
+             "(h = K = 10, alpha = 1.0)</h2><div class='cards'>")
+    for rname, reg in regimes.items():
+        c = reg["results"].get("fixed_linear|10|10")
+        if not c:
+            continue
+        helps = c["w1_p50"] < 1.0
+        verb = "projection helps" if helps else "projection does not help"
+        cls = "card help" if helps else "card hurt"
+        hstar = _crossover(reg, "fixed_linear", 10)
+        P.append(f"<div class='{cls}'><div class='card-reg'>{esc(REGIME_LABEL.get(rname, rname))}</div>"
+                 f"<div class='card-num'>{c['w1_p50']:.3f}</div>"
+                 f"<div class='card-lab'>weight_proj_ratio, median</div>"
+                 f"<div class='card-verb'>{verb}</div>"
+                 f"<div class='card-meta'>dir_cos {c['dir_cos_p50']:.3f} &middot; crossover h* = {hstar}</div></div>")
+    P.append("</div><p class='callout-note'>Below 1.0 means the projected weight is closer to the "
+             "current weight than doing nothing. The crossover h* is the largest horizon where the "
+             "median ratio still stays below 1.0.</p></section>")
 
     # ---- definitions ----
     P.append("<h2>What is measured</h2>")
@@ -196,20 +241,20 @@ def build(sweep_json_path, out_path, title):
     # ---- plots ----
     P.append("<h2>Plots</h2>")
     P.append("<h3>Headline: accuracy and straightness vs horizon (spacing 10, fixed_linear)</h3>")
-    P.append(f"<img src='data:image/png;base64,{fig_headline(regimes)}' />")
+    P.append(f"<figure><img src='data:image/png;base64,{fig_headline(regimes)}' /></figure>")
     P.append("<p class='cap'>Left: the projection ratio crosses 1.0 (the do-nothing line) at the crossover "
              "horizon. The shaded band is the spread across individual weight matrices (p10 to p90). Right: "
              "dir_cos stays positive across the whole grid in both regimes, so the overshoot above is a "
              "magnitude effect (alpha scales the step past theta_now along a consistently aligned direction), "
              "not a direction reversal.</p>")
     P.append("<h3>Spacing effect on the crossover</h3>")
-    P.append(f"<img src='data:image/png;base64,{fig_spacing(regimes)}' />")
+    P.append(f"<figure><img src='data:image/png;base64,{fig_spacing(regimes)}' /></figure>")
     P.append("<p class='cap'>A shorter spacing Delta = 5 reaches the same alpha at a smaller h, so its curve "
              "rises later in h. The operating spacing is Delta = 10.</p>")
     gfig = fig_groups(regimes)
     if gfig:
         P.append("<h3>Per-group accuracy (widened select_all sweep)</h3>")
-        P.append(f"<img src='data:image/png;base64,{gfig}' />")
+        P.append(f"<figure><img src='data:image/png;base64,{gfig}' /></figure>")
         P.append("<p class='cap'>decoder is the set the projector actually extrapolates. embed, norm and bias "
                  "are the params it excludes. Curves below 1.0 at the operating horizon would indicate the "
                  "exclusion is leaving usable predictability on the table.</p>")
@@ -260,18 +305,64 @@ def build(sweep_json_path, out_path, title):
     P.append("<li>Source: research/scripts/weight_proj_sweep.py over the per-tick weight sketch trace "
              "collected on a single H200. Analysis is GPU-free on the MacBook.</li></ul>")
 
-    css = ("body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1000px;margin:24px auto;"
-           "padding:0 16px;color:#1a1a1a;line-height:1.5} h1{font-size:1.6em} h2{margin-top:1.6em;"
-           "border-bottom:2px solid #eee;padding-bottom:4px} .sub{color:#444} .cap{color:#555;font-size:0.9em}"
-           "table{border-collapse:collapse;margin:8px 0;font-size:0.9em} th,td{border:1px solid #ccc;"
-           "padding:4px 8px;text-align:right} th{background:#f5f5f5} td:first-child,th:first-child{text-align:left}"
-           ".ok{color:#1a7f37;font-weight:600} .bad{color:#b42318;font-weight:600} "
-           "img{max-width:100%;height:auto;display:block;margin:8px 0;border:1px solid #eee}")
-    out = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(title)}</title>"
-           f"<style>{css}</style></head><body>" + "".join(P) + "</body></html>")
+    css = """
+:root{--ground:#f7f8fa;--surface:#fff;--ink:#14181f;--muted:#5b6573;--line:#e3e6eb;
+  --a:#1f5fae;--b:#b42318;--help:#1a7f37;--sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);line-height:1.6;
+  font-size:16px;-webkit-font-smoothing:antialiased}
+.wrap{max-width:980px;margin:0 auto;padding:40px 24px 80px}
+header{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:8px}
+.eyebrow{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:600}
+h1{font-size:30px;line-height:1.18;margin:10px 0 12px;text-wrap:balance;font-weight:680;letter-spacing:-.01em}
+.thesis{color:var(--muted);max-width:68ch;margin:0 0 16px;font-size:16px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--surface);
+  border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+h2{font-size:20px;margin:44px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line);
+  letter-spacing:-.01em;font-weight:660}
+h3{font-size:15px;margin:24px 0 6px;font-weight:640}
+h4{font-size:13px;margin:16px 0 4px;color:var(--muted);font-weight:640;font-family:var(--mono)}
+p{max-width:72ch}
+.callout{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:22px 0}
+.callout-h{border:0;margin:0 0 14px;padding:0;font-size:16px}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card{border:1px solid var(--line);border-radius:11px;padding:16px 18px;border-left-width:4px}
+.card.help{border-left-color:var(--help)}.card.hurt{border-left-color:var(--b)}
+.card-reg{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.card-num{font-size:38px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin:4px 0}
+.card.help .card-num{color:var(--help)}.card.hurt .card-num{color:var(--b)}
+.card-lab{font-size:12px;color:var(--muted)}
+.card-verb{font-weight:640;margin-top:8px;font-size:14px}
+.card-help .card-verb{color:var(--help)}
+.card-meta{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:4px}
+.callout-note{color:var(--muted);font-size:13.5px;margin:14px 0 0}
+.tbl{overflow-x:auto;margin:10px 0}
+table{border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums;min-width:100%}
+th,td{padding:6px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;border-bottom:1.5px solid var(--muted);background:transparent}
+td:first-child,th:first-child{text-align:left}
+tbody tr:nth-child(even){background:rgba(31,95,174,.035)}
+.ok{color:var(--help);font-weight:640}.bad{color:var(--b);font-weight:640}
+.cap{color:var(--muted);font-size:13px;max-width:74ch;margin:8px 0 4px}
+ul{max-width:74ch;color:var(--ink)}li{margin:3px 0}
+figure{margin:14px 0;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
+figure img{max-width:100%;height:auto;display:block;border-radius:6px}
+b{font-weight:660}
+"""
+    content = "".join(P).replace("<table", "<div class='tbl'><table").replace("</table>", "</table></div>")
+    body = "<div class='wrap'>" + content + "</div>"
+    if fragment:
+        out = f"<style>{css}</style>" + body
+    else:
+        out = (f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+               f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+               f"<title>{esc(title)}</title><style>{css}</style></head><body>" + body + "</body></html>")
     with open(out_path, "w") as fh:
         fh.write(out)
-    print(f"wrote {out_path} ({len(out)} bytes)")
+    print(f"wrote {out_path} ({len(out)} bytes, fragment={fragment})")
 
 
 def _discussion(regimes):
@@ -349,8 +440,9 @@ def main():
     ap.add_argument("sweep_json")
     ap.add_argument("out_html")
     ap.add_argument("--title", default="EXP-42 weight-projection accuracy")
+    ap.add_argument("--fragment", action="store_true", help="emit body-only fragment (for Artifact)")
     a = ap.parse_args()
-    build(a.sweep_json, a.out_html, a.title)
+    build(a.sweep_json, a.out_html, a.title, fragment=a.fragment)
 
 
 if __name__ == "__main__":
