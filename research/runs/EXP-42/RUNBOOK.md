@@ -6,10 +6,12 @@
 > **[EXP-43](../../.claude/plans/43.md)**. Plan: [`.claude/plans/42.md`](../../.claude/plans/42.md).
 > The old 3-cell gradient scaffold here is superseded — it belongs to EXP-43.
 
-**Strategy (operator: LIMIT Vast spend):** the GPU box only runs *ordinary* training and emits a
-tiny per-tick **weight sketch** (~320 MB/regime). The look-ahead predictor is a pure function of
-the trajectory and is **replayed entirely on the MacBook** (GPU-free) across every method × horizon.
-**One 1×H200 box, two short sequential runs (Regime A → Regime B), then tear down.**
+**Strategy (operator: LIMIT Vast spend):** GPUs **collect everything** — the box trains and emits
+a tiny per-tick **weight sketch** (~320 MB/regime) + exact on-box headline scalars at the
+operating points. The rule is just: anything doable from downloaded data, do on the MacBook — so
+we tear the H200 down the moment `weights/` is synced instead of renting it through the long
+horizon sweep + report. **One 1×H200 box, two short sequential runs (Regime A → Regime B), then
+tear down; the full sweep replays on the MacBook.**
 
 - Branch: `exp/42-weight-accuracy` (NEW, off `vast-ai-workload`). Instrument:
   `comm_eff.probe.weight_traj` (per-tick count-sketch + per-matrix mean + exact calib scalars).
@@ -83,7 +85,7 @@ without pipeline/DP and Regime B is invalid).
 - as each regime finishes (`done.flag`), `rsync` only `<regime>/weights/` (sketches + manifest +
   calib) → `runs/EXP-42/<regime>/weights/`. **~320 MB/regime — tiny.**
 
-## STEP E — OFFLINE analysis on the MacBook (GPU-free; this is where the science happens)
+## STEP E — analysis on the MacBook (after download, so the box can be torn down first)
 ```bash
 python research/scripts/weight_proj_sweep.py runs/EXP-42 --emit report.html --calib-tol 0.05
 python research/scripts/analyze.py runs/EXP-42 --emit verdict.md
