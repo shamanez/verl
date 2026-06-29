@@ -493,6 +493,7 @@ class WeightTrajObserver:
         self._tick = 0  # monotonic optimizer-tick counter (own; comm_eff may be off)
         self._countsketches: dict = {}  # (d,k) -> CountSketch
         self._calib_groups: list = []  # open tripoint groups
+        self._calib_snaps: dict = {}  # tick -> full fp32 snapshot (SHARED across groups)
         self._calib_skipped = 0
         self._n_sketched = 0
 
@@ -581,62 +582,73 @@ class WeightTrajObserver:
     def _update_calib(self, tick: int, global_step: int, weights: dict) -> None:
         """Open/advance/close the bounded exact-calib tripoint groups.
 
-        Each group for config ``(Δ, h)`` samples the full fp32 weights at three
+        Each group for config ``(Δ, h)`` needs the full fp32 weights at three
         ticks — ``old = base``, ``stale = base+Δ``, ``target = base+Δ+h`` — and
         at the target tick computes the EXACT per-matrix ``weight_proj_ratio`` /
-        ``dir_cos`` ground truth, then frees the snapshots. Total retained
-        snapshots are capped at ``calib_max_snapshots`` (the CPU-OOM guard).
-        """
-        if not self.calib_grid:
-            return
+        ``dir_cos`` ground truth.
 
-        def _retained() -> int:
-            return sum(len(g["snaps"]) for g in self._calib_groups)
+        **CPU-OOM guard (hard).** Snapshots are clones keyed by TICK in a SHARED
+        store (``_calib_snaps``); groups sampling the same tick reuse one clone.
+        The cap ``calib_max_snapshots`` is enforced at CAPTURE time on the number
+        of DISTINCT retained clones — when capturing a new tick would exceed it,
+        the capture is refused and any group that needed that tick is marked dead
+        (dropped, counted in ``_calib_skipped``) rather than risking OOM. A clone
+        is freed the moment no live group still references its tick. This bounds
+        peak retained clones to ``calib_max_snapshots`` for ANY stride / grid
+        (not just the default auto-stride single-config case). Each clone is the
+        ~5 GB live ``weights`` dict, so true peak ≈ (cap + 1) × that.
+        """
+        if not self.calib_grid or self.calib_max_snapshots <= 0:
+            return
 
         # Open new groups (one per config) when the tick lands on the stride.
         if tick % self.calib_stride == 0:
             for (delta, h) in self.calib_grid:
-                if _retained() + 1 > self.calib_max_snapshots:
-                    self._calib_skipped += 1
-                    continue
                 self._calib_groups.append(
-                    {"delta": delta, "h": h, "base": tick, "snaps": {}}
+                    {"delta": delta, "h": h, "base": tick,
+                     "need": {tick, tick + delta, tick + delta + h}, "dead": False}
                 )
 
-        # Advance every open group: capture the sample if this tick is one of its
-        # three sample points; clone the FULL fp32 weights (the calib needs exact
-        # values, not the sketch).
-        def _clone_full() -> dict:
-            return {n: w.detach().to(torch.float32).clone() for n, w in weights.items()}
+        # Capture this tick (once) iff a live group needs it AND the distinct-clone
+        # cap permits. Refusal ⇒ a gap, which kills any group that needed it.
+        want = any((tick in g["need"]) for g in self._calib_groups if not g["dead"])
+        if want and tick not in self._calib_snaps:
+            if len(self._calib_snaps) < self.calib_max_snapshots:
+                self._calib_snaps[tick] = {n: w.detach().to(torch.float32).clone() for n, w in weights.items()}
+            else:
+                self._calib_skipped += 1
+        captured = tick in self._calib_snaps
 
+        # Advance: kill groups that hit a capture gap; compute + close at target.
         closed = []
-        snap_this_tick = None  # share one clone across groups sampling the same tick
         for g in self._calib_groups:
-            base, delta, h = g["base"], g["delta"], g["h"]
-            t_old, t_stale, t_target = base, base + delta, base + delta + h
-            role = None
-            if tick == t_old:
-                role = "old"
-            elif tick == t_stale:
-                role = "stale"
-            elif tick == t_target:
-                role = "target"
-            if role is None:
+            if g["dead"]:
+                closed.append(g)
                 continue
-            if snap_this_tick is None:
-                snap_this_tick = _clone_full()
-            g["snaps"][role] = snap_this_tick
-            if role == "target":
-                if {"old", "stale", "target"} <= set(g["snaps"].keys()):
+            if (tick in g["need"]) and not captured:
+                g["dead"] = True
+                closed.append(g)
+                continue
+            if tick == g["base"] + g["delta"] + g["h"]:
+                if g["need"] <= set(self._calib_snaps.keys()):
                     self._emit_calib_row(g, global_step)
                 closed.append(g)
         if closed:
             self._calib_groups = [g for g in self._calib_groups if g not in closed]
 
+        # Free any retained clone no LIVE group still needs (handles shared ticks).
+        live_needed = set()
+        for g in self._calib_groups:
+            live_needed |= g["need"]
+        for tk in [t for t in self._calib_snaps if t not in live_needed]:
+            del self._calib_snaps[tk]
+
     def _emit_calib_row(self, g: dict, global_step: int) -> None:
         delta, h, base = g["delta"], g["h"], g["base"]
         alpha = float(h) / float(delta)
-        old, stale, target = g["snaps"]["old"], g["snaps"]["stale"], g["snaps"]["target"]
+        old = self._calib_snaps[base]
+        stale = self._calib_snaps[base + delta]
+        target = self._calib_snaps[base + delta + h]
         w1, dcos, w3 = [], [], []
         for name in stale.keys():
             if name not in old or name not in target:

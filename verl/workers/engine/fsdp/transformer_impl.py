@@ -2590,10 +2590,25 @@ class FSDPEngine(BaseEngine):
 
         substrs = getattr(observer, "target_substrs", None)
         _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        _world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
         rank0_only = bool(getattr(observer, "rank0_only", True))
         is_writer = (_rank == 0) or (not rank0_only)
 
         module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+        # FSDP2 + rank0_only + multi-rank would DEADLOCK: the per-param
+        # DTensor.full_tensor() all-gather below runs only inside the rank-0
+        # writer block, so non-writer ranks never enter the matching collective.
+        # EXP-42 runs FSDP1 (summon_full_params is the all-rank collective and
+        # the summoned params are plain tensors, so full_tensor() is never hit),
+        # and single-GPU has no collective at all — so fail loudly instead of
+        # hanging only in the unsupported FSDP2 multi-rank rank0_only case.
+        if (not module_is_fsdp1) and _world > 1 and rank0_only:
+            raise RuntimeError(
+                "comm_eff weight_traj probe under FSDP2 multi-rank requires "
+                "comm_eff.probe.weight_traj.rank0_only=false (rank0_only=true would "
+                "deadlock on DTensor.full_tensor(), a per-rank collective). EXP-42 uses "
+                "FSDP1; set actor.strategy=fsdp or rank0_only=false."
+            )
 
         def _summon_ctx():
             if module_is_fsdp1:
