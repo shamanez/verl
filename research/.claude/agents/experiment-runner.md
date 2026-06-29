@@ -70,17 +70,30 @@ Canonical project facts (vast template hash, secrets path, default compute chain
    **Skill contract — DO NOT re-invent provisioning.** The runner must invoke the `vast-provision` skill and **only** that skill. Direct `vastai create instance` calls are forbidden. The skill is the single source of truth for: docker image, container `--shm-size` / `--cap-add`, onstart script (clones `shamanez/verl @ vast-ai-workload` + pip-installs verl `--no-deps`), disk-size default, and the locked research Template. The runner supplies only the per-experiment knobs (query, max-price, count); the skill auto-reads the active Template from `.claude/skills/vast-provision/templates.json` when no `--template-hash` is passed.
 
    For each tier `IDX` in the chain (0-based):
-   1. Invoke the globally-available `vast-provision` skill with that tier's query and the plan's `max_dph`. **First `export VAST_ACCOUNT=<team|private>`** (from your `vast_account` input — default `private`) so the skill provisions on the right account; **pass `--query`, `--max-price`, `--count`, `--disk-gb`. Do NOT pass `--image` or `--template-hash`** — the skill defaults both from `templates.json`:
+   1. **Run `vast-provision` DETACHED, then poll — never block one shell on the wait.** The image pull can take ~7–25 min, longer than a single Bash tool call's ~10-min cap; a blocking call is killed mid-pull (the skill's EXIT trap then self-destroys the half-built box — no leak, but no box, and the run silently never launches: this is the EXP-42-era failure). A `nohup` child of a **foreground** bash call keeps network egress (verified), so launch detached and poll a LOCAL file. Pass `--handle-dir` so handles land in the run dir, and **`export VAST_ACCOUNT`** so the skill picks the right account AND the right template hash (private hash for `private`; `team_hash_id` for `team`) — do NOT pass `--image`/`--template-hash`:
+      ```bash
+      export VAST_ACCOUNT="<team|private>"          # default private; stamped on the handle
+      mkdir -p "$PARENT/runs/EXP-<ID>/handles"
+      LOG="$PARENT/runs/EXP-<ID>/provision.<IDX>.log"
+      nohup bash "$PARENT/.claude/skills/vast-provision/run.sh" \
+        --query "<chain[IDX]>" --max-price <max_dph> --count <gpu_count> --disk-gb 200 \
+        --handle-dir "$PARENT/runs/EXP-<ID>/handles" \
+        > "$LOG" 2>&1 &
+      echo $! > "$PARENT/runs/EXP-<ID>/provision.<IDX>.pid"; disown
       ```
-      export VAST_ACCOUNT="<team|private>"   # default private; the skill stamps it on the handle
-      /vast-provision count=<gpu_count> \
-                      query="<chain[IDX]>" \
-                      max_price=<max_dph> \
-                      disk_gb=200
+   1b. **Poll for completion with a backgrounded `until` loop (local checks only — no egress needed), `run_in_background: true`** (one notification when provisioning concludes; exits on handle-appears OR provision-process-dies OR ~26-min deadline):
+      ```bash
+      P=$(cat "$PARENT/runs/EXP-<ID>/provision.<IDX>.pid"); n=0
+      until ls "$PARENT/runs/EXP-<ID>/handles/"*.json >/dev/null 2>&1 || ! kill -0 "$P" 2>/dev/null || [ $n -ge 312 ]; do sleep 5; n=$((n+1)); done
+      grep -E 'VAST_PROVISIONED|NO_OFFERS|MANUAL_REVIEW|SSH probe FAILED|WARNING VAST_ACCOUNT=team|auto-selected' "$LOG" | tail -20
       ```
-      The stderr line `vast-provision: auth: using VAST_API_KEY (account=<team|private>)` confirms the selected account.
-      The stderr line `vast-provision: auto-selected template 'verl-research-vllm020' hash=<HEX> image=verlai/verl:vllm020.dev1` confirms the locked Template was used. If you ever see `auto-selected` missing, something has corrupted `templates.json` — append `MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing` to PROGRESS.md and stop instead of bypassing it.
-   2. Capture every `VAST_HANDLE: { ... }` line from stdout. Write each handle JSON into `$PARENT/runs/EXP-<ID>/handles/<instance_id>.json` **and** record the tier index on the handle: append `chosen_tier_idx: <IDX>` and `chosen_tier_query: "<chain[IDX]>"` fields via `jq` before writing.
+   1c. **Classify from `$LOG` / the handle dir:**
+      - handle JSON present in `runs/EXP-<ID>/handles/` → success; go to step 4.2.
+      - `WARNING VAST_ACCOUNT=team but templates.json has no team_hash_id`, OR a `MANUAL_REVIEW unrecoverable create error` line → append `MANUAL_REVIEW_NEEDED: team template hash missing/inaccessible — EXP-<ID>` to `$PARENT/PROGRESS.md` and STOP (do NOT walk more tiers — every tier fails identically; the skill self-destroyed any box).
+      - `NO_OFFERS` → advance to the next tier (no box created).
+      - process died, no handle, no clear cause → `tail "$LOG"`, append `LAUNCH_FAILED_TIER: EXP-<ID> tier=<IDX>`, walk to the next tier.
+      The `auto-selected [TEAM ]template … hash=<HEX>` line confirms the locked Template was used (the `TEAM ` variant confirms the team copy on `VAST_ACCOUNT=team`). If `auto-selected` is entirely absent, `templates.json` is corrupted — append `MANUAL_REVIEW_NEEDED: vast-provision template auto-default missing` and stop.
+   2. The skill (via `--handle-dir`) has already written each handle to `$PARENT/runs/EXP-<ID>/handles/<instance_id>.json`. Record the tier on each handle in-place: add `chosen_tier_idx: <IDX>` and `chosen_tier_query: "<chain[IDX]>"` via a `jq` edit (read → tmp → mv).
    3. If ≥1 handle was captured this tier: set `CHOSEN_TIER_IDX=<IDX>`, exit the loop, and proceed to step 5.
    4. If `vast-provision` raises a transient error (network, API rate-limit), retry up to 3 attempts within this tier. On 3rd failure, append `LAUNCH_FAILED_TIER: EXP-<ID> tier=<IDX>` to PROGRESS.md and walk to the next tier — do NOT abort the whole walk on a single-tier failure.
    5. If `vast-provision` succeeds but returns zero offers (i.e. no SKU matched the query under `max_dph`), advance to the next tier without retries.

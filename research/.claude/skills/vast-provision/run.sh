@@ -97,9 +97,23 @@ if [[ -z "$IMAGE" && -z "$TEMPLATE_HASH" && -r "$TEMPLATES_JSON" ]]; then
   NUM_TEMPLATES=$(jq 'length' "$TEMPLATES_JSON" 2>/dev/null || echo 0)
   if [[ "$NUM_TEMPLATES" == "1" ]]; then
     TEMPLATE_NAME=$(jq -r 'keys[0]' "$TEMPLATES_JSON")
-    TEMPLATE_HASH=$(jq -r '.[keys[0]].hash_id' "$TEMPLATES_JSON")
     TEMPLATE_IMAGE=$(jq -r '.[keys[0]].image // "?"' "$TEMPLATES_JSON")
-    echo "$PROG: auto-selected template '$TEMPLATE_NAME' hash=$TEMPLATE_HASH image=$TEMPLATE_IMAGE" >&2
+    if [[ "${VAST_ACCOUNT:-private}" == "team" ]]; then
+      # A Vast Template is owned by ONE account; the private-owned template is NOT
+      # accessible to the team account (create 400s). Use the recorded team-owned
+      # copy (team_hash_id) when provisioning on the team account.
+      TEMPLATE_HASH=$(jq -r '.[keys[0]].team_hash_id // empty' "$TEMPLATES_JSON")
+      if [[ -n "$TEMPLATE_HASH" ]]; then
+        echo "$PROG: auto-selected TEAM template '$TEMPLATE_NAME' hash=$TEMPLATE_HASH image=$TEMPLATE_IMAGE (VAST_ACCOUNT=team)" >&2
+      else
+        echo "$PROG: WARNING VAST_ACCOUNT=team but templates.json has no team_hash_id for '$TEMPLATE_NAME' —" >&2
+        echo "$PROG: falling back to the PRIVATE hash, which will 400 on the team account. Record a team-owned copy (SKILL.md 'Team-account templates')." >&2
+        TEMPLATE_HASH=$(jq -r '.[keys[0]].hash_id' "$TEMPLATES_JSON")
+      fi
+    else
+      TEMPLATE_HASH=$(jq -r '.[keys[0]].hash_id' "$TEMPLATES_JSON")
+      echo "$PROG: auto-selected template '$TEMPLATE_NAME' hash=$TEMPLATE_HASH image=$TEMPLATE_IMAGE" >&2
+    fi
     echo "$PROG: (pass --template-hash explicitly to override, or --image to bypass the template entirely)" >&2
   elif [[ "$NUM_TEMPLATES" -gt 1 ]]; then
     echo "$PROG: templates.json has $NUM_TEMPLATES entries; pass --template-hash explicitly to pick one" >&2

@@ -56,7 +56,10 @@ fi
 
 EXP_ID="${EXP_ID:-ATTACH-$INSTANCE_ID}"
 GPU_NAME="${GPU_NAME:-unknown}"
-SSH_LOGIN="ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p $SSH_PORT root@$SSH_HOST"
+# Offer the team key for a team box, the personal key otherwise (display convenience;
+# the operator can pass any -i when they actually connect to their BYO box).
+if [[ "$ACCOUNT" == "team" ]]; then SSH_ID="~/.ssh/Vast-Team"; else SSH_ID="~/.ssh/vast_ai_name"; fi
+SSH_LOGIN="ssh -i $SSH_ID -o StrictHostKeyChecking=accept-new -p $SSH_PORT root@$SSH_HOST"
 
 HANDLE=$(jq -nc \
   --arg iid "$INSTANCE_ID" --arg host "$SSH_HOST" --argjson port "$SSH_PORT" \
