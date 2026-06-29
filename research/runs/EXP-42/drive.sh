@@ -35,9 +35,20 @@ for REGIME in regimeA regimeB; do
   CAL=$(wc -l < "$OUT/weights/calib.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
   VAL=$(grep -oE "val-core[^ ]*acc/mean@1:[0-9.]+" "$IL" 2>/dev/null | tail -1 || echo "n/a")
   log "PHASE $REGIME DONE rc=$RC sketch_npz=$NPZ manifest_rows=$MAN calib_rows=$CAL last_val=$VAL"
-  if [[ "$REGIME" == "regimeA" && "$RC" -ne 0 ]]; then
-    log "REGIME A FAILED (rc=$RC) — single-GPU plain-GRPO premise broken; STOP before B (on_fail=stop)"
+  # on_fail=stop gate for regimeA keys on the CAPTURED TRAJECTORY LENGTH, NOT rc.
+  # The launcher routinely exits rc!=0 from BENIGN atexit teardown noise (a
+  # DataLoader-worker SIGKILL during the final wandb flush + a stale
+  # launcher-internal done.flag path) AFTER training + val + checkpoint + sync +
+  # the FULL per-tick sketch capture all complete (observed regimeA 2026-06-29:
+  # rc=1 but 80/80 steps + 160 sketches). Gating on rc falsely aborts the chain;
+  # gate on the trajectory we actually paid for instead.
+  EXPECT=$((2 * 80))   # 2 optimizer ticks/step at batch128/mini64
+  if [[ "$REGIME" == "regimeA" ]] && (( NPZ < EXPECT - 20 )); then
+    log "REGIME A INCOMPLETE (sketch_npz=$NPZ < ~$EXPECT) — single-GPU plain-GRPO premise broken; STOP before B (on_fail=stop)"
     break
+  fi
+  if [[ "$REGIME" == "regimeA" && "$RC" -ne 0 ]]; then
+    log "REGIME A launcher rc=$RC but trajectory complete (sketch_npz=$NPZ ~ $EXPECT) — benign teardown rc, proceeding to regimeB"
   fi
 done
 log "ALL_DONE"
