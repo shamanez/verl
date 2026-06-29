@@ -114,6 +114,13 @@ for iid in "${IDS[@]}"; do
   fi
   OUT=$(VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
   echo "[$iid] account=$ACCT $OUT" >>"$ERR_LOG"
+  # Already-gone = goal achieved (idempotent). `destroy` errors on a missing
+  # instance, so check this BEFORE the generic error->FAILED guard (mirrors the
+  # Stop hook's verify-authoritative classification).
+  if grep -qiE 'not found|no such|does not exist|no longer (exists|gone)|already (destroyed|gone)|"?404"?' <<<"$OUT"; then
+    DESTROYED+=("$iid")
+    continue
+  fi
   # Belt-and-braces: even with -y, treat "Aborted" / "error" anywhere in stdout
   # as a hard failure. The CLI's exit code alone is not trustworthy.
   if grep -qiE 'aborted|^error[: ]|status_code' <<<"$OUT"; then
