@@ -1,145 +1,121 @@
-# EXP-42 runbook — GPU-from-minute-1 execution (optimized, no-smoke)
+# EXP-42 runbook — weight-projection accuracy (single 1×H200, 2 regimes, sketch→MacBook)
 
-**State:** all implementation + CPU/config probe DONE locally (14/14 pass). The run is
-now **performance-optimized**: dynamic batching ON, initial validation OFF, **no smoke
-phase** — `drive.sh` goes straight into the 3 training cells. The box is operator-provided
-per session (OFF by default; teardown-safe registration — never auto-torn-down).
+> **REFRAMED 2026-06-29.** EXP-42 now measures **weight-projection accuracy** (does `θ̂` land
+> closer to `θ_now` than raw-stale `θ[t−K]`), as a function of how many steps ahead we predict,
+> in two regimes (plain GRPO / GRPO+activation-compression). The *gradient* study moved to
+> **[EXP-43](../../.claude/plans/43.md)**. Plan: [`.claude/plans/42.md`](../../.claude/plans/42.md).
+> The old 3-cell gradient scaffold here is superseded — it belongs to EXP-43.
 
-- Branch: `exp/42-lookahead-horizon` @ `eda0eaeb` (only exp branch; pushed to origin).
-- Instrument: `comm_eff.probe.grad_proj_enabled` (+ `grad_proj_out_dir`).
+**Strategy (operator: LIMIT Vast spend):** the GPU box only runs *ordinary* training and emits a
+tiny per-tick **weight sketch** (~320 MB/regime). The look-ahead predictor is a pure function of
+the trajectory and is **replayed entirely on the MacBook** (GPU-free) across every method × horizon.
+**One 1×H200 box, two short sequential runs (Regime A → Regime B), then tear down.**
 
----
-## Performance-optimized surface (LOCKED 2026-06-26 — do NOT re-tune)
-The first attempt ran **2.7× too slow** because the comm-eff launcher defaults to STATIC
-batching (`USE_DYNAMIC_BSZ=False` ⇒ `micro_batch=1`/GPU, the token budget IGNORED, ~1%
-MFU, ~17 GB HBM of 143, ~135 s/step). The fast reference run `hoasiw5u` (same signed_ema
-method) ran 50 s/step with dynamic batching. The scaffold now pins:
-
-- **`USE_DYNAMIC_BSZ=True`** — token-balanced micro-batches. The per-element mask is
-  packing-invariant, so results are unchanged; ~2.7× faster.
-- **`VAL_BEFORE_TRAIN=False`** — skip the step-0 validation pass (operator). Validation
-  still runs at steps 25/50/75/100.
-- **No smoke** — `drive.sh` launches run1→run2→run3 directly (the +2-backward FSDP path
-  was already validated: prior smoke GATE_PASS + run1 ran healthy through step 7).
-- **`PPO_MAX_TOKEN_LEN_PER_GPU`** and **`snapshot_device`/`ema_device`** — see the
-  "Locked params" block at the bottom (finalized from the OOM/offload analysis).
-
-These are baked into `run_cell.sh`; do not override them on the box.
+- Branch: `exp/42-weight-accuracy` (NEW, off `vast-ai-workload`). Instrument:
+  `comm_eff.probe.weight_traj` (per-tick count-sketch + per-matrix mean + exact calib scalars).
+- Single-GPU is a **documented deviation** from the 4≤num_gpus≤8 fixed control — **get operator
+  sign-off on the `num_gpus=1 gpu_name=H200` vast filter before provisioning** (or attach an
+  operator-provided 1×H200 via `vast-attach`).
 
 ---
 ## HF + WandB auth (REQUIRED — set BEFORE launch; NEVER echo secret values)
-The launcher **sources `~/.config/verl-research/secrets.env` ON THE BOX** and FATALS if it
-is missing OR if `VAST_API_KEY` leaks into it. A fresh template box does NOT have it.
-Push everything over SSH stdin so values never hit a terminal/log:
+The launcher **sources `~/.config/verl-research/secrets.env` ON THE BOX** and FATALS if it is
+missing OR if `VAST_API_KEY` leaks into it. Push a STRIPPED copy over SSH stdin so values never hit
+a terminal/log:
 
-1. **secrets.env (mandatory).** Push a STRIPPED copy — HF_TOKEN + WANDB_API_KEY only:
+1. **secrets.env (mandatory)** — HF_TOKEN + WANDB_API_KEY only:
    ```bash
    grep -E '^(export +)?(HF_TOKEN|WANDB_API_KEY)=' ~/.config/verl-research/secrets.env \
      | sed -E 's/^(export +)?/export /' \
      | ssh <box> 'mkdir -p ~/.config/verl-research && cat > ~/.config/verl-research/secrets.env && chmod 600 ~/.config/verl-research/secrets.env'
    ```
-   (The `grep` drops VAST_API_KEY — the launcher aborts if it sees it.)
-2. **HF token file** (so `hf`/`huggingface_hub` auth even without env):
+2. **HF token file:**
    ```bash
    source ~/.config/verl-research/secrets.env
    printf '%s' "$HF_TOKEN" | ssh <box> 'mkdir -p ~/.cache/huggingface && cat > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token'
    ```
-3. **WandB `.netrc`** (optional — the exported `WANDB_API_KEY` already authenticates wandb):
+3. **WandB `.netrc`** (optional — exported `WANDB_API_KEY` already authenticates):
    ```bash
    printf 'machine api.wandb.ai\n  login user\n  password %s\n' "$WANDB_API_KEY" \
      | ssh <box> 'cat > ~/.netrc && chmod 600 ~/.netrc'
    ```
-4. **HF CLI gotcha:** `huggingface-cli` is **DEPRECATED and no longer works** — use `hf`
-   (huggingface_hub ≥ 1.x):
-   - verify: `hf auth whoami`  → expect "✓ Logged in", user **`gshasiri`**.
-   - pre-download (background, so training does not stall on a cold pull):
-     `nohup hf download Qwen/Qwen2.5-1.5B-Instruct > ~/hf_dl.log 2>&1 &`
-5. The launcher re-exports the HF token under `HUGGING_FACE_HUB_TOKEN` +
-   `HUGGINGFACE_HUB_TOKEN` (every name HF clients look for).
-
-- **Model:** `Qwen/Qwen2.5-1.5B-Instruct` (the launcher's `MODEL_PATH` default).
-- **WandB:** project `verl_compression_research`; run names `exp42-run1` / `exp42-run2` /
-  `exp42-run3` (set per cell by `run_cell.sh` via `EXPERIMENT_NAME`).
-- Auth files live on the persistent disk and survive a Vast stop/start — rewrite only if
-  `ls ~/.config/verl-research/secrets.env ~/.netrc ~/.cache/huggingface/token` shows missing.
+4. **HF CLI gotcha:** `huggingface-cli` is DEPRECATED — use `hf` (huggingface_hub ≥ 1.x):
+   `hf auth whoami` → expect "✓ Logged in", user **`gshasiri`**. Pre-pull:
+   `nohup hf download Qwen/Qwen2.5-1.5B-Instruct > ~/hf_dl.log 2>&1 &`
+- **Model:** `Qwen/Qwen2.5-1.5B-Instruct`. **WandB:** project `verl_compression_research`, run
+  names `exp42-regimeA` / `exp42-regimeB`. Auth files survive a Vast stop/start.
 
 ---
-## STEP A — reconnect + checkout (seconds)
-Vast may reassign host/port on stop/start; take the current ssh line from the operator.
+## STEP A — single-GPU launcher edit (one-time, on the exp branch)
+The committed launchers hard-fail on 1 GPU (`(( DETECTED_GPUS < 4 || DETECTED_GPUS > 8 ))`,
+`vast_comm_eff_baseline_*.sh:105`). On `exp/42-weight-accuracy`:
+- relax the guard to allow `>= 1` GPU;
+- ensure `ROLLOUT_TP=1` (the accel base already sets it).
+Push the branch BEFORE launch (survives a laptop crash).
+
+## STEP B — reconnect + checkout
 ```bash
 SSH='ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p <PORT> root@<HOST>'
-$SSH 'nvidia-smi -L'   # confirm 4..8 H100/H200 — ABORT if single-GPU
-$SSH 'cd /workspace/verl && git fetch origin exp/42-lookahead-horizon -q && git checkout -B exp/42-lookahead-horizon FETCH_HEAD && git log --oneline -1'   # expect eda0eae
+$SSH 'nvidia-smi -L'    # confirm 1× H200 (this run is INTENTIONALLY single-GPU)
+$SSH 'cd /workspace/verl && git fetch origin exp/42-weight-accuracy -q && git checkout -B exp/42-weight-accuracy FETCH_HEAD && git log --oneline -1'
 ```
-Then do the HF + WandB auth above (if missing), and push the scripts:
+Do the HF + WandB auth above (if missing), then push the (re-materialised) scaffold:
 ```bash
 rsync -az -e "ssh -i ~/.ssh/vast_ai -p <PORT>" runs/EXP-42/{drive.sh,run_cell.sh,probe_cpu.py} root@<HOST>:/workspace/runs/EXP-42/
 ```
-(`smoke.sh` is no longer part of the flow — kept on disk only as an optional manual gate.)
 
-## STEP B — launch the 3 runs (ONE command; no smoke, GPU busy from here)
+## STEP C — launch the 2 regimes (ONE command, sequential)
 ```bash
 $SSH "tmux new -d -s exp42 'bash /workspace/runs/EXP-42/drive.sh'"
 ```
-`drive.sh` runs run1 (fixed_linear@0.50) → run2 (learned@0.50) → run3 (no-projection),
-each 100 steps @ 1024 ctx, anchor delay_K=cadence=10, dynamic batching, strictly sequential.
-Watch: `tail -f /workspace/runs/EXP-42/drive.status`.
+`drive.sh` runs **regimeA (COMM_EFF_ENABLED=false)** → **regimeB (enabled=true, powersgd r=77,
+anchor+spectral OFF)**, each 80 steps (=160 ticks) @ resp=1024, dyn_bsz, `probe.weight_traj.enabled=true`.
+Watch `drive.status`.
 
-## STEP C — monitor from the laptop (training-log-monitor subagent, 30 s cadence)
-Watch `drive.status` + the current cell's `/workspace/runs/EXP-42/<cell>/train_<cell>_internal.log`
-for: tmux liveness, crash signatures (Traceback / CUDA OOM / NaN / AssertionError), per-fire
-`[grad-proj-probe] ... grad_proj_gain=...`, val@25/50/75/100, and `response_length/mean`.
-- **First few steps are the new risk surface** (dynamic batching + the +2-backward path
-  were not smoke-gated) — confirm no OOM/NaN by ~step 10 (the first projecting fire).
-- register each cell teardown-safe: `bash runs/EXP-42/register_run.sh <cell> RUNNING` → `COMPLETE` on its `done.flag`.
-- as each cell finishes (its `done.flag` appears): backfill the final 1–2 steps from the
-  authoritative internal log; `rsync` `/workspace/runs/EXP-42/<cell>/` → `runs/EXP-42/<cell>/`.
+## STEP D — monitor (training-log-monitor subagent, 30 s cadence)
+Watch `drive.status` + `<regime>/train_<regime>_internal.log` for: tmux liveness, crash signatures
+(Traceback / CUDA OOM / NaN), per-tick `[weight-traj]` sketch writes, and the **codec-active check**
+in Regime B (PowerSGD `reconstruction_rel_error` > 0 ⇒ codec is actually changing the gradient on 1
+GPU — if it is identically 0 or the trajectory matches Regime A, STOP: the boundary codec is inactive
+without pipeline/DP and Regime B is invalid).
+- **First 10 steps are the risk surface** (single-GPU OOM + the new summon→sketch hook) — confirm no
+  OOM/NaN and a growing `weights/manifest.jsonl`.
+- as each regime finishes (`done.flag`), `rsync` only `<regime>/weights/` (sketches + manifest +
+  calib) → `runs/EXP-42/<regime>/weights/`. **~320 MB/regime — tiny.**
 
-## STEP D — analyst → verdict (step 6)
+## STEP E — OFFLINE analysis on the MacBook (GPU-free; this is where the science happens)
 ```bash
-python research/scripts/analyze.py runs/EXP-42 --emit verdict.md   # or dispatch the analyst agent
+python research/scripts/weight_proj_sweep.py runs/EXP-42 --emit report.html --calib-tol 0.05
+python research/scripts/analyze.py runs/EXP-42 --emit verdict.md
 ```
-- **HEADLINE:** median `grad_proj_gain` for run1 & run2. **STOP if ≤ 0 for BOTH** (the
-  projection premise is falsified at the gradient level — the deepest finding; a clean STOP
-  with a measured gain profile is a SUCCESSFUL outcome of this plan).
-- Secondary (conversion): final `val@100` of each vs run3 + collapse check
-  (`response_length/mean ≤ 2×` its first-25-step mean).
+- validates sketch vs the on-box EXACT calib scalars (<5%); if it fails ⇒ REVISE (bigger k / bf16
+  full-dump), NOT a GPU re-run.
+- emits `weight_proj_ratio` & `dir_cos` vs horizon h (ticks), fixed & learned, regime A & B, with
+  per-matrix p10/p50/p90 and the crossover horizon h\*.
+- **HEADLINE answer:** at h=K=10 (and K=20), is median `weight_proj_ratio < 1` and `dir_cos > 0`?
+  This GATES whether [EXP-43](../../.claude/plans/43.md) (gradients) launches at all.
 
-## STEP E — report + teardown
-Report to operator. **Do NOT tear down the box — ASK first** (operator owns it).
-
----
-## Teardown-safety (in effect)
-Box attached via `vast-attach --no-register` (no box ledger row) + per-cell rows use empty
-`handles[]` ⇒ the teardown Stop hook finds no instance to destroy ⇒ the box is NEVER
-auto-torn-down. Teardown happens only on explicit operator OK.
+## STEP F — report + teardown
+Report to operator. **Do NOT tear down the box — ASK first** (operator owns it). After teardown,
+de-bloat per the close-out duty (keep the report + verdict + SUMMARY entry; delete the sketches).
 
 ---
-## Locked params (finalized 2026-06-26 from the OOM/offload analysis + operator choice)
+## Locked params
+| Knob | Value | Note |
+|---|---|---|
+| GPUs | **1× H200** | documented deviation; resp=1024 defuses the 16K headroom rule |
+| base launcher | accel surface | resp=1024, USE_DYNAMIC_BSZ=True, ROLLOUT_TP=1, mem_util=0.55, token budget 24576 |
+| regime A | `COMM_EFF_ENABLED=false` | byte-identical dense path |
+| regime B | `enabled=true type=powersgd rank=77`, `ANCHOR_ENABLED=false SPECTRAL_ENABLED=false` | codec only (no anchor/merger — avoids circularity) |
+| instrument | `probe.weight_traj.enabled=true` k=4096 | per-tick count-sketch + mean + exact calib @ (Δ,h)∈{(10,10),(20,20)} |
+| steps | 80 (=160 ticks) | spans h≤40 ticks with ~100 anchor points |
+| test_freq | 40 | val@40/80 = convergence sanity only; val is NOT the metric |
+| snapshot/ema device | cpu | OOM-safe |
 
-Operator choice: **ema stays on CPU, strictly no smoke** — trade ~0.5–1 s/step (the
-per-step EMA H2D transfer) for zero added HBM and no OOM gate. The ONLY non-default knobs
-are batching + initial-val; everything memory-related stays at the safe, already-run
-defaults, so dynamic batching is the single new variable (well-trodden in verl; budget
-18432 < the fast ref's 24576 ⇒ low OOM risk).
+- **Expected wall-clock (rough):** single-H200 ≈ 3.5–4× slower/step than 4×H200 (~190 s/step) ⇒
+  ~4 h/regime ⇒ **~8–9 h for both** + provisioning. Budget envelope 14 h. Regime B ≈ A (no anchor
+  clone). If OOM: lower `PPO_MAX_TOKEN_LEN_PER_GPU` (24576→16384) and/or `ROLLOUT_GPU_MEM_UTIL` 0.55→0.45.
 
-| Knob | Locked value | Env var | Note |
-|---|---|---|---|
-| batching | `True` | `USE_DYNAMIC_BSZ` | the 2.7× win; results-invariant (per-element mask packing-invariant) |
-| initial val | `False` | `VAL_BEFORE_TRAIN` | skip step-0 eval; val@25/50/75/100 unaffected |
-| token budget (4×H200) | `18432` | `PPO_MAX_TOKEN_LEN_PER_GPU` | launcher default; active under dynamic_bsz; **ceiling ~20480 with anchor ON** |
-| snapshot_device | `cpu` | (default) | per-fire only; **required by the grad_proj guard** — do not move |
-| ema_device | `cpu` | (default) | KEPT on CPU per operator (OOM-safe, no smoke); per-step transfer accepted |
-| vLLM mem util | `0.4` | `ROLLOUT_GPU_MEM_UTIL` | launcher default; conservative (the prior healthy run used it) |
-
-- These map to: `run_cell.sh` exports `USE_DYNAMIC_BSZ=True` + `VAL_BEFORE_TRAIN=False`;
-  all memory knobs inherit the launcher defaults (cpu/cpu/18432/0.4). No other overrides.
-- **Expected:** ~55–65 s/step (a touch above the 48–52 ema-on-GPU estimate, since the EMA
-  stays on CPU), ~55–70 min/cell, **~3–3.5 h for all 3 cells** (vs ~12 h unoptimized).
-- **8×H100 fallback** (only if no H200; anchor-ON is marginal there): set
-  `PPO_MAX_TOKEN_LEN_PER_GPU=10240` (drop to 8192 if a fire-tick OOMs) and
-  `ROLLOUT_GPU_MEM_UTIL=0.38`; keep ema/snapshot on CPU. **Do not mix GPU types within one
-  3-cell run** (different budgets/devices would break cell-to-cell comparability).
-- **No-smoke residual risk:** the dynamic-batching + grad-proj +2-backward path was never
-  gate-validated; the training-log-monitor must confirm no OOM/NaN by ~step 10 (the first
-  projecting fire). If it OOMs, lower `PPO_MAX_TOKEN_LEN_PER_GPU` (e.g. 16384) and relaunch.
+## Teardown-safety
+Attach via `vast-attach --no-register` + empty `handles[]` ⇒ the teardown Stop hook finds no
+instance to destroy ⇒ never auto-torn-down. Teardown only on explicit operator OK.

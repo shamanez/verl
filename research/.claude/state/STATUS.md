@@ -1,25 +1,33 @@
-# Research Status — 2026-06-25
+# Research Status — 2026-06-29
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 i_42465843 (team) TORN_DOWN | STOP | probe PASSED 10/10 hard invariants (code correct); cell A 5/5 ref clean (val@100=0.7066); cell B collapsed (val@100=0.0478, 8 resp_len breach steps, no catastrophic ignition); lift +0.0267 present but merger over-amplified; cell C gated off; WandB A=7tbzm9kl B=g6dt6bza |
+| 42 | M4 weight-projection accuracy vs horizon (fixed vs learned · plain GRPO vs +compression) | PLAN_READY | none yet (single 1×H200, observe-only) | — | **REFRAMED 2026-06-29 (operator):** measure how accurately `θ̂` projects the WEIGHTS (not gradients) as a function of steps-ahead, in 2 regimes. Cost-minimised: ordinary training emits a tiny per-tick weight SKETCH (~320 MB/regime); look-ahead replayed OFFLINE on the MacBook across every method×horizon. 1 box, 2 sequential runs, then teardown. Plan `.claude/plans/42.md`; runbook `runs/EXP-42/RUNBOOK.md`. Single-GPU = documented deviation (needs operator sign-off on `num_gpus=1` filter). |
+| 43 | M4 gradient-projection accuracy (same-batch grad_proj_gain) | PLANNED · BLOCKED on 42 | none | — | Split from old EXP-42 on 2026-06-29. Instrument already BUILT + 14/14 CPU probes PASS on `exp/42-lookahead-horizon`. Gated: launch ONLY if EXP-42 shows `weight_proj_ratio<1` & `dir_cos>0` at a useful horizon; else STOP (a gradient can't be more accurate than the weight it's computed at). Plan `.claude/plans/43.md`. |
+| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 i_42465843 (team) TORN_DOWN | STOP | probe PASSED 10/10 (code correct); cell A 5/5 ref clean (val@100=0.7066); cell B collapsed (val@100=0.0478) via length-explosion; lift +0.0267 present but merger over-amplified. WandB A=7tbzm9kl B=g6dt6bza |
 
 ## Last tick
-2026-06-25 · running=[] · analyzing=[] · logging=[] · blocked=[]
+2026-06-29 · running=[] · analyzing=[] · logging=[] · blocked=[43 (on 42)]
 
 ## Pipeline state
-Idle. No experiment in flight. EXP-41 is the most recent closed experiment (STOP).
+EXP-42 **reframed** to a weight-projection-accuracy measurement (operator ruling: weights MUST be
+verified accurate before any gradient claim). EXP-43 created to carry the (already-built) gradient
+study, gated on EXP-42. No experiment in flight; GPU OFF (operator-managed). Next GPU step =
+EXP-42's 2-regime single-1×H200 observe run — **awaiting operator sign-off on the single-GPU
+deviation** before provisioning.
 
-## EXP-41 close-out summary
-- ✅ Fire-forcing invariant probe (10/10 hard gates PASS, runs/EXP-41/probe-invariants.md)
-- ✅ Cell A (onsurface 5/5 reference, 100 steps clean): val@25/50/75/100 = 0.6998/0.7255/0.7233/0.7066; raw-stale anchor_align_cos mean +0.0063
-- ✅ Cell B (fixed_linear 20/20, 100 steps, no NaN): anchor_align_cos lift +0.0267 (6/8 fires positive, peak +0.131 @ step 60); BUT response_length/mean breached 2x threshold at 8 steps (peak 552 @ step 59); val crashed 0.498->0.115->0.048
-- ✅ WandB backfilled both cells to step 100 (A=7tbzm9kl, B=g6dt6bza, project verl_compression_research)
-- ✅ Box 42465843 torn down (team), 0 live instances verified
-- VERDICT: STOP — no-collapse criterion FAILS, val@100 band criterion FAILS; cell C gated off per plan on_fail
-- Deferred research direction (operator review): lower beta_anc (0.50->0.10-0.25) with fixed-linear held on at 20/20; merger over-amplification is now the suspect, not the projector
+## Open notes for operator
+- `runs.jsonl` still has a line-4 `EXP-42-run1` BYO box (RUNNING, operator-managed) from the OLD
+  gradient run — tear down or repurpose at will; the reframe does not touch it.
+- Single-GPU `num_gpus=1 gpu_name=H200` is NOT in the sanctioned `gpu_filter_chain` (4×H200/8×H100
+  only). Sign off before provisioning, or attach an operator-provided 1×H200.
+
+## EXP-41 close-out summary (most recent CLOSED experiment)
+- VERDICT: STOP — fixed-linear θ̂=2θ[t-20]-θ[t-40] at 20/20: cell A 5/5 ref clean (0.6998/0.7255/0.7233/0.7066),
+  cell B collapsed (0.36→0.50→0.11→0.048) via response-length explosion; cos-lift present but merger over-amplified.
+- Deferred direction: lower beta_anc — SUPERSEDED by the EXP-42 reframe (measure the weight projection first).
 
 ## Budget
-All GPU spend complete. 0 live instances. No active spend.
+0 live instances (harness-provisioned). No active spend. Operator-managed BYO box may still exist (see notes).
