@@ -44,6 +44,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.comm_eff import maybe_build_comm_eff_state
+from verl.workers.comm_eff.capture import maybe_build_weight_traj_observer
 from verl.workers.comm_eff.state import comm_eff_metrics
 from verl.workers.config import (
     ActorConfig,
@@ -753,6 +754,35 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             logger.warning("comm_eff.powersgd: could not bind DP group (%s); using world group", e)
         return getattr(self, "_comm_eff_state", None)
 
+    def _maybe_weight_traj_observer(self):
+        """Return this worker's EXP-42 weight-trajectory observer, building once.
+
+        Built INDEPENDENTLY of ``comm_eff.enabled`` (read straight off
+        ``comm_eff.probe.weight_traj.enabled``) so the plain-GRPO regime (codec
+        OFF, ``comm_eff.enabled=false`` ⇒ no comm_eff state) is still
+        instrumented. ``None`` when the flag is off — a strict no-op: no observer,
+        no summon, no I/O, train path byte-identical. Attached to the actor train
+        engine so ``BaseEngine.train_batch``'s ``_maybe_comm_eff_weight_traj``
+        hook can reach it. Dump-only — it never touches the optimizer/EMA/Q.
+        """
+        if getattr(self, "_weight_traj_observer_built", False):
+            return getattr(self, "_weight_traj_observer", None)
+        observer = None
+        try:
+            comm_eff_cfg = self.config.actor.get("comm_eff", None)
+            observer = maybe_build_weight_traj_observer(comm_eff_cfg)
+        except Exception as e:  # pragma: no cover - defensive: never break training
+            logger.warning("comm_eff.weight_traj: observer build failed (%s); instrument off", e)
+            observer = None
+        object.__setattr__(self, "_weight_traj_observer", observer)
+        object.__setattr__(self, "_weight_traj_observer_built", True)
+        if observer is not None:
+            engine = getattr(getattr(self, "actor", None), "engine", None)
+            if engine is not None:
+                object.__setattr__(engine, "_weight_traj_observer", observer)
+                logger.info("comm_eff.weight_traj: instrument attached to actor train engine")
+        return observer
+
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
         """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
 
@@ -859,6 +889,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # disabled (state None ⇒ global_step None ⇒ clean_step False).
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
         clean_step = comm_eff_state.is_clean_step(global_step) if comm_eff_state is not None else False
+
+        # EXP-42 weight-trajectory instrument. Built independently of comm_eff
+        # (so the codec-OFF regime is instrumented); strict no-op when the flag is
+        # off. When active on the dense path (no comm_eff state), mirror the
+        # trainer step onto the engine so the per-tick sketch is keyed on the real
+        # global_step (the comm_eff state's threader is a no-op when state=None).
+        weight_traj_observer = self._maybe_weight_traj_observer()
+        if weight_traj_observer is not None and comm_eff_state is None:
+            _wt_gs = tu.get(data, key="comm_eff_global_step", default=None)
+            if _wt_gs is not None:
+                engine = getattr(getattr(self, "actor", None), "engine", None)
+                if engine is not None:
+                    object.__setattr__(engine, "_comm_eff_global_step", int(_wt_gs))
 
         # Mask-active flag scope: set ONLY around the actor-train forward/backward
         # so the masking forward-hooks fire exclusively on this path. The engine

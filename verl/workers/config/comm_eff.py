@@ -35,6 +35,7 @@ __all__ = [
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
     "CommEffCaptureConfig",
+    "CommEffWeightTrajConfig",
     "CommEffProbeConfig",
     "CommEffConfig",
 ]
@@ -545,6 +546,62 @@ class CommEffCaptureConfig(BaseConfig):
 
 
 @dataclass
+class CommEffWeightTrajConfig(BaseConfig):
+    """EXP-42 weight-trajectory sketch instrument; off by default.
+
+    A dump-only per-tick recorder (``verl.workers.comm_eff.capture
+    .WeightTrajObserver``) that measures how accurately the look-ahead anchor
+    projects the WEIGHTS. At every optimizer tick it summons the FULL decoder
+    weight matrices and writes a compact count-sketch (+ per-matrix mean), plus
+    EXACT fp32 headline scalars from a bounded CPU snapshot ring. Telemetry-only:
+    it reads the live weights and feeds NOTHING into the optimizer / EMA / Q.
+
+    **Independent of ``comm_eff.enabled``.** Built whenever ``enabled=true`` even
+    on the plain-GRPO (codec OFF) regime, so the clean-trajectory baseline is
+    instrumented. ``enabled=false`` (default) ⇒ no observer, no summon, no I/O:
+    the train path is byte-identical (off-path-parity invariant).
+
+    Args:
+        enabled (bool): Master switch. ``false`` (default) = strict no-op.
+        k (int): Count-sketch width (buckets). ``4096`` ⇒ rel. std ≈ 1/√k ≈ 1.6%.
+            Must be ``>= 1``.
+        out_dir (str): Directory for ``sketch_tick_*.npz`` + ``manifest.jsonl`` +
+            ``calib.jsonl``. Empty ⇒ ``./weights`` at build (launcher pins an
+            absolute run-dir path).
+        dump_dtype (str): Sketch storage precision, ``"fp32"`` (default) or
+            ``"fp16"``. fp32 is REQUIRED for the weight-DIFFERENCE reconstruction
+            the study relies on (the per-tick update is ~1e-3 relative to the
+            weights, which an fp16 absolute sketch would swamp). Validated to
+            {fp32, fp16}.
+        calib_deltas (list[int]): Spacings Δ (ticks) the on-box EXACT calibration
+            evaluates. Default ``[10]`` (the operating point). Each entry ``>= 1``.
+        calib_horizons (list[int]): Horizons h (ticks) the on-box EXACT
+            calibration evaluates. Default ``[10]``. Each entry ``>= 1``. The
+            FULL horizon sweep is done offline from the sketch; this grid is only
+            the fp32 ground truth the sketch is validated against.
+        calib_stride (int): Ticks between opening exact-calib tripoint groups.
+            ``0`` (default) ⇒ AUTO = max(Δ+h) so groups never overlap (≤3 full
+            snapshots in flight per config). ``>= 0``.
+        calib_max_snapshots (int): Hard cap on retained full fp32 snapshots — the
+            CPU-OOM guard (each is ~5 GB on Qwen2.5-1.5B). New calib groups are
+            dropped past the cap. Must be ``>= 0``. ``0`` disables exact calib.
+        rank0_only (bool): Sketch/compute/write on DP rank 0 only (default; the
+            summoned full params are DP-identical). Other ranks build an inactive
+            observer so the summon collective stays symmetric.
+    """
+
+    enabled: bool = False
+    k: int = 4096
+    out_dir: str = ""
+    dump_dtype: str = "fp32"
+    calib_deltas: list = field(default_factory=lambda: [10])
+    calib_horizons: list = field(default_factory=lambda: [10])
+    calib_stride: int = 0
+    calib_max_snapshots: int = 6
+    rank0_only: bool = True
+
+
+@dataclass
 class CommEffProbeConfig(BaseConfig):
     """Geometry probe for paired anchor replay; off by default.
 
@@ -592,6 +649,10 @@ class CommEffProbeConfig(BaseConfig):
     rank0_only: bool = True
     m4_lags: int = 5
     per_target_sidecar: bool = True
+    # EXP-42 weight-trajectory sketch instrument (dump-only). Off by default; no
+    # observer/summon/IO is built unless weight_traj.enabled. Independent of the
+    # geometry probe and of comm_eff.enabled.
+    weight_traj: CommEffWeightTrajConfig = field(default_factory=CommEffWeightTrajConfig)
 
 
 @dataclass
@@ -868,6 +929,36 @@ class CommEffConfig(BaseConfig):
                     f"an active merger would corrupt it). Got correction_mode="
                     f"{self.spectral.correction_mode!r}."
                 )
+        # Weight-trajectory instrument (EXP-42). Validated unconditionally so a
+        # typo fails fast even when the instrument is off. It is dump-only and
+        # carries NO cross-config dependency (independent of comm_eff.enabled,
+        # the anchor, the merger and the geometry probe).
+        wt = self.probe.weight_traj
+        if not isinstance(wt.enabled, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.enabled must be a bool; got {type(wt.enabled).__name__} ({wt.enabled!r})"
+            )
+        if not isinstance(wt.rank0_only, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.rank0_only must be a bool; got "
+                f"{type(wt.rank0_only).__name__} ({wt.rank0_only!r})"
+            )
+        if wt.k < 1:
+            raise ValueError(f"comm_eff.probe.weight_traj.k must be >= 1; got {wt.k}")
+        if wt.dump_dtype not in ("fp32", "fp16"):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.dump_dtype must be one of (fp32, fp16); got {wt.dump_dtype!r}"
+            )
+        for _knob in ("calib_deltas", "calib_horizons"):
+            for _v in list(getattr(wt, _knob)):
+                if int(_v) < 1:
+                    raise ValueError(f"comm_eff.probe.weight_traj.{_knob} entries must each be >= 1; got {_v}")
+        if wt.calib_stride < 0:
+            raise ValueError(f"comm_eff.probe.weight_traj.calib_stride must be >= 0; got {wt.calib_stride}")
+        if wt.calib_max_snapshots < 0:
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.calib_max_snapshots must be >= 0; got {wt.calib_max_snapshots}"
+            )
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
         if self.clean_cadence < 0:

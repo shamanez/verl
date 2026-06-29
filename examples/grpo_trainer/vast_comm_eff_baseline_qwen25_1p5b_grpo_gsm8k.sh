@@ -99,12 +99,27 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — multi-GPU MANDATE (4..8).
+# 2. GPU count — 1..8.
+#    The default research mandate is multi-GPU (4..8). EXP-42 (the weight-
+#    trajectory measurement study, research/.claude/plans/42.md) is an
+#    operator-AUTHORIZED single-GPU exception (2026-06-29): the weight-trajectory
+#    geometry is invariant to GPU count when the global batch is held fixed (DP
+#    degree changes only the reduction order, not the trajectory), and the
+#    16K-context rationale behind the multi-GPU rule is defused by resp=1024. Set
+#    ALLOW_SINGLE_GPU=1 to permit 1..3 GPUs (single-GPU collection); otherwise the
+#    4..8 mandate stands.
 # ---------------------------------------------------------------------------
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
-if (( DETECTED_GPUS < 4 || DETECTED_GPUS > 8 )); then
-  echo "FATAL: this recipe requires 4..8 GPUs; detected $DETECTED_GPUS" >&2
-  echo "       (1.5B GRPO with 16K response + n=8 rollouts needs the headroom)" >&2
+GPU_MIN=4
+if [[ "${ALLOW_SINGLE_GPU:-0}" == "1" ]]; then
+  GPU_MIN=1
+fi
+if (( DETECTED_GPUS < GPU_MIN || DETECTED_GPUS > 8 )); then
+  echo "FATAL: this recipe requires ${GPU_MIN}..8 GPUs; detected $DETECTED_GPUS" >&2
+  if (( GPU_MIN > 1 )); then
+    echo "       (1.5B GRPO with 16K response + n=8 rollouts needs the headroom;" >&2
+    echo "        set ALLOW_SINGLE_GPU=1 for the EXP-42 single-GPU measurement path)" >&2
+  fi
   exit 1
 fi
 export NGPUS_PER_NODE="$DETECTED_GPUS"
@@ -151,6 +166,12 @@ export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 
 # Rollout shape — n=8 rollouts/prompt, paged KV.
 export ROLLOUT_TP="${ROLLOUT_TP:-2}"
+# Clamp TP to the detected GPU count: the single-GPU EXP-42 path forces TP=1
+# (rollout tensor-parallel can't exceed the device count). No effect on >=TP GPUs.
+if (( ROLLOUT_TP > DETECTED_GPUS )); then
+  echo "=== clamping ROLLOUT_TP $ROLLOUT_TP -> $DETECTED_GPUS (single-GPU path) ==="
+  export ROLLOUT_TP="$DETECTED_GPUS"
+fi
 export ROLLOUT_N="${ROLLOUT_N:-8}"
 export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.4}"
 
