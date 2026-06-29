@@ -173,6 +173,22 @@ bottom of this file:
 - `analyst` — for `RESULTS_READY`.
 - `log-writer` — for `VERDICT_PASS` and `VERDICT_STOP`.
 
+**Workflow lanes (the moment of truth + scale).** For *analysis*-heavy and
+*parallel*-scale work you may launch a **dynamic workflow EXPLICITLY** (the
+`ultracode` keyword / "run a workflow") instead of dispatching a single subagent —
+NOT by turning the session into `/effort ultracode` (that auto-escalates every tick
+and pushes state out of the crash-durable ledger). Sanctioned lanes (source of truth:
+`project.yaml workflows:`): (1) `RESULTS_READY` deep analysis — fan out analyst-typed
+workers across dimensions (reward/length/entropy/grad-cosine/train-infer gap) →
+adversarial verify → one synthesized verdict; (2) live in-training diagnostics on a
+`RUNNING` box (the 30 s SSH monitor stays the heartbeat); (3) hard `code_change`
+patch authoring (implement → review → test; the runner still applies + launches it);
+(4) parallel runs across several approved plans (the `parallel-runs` saved workflow).
+**Hard line:** a workflow's workers auto-approve edits, so they must stay READ-ONLY
+(`runs/` + reports). Provisioning, git/PR, and `runs.jsonl` writes are NEVER done by a
+workflow worker — they stay gated single-shot dispatches, so the `status:approved`
+gate and budget caps hold.
+
 For `VERDICT_REVISE`: create the child issue via
 `gh issue create --title "REVISE child of EXP-<N>" --label "status:planned" --body-file <next-actions-body>`.
 The child issue is created at **`status:planned`**, NOT `status:approved` —
@@ -184,6 +200,27 @@ Write the child's plan file locally (mirroring the original plan with
 
 Overwrite `.claude/state/STATUS.md` with the current state table (format
 below).
+
+### Step 5b — Print the plan-completion ledger (for `/goal`)
+
+This loop is launched under `/goal` (researcher_steps.md §3a), whose evaluator is
+**transcript-only** — it cannot read `runs.jsonl`, WandB, `verdict.md`, or labels. So
+each tick, **print to your reply** (not just STATUS.md) a compact ledger that lets the
+evaluator decide whether everything is done:
+
+```
+PLAN-COMPLETION LEDGER <ISO>
+EXP-<N> (<title>):
+  - <success-criterion 1> … DONE    (evidence: verdict.md PASS · runs.jsonl TORN_DOWN · WandB val@50=0.74 · label status:pass)
+  - <success-criterion 2> … PENDING (RUNNING, step 30/50)
+OVERALL: <ALL TERMINAL | N pending | STUCK:EXP-<N> reason>
+```
+
+Cite the *source* of each evidence token (the file/metric you read it from). When every
+approved plan is terminal (PASS/STOP, box TORN_DOWN, LOG.md written) — or you have logged
+a `STUCK`/`MANUAL_REVIEW_NEEDED` line — the `/goal` condition is met and the loop ends.
+Until then it keeps ticking. **The end-of-tick foreground teardown sweep (Hard rules) is
+what keeps budget safety intact while `/goal` holds the session open — never skip it.**
 
 ### Step 6 — Log + bookmark tick
 

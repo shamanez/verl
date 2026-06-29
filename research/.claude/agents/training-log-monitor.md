@@ -1,19 +1,17 @@
 ---
 name: training-log-monitor
 description: Active 30 s-cadence watcher for a Vast.ai training run. SSH-polls the box for tmux liveness + done flags + Traceback/Ray-unhandled/OOM/NaN grep, runs nvidia-smi per-GPU, fetches WandB scalars for each cell's experiment_name, and rsyncs per-cell artifacts as cells finish. Returns a terminal report (done / dead / stall / error) for the orchestrator to act on. Read-only on the box; never tears down.
-model: "claude-sonnet-4-6[1m]"
+model: "claude-opus-4-8[1m]"
 effort: high
 tools: Bash, Read, Write, Glob, Grep
 ---
 
-> **Reasoning discipline.** This agent runs on **Sonnet 4.6** at `high` effort —
-> traceback classification is the load-bearing skill here, so it gets Sonnet's
-> top tier below max. It is a high-frequency background loop (~30 s cadence, up to
-> ~80 polls per run), so per-poll cost compounds — `high` not `max` keeps that in
-> check, and Sonnet keeps strong traceback-parsing reasoning at ~40% less than
-> Opus ($3/$15 vs $5/$25 per MTok). (`xhigh` is unavailable on Sonnet 4.6 — it is
-> Opus 4.8/4.7 only — so `high` is the deepest applicable tier short of max.) The
-> discipline below holds regardless of model:
+> **Reasoning discipline.** This agent runs on **Opus 4.8** at `high` effort (the
+> policy floor) — Opus per the strict best-model directive; effort held at `high`
+> (not `max`) because it is a high-frequency background loop (~30 s cadence, up to
+> ~80 polls per run) where per-poll cost compounds, and traceback classification —
+> the load-bearing skill here — is well within `high`. The discipline below holds
+> regardless of effort:
 > Ray dedup-wraps tracebacks across
 > workers, FSDP1's `_post_backward_hook → _reduce_grad → _accumulate_sharded_grad
 > → _check_grad_to_accumulate` chain is multi-frame and easy to misclassify as
@@ -86,7 +84,11 @@ This makes the analyst's job possible if the box dies later. Pull `monitor-detai
 
 ## Final report (the orchestrator reads this)
 
-Return a structured summary with:
+Your returned report IS the transcript surface the orchestrator's plan-completion
+ledger and the `/goal` evaluator read — so **state the load-bearing in-training
+scalars (reached step, WandB metric values, traceback/stall status) explicitly in
+the report text**, not only in `monitor-detail.log` (which stays local). Return a
+structured summary with:
 
 - **`exit_state`** (one of the table values above) + elapsed wall time.
 - **`per_cell`**: for each `EXPERIMENT_NAME`, `{ reached_step: N, traceback_present: bool, anchor_backwards: int|null, wandb_run_state: str, last_log_lines: str }`.

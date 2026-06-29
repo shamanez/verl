@@ -114,27 +114,27 @@ agent_models:
   # the whole spread is reviewable in one place; if you change an agent's frontmatter,
   # update the matching row here by hand (and vice versa).
   #
-  # Policy: effort is tiered by role and pushed toward the top of each model's range.
-  #   • max  — the two agents that AUTHOR the load-bearing artifacts: research-planner
-  #            (designs the experiment plan) and experiment-runner (writes/patches the verl
-  #            code + launch payload). Both gate everything downstream, so they get Opus
-  #            4.8's absolute ceiling. (Operator directive: this overrides Anthropic's
-  #            "xhigh is the starting tier for coding" guidance for experiment-runner — the
-  #            operator wants the code author at max because a wrong patch burns GPU money.)
-  #   • xhigh — other Opus agents (analyst): deep verdict reasoning, one notch below max.
-  #            max is reserved for the plan/code authors; xhigh ("extended capability for
-  #            long-horizon work") keeps the gate-the-compute judgment strong without it.
-  #   • high  — both Sonnet 4.6 support agents (training-log-monitor, log-writer). Sonnet is
-  #            the cost lever (Sonnet $3/$15 vs Opus $5/$25 per MTok; all Opus 4.x are the
-  #            same price, so version != cost lever — tier is). `high` is Sonnet's strongest
-  #            tier BELOW max: Sonnet 4.6 has NO xhigh (low/medium/high/max only — xhigh is
-  #            Opus 4.8/4.7 exclusive), so high is the faithful "xhigh-equivalent" here.
-  # No agent runs on Haiku.
+  # Policy (operator directive 2026-06-29): STRICT best model — every agent runs on
+  # Opus 4.8 (claude-opus-4-8). Model is NOT a tunable; the ONLY knob is reasoning
+  # effort, with a FLOOR of `high` (no agent at low/medium, and none on Sonnet/Haiku).
+  # Effort is tiered by role within {high, xhigh, max}:
+  #   • max  — the two agents that AUTHOR load-bearing artifacts: research-planner
+  #            (designs the plan) and experiment-runner (writes/patches verl code +
+  #            launch payload). A wrong plan/patch burns GPU money, so they get the ceiling.
+  #   • xhigh — analyst: deep verdict reasoning, one notch below max.
+  #   • high  — training-log-monitor + log-writer (the floor). Held at the floor (NOT a
+  #            cost-vs-quality model choice — both are now Opus 4.8) because the monitor is
+  #            a high-frequency ~80-poll/run loop and log-writer is mechanical.
+  # "ultracode" (xhigh + dynamic-workflow orchestration) is a MECHANISM, not a per-agent
+  # effort: it is launched at the SESSION level (orchestrator/triage/interactive) for the
+  # hard lanes — moment-of-truth analysis, hard code_change patches, hard planning, parallel
+  # runs — because workflows spawn their own workers and a leaf subagent cannot host one.
+  # See the `workflows:` block below. The /goal evaluator model is pinned via
+  # ANTHROPIC_DEFAULT_HAIKU_MODEL (see `goal_command:` + settings.json env).
   #
-  # Reasoning-effort rule: max for the plan/code authors (research-planner, experiment-runner);
-  # xhigh for other Opus agents (analyst); high for both Sonnet 4.6 agents (Sonnet has no
-  # xhigh — high is its top tier below max).
-  reasoning_effort_rule: "Opus plan/code authors @ max (research-planner, experiment-runner); other Opus @ xhigh (analyst); both Sonnet 4.6 agents @ high (Sonnet has no xhigh; high is its top tier below max)"
+  # Reasoning-effort rule: research-planner + experiment-runner @ max; analyst @ xhigh;
+  # training-log-monitor + log-writer @ high (the floor). Model = Opus 4.8 for all.
+  reasoning_effort_rule: "Opus 4.8 for ALL agents (strict best-model policy); effort floor=high; research-planner+experiment-runner @ max, analyst @ xhigh, training-log-monitor+log-writer @ high; ultracode/workflows = session-level mechanism for the hard lanes"
   context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]). NOTE: Claude Code may currently STRIP [1m] from subagents at spawn time (ref GH claude-code#45169), so the suffix is correct + future-proof but may be a no-op until that bug is fixed. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent Opus/Sonnet tiers below."
   agents:
     analyst:
@@ -150,10 +150,49 @@ agent_models:
       effort: max
       why: writes/patches verl code on exp/* branches + authors launch.sh/config/provisioning payload — the code author, one of the two max agents. Operator directive — max (not Anthropic's xhigh coding-default) because a wrong patch or mis-provision burns real GPU money and corrupts the run.
     training-log-monitor:
-      model: "claude-sonnet-4-6[1m]"
+      model: "claude-opus-4-8[1m]"
       effort: high
-      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains) so it gets Sonnet's top non-max tier; high rather than max because it is a high-frequency ~80-poll/run loop where per-poll cost compounds. xhigh is unavailable here (Opus 4.8/4.7 only).
+      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains). Opus 4.8 per the strict best-model policy; effort held at `high` (the floor) because it is a high-frequency ~80-poll/run loop where per-poll cost compounds. May be a worker inside a session-launched deep-diagnostics workflow.
     log-writer:
-      model: "claude-sonnet-4-6[1m]"
+      model: "claude-opus-4-8[1m]"
       effort: high
-      why: mechanical append/copy/rewrite + draft PR (genuinely not reasoning-heavy), but bumped to high under the uniform all-Sonnet-agents policy per operator directive. high is Sonnet's xhigh-equivalent (xhigh is Opus-only).
+      why: mechanical append/copy/rewrite + draft PR (genuinely not reasoning-heavy). Opus 4.8 per the strict best-model policy; effort held at `high` (the floor). Never launches a workflow — its durable git/GitHub mutations stay single-shot.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New-feature policy (operator directive 2026-06-29). Full design + rollout:
+# .claude/HARNESS_FEATURE_INTEGRATION.md. These three blocks are the single
+# source of truth for HOW /goal, dynamic workflows (ultracode), and agent teams
+# are used in this harness; playbooks/runbook/CLAUDE.md mirror one-line pointers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+goal_command:                                                 # Claude Code /goal — DRIVES the autonomous loop to completion
+  status: enabled
+  role: "the autonomous loop launch commands START with /goal so a session does not stop until the plan's success-criteria are met (or it escalates). See researcher_steps.md §2/§3."
+  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # the /goal done-judge uses the 'small fast model' slot; pinned to claude-opus-4-8 in settings.json env per the strict best-model policy.
+  evaluator_model_caveat: "pinning ANTHROPIC_DEFAULT_HAIKU_MODEL repoints ALL small-fast-model usage (incl. background summarization) to Opus, not just /goal — higher per-turn cost on a long loop. Dial back here + in settings.json env if cost matters."
+  transcript_evidence_rule: "the /goal evaluator is transcript-only (no tools; cannot read runs.jsonl/WandB/verdict.md/labels). The orchestrator MUST print a plan-completion ledger each tick (every success-criterion + its evidence, DONE/PENDING) so the judge can see 'done'. Without surfaced evidence the goal never confirms (spins) or false-confirms on a mere claim."
+  escape_hatch: "every /goal condition MUST include an escape — '… OR log STUCK/MANUAL_REVIEW_NEEDED' + a turn bound (e.g. 'stop after 200 turns') — so an impossible criterion cannot burn money forever."
+  stop_hook_interaction: "/goal blocks the Stop event, so budget safety must NOT depend on the Stop hook firing: the orchestrator runs teardown-finished-runs.sh IN-FOREGROUND every tick (it already does — keep it). VERIFY on a throwaway session that a /goal block does not suppress the teardown Stop hook before relying on it (CC 2.1.177)."
+  must_not_replace: [human status:approved gate, teardown-finished-runs.sh foreground sweep, GOAL.md north-star]
+
+workflows:                                                    # Claude Code dynamic workflows / `ultracode` — ENABLED in the harness
+  status: enabled
+  driver_policy: "the unattended /loop|/goal driver runs at effort=max (NOT session-wide `/effort ultracode`); it launches workflows EXPLICITLY per lane. Session-wide ultracode auto-escalates every tick and pushes orchestration state into ephemeral script variables — the driver's value is crash-durable file/ledger state."
+  interactive_policy: "an operator interactive session MAY use `/effort ultracode` freely (big analysis, design, hard coding)."
+  workflow_lanes:                                             # where the SESSION launches a workflow instead of dispatching a single subagent
+    - "analysis (moment of truth): fan out N analysts (reward·length·entropy·grad-cosine·train-infer gap) -> adversarial verify -> one verdict"
+    - "live in-training diagnostics: deep probe fan-out on the live box; the 30s SSH poll stays the always-on heartbeat"
+    - "hard planning: judge-panel — draft N approaches -> score -> synthesize"
+    - "parallel/sequential runs: pipeline/fan-out across multiple approved plans & boxes"
+    - "hard code_change patches: implement -> adversarial review -> test (worktree); experiment-runner executes the result"
+  read_only_auto_approve_rule: "workflow worker agents auto-approve edits (acceptEdits; no prompt when headless). SAFE only for the read-only lanes (analysis/planning/diagnostics — they touch only runs/ + reports). Anything that SPENDS MONEY or mutates durable state (vast-provision, git branches, PRs, runs.jsonl) STAYS a gated single-shot subagent — NEVER a worker inside an auto-approving workflow. This preserves the status:approved gate + budget caps."
+  not_disabled: "CLAUDE_CODE_DISABLE_WORKFLOWS is intentionally NOT set; the `ultracode` keyword/effort tier stays available."
+  saved_workflows_dir: .claude/workflows/                     # e.g. parallel-runs.md — read input via the `args` global
+
+agent_teams:                                                  # Claude Code agent teams — CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 is set in the environment
+  status: enabled-opt-in
+  unattended_substrate: "the two background sessions + single-shot subagents remain the crash-durable spine (issues + runs.jsonl + files). Do NOT replace them with an Agent team: in-process teammates do NOT survive /resume, background bash has no network egress, one-team-per-session, no nesting."
+  sanctioned_uses:
+    - "parallel runs: one teammate per concurrent box (typed from experiment-runner) — provisioning still via the gated single-shot runner path, never an auto-approving teammate"
+    - "operator-run adversarial verdict review: spawn analyst-typed teammates that defend vs. challenge a verdict, reconcile into one verdict.md (GPU-free, post-teardown, NEVER flips status:approved)"
+  caveat: "a teammate spawned from a subagent definition does NOT inherit that def's `skills`/`mcpServers` frontmatter — keep team uses GPU-free and skill-free (no vast-* dependency)."

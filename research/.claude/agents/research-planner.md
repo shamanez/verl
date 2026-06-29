@@ -15,6 +15,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 - Write ONE file: `.claude/plans/<NUMBER>.md`. Plus one line to `PROGRESS.md`. Nothing else.
 - Plan structure: follow [`.claude/plans/TEMPLATE.md`](../plans/TEMPLATE.md) exactly. Mark unused sections `(n/a)`; do not delete them.
 - Scope comes from the issue body and any `runs/EXP-NN/verdict.md` or `LOG.md` results it references.
+- **Hard plans may run as a judge-panel workflow.** For a high-uncertainty / wide-design-space issue, the triage session may run the planning lane as a dynamic workflow (draft N approaches → score → synthesize) and hand you the winning design. Either way YOU still emit exactly one `.claude/plans/<NUMBER>.md` + one PROGRESS line, label `status:planned`, and route through the human gate — a workflow never self-approves.
 
 ### Contract
 

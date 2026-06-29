@@ -16,7 +16,7 @@ If you're an agent reading this — wrong layer. Agents read
 file GitHub issue (label: research:claim)
         │
         ▼
-Session A — triage /loop 60m
+Session A — triage /goal-driven (was /loop 60m)
    spawns research-planner → writes .claude/plans/<N>.md + posts comment
         │
         ▼
@@ -24,7 +24,7 @@ Session A — triage /loop 60m
    read the plan, then flip status:planned → status:approved
         │
         ▼
-Session B — orchestrator /loop 30m
+Session B — orchestrator /goal-driven (was /loop 30m)
    experiment-runner (provision Vast → train → done.flag)
      → analyst (writes verdict.md)
        → log-writer (LOG.md + runs/SUMMARY.md + draft PR on PASS)
@@ -109,8 +109,11 @@ claude
 Inside the claude session:
 
 ```
-/bg /loop 60m Read .claude/playbooks/triage.md and execute it.
+/bg /goal Every open research:claim issue has a .claude/plans/<N>.md (my printed triage ledger shows unplanned=0), OR I have logged a triage error. Until then, read .claude/playbooks/triage.md and execute one tick, pacing ~60m between checks. Stop after 100 turns.
 ```
+
+> **Why `/goal`, not `/loop`?** `/goal` keeps the session working until the condition
+> holds (then auto-stops), instead of firing blindly on a clock — see §3a.
 
 Triage polls open `research:claim` issues every 60 min and spawns a
 `research-planner` per unplanned issue. Each planner:
@@ -148,8 +151,12 @@ claude
 Inside:
 
 ```
-/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
+/bg /goal Every status:approved plan has reached a terminal verdict (PASS/STOP) with its box TORN_DOWN and LOG.md updated — confirmed by the plan-completion ledger I print each tick from runs.jsonl + verdict.md + WandB + gh labels — OR I have logged a STUCK / MANUAL_REVIEW_NEEDED line. Until then, read .claude/playbooks/orchestrator.md and execute one tick, pacing ~30m between active checks. Stop after 200 turns.
 ```
+
+> This loop is `/goal`-driven (was `/loop 30m`) — it runs to plan completion, then
+> auto-stops. The team-account / attach-box variants below take the SAME `/goal` wrapper:
+> just append their extra directive to the `/goal` prompt. See §3a.
 
 ### Choosing the Vast.ai account (team vs private)
 
@@ -158,7 +165,7 @@ To run a session on the shared **team** account (`VAST_API_KEY_TEAM`, the
 "Pluralis Research" team) instead, just say so in the loop instruction:
 
 ```
-/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it. Use the team account.
+/bg /goal <the orchestrator completion condition from §3 above> Use the team account.
 ```
 
 …or `Use the private account.` to be explicit. The orchestrator passes
@@ -190,6 +197,48 @@ Each tick, the orchestrator advances every approved plan:
 `experiment-runner` defaults: **single Vast.ai node, $24/hr per-instance cap,
 96 GPU-hr total**, walking the 4×H200 → 8×H100 fallback chain unless
 the plan overrides it.
+
+---
+
+## 3a. The `/goal`-driven loop + workflow lanes + teams (new features, 2026-06-29)
+
+The harness uses three Claude Code features. Full design + rollout:
+`.claude/HARNESS_FEATURE_INTEGRATION.md`; the rules' single source of truth is
+`project.yaml` (`goal_command:` / `workflows:` / `agent_teams:`).
+
+**`/goal` drives the loop to completion.** Both loop commands above START with `/goal`
+(not `/loop`) so a session does not stop until the plan is actually done (then it
+auto-stops), instead of firing blindly on a clock. The `/goal` evaluator is a cheap
+yes/no judge that is **transcript-only** — it can't read `runs.jsonl`, WandB, or labels —
+so each tick the playbook **prints a completion ledger** (the evidence) the judge reads.
+Every `/goal` condition carries an escape (`… OR log STUCK …` + a turn bound) so an
+impossible criterion can't spin forever.
+- Evaluator model: pinned to Opus 4.8 via `ANTHROPIC_DEFAULT_HAIKU_MODEL` in
+  `settings.json` env (strict best-model policy). NOTE this repoints **all** small-fast-model
+  use to Opus — higher per-turn cost; dial back in `settings.json` if needed.
+- Safety: `/goal` blocks the Stop event, so the orchestrator runs the teardown sweep
+  **in-foreground every tick** — that's what reaps idle/over-budget boxes while a goal
+  holds the session open. (Before a long unattended run, verify on a throwaway session
+  that a `/goal` block doesn't suppress the teardown Stop hook — CC 2.1.177.)
+
+**Workflows (`ultracode`) for the hard lanes.** The driver stays at `effort: max` and
+launches a dynamic workflow EXPLICITLY (the `ultracode` keyword / "run a workflow") for:
+moment-of-truth analysis (fan-out adversarial verdict), live in-training diagnostics, hard
+`code_change` patches, hard planning (judge-panel), and parallel runs
+(`.claude/workflows/parallel-runs.md`). Do NOT set `/effort ultracode` on the unattended
+loops (it auto-escalates every tick and moves state out of the crash-durable ledger) — that
+mode is for YOUR interactive sessions. **Workflow workers auto-approve edits, so they stay
+READ-ONLY** (analysis/reports); provisioning, git/PR, and ledger writes never run inside a
+workflow — they stay gated single-shot dispatches, preserving the `status:approved` gate.
+
+**Agent teams (opt-in, GPU-free).** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set. The two
+background loops stay the crash-durable spine — do NOT replace them with a team (teammates
+don't survive `/resume`; background bash has no egress). Sanctioned operator-run uses: (1)
+parallel runs — one teammate per box, typed from `experiment-runner` (provisioning still via
+the gated runner); (2) adversarial verdict review — spawn analyst-typed teammates that defend
+vs. challenge a finished verdict and reconcile into one `verdict.md` (post-teardown, GPU-free,
+NEVER flips `status:approved`). A teammate does NOT inherit a definition's `skills`/`mcpServers`
+frontmatter — keep team uses skill-free.
 
 ---
 
@@ -241,7 +290,7 @@ Two ways. Either way the box is **EXTERNAL** (provenance only) and is **torn dow
 account selector). The orchestrator attaches your box for the next eligible experiment
 instead of provisioning:
 ```
-/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it. Use the team account.
+/bg /goal <the orchestrator completion condition from §3 above> Use the team account.
 Use box instance_id=41680420 ssh_host=84.8.106.109 ssh_port=40206 num_gpus=4 this session
 instead of provisioning — it is EXTERNAL (provenance only; still torn down after its run), one
 experiment at a time on it.
@@ -287,6 +336,14 @@ python scripts/check_budget.py --month
 | `sync-metrics.sh` | PostToolUse Bash (5-min debounce) | pulls remote `train.log` for RUNNING experiments |
 | `teardown-finished-runs.sh` | Stop | destroys Vast instances whose run is verdicted / dead / over-budget |
 | `commit-on-stop.sh` | Stop | autosaves uncommitted research/ changes |
+| `on-session-start.sh` | SessionStart | logs RUNNING count + $/hr burn to `~/.claude-events.log` |
+
+> **`/goal` is also a session Stop hook.** When a loop runs under `/goal` (§3a), the
+> evaluator intercepts Stop each turn to judge done-ness. It is transcript-only and
+> **additive** — it does NOT replace the wired Stop hooks above. Because `/goal` blocks
+> Stop, the orchestrator runs `teardown-finished-runs.sh` in-foreground each tick so budget
+> safety never depends on Stop firing. `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-4-8`
+> (settings.json env) pins the evaluator to Opus per the best-model policy.
 
 ---
 
@@ -313,7 +370,7 @@ python scripts/check_budget.py --month
 | Orchestrator picks up unapproved plan | label was set to `status:approved` by mistake → demote |
 | Vast instance not torn down | `bash .claude/skills/vast-teardown/run.sh <instance_id>` |
 | Loop stopped | session ended → re-run `/bg /loop` in a new session |
-| `/bg` says "Nothing to background yet" | must prefix `/loop`: `/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.` |
+| `/bg` says "Nothing to background yet" | must prefix a command: `/bg /goal … Read .claude/playbooks/orchestrator.md …` (full command in §3) |
 | protect-upstream refusing an edit | not on `exp/*` or `vast-ai-workload` — `git rev-parse --abbrev-ref HEAD` |
 
 ---
@@ -356,10 +413,10 @@ agents/playbooks/hooks come along unchanged.
 ## 8. Quick reference
 
 ```bash
-# Start the loop
+# Start the loop (now /goal-driven — runs to plan completion, then auto-stops; see §3a)
 cd /Users/shamane/Documents/verl/research && claude
-#   Session A:  /bg /loop 60m Read .claude/playbooks/triage.md and execute it.
-#   Session B:  /bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
+#   Session A:  /bg /goal All open research:claim issues planned (triage ledger unplanned=0) … or log a triage error. Read .claude/playbooks/triage.md, one tick, pace ~60m. Stop after 100 turns.
+#   Session B:  /bg /goal All status:approved plans terminal (PASS/STOP, box TORN_DOWN, LOG.md written) per my plan-completion ledger … or log STUCK/MANUAL_REVIEW_NEEDED. Read .claude/playbooks/orchestrator.md, one tick, pace ~30m. Stop after 200 turns.
 
 # Approve a plan
 gh issue edit <N> --add-label status:approved --remove-label status:planned

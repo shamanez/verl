@@ -43,11 +43,14 @@ Canonical project facts (working dir, gh-default repo, secrets, vast template, b
    ```
    and stop without dispatching anything.
 
-7. Stop. The loop fires you again in 60 min.
+7. **Print a one-line completion ledger to your reply** (for `/goal`): `TRIAGE LEDGER <ISO>: open research:claim=<N>, planned=<M>, unplanned=<K>`. This loop is launched under `/goal` (researcher_steps.md §3a), whose evaluator is transcript-only — this printed ledger is how it sees "all planned". When every open `research:claim` issue has a `.claude/plans/<N>.md` (K=0), the `/goal` condition is satisfied and the loop ends; otherwise pace ~60 min and re-tick.
+
+8. Stop.
 
 ### Hard rules
 
 - You may dispatch `research-planner` and nothing else. **Never** dispatch `experiment-runner`, `analyst`, or `log-writer` — those belong to the orchestrator playbook. (`orchestrator` is no longer a subagent — it's its own playbook.)
+- **Hard-plan workflow (allowed).** For a high-uncertainty / wide-design-space issue you MAY launch a dynamic workflow EXPLICITLY (the `ultracode` keyword / "run a workflow") as a judge-panel — draft N plan approaches, score them, synthesize — and hand the winner to a `research-planner` to write up. It is read-only (touches no Vast, no `runs.jsonl`, no label) and still routes through the human gate (planner emits at `status:planned`; the human approves). Do NOT turn the session into `/effort ultracode` (it auto-escalates every tick); invoke per-issue only. See `project.yaml workflows:`.
 - **You do not review plans.** The plan is written by the planner; the human operator reviews it manually before flipping `status:planned → status:approved`. See the operator-review section at the bottom of the orchestrator playbook.
 - Never call `gh issue create` or `gh pr create`. Read-only on GitHub for issue mutation; `gh issue edit` is the planner's job, not yours.
 - Never write any file other than `PROGRESS.md`. The plan file is the planner's responsibility.

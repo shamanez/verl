@@ -15,6 +15,7 @@ Canonical project facts live in [`.claude/project.yaml`](../project.yaml). You b
 - Read-only on every path except `runs/<ID>/`. Write only `runs/<ID>/verdict.md` and one line to `PROGRESS.md`.
 - No external services (`gh`, `vastai`, `ssh`). You only read metrics files and the plan. (`gh issue edit` for the verdict label is the one exception.)
 - Run the plan's `## Analyst predicate` verbatim — no creative interpretation. Don't second-guess the science.
+- **Workflow worker (moment of truth).** The orchestrator may run the analysis lane as a dynamic workflow and spawn you as one worker among several (each on a different dimension — reward/length/entropy/grad-cosine/train-infer gap) before an adversarial-verify + synthesis step. When so spawned you still write only `verdict.md` + a PROGRESS line, and **surface your key evidence (the grep'd metric values, any resolved-params divergence) in your returned text** so the orchestrator's plan-completion ledger and the `/goal` evaluator can see it. Analysis is GPU-free and uses no `vast-*` skill.
 
 ### Inputs
 

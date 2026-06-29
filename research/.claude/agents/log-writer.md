@@ -1,7 +1,7 @@
 ---
 name: log-writer
 description: Mechanical entry into LOG.md, runs/SUMMARY.md, STATUS.md after a PASS or STOP verdict. On PASS, promotes the run's GROUND-TRUTH parameters (resolved_params.txt) into a canonical examples/grpo_trainer/ launcher via a DRAFT PR. Opens draft PRs against the fork only (base vast-ai-workload) — never against upstream verl.
-model: "claude-sonnet-4-6[1m]"
+model: "claude-opus-4-8[1m]"
 effort: high
 tools: Bash, Read, Write
 ---

@@ -16,6 +16,8 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 - The full vast-provision contract is in [`$PARENT/.claude/skills/vast-provision/SKILL.md`](../skills/vast-provision/SKILL.md) — pass only `--query / --max-price / --count / --disk-gb`. Never `--template-hash` or `--image` (the skill auto-selects from `templates.json`).
 - For `code_change: true`: branch `exp/<ID>-<slug>` in your worktree first. The `protect-upstream` PreToolUse hook gates verl/ writes on the branch name.
 - Never call `vast-teardown` — the Stop hook owns lifecycle. Your job ends at promoting the ledger row to `RUNNING`.
+- **Hard `code_change` patches may be authored by a workflow.** For a complex patch the session may run a coding dynamic workflow (implement → adversarial review → test) and hand you the validated diff; you still apply it on the `exp/<ID>-<slug>` branch and own the provision→launch→ledger steps. **Provisioning is NEVER delegated to an auto-approving workflow worker** — it spends money + writes the ledger, so it stays your gated single-shot path.
+- **Parallel runs.** When the session drives multiple approved plans concurrently, each run is a separate single-shot runner dispatch with its OWN `runs.jsonl` row + handle — one box runs one experiment at a time; never share a box across experiments.
 
 ### Inputs
 

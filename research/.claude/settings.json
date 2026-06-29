@@ -2,6 +2,9 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "model": "claude-opus-4-8[1m]",
   "effortLevel": "max",
+  "env": {
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4-8"
+  },
   "statusLine": {
     "type": "command",
     "command": "printf '%s · %s · runs=%s · burn=$%s/hr' \"$(jq -r '.model.display_name // \"claude\"' 2>/dev/null)\" \"$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo no-branch)\" \"$(jq -s 'map(select(.status==\"RUNNING\")) | length' .claude/state/runs.jsonl 2>/dev/null || echo 0)\" \"$(jq -s 'map(select(.status==\"RUNNING\")) | map(.dph // 0) | add // 0' .claude/state/runs.jsonl 2>/dev/null || echo 0)\""
