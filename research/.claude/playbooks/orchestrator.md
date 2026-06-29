@@ -347,7 +347,13 @@ $/hr now: <X> · spent today: $<Y> · monthly cap remaining: $<Z>
   always go through the skill so the ledger row is flipped to `TORN_DOWN`. For
   every case you don't explicitly handle, the `teardown-finished-runs` Stop
   hook is the automatic backstop (verdict / stale heartbeat / budget /
-  PROVISIONED-stale), firing after each tick. **Teardown is a MUST — it applies to
+  PROVISIONED-stale). **But a long-lived `/loop` session may not emit a Stop
+  between ticks, so do NOT rely on the Stop hook alone:** at the END of every
+  tick, run the sweep explicitly — it is idempotent and, run in the foreground,
+  has the network egress a background bash lacks:
+  `bash .claude/hooks/teardown-finished-runs.sh`. This guarantees
+  verdict / stale-heartbeat (incl. never-heartbeated) / budget / PROVISIONED-stale
+  boxes are reaped every tick even when no Stop fires. **Teardown is a MUST — it applies to
   `external:true` (operator-attached, via `vast-attach`) boxes exactly as to
   provisioned ones; nothing is exempt.** The only external-specific rule is in
   constraint #4: on an env-failure of an external box, tear it down but do NOT

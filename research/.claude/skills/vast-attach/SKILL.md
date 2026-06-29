@@ -42,7 +42,9 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
    `external: true`**, and prints a `VAST_HANDLE: {...}` line (so the
    experiment-runner's rsync+launch path consumes it unchanged).
 2. Unless `--no-register`, appends a ledger row `status:"RUNNING", external:true`
-   so the orchestrator/monitor/analyst can see it — but the teardown machinery skips it.
+   so the orchestrator/monitor/analyst can see it — and the teardown machinery tears it
+   down on the same triggers as any provisioned box (external is provenance, NOT exemption;
+   see the next section). Use `--no-register` for a box you do NOT want auto-torn-down.
 
 ## The external flag (provenance, NOT teardown protection)
 

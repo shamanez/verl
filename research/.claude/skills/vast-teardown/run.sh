@@ -20,17 +20,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Expand handle paths (files or dirs of *.json) into instance ids.
+# Expand handle paths (files or dirs of *.json) into instance ids, capturing the
+# vast_account stamped on each handle so we destroy with the RIGHT account even
+# when the ledger has no row for this id yet.
+declare -A HANDLE_ACCT       # instance_id -> vast_account (from the handle JSON)
 for hp in "${HANDLE_PATHS[@]:-}"; do
   [[ -z "$hp" ]] && continue
   if [[ -d "$hp" ]]; then
     while IFS= read -r f; do
       iid=$(jq -r '.instance_id // empty' "$f" 2>/dev/null || true)
-      [[ -n "$iid" ]] && IDS+=("$iid")
+      [[ -n "$iid" ]] || continue
+      IDS+=("$iid")
+      a=$(jq -r '.vast_account // empty' "$f" 2>/dev/null || true)
+      [[ -n "$a" ]] && HANDLE_ACCT["$iid"]="$a"
     done < <(find "$hp" -maxdepth 2 -type f -name '*.json')
   elif [[ -f "$hp" ]]; then
     iid=$(jq -r '.instance_id // empty' "$hp" 2>/dev/null || true)
-    [[ -n "$iid" ]] && IDS+=("$iid")
+    if [[ -n "$iid" ]]; then
+      IDS+=("$iid")
+      a=$(jq -r '.vast_account // empty' "$hp" 2>/dev/null || true)
+      [[ -n "$a" ]] && HANDLE_ACCT["$iid"]="$a"
+    fi
   fi
 done
 
@@ -57,9 +67,19 @@ fi
 acct_for_iid() {
   local iid="$1" a=""
   if [[ -n "${VAST_ACCOUNT:-}" ]]; then vast_account_norm "$VAST_ACCOUNT"; return; fi
-  [[ -f "$LEDGER" ]] && a=$(jq -r --arg i "$iid" '
-    select(any(.handles[]?.instance_id // empty; (.|tostring) == $i)) | .vast_account // empty' \
-    "$LEDGER" 2>/dev/null | tail -1)
+  # 1) account stamped on the handle JSON passed via --handles (most authoritative)
+  a="${HANDLE_ACCT[$iid]:-}"
+  # 2) the provision handle dir (handles there are keyed by instance id)
+  if [[ -z "$a" ]]; then
+    local hf="$PROJECT_DIR/.claude/state/vast-handles/${iid}.json"
+    [[ -r "$hf" ]] && a=$(jq -r '.vast_account // empty' "$hf" 2>/dev/null || true)
+  fi
+  # 3) the ledger row that references this instance id
+  if [[ -z "$a" && -f "$LEDGER" ]]; then
+    a=$(jq -r --arg i "$iid" '
+      select(any(.handles[]?.instance_id // empty; (.|tostring) == $i)) | .vast_account // empty' \
+      "$LEDGER" 2>/dev/null | tail -1)
+  fi
   vast_account_norm "${a:-private}"
 }
 
@@ -72,6 +92,14 @@ for iid in "${IDS[@]}"; do
   # confirmation, and when stdin isn't a TTY the prompt collapses to "Aborted"
   # — but the CLI STILL EXITS 0. Without -y the destroy silently does nothing.
   ACCT=$(acct_for_iid "$iid"); KEY=$(vast_key_for "$ACCT")
+  # Never call vastai with an EMPTY key: an exported-but-empty VAST_API_KEY makes
+  # the CLI silently fall back to ~/.config/vastai (the PRIVATE key), so a team box
+  # would be "destroyed" under the wrong account, 404, and keep billing.
+  if [[ -z "$KEY" ]]; then
+    echo "[$iid] no API key for account=$ACCT — skipping (set VAST_API_KEY_TEAM in $SECRETS_FILE)" >>"$ERR_LOG"
+    FAILED+=("$iid")
+    continue
+  fi
   OUT=$(VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
   echo "[$iid] account=$ACCT $OUT" >>"$ERR_LOG"
   # Belt-and-braces: even with -y, treat "Aborted" / "error" anywhere in stdout

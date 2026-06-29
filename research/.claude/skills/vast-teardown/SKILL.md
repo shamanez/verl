@@ -27,10 +27,10 @@ This tears down **any** instance id you give it — including operator-attached
 
 ## Behavior
 
-1. Resolves auth **per instance** from the ledger's `vast_account` field (`team`|`private`, default `private`) via the shared `../_vast_account.sh` resolver: a `team` box is destroyed with `VAST_API_KEY_TEAM`, a `private` box with `VAST_API_KEY` (both sourced from `~/.config/verl-research/secrets.env`). This guarantees a team-account box is never orphaned under the personal key. An explicit `VAST_ACCOUNT=team|private` env var forces that account for **all** ids (use for ad-hoc ids that aren't in the ledger).
+1. Resolves auth **per instance** (`team`|`private`, default `private`) via the shared `../_vast_account.sh` resolver, reading `vast_account` in priority order: (a) the handle JSON passed via `--handles`, (b) the provision handle dir `.claude/state/vast-handles/<id>.json`, (c) the ledger row referencing the id. A `team` box is destroyed with `VAST_API_KEY_TEAM`, a `private` box with `VAST_API_KEY` (both from `~/.config/verl-research/secrets.env`). This guarantees a team-account box is never orphaned under the personal key — even for an id with no ledger row yet. If the resolved key is **empty**, the id is SKIPPED (logged + counted failed) rather than destroyed with an empty key (which the CLI would silently downgrade to the stored private config). An explicit `VAST_ACCOUNT=team|private` env var forces that account for **all** ids.
 2. For each instance id, runs `vastai destroy instance <id> -y` under the resolved key. Failures are logged to `/tmp/teardown.err` but never block — the script always exits 0 even if some destroys failed, so a partially-failed teardown still lets the orchestrator move on.
 3. Patches matching ledger rows in `.claude/state/runs.jsonl` to `status: "TORN_DOWN"` with `torn_down_at` and `teardown_reason: "manual"` (or `--reason <r>` to override).
-4. Emits a one-line summary on stdout: `VAST_TORN_DOWN: count=<N> reasons=<list>`.
+4. Emits a one-line summary on stdout: `VAST_TORN_DOWN: destroyed=<N> failed=<N> reason=<R>` (a non-zero `failed` means a box may still be live — check `/tmp/teardown.err`).
 
 ## Why this exists separately from the Stop-hook teardown
 

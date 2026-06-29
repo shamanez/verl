@@ -217,6 +217,15 @@ FILTER_JQ="
       and (${PRICE_EXPR} | tonumber) <= (\$mp|tonumber)
       and ((.reliability2 // 0) | tonumber) >= (\$mr|tonumber)
 "
+# We always 'create --direct', so require the host to actually have a direct
+# port available (direct_port_count>=1). Without this the cheapest offer can be a
+# host that can never give a direct route — you silently fall to the slower proxy
+# path the poll warns about. Skipped under --no-default-filters.
+if ! $NO_DEFAULT_FILTERS; then
+  FILTER_JQ+="
+      and ((.direct_port_count // 0) | tonumber) >= 1
+  "
+fi
 if [[ -n "$GPU_COUNT_FILTER" ]]; then
   [[ "$GPU_COUNT_FILTER" =~ ^[0-9]+$ ]] || { echo "$PROG: --gpu-count must be a non-negative integer" >&2; exit 2; }
   FILTER_JQ+="
@@ -260,8 +269,11 @@ if [[ "$NUM_FILTERED" -lt "$COUNT" ]]; then
   exit 3
 fi
 
-# ---- pick N cheapest, distinct by host_id ---------------------------------
-CHOSEN=$(echo "$FILTERED" | jq --argjson n "$COUNT" "
+# ---- pick a candidate POOL (COUNT + spares), cheapest first, distinct by host_id ----
+# We take more than COUNT so the create loop can DESTROY an unreachable/failed
+# host and advance to the next cheapest candidate instead of aborting the run.
+POOL_SIZE=$(( COUNT + 8 ))
+CHOSEN=$(echo "$FILTERED" | jq --argjson n "$POOL_SIZE" "
   sort_by(${PRICE_EXPR} | tonumber)
   | reduce .[] as \$o ([];
       if any(.[]; (.host_id // .id) == (\$o.host_id // \$o.id))
@@ -275,6 +287,7 @@ if [[ "$NUM_CHOSEN" -lt "$COUNT" ]]; then
   echo "$PROG: only $NUM_CHOSEN distinct hosts after de-duplication; need --count=$COUNT" >&2
   exit 3
 fi
+echo "$PROG: candidate pool: $NUM_CHOSEN distinct hosts (provisioning $COUNT; unreachable/failed hosts are destroyed and skipped)" >&2
 
 # ---- dry run --------------------------------------------------------------
 if $DRY_RUN; then
@@ -304,14 +317,74 @@ fi
 MAX_TOTAL_DPH=$(awk -v c="$COUNT" -v p="$MAX_PRICE" 'BEGIN { printf "%.4f", c * p }')
 echo "$PROG: BUDGET: about to create $COUNT instance(s) at up to \$${MAX_PRICE}/hr each (ceiling: \$${MAX_TOTAL_DPH}/hr aggregate). Pass --dry-run to inspect without spend." >&2
 
+# ---- ssh-reachability probe + orphan-cleanup helpers ----------------------
+# A mapped 22/tcp port is NECESSARY but NOT SUFFICIENT: sshd may not be up,
+# a host firewall may block the direct port, the proxy may not be forwarding
+# yet, or (team) the per-instance key attach may not have landed. So we run a
+# REAL ssh command before declaring success. And every instance we create is
+# tracked until verified, so any failure (timeout, host error, failed probe,
+# set -e on an unguarded command, or a signal) destroys the orphan instead of
+# leaving a billing leak — the #1 money-leak class this skill must own, because
+# provision is the ONLY component that knows the instance id before a ledger row.
+SSH_IDENTITY_PATH="${SSH_IDENTITY/#\~/$HOME}"   # expand ~ for programmatic ssh
+ACTIVE_UNVERIFIED=()
+
+_sleep_quiet() { sleep "$1"; }
+
+_destroy_instance() {
+  local iid="$1"
+  [[ -z "$iid" ]] && return 0
+  if VAST_API_KEY="$VAST_API_KEY" vastai destroy instance "$iid" -y >/dev/null 2>&1; then
+    echo "$PROG: destroyed instance $iid (account=$VAST_ACCOUNT)" >&2
+  else
+    echo "$PROG: WARNING could not destroy $iid — verify with: vastai show instances (account=$VAST_ACCOUNT)" >&2
+  fi
+}
+
+_drop_unverified() {   # remove an id from ACTIVE_UNVERIFIED once it is verified
+  local keep=() x
+  for x in "${ACTIVE_UNVERIFIED[@]:-}"; do
+    [[ -z "$x" || "$x" == "$1" ]] && continue
+    keep+=("$x")
+  done
+  if [[ ${#keep[@]} -gt 0 ]]; then ACTIVE_UNVERIFIED=("${keep[@]}"); else ACTIVE_UNVERIFIED=(); fi
+}
+
+_on_exit() {           # EXIT trap: never leave a created-but-unverified box billing
+  local x
+  for x in "${ACTIVE_UNVERIFIED[@]:-}"; do
+    [[ -z "$x" ]] && continue
+    echo "$PROG: cleanup — destroying unverified instance $x to avoid a billing leak" >&2
+    _destroy_instance "$x"
+  done
+  ACTIVE_UNVERIFIED=()
+  rm -f "${SEARCH_ERR:-}" "${CREATE_ERR:-}" 2>/dev/null || true
+}
+trap '_on_exit' EXIT
+
+_ssh_probe() {         # host port -> 0 iff a REAL ssh command succeeds with the offered key
+  local host="$1" port="$2" i
+  for i in 1 2 3 4 5; do
+    if ssh -i "$SSH_IDENTITY_PATH" \
+           -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+           -o BatchMode=yes -o ConnectTimeout=10 \
+           -p "$port" "root@$host" true >/dev/null 2>&1; then
+      return 0
+    fi
+    _sleep_quiet "$POLL_INTERVAL"
+  done
+  return 1
+}
+
 # ---- create + wait loop ---------------------------------------------------
+# Iterate the candidate pool (COUNT + spares). On ANY per-offer failure we
+# destroy that instance and advance to the NEXT cheapest candidate, only failing
+# the whole run when the pool is exhausted before COUNT boxes are SSH-verified.
 TOTAL_DPH="0"
 PROVISIONED=0
 
-# stderr-only helper for sleep so progress doesn't pollute stdout
-_sleep_quiet() { sleep "$1"; }
-
 while IFS= read -r offer; do
+  [[ "$PROVISIONED" -ge "$COUNT" ]] && break
   OID=$(echo    "$offer" | jq -r '.id')
   OPRICE=$(echo "$offer" | jq -r "${PRICE_EXPR}")
   OGPU=$(echo   "$offer" | jq -r '.gpu_name // ""')
@@ -332,12 +405,11 @@ while IFS= read -r offer; do
 
   echo "$PROG: creating instance from offer $OID (dph=$OPRICE gpu=$OGPU num_gpus=$ONUMG)" >&2
   CREATE_ERR="$(mktemp)"
-  CREATE_OUT="$("${CREATE_CMD[@]}" 2>"$CREATE_ERR")" || {
-    echo "$PROG: vastai create instance failed for offer $OID" >&2
+  if ! CREATE_OUT="$("${CREATE_CMD[@]}" 2>"$CREATE_ERR")"; then
+    echo "$PROG: vastai create instance failed for offer $OID — trying next candidate" >&2
     head -20 "$CREATE_ERR" >&2 || true
-    rm -f "$CREATE_ERR"
-    exit 4
-  }
+    rm -f "$CREATE_ERR"; continue
+  fi
   rm -f "$CREATE_ERR"
 
   # Parse new_contract: prefer JSON; fall back to a tolerant regex on text output.
@@ -349,25 +421,36 @@ while IFS= read -r offer; do
     INSTANCE_ID=$(echo "$CREATE_OUT" | grep -oE '"new_contract"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
   fi
   if [[ -z "$INSTANCE_ID" ]]; then
-    echo "$PROG: could not parse new_contract from 'vastai create instance' output:" >&2
+    echo "$PROG: could not parse new_contract from 'vastai create instance' output — trying next candidate:" >&2
     echo "$CREATE_OUT" >&2
-    exit 4
+    continue
   fi
 
+  # Track for cleanup the INSTANT the instance exists, so a crash/timeout/probe
+  # failure from here on destroys it instead of leaking.
+  ACTIVE_UNVERIFIED+=("$INSTANCE_ID")
   echo "$PROG: instance $INSTANCE_ID created, waiting up to ${TIMEOUT}s for running + ssh-routable" >&2
 
   # TEAM account: account-level keys aren't supported, so Vast attaches nothing
   # to a team-key create — the box would be unreachable. Attach the harness
   # key(s) to THIS instance now. (Private boxes get account keys auto-attached.)
   if [[ "$VAST_ACCOUNT" == "team" ]]; then
+    ATTACHED=0
     for pk in "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
       [[ -r "$pk" ]] || continue
       if vastai attach ssh "$INSTANCE_ID" "$(cat "$pk")" >/dev/null 2>&1; then
         echo "$PROG: attached $(basename "$pk") to team instance $INSTANCE_ID" >&2
+        ATTACHED=$((ATTACHED + 1))
       else
-        echo "$PROG: WARNING: failed to attach $(basename "$pk") to $INSTANCE_ID — box may be unreachable" >&2
+        echo "$PROG: WARNING: failed to attach $(basename "$pk") to $INSTANCE_ID" >&2
       fi
     done
+    # Zero keys attached => the box is GUARANTEED unreachable. Don't wait out the
+    # timeout on a doomed box — destroy it now and advance to the next candidate.
+    if [[ "$ATTACHED" -eq 0 ]]; then
+      echo "$PROG: no SSH key attached to team instance $INSTANCE_ID — destroying + next candidate" >&2
+      _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
+    fi
   fi
 
   # ---- poll for ready ----
@@ -405,6 +488,7 @@ except Exception:
   INSTANCE_JSON=""
   ENDPOINT_MODE=""
   POLLS=0
+  POLL_OUTCOME="timeout"     # ready | host-failed | timeout
   while [[ $(date +%s) -lt $DEADLINE ]]; do
     SHOW_RAW="$(_vast_show_sanitized "$INSTANCE_ID")"
     if [[ -n "$SHOW_RAW" ]] && echo "$SHOW_RAW" | jq -e 'type=="object" and has("id")' >/dev/null 2>&1; then
@@ -447,9 +531,10 @@ except Exception:
             || "$LATEST_MSG_RAW" == *"unresolvable CDI"* ]]; then
         echo "$PROG: instance $INSTANCE_ID failed host-side (intended_status=$INTENDED actual_status=$ACTUAL)" >&2
         echo "$PROG: status_msg tail: ${LATEST_MSG_RAW: -300}" >&2
-        echo "$PROG: this host is unrecoverable. Destroy and re-provision; vast scheduler should pick a different machine." >&2
+        echo "$PROG: this host is unrecoverable — will destroy + advance to the next candidate." >&2
         LAST_STATUS="host-failed"
-        exit 6
+        POLL_OUTCOME="host-failed"
+        break
       fi
 
       if [[ "$ACTUAL" == "running" && -n "$PORT22" && "$PORT22" != "0" ]]; then
@@ -460,10 +545,12 @@ except Exception:
         if [[ -n "$DIRECT_IP" ]]; then
           ENDPOINT_MODE="direct"
           INSTANCE_JSON="$SHOW_RAW"
+          POLL_OUTCOME="ready"
           break
         elif [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "$DIRECT_IP" && "$PROXY_PORT" != "0" ]]; then
           ENDPOINT_MODE="proxy"
           INSTANCE_JSON="$SHOW_RAW"
+          POLL_OUTCOME="ready"
           break
         fi
         LAST_STATUS="port-mapped-but-no-host"
@@ -474,9 +561,10 @@ except Exception:
     _sleep_quiet "$POLL_INTERVAL"
   done
 
-  if [[ -z "$INSTANCE_JSON" ]]; then
-    echo "$PROG: instance $INSTANCE_ID did not become running+ssh-routable within ${TIMEOUT}s (last status=$LAST_STATUS)" >&2
-    exit 5
+  # Port-mapped never reached (timeout) or host gave up: destroy + next candidate.
+  if [[ "$POLL_OUTCOME" != "ready" || -z "$INSTANCE_JSON" ]]; then
+    echo "$PROG: instance $INSTANCE_ID not ssh-routable (outcome=$POLL_OUTCOME last=$LAST_STATUS within ${TIMEOUT}s) — destroying + next candidate" >&2
+    _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
   fi
 
   # ---- finalize fields ----
@@ -488,6 +576,30 @@ except Exception:
     SSH_HOST=$(echo "$INSTANCE_JSON" | jq -r '.ssh_host')
     SSH_PORT=$(echo "$INSTANCE_JSON" | jq -r '.ssh_port')
   fi
+
+  # ---- REAL SSH reachability gate (the critical check) ----
+  # The 22/tcp mapping only proves the host PUBLISHED the port. Prove we can
+  # actually log in with the offered key before writing a "success" handle.
+  echo "$PROG: port 22 mapped ($ENDPOINT_MODE $SSH_HOST:$SSH_PORT); probing real SSH ..." >&2
+  if _ssh_probe "$SSH_HOST" "$SSH_PORT"; then
+    SSH_OK=1
+  else
+    SSH_OK=0
+    # Team boxes: the per-instance key may have raced container start — re-attach once and retry.
+    if [[ "$VAST_ACCOUNT" == "team" ]]; then
+      echo "$PROG: SSH probe failed; re-attaching key to $INSTANCE_ID and retrying ..." >&2
+      for pk in "$HOME/.ssh/vast_ai_name.pub" "$HOME/.ssh/vast_ai.pub"; do
+        [[ -r "$pk" ]] && vastai attach ssh "$INSTANCE_ID" "$(cat "$pk")" >/dev/null 2>&1 || true
+      done
+      _ssh_probe "$SSH_HOST" "$SSH_PORT" && SSH_OK=1
+    fi
+  fi
+  if [[ "$SSH_OK" != "1" ]]; then
+    echo "$PROG: $INSTANCE_ID port-mapped but SSH probe FAILED — unreachable box; destroying + next candidate" >&2
+    _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
+  fi
+  echo "$PROG: SSH verified to $INSTANCE_ID ($SSH_HOST:$SSH_PORT)" >&2
+
   PUB_IP=$(echo "$INSTANCE_JSON"  | jq -r '.public_ipaddr // ""')
   INST_GPU_NAME=$(echo "$INSTANCE_JSON" | jq -r '.gpu_name // ""')
   INST_NUM_GPUS=$(echo "$INSTANCE_JSON" | jq -r '.num_gpus // 0')
@@ -531,6 +643,10 @@ except Exception:
   echo "$HANDLE" > "$TMP_HANDLE"
   mv "$TMP_HANDLE" "$HANDLE_PATH"
 
+  # Verified + handle written: this box is no longer an orphan — drop it from the
+  # cleanup set so the EXIT trap leaves it running.
+  _drop_unverified "$INSTANCE_ID"
+
   echo "VAST_HANDLE: $HANDLE"
   echo "$PROG: instance $INSTANCE_ID running at $SSH_HOST:$SSH_PORT (handle: $HANDLE_PATH)" >&2
   echo "$PROG: log in FIRST, then work — copy this verbatim:" >&2
@@ -539,6 +655,14 @@ except Exception:
   TOTAL_DPH=$(awk -v a="$TOTAL_DPH" -v b="$OPRICE" 'BEGIN { printf "%.4f", a + b }')
   PROVISIONED=$((PROVISIONED + 1))
 done < <(echo "$CHOSEN" | jq -c '.[]')
+
+# Candidate pool exhausted before COUNT boxes were SSH-verified. Any instances
+# created along the way were already destroyed on their failure; the EXIT trap is
+# the backstop for any that slipped through. Fail non-zero so the caller retries.
+if [[ "$PROVISIONED" -lt "$COUNT" ]]; then
+  echo "$PROG: provisioned only $PROVISIONED of $COUNT requested — candidate pool exhausted (unreachable/failed hosts were destroyed)" >&2
+  exit 5
+fi
 
 echo "VAST_PROVISIONED: count=${PROVISIONED} total_dph=${TOTAL_DPH}"
 exit 0

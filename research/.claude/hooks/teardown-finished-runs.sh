@@ -22,7 +22,14 @@ if [[ -f "$PROJECT_DIR/.claude/skills/_vast_account.sh" ]]; then
   source "$PROJECT_DIR/.claude/skills/_vast_account.sh"
   vast_load_secrets
 else
-  vast_key_for() { printf '%s' "${VAST_API_KEY:-}"; }
+  # Degraded-mode fallback must STILL be account-aware, else a team row would be
+  # torn down with the private key (silent no-op leak).
+  vast_key_for() {
+    case "${1:-private}" in
+      team) printf '%s' "${VAST_API_KEY_TEAM:-${VAST_API_KEY:-}}" ;;
+      *)    printf '%s' "${VAST_API_KEY:-}" ;;
+    esac
+  }
 fi
 
 NOW=$(date +%s)
@@ -51,13 +58,23 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     REASON="verdict-written"
   fi
 
-  # 2. Heartbeat stale > 30 min? (RUNNING only)
+  # 2. Heartbeat stale? (RUNNING only)
+  #    - If incoming.log EXISTS: stale > 30 min => dead.
+  #    - If incoming.log NEVER appeared (box died before sync-metrics landed a
+  #      file): clock from launch with a longer 60-min grace, so a never-heartbeat
+  #      RUNNING box tears down at ~1h instead of leaking until the ~24h budget
+  #      backstop — while not falsely killing a slow-starting healthy run.
   if [[ "$STATUS" == "RUNNING" && -z "$REASON" ]]; then
     HEARTBEAT="$PROJECT_DIR/runs/$ID/metrics/incoming.log"
     if [[ -f "$HEARTBEAT" ]]; then
       LAST_MOD=$(stat -f %m "$HEARTBEAT" 2>/dev/null || stat -c %Y "$HEARTBEAT" 2>/dev/null || echo 0)
-      if (( NOW - LAST_MOD > 1800 )); then
+      if (( LAST_MOD > 0 && NOW - LAST_MOD > 1800 )); then
         REASON="no-heartbeat-30min"
+      fi
+    else
+      STARTED=$(echo "$row" | jq -r '.started_at_epoch // 0')
+      if (( STARTED > 0 && NOW - STARTED > 3600 )); then
+        REASON="no-heartbeat-ever-60min"
       fi
     fi
   fi
@@ -107,6 +124,25 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     ROW_KEY=$(vast_key_for "$ROW_ACCT")
     while IFS= read -r iid; do
       [[ -z "$iid" ]] && continue
+      # Empty key guard: an exported-but-empty VAST_API_KEY makes the CLI fall back
+      # to the stored (private) config, so a team box would be destroyed under the
+      # wrong account and keep billing. Keep the row for a later retry.
+      if [[ -z "$ROW_KEY" ]]; then
+        echo "[$(date -Iseconds)] SKIP destroy $iid: no key for account=$ROW_ACCT (set VAST_API_KEY_TEAM)" >> /tmp/teardown.err
+        FAILED=$((FAILED + 1)); continue
+      fi
+      # Co-ownership guard: if another live ledger row (a concurrent /loop session
+      # reusing this box) references the same instance_id, do NOT destroy it — that
+      # session owns its teardown (the box-reuse teardown race).
+      CO=$(jq -s --arg iid "$iid" --arg self "$ID" '
+        [ .[] | select(.id != $self)
+              | select(.status=="RUNNING" or .status=="PROVISIONED")
+              | select(any(.handles[]?.instance_id // empty; (.|tostring)==$iid)) ] | length' \
+        "$LEDGER" 2>/dev/null || echo 0)
+      if [[ "${CO:-0}" -gt 0 ]]; then
+        echo "[$(date -Iseconds)] SKIP destroy $iid: co-owned by $CO other live ledger row(s) — leaving box for the owning session" >> /tmp/teardown.err
+        FAILED=$((FAILED + 1)); continue
+      fi
       # MUST pass -y (without it a non-TTY prompt collapses to "Aborted" yet the
       # CLI still exits 0 — a silent no-op; observed 2026-06-03 on 39132674).
       DOUT=$(VAST_API_KEY="$ROW_KEY" vastai destroy instance "$iid" -y 2>&1); DRC=$?

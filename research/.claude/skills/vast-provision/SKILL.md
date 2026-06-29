@@ -73,8 +73,15 @@ Template record on Vast.ai and is referenced by `templates.json`.
 SSH keys, so the skill skips the account-key precheck and instead runs
 `vastai attach ssh <instance> <key>` for `~/.ssh/vast_ai_name.pub` (+ `~/.ssh/vast_ai.pub`)
 on each instance right after create — so a team box is reachable with the same harness
-keys as a personal box. (Private boxes rely on the account's uploaded keys, auto-attached
-by Vast.) Verified end-to-end: a team box comes up SSH-reachable with `vast_ai_name`.
+keys as a personal box. If ZERO keys attach, the box is doomed → it is destroyed and the
+next candidate is tried. (Private boxes rely on the account's uploaded keys, auto-attached by Vast.)
+
+**SSH is VERIFIED, not assumed.** A mapped `22/tcp` port is necessary but NOT sufficient
+(sshd may be down, a host firewall may block the direct port, the proxy may not forward
+yet, or a team key-attach may not have landed). So after the port maps the skill runs a
+REAL `ssh ... true` with the offered key (`vast_ai_name`, up to 5 retries) and only writes
+a handle once it succeeds; on a team probe failure it re-attaches the key once and retries.
+A box that never passes the probe is destroyed and the next candidate is tried.
 
 ## Expected wait time (the skill blocks the calling shell)
 
@@ -112,10 +119,14 @@ vast.ai's API returns `status_msg` with raw newlines inside a JSON string,
 which is technically invalid JSON — that's why the snippet above uses a
 regex instead of `jq`. The skill handles this internally.
 
-If the timeout expires (`--timeout`, default `1500`), the skill exits 5
-**but the instance is still running and billing**. Either re-attach via
-`vastai show instance <id>` to debug, or tear it down with
-`vast-teardown`. The Stop hook will also catch it on session end.
+**Failure is self-cleaning (no billing leak).** On timeout (`--timeout`, default
+`1500`), a host-side failure, a failed SSH probe, or any unexpected error, the skill
+**destroys the instance it created** before moving on (an `EXIT` trap is the backstop
+for anything that slips through), then advances to the next candidate in the pool. It
+exits 5 only once the pool is exhausted without `--count` SSH-verified boxes — and by
+then nothing it created is still running. (Provision is the ONLY component that knows these
+instance ids before a ledger row exists, so it must own this cleanup; the ledger-driven
+Stop hook cannot see a box that never produced a handle/row.)
 
 ## Cost & safety contract (read first)
 
