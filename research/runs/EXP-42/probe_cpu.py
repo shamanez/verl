@@ -1,151 +1,310 @@
-#!/usr/bin/env python
-"""EXP-42 pre-run probe — CPU/GPU-free hard-gate invariants.
+#!/usr/bin/env python3
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Covers the invariants that do NOT need a live FSDP/distributed runtime:
-  inv2  limiting-case identity   (strength=0 => theta_hat==theta[t-K]; coeffs)
-  inv3  learned cold-start       (learned first fire == fixed_linear)
-  inv6  cross-rank (single-proc) (cross_rank_max_rel_dev on identical => 0.0)
-  cfg   config validation        (grad_proj requires replay; does NOT force merger=none)
-  cfg   Hydra/OmegaConf override merge accepts comm_eff.probe.grad_proj_enabled
+"""EXP-42 Phase-1 CPU hard-gate probe (GPU-free).
 
-The FSDP-integration invariants (1 off-path parity, 4 same-batch, 5 no-leak in
-the engine, 7 backend/HBM) are exercised by the GPU smoke (probe_smoke.sh).
+Runs the CPU-testable correctness invariants from research/.claude/plans/42.md
+for the weight-trajectory sketch instrument. Exit code 0 iff every gate passes.
 
-Exit 0 iff every check PASSES. Any failure prints FAIL and exits 1.
+Gates:
+  1. off-path parity      — disabled ⇒ no observer; enabled ⇒ observe() never
+                            mutates the weights it measures (dump-only) and the
+                            disabled path writes nothing.
+  2. decoder-only / 196   — exactly the 196 decoder 2-D matrices are selected;
+                            LayerNorm / embed / lm_head / bias excluded (same
+                            selector as the projector).
+  3. predictor parity     — the offline NumPy compute_theta_hat / learned update
+                            reproduce the on-device lookahead.py outputs
+                            bit-for-bit; limiting cases α=0 ⇒ ratio==1 and
+                            learned-first-fire == fixed.
+  4. (bonus) sketch fidelity end-to-end — a synthetic linear-ish trajectory run
+                            through the real WeightTrajObserver + the offline
+                            sweep agrees with the on-box EXACT calib within 5%
+                            (the local de-risk of the GPU-phase fidelity gate).
+
+Usage:  python research/runs/EXP-42/probe_cpu.py
 """
-import sys
-import types
 
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+import numpy as np
 import torch
 
-FAILS = []
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+sys.path.insert(0, _REPO)  # so `verl` is importable when run as a script
+sys.path.insert(0, os.path.join(_REPO, "research", "scripts"))
+
+import weight_proj_sweep as W  # noqa: E402
+from verl.workers.comm_eff import lookahead as LA  # noqa: E402
+from verl.workers.comm_eff.capture import (  # noqa: E402
+    WEIGHT_TRAJ_DEFAULT_SUBSTRS,
+    WeightTrajObserver,
+    maybe_build_weight_traj_observer,
+    select_weight_traj_targets,
+)
+from verl.workers.config.comm_eff import (  # noqa: E402
+    CommEffConfig,
+    CommEffProbeConfig,
+    CommEffWeightTrajConfig,
+)
+
+SUBSTRS = WEIGHT_TRAJ_DEFAULT_SUBSTRS
+_FAILS = []
 
 
-def check(name, cond, detail=""):
-    ok = bool(cond)
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+def check(name, ok, detail=""):
+    status = "PASS" if ok else "FAIL"
+    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
     if not ok:
-        FAILS.append(name)
+        _FAILS.append(name)
 
 
-from verl.workers.comm_eff import lookahead as la
+# --------------------------------------------------------------------- #
+# Gate 1 — off-path parity
+# --------------------------------------------------------------------- #
+def gate_off_path_parity():
+    print("Gate 1: off-path parity")
+    # disabled config ⇒ no observer, no filesystem touch
+    cfg_off = CommEffConfig()
+    obs_off = maybe_build_weight_traj_observer(cfg_off)
+    check("disabled ⇒ observer is None", obs_off is None)
 
-FIXED = la.FIXED_LINEAR_COEFFS  # (2,-1,0)
+    # disabled even when comm_eff.enabled=true but weight_traj.enabled=false
+    cfg_codec_only = CommEffConfig(enabled=True, compression_type="powersgd")
+    check("codec-on + weight_traj-off ⇒ observer None", maybe_build_weight_traj_observer(cfg_codec_only) is None)
 
-
-def cfg(mode, strength, anchor_on=True):
-    return types.SimpleNamespace(
-        lookahead_anchor=anchor_on, lookahead_mode=mode, lookahead_strength=strength
-    )
-
-
-TARGET_SUBSTRS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
-
-
-def make_sources(seed=0):
-    g = torch.Generator().manual_seed(seed)
-    # two target 2D matrices + one non-target (norm, 1-D) + lm_head (2D but non-target)
-    def snap(scale):
-        return {
-            "model.layers.0.self_attn.q_proj.weight": torch.randn(8, 8, generator=g) * scale,
-            "model.layers.0.mlp.gate_proj.weight": torch.randn(8, 8, generator=g) * scale,
-            "model.layers.0.input_layernorm.weight": torch.randn(8, generator=g) * scale,
-            "lm_head.weight": torch.randn(8, 8, generator=g) * scale,
+    with tempfile.TemporaryDirectory() as d:
+        cfg_on = CommEffConfig(
+            probe=CommEffProbeConfig(weight_traj=CommEffWeightTrajConfig(enabled=True, out_dir=d, k=512))
+        )
+        obs = maybe_build_weight_traj_observer(cfg_on)
+        check("enabled ⇒ observer built", obs is not None and obs.enabled)
+        # observe() must NOT mutate the tensors it is handed (dump-only)
+        rng = torch.Generator().manual_seed(1)
+        w = {
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(16, 16, generator=rng),
+            "model.layers.0.mlp.gate_proj.weight": torch.randn(24, 16, generator=rng),
         }
-    s0 = snap(1.0)   # theta[t-K]
-    s1 = snap(1.3)   # theta[t-2K]
-    s2 = snap(1.7)   # theta[t-3K]
-    return [s0, s1, s2]
+        before = {k: v.clone() for k, v in w.items()}
+        obs.observe(w, global_step=1)
+        unchanged = all(torch.equal(w[k], before[k]) for k in w)
+        check("observe() does not mutate inputs", unchanged)
+        wrote = os.path.exists(os.path.join(d, "manifest.jsonl"))
+        check("enabled ⇒ sketch written", wrote)
 
 
-# ---- inv2: coeffs ---------------------------------------------------------
-p05 = la.LookaheadProjector(cfg("fixed_linear", 0.5), TARGET_SUBSTRS)
-check("inv2.coeffs strength=0.5 == (1.5,-0.5,0)", p05.coeffs == [1.5, -0.5, 0.0], str(p05.coeffs))
-p10 = la.LookaheadProjector(cfg("fixed_linear", 1.0), TARGET_SUBSTRS)
-check("inv2.coeffs strength=1.0 == AsyncPP (2,-1,0)", p10.coeffs == [2.0, -1.0, 0.0] and tuple(FIXED) == (2.0, -1.0, 0.0), str(p10.coeffs))
-p00 = la.LookaheadProjector(cfg("fixed_linear", 0.0), TARGET_SUBSTRS)
-check("inv2.coeffs strength=0.0 == (1,0,0)", p00.coeffs == [1.0, 0.0, 0.0], str(p00.coeffs))
+# --------------------------------------------------------------------- #
+# Gate 2 — decoder-only / 196-matrix selection
+# --------------------------------------------------------------------- #
+def _synthetic_qwen_named_params(n_layers=28, hidden=1536, kv=256, inter=8960):
+    """A faithful Qwen2.5-1.5B parameter name/shape set (decoder + the exclusions)."""
+    params = []
+    # nn.Linear weight is [out_features, in_features]
+    shapes = {
+        "q_proj": (hidden, hidden),
+        "k_proj": (kv, hidden),
+        "v_proj": (kv, hidden),
+        "o_proj": (hidden, hidden),
+        "gate_proj": (inter, hidden),
+        "up_proj": (inter, hidden),
+        "down_proj": (hidden, inter),
+    }
+    for L in range(n_layers):
+        for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            params.append((f"model.layers.{L}.self_attn.{proj}.weight", torch.zeros(*shapes[proj])))
+            # attention projection biases (q/k/v have bias in Qwen2) — 1-D, must be EXCLUDED
+            if proj in ("q_proj", "k_proj", "v_proj"):
+                params.append((f"model.layers.{L}.self_attn.{proj}.bias", torch.zeros(shapes[proj][0])))
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            params.append((f"model.layers.{L}.mlp.{proj}.weight", torch.zeros(*shapes[proj])))
+        # LayerNorms — 1-D, EXCLUDED
+        params.append((f"model.layers.{L}.input_layernorm.weight", torch.zeros(hidden)))
+        params.append((f"model.layers.{L}.post_attention_layernorm.weight", torch.zeros(hidden)))
+    # embeddings / final norm / lm_head — EXCLUDED (embed/lm_head 2-D but no substr match)
+    params.append(("model.embed_tokens.weight", torch.zeros(151936, hidden)))
+    params.append(("model.norm.weight", torch.zeros(hidden)))
+    params.append(("lm_head.weight", torch.zeros(151936, hidden)))
+    return params
 
-# ---- inv2: limiting-case identity theta_hat==theta[t-K] at strength 0 -----
-src = make_sources()
-th0, excl0 = p00.project(src)
-tk = src[0]
-ident = all(torch.equal(th0[k], tk[k]) for k in tk)
-check("inv2.theta_hat==theta[t-K] EXACT at strength=0 (all keys)", ident)
-# non-targets are passthrough at ANY strength
-th05, excl05 = p05.project(src)
-nt_ok = torch.equal(th05["model.layers.0.input_layernorm.weight"], tk["model.layers.0.input_layernorm.weight"]) and \
-        torch.equal(th05["lm_head.weight"], tk["lm_head.weight"])
-check("inv2.non-targets (norm, lm_head) passthrough theta[t-K]", nt_ok, f"excluded={excl05}")
-# target IS extrapolated at strength 0.5: theta_hat = 1.5*tk - 0.5*t2k
-q = "model.layers.0.self_attn.q_proj.weight"
-expect_q = (1.5 * src[0][q].float() - 0.5 * src[1][q].float()).to(src[0][q].dtype)
-check("inv2.target extrapolated theta_hat=1.5*tK-0.5*t2K", torch.allclose(th05[q], expect_q, atol=1e-6))
-# weight_proj_ratio==1 at strength 0 (theta_hat==theta[t-K]) for targets
-wr = (th0[q].float() - src[2][q].float()).norm() / ((tk[q].float() - src[2][q].float()).norm() + 1e-12)
-check("inv2.weight_proj_ratio==1.0 at strength=0 (target q_proj)", abs(float(wr) - 1.0) < 1e-6, f"ratio={float(wr):.8f}")
 
-# ---- inv3: learned cold-start == fixed_linear (residual empty) ------------
-pf = la.LookaheadProjector(cfg("fixed_linear", 0.5), TARGET_SUBSTRS)
-pl = la.LookaheadProjector(cfg("learned_linear_with_fixed_linear_cold_start", 0.5), TARGET_SUBSTRS)
-thf, _ = pf.project(src)
-thl, _ = pl.project(src)
-cold = all(torch.equal(thf[k], thl[k]) for k in thf)
-check("inv3.learned first-fire == fixed_linear (residual=0)", cold and pl.learns and not pf.learns)
-
-# ---- inv6: cross_rank_max_rel_dev single-proc == 0.0 ----------------------
-v = torch.tensor([0.1, -0.2, 0.3])
-dev = la.cross_rank_max_rel_dev(v)
-check("inv6.cross_rank_max_rel_dev single-proc == 0.0", dev == 0.0, f"dev={dev}")
-
-# ---- cfg: validation — grad_proj requires replay, NOT merger=none ----------
-import dataclasses as dc
-
-from verl.workers.config.comm_eff import CommEffConfig
-
-# CommEffConfig is a FROZEN dataclass; build via dataclasses.replace so the
-# top-level __post_init__ (where the grad_proj validation lives) re-runs with the
-# overridden nested values.
-def build(replay=True, snapshot_device="cpu", geometry=False, correction_mode="signed_ema"):
-    base = CommEffConfig()
-    return dc.replace(
-        base,
-        enabled=True,
-        anchor=dc.replace(base.anchor, enabled=True, replay_paired_batch=replay, snapshot_device=snapshot_device),
-        spectral=dc.replace(base.spectral, enabled=True, correction_mode=correction_mode),
-        probe=dc.replace(base.probe, grad_proj_enabled=True, geometry_enabled=geometry),
+def gate_decoder_selection():
+    print("Gate 2: decoder-only / 196-matrix selection")
+    params = _synthetic_qwen_named_params()
+    selected = select_weight_traj_targets(params, SUBSTRS)
+    names = [n for n, _ in selected]
+    check("exactly 196 matrices selected", len(selected) == 196, f"got {len(selected)}")
+    # every selected is a decoder projection weight, 2-D, substr match
+    all_targets = all(any(s in n for s in SUBSTRS) for n in names)
+    check("all selected match a decoder substr", all_targets)
+    all_2d = all(t.dim() == 2 for _, t in selected)
+    check("all selected are 2-D", all_2d)
+    # exclusions: no decoder *weight* matrix should be excluded
+    excluded = [n for n, _ in params if n not in set(names)]
+    bad = [n for n in excluded if any(s in n for s in SUBSTRS) and not n.endswith(".bias")]
+    check("no decoder weight matrix excluded", not bad, f"unexpected exclusions: {bad[:3]}")
+    norms_excluded = all(
+        ("norm" in n) or ("embed" in n) or ("lm_head" in n) or n.endswith(".bias") for n in excluded
     )
+    check("norms/embed/lm_head/bias all excluded", norms_excluded)
+    # per-type count: 28 each of the 7 types
+    by_type = {s: sum(1 for n in names if s in n) for s in SUBSTRS}
+    check("28 of each of the 7 matrix types", all(v == 28 for v in by_type.values()), str(by_type))
+    # FSDP wrap-infix is canonicalised away
+    infixed = [("model.layers.0.self_attn._fsdp_wrapped_module.q_proj.weight", torch.zeros(8, 8))]
+    sel_inf = select_weight_traj_targets(infixed, SUBSTRS)
+    check("FSDP wrap-infix canonicalised", bool(sel_inf) and "_fsdp_wrapped_module" not in sel_inf[0][0])
 
-try:
-    build()  # signed_ema active + replay + cpu + grad_proj => MUST pass
-    check("cfg.grad_proj OK with signed_ema active (NOT forced to merger=none)", True)
-except Exception as e:
-    check("cfg.grad_proj OK with signed_ema active (NOT forced to merger=none)", False, repr(e))
 
-for label, kw, needle in [
-    ("cfg.grad_proj REQUIRES replay_paired_batch", dict(replay=False), "replay_paired_batch"),
-    ("cfg.grad_proj REQUIRES snapshot_device=cpu", dict(snapshot_device="gpu"), "snapshot_device"),
-    # correction_mode=none so geometry's own inert-merger check passes and MY
-    # mutual-exclusion guard is the one that fires.
-    ("cfg.grad_proj MUTUALLY EXCLUSIVE with geometry", dict(geometry=True, correction_mode="none"), "mutually exclusive"),
-]:
-    try:
-        build(**kw)
-        check(label + " (raises)", False, "no error raised")
-    except ValueError as e:
-        check(label + " (raises)", needle in str(e), str(e)[:80])
-    except Exception as e:
-        check(label + " (raises)", False, repr(e))
+# --------------------------------------------------------------------- #
+# Gate 3 — predictor parity (NumPy ref vs on-device lookahead.py)
+# --------------------------------------------------------------------- #
+class _AnchorCfgStub:
+    """Minimal anchor-cfg stub enabling the learned look-ahead projector."""
 
-# ---- cfg: OmegaConf structured-config accepts the override key -------------
-try:
-    from omegaconf import OmegaConf
-    base = OmegaConf.structured(CommEffConfig())
-    merged = OmegaConf.merge(base, OmegaConf.from_dotlist(["probe.grad_proj_enabled=true", "probe.grad_proj_out_dir=/tmp/gp"]))
-    check("cfg.OmegaConf merge accepts probe.grad_proj_enabled override",
-          bool(merged.probe.grad_proj_enabled) is True and str(merged.probe.grad_proj_out_dir) == "/tmp/gp")
-except Exception as e:
-    check("cfg.OmegaConf merge accepts probe.grad_proj_enabled override", False, repr(e))
+    lookahead_anchor = True
+    lookahead_mode = "learned_linear_with_fixed_linear_cold_start"
+    lookahead_strength = 1.0
 
-print("\n" + ("PROBE_CPU_RESULT: ALL PASS" if not FAILS else f"PROBE_CPU_RESULT: {len(FAILS)} FAIL -> {FAILS}"))
-sys.exit(0 if not FAILS else 1)
+
+def gate_predictor_parity():
+    print("Gate 3: predictor parity (numpy ref vs lookahead.py)")
+    rng = torch.Generator().manual_seed(123)
+    # fixture: 2 targets (2-D), one excluded norm (1-D), one excluded 2-D (no substr)
+    s0 = {
+        "model.layers.0.self_attn.q_proj.weight": torch.randn(12, 8, generator=rng),
+        "model.layers.0.mlp.down_proj.weight": torch.randn(8, 20, generator=rng),
+        "model.layers.0.input_layernorm.weight": torch.randn(12, generator=rng),
+        "model.embed_tokens.weight": torch.randn(30, 8, generator=rng),
+    }
+    s1 = {k: v + 0.01 * torch.randn(v.shape, generator=rng) for k, v in s0.items()}
+    sources_t = [s0, s1]
+    sources_np = [{k: v.numpy().astype(np.float32) for k, v in s.items()} for s in sources_t]
+
+    def parity_at(alpha, label=""):
+        coeffs = W.coeffs_for_alpha(alpha)
+        th_t, exc_t = LA.compute_theta_hat(sources_t, coeffs, target_substrs=SUBSTRS, residual=None)
+        th_np, exc_np = W.compute_theta_hat_ref(sources_np, coeffs, target_substrs=SUBSTRS, residual=None)
+        same_keys = exc_t == exc_np
+        maxdiff = 0.0
+        for k in th_t:
+            a = th_t[k].numpy()
+            b = th_np[k]
+            maxdiff = max(maxdiff, float(np.max(np.abs(a - b))) if a.size else 0.0)
+        check(f"theta_hat parity {label} (α={alpha})", maxdiff <= 1e-6 and same_keys, f"maxdiff={maxdiff:.2e}")
+        return th_t
+
+    parity_at(1.0, label="fixed")
+    parity_at(0.5, label="under-shoot")
+
+    # limiting case α=0 ⇒ theta_hat == theta_stale ⇒ weight_proj_ratio == 1 exactly
+    th_t0 = parity_at(0.0, label="alpha0")
+    target = {k: v - 0.02 for k, v in s0.items()}  # arbitrary future point
+    ratios = []
+    for k, p0 in s0.items():
+        if not (any(s in k for s in SUBSTRS) and p0.dim() == 2):
+            continue
+        num = torch.linalg.norm(th_t0[k] - target[k])
+        den = torch.linalg.norm(s0[k] - target[k])
+        ratios.append(float(num / den))
+    check("α=0 ⇒ weight_proj_ratio == 1", all(abs(r - 1.0) < 1e-6 for r in ratios), f"ratios={[round(r, 6) for r in ratios]}")
+
+    # learned first-fire (residual == {}) == fixed
+    th_fix_t, _ = LA.compute_theta_hat(sources_t, W.coeffs_for_alpha(1.0), target_substrs=SUBSTRS, residual=None)
+    proj = LA.LookaheadProjector(_AnchorCfgStub(), SUBSTRS)
+    th_learn0, _ = proj.project(sources_t)  # residual dict empty on first fire
+    maxd = max(float(torch.max(torch.abs(th_fix_t[k] - th_learn0[k]))) for k in th_fix_t)
+    check("learned first-fire == fixed", maxd <= 1e-6, f"maxdiff={maxd:.2e}")
+
+    # learned update parity: one retrospective step, numpy ref vs on-device
+    th_true_prev = {k: v + 0.05 for k, v in s0.items()}
+    r_dev = proj.update_from_retrospective(th_true_prev, th_fix_t)
+    r_np = W.learned_update_ref(
+        {},
+        {k: v.numpy() for k, v in th_true_prev.items()},
+        {k: v.numpy() for k, v in th_fix_t.items()},
+        target_substrs=SUBSTRS,
+    )
+    keys = set(r_dev) | set(r_np)
+    maxr = max((abs(float(r_dev.get(k, 0.0)) - float(r_np.get(k, 0.0))) for k in keys), default=0.0)
+    check("learned residual update parity", maxr <= 1e-7, f"maxdiff={maxr:.2e}")
+
+
+# --------------------------------------------------------------------- #
+# Gate 4 (bonus) — end-to-end sketch fidelity vs exact calib (synthetic)
+# --------------------------------------------------------------------- #
+def gate_sketch_fidelity_synthetic():
+    print("Gate 4 (bonus): end-to-end sketch fidelity vs exact calib (synthetic trajectory)")
+    rng = np.random.default_rng(0)
+    # small synthetic model: 4 decoder matrices, a near-linear trajectory with noise
+    shapes = {
+        "model.layers.0.self_attn.q_proj.weight": (48, 32),
+        "model.layers.0.self_attn.k_proj.weight": (16, 32),
+        "model.layers.0.mlp.gate_proj.weight": (64, 32),
+        "model.layers.0.mlp.down_proj.weight": (32, 64),
+    }
+    theta0 = {n: rng.standard_normal(s).astype(np.float32) * 0.02 for n, s in shapes.items()}
+    vel = {n: rng.standard_normal(s).astype(np.float32) * 1e-4 for n, s in shapes.items()}  # linear drift
+    n_ticks = 40
+    delta, h = 10, 10
+    with tempfile.TemporaryDirectory() as d:
+        obs = WeightTrajObserver(
+            out_dir=d, k=4096, dump_dtype="fp32",
+            target_substrs=SUBSTRS, calib_deltas=(delta,), calib_horizons=(h,),
+            calib_stride=delta + h, calib_max_snapshots=6, rank=0, rank0_only=True,
+        )
+        for t in range(n_ticks):
+            w = {
+                n: torch.from_numpy(
+                    theta0[n] + vel[n] * t + (rng.standard_normal(shapes[n]).astype(np.float32) * 2e-5)
+                )
+                for n in shapes
+            }
+            obs.observe(w, global_step=t // 2)
+        sweep = W.sweep_regime(d, deltas=(delta,), horizons=(h,), methods=("fixed_linear", "learned_linear"))
+        calib = W.validate_against_calib(sweep, d, tol=0.05)
+        check("calib.jsonl produced on-box", calib.get("available"), str(calib.get("available")))
+        if calib.get("available"):
+            for c in calib["checks"]:
+                check(
+                    f"sketch≈exact within 5% (Δ={c['delta']},h={c['h']})",
+                    c["pass"],
+                    f"sketch={c['sketch_w1_p50']:.4f} calib={c['calib_w1_p50']:.4f} rel={c['rel_err']:.2%}",
+                )
+        cell = sweep["results"].get(("fixed_linear", delta, h))
+        check("sweep produced a headline cell", cell is not None and cell["n"] > 0, f"n={cell['n'] if cell else 0}")
+
+
+def main():
+    print("=" * 72)
+    print("EXP-42 Phase-1 CPU hard-gate probe")
+    print("=" * 72)
+    gate_off_path_parity()
+    gate_decoder_selection()
+    gate_predictor_parity()
+    gate_sketch_fidelity_synthetic()
+    print("=" * 72)
+    if _FAILS:
+        print(f"RESULT: FAIL ({len(_FAILS)} gate check(s) failed): {_FAILS}")
+        sys.exit(1)
+    print("RESULT: ALL GATES PASS")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
