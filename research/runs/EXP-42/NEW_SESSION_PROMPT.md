@@ -1,0 +1,26 @@
+# EXP-42 Phase 4 (widened completeness extension) — new-session prompt
+
+Open a fresh Claude session in `/Users/shamane/Documents/verl/research` and paste the
+block below (everything inside the fenced `/goal ...` block). It runs the widened
+all-matrices pass via `.claude/playbooks/orchestrator.md`, driven by `/goal`, and stops
+when the per-group analysis and writeups are done.
+
+Context a fresh session needs to know (already true, do not redo): the narrow 196-matrix
+study is COMPLETE and decisive (see `.claude/plans/42.md` Progress and
+`runs/EXP-42/verdict.md`). The widened instrument is ALREADY built and pushed
+(`exp/42-weight-accuracy` @ commit `531dd5e9`): `weight_traj.select_all` in
+`verl/workers/comm_eff/capture.py` + config + `actor.yaml`, the parametrised
+`runs/EXP-42/run_cell.sh`, the widened driver `runs/EXP-42/drive_all.sh`, and the report
+builder `runs/EXP-42/build_report.py` (which already renders per-group curves). So the
+runner ONLY provisions and launches; it does NOT re-patch. The first widened attempt was
+lost when the box was auto-reaped (no-heartbeat-30min) after the monitor was killed, so the
+single most important operational rule this time is: keep the heartbeat fresh every tick.
+
+```
+/goal EXP-42 Phase 4 (widened completeness extension) is COMPLETE, driven directly by .claude/playbooks/orchestrator.md on plan .claude/plans/42.md (no GitHub issue). The weight-trajectory instrument is ALREADY built and pushed on exp/42-weight-accuracy @ 531dd5e9 (weight_traj.select_all knob + parametrised runs/EXP-42/run_cell.sh + runs/EXP-42/drive_all.sh + runs/EXP-42/build_report.py), so the runner ONLY provisions and launches; it does NOT re-patch. The narrow 196-matrix study is already DONE (plan Progress + runs/EXP-42/verdict.md); this session does ONLY the widened all-matrices pass. Done means, as shown by the plan-completion ledger I print each tick:
+(1) Provision ONE fresh 1xH200 (team account; gpu_filter_chain in the plan; 1xB200 only if H200 OOMs). On the box: git fetch origin exp/42-weight-accuracy and checkout -fB, assert HEAD is 531dd5e9 or newer; push the stripped secrets.env (HF_TOKEN + WANDB_API_KEY only, never echo values); rsync runs/EXP-42/run_cell.sh + runs/EXP-42/drive_all.sh to /workspace/runs/EXP-42/. Launch tmux new -d -s exp42all 'bash /workspace/runs/EXP-42/drive_all.sh' (it exports RUN_DIR=/workspace/runs/EXP-42-all, WEIGHT_TRAJ_SELECT_ALL=true, EXPN_SUFFIX=-all, and runs regimeA codec-off then regimeB PowerSGD r=77 codec-only with anchor+spectral off, 80 steps each). VERIFY the widened instrument fired: the [comm_eff][weight_traj] observer banner shows select_all=True AND the first manifest row n_matrices is about 338 (NOT 196: 196 decoder + 1 embed + about 57 RMSNorm gains + about 84 attention biases); if it shows 196, log STUCK and stop. Re-confirm regimeB codec ACTIVE (powersgd_applications greater than 0 vs regimeA 0). Judge each regime success by step-80 plus about 160 sketch npz plus done.flag, NOT the launcher rc (it exits rc=1 from benign atexit teardown noise).
+(2) rsync runs/EXP-42-all/{regimeA,regimeB}/weights to the MacBook. Backfill the final 1 to 2 steps to WandB for BOTH widened runs (resume=must, via runs/EXP-42/backfill_wandb.py) so val@80 is present; this is a MUST. THEN tear down the box (runs.jsonl shows TORN_DOWN). Analysis is MacBook-only, no rental during it.
+(3) Run python research/scripts/weight_proj_sweep.py runs/EXP-42-all --json runs/EXP-42-all/sweep_all.json --calib-tol 0.05, then python research/runs/EXP-42/build_report.py runs/EXP-42-all/sweep_all.json runs/EXP-42-all/report_all.html --title "EXP-42 widened (all matrices)". The report MUST answer, per group (decoder vs embed vs norm vs bias) and per regime: at the operating horizon h=10, does linear weight projection help (median ratio below 1) or hurt on the EXCLUDED params, and what is the crossover h* per group. This is the direct test of the prior-work exclusion claim.
+(4) Amend runs/EXP-42/verdict.md, LOG.md, and runs/SUMMARY.md with the per-group findings, and tick plan .claude/plans/42.md Phase 4.
+CRITICAL infra rule: keep the heartbeat fresh on EVERY tick (touch the RUNNING row's runs/<id>/metrics/incoming.log AND keep a training-log-monitor subagent running over SSH) so the teardown-finished-runs hook does not auto-reap the box mid-collection; that no-heartbeat-30min reap is exactly what destroyed the first widened attempt. Honor the playbook budget caps and the end-of-tick foreground teardown sweep. Do NOT use em-dashes in any writing. If the widened instrument does not fire (n_matrices equals 196) or any hard invariant fails, log STUCK and stop. Stop after 120 turns.
+```

@@ -48,6 +48,38 @@ rotation). Two collapse symptoms, one cause (off-policy staleness `K>τ`):
 
 Full argument: `../reports/priority-1-anchor-staleness-k-collapse.html`.
 
+## EXP-42 weight-projection accuracy (M4 measurement, 2026-06-29)
+
+Measures the primitive the look-ahead anchor rests on: does the projected weight
+`theta_hat = theta_stale + alpha (theta_stale - theta_old)` land closer to the
+current weight than the raw-stale weight, in weight space, versus horizon. One
+operator 1xH200, single-GPU (operator-authorised), two regimes, per-tick
+count-sketch of the 196 decoder matrices replayed offline on the MacBook.
+
+- Regime A (plain GRPO, val@80=0.7695): at the operating horizon h = K = 10
+  (alpha = 1) median `weight_proj_ratio = 0.972 < 1` (projection helps),
+  `dir_cos = 0.549`. Crossover `h* = 10`.
+- Regime B (PowerSGD r=77 codec only, val@80=0.0788, collapsed = allowed data):
+  at h = 10 ratio `= 1.083 > 1` (no help). Crossover `h* = 5`. Codec-active
+  confirmed on 1 GPU (powersgd_applications 19838 vs 0; recon rel-error ~0.97;
+  the in-graph projection fires without PP or DP).
+- `dir_cos` stays positive at every horizon in both regimes, so the overshoot
+  past `h*` is a MAGNITUDE effect (alpha steps past `theta_now` along an aligned
+  direction), not a weight-space sign flip. This refines the prior-collapse
+  reading: the sign flip seen in the prior extrapolated-anchor-cosine runs is not
+  a weight-space direction reversal at h up to 20.
+- `learned_linear` (scalar-mean residual) is inert versus `fixed_linear` at the
+  operating point.
+- Consequence for the look-ahead method: weight projection beats doing nothing
+  only at LOW staleness in the clean regime (h up to K=10), and compression
+  halves that window (h up to 5). A gradient-accuracy follow-up is gated to the
+  clean regime at fixed_linear, h up to 10.
+- Deliverables: `runs/EXP-42/report.html` (plots + discussion), `verdict.md`,
+  `sweep_narrow.json`. Code: `exp/42-weight-accuracy` @ 531dd5e9. The widened
+  completeness extension (all matrices incl. embeddings, RMSNorm gains, biases)
+  is built and pushed but DEFERRED to a fresh session (box auto-reaped
+  mid-collection).
+
 ## Bottom line
 
 The baseline is a comm-eff trainer that is **stable at low anchor latency but
