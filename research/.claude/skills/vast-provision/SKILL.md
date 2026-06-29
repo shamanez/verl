@@ -83,6 +83,29 @@ REAL `ssh ... true` with the offered key (`vast_ai_name`, up to 5 retries) and o
 a handle once it succeeds; on a team probe failure it re-attaches the key once and retries.
 A box that never passes the probe is destroyed and the next candidate is tried.
 
+**Team-account templates (a real gotcha).** A Vast.ai **Template is owned by the account
+that created it and is NOT visible to other accounts** (incl. a team you belong to). The
+locked `verl-research-vllm020` template (hash `3b0f…6d75f`, id 447527) was created by the
+PRIVATE account (538739), so `VAST_ACCOUNT=team` create returns HTTP 400
+`invalid template hash or id or template not accessible by user` (observed EXP-41). The skill
+now **fails fast** on that error (no candidate-loop churn) and prints the remedy. Choose one:
+- **(a)** Re-run with `VAST_ACCOUNT=private` (the template's owner account).
+- **(b)** Recreate the template under the team account so team create works — from this repo's
+  `templates.json` + `onstart.verl-vllm020.sh`, e.g.:
+  ```bash
+  source .claude/skills/_vast_account.sh; vast_load_secrets
+  VAST_API_KEY="$(vast_key_for team)" vastai create template \
+    --name verl-research-vllm020-team \
+    --image verlai/verl:vllm020.dev1 \
+    --disk 200 \
+    --onstart-cmd "$(cat .claude/skills/vast-provision/onstart.verl-vllm020.sh)" \
+    --search_params "..."   # plus the docker_options from templates.json
+  ```
+  then add the new hash to `templates.json` (or pass `--template-hash`). NB: the template
+  carries `docker_options` (`--shm-size=10g --cap-add=SYS_ADMIN -e …`) that training needs —
+  recreating preserves them; a bare `--image` create would drop them, so prefer (a) or (b),
+  not an ad-hoc image launch.
+
 ## Expected wait time (the skill blocks the calling shell)
 
 A `vastai create instance` returns a contract id in seconds, but the box is

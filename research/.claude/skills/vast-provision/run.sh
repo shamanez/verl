@@ -376,6 +376,13 @@ _ssh_probe() {         # host port -> 0 iff a REAL ssh command succeeds with the
   return 1
 }
 
+# Some create failures are UNRECOVERABLE across every candidate (the template is
+# not visible to this account, or the API key is bad) — looping the whole pool
+# just wastes time, so detect these and abort with an actionable message.
+_unrecoverable_create_err() {   # blob -> 0 iff the error is account/template-fatal
+  grep -qiE 'not accessible by user|invalid template hash|template not (accessible|found)|unauthorized|invalid api key|\b40[13]\b' <<<"${1:-}"
+}
+
 # ---- create + wait loop ---------------------------------------------------
 # Iterate the candidate pool (COUNT + spares). On ANY per-offer failure we
 # destroy that instance and advance to the NEXT cheapest candidate, only failing
@@ -406,9 +413,16 @@ while IFS= read -r offer; do
   echo "$PROG: creating instance from offer $OID (dph=$OPRICE gpu=$OGPU num_gpus=$ONUMG)" >&2
   CREATE_ERR="$(mktemp)"
   if ! CREATE_OUT="$("${CREATE_CMD[@]}" 2>"$CREATE_ERR")"; then
-    echo "$PROG: vastai create instance failed for offer $OID — trying next candidate" >&2
+    CREATE_BLOB="$(cat "$CREATE_ERR" 2>/dev/null)${CREATE_OUT:-}"
     head -20 "$CREATE_ERR" >&2 || true
-    rm -f "$CREATE_ERR"; continue
+    rm -f "$CREATE_ERR"
+    if _unrecoverable_create_err "$CREATE_BLOB"; then
+      echo "$PROG: MANUAL_REVIEW unrecoverable create error for account=$VAST_ACCOUNT (template/api-key) — aborting; every candidate would fail identically." >&2
+      [[ -n "$TEMPLATE_HASH" ]] && echo "$PROG: template $TEMPLATE_HASH is likely owned by a DIFFERENT account. Remedy: re-run with VAST_ACCOUNT=private (the owner), OR recreate/share the template on this account (see SKILL.md 'Team-account templates')." >&2
+      exit 4
+    fi
+    echo "$PROG: vastai create instance failed for offer $OID — trying next candidate" >&2
+    continue
   fi
   rm -f "$CREATE_ERR"
 
@@ -421,6 +435,12 @@ while IFS= read -r offer; do
     INSTANCE_ID=$(echo "$CREATE_OUT" | grep -oE '"new_contract"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
   fi
   if [[ -z "$INSTANCE_ID" ]]; then
+    if _unrecoverable_create_err "$CREATE_OUT"; then
+      echo "$PROG: MANUAL_REVIEW unrecoverable create error for account=$VAST_ACCOUNT (template/api-key):" >&2
+      echo "$CREATE_OUT" >&2
+      [[ -n "$TEMPLATE_HASH" ]] && echo "$PROG: template $TEMPLATE_HASH not accessible by account=$VAST_ACCOUNT — re-run with VAST_ACCOUNT=private OR recreate the template on this account (see SKILL.md 'Team-account templates')." >&2
+      exit 4
+    fi
     echo "$PROG: could not parse new_contract from 'vastai create instance' output — trying next candidate:" >&2
     echo "$CREATE_OUT" >&2
     continue
