@@ -213,9 +213,11 @@ yes/no judge that is **transcript-only** — it can't read `runs.jsonl`, WandB, 
 so each tick the playbook **prints a completion ledger** (the evidence) the judge reads.
 Every `/goal` condition carries an escape (`… OR log STUCK …` + a turn bound) so an
 impossible criterion can't spin forever.
-- Evaluator model: pinned to Opus 4.8 via `ANTHROPIC_DEFAULT_HAIKU_MODEL` in
-  `settings.json` env (strict best-model policy). NOTE this repoints **all** small-fast-model
-  use to Opus — higher per-turn cost; dial back in `settings.json` if needed.
+- Evaluator model: **Opus 4.8 — no Haiku anywhere.** Claude Code's small-fast slot (env
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL`, whose default is Haiku) is overridden to `claude-opus-4-8`
+  in `settings.json`. The var's name says "HAIKU" but the override ELIMINATES it — do not
+  delete it (that lets Haiku return). It also routes other small-fast/background calls to
+  Opus — an accepted cost trade-off under the best-model policy.
 - Safety: `/goal` blocks the Stop event, so the orchestrator runs the teardown sweep
   **in-foreground every tick** — that's what reaps idle/over-budget boxes while a goal
   holds the session open. (Before a long unattended run, verify on a throwaway session
@@ -342,8 +344,9 @@ python scripts/check_budget.py --month
 > evaluator intercepts Stop each turn to judge done-ness. It is transcript-only and
 > **additive** — it does NOT replace the wired Stop hooks above. Because `/goal` blocks
 > Stop, the orchestrator runs `teardown-finished-runs.sh` in-foreground each tick so budget
-> safety never depends on Stop firing. `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-4-8`
-> (settings.json env) pins the evaluator to Opus per the best-model policy.
+> safety never depends on Stop firing. The evaluator runs on **Opus 4.8 (no Haiku)** — CC's
+> small-fast slot (`ANTHROPIC_DEFAULT_HAIKU_MODEL`, default Haiku) is overridden to
+> `claude-opus-4-8` in settings.json; do not delete that override.
 
 ---
 

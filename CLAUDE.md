@@ -121,22 +121,38 @@ cd /Users/shamane/Documents/verl/research
 claude
 ```
 
+Both loops are **`/goal`-driven** (they run until the plan's success-criteria are met,
+then auto-stop) — full commands + rationale in `research/researcher_steps.md` §3/§3a.
+
 Session A (planning watcher):
 
 ```
-/bg /loop 60m Read .claude/playbooks/triage.md and execute it.
+/bg /goal All open research:claim issues planned (triage ledger unplanned=0) … or log a triage error. Read .claude/playbooks/triage.md, one tick, pace ~60m. Stop after 100 turns.
 ```
 
 Session B (executor):
 
 ```
-/bg /loop 30m Read .claude/playbooks/orchestrator.md and execute it.
+/bg /goal All status:approved plans terminal (PASS/STOP, box TORN_DOWN, LOG.md written) per my plan-completion ledger … or log STUCK/MANUAL_REVIEW_NEEDED. Read .claude/playbooks/orchestrator.md, one tick, pace ~30m. Stop after 200 turns.
 ```
 
 Triage polls GitHub for `research:claim` issues, the planner writes a
 plan, you read it and flip the issue label to `status:approved`, then the
 orchestrator drives provisioning → training → verdict → log entry
 autonomously.
+
+**Model & feature policy (2026-06-29).** Every agent — and the `/goal` done-judge — runs on
+**Opus 4.8** (no Sonnet, no Haiku anywhere); the only knob is reasoning **effort** with a
+floor of `high`. The per-agent effort tiers (max / xhigh / high) live in
+`research/.claude/project.yaml` (`reasoning_effort_rule` + per-agent `effort:`) — do not
+restate them here. Dynamic **workflows** (`ultracode`) are
+enabled and launched EXPLICITLY at the session level for the hard lanes (moment-of-truth
+analysis, hard `code_change`, hard planning, parallel runs) — never as session-wide
+`/effort ultracode` on the unattended loops, and a workflow's auto-approving workers stay
+READ-ONLY (provisioning / PR / `runs.jsonl` writes remain gated single-shot). **Agent
+teams** are opt-in and GPU-free (adversarial verdict review, parallel-run fan-out). Single
+source of truth: `research/.claude/project.yaml` (`goal_command:` / `workflows:` /
+`agent_teams:`); full design in `research/.claude/HARNESS_FEATURE_INTEGRATION.md`.
 
 Kill switch (instant pause of all agent tool calls):
 

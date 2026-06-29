@@ -129,13 +129,14 @@ agent_models:
   # effort: it is launched at the SESSION level (orchestrator/triage/interactive) for the
   # hard lanes — moment-of-truth analysis, hard code_change patches, hard planning, parallel
   # runs — because workflows spawn their own workers and a leaf subagent cannot host one.
-  # See the `workflows:` block below. The /goal evaluator model is pinned via
-  # ANTHROPIC_DEFAULT_HAIKU_MODEL (see `goal_command:` + settings.json env).
+  # See the `workflows:` block below. The /goal evaluator runs on Opus 4.8: Claude Code's
+  # small-fast-model slot (env ANTHROPIC_DEFAULT_HAIKU_MODEL, default Haiku) is OVERRIDDEN to
+  # claude-opus-4-8 in settings.json, so NO Haiku model ever runs (see `goal_command:`).
   #
   # Reasoning-effort rule: research-planner + experiment-runner @ max; analyst @ xhigh;
   # training-log-monitor + log-writer @ high (the floor). Model = Opus 4.8 for all.
   reasoning_effort_rule: "Opus 4.8 for ALL agents (strict best-model policy); effort floor=high; research-planner+experiment-runner @ max, analyst @ xhigh, training-log-monitor+log-writer @ high; ultracode/workflows = session-level mechanism for the hard lanes"
-  context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]). NOTE: Claude Code may currently STRIP [1m] from subagents at spawn time (ref GH claude-code#45169), so the suffix is correct + future-proof but may be a no-op until that bug is fixed. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent Opus/Sonnet tiers below."
+  context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]); keep the suffix on every agent. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent reasoning-effort tiers below (all agents are Opus 4.8; only effort varies)."
   agents:
     analyst:
       model: "claude-opus-4-8[1m]"
@@ -168,11 +169,11 @@ agent_models:
 goal_command:                                                 # Claude Code /goal — DRIVES the autonomous loop to completion
   status: enabled
   role: "the autonomous loop launch commands START with /goal so a session does not stop until the plan's success-criteria are met (or it escalates). See researcher_steps.md §2/§3."
-  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # the /goal done-judge uses the 'small fast model' slot; pinned to claude-opus-4-8 in settings.json env per the strict best-model policy.
-  evaluator_model_caveat: "pinning ANTHROPIC_DEFAULT_HAIKU_MODEL repoints ALL small-fast-model usage (incl. background summarization) to Opus, not just /goal — higher per-turn cost on a long loop. Dial back here + in settings.json env if cost matters."
+  evaluator_model: claude-opus-4-8                            # the /goal done-judge runs on Opus 4.8. NO Haiku model runs anywhere in this harness.
+  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # HOW: this is Claude Code's small-fast-model slot (its DEFAULT is Haiku); settings.json OVERRIDES it to claude-opus-4-8 so NO Haiku ever runs. The var NAME says 'HAIKU' but its EFFECT is to ELIMINATE Haiku. Do NOT delete the override (that lets the slot fall back to Haiku). Operator note (non-directive): this also routes other small-fast/background calls to Opus — an accepted cost trade-off under the strict best-model policy; do NOT change without an operator directive.
   transcript_evidence_rule: "the /goal evaluator is transcript-only (no tools; cannot read runs.jsonl/WandB/verdict.md/labels). The orchestrator MUST print a plan-completion ledger each tick (every success-criterion + its evidence, DONE/PENDING) so the judge can see 'done'. Without surfaced evidence the goal never confirms (spins) or false-confirms on a mere claim."
   escape_hatch: "every /goal condition MUST include an escape — '… OR log STUCK/MANUAL_REVIEW_NEEDED' + a turn bound (e.g. 'stop after 200 turns') — so an impossible criterion cannot burn money forever."
-  stop_hook_interaction: "/goal blocks the Stop event, so budget safety must NOT depend on the Stop hook firing: the orchestrator runs teardown-finished-runs.sh IN-FOREGROUND every tick (it already does — keep it). VERIFY on a throwaway session that a /goal block does not suppress the teardown Stop hook before relying on it (CC 2.1.177)."
+  stop_hook_interaction: "/goal blocks the Stop event, so budget safety must NOT depend on the Stop hook firing: the orchestrator runs teardown-finished-runs.sh IN-FOREGROUND every tick — keep it; this is the mandatory, trusted budget backstop."
   must_not_replace: [human status:approved gate, teardown-finished-runs.sh foreground sweep, GOAL.md north-star]
 
 workflows:                                                    # Claude Code dynamic workflows / `ultracode` — ENABLED in the harness

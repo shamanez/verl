@@ -1,8 +1,9 @@
 # Playbook: orchestrator
 
-Coordinator for the implementation phase. Runs at the top level of a Claude
-Code `/loop` session and advances every approved issue one step toward a
-finding per tick. Dispatches `experiment-runner`, `training-log-monitor`,
+Coordinator for the implementation phase. Runs at the top level of a Claude Code
+session **driven by `/goal`** (launched inside `/bg /loop` for recurrence; see
+researcher_steps.md §3a) — the `/goal` done-judge decides when the loop ends (Step 5b).
+It advances every approved issue one step toward a finding per tick. Dispatches `experiment-runner`, `training-log-monitor`,
 `analyst`, and `log-writer` subagents via the `Agent` tool — in parallel where
 dependencies allow, in the background for the polling-shaped monitor. Reads
 state from plan files, `gh`, `runs.jsonl`, verdict files, and `PROGRESS.md`.

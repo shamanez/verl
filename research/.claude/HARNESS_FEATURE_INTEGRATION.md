@@ -37,9 +37,9 @@ for the hard lanes (launched explicitly, see §3). No agent runs below `high`; n
 | **research-planner** | Opus 4.8 | `max` | Hard plans → triage launches a judge-panel **workflow** | unchanged (already Opus@max) |
 | **experiment-runner** | Opus 4.8 | `max` | Hard `code_change` → a coding **workflow** produces the patch; runner executes it | unchanged (already Opus@max) |
 | **analyst** | Opus 4.8 | `xhigh` | **Yes** — moment-of-truth fan-out (multi-dimension adversarial verdict) | unchanged (already Opus@xhigh) |
-| **training-log-monitor** | Opus 4.8 | `high` (floor) | Selective deep live diagnostics workflow; keep the 30s SSH poll as heartbeat | **model ↑ Sonnet → Opus 4.8** |
-| **log-writer** | Opus 4.8 | `high` (floor) | No (durable git/GitHub mutations stay single-shot) | **model ↑ Sonnet → Opus 4.8** |
-| **`/goal` evaluator** | Opus 4.8 | n/a (yes/no judge) | n/a | **model ↑ Haiku → Opus 4.8** (set `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-opus-4-8`) — strict "best model" directive; higher per-turn cost noted in §7 |
+| **training-log-monitor** | Opus 4.8 | `high` (floor) | Selective deep live diagnostics workflow; keep the 30s SSH poll as heartbeat | was Sonnet → now Opus 4.8 (no Sonnet remains) |
+| **log-writer** | Opus 4.8 | `high` (floor) | No (durable git/GitHub mutations stay single-shot) | was Sonnet → now Opus 4.8 (no Sonnet remains) |
+| **`/goal` evaluator** | Opus 4.8 | n/a (yes/no judge) | n/a | Runs on **claude-opus-4-8**. CC's small-model slot (`ANTHROPIC_DEFAULT_HAIKU_MODEL`, default Haiku) is overridden to Opus so **NO Haiku runs**; do not delete the override. |
 
 **Why `ultracode` is a *mechanism*, not a per-agent setting:** workflows launch at the **session** level
 and spawn their own worker agents; CC disallows nested orchestration, so a dispatched leaf subagent
@@ -116,8 +116,8 @@ spine as the unattended substrate (teammates don't survive `/resume`; background
 | `researcher_steps.md` | runbook | Replace both loop-launch commands with the **`/goal`-wrapped** form (§2). Add a `/goal` operator section + an agent-teams parallel/adversarial-review section. | The persistent-loop ask. |
 | `.claude/playbooks/orchestrator.md` | playbook | Each tick **print the plan-completion ledger**; keep the foreground teardown sweep; sanction **explicit** per-lane workflow launches (analysis/parallel/coding) — NOT session-wide ultracode. | Makes `/goal` terminate correctly + enables the moment-of-truth fan-out. |
 | `.claude/playbooks/triage.md` | playbook | `/goal`-wrap; may launch a judge-panel planning workflow for hard plans. | Persistence + hard-plan quality. |
-| `.claude/agents/training-log-monitor.md` | agent | **`model: claude-opus-4-8`** (↑ from Sonnet); **print key in-training scalars into its report**; may be a worker in a diagnostics workflow. | Strict model policy + evidence-to-transcript for the goal-ledger. |
-| `.claude/agents/log-writer.md` | agent | **`model: claude-opus-4-8`** (↑ from Sonnet), `effort: high`. | Strict model policy. |
+| `.claude/agents/training-log-monitor.md` | agent | **`model: claude-opus-4-8`** (was Sonnet; no Sonnet now); **print key in-training scalars into its report**; may be a worker in a diagnostics workflow. | Strict model policy + evidence-to-transcript for the goal-ledger. |
+| `.claude/agents/log-writer.md` | agent | **`model: claude-opus-4-8`** (was Sonnet; no Sonnet now), `effort: high`. | Strict model policy. |
 | `.claude/agents/analyst.md` | agent | Note it may be a worker inside an analysis/diagnostics workflow; surface verdict evidence to transcript. Frontmatter stays Opus@xhigh. | Moment-of-truth fan-out feeds the ledger. |
 | `.claude/agents/research-planner.md` | agent | Note hard plans may be produced via a judge-panel workflow at the triage session. Frontmatter stays Opus@max. | Hard-plan quality. |
 | `.claude/agents/experiment-runner.md` | agent | Note hard `code_change` patches come from a coding workflow (runner executes); support N concurrent boxes. Frontmatter stays Opus@max. | Parallel runs + hard coding. |
@@ -157,7 +157,7 @@ unverified payload field; the second guarded a state its sanctioned use already 
   *Verify:* a dispatched monitor/log-writer reports `claude-opus-4-8`; no agent below `high`.
 - **Phase B — `/goal`-driven loop.** Add the ledger step to `orchestrator.md`/`triage.md`, rewrite the
   launch commands. *Verify first:* the `/bg /goal` invocation + the `/goal`-blocks-Stop-vs-foreground-sweep
-  interaction on a throwaway session (both unconfirmed at `2.1.177`); confirm the foreground teardown still
+  interaction on a throwaway session (operator pre-flight, one-time); confirm the foreground teardown still
   reaps a live box while a goal is active.
 - **Phase C — Workflow lanes (read-only).** Wire the analysis/diagnostics/planning/parallel workflow
   launches into the playbooks; add `project.yaml workflows:`. *Verify:* an analysis workflow runs GPU-free,
@@ -172,12 +172,12 @@ unverified payload field; the second guarded a state its sanctioned use already 
 
 ## 7. Open questions
 
-1. **`/goal` evaluator = Opus 4.8?** Honors "strictly the best model," but it runs **every turn** of a
-   long loop → materially higher cost than the default Haiku judge. Confirm, or allow this one slot to
-   stay cheap. *(Plan assumes Opus per your directive.)*
+1. **`/goal` evaluator = claude-opus-4-8 — DECIDED (operator, 2026-06-29).** No Haiku anywhere; CC's
+   small-model slot (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) is overridden to Opus. This routes other
+   small-fast/background calls to Opus too — an accepted cost trade-off, not a knob.
 2. **Driver effort `xhigh` vs `max`?** xhigh keeps per-tick cost sane on a frequent poller; max if you
    want the deepest single-context reasoning on every tick regardless of cost.
-3. **`/bg /goal` + Stop-hook composition unverified at `2.1.177`** — Phase B gates on confirming a
+3. **`/bg /goal` + Stop-hook composition — operator pre-flight, one-time at `2.1.177`** — Phase B gates on confirming a
    `/goal` block doesn't suppress the teardown sweep. Acceptable to verify on a throwaway session first?
 4. **Relax the `status:approved` gate?** Currently kept. Say so explicitly if you want `/goal` to also
    auto-approve plans (a money-spending change I won't make unilaterally).
