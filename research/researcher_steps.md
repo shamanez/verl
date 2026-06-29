@@ -16,7 +16,7 @@ If you're an agent reading this — wrong layer. Agents read
 file GitHub issue (label: research:claim)
         │
         ▼
-Session A — triage /goal-driven (was /loop 60m)
+Session A — triage  (/goal-driven · ~60m cadence)
    spawns research-planner → writes .claude/plans/<N>.md + posts comment
         │
         ▼
@@ -24,7 +24,7 @@ Session A — triage /goal-driven (was /loop 60m)
    read the plan, then flip status:planned → status:approved
         │
         ▼
-Session B — orchestrator /goal-driven (was /loop 30m)
+Session B — orchestrator  (/goal-driven · ~30m cadence)
    experiment-runner (provision Vast → train → done.flag)
      → analyst (writes verdict.md)
        → log-writer (LOG.md + runs/SUMMARY.md + draft PR on PASS)
@@ -154,9 +154,9 @@ Inside:
 /bg /goal Every status:approved plan has reached a terminal verdict (PASS/STOP) with its box TORN_DOWN and LOG.md updated — confirmed by the plan-completion ledger I print each tick from runs.jsonl + verdict.md + WandB + gh labels — OR I have logged a STUCK / MANUAL_REVIEW_NEEDED line. Until then, read .claude/playbooks/orchestrator.md and execute one tick, pacing ~30m between active checks. Stop after 200 turns.
 ```
 
-> This loop is `/goal`-driven (was `/loop 30m`) — it runs to plan completion, then
-> auto-stops. The team-account / attach-box variants below take the SAME `/goal` wrapper:
-> just append their extra directive to the `/goal` prompt. See §3a.
+> This loop is `/goal`-driven — it runs to plan completion, then auto-stops. The
+> team-account / attach-box variants below take the SAME `/goal` wrapper: just append
+> their extra directive to the `/goal` prompt. See §3a.
 
 ### Choosing the Vast.ai account (team vs private)
 
@@ -220,8 +220,8 @@ impossible criterion can't spin forever.
   Opus — an accepted cost trade-off under the best-model policy.
 - Safety: `/goal` blocks the Stop event, so the orchestrator runs the teardown sweep
   **in-foreground every tick** — that's what reaps idle/over-budget boxes while a goal
-  holds the session open. (Before a long unattended run, verify on a throwaway session
-  that a `/goal` block doesn't suppress the teardown Stop hook — CC 2.1.177.)
+  holds the session open. One-time before your first long unattended run: confirm on a
+  throwaway session that a `/goal` block doesn't suppress the teardown Stop hook.
 
 **Workflows (`ultracode`) for the hard lanes.** The driver stays at `effort: max` and
 launches a dynamic workflow EXPLICITLY (the `ultracode` keyword / "run a workflow") for:
@@ -319,6 +319,44 @@ do it yourself (no `--force` needed):
 bash .claude/skills/vast-teardown/run.sh <instance_id>   # or just destroy it on vast.ai
 ```
 
+---
+
+## 3c. Hand-drive an experiment yourself (off the auto-loop) — fresh-session hand-off
+
+Use this **instead of** the `/goal` auto-loop (§2/§3) when: a `code_change` experiment needs
+hands-on authoring, it's an off-queue re-run with **no issue** (e.g. EXP-42), or you simply want
+to watch each step and gate the GPU spend. Because the **plan file is the durable hand-off**, you
+can run across SEVERAL fresh sessions to keep each context window small (cheaper, faster) — a new
+session resumes exactly where the last left off.
+
+**Each session — start:**
+1. Open Claude Code in this dir (`cd /Users/shamane/Documents/verl/research && claude`, or the desktop app).
+2. `/effort ultracode` — hard coding/training; interactive sessions only (NOT the auto-loop). Model is already Opus 4.8.
+3. Paste a kickoff prompt that points at the plan and says where to start:
+   ```
+   Read .claude/plans/<N>.md including its "## Progress / session hand-off" section, and
+   CODE_WALKTHROUGH.md. I'm driving this directly (not the orchestrator loop). Do the NEXT
+   unchecked phase in the Progress section. Keep every GPU step gated — ask me before the box.
+   ```
+
+**The plan is the hand-off (the load-bearing part):**
+- A fresh session has **no memory** of prior sessions — the only thing it inherits is the plan file.
+  So the session keeps the plan's **`## Progress / session hand-off`** section current: tick finished
+  phases, record the branch, data paths, and the single next action. (Same discipline as a run
+  close-out: done / data-paths / next.)
+- When the context window gets large, **stop and open a fresh session.** It reads the Progress
+  section and continues — no re-explaining.
+
+**GPU stays OFF** until you explicitly say go (box off by default). Write the code and pass the
+CPU-testable correctness gates locally first; provision only when those pass.
+
+> Why not the `/goal` auto-loop here? It keys plans by *issue number* and auto-provisions; for a
+> delicate `code_change` or an off-queue re-run (no issue) you want to watch the patch and gate the
+> spend. Hand-driving gives that control; the plan's Progress section gives the durability the loop
+> would otherwise get from the ledger.
+
+---
+
 ## 4. Monitor
 
 ```bash
@@ -372,7 +410,7 @@ python scripts/check_budget.py --month
 | Triage fires, no plan appears | check label is `research:claim`; grep PROGRESS.md for planner failure |
 | Orchestrator picks up unapproved plan | label was set to `status:approved` by mistake → demote |
 | Vast instance not torn down | `bash .claude/skills/vast-teardown/run.sh <instance_id>` |
-| Loop stopped | session ended → re-run `/bg /loop` in a new session |
+| Loop stopped | session ended → re-run the `/bg /goal …` command in a new session (§3) |
 | `/bg` says "Nothing to background yet" | must prefix a command: `/bg /goal … Read .claude/playbooks/orchestrator.md …` (full command in §3) |
 | protect-upstream refusing an edit | not on `exp/*` or `vast-ai-workload` — `git rev-parse --abbrev-ref HEAD` |
 
@@ -391,18 +429,21 @@ research/
 │   └── SUMMARY.md                  durable record: baseline, method, knobs, tried-so-far
 ├── scripts/                        analyze.py, check_budget.py, diff_against_baseline.py
 └── .claude/
-    ├── project.yaml                single source of truth (repo, secrets, vast template, defaults, branch policy)
+    ├── project.yaml                single source of truth (repos, secrets, vast template, defaults, branch policy, model/goal/workflow/team policy)
+    ├── GOAL.md                     project north-star (what "done" means)
+    ├── HARNESS_FEATURE_INTEGRATION.md   /goal + workflows + agent-teams design
     ├── playbooks/                  triage.md, orchestrator.md
     ├── agents/                     research-planner, experiment-runner, analyst, log-writer, training-log-monitor
     ├── plans/                      TEMPLATE.md, <N>.md per issue
-    ├── hooks/                      kill-switch, protect-upstream, sync-metrics, teardown-finished-runs, commit-on-stop
-    ├── skills/                     vast-provision, vast-attach, vast-teardown, de-bloat
+    ├── hooks/                      kill-switch, protect-upstream, sync-metrics, teardown-finished-runs, commit-on-stop, on-session-start
+    ├── skills/                     vast-provision, vast-attach, vast-teardown, vast-cost, de-bloat, codex-verify
+    ├── workflows/                  parallel-runs.md (opt-in saved workflows)
     └── state/                      STATUS.md, runs.jsonl, .last-orchestrator-tick
 
 verl/examples/grpo_trainer/
-├── vast_baseline_qwen25_1p5b_grpo_gsm8k.sh             dense reference launcher
-├── vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh  THE comm-eff baseline (signed_ema, 20/20 collapse regime, resp 1024)
-└── vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh    generic comm-eff engine
+├── vast_baseline_qwen25_1p5b_grpo_gsm8k.sh             dense reference launcher (comm-eff OFF)
+├── vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh  THE canonical comm-eff baseline (values live in the launcher; see project.yaml fixed_control_surface)
+└── vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh    generic comm-eff engine (all knobs exposed)
 
 verl/CLAUDE.md                      fork-specific agent instructions
 ```
