@@ -34,8 +34,15 @@ case "$REGIME" in
   *) echo "usage: run_cell.sh regimeA|regimeB"; exit 2 ;;
 esac
 
-EXPN="exp42-${REGIME}"
-OUT="/workspace/runs/EXP-42/${REGIME}"
+# RUN_DIR + WEIGHT_TRAJ_SELECT_ALL let the SAME cell serve both passes:
+#   narrow (the 196 projector set):  defaults -> RUN_DIR=/workspace/runs/EXP-42, select_all=false
+#   widened (completeness, ALL matrices incl. excluded embed/norm/bias):
+#       RUN_DIR=/workspace/runs/EXP-42-all WEIGHT_TRAJ_SELECT_ALL=true
+# Separate RUN_DIR keeps the widened sketches from clobbering the narrow study.
+RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-42}"
+SELECT_ALL="${WEIGHT_TRAJ_SELECT_ALL:-false}"
+EXPN="exp42-${REGIME}${EXPN_SUFFIX:-}"
+OUT="${RUN_DIR}/${REGIME}"
 WEIGHTS="$OUT/weights"
 mkdir -p "$WEIGHTS"
 # main_ppo (incl. [comm_eff][weight_traj], val, response_length) -> *_internal.log
@@ -43,7 +50,7 @@ mkdir -p "$WEIGHTS"
 # truth for resolved_params) -> driver.log.
 INTERNAL_LOG="$OUT/train_${REGIME}_internal.log"
 
-echo "=== EXP-42 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=ON out_dir=$WEIGHTS ==="
+echo "=== EXP-42 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=ON select_all=$SELECT_ALL exp=$EXPN out_dir=$WEIGHTS ==="
 LOG="$INTERNAL_LOG" \
 ALLOW_SINGLE_GPU=1 \
 ROLLOUT_TP=1 \
@@ -58,6 +65,7 @@ EXPERIMENT_NAME="$EXPN" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.enabled=true \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.k=4096 \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.select_all=$SELECT_ALL \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.out_dir="$WEIGHTS" \
   'actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_deltas=[10]' \
   'actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_horizons=[5,10,20]' \
