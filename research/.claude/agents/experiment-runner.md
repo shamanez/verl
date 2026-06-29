@@ -42,6 +42,7 @@ Canonical project facts (vast template hash, secrets path, default compute chain
 2. **Materialise the run config** under `$PARENT/runs/EXP-<ID>/config.yaml` by cross-producting `sweep_grid`. Cap fanout at `compute.max_parallel`. Write one config block per cell; the launch script reads the block index from its tmux session name.
 
 3. **Code change path** (only if `code_change: true`):
+   - **Implementation may already be done (the MacBook implement step — researcher_steps §2).** First check origin: `git ls-remote --heads origin "exp/<ID>-<slug>"`. If that branch EXISTS **and** the plan's `## Progress` marks the implementation complete, do NOT re-author the patch — just make it shippable to the box: `git fetch origin "exp/<ID>-<slug>"`, then `git bundle create $PARENT/runs/EXP-<ID>/exp.bundle "exp/<ID>-<slug>"` (so the existing launch.sh `if [[ -f exp.bundle ]]` clone path works unchanged), and skip straight to provisioning (step 4). Run the fork+patch+push below ONLY when the branch does NOT already exist (no prior implement step).
    - In your worktree, fork the per-experiment branch from the project's base branch (NOT `main` — main tracks upstream and is read-only):
      ```bash
      BASE=$(awk -F': ' '/^  base_branch:/ {gsub(/[ "'\'']/,"",$2); print $2}' "$PARENT/.claude/project.yaml")
