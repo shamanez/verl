@@ -97,3 +97,49 @@ GRPO run (regime A) from the dense decoder sketch:
 A deeper GPU-free follow-up (low-rank structure, per-matrix projectability, optimal-coefficient
 sweep, and a like-for-like global-line-fit linearity to compare with the paper) is specified in
 runs/EXP-42/NEW_SESSION_PROMPT.md. No further GPU training will be run.
+
+## Dense-run weight-behavior v2 (deeper GPU-free follow-up, 2026-06-29)
+runs/EXP-42/report_dense_v2.html (builder runs/EXP-42/build_dense_report_v2.py, sibling of
+build_dense_report.py) extends the dense analysis with five studies, every number computed from
+the regimeA decoder sketch (196 matrices, 160 ticks, k=4096; rel std about 1/sqrt(k) about 1.6
+percent). Metrics dumped to report_dense_v2_metrics.json. Coherent one-line read: the dense GRPO
+trajectory is globally near-linear and low-rank, but the look-ahead's two-point slope overshoots, so
+a damped coefficient is the lever.
+
+- (a) LOW-RANK displacement subspace: stacking the 159 per-tick displacement vectors per matrix, the
+  median participation ratio is 7.6 of a 159 ceiling and a median of 26 components hold 90 percent of
+  the per-tick update energy. The cumulative displacement is nearly rank-1 (participation ratio about
+  1.2; one direction holds about 69 percent of the centered-trajectory energy). The RLVR low-rank
+  claim is SUPPORTED in the temporal sense. A like-for-like GLOBAL straight-line fit gives R squared
+  0.85 (through-origin extrapolation) and 0.68 (centered), which reconciles the prior report's "local
+  consecutive-step R squared decays to 0.32" with the cited paper's global about-0.9: same data, the
+  trajectory is one slow drift plus per-step noise, the local metric sees the noise and the global
+  metric sees the drift. Sketch noise inflates the residual, so 0.85 is a lower bound on the true
+  linearity. NOT computable from this data and not claimed: the matrix-native (LoRA-style) singular
+  rank of an individual weight matrix, which flatten-then-sketch destroys; and anything about
+  embeddings, RMSNorm gains or biases, which were not collected (decoder matrices only).
+- (b) PER-MATRIX projectability: the crossover horizon h* is tight across the decoder, 9 to 14 ticks
+  (median 11), and the ratio at h=10 spans only [0.956, 0.985]. The attention value and output
+  projections (v_proj, o_proj) in the middle-to-late layers project furthest (h* 13 to 14); MLP and
+  the attention key/query projections project least (h* 9 to 10). Projectability is a decoder-wide
+  property, not a few outliers.
+- (c) OPTIMAL coefficient: the naive alpha = h/Delta overshoots at every horizon. A damped alpha
+  (about 0.53 at h=10, about 0.74 at h=20) cuts the median weight_proj_ratio from 0.972 to 0.836 at
+  h=10, and keeps it below 1 at h=20 (1.173 to 0.897) where the naive rule fails. The gain grows with
+  horizon and is far above the 1.6 percent sketch floor. Mechanism: the two-point slope over-states
+  the persistent drift because it also captures per-step noise, so the naive rule extrapolates too
+  far; damping corrects the over-step. Caveat: the optimal alpha is fit in-sample (an oracle upper
+  bound), but it is stable across horizons (about 0.5 to 0.75), so a single fixed damped coefficient
+  near 0.5 captures most of the gain with no online estimation. This is the concrete deployable change
+  the dense data suggests for the look-ahead rule (to be validated in the compressed regime, where
+  EXP-42 already found the crossover at h*=5).
+- (d) LINEARITY vs projectability: more-linear matrices are more projectable. Spearman 0.45 (fine-scale
+  R squared at 1 tick vs crossover h*) and -0.51 (vs ratio at h=10, negative because lower ratio is
+  better). Significant at n=196 (5 percent threshold about 0.14). Real but loose: local linearity
+  explains part of projectability, the rest is set by how per-step noise inflates the two-point slope.
+- (e) LEARNED vs FIXED residual: inert on the dense run. The per-matrix scalar mean-shift residual
+  grows to at most 2.7e-9 (clip 1e-3), contributes relative norm about 1e-4 to the projection, and
+  changes the ratio by at most 6.5e-5, all below the 1.6 percent sketch floor. A scalar added
+  uniformly to a high-dimensional matrix barely moves the displacement norm or direction, and the
+  per-matrix mean drifts so smoothly that the fixed extrapolation has almost no retrospective error to
+  correct.

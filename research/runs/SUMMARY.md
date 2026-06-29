@@ -80,6 +80,39 @@ count-sketch of the 196 decoder matrices replayed offline on the MacBook.
   is built and pushed but DEFERRED to a fresh session (box auto-reaped
   mid-collection).
 
+### Dense-run weight-behavior v2 (deeper GPU-free follow-up)
+
+`runs/EXP-42/report_dense_v2.html` (builder `build_dense_report_v2.py`) adds five
+studies on the regime-A dense decoder sketch (196 matrices, 160 ticks, k=4096; rel
+std ~1.6%). One-line read: the dense GRPO trajectory is globally near-linear and
+low-rank, but the look-ahead's two-point slope overshoots, so a damped coefficient
+is the lever.
+
+- **Low-rank (RLVR claim, temporal sense) SUPPORTED.** Per-tick update subspace
+  participation ratio ~7.6 of a 159 ceiling (~26 components for 90% energy);
+  cumulative displacement is near rank-1 (PR ~1.2, top direction holds ~69% of the
+  centered energy). A like-for-like global straight-line fit gives R^2 ~0.85
+  (through-origin), reconciling the prior "local R^2 decays to 0.32" with the cited
+  paper's global ~0.9: one slow drift plus per-step noise, local metric sees the
+  noise, global sees the drift. NOT computable, not claimed: matrix-native (LoRA)
+  rank of a single weight matrix (flatten+sketch destroys it); embeddings / norms /
+  biases (not collected).
+- **Per-matrix crossover is tight:** h* 9 to 14 ticks (median 11), ratio@10 in
+  [0.956, 0.985]. Attention v_proj / o_proj (mid-to-late layers) project furthest;
+  MLP and k/q_proj least. Projectability is decoder-wide.
+- **A better-than-naive coefficient exists (actionable).** The naive alpha = h/Delta
+  overshoots. A damped alpha (~0.53 at h=10, ~0.74 at h=20) cuts the median ratio
+  0.972 to 0.836 at h=10 and keeps h=20 below 1 (1.173 to 0.897). The optimal alpha
+  is stable (~0.5 to 0.75), so a fixed damped coefficient near 0.5 is a deployable
+  change to the look-ahead rule (validate in the compressed regime, h*=5 there). The
+  two-point slope over-states the persistent drift because it captures per-step
+  noise; damping corrects the over-step.
+- **More-linear means more-projectable** (Spearman +0.45 vs h*, -0.51 vs ratio@10;
+  significant at n=196). Real but loose.
+- **Learned residual is inert** on the dense run (max |resid| 2.7e-9, ratio change
+  <= 6.5e-5, below the 1.6% sketch floor): a scalar mean-shift barely moves a
+  high-dimensional displacement and the per-matrix mean drifts smoothly.
+
 ## Bottom line
 
 The baseline is a comm-eff trainer that is **stable at low anchor latency but

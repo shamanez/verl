@@ -64,3 +64,49 @@ deferred new session (see NEW_SESSION_PROMPT.md), which also re-collects the den
   h*=5 is robust; the 5.85% is attributable to anchor-sampling (15 calib anchors vs ~28k sweep
   samples) in the collapsed regime, not a count-sketch reconstruction error (CPU parity is bit-exact
   and regimeA passes cleanly with identical machinery).
+
+## Dense-run v2 deeper analysis (regimeA, GPU-free, report_dense_v2.html)
+Builder runs/EXP-42/build_dense_report_v2.py (sibling of build_dense_report.py). All five studies
+computed from the regimeA decoder sketch only; rel std about 1/sqrt(k) about 1.6 percent stated where
+it matters. Coherent read: the dense GRPO trajectory is globally near-linear and low-rank, but the
+look-ahead's two-point slope overshoots, so a damped coefficient is the lever.
+
+(a) Low-rank displacement subspace + global linearity:
+| measure | p10 | p50 | p90 |
+|---|---|---|---|
+| participation ratio (per-tick increments, ceiling 159) | 5.5 | 7.6 | 10.7 |
+| components for 90% increment energy | 20 | 26 | 32 |
+| participation ratio (cumulative displacement) | - | 1.2 | - |
+| top-PC energy fraction (centered trajectory) | - | 0.69 | - |
+| global line-fit R^2 (centered) | 0.66 | 0.68 | 0.71 |
+| global line R^2 (through-origin extrapolation) | 0.83 | 0.85 | 0.86 |
+RLVR low-rank claim SUPPORTED (temporal sense). The global line-fit R^2 (0.85 through-origin)
+reconciles the prior local consecutive-step R^2 (0.80 at 1 tick, 0.32 at K=10) with the cited paper's
+global about-0.9: same data, one slow drift plus per-step noise; the local metric sees the noise, the
+global metric sees the drift. Sketch noise inflates the residual so 0.85 is a lower bound. NOT
+computable, not claimed: matrix-native (LoRA) singular rank of a single weight matrix (flatten+sketch
+destroys it); embeddings / RMSNorm gains / biases (not collected, decoder only).
+
+(b) Per-matrix projectability: crossover h* tight 9 to 14 ticks (median 11); ratio@10 spans
+[0.956, 0.985]. Furthest: attention v_proj / o_proj in mid-to-late layers (h* 13 to 14). Least: MLP
+and attention k/q_proj (h* 9 to 10). h* histogram {9:1, 10:56, 11:114, 12:21, 13:2, 14:2}.
+
+(c) Optimal-coefficient sweep (Delta=10): naive alpha=h/Delta overshoots at every horizon.
+| h | naive alpha | ratio@naive | opt alpha | ratio@opt | gain |
+|---|---|---|---|---|---|
+| 5 | 0.50 | 0.849 | 0.33 | 0.780 | 0.069 |
+| 10 | 1.00 | 0.972 | 0.53 | 0.836 | 0.135 |
+| 20 | 2.00 | 1.173 | 0.74 | 0.897 | 0.276 |
+Optimal alpha is well below naive (about 0.5 to 0.75), and at h=20 it keeps the ratio below 1 where
+naive fails. Mechanism: the two-point slope over-states the persistent drift (it also captures
+per-step noise), so naive extrapolates too far; damping corrects it. Gains far exceed the 1.6 percent
+sketch floor. Caveat: in-sample oracle, but alpha is stable, so a fixed damped coefficient near 0.5 is
+a deployable change to the look-ahead rule (validate in the compressed regime, h*=5 there).
+
+(d) Linearity vs projectability: more-linear -> more-projectable. Spearman 0.45 (R^2@1 vs h*),
+-0.51 (R^2@1 vs ratio@10, negative is better). Significant at n=196. Real but loose.
+
+(e) Learned vs fixed residual: inert on the dense run. max|resid| 2.7e-9 (clip 1e-3), residual-term
+rel-norm about 1e-4, |delta ratio| at most 6.5e-5, all below the 1.6 percent sketch floor. A scalar
+shift barely moves a high-dim displacement; the per-matrix mean drifts smoothly so the fixed
+extrapolation has near-zero retrospective error.
