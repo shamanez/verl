@@ -20,27 +20,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Expand handle paths (files or dirs of *.json) into instance ids, capturing the
-# vast_account stamped on each handle so we destroy with the RIGHT account even
-# when the ledger has no row for this id yet.
-declare -A HANDLE_ACCT       # instance_id -> vast_account (from the handle JSON)
+# Expand handle paths (files or dirs of *.json) into instance ids. The vast_account
+# for each id is resolved later by acct_for_iid, which re-scans these same paths —
+# kept map-free for bash 3.2 (macOS default ships no associative-array support).
 for hp in "${HANDLE_PATHS[@]:-}"; do
   [[ -z "$hp" ]] && continue
   if [[ -d "$hp" ]]; then
     while IFS= read -r f; do
       iid=$(jq -r '.instance_id // empty' "$f" 2>/dev/null || true)
-      [[ -n "$iid" ]] || continue
-      IDS+=("$iid")
-      a=$(jq -r '.vast_account // empty' "$f" 2>/dev/null || true)
-      [[ -n "$a" ]] && HANDLE_ACCT["$iid"]="$a"
+      [[ -n "$iid" ]] && IDS+=("$iid")
     done < <(find "$hp" -maxdepth 2 -type f -name '*.json')
   elif [[ -f "$hp" ]]; then
     iid=$(jq -r '.instance_id // empty' "$hp" 2>/dev/null || true)
-    if [[ -n "$iid" ]]; then
-      IDS+=("$iid")
-      a=$(jq -r '.vast_account // empty' "$hp" 2>/dev/null || true)
-      [[ -n "$a" ]] && HANDLE_ACCT["$iid"]="$a"
-    fi
+    [[ -n "$iid" ]] && IDS+=("$iid")
   fi
 done
 
@@ -64,11 +56,31 @@ fi
 
 # Account a given instance id was provisioned on (default private). VAST_ACCOUNT
 # env, if set, forces that account for every id (manual override).
+# Scan the --handles paths for a handle whose instance_id matches $1, echo its
+# vast_account. bash 3.2 has no associative arrays, so we re-scan instead of a map.
+acct_from_handles() {
+  local iid="$1" hp f
+  for hp in "${HANDLE_PATHS[@]:-}"; do
+    [[ -z "$hp" ]] && continue
+    if [[ -d "$hp" ]]; then
+      while IFS= read -r f; do
+        if [[ "$(jq -r '.instance_id // empty' "$f" 2>/dev/null)" == "$iid" ]]; then
+          jq -r '.vast_account // empty' "$f" 2>/dev/null; return
+        fi
+      done < <(find "$hp" -maxdepth 2 -type f -name '*.json')
+    elif [[ -f "$hp" ]]; then
+      if [[ "$(jq -r '.instance_id // empty' "$hp" 2>/dev/null)" == "$iid" ]]; then
+        jq -r '.vast_account // empty' "$hp" 2>/dev/null; return
+      fi
+    fi
+  done
+}
+
 acct_for_iid() {
   local iid="$1" a=""
   if [[ -n "${VAST_ACCOUNT:-}" ]]; then vast_account_norm "$VAST_ACCOUNT"; return; fi
-  # 1) account stamped on the handle JSON passed via --handles (most authoritative)
-  a="${HANDLE_ACCT[$iid]:-}"
+  # 1) account stamped on a handle JSON passed via --handles (most authoritative)
+  a="$(acct_from_handles "$iid")"
   # 2) the provision handle dir (handles there are keyed by instance id)
   if [[ -z "$a" ]]; then
     local hf="$PROJECT_DIR/.claude/state/vast-handles/${iid}.json"
