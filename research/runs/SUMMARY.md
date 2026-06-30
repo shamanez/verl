@@ -169,3 +169,17 @@ per-step movement trajectory is the first tick of each global_step (ticks 0,2,..
 -> steps 1..80). Heavy .pt live in R2; local artifacts are the two small manifests +
 the internal log. Downstream differencing of consecutive snapshots must account for
 bf16 ~4e-3 relative error (or commission a future fp32 run, dump_dtype=fp32, ~984 GB).
+
+**Index + access (what every downstream issue reads).** The trace is self-describing: the
+index manifests live BOTH in R2 (`.../weights/full_manifest.jsonl` = per-tick per-matrix
+names/shapes/fp32-norms; `.../weights/r2_manifest.jsonl` = keys + verified sizes) AND tracked
+in-repo at `runs/EXP-43/regimeA/weights/{full_manifest,r2_manifest}.jsonl`. MANDATORY access
+discipline (do NOT bulk-download ~492 GB, it will exhaust disk): stream layer-wise/block-wise,
+reduce to small per-layer/per-block intermediates, combine, THEN render the HTML. Full pattern:
+`research/reports/r2-access-pattern-for-analysis.md` (also commented on every issue #44-#56).
+Ad-hoc aws->R2 needs `R2_*->AWS_*` (region=auto); the repo scripts map it internally.
+
+**Next (M4 analysis phase).** #43 (collection) is DONE and closed. The entry point is **#44**
+(extend the offline weight-projection sweep engine: orders>=2, damped-alpha, learnable-at-every-order,
+general regression, EMA/momentum, new GPU-free metrics) - the shared engine the rest of #45-#56
+build on. All downstream M4 issues are `kind:analysis` (GPU-free) and depend only on this trace.

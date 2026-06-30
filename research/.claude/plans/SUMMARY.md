@@ -34,3 +34,13 @@ kill-gates** — `../../reports/priority-1-anchor-staleness-k-collapse.html` and
 `../../reports/priority-2-compression-train-inference-mismatch.html`; gate before any GPU spend.
 
 Do not import invalid (pre-paired-replay) anchor claims or rebuild deleted plan files.
+
+## M4 weight-projection track (separate from the comm-eff fronts above)
+
+Dense weight-trajectory analysis, GPU-free. Shared trace = **EXP-43** (PASS, issue closed):
+per-tick full weights in R2 `s3://shamane-pluralis/verl-research/EXP-43/regimeA/weights/full/`
+(key `tick_<N>/tick_<N>.pt`, 160 bf16 snapshots, n_matrices=338, ~492 GB R2-only) + index
+manifests (R2 + `runs/EXP-43/regimeA/weights/`). Entry point = **#44** (the offline sweep
+engine); #45-#56 build on it. All `kind:analysis`. Stream the trace layer/block-wise
+(`reports/r2-access-pattern-for-analysis.md`) - never bulk-download. Reports go to
+`research/reports/`; results to `runs/SUMMARY.md` + each verdict.
