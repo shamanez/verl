@@ -150,3 +150,6 @@ research/runs/*/metrics/incoming.log
 research/runs/*/*/captures/
 research/runs/*/*/metrics/onbox/
 research/runs/*/*/metrics/incoming.log
+
+# EXP-42 weight-trajectory sketch traces (large local-only data; analysis outputs are committed)
+research/runs/EXP-42*/**/weights/

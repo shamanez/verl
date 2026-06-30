@@ -616,6 +616,58 @@ comm_eff:
     # stepA_fires_targets.jsonl (scalars only, ~KBs per fire).
     per_target_sidecar: true
 
+    # EXP-42 weight-trajectory sketch instrument (dump-only). OFF by default.
+    # Built independently of comm_eff.enabled, so the plain-GRPO (codec-OFF)
+    # regime is instrumented. Records a per-tick count-sketch (+ per-matrix mean)
+    # of the decoder weight matrices plus bounded EXACT fp32 headline scalars.
+    # Telemetry-only: never feeds the optimizer / EMA / Q.
+    weight_traj:
+
+      # Target dataclass for this configuration
+      _target_: verl.workers.config.CommEffWeightTrajConfig
+
+      # Master switch. false (default) => strict no-op (no observer/summon/IO).
+      enabled: false
+
+      # Count-sketch width (buckets). 4096 => rel. std ~ 1/sqrt(k) ~ 1.6%.
+      k: 4096
+
+      # Directory for sketch_tick_*.npz + manifest.jsonl + calib.jsonl. Empty =>
+      # ./weights at build. The launcher pins an absolute run-dir path.
+      out_dir: ""
+
+      # Sketch storage precision. "fp32" (default; REQUIRED for the weight-
+      # difference reconstruction) or "fp16" (absolute magnitudes only).
+      dump_dtype: fp32
+
+      # EXP-42 completeness extension. false (default) => the 196 decoder matrices
+      # the projector extrapolates. true => sketch EVERY 1-D/2-D param (decoder
+      # linears + the projector-EXCLUDED token embeddings / RMSNorm gains / attn
+      # biases), so the offline sweep can measure projection accuracy on the
+      # excluded params too (a direct test of the prior-work exclusion claim).
+      select_all: false
+
+      # Spacings Δ (ticks) the on-box EXACT calibration evaluates. The full
+      # horizon sweep is done offline from the sketch; this is the fp32 ground
+      # truth the sketch is validated against. Operating point: Δ=10.
+      calib_deltas: [10]
+
+      # Horizons h (ticks) the on-box EXACT calibration evaluates. Operating
+      # point: h=10. Add 5/20 for under/over-shoot if host RAM permits.
+      calib_horizons: [10]
+
+      # Ticks between opening exact-calib tripoint groups. 0 => AUTO = max(Δ+h)
+      # so groups never overlap (≤3 full snapshots in flight per config).
+      calib_stride: 0
+
+      # Hard cap on retained full fp32 snapshots (the CPU-OOM guard; each is
+      # ~5 GB on Qwen2.5-1.5B). New calib groups are dropped past the cap.
+      calib_max_snapshots: 6
+
+      # Sketch/compute/write on DP rank 0 only (the summoned full params are
+      # DP-identical). Other ranks build an inactive observer (symmetric summon).
+      rank0_only: true
+
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training

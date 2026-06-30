@@ -2565,6 +2565,87 @@ class FSDPEngine(BaseEngine):
             ring.push(tick, g_comp, g_norms)
         lag.push(tick, g_comp, g_norms)
 
+    def _maybe_comm_eff_weight_traj(self) -> None:
+        """Per-tick weight-trajectory sketch (FSDP override — EXP-42).
+
+        Runs in ``BaseEngine.train_batch`` AFTER the backward (+ optional
+        grad-correction / geometry probe) and BEFORE ``optimizer_step`` — it
+        records the tick's PRE-update weights ``θ[t]``. Summons the full decoder
+        weight matrices (the FSDP1 summon is a COLLECTIVE entered on EVERY rank
+        for deadlock safety), selects exactly the 196 decoder 2-D matrices (same
+        selector as the projector), moves them to CPU/fp32, and hands them to the
+        :class:`WeightTrajObserver`, which writes the compact count-sketch +
+        per-matrix mean (+ sparse exact fp32 headline scalars).
+
+        Gated on the ``_weight_traj_observer`` attribute (attached by the worker
+        whenever ``comm_eff.probe.weight_traj.enabled``), NOT the comm_eff state —
+        so the plain-GRPO (codec OFF) regime is instrumented too. Strict
+        telemetry: reads the live weights, mutates nothing the optimizer sees.
+        """
+        observer = getattr(self, "_weight_traj_observer", None)
+        if observer is None or not getattr(observer, "enabled", False):
+            return
+
+        from verl.workers.comm_eff.capture import select_weight_traj_targets
+
+        substrs = getattr(observer, "target_substrs", None)
+        select_all = bool(getattr(observer, "select_all", False))
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        _world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+        rank0_only = bool(getattr(observer, "rank0_only", True))
+        is_writer = (_rank == 0) or (not rank0_only)
+
+        module_is_fsdp1 = isinstance(self.module, FSDP) and not isinstance(self.module, FSDPModule)
+        # FSDP2 + rank0_only + multi-rank would DEADLOCK: the per-param
+        # DTensor.full_tensor() all-gather below runs only inside the rank-0
+        # writer block, so non-writer ranks never enter the matching collective.
+        # EXP-42 runs FSDP1 (summon_full_params is the all-rank collective and
+        # the summoned params are plain tensors, so full_tensor() is never hit),
+        # and single-GPU has no collective at all — so fail loudly instead of
+        # hanging only in the unsupported FSDP2 multi-rank rank0_only case.
+        if (not module_is_fsdp1) and _world > 1 and rank0_only:
+            raise RuntimeError(
+                "comm_eff weight_traj probe under FSDP2 multi-rank requires "
+                "comm_eff.probe.weight_traj.rank0_only=false (rank0_only=true would "
+                "deadlock on DTensor.full_tensor(), a per-rank collective). EXP-42 uses "
+                "FSDP1; set actor.strategy=fsdp or rank0_only=false."
+            )
+
+        def _summon_ctx():
+            if module_is_fsdp1:
+                use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
+                if not use_orig:
+                    raise RuntimeError(
+                        "comm_eff weight_traj probe under FSDP1 requires "
+                        "actor_rollout_ref.actor.fsdp_config.use_orig_params=true "
+                        "(summon_full_params needs it)."
+                    )
+                # Weights only — no grads needed for the trajectory snapshot.
+                return FSDP.summon_full_params(self.module, with_grads=False, writeback=False)
+            return nullcontext()
+
+        weights = {}
+        with _summon_ctx():  # COLLECTIVE — entered on EVERY rank (deadlock-safe)
+            if is_writer:
+                inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                materialized = []
+                for _name, _p in inner.named_parameters():
+                    # select_all (EXP-42 completeness) takes EVERY param; otherwise
+                    # pre-filter to the substr set before the (cheap) full_tensor().
+                    if not select_all and not any(s in _name for s in (substrs or ())):
+                        continue
+                    _full = _p.full_tensor() if isinstance(_p, DTensor) else _p
+                    materialized.append((_name, _full))
+                for _cn, _full in select_weight_traj_targets(materialized, substrs, select_all=select_all):
+                    # copy to CPU/fp32: the live param tensor is reused by the
+                    # optimizer step that follows — an aliased store would race.
+                    weights[_cn] = _full.detach().to(device="cpu", dtype=torch.float32, copy=True)
+        if not is_writer:
+            return
+
+        global_step = int(getattr(self, "_comm_eff_global_step", -1) or -1)
+        observer.observe(weights, global_step=global_step)
+
     def _maybe_comm_eff_capture_g_dense(self, data, loss_function) -> None:
         """FSDP override: parallel UNCOMPRESSED G_dense capture.
 

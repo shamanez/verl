@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# EXP-42 ON-BOX DRIVER — GPU busy from minute 1, zero idle gaps.
+# EXP-42 ON-BOX DRIVER — weight-projection accuracy study (2-regime, single-GPU).
+# Re-materialised 2026-06-29 for the 2-regime design. Runs the two regimes
+# back-to-back inside ONE tmux, STRICTLY sequential:
+#   regimeA (plain GRPO, COMM_EFF_ENABLED=false)
+#   regimeB (PowerSGD r=77, codec only — anchor + spectral OFF)
+# Each: 80 steps (=160 optimizer ticks) @ resp=1024, dynamic batching,
+# probe.weight_traj.enabled=true (per-tick count-sketch + bounded exact calib).
 #
-# Runs the 3 training cells back-to-back inside a single tmux, STRICTLY sequential:
-#   run1 (fixed_linear@0.50) -> run2 (learned@0.50) -> run3 (no-projection)
-# Each: 100 steps @ 1024 ctx, anchor delay_K=cadence=10, full batch, DYNAMIC batching.
-#
-# NO smoke phase (operator 2026-06-26): the FSDP +2-backward path was already
-# validated (a prior smoke GATE_PASS on this exact code + run1 ran healthy through
-# step 7). We go straight to training. on_fail=continue per the plan — a collapse is
-# expected DATA, not a stop (the per-fire grad_proj_gain is the headline and is
-# captured even on an early collapse). The training-log-monitor subagent catches
-# NaN/OOM/Traceback within the first few steps if the new (dynamic-batching) path
-# misbehaves.
+# on_fail policy (per plan):
+#   regimeA = STOP   (if plain GRPO can't run on 1xH200, the single-GPU premise
+#                     is broken — fix before B; do NOT waste B's compute)
+#   regimeB = continue (a collapse is ALLOWED data — the codec trajectory IS the
+#                     measurement; the per-tick sketch is captured even on collapse)
 #
 # Launch:  tmux new -d -s exp42 'bash /workspace/runs/EXP-42/drive.sh'
 # Watch:   tail -f /workspace/runs/EXP-42/drive.status
@@ -22,17 +22,34 @@ STATUS="$BASE/drive.status"
 : > "$STATUS"
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$STATUS"; }
 
-log "DRIVE START (no smoke — direct to training, dynamic batching)"
+log "DRIVE START — 2 regimes sequential (regimeA plain-GRPO -> regimeB powersgd-r77 codec-only)"
 
-# ---------- The 3 cells, STRICTLY sequential, no gaps ----------
-for CELL in run1 run2 run3; do
-  log "PHASE $CELL START"
-  bash "$BASE/run_cell.sh" "$CELL"
+for REGIME in regimeA regimeB; do
+  log "PHASE $REGIME START"
+  bash "$BASE/run_cell.sh" "$REGIME"
   RC=$?
-  IL="$BASE/$CELL/train_${CELL}_internal.log"
-  FIRES=$(grep -cE "\[grad-proj-probe\]" "$IL" 2>/dev/null || echo 0)
+  OUT="$BASE/$REGIME"
+  IL="$OUT/train_${REGIME}_internal.log"
+  NPZ=$(ls "$OUT/weights/"sketch_tick_*.npz 2>/dev/null | wc -l | tr -d ' ')
+  MAN=$(wc -l < "$OUT/weights/manifest.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
+  CAL=$(wc -l < "$OUT/weights/calib.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
   VAL=$(grep -oE "val-core[^ ]*acc/mean@1:[0-9.]+" "$IL" 2>/dev/null | tail -1 || echo "n/a")
-  log "PHASE $CELL DONE rc=$RC grad_proj_fires=$FIRES last_val=$VAL"
+  log "PHASE $REGIME DONE rc=$RC sketch_npz=$NPZ manifest_rows=$MAN calib_rows=$CAL last_val=$VAL"
+  # on_fail=stop gate for regimeA keys on the CAPTURED TRAJECTORY LENGTH, NOT rc.
+  # The launcher routinely exits rc!=0 from BENIGN atexit teardown noise (a
+  # DataLoader-worker SIGKILL during the final wandb flush + a stale
+  # launcher-internal done.flag path) AFTER training + val + checkpoint + sync +
+  # the FULL per-tick sketch capture all complete (observed regimeA 2026-06-29:
+  # rc=1 but 80/80 steps + 160 sketches). Gating on rc falsely aborts the chain;
+  # gate on the trajectory we actually paid for instead.
+  EXPECT=$((2 * 80))   # 2 optimizer ticks/step at batch128/mini64
+  if [[ "$REGIME" == "regimeA" ]] && (( NPZ < EXPECT - 20 )); then
+    log "REGIME A INCOMPLETE (sketch_npz=$NPZ < ~$EXPECT) — single-GPU plain-GRPO premise broken; STOP before B (on_fail=stop)"
+    break
+  fi
+  if [[ "$REGIME" == "regimeA" && "$RC" -ne 0 ]]; then
+    log "REGIME A launcher rc=$RC but trajectory complete (sketch_npz=$NPZ ~ $EXPECT) — benign teardown rc, proceeding to regimeB"
+  fi
 done
 log "ALL_DONE"
 echo "EXP42_DRIVE_COMPLETE"
