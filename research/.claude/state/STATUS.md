@@ -1,33 +1,37 @@
-# Research Status — 2026-06-30T15:55+10:00
+# Research Status — 2026-06-30T16:40+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 43 | Weight-proj: collect shared dense GRPO weight traj (select_all observer, regime A) | RUNNING (monitor active) | external 1×H200 i_43190371 (team) | — | `status:running`, kind:experiment, M4. Runner attached + launched tmux `exp43a` ALIVE. code_change=false (wiring grep hit @ HEAD ded0762). WandB `exp42-regimeA-exp43`. **Gate 1 + Gate 4 pre-confirmed in resolved cmd** (select_all=true reached observer; comm_eff.enabled=false master off). training-log-monitor dispatched (bg). |
-| 42 | M4 weight-projection accuracy vs horizon | DONE | external boxes TORN_DOWN | pass | CLOSED (status:pass). The narrow 196-matrix study; de-bloated. EXP-43 widens to select_all (~338 matrices), regime A only. |
-| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 TORN_DOWN | STOP | fixed-linear θ̂ falsified; cell B collapsed via length-explosion. |
+| 43 | Weight-proj: collect dense GRPO **FULL weight matrices** (bf16, per step, regime A) | READY (code done) | external 1×H200 i_43190371 (team) **ABORTED+held** | — | `status:approved`. First attempt (count-sketch) ABORTED by operator mid-load. Study REDEFINED to FULL per-step weights; sketch/calib code REMOVED; code DONE + pushed `vast-ai-workload@12202b0e`. New session: attach 43190371, fetch, smoke, launch. |
+| 42 | M4 weight-projection accuracy vs horizon | DONE | TORN_DOWN | pass | CLOSED. Narrow 196-matrix count-sketch study; its sketch-analysis tooling removed this session. |
+| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | TORN_DOWN | STOP | fixed-linear θ̂ falsified; cell B length-explosion. |
 
 ## Last tick
-2026-06-30T15:59+10:00 · running=[43] · launching=[] · analyzing=[] · logging=[] · blocked=[]
-Runner returned RUNNING (exp43a ALIVE, ledger row RUNNING+external+team, heartbeat owned).
-training-log-monitor active (bg, 40-min poll). Teardown sweep ran clean — box correctly survived.
+2026-06-30T16:40+10:00 · running=[] · aborted+held=[43] · analyzing=[] · logging=[] · blocked=[]
+EXP-43 first attempt operator-aborted; instrument redefined + reimplemented (full-weights);
+code committed + pushed to vast-ai-workload; box held for new-session relaunch.
 
-## Pipeline state
-EXP-43 is the ROOT of the M4 weight-proj dependency spine (depends_on: []). First tick: the
-experiment-runner is attaching the operator-provided external 1×H200 (instance 43190371, team
-account) and launching the single dense regime-A collection cell (exp42_run_cell.sh regimeA,
-WEIGHT_TRAJ_SELECT_ALL=true, RUN_DIR=/workspace/runs/EXP-43). No provisioning — external box,
-do NOT auto-replace. Awaiting runner's RUNNING report → then dispatch training-log-monitor.
+## Pipeline state — EXP-43 REDEFINED to FULL weights (operator, 2026-06-30)
+The count-sketch (k=4096) weight-trajectory instrument was REMOVED. `WeightTrajObserver` now
+dumps the FULL weight matrices once per training step (bf16 default, `full/step_<gs>.pt` +
+`full_manifest.jsonl`), no compression. Code change is DONE + committed + pushed:
+`shamanez/verl` `vast-ai-workload@12202b0e`. Plan `.claude/plans/43.md` reconciled (code_change:true,
+status:DONE; new session fetches vast-ai-workload + launches, no re-patch). Local validation:
+py_compile OK; observer + `verify_full_weight_dump.py` CPU-smoked PASS.
 
-## Acceptance gates (this run is ACCEPTED iff ALL FOUR hold)
-1. Widened instrument fired: select_all=True banner + first manifest.jsonl n_matrices ≈ 338 (NOT 196).
-2. Trajectory >= 80 steps (≈160 ticks, ~160 sketch_tick_*.npz), no NaN/Inf.
-3. Sketch fidelity <= 5% rel vs on-box exact fp32 calib.jsonl at grid deltas=[10]×horizons=[5,10,20].
-4. Dense regime codec-OFF: powersgd_applications=0, anchor_backwards=0, spectral_corrections=0.
-Then: trace synced to research/runs/EXP-43/regimeA/weights/, WandB backfilled to step 80, box TORN_DOWN.
+## What the NEW session does (the run was handed off)
+1. Attach external box `43190371` (1×H200, team) — still up; `attach_box` in the plan. If reaped, provision per chain.
+2. On box: `git fetch origin vast-ai-workload && git checkout -fB vast-ai-workload origin/vast-ai-workload`; assert
+   `grep _dump_full verl/workers/comm_eff/capture.py` hits and `grep -c "class CountSketch" ...` is 0.
+3. Smoke 1-2 steps → confirm `full/step_*.pt` load as ≈338 real tensors; then launch the 80-step regime-A cell:
+   `exp42_run_cell.sh regimeA` with `RUN_DIR=/workspace/runs/EXP-43 WEIGHT_TRAJ_SELECT_ALL=true WEIGHT_TRAJ_FULL_DTYPE=bf16 WEIGHT_TRAJ_FULL_EVERY=1`.
+4. Gates: 80 `full/step_*.pt` (n_matrices≈338, real shapes), no NaN, `verify_full_weight_dump.py` PASS, comm_eff counters 0.
+5. Sync ~246 GB to MacBook (needs ≈250 GB free), backfill WandB, THEN tear down.
 
-## Budget
-External operator box (team account), max_dph $8.0, max_gpu_hr 14. Single live instance once attached.
-Teardown is a MUST after the trace syncs + gates pass — external boxes are not exempt.
-On terminal gate failure: log STUCK + MANUAL_REVIEW_NEEDED, do NOT auto-provision a replacement.
+## Budget / box
+External operator box `43190371` (team) is UP and idle (training killed). Intentionally NOT torn down
+(operator chose keep-up for the relaunch). CAVEAT: the harness auto-reaper may destroy an idle external
+box after ~30-60 min of stale heartbeat; if so, the new session re-attaches/re-provisions per the chain.
+Teardown is a MUST after the new run's trace syncs + gates pass.
