@@ -37,3 +37,4 @@ prior anchor-usage + beta_anc sweeps were null beyond eval noise. Do not import 
 claims or run labels into new plans.
 [2026-06-30T15:42:58+10:00] [research-planner #43] plan written
 [2026-06-30T15:43:21+10:00] [triage] dispatched 1 planner, 0 issues already planned
+[2026-06-30T15:54:06+10:00] [orchestrator] tick1: EXP-43 READY_TO_RUN → dispatched experiment-runner (attach external 1xH200 i_43190371 team, launch regimeA collection cell). box SSH-probed healthy. awaiting RUNNING report → monitor next.

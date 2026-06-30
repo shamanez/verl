@@ -1,32 +1,31 @@
-# Research Status — 2026-06-29
+# Research Status — 2026-06-30T15:55+10:00
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 42 | M4 weight-projection accuracy vs horizon (fixed vs learned · plain GRPO vs +compression) | PLAN_READY | none yet (single 1×H200, observe-only) | — | **REFRAMED 2026-06-29 (operator):** measure how accurately `θ̂` projects the WEIGHTS (not gradients) as a function of steps-ahead, at the **K=10** operating point, in 2 regimes. Collection on GPU (incl. exact on-box headline); horizon sweep + report on the MacBook from the tiny sketch (~320 MB/regime). 1 box, 2 sequential runs, then teardown. Plan `.claude/plans/42.md`; runbook `runs/EXP-42/RUNBOOK.md`. Single-GPU **operator-authorized**: 1×H200, fall back to 1×B200 ONLY on OOM; full permission to fit to H200. |
-| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 i_42465843 (team) TORN_DOWN | STOP | probe PASSED 10/10 (code correct); cell A 5/5 ref clean (val@100=0.7066); cell B collapsed (val@100=0.0478) via length-explosion; lift +0.0267 present but merger over-amplified. WandB A=7tbzm9kl B=g6dt6bza |
+| 43 | Weight-proj: collect shared dense GRPO weight traj (select_all observer, regime A) | LAUNCHING | external 1×H200 i_43190371 (team), attaching | — | `status:approved`, kind:experiment, M4. First tick: runner dispatched to attach + launch regime-A cell. Box SSH-probed healthy (H200 143771 MiB, idle, 400G free). code_change=false (instrument already on vast-ai-workload). |
+| 42 | M4 weight-projection accuracy vs horizon | DONE | external boxes TORN_DOWN | pass | CLOSED (status:pass). The narrow 196-matrix study; de-bloated. EXP-43 widens to select_all (~338 matrices), regime A only. |
+| 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 TORN_DOWN | STOP | fixed-linear θ̂ falsified; cell B collapsed via length-explosion. |
 
 ## Last tick
-2026-06-29 · running=[] · analyzing=[] · logging=[] · blocked=[]
+2026-06-30T15:55+10:00 · running=[] · launching=[43] · analyzing=[] · logging=[] · blocked=[]
 
 ## Pipeline state
-EXP-42 **reframed** to a weight-projection-accuracy measurement at the **K=10** operating point
-(operator ruling: weights MUST be verified accurate before any gradient claim). A gradient-accuracy
-follow-up is **deferred to a separate future session** — no plan kept (avoids agent pollution). No
-experiment in flight; GPU OFF (operator-managed). Next GPU step = EXP-42's 2-regime single-GPU
-observe run (1×H200, B200 fallback on OOM); single-GPU is operator-authorized.
+EXP-43 is the ROOT of the M4 weight-proj dependency spine (depends_on: []). First tick: the
+experiment-runner is attaching the operator-provided external 1×H200 (instance 43190371, team
+account) and launching the single dense regime-A collection cell (exp42_run_cell.sh regimeA,
+WEIGHT_TRAJ_SELECT_ALL=true, RUN_DIR=/workspace/runs/EXP-43). No provisioning — external box,
+do NOT auto-replace. Awaiting runner's RUNNING report → then dispatch training-log-monitor.
 
-## Open notes for operator
-- `runs.jsonl` still has a line-4 `EXP-42-run1` BYO box (RUNNING, operator-managed) from the OLD
-  gradient run — tear down or repurpose at will; the reframe does not touch it.
-- Single-GPU `num_gpus=1` is a documented (operator-authorized) deviation from the sanctioned
-  `gpu_filter_chain` (4×H200/8×H100); 1×H200 primary, 1×B200 fallback on OOM.
-
-## EXP-41 close-out summary (most recent CLOSED experiment)
-- VERDICT: STOP — fixed-linear θ̂=2θ[t-20]-θ[t-40] at 20/20: cell A 5/5 ref clean (0.6998/0.7255/0.7233/0.7066),
-  cell B collapsed (0.36→0.50→0.11→0.048) via response-length explosion; cos-lift present but merger over-amplified.
-- Deferred direction: lower beta_anc — SUPERSEDED by the EXP-42 reframe (measure the weight projection first).
+## Acceptance gates (this run is ACCEPTED iff ALL FOUR hold)
+1. Widened instrument fired: select_all=True banner + first manifest.jsonl n_matrices ≈ 338 (NOT 196).
+2. Trajectory >= 80 steps (≈160 ticks, ~160 sketch_tick_*.npz), no NaN/Inf.
+3. Sketch fidelity <= 5% rel vs on-box exact fp32 calib.jsonl at grid deltas=[10]×horizons=[5,10,20].
+4. Dense regime codec-OFF: powersgd_applications=0, anchor_backwards=0, spectral_corrections=0.
+Then: trace synced to research/runs/EXP-43/regimeA/weights/, WandB backfilled to step 80, box TORN_DOWN.
 
 ## Budget
-0 live instances (harness-provisioned). No active spend. Operator-managed BYO box may still exist (see notes).
+External operator box (team account), max_dph $8.0, max_gpu_hr 14. Single live instance once attached.
+Teardown is a MUST after the trace syncs + gates pass — external boxes are not exempt.
+On terminal gate failure: log STUCK + MANUAL_REVIEW_NEEDED, do NOT auto-provision a replacement.
