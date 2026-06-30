@@ -2566,16 +2566,16 @@ class FSDPEngine(BaseEngine):
         lag.push(tick, g_comp, g_norms)
 
     def _maybe_comm_eff_weight_traj(self) -> None:
-        """Per-tick weight-trajectory sketch (FSDP override — EXP-42).
+        """Per-tick full-weight observe hook (FSDP override).
 
         Runs in ``BaseEngine.train_batch`` AFTER the backward (+ optional
         grad-correction / geometry probe) and BEFORE ``optimizer_step`` — it
-        records the tick's PRE-update weights ``θ[t]``. Summons the full decoder
-        weight matrices (the FSDP1 summon is a COLLECTIVE entered on EVERY rank
-        for deadlock safety), selects exactly the 196 decoder 2-D matrices (same
-        selector as the projector), moves them to CPU/fp32, and hands them to the
-        :class:`WeightTrajObserver`, which writes the compact count-sketch +
-        per-matrix mean (+ sparse exact fp32 headline scalars).
+        records the tick's PRE-update weights ``θ[t]``. Summons the full weight
+        matrices (the FSDP1 summon is a COLLECTIVE entered on EVERY rank for
+        deadlock safety), selects the target matrices (the 196 decoder 2-D set, or
+        ALL ~338 1-D/2-D params under select_all), moves them to CPU/fp32, and
+        hands them to the :class:`WeightTrajObserver`, which saves the FULL weight
+        matrices to disk once per training step (no compression).
 
         Gated on the ``_weight_traj_observer`` attribute (attached by the worker
         whenever ``comm_eff.probe.weight_traj.enabled``), NOT the comm_eff state —

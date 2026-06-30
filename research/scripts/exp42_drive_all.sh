@@ -30,16 +30,16 @@ for REGIME in regimeA regimeB; do
   bash "$BASE/run_cell.sh" "$REGIME"
   RC=$?
   OUT="$ADIR/$REGIME"
-  NPZ=$(ls "$OUT/weights/"sketch_tick_*.npz 2>/dev/null | wc -l | tr -d ' ')
-  MAN=$(wc -l < "$OUT/weights/manifest.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
-  CAL=$(wc -l < "$OUT/weights/calib.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
-  NMAT=$(head -1 "$OUT/weights/manifest.jsonl" 2>/dev/null | python3 -c "import sys,json;print(json.loads(sys.stdin.readline())['n_matrices'])" 2>/dev/null || echo "?")
+  NPT=$(ls "$OUT/weights/full/"step_*.pt 2>/dev/null | wc -l | tr -d ' ')
+  MAN=$(wc -l < "$OUT/weights/full_manifest.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
+  NMAT=$(head -1 "$OUT/weights/full_manifest.jsonl" 2>/dev/null | python3 -c "import sys,json;print(json.loads(sys.stdin.readline())['n_matrices'])" 2>/dev/null || echo "?")
   VAL=$(grep -oE "val-core[^ ]*acc/mean@1:[0-9.]+" "$OUT/train_${REGIME}_internal.log" 2>/dev/null | tail -1 || echo "n/a")
-  log "PHASE $REGIME DONE rc=$RC sketch_npz=$NPZ manifest_rows=$MAN calib_rows=$CAL n_matrices=$NMAT last_val=$VAL"
+  log "PHASE $REGIME DONE rc=$RC full_step_pt=$NPT manifest_rows=$MAN n_matrices=$NMAT last_val=$VAL"
   # Gate on captured-trajectory length, NOT rc (launcher exits rc=1 from benign atexit teardown noise).
-  EXPECT=$((2 * 80))
-  if [[ "$REGIME" == "regimeA" ]] && (( NPZ < EXPECT - 20 )); then
-    log "WIDENED REGIME A INCOMPLETE (sketch_npz=$NPZ < ~$EXPECT) — STOP before B"
+  # Full weights dump once per TRAINING STEP, so EXPECT = total_training_steps (80), not ticks.
+  EXPECT=80
+  if [[ "$REGIME" == "regimeA" ]] && (( NPT < EXPECT - 10 )); then
+    log "WIDENED REGIME A INCOMPLETE (full_step_pt=$NPT < ~$EXPECT) — STOP before B"
     break
   fi
 done

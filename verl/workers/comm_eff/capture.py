@@ -57,7 +57,6 @@ import re
 import threading
 from typing import Any, Optional
 
-import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
@@ -65,7 +64,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CaptureWriter",
     "CAPTURE_ROLES",
-    "CountSketch",
     "WeightTrajObserver",
     "select_weight_traj_targets",
     "maybe_build_weight_traj_observer",
@@ -87,9 +85,9 @@ __all__ = [
 #   Q_<family>     -> passive-screen candidate basis per family
 #                     (Q_act / Q_grad / Q_adv / Q_tail / Q_hybrid / Q_ticket), each
 #                     an (H, r) orthonormal basis the analyst judges by update geometry
-#   weights        -> a FULL current weight matrix theta_m[t] (the EXP-42 weight-
+#   weights        -> a FULL current weight matrix theta_m[t] (the weight-
 #                     trajectory role). Used only by the dump-only WeightTrajObserver
-#                     (count-sketch + per-matrix mean), never by the optimizer/EMA/Q.
+#                     (full per-step weight snapshot), never by the optimizer/EMA/Q.
 CAPTURE_ROLES = (
     "A",
     "A_hat",
@@ -337,33 +335,30 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
 
 
 # ====================================================================== #
-# EXP-42 weight-trajectory sketch instrument
+# Weight-trajectory FULL-weight instrument
 # ====================================================================== #
 #
-# A dump-only per-tick weight-trajectory recorder used by the look-ahead
-# weight-projection-accuracy study (research/.claude/plans/42.md). At every
-# optimizer tick it summons the FULL current decoder weight matrices and writes
-# a COMPACT count-sketch (+ per-matrix mean) instead of the ~5 GB full snapshot,
-# plus optional EXACT fp32 headline scalars from a bounded CPU snapshot ring. It
-# is strictly telemetry: it reads (never writes) the live weights, runs only on
-# the actor-train path, and feeds nothing back into the optimizer, EMA, sketch V
-# or Q.
+# A dump-only weight-trajectory recorder used by the M4 weight-projection study
+# (research/.claude/plans/43.md). The engine summons the FULL current weight
+# matrices on every optimizer tick and hands them here; the observer saves the
+# ACTUAL weight matrices to disk ONCE PER TRAINING STEP (deduped on global_step)
+# as ``full/step_<gs>.pt`` (a ``torch.save`` state dict) + a ``full_manifest.jsonl``
+# row. There is NO compression: the tensors saved ARE the weights (cast to
+# ``dump_dtype``), so ANY offline analysis can be run on them directly. It is
+# strictly telemetry: it reads (never writes) the live weights, runs only on the
+# actor-train path, and feeds nothing back into the optimizer, EMA, sketch V or Q.
 #
-# Design notes anchored to current behaviour:
-#   * The metrics the study reports — weight_proj_ratio = ||θ̂−target||/||θ_stale
-#     −target|| and dir_cos — are all functions of weight-DIFFERENCE vectors. A
-#     count-sketch is LINEAR, so sketch(θ_t)−sketch(θ_s) == sketch(θ_t−θ_s): the
-#     full horizon×method×spacing sweep is reconstructable OFFLINE from the saved
-#     per-tick sketches (rel. std ≈ 1/√k). The per-matrix MEAN is kept (fp32) so
-#     the learned-residual rule, whose update is mean(θ_now−θ̂_prev), replays
-#     offline too.
-#   * The sketch is stored fp32 (not fp16). The RLVR per-tick weight update is
-#     O(1e-6)/element — ~1e-3 relative to the weights — so an fp16-quantised
-#     ABSOLUTE sketch (≈1e-3 relative error) would swamp the very difference
-#     signal the study measures. fp32 keeps the differenced sketch accurate to
-#     ~1e-4 relative; the disk cost (≈3.2 MB/tick → ~0.5 GB/regime) is still
-#     negligible vs full snapshots (~5 GB/tick). ``dump_dtype`` exposes fp16 for
-#     callers who only need absolute magnitudes — do NOT use it for differencing.
+# Storage cost (Qwen2.5-1.5B, ~1.54B params): a bf16 full-model snapshot ≈ 3 GB;
+# fp32 ≈ 6 GB. Dumping per training step (NOT per tick) keeps an 80-step bf16
+# trajectory at ≈246 GB. ``dump_dtype=fp32`` doubles that and is needed only when
+# the downstream analysis differences consecutive steps (the ~1e-3 per-step update
+# would be swamped by bf16's ~4e-3 rounding); ``every_steps>1`` thins the
+# trajectory to fit a smaller disk.
+#
+# NOTE: an earlier version of this instrument stored a lossy k-bucket COUNT-SKETCH
+# of each matrix (non-invertible) plus a bounded exact-calibration ring. That was
+# REMOVED (operator directive 2026-06-30): the study needs the raw weights, not a
+# sketch. Recover the sketch implementation from git history if ever needed.
 
 # The decoder weight-matrix selector (matches the spectral merger / look-ahead
 # projector target set: q/k/v/o_proj + gate/up/down_proj, 2-D only). LayerNorm,
@@ -389,10 +384,10 @@ def select_weight_traj_targets(named_params, target_substrs=None, select_all: bo
     * ``select_all=True`` (EXP-42 completeness extension): select EVERY 1-D / 2-D
       float parameter — the 196 decoder linears PLUS the params the projector
       EXCLUDES (token embeddings, RMSNorm gains, attention biases). Lets the
-      offline sweep measure what linear weight projection WOULD do on the
+      offline analysis measure what linear weight projection WOULD do on the
       excluded params (a direct test of the prior-work exclusion claim). The
-      count-sketch / metric math is shape-agnostic (it operates on flat
-      weight-DIFFERENCE vectors), so 1-D params are handled identically.
+      full-weight dump is shape-agnostic (the whole tensor is saved as-is), so
+      1-D params are handled identically.
     """
     substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
     out = []
@@ -410,102 +405,57 @@ def select_weight_traj_targets(named_params, target_substrs=None, select_all: bo
     return out
 
 
-class CountSketch:
-    """Deterministic, cross-rank-identical count-sketch (a.k.a. feature hashing).
-
-    For a length-``d`` vector ``x`` it computes ``s[b] = Σ_{i: bucket(i)=b}
-    sign(i)·x[i]`` with ``bucket(i)∈[0,k)`` and ``sign(i)∈{±1}``. This is an
-    unbiased AMS/JL sketch: ``E‖s‖² = ‖x‖²`` and ``E⟨s_x,s_y⟩ = ⟨x,y⟩`` with
-    rel. std ≈ ``1/√k``, and it is LINEAR (``sketch(x−y) = sketch(x)−sketch(y)``)
-    so weight-difference norms/cosines reconstruct from per-snapshot sketches.
-
-    The hash/sign tables are drawn with **NumPy** ``default_rng(seed)`` (PCG64,
-    bit-stable across NumPy versions) seeded purely from ``(d, k)`` — so the
-    sketch is identical on every DP rank AND reproducible bit-for-bit by the
-    MacBook analysis (``research/scripts/weight_proj_sweep.py`` re-draws the same
-    tables). No rank/device/time input ⇒ no determinism leak.
-    """
-
-    def __init__(self, d: int, k: int):
-        self.d = int(d)
-        self.k = int(k)
-        rng = np.random.default_rng([self.d, self.k])
-        buckets = rng.integers(0, self.k, size=self.d, dtype=np.int64)
-        signs = (rng.integers(0, 2, size=self.d, dtype=np.int8).astype(np.float32) * 2.0) - 1.0
-        self._bucket = torch.from_numpy(buckets)
-        self._sign = torch.from_numpy(signs)
-
-    def sketch(self, x_flat: torch.Tensor) -> torch.Tensor:
-        """Return the length-``k`` fp32 sketch of the flat fp32 vector ``x_flat``."""
-        x = x_flat.detach().reshape(-1).to(torch.float32)
-        assert x.numel() == self.d, f"CountSketch dim mismatch: got {x.numel()} expected {self.d}"
-        bucket = self._bucket.to(x.device)
-        sign = self._sign.to(x.device)
-        s = torch.zeros(self.k, dtype=torch.float32, device=x.device)
-        s.scatter_add_(0, bucket, sign * x)
-        return s
-
-
 def _norm(t: torch.Tensor) -> float:
     return float(torch.linalg.norm(t.to(torch.float32)).item())
 
 
 class WeightTrajObserver:
-    """Per-tick dump-only weight-trajectory recorder (EXP-42).
+    """Per-step dump-only FULL-weight recorder.
 
     Constructed once per worker iff ``comm_eff.probe.weight_traj.enabled`` — and,
     crucially, INDEPENDENTLY of ``comm_eff.enabled`` so the plain-GRPO regime
     (codec OFF) is still instrumented. :meth:`observe` is the single entry point:
-    the engine summons the full decoder matrices to CPU/fp32 and hands them here;
-    this class writes the compact sketch + means and (sparsely) the EXACT fp32
-    headline scalars. Pure I/O — it never mutates the tensors it is given.
+    the engine summons the full weight matrices to CPU/fp32 and hands them here on
+    every optimizer tick; this class writes the **FULL weight matrices** to disk
+    ONCE PER TRAINING STEP (deduped on ``global_step``, gated by ``every_steps``)
+    as ``full/step_<gs>.pt`` (a ``torch.save`` state dict ``{canon_name -> tensor}``)
+    plus a ``full_manifest.jsonl`` row. Pure I/O — it never mutates the tensors it
+    is given, and feeds nothing back into the optimizer / EMA / Q.
 
-    All storage/IO is on DP rank 0 by default (the summoned full params are
-    DP-identical). Other ranks build an INACTIVE observer that no-ops, so the
-    engine's summon collective stays symmetric across ranks.
+    There is NO compression: the saved tensors ARE the weights (cast to
+    ``dump_dtype``), so any offline analysis can run on them directly. Storage is
+    on DP rank 0 by default (the summoned full params are DP-identical); other
+    ranks build an INACTIVE observer that no-ops so the engine's summon collective
+    stays symmetric across ranks.
     """
 
     def __init__(
         self,
         *,
         out_dir: str,
-        k: int = 4096,
-        dump_dtype: str = "fp32",
+        dump_dtype: str = "bf16",
         target_substrs=None,
         select_all: bool = False,
-        calib_deltas=(10,),
-        calib_horizons=(10,),
-        calib_stride: int = 0,
-        calib_max_snapshots: int = 6,
+        every_steps: int = 1,
         rank: Optional[int] = None,
         rank0_only: bool = True,
     ):
         self.enabled = True
         self.out_dir = out_dir or os.path.join(os.getcwd(), "weights")
-        self.k = int(k)
-        assert dump_dtype in ("fp32", "fp16"), dump_dtype
-        self._np_dtype = np.float32 if dump_dtype == "fp32" else np.float16
+        assert dump_dtype in ("bf16", "fp32"), dump_dtype
         self.dump_dtype = dump_dtype
+        self._torch_dtype = torch.bfloat16 if dump_dtype == "bf16" else torch.float32
         self.target_substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
-        # EXP-42 completeness extension: when True the observer sketches EVERY
-        # 1-D/2-D param (decoder linears + the projector-excluded embeddings /
-        # RMSNorm gains / biases), so the offline sweep can measure projection
-        # accuracy on the excluded params too. False = the 196-matrix projector set.
+        # Completeness extension: when True the observer dumps EVERY 1-D/2-D param
+        # (decoder linears + the projector-excluded embeddings / RMSNorm gains /
+        # biases) ≈ the whole model. False = the 196-matrix projector set.
         self.select_all = bool(select_all)
-        self.calib_deltas = tuple(int(x) for x in calib_deltas)
-        self.calib_horizons = tuple(int(x) for x in calib_horizons)
-        # Exact-calib grid = deltas × horizons (the on-box ground truth that the
-        # offline sketch sweep is validated against). Operating point: Δ=h=10.
-        self.calib_grid = [(d, h) for d in self.calib_deltas for h in self.calib_horizons]
-        # New tripoint group opens every ``calib_stride`` ticks. Default = the
-        # longest group lifetime (max Δ+h) so groups never overlap ⇒ ≤3 full
-        # snapshots in flight per config (bounded CPU memory). Each full snapshot
-        # is ~5 GB on Qwen2.5-1.5B, so the cap is the OOM guard.
-        if calib_stride and calib_stride > 0:
-            self.calib_stride = int(calib_stride)
-        else:
-            self.calib_stride = max((d + h for d, h in self.calib_grid), default=20)
-        self.calib_max_snapshots = int(calib_max_snapshots)
+        # Dump the FULL weights once per training step. The engine calls observe()
+        # per optimizer TICK (>=1 tick/step); we dedup on global_step and gate on
+        # ``every_steps`` so the on-disk trajectory is one snapshot per
+        # ``every_steps`` training step(s) — the disk-volume control (a bf16
+        # full-model snapshot is ~3 GB on Qwen2.5-1.5B).
+        self.every_steps = max(1, int(every_steps))
 
         if rank is None:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -514,212 +464,90 @@ class WeightTrajObserver:
         self._inactive = self.rank0_only and self.rank != 0
 
         self._tick = 0  # monotonic optimizer-tick counter (own; comm_eff may be off)
-        self._countsketches: dict = {}  # (d,k) -> CountSketch
-        self._calib_groups: list = []  # open tripoint groups
-        self._calib_snaps: dict = {}  # tick -> full fp32 snapshot (SHARED across groups)
-        self._calib_skipped = 0
-        self._n_sketched = 0
+        self._last_dumped_step = -1  # dedup: at most one full dump per global_step
+        self._n_dumped = 0
 
         if not self._inactive:
-            os.makedirs(self.out_dir, exist_ok=True)
-            self.manifest_path = os.path.join(self.out_dir, "manifest.jsonl")
-            self.calib_path = os.path.join(self.out_dir, "calib.jsonl")
+            self.full_dir = os.path.join(self.out_dir, "full")
+            os.makedirs(self.full_dir, exist_ok=True)
+            self.manifest_path = os.path.join(self.out_dir, "full_manifest.jsonl")
         print(
-            f"[comm_eff][weight_traj] observer out_dir={self.out_dir} k={self.k} "
-            f"dump_dtype={self.dump_dtype} select_all={self.select_all} calib_grid={self.calib_grid} "
-            f"calib_stride={self.calib_stride} calib_max_snapshots={self.calib_max_snapshots} "
+            f"[comm_eff][weight_traj] FULL-weight observer out_dir={self.out_dir} "
+            f"dump_dtype={self.dump_dtype} select_all={self.select_all} every_steps={self.every_steps} "
             f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive}",
             flush=True,
         )
 
-    # ------------------------------------------------------------------ #
-    def _cs_for(self, t: torch.Tensor) -> CountSketch:
-        d = int(t.numel())
-        cs = self._countsketches.get(d)
-        if cs is None:
-            cs = CountSketch(d, self.k)
-            self._countsketches[d] = cs
-        return cs
-
     def observe(self, weights: dict, global_step: int = -1) -> int:
-        """Record this tick's weight matrices. Returns the tick index (or -1).
+        """Record this tick. Dumps the FULL weights once per training step.
 
-        ``weights`` is ``{canon_name -> 2-D CPU fp32 tensor}`` (the selected
-        decoder matrices). Pure read: tensors are never mutated. No-op on an
-        inactive (non-writer) rank.
+        ``weights`` is ``{canon_name -> CPU fp32 tensor}`` (the selected matrices).
+        Pure read: tensors are never mutated. No-op on an inactive (non-writer)
+        rank. The engine calls this per optimizer TICK; the full dump fires only on
+        the FIRST tick of each new ``global_step`` (deduped), gated by
+        ``every_steps``. Returns the tick index (or -1 when inactive).
         """
         if self._inactive:
             return -1
         tick = self._tick
         self._tick += 1
 
-        # 1) per-matrix mean (fp32, computed in fp64 for accuracy — the mean is
-        #    tiny and feeds the learned-residual replay) + the count-sketch.
+        gs = int(global_step)
+        if gs >= 0 and gs != self._last_dumped_step and (gs % self.every_steps == 0):
+            self._dump_full(gs, weights)
+            self._last_dumped_step = gs
+        return tick
+
+    def _dump_full(self, global_step: int, weights: dict) -> None:
+        """Write this step's FULL weight matrices to ``full/step_<gs>.pt``.
+
+        No compression: each tensor is detached, cast to ``dump_dtype`` (bf16 by
+        default), moved to CPU and stored AS-IS in a ``torch.save`` state dict
+        ``{canon_name -> tensor}``. A ``full_manifest.jsonl`` row records per-matrix
+        name / shape / exact-fp32 Frobenius norm so the analyst can verify the dump
+        loads and the norms match the live weights within ``dump_dtype`` rounding.
+        """
         records = []
-        sketch_arrays = {}
+        state = {}
         for name in sorted(weights.keys()):
             w = weights[name]
-            flat = w.detach().reshape(-1).to(torch.float32)
-            mean = float(w.detach().to(torch.float64).mean().item())
-            s = self._cs_for(flat).sketch(flat)
-            san = _sanitize(name)
-            sketch_arrays[san] = s.cpu().numpy().astype(self._np_dtype)
-            rows = int(w.shape[0]) if w.dim() >= 1 else 0
-            cols = int(w.shape[1]) if w.dim() >= 2 else 1
+            t32 = w.detach().to(torch.float32)
+            fro = float(torch.linalg.norm(t32).item()) if t32.numel() else 0.0
+            state[name] = t32.to(self._torch_dtype).cpu().contiguous()
             records.append(
                 {
                     "name": name,
-                    "sanitized": san,
-                    "rows": rows,
-                    "cols": cols,
-                    "d": int(flat.numel()),
-                    "mean": mean,
-                    "fro_norm": _norm(flat),
+                    "shape": list(w.shape),
+                    "d": int(w.numel()),
+                    "fro_norm": fro,
                 }
             )
-
-        sketch_path = os.path.join(self.out_dir, f"sketch_tick_{global_step}_{tick}.npz")
-        np.savez(sketch_path, **sketch_arrays)
+        fname = f"step_{global_step}.pt"
+        fpath = os.path.join(self.full_dir, fname)
+        torch.save(state, fpath)
         with open(self.manifest_path, "a") as fh:
             fh.write(
                 json.dumps(
                     {
-                        "tick": tick,
                         "global_step": int(global_step),
-                        "k": self.k,
                         "dump_dtype": self.dump_dtype,
                         "n_matrices": len(records),
-                        "sketch_path": os.path.basename(sketch_path),
+                        "path": os.path.join("full", fname),
                         "matrices": records,
                     }
                 )
                 + "\n"
             )
-        self._n_sketched += 1
-
-        # 2) exact fp32 calib (sparse, bounded tripoint groups).
-        self._update_calib(tick, int(global_step), weights)
-        return tick
-
-    # ------------------------------------------------------------------ #
-    def _update_calib(self, tick: int, global_step: int, weights: dict) -> None:
-        """Open/advance/close the bounded exact-calib tripoint groups.
-
-        Each group for config ``(Δ, h)`` needs the full fp32 weights at three
-        ticks — ``old = base``, ``stale = base+Δ``, ``target = base+Δ+h`` — and
-        at the target tick computes the EXACT per-matrix ``weight_proj_ratio`` /
-        ``dir_cos`` ground truth.
-
-        **CPU-OOM guard (hard).** Snapshots are clones keyed by TICK in a SHARED
-        store (``_calib_snaps``); groups sampling the same tick reuse one clone.
-        The cap ``calib_max_snapshots`` is enforced at CAPTURE time on the number
-        of DISTINCT retained clones — when capturing a new tick would exceed it,
-        the capture is refused and any group that needed that tick is marked dead
-        (dropped, counted in ``_calib_skipped``) rather than risking OOM. A clone
-        is freed the moment no live group still references its tick. This bounds
-        peak retained clones to ``calib_max_snapshots`` for ANY stride / grid
-        (not just the default auto-stride single-config case). Each clone is the
-        ~5 GB live ``weights`` dict, so true peak ≈ (cap + 1) × that.
-        """
-        if not self.calib_grid or self.calib_max_snapshots <= 0:
-            return
-
-        # Open new groups (one per config) when the tick lands on the stride.
-        if tick % self.calib_stride == 0:
-            for (delta, h) in self.calib_grid:
-                self._calib_groups.append(
-                    {"delta": delta, "h": h, "base": tick,
-                     "need": {tick, tick + delta, tick + delta + h}, "dead": False}
-                )
-
-        # Capture this tick (once) iff a live group needs it AND the distinct-clone
-        # cap permits. Refusal ⇒ a gap, which kills any group that needed it.
-        want = any((tick in g["need"]) for g in self._calib_groups if not g["dead"])
-        if want and tick not in self._calib_snaps:
-            if len(self._calib_snaps) < self.calib_max_snapshots:
-                self._calib_snaps[tick] = {n: w.detach().to(torch.float32).clone() for n, w in weights.items()}
-            else:
-                self._calib_skipped += 1
-        captured = tick in self._calib_snaps
-
-        # Advance: kill groups that hit a capture gap; compute + close at target.
-        closed = []
-        for g in self._calib_groups:
-            if g["dead"]:
-                closed.append(g)
-                continue
-            if (tick in g["need"]) and not captured:
-                g["dead"] = True
-                closed.append(g)
-                continue
-            if tick == g["base"] + g["delta"] + g["h"]:
-                if g["need"] <= set(self._calib_snaps.keys()):
-                    self._emit_calib_row(g, global_step)
-                closed.append(g)
-        if closed:
-            self._calib_groups = [g for g in self._calib_groups if g not in closed]
-
-        # Free any retained clone no LIVE group still needs (handles shared ticks).
-        live_needed = set()
-        for g in self._calib_groups:
-            live_needed |= g["need"]
-        for tk in [t for t in self._calib_snaps if t not in live_needed]:
-            del self._calib_snaps[tk]
-
-    def _emit_calib_row(self, g: dict, global_step: int) -> None:
-        delta, h, base = g["delta"], g["h"], g["base"]
-        alpha = float(h) / float(delta)
-        old = self._calib_snaps[base]
-        stale = self._calib_snaps[base + delta]
-        target = self._calib_snaps[base + delta + h]
-        w1, dcos, w3 = [], [], []
-        for name in stale.keys():
-            if name not in old or name not in target:
-                continue
-            th_s = stale[name].to(torch.float32)
-            d_old = th_s - old[name].to(torch.float32)  # θ_stale − θ_old
-            d_tgt = th_s - target[name].to(torch.float32)  # θ_stale − target
-            proj_err = d_tgt + alpha * d_old  # θ̂_fix − target
-            den = _norm(d_tgt)
-            if den <= 0.0:
-                continue
-            w1.append(_norm(proj_err) / den)
-            tgt_norm = _norm(target[name])
-            if tgt_norm > 0.0:
-                w3.append(_norm(proj_err) / tgt_norm)
-            no, nt = _norm(d_old), den
-            if no > 0.0 and nt > 0.0:
-                ip = float(torch.sum(d_old * d_tgt).item())
-                dcos.append(-ip / (no * nt))  # cos(θ_stale−θ_old, target−θ_stale)
-
-        def _pct(a, q):
-            return float(np.percentile(np.asarray(a, dtype=np.float64), q)) if a else None
-
-        row = {
-            "anchor_tick": base + delta,  # s = θ_stale's tick (matches the sketch sweep)
-            "global_step": int(global_step),
-            "delta": delta,
-            "h": h,
-            "alpha": alpha,
-            "n_matrices": len(w1),
-            "weight_proj_ratio_p10": _pct(w1, 10),
-            "weight_proj_ratio_p50": _pct(w1, 50),
-            "weight_proj_ratio_p90": _pct(w1, 90),
-            "dir_cos_p50": _pct(dcos, 50),
-            "weight_relerr_p50": _pct(w3, 50),
-        }
-        with open(self.calib_path, "a") as fh:
-            fh.write(json.dumps(row) + "\n")
+        self._n_dumped += 1
         print(
-            f"[comm_eff][weight_traj] calib anchor_tick={row['anchor_tick']} Δ={delta} h={h} "
-            f"α={alpha:.3f} w1_p50={row['weight_proj_ratio_p50']} dir_cos_p50={row['dir_cos_p50']} "
-            f"n={row['n_matrices']}",
+            f"[comm_eff][weight_traj] FULL dump step={global_step} n_matrices={len(records)} "
+            f"dtype={self.dump_dtype} -> {os.path.join('full', fname)}",
             flush=True,
         )
 
     @property
-    def n_sketched(self) -> int:
-        return self._n_sketched
+    def n_dumped(self) -> int:
+        return self._n_dumped
 
 
 def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int] = None):
@@ -741,13 +569,9 @@ def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int
     return WeightTrajObserver(
         out_dir=str(getattr(wt, "out_dir", "") or ""),
         select_all=bool(getattr(wt, "select_all", False)),
-        k=int(getattr(wt, "k", 4096)),
-        dump_dtype=str(getattr(wt, "dump_dtype", "fp32")),
+        dump_dtype=str(getattr(wt, "dump_dtype", "bf16")),
+        every_steps=int(getattr(wt, "every_steps", 1)),
         target_substrs=substrs,
-        calib_deltas=tuple(getattr(wt, "calib_deltas", (10,)) or (10,)),
-        calib_horizons=tuple(getattr(wt, "calib_horizons", (10,)) or (10,)),
-        calib_stride=int(getattr(wt, "calib_stride", 0)),
-        calib_max_snapshots=int(getattr(wt, "calib_max_snapshots", 6)),
         rank=rank,
         rank0_only=bool(getattr(wt, "rank0_only", True)),
     )

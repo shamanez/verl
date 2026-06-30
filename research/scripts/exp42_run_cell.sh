@@ -43,11 +43,16 @@ esac
 
 # RUN_DIR + WEIGHT_TRAJ_SELECT_ALL let the SAME cell serve both passes:
 #   narrow (the 196 projector set):  defaults -> RUN_DIR=/workspace/runs/EXP-42, select_all=false
-#   widened (completeness, ALL matrices incl. excluded embed/norm/bias):
-#       RUN_DIR=/workspace/runs/EXP-42-all WEIGHT_TRAJ_SELECT_ALL=true
-# Separate RUN_DIR keeps the widened sketches from clobbering the narrow study.
+#   widened (completeness, ALL ~338 matrices incl. excluded embed/norm/bias):
+#       RUN_DIR=/workspace/runs/EXP-43 WEIGHT_TRAJ_SELECT_ALL=true
+# Separate RUN_DIR keeps the full-weight dumps from clobbering another study.
+# The observer saves the FULL weight matrices (NOT a sketch) once per training
+# step; WEIGHT_TRAJ_FULL_DTYPE (bf16|fp32) + WEIGHT_TRAJ_FULL_EVERY (every N steps)
+# control dump precision/cadence. bf16 ~3 GB/step, fp32 ~6 GB/step on Qwen2.5-1.5B.
 RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-42}"
 SELECT_ALL="${WEIGHT_TRAJ_SELECT_ALL:-false}"
+FULL_DTYPE="${WEIGHT_TRAJ_FULL_DTYPE:-bf16}"
+FULL_EVERY="${WEIGHT_TRAJ_FULL_EVERY:-1}"
 EXPN="exp42-${REGIME}${EXPN_SUFFIX:-}"
 OUT="${RUN_DIR}/${REGIME}"
 WEIGHTS="$OUT/weights"
@@ -57,7 +62,7 @@ mkdir -p "$WEIGHTS"
 # truth for resolved_params) -> driver.log.
 INTERNAL_LOG="$OUT/train_${REGIME}_internal.log"
 
-echo "=== EXP-42 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=ON select_all=$SELECT_ALL exp=$EXPN out_dir=$WEIGHTS ==="
+echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL select_all=$SELECT_ALL dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY exp=$EXPN out_dir=$WEIGHTS ==="
 LOG="$INTERNAL_LOG" \
 ALLOW_SINGLE_GPU=1 \
 ROLLOUT_TP=1 \
@@ -71,13 +76,10 @@ ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.5}" \
 EXPERIMENT_NAME="$EXPN" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.enabled=true \
-  actor_rollout_ref.actor.comm_eff.probe.weight_traj.k=4096 \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.select_all=$SELECT_ALL \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.dump_dtype=$FULL_DTYPE \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.every_steps=$FULL_EVERY \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.out_dir="$WEIGHTS" \
-  'actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_deltas=[10]' \
-  'actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_horizons=[5,10,20]' \
-  actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_stride=0 \
-  actor_rollout_ref.actor.comm_eff.probe.weight_traj.calib_max_snapshots=8 \
   > "$OUT/driver.log" 2>&1
 RC=$?
 echo "$(date -u +%FT%TZ) done $REGIME rc=$RC" > "$OUT/done.flag"
