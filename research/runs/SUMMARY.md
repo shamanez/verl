@@ -136,3 +136,36 @@ swarm). The two open priorities both target the anchor ↔ fast-circuit coupling
 mismatch (Priority 2). Both next steps are **GPU-free offline kill-gates** — see
 the two reports. Stay on EMA-family mergers; everything else is locked
 (`FIXED_CONTROL_SURFACE.md`).
+
+## Milestone M4
+
+Two M4 weight-projection studies have PASSed. Roll-up:
+
+- **EXP-42 — weight-projection accuracy vs horizon (measurement, PASS).** Success
+  criteria checked: projection-ratio + direction-cosine sweep vs horizon over 2
+  regimes, crossover h* identified, RLVR-linearity quantified. Key values: regime A
+  (dense GRPO, val@80 0.7695) crossover h*=10 ticks, weight_proj_ratio 0.972 / dir_cos
+  0.549 at K=10, per-matrix R^2 ~0.80@1tick decaying to ~0.32@K=10; regime B
+  (PowerSGD r=77 codec-only, val@80 0.0788) h*=5 but INVALID (frozen random basis,
+  collapsed). The count-sketch instrument behind these numbers was SUPERSEDED by
+  EXP-43 (raw full-weights); cite EXP-42 for provenance only.
+- **EXP-43 — shared dense FULL-weight per-tick trajectory to R2 (collection unit, PASS).**
+  Success criteria checked: all five acceptance gates on the artifact (160/160
+  full-model bf16 snapshots in R2 with n_matrices=338 real shapes not a sketch/subset;
+  >=80 steps no NaN; r2_manifest 160/160 verified:true + sample download verify PASS;
+  comm_eff counters all 0 = codec OFF; local staging near-empty = upload-then-delete).
+  Key values: verify_full_weight_dump.py --r2 PASS, max_rel_norm_err=0.0001 (<= 0.01 tol);
+  final GSM8K val acc 0.7809 (dense-control band 0.75-0.78, provenance only); WandB
+  a51waqza; run cost ~$18.60.
+
+**M4 weight-proj spine root (published, canonical).** Every downstream M4 weight-proj
+issue (#44 through #56) reads the EXP-43 R2 trace:
+
+  `s3://shamane-pluralis/verl-research/EXP-43/regimeA/weights/full/`
+
+Key form `tick_<N>/tick_<N>.pt`, 160 bf16 full-model snapshots (n_matrices=338), one
+per optimizer tick over 80 steps (~492 GB, R2 ONLY — do not pull to the laptop). The
+per-step movement trajectory is the first tick of each global_step (ticks 0,2,...,158
+-> steps 1..80). Heavy .pt live in R2; local artifacts are the two small manifests +
+the internal log. Downstream differencing of consecutive snapshots must account for
+bf16 ~4e-3 relative error (or commission a future fp32 run, dump_dtype=fp32, ~984 GB).

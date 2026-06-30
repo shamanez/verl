@@ -61,3 +61,7 @@ claims or run labels into new plans.
 - 2026-06-30T11:56:38Z EXP-43 monitor (window close): HEALTHY @ step71/80, gs71 tick141, 0 crashes, full_manifest=143/r2=142, disk 361G, WandB running. Completion next window (~9 steps/~31min). recommend=continue
 [2026-06-30T21:57:09+10:00] [orchestrator] tick: EXP-43 healthy @ 71/80 (~207s/step, ETA ~31min). 143 ticks/142 R2-verified (of ~160, ~89%), staging 0-1, disk 358-361G, 0 crash/NaN, codec-off counters 0, grad_norm 0.31, score ~0.86, WandB running historyLineCount 68. Monitor clean; re-dispatched (completion expected NEXT window). Heartbeat+sweep no-op. GATE holds.
 - [2026-06-30 22:20] EXP-43 regimeA monitor: DONE_AGGREGATE. 80/80 steps, done.flag present (rc=1 benign teardown noise), full+r2 manifests 160/160 verified (R2), final val gsm8k acc/mean@1=0.7809, codec counters all 0 (dense). 0 real errors. Rec: dispatch_analyst.
+[2026-06-30T22:40:08+10:00] [analyst #43] RESOLVED_CONFIG_MISSING: EXP-43 (train.log not at run-dir root; trace in regimeA/train_regimeA_internal.log; resolved_params.txt recovered manually from set -x)
+[2026-06-30T22:40:08+10:00] [analyst #43] verdict=PASS
+MILESTONE_PASS: M4
+[2026-06-30T22:44:26+10:00] [log-writer #43] logged verdict=PASS milestone=M4
