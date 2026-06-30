@@ -21,6 +21,9 @@ runs, box-validation pending). No live boxes. The next work is GPU-free analysis
 - **Access discipline (MANDATORY):** stream layer/block-wise → per-layer/block intermediates → combine → HTML; never bulk-download (~492 GB = out-of-disk). Doc: `research/reports/r2-access-pattern-for-analysis.md` (also on every issue #44–#56).
 - **Dependency:** #43 PASS + closed → #44–#56 unblocked.
 - Certified verdict + provenance kept at `runs/EXP-43/` (verdict.md, manifests, resolved_params, train log); plan file `.claude/plans/43.md` removed (folded into `runs/SUMMARY.md` §Milestone M4); ephemeral monitor/heartbeat/handle noise trimmed.
+- **#44 engine blueprint + status review:** `research/reports/m4-weight-proj-status-and-architecture.md` — recommended `research/scripts/weight_proj/` package (block-outside/tick-inside R2 streaming reader, predictor-family API for #47–#51, metric module, bf16-noise-floor check replacing the dead parity gate). **#44 is a build-from-scratch** (`weight_proj_sweep.py` was deleted), NOT an extension.
+- **Issue bodies are stale (count-sketch era):** #44–#54 + #56 carry `[EXP-43 supersession correction]` comments reconciling them to raw full-weights (the bodies themselves still reference count-sketch / `weight_proj_sweep.py` / parity-gate / select_all). **Authoritative scope = the architect report + those correction comments, not the raw bodies.** #55 was already clean.
+- **Carry-forward risks:** (1) bf16 single-tick Δθ noise floor (~0.4%) may force an fp32 re-collection (a future GPU run, set an SNR trigger up front); (2) async R2 upload is merged + default-on but UNVALIDATED on a box (EXP-43 ran the synchronous path).
 
 ## Last tick
 2026-06-30T23:00+10:00 · running=[] · analyzing=[] · logging=[] · blocked=[]
