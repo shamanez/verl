@@ -59,6 +59,8 @@ from typing import Any, Optional
 
 import torch
 
+from verl.workers.comm_eff.r2_sink import maybe_build_r2_sink
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -67,7 +69,6 @@ __all__ = [
     "WeightTrajObserver",
     "select_weight_traj_targets",
     "maybe_build_weight_traj_observer",
-    "WEIGHT_TRAJ_DEFAULT_SUBSTRS",
 ]
 
 # The capture roles. Each names a distinct diagnostic tensor.
@@ -156,8 +157,12 @@ class CaptureWriter:
         rank: Optional[int] = None,
         rank0_only: bool = True,
         min_tick: int = 0,
+        r2_sink=None,
     ):
         self.base_dir = capture_dir or os.path.join(os.getcwd(), "captures")
+        # Optional R2 offload: upload each .pt then delete the local file after a
+        # verified upload. None => keep .pt files local (byte-identical default).
+        self.r2_sink = r2_sink
         self.max_ticks = int(max_ticks)
         self.stratified_targets = int(stratified_targets)
         # Skip ticks below min_tick. This is useful when avoiding cold-start
@@ -306,6 +311,20 @@ class CaptureWriter:
             with open(self.manifest_path, "a") as fh:
                 fh.write(json.dumps(row) + "\n")
             self._n_written += 1
+            # R2 offload (upload + delete-local after a verified upload). Raises on
+            # failure and KEEPS the local file, so a bad upload never loses the
+            # tensor; a misconfig (missing aws / creds / wrong bucket) fails loud.
+            if self.r2_sink is not None:
+                self.r2_sink.upload(
+                    local_path=fpath,
+                    key_suffix=f"{role}/tick_{tick_key[0]}_{tick_key[1]}/{fname}",
+                    meta={
+                        "role": role,
+                        "global_step": tick_key[0],
+                        "optimizer_tick": tick_key[1],
+                        "target_name": target_name,
+                    },
+                )
         return True
 
     @property
@@ -323,7 +342,7 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
     cap = getattr(config, "capture", None)
     if cap is None or not bool(getattr(cap, "enabled", False)):
         return None
-    return CaptureWriter(
+    writer = CaptureWriter(
         capture_dir=str(getattr(cap, "capture_dir", "") or ""),
         max_ticks=int(getattr(cap, "max_ticks", 10)),
         stratified_targets=int(getattr(cap, "stratified_targets", 0)),
@@ -332,6 +351,16 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
         rank0_only=bool(getattr(cap, "rank0_only", True)),
         min_tick=int(getattr(cap, "min_tick", 0)),
     )
+    # R2 offload for the raw grad/activation dumps. Built only on the writer rank
+    # (reusing the writer's resolved root for the local r2_manifest.jsonl).
+    if bool(getattr(cap, "r2_enabled", False)) and not writer._inactive:
+        writer.r2_sink = maybe_build_r2_sink(
+            enabled=True,
+            artifact_kind="grads",
+            manifest_dir=writer.root,
+            delete_local=bool(getattr(cap, "r2_delete_local", True)),
+        )
+    return writer
 
 
 # ====================================================================== #
@@ -341,65 +370,45 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
 # A dump-only weight-trajectory recorder used by the M4 weight-projection study
 # (research/.claude/plans/43.md). The engine summons the FULL current weight
 # matrices on every optimizer tick and hands them here; the observer saves the
-# ACTUAL weight matrices to disk ONCE PER TRAINING STEP (deduped on global_step)
-# as ``full/step_<gs>.pt`` (a ``torch.save`` state dict) + a ``full_manifest.jsonl``
-# row. There is NO compression: the tensors saved ARE the weights (cast to
-# ``dump_dtype``), so ANY offline analysis can be run on them directly. It is
+# ACTUAL weight matrices to disk as ``full/<snapshot>.pt`` (a ``torch.save`` state
+# dict) + a ``full_manifest.jsonl`` row. The cadence is set by ``per_tick``:
+# per-tick dumps EVERY optimizer tick (``full/tick_<tick>.pt``), per-step dumps
+# once per training step (``full/step_<gs>.pt``, deduped on global_step). There is
+# NO compression and NO subset: the tensors saved ARE every floating param (cast
+# to ``dump_dtype``), so ANY offline analysis can be run on them directly. It is
 # strictly telemetry: it reads (never writes) the live weights, runs only on the
 # actor-train path, and feeds nothing back into the optimizer, EMA, sketch V or Q.
 #
 # Storage cost (Qwen2.5-1.5B, ~1.54B params): a bf16 full-model snapshot ≈ 3 GB;
-# fp32 ≈ 6 GB. Dumping per training step (NOT per tick) keeps an 80-step bf16
-# trajectory at ≈246 GB. ``dump_dtype=fp32`` doubles that and is needed only when
-# the downstream analysis differences consecutive steps (the ~1e-3 per-step update
-# would be swamped by bf16's ~4e-3 rounding); ``every_steps>1`` thins the
-# trajectory to fit a smaller disk.
+# fp32 ≈ 6 GB. A per-STEP bf16 80-step trajectory is ≈246 GB; the per-TICK variant
+# (2 ticks/step) ≈492 GB. ``dump_dtype=fp32`` doubles that and is needed only when
+# the downstream analysis differences consecutive snapshots (the ~1e-3 per-step
+# update would be swamped by bf16's ~4e-3 rounding). These volumes do not fit the
+# box / laptop, so set ``r2_enabled`` to upload each snapshot to R2 and delete the
+# local ``.pt`` (see ``verl.workers.comm_eff.r2_sink``) — local disk becomes a
+# few-GB staging area.
 #
 # NOTE: an earlier version of this instrument stored a lossy k-bucket COUNT-SKETCH
 # of each matrix (non-invertible) plus a bounded exact-calibration ring. That was
 # REMOVED (operator directive 2026-06-30): the study needs the raw weights, not a
 # sketch. Recover the sketch implementation from git history if ever needed.
 
-# The decoder weight-matrix selector (matches the spectral merger / look-ahead
-# projector target set: q/k/v/o_proj + gate/up/down_proj, 2-D only). LayerNorm,
-# embeddings, lm_head and biases never contain these substrings, so they are
-# excluded exactly as the projector excludes them.
-WEIGHT_TRAJ_DEFAULT_SUBSTRS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 
+def select_weight_traj_targets(named_params) -> list:
+    """Return ``[(canon_name, tensor), ...]`` for the FULL weight trajectory.
 
-def select_weight_traj_targets(named_params, target_substrs=None, select_all: bool = False) -> list:
-    """Return ``[(canon_name, tensor), ...]`` for the weight-trajectory matrices.
-
-    Pure selection — no device moves, no clones, no FSDP. Names are canonicalised
-    (FSDP wrap-infix stripped) so the selection is identical off a summoned live
-    module or a plain clone.
-
-    Two modes:
-
-    * ``select_all=False`` (default — the projector's set): a parameter is
-      selected iff its name contains one of ``target_substrs`` (default
-      :data:`WEIGHT_TRAJ_DEFAULT_SUBSTRS`) AND its tensor is 2-D. On Qwen2.5-1.5B
-      (28 layers) this is exactly the 196 decoder matrices the projector
-      extrapolates.
-    * ``select_all=True`` (EXP-42 completeness extension): select EVERY 1-D / 2-D
-      float parameter — the 196 decoder linears PLUS the params the projector
-      EXCLUDES (token embeddings, RMSNorm gains, attention biases). Lets the
-      offline analysis measure what linear weight projection WOULD do on the
-      excluded params (a direct test of the prior-work exclusion claim). The
-      full-weight dump is shape-agnostic (the whole tensor is saved as-is), so
-      1-D params are handled identically.
+    Always selects EVERY floating-point parameter (the whole model: decoder
+    linears + token embeddings + lm_head + RMSNorm gains + biases). There is no
+    subset, no projector substring set, and no ``select_all`` toggle: the EXP-43
+    deliverable is the raw weights of every trainable param. Pure selection — no
+    device moves, no clones, no FSDP. Names are canonicalised (FSDP wrap-infix
+    stripped) so the selection is identical off a summoned live module or a plain
+    clone. Non-floating params (e.g. int buffers) are skipped because a weight
+    trajectory is only defined for float tensors.
     """
-    substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
     out = []
     for name, p in named_params:
-        dim = getattr(p, "dim", lambda: 0)()
-        if select_all:
-            if dim in (1, 2):
-                out.append((_canon(name), p))
-            continue
-        if not any(s in name for s in substrs):
-            continue
-        if dim != 2:
+        if not torch.is_floating_point(p):
             continue
         out.append((_canon(name), p))
     return out
@@ -410,23 +419,32 @@ def _norm(t: torch.Tensor) -> float:
 
 
 class WeightTrajObserver:
-    """Per-step dump-only FULL-weight recorder.
+    """Dump-only FULL-weight recorder (per-step or per-tick).
 
     Constructed once per worker iff ``comm_eff.probe.weight_traj.enabled`` — and,
     crucially, INDEPENDENTLY of ``comm_eff.enabled`` so the plain-GRPO regime
     (codec OFF) is still instrumented. :meth:`observe` is the single entry point:
-    the engine summons the full weight matrices to CPU/fp32 and hands them here on
-    every optimizer tick; this class writes the **FULL weight matrices** to disk
-    ONCE PER TRAINING STEP (deduped on ``global_step``, gated by ``every_steps``)
-    as ``full/step_<gs>.pt`` (a ``torch.save`` state dict ``{canon_name -> tensor}``)
-    plus a ``full_manifest.jsonl`` row. Pure I/O — it never mutates the tensors it
-    is given, and feeds nothing back into the optimizer / EMA / Q.
+    the engine summons ALL floating params to CPU/fp32 and hands them here on every
+    optimizer tick; this class writes the **FULL weight matrices** to disk as
+    ``full/<snapshot>.pt`` (a ``torch.save`` state dict ``{canon_name -> tensor}``)
+    plus a ``full_manifest.jsonl`` row. The cadence is set by ``per_tick``:
 
-    There is NO compression: the saved tensors ARE the weights (cast to
-    ``dump_dtype``), so any offline analysis can run on them directly. Storage is
-    on DP rank 0 by default (the summoned full params are DP-identical); other
-    ranks build an INACTIVE observer that no-ops so the engine's summon collective
-    stays symmetric across ranks.
+    * ``per_tick=True`` — dump EVERY optimizer tick (``full/tick_<tick>.pt``). For
+      batch128/mini64 that is 2 ticks/step ≈ 160 snapshots over 80 steps.
+    * ``per_tick=False`` (default) — dump once per training step
+      (``full/step_<gs>.pt``, deduped on ``global_step``, gated by ``every_steps``).
+
+    Each manifest row carries both ``global_step`` and ``tick``, so a per-tick
+    trajectory can be subsampled to the per-step one offline (the 80-point set is a
+    subset of the 160-point set). Pure I/O — it never mutates the tensors it is
+    given, and feeds nothing back into the optimizer / EMA / Q.
+
+    There is NO compression and NO subset: the saved tensors ARE every floating
+    param (cast to ``dump_dtype``). Storage is on DP rank 0 by default (the summoned
+    full params are DP-identical); other ranks build an INACTIVE observer that
+    no-ops so the engine's summon collective stays symmetric across ranks. When
+    ``r2_enabled`` each snapshot is uploaded to R2 and the local ``.pt`` is deleted
+    after a verified upload (see :mod:`verl.workers.comm_eff.r2_sink`).
     """
 
     def __init__(
@@ -434,27 +452,22 @@ class WeightTrajObserver:
         *,
         out_dir: str,
         dump_dtype: str = "bf16",
-        target_substrs=None,
-        select_all: bool = False,
+        per_tick: bool = False,
         every_steps: int = 1,
         rank: Optional[int] = None,
         rank0_only: bool = True,
+        r2_enabled: bool = False,
+        r2_delete_local: bool = True,
     ):
         self.enabled = True
         self.out_dir = out_dir or os.path.join(os.getcwd(), "weights")
         assert dump_dtype in ("bf16", "fp32"), dump_dtype
         self.dump_dtype = dump_dtype
         self._torch_dtype = torch.bfloat16 if dump_dtype == "bf16" else torch.float32
-        self.target_substrs = tuple(target_substrs) if target_substrs else WEIGHT_TRAJ_DEFAULT_SUBSTRS
-        # Completeness extension: when True the observer dumps EVERY 1-D/2-D param
-        # (decoder linears + the projector-excluded embeddings / RMSNorm gains /
-        # biases) ≈ the whole model. False = the 196-matrix projector set.
-        self.select_all = bool(select_all)
-        # Dump the FULL weights once per training step. The engine calls observe()
-        # per optimizer TICK (>=1 tick/step); we dedup on global_step and gate on
-        # ``every_steps`` so the on-disk trajectory is one snapshot per
-        # ``every_steps`` training step(s) — the disk-volume control (a bf16
-        # full-model snapshot is ~3 GB on Qwen2.5-1.5B).
+        # Snapshot cadence. per_tick dumps every observe() call (keyed by the
+        # monotonic tick); otherwise dedup one full dump per global_step, gated by
+        # every_steps. The observer always dumps ALL floating params — no subset.
+        self.per_tick = bool(per_tick)
         self.every_steps = max(1, int(every_steps))
 
         if rank is None:
@@ -464,28 +477,39 @@ class WeightTrajObserver:
         self._inactive = self.rank0_only and self.rank != 0
 
         self._tick = 0  # monotonic optimizer-tick counter (own; comm_eff may be off)
-        self._last_dumped_step = -1  # dedup: at most one full dump per global_step
+        self._last_dumped_step = -1  # dedup: at most one full dump per global_step (per-step mode)
         self._n_dumped = 0
 
+        self.r2_sink = None
         if not self._inactive:
             self.full_dir = os.path.join(self.out_dir, "full")
             os.makedirs(self.full_dir, exist_ok=True)
             self.manifest_path = os.path.join(self.out_dir, "full_manifest.jsonl")
+            # R2 offload: upload each snapshot then delete the local .pt. Built only
+            # on the writer rank; creds + bucket guard live in r2_sink.
+            self.r2_sink = maybe_build_r2_sink(
+                enabled=bool(r2_enabled),
+                artifact_kind="weights",
+                manifest_dir=self.out_dir,
+                delete_local=bool(r2_delete_local),
+            )
         print(
             f"[comm_eff][weight_traj] FULL-weight observer out_dir={self.out_dir} "
-            f"dump_dtype={self.dump_dtype} select_all={self.select_all} every_steps={self.every_steps} "
-            f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive}",
+            f"dump_dtype={self.dump_dtype} per_tick={self.per_tick} every_steps={self.every_steps} "
+            f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive} "
+            f"r2={'on' if self.r2_sink is not None else 'off'}",
             flush=True,
         )
 
     def observe(self, weights: dict, global_step: int = -1) -> int:
-        """Record this tick. Dumps the FULL weights once per training step.
+        """Record this tick; dump the FULL weights per the configured cadence.
 
-        ``weights`` is ``{canon_name -> CPU fp32 tensor}`` (the selected matrices).
+        ``weights`` is ``{canon_name -> CPU fp32 tensor}`` (ALL floating params).
         Pure read: tensors are never mutated. No-op on an inactive (non-writer)
-        rank. The engine calls this per optimizer TICK; the full dump fires only on
-        the FIRST tick of each new ``global_step`` (deduped), gated by
-        ``every_steps``. Returns the tick index (or -1 when inactive).
+        rank. The engine calls this per optimizer TICK. When ``per_tick`` the full
+        dump fires EVERY tick (``full/tick_<tick>.pt``); otherwise it fires once per
+        ``global_step`` (deduped, gated by ``every_steps``, ``full/step_<gs>.pt``).
+        Returns the tick index (or -1 when inactive).
         """
         if self._inactive:
             return -1
@@ -493,19 +517,25 @@ class WeightTrajObserver:
         self._tick += 1
 
         gs = int(global_step)
-        if gs >= 0 and gs != self._last_dumped_step and (gs % self.every_steps == 0):
-            self._dump_full(gs, weights)
+        if self.per_tick:
+            # One snapshot per optimizer tick, keyed by the monotonic tick index.
+            self._dump_full(f"tick_{tick}", weights, global_step=gs, tick=tick)
+        elif gs >= 0 and gs != self._last_dumped_step and (gs % self.every_steps == 0):
+            self._dump_full(f"step_{gs}", weights, global_step=gs, tick=tick)
             self._last_dumped_step = gs
         return tick
 
-    def _dump_full(self, global_step: int, weights: dict) -> None:
-        """Write this step's FULL weight matrices to ``full/step_<gs>.pt``.
+    def _dump_full(self, snapshot_id: str, weights: dict, *, global_step: int, tick: int) -> None:
+        """Write a FULL-weight snapshot to ``full/<snapshot_id>.pt`` (+ manifest row).
 
         No compression: each tensor is detached, cast to ``dump_dtype`` (bf16 by
         default), moved to CPU and stored AS-IS in a ``torch.save`` state dict
-        ``{canon_name -> tensor}``. A ``full_manifest.jsonl`` row records per-matrix
-        name / shape / exact-fp32 Frobenius norm so the analyst can verify the dump
-        loads and the norms match the live weights within ``dump_dtype`` rounding.
+        ``{canon_name -> tensor}``. The ``full_manifest.jsonl`` row records the
+        snapshot's ``global_step`` + ``tick`` (so a per-tick trajectory subsamples
+        to per-step) and per-matrix name / shape / exact-fp32 Frobenius norm so the
+        analyst can verify the dump loads and the norms match within ``dump_dtype``
+        rounding. When an R2 sink is attached the saved ``.pt`` is uploaded and the
+        local file is deleted after a verified upload.
         """
         records = []
         state = {}
@@ -522,7 +552,7 @@ class WeightTrajObserver:
                     "fro_norm": fro,
                 }
             )
-        fname = f"step_{global_step}.pt"
+        fname = f"{snapshot_id}.pt"
         fpath = os.path.join(self.full_dir, fname)
         torch.save(state, fpath)
         with open(self.manifest_path, "a") as fh:
@@ -530,6 +560,7 @@ class WeightTrajObserver:
                 json.dumps(
                     {
                         "global_step": int(global_step),
+                        "tick": int(tick),
                         "dump_dtype": self.dump_dtype,
                         "n_matrices": len(records),
                         "path": os.path.join("full", fname),
@@ -540,10 +571,22 @@ class WeightTrajObserver:
             )
         self._n_dumped += 1
         print(
-            f"[comm_eff][weight_traj] FULL dump step={global_step} n_matrices={len(records)} "
-            f"dtype={self.dump_dtype} -> {os.path.join('full', fname)}",
+            f"[comm_eff][weight_traj] FULL dump {snapshot_id} (step={global_step} tick={tick}) "
+            f"n_matrices={len(records)} dtype={self.dump_dtype} -> {os.path.join('full', fname)}",
             flush=True,
         )
+        if self.r2_sink is not None:
+            self.r2_sink.upload(
+                local_path=fpath,
+                key_suffix=f"full/{snapshot_id}/{fname}",
+                meta={
+                    "role": "weights",
+                    "global_step": int(global_step),
+                    "tick": int(tick),
+                    "n_matrices": len(records),
+                    "dump_dtype": self.dump_dtype,
+                },
+            )
 
     @property
     def n_dumped(self) -> int:
@@ -564,14 +607,13 @@ def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int
     wt = getattr(probe, "weight_traj", None) if probe is not None else None
     if wt is None or not bool(getattr(wt, "enabled", False)):
         return None
-    spectral = getattr(comm_eff_config, "spectral", None)
-    substrs = getattr(spectral, "target_substr", None) if spectral is not None else None
     return WeightTrajObserver(
         out_dir=str(getattr(wt, "out_dir", "") or ""),
-        select_all=bool(getattr(wt, "select_all", False)),
         dump_dtype=str(getattr(wt, "dump_dtype", "bf16")),
+        per_tick=bool(getattr(wt, "per_tick", False)),
         every_steps=int(getattr(wt, "every_steps", 1)),
-        target_substrs=substrs,
         rank=rank,
         rank0_only=bool(getattr(wt, "rank0_only", True)),
+        r2_enabled=bool(getattr(wt, "r2_enabled", False)),
+        r2_delete_local=bool(getattr(wt, "r2_delete_local", True)),
     )

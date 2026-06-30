@@ -125,7 +125,7 @@ research/
 ├── researcher_steps.md     this guide
 ├── LOG.md / PROGRESS.md    newest-first PASS/STOP log · append-only audit
 ├── runs/<id>/ , runs/SUMMARY.md
-├── scripts/                analyze.py, check_budget.py, weight_proj_sweep.py, …
+├── scripts/                analyze.py, check_budget.py, verify_full_weight_dump.py, …
 └── .claude/
     ├── project.yaml        single source of truth (repos, secrets, vast template, defaults, branch + model/goal/workflow/team policy)
     ├── GOAL.md             project north-star (what "done" means)

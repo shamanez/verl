@@ -192,16 +192,16 @@ class BaseEngine:
         # FSDPEngine._maybe_comm_eff_geometry_probe).
 
     def _maybe_comm_eff_weight_traj(self) -> None:
-        """Weight-trajectory sketch hook point (strict no-op when disabled).
+        """Weight-trajectory FULL-weight hook point (strict no-op when disabled).
 
-        EXP-42 dump-only instrument. Sits BEFORE ``optimizer_step`` and records a
-        per-tick count-sketch of the current decoder weight matrices (+ exact
-        headline scalars). Gated on the ``_weight_traj_observer`` attribute, NOT
-        the comm_eff state — so it instruments the plain-GRPO (codec OFF) regime
-        too. Telemetry-only: it never touches gradients, the optimizer, the EMA,
-        V or Q. When the observer is absent (the default) this returns
-        immediately and the train path is byte-identical; the FSDP backend
-        OVERRIDES this method to do the summon + sketch.
+        EXP-43 dump-only instrument. Sits BEFORE ``optimizer_step`` and records the
+        tick's pre-update FULL weight matrices of EVERY floating param (no subset,
+        no sketch). Gated on the ``_weight_traj_observer`` attribute, NOT the
+        comm_eff state — so it instruments the plain-GRPO (codec OFF) regime too.
+        Telemetry-only: it never touches gradients, the optimizer, the EMA, V or Q.
+        When the observer is absent (the default) this returns immediately and the
+        train path is byte-identical; the FSDP backend OVERRIDES this method to do
+        the summon + full-weight dump.
         """
         observer = getattr(self, "_weight_traj_observer", None)
         if observer is None or not getattr(observer, "enabled", False):
@@ -241,10 +241,10 @@ class BaseEngine:
         # correction and before the optimizer step. Telemetry-only; strict no-op
         # unless comm_eff.probe.geometry_enabled.
         self._maybe_comm_eff_geometry_probe()
-        # Weight-trajectory sketch (EXP-42): per-tick weight snapshot → count-
-        # sketch, BEFORE the optimizer step so it records the tick's pre-update
-        # weights θ[t]. Dump-only; strict no-op unless a weight-traj observer is
-        # attached (comm_eff.probe.weight_traj.enabled). Independent of the codec.
+        # Weight-trajectory (EXP-43): per-step/per-tick FULL weight snapshot,
+        # BEFORE the optimizer step so it records the tick's pre-update weights
+        # θ[t]. Dump-only; strict no-op unless a weight-traj observer is attached
+        # (comm_eff.probe.weight_traj.enabled). Independent of the codec.
         self._maybe_comm_eff_weight_traj()
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():

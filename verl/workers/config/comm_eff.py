@@ -543,6 +543,12 @@ class CommEffCaptureConfig(BaseConfig):
     rank0_only: bool = True
     # Skip capture ticks below this value. Useful for avoiding cold-start capture.
     min_tick: int = 0
+    # Cloudflare R2 offload for the raw grad/activation .pt dumps: upload-then-
+    # delete-local (creds from the env, R2_BUCKET=shamane-pluralis guard). Off =>
+    # local-only (byte-identical). For an ACCEPTED raw-grad collection run pair
+    # this with max_ticks=0 (no cap) + stratified_targets=0 (every target).
+    r2_enabled: bool = False
+    r2_delete_local: bool = True
 
 
 @dataclass
@@ -550,14 +556,25 @@ class CommEffWeightTrajConfig(BaseConfig):
     """Full-weight trajectory recorder; off by default.
 
     A dump-only recorder (``verl.workers.comm_eff.capture.WeightTrajObserver``)
-    that saves the model's FULL weight matrices to disk ONCE PER TRAINING STEP so
-    any offline analysis can run on the real weights. At every optimizer tick the
-    engine summons the full weight matrices and hands them to the observer, which
-    (deduped on ``global_step``) writes ``full/step_<gs>.pt`` (a ``torch.save``
-    state dict of the actual tensors) + a ``full_manifest.jsonl`` row. There is NO
-    compression — the tensors saved ARE the weights (cast to ``dump_dtype``).
-    Telemetry-only: it reads the live weights and feeds NOTHING into the optimizer
-    / EMA / Q.
+    that saves the model's FULL weight matrices to disk so any offline analysis
+    can run on the real weights. At every optimizer tick the engine summons ALL
+    floating-point params (the whole model — no subset, no sketch) and hands them
+    to the observer, which writes ``full/<snapshot>.pt`` (a ``torch.save`` state
+    dict of the actual tensors) + a ``full_manifest.jsonl`` row. The snapshot
+    cadence is set by ``per_tick``: ``true`` dumps EVERY optimizer tick
+    (``full/tick_<tick>.pt``; e.g. 160 snapshots for batch128/mini64 × 80 steps),
+    ``false`` (default) dumps once per training step (``full/step_<gs>.pt``,
+    deduped on ``global_step``, gated by ``every_steps``). Either way each row
+    records both ``global_step`` and ``tick`` so the per-tick trajectory can be
+    subsampled to the per-step one offline. There is NO compression — the tensors
+    saved ARE the weights (cast to ``dump_dtype``). Telemetry-only: it reads the
+    live weights and feeds NOTHING into the optimizer / EMA / Q.
+
+    The heavy ``.pt`` files are large (a bf16 full-model snapshot is ~3 GB on
+    Qwen2.5-1.5B; a per-tick bf16 trajectory ~492 GB). Set ``r2_enabled=true`` to
+    upload each snapshot to Cloudflare R2 (bucket ``shamane-pluralis``, creds from
+    the env) and delete the local ``.pt`` after a verified upload, so local disk is
+    only a staging area (see ``verl.workers.comm_eff.r2_sink``).
 
     **Independent of ``comm_eff.enabled``.** Built whenever ``enabled=true`` even
     on the plain-GRPO (codec OFF) regime, so the clean-trajectory baseline is
@@ -578,27 +595,37 @@ class CommEffWeightTrajConfig(BaseConfig):
             fp32 keeps full precision (needed only if the downstream analysis
             differences consecutive steps, where the ~1e-3 per-step update would be
             swamped by bf16's ~4e-3 rounding). Validated to {bf16, fp32}.
-        select_all (bool): ``false`` (default) = the 196 decoder 2-D matrices the
-            projector extrapolates. ``true`` = dump EVERY 1-D/2-D param (decoder
-            linears + the projector-EXCLUDED token embeddings / RMSNorm gains / attn
-            biases) ≈ the whole model (~338 matrices on Qwen2.5-1.5B).
-        every_steps (int): Dump the full weights every N training steps. ``1``
-            (default) = every step. Larger = sparser trajectory / less disk. ``>= 1``.
+        per_tick (bool): Snapshot cadence. ``false`` (default) = one dump per
+            training step (deduped on ``global_step``, gated by ``every_steps``).
+            ``true`` = dump EVERY optimizer tick (no dedup, ``every_steps`` ignored);
+            for batch128/mini64 this is 2 ticks/step ≈ 160 snapshots over 80 steps.
+            The per-tick set is a superset of the per-step one (subsample the first
+            tick of each ``global_step`` to recover the 80-point trajectory).
+        every_steps (int): Per-STEP-mode only. Dump the full weights every N
+            training steps. ``1`` (default) = every step. Ignored when ``per_tick``.
+            ``>= 1``.
         rank0_only (bool): Dump/write on DP rank 0 only (default; the summoned full
             params are DP-identical). Other ranks build an inactive observer so the
             summon collective stays symmetric.
+        r2_enabled (bool): Upload each snapshot to Cloudflare R2 (bucket
+            ``shamane-pluralis``, creds from the env) then delete the local ``.pt``
+            after a verified upload. ``false`` (default) = keep ``.pt`` files local.
+        r2_delete_local (bool): When ``r2_enabled``, delete the local ``.pt`` after a
+            VERIFIED upload (``true``, default). ``false`` keeps a local copy too.
     """
 
     enabled: bool = False
     out_dir: str = ""
     dump_dtype: str = "bf16"
-    # Completeness extension. False (default) = the 196 decoder matrices the
-    # projector extrapolates. True = dump EVERY 1-D/2-D param (decoder linears +
-    # the projector-EXCLUDED token embeddings / RMSNorm gains / attn biases) ≈ the
-    # whole model, so offline analysis can cover the excluded params too.
-    select_all: bool = False
+    # Always dump ALL floating-point params (the whole model). There is no subset
+    # toggle: the deliverable is the raw full weights.
+    per_tick: bool = False
     every_steps: int = 1
     rank0_only: bool = True
+    # Cloudflare R2 offload (heavy .pt files): upload-then-delete-local. Creds from
+    # the env (R2_BUCKET=shamane-pluralis guard). Off => local-only (byte-identical).
+    r2_enabled: bool = False
+    r2_delete_local: bool = True
 
 
 @dataclass
@@ -943,10 +970,20 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.probe.weight_traj.rank0_only must be a bool; got "
                 f"{type(wt.rank0_only).__name__} ({wt.rank0_only!r})"
             )
-        if not isinstance(wt.select_all, bool):
+        if not isinstance(wt.per_tick, bool):
             raise ValueError(
-                f"comm_eff.probe.weight_traj.select_all must be a bool; got "
-                f"{type(wt.select_all).__name__} ({wt.select_all!r})"
+                f"comm_eff.probe.weight_traj.per_tick must be a bool; got "
+                f"{type(wt.per_tick).__name__} ({wt.per_tick!r})"
+            )
+        if not isinstance(wt.r2_enabled, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_enabled must be a bool; got "
+                f"{type(wt.r2_enabled).__name__} ({wt.r2_enabled!r})"
+            )
+        if not isinstance(wt.r2_delete_local, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_delete_local must be a bool; got "
+                f"{type(wt.r2_delete_local).__name__} ({wt.r2_delete_local!r})"
             )
         if wt.dump_dtype not in ("bf16", "fp32"):
             raise ValueError(

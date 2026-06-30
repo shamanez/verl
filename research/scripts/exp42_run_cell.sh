@@ -41,18 +41,28 @@ case "$REGIME" in
   *) echo "usage: run_cell.sh regimeA|regimeB"; exit 2 ;;
 esac
 
-# RUN_DIR + WEIGHT_TRAJ_SELECT_ALL let the SAME cell serve both passes:
-#   narrow (the 196 projector set):  defaults -> RUN_DIR=/workspace/runs/EXP-42, select_all=false
-#   widened (completeness, ALL ~338 matrices incl. excluded embed/norm/bias):
-#       RUN_DIR=/workspace/runs/EXP-43 WEIGHT_TRAJ_SELECT_ALL=true
-# Separate RUN_DIR keeps the full-weight dumps from clobbering another study.
-# The observer saves the FULL weight matrices (NOT a sketch) once per training
-# step; WEIGHT_TRAJ_FULL_DTYPE (bf16|fp32) + WEIGHT_TRAJ_FULL_EVERY (every N steps)
-# control dump precision/cadence. bf16 ~3 GB/step, fp32 ~6 GB/step on Qwen2.5-1.5B.
+# The observer ALWAYS saves the FULL weight matrices of EVERY floating param (the
+# whole model, NOT a sketch, NOT a subset). Knobs (all env-overridable):
+#   WEIGHT_TRAJ_PER_TICK  (true|false): true => one snapshot per optimizer TICK
+#       (~160 over 80 steps for batch128/mini64); false (default) => one per step.
+#   WEIGHT_TRAJ_FULL_DTYPE (bf16|fp32): dump precision. bf16 ~3 GB/snapshot,
+#       fp32 ~6 GB/snapshot on Qwen2.5-1.5B.
+#   WEIGHT_TRAJ_FULL_EVERY (N): per-STEP-mode cadence (ignored when per_tick).
+#   WEIGHT_TRAJ_R2_ENABLED (true|false): upload each snapshot to Cloudflare R2
+#       (bucket shamane-pluralis) then delete the local .pt — local disk is staging
+#       only. The per-tick bf16 trajectory (~492 GB) does NOT fit the box, so set
+#       true for the accepted collection. Creds come from $HOME/.verl_auth.env
+#       (R2_ACCOUNT_ID/R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET).
+# Separate RUN_DIR keeps the full-weight dumps from clobbering another study and
+# names the R2 key prefix (verl-research/<RUN_DIR-basename>/<regime>/weights/...).
 RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-42}"
-SELECT_ALL="${WEIGHT_TRAJ_SELECT_ALL:-false}"
+PER_TICK="${WEIGHT_TRAJ_PER_TICK:-false}"
 FULL_DTYPE="${WEIGHT_TRAJ_FULL_DTYPE:-bf16}"
 FULL_EVERY="${WEIGHT_TRAJ_FULL_EVERY:-1}"
+R2_ENABLED="${WEIGHT_TRAJ_R2_ENABLED:-false}"
+# R2 object key prefix is verl-research/$R2_EXPERIMENT/$R2_REGIME/weights/...
+export R2_EXPERIMENT="${R2_EXPERIMENT:-$(basename "$RUN_DIR")}"
+export R2_REGIME="${R2_REGIME:-$REGIME}"
 EXPN="exp42-${REGIME}${EXPN_SUFFIX:-}"
 OUT="${RUN_DIR}/${REGIME}"
 WEIGHTS="$OUT/weights"
@@ -62,7 +72,7 @@ mkdir -p "$WEIGHTS"
 # truth for resolved_params) -> driver.log.
 INTERNAL_LOG="$OUT/train_${REGIME}_internal.log"
 
-echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL select_all=$SELECT_ALL dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY exp=$EXPN out_dir=$WEIGHTS ==="
+echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL(all-params) per_tick=$PER_TICK dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY r2_enabled=$R2_ENABLED r2_key=verl-research/$R2_EXPERIMENT/$R2_REGIME/weights exp=$EXPN out_dir=$WEIGHTS ==="
 LOG="$INTERNAL_LOG" \
 ALLOW_SINGLE_GPU=1 \
 ROLLOUT_TP=1 \
@@ -76,9 +86,10 @@ ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.5}" \
 EXPERIMENT_NAME="$EXPN" \
 bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.enabled=true \
-  actor_rollout_ref.actor.comm_eff.probe.weight_traj.select_all=$SELECT_ALL \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.per_tick=$PER_TICK \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.dump_dtype=$FULL_DTYPE \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.every_steps=$FULL_EVERY \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_enabled=$R2_ENABLED \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.out_dir="$WEIGHTS" \
   > "$OUT/driver.log" 2>&1
 RC=$?

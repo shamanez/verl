@@ -590,6 +590,15 @@ comm_eff:
     # Skip capture ticks below this value. 0 = capture from start.
     min_tick: 0
 
+    # Upload each raw grad/activation .pt to Cloudflare R2 (bucket shamane-pluralis,
+    # creds from the env) then delete the local file after a verified upload. false
+    # (default) => local-only. For an ACCEPTED raw-grad run pair with max_ticks=0
+    # (no cap) + stratified_targets=0 (every target).
+    r2_enabled: false
+
+    # When r2_enabled, delete the local .pt after a VERIFIED upload (true, default).
+    r2_delete_local: true
+
   # Geometry probe (telemetry-only). OFF by default. When enabled, appends one
   # JSON line per anchor fire plus a train-log line. Probes never feed the
   # optimizer. Requires paired replay and an inert merger.
@@ -618,8 +627,9 @@ comm_eff:
 
     # Weight-trajectory FULL-weight recorder (dump-only). OFF by default.
     # Built independently of comm_eff.enabled, so the plain-GRPO (codec-OFF)
-    # regime is instrumented. Saves the FULL weight matrices to disk once per
-    # training step (NO compression). Telemetry-only: never feeds optimizer/EMA/Q.
+    # regime is instrumented. Saves the FULL weight matrices (ALL floating params,
+    # NO subset, NO compression) to disk per step or per tick. Telemetry-only:
+    # never feeds optimizer/EMA/Q.
     weight_traj:
 
       # Target dataclass for this configuration
@@ -628,26 +638,36 @@ comm_eff:
       # Master switch. false (default) => strict no-op (no observer/summon/IO).
       enabled: false
 
-      # Directory for full/step_*.pt + full_manifest.jsonl. Empty => ./weights at
-      # build. The launcher pins an absolute run-dir path.
+      # Directory for full/<snapshot>.pt + full_manifest.jsonl. Empty => ./weights
+      # at build. The launcher pins an absolute run-dir path.
       out_dir: ""
 
-      # Full-weight storage precision. "bf16" (default; ~3 GB/step on Qwen2.5-1.5B)
-      # or "fp32" (~6 GB/step; full precision, for difference-based analysis).
+      # Full-weight storage precision. "bf16" (default; ~3 GB/snapshot on
+      # Qwen2.5-1.5B) or "fp32" (~6 GB; full precision, for difference analysis).
       dump_dtype: bf16
 
-      # false (default) => the 196 decoder 2-D matrices the projector extrapolates.
-      # true => dump EVERY 1-D/2-D param (decoder linears + the projector-EXCLUDED
-      # token embeddings / RMSNorm gains / attn biases) ~ the whole model.
-      select_all: false
+      # Snapshot cadence. false (default) => one dump per training step
+      # (full/step_<gs>.pt, deduped on global_step, gated by every_steps). true =>
+      # dump EVERY optimizer tick (full/tick_<tick>.pt; ~160 for batch128/mini64 ×
+      # 80 steps). every_steps is ignored when per_tick.
+      per_tick: false
 
-      # Dump the full weights every N training steps. 1 (default) = every step.
-      # Larger = sparser trajectory / less disk.
+      # Per-STEP-mode only. Dump the full weights every N training steps. 1
+      # (default) = every step. Ignored when per_tick.
       every_steps: 1
 
       # Dump/write on DP rank 0 only (the summoned full params are DP-identical).
       # Other ranks build an inactive observer (symmetric summon).
       rank0_only: true
+
+      # Upload each snapshot to Cloudflare R2 (bucket shamane-pluralis, creds from
+      # the env) then delete the local .pt after a verified upload. false
+      # (default) => keep .pt files local. Local disk is staging only when true.
+      r2_enabled: false
+
+      # When r2_enabled, delete the local .pt after a VERIFIED upload (true,
+      # default). false keeps a local copy alongside the R2 object.
+      r2_delete_local: true
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

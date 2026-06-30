@@ -50,6 +50,16 @@ Full argument: `../reports/priority-1-anchor-staleness-k-collapse.html`.
 
 ## EXP-42 weight-projection accuracy (M4 measurement, 2026-06-29)
 
+> **SUPERSEDED (2026-06-30).** Everything in this section derives from the lossy
+> per-tick **count-sketch** (k=4096) of the 196 decoder matrices, which discarded
+> the raw weights. That instrument was removed; the sketch-derived HTML reports
+> (`reports/exp42-weight-projection-accuracy.html`,
+> `reports/exp42-dense-weight-behavior.html`, `reports/exp42-dense-deep-analysis.html`)
+> were deleted. These numbers are kept for provenance only — **do not cite them as
+> ground truth.** EXP-43 collects the RAW full weights of every floating param
+> (per tick, bf16, uploaded to R2) and supersedes this study; rerun any analysis on
+> that trace.
+
 Measures the primitive the look-ahead anchor rests on: does the projected weight
 `theta_hat = theta_stale + alpha (theta_stale - theta_old)` land closer to the
 current weight than the raw-stale weight, in weight space, versus horizon. One

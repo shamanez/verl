@@ -17,6 +17,10 @@ Weight-projection accuracy of the look-ahead anchor vs horizon, 2 regimes, singl
 - Deliverables: `reports/exp42-*.html` · verdict `.claude/plans/42-verdict.md` · tooling
   `research/scripts/{weight_proj_sweep,build_report,build_dense_report,build_dense_report_v2}.py` ·
   code `exp/42-weight-accuracy`. WandB er0syc3n (A) / 0tpez2fz (B). GitHub issue #42 closed.
+- SUPERSEDED 2026-06-30: the count-sketch instrument, the listed sketch tooling, and the
+  3 sketch-derived `reports/exp42-{weight-projection-accuracy,dense-weight-behavior,dense-deep-analysis}.html`
+  were removed (the raw weights are kept instead). The conclusions above derive from the lossy
+  k=4096 sketch — see EXP-43 (raw full-weight collection on R2) for the ground-truth replacement.
 
 ## EXP-41 · 2026-06-25 · M4 · STOP
 Fixed-linear look-ahead anchor (theta_hat = 2*theta[t-20] - theta[t-40]) at cadence/delay_K=20/20.

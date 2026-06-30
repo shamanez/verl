@@ -2572,10 +2572,10 @@ class FSDPEngine(BaseEngine):
         grad-correction / geometry probe) and BEFORE ``optimizer_step`` — it
         records the tick's PRE-update weights ``θ[t]``. Summons the full weight
         matrices (the FSDP1 summon is a COLLECTIVE entered on EVERY rank for
-        deadlock safety), selects the target matrices (the 196 decoder 2-D set, or
-        ALL ~338 1-D/2-D params under select_all), moves them to CPU/fp32, and
-        hands them to the :class:`WeightTrajObserver`, which saves the FULL weight
-        matrices to disk once per training step (no compression).
+        deadlock safety), selects ALL floating-point params (the full model — no
+        subset), moves them to CPU/fp32, and hands them to the
+        :class:`WeightTrajObserver`, which saves the FULL weight matrices to disk
+        per training step or per optimizer tick (no compression).
 
         Gated on the ``_weight_traj_observer`` attribute (attached by the worker
         whenever ``comm_eff.probe.weight_traj.enabled``), NOT the comm_eff state —
@@ -2588,8 +2588,6 @@ class FSDPEngine(BaseEngine):
 
         from verl.workers.comm_eff.capture import select_weight_traj_targets
 
-        substrs = getattr(observer, "target_substrs", None)
-        select_all = bool(getattr(observer, "select_all", False))
         _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         _world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
         rank0_only = bool(getattr(observer, "rank0_only", True))
@@ -2630,13 +2628,12 @@ class FSDPEngine(BaseEngine):
                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
                 materialized = []
                 for _name, _p in inner.named_parameters():
-                    # select_all (EXP-42 completeness) takes EVERY param; otherwise
-                    # pre-filter to the substr set before the (cheap) full_tensor().
-                    if not select_all and not any(s in _name for s in (substrs or ())):
-                        continue
+                    # ALL params — the dump is the full model (no subset). Under
+                    # FSDP1+summon these are already plain tensors; full_tensor()
+                    # only fires on the (supported) FSDP2 rank0_only=false path.
                     _full = _p.full_tensor() if isinstance(_p, DTensor) else _p
                     materialized.append((_name, _full))
-                for _cn, _full in select_weight_traj_targets(materialized, substrs, select_all=select_all):
+                for _cn, _full in select_weight_traj_targets(materialized):
                     # copy to CPU/fp32: the live param tensor is reused by the
                     # optimizer step that follows — an aliased store would race.
                     weights[_cn] = _full.detach().to(device="cpu", dtype=torch.float32, copy=True)
