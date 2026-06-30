@@ -24,12 +24,19 @@ case "$REGIME" in
   regimeA)  # plain GRPO — byte-identical dense path (the clean predictability ceiling)
     export COMM_EFF_ENABLED=false
     ;;
-  regimeB)  # GRPO + activation compression, CODEC ONLY (anchor + spectral OFF)
+  regimeB)  # GRPO + activation compression, CODEC ONLY with ADAPTIVE Q (anchor + spectral OFF)
     export COMM_EFF_ENABLED=true
     export COMM_EFF_COMPRESSION_TYPE=powersgd
     export COMM_EFF_POWERSGD_RANK=77
     export COMM_EFF_ANCHOR_ENABLED=false
     export COMM_EFF_SPECTRAL_ENABLED=false
+    # Q-UPDATE IS MANDATORY. owns_q=false = the FAST-OWNED-Q path: the fast hook
+    # accumulates V += M^T(MQ) on its own gradient-bearing forwards and runs
+    # Q<-orth(V) at powersgd.update_cadence, so the rank-77 basis ADAPTS to the
+    # activation subspace. The prior regime B left owns_q=true with the anchor
+    # off, which FROZE Q at a random basis (basis_updates=0, recon ~0.97) and
+    # collapsed the policy. A frozen-basis codec is not a valid compressed regime.
+    export COMM_EFF_ANCHOR_OWNS_Q=false
     ;;
   *) echo "usage: run_cell.sh regimeA|regimeB"; exit 2 ;;
 esac

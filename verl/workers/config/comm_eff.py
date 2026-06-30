@@ -1009,6 +1009,28 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.powersgd.qr_dtype must be one of (fp32, bf16); got {self.powersgd.qr_dtype!r}")
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
+        # FROZEN-Q footgun guard. With anchor.owns_q=true the anchor is the ONLY
+        # Q updater and the fast-path basis update is fail-closed; if the anchor
+        # is ALSO off, NOTHING ever updates Q, so the PowerSGD codec runs on its
+        # fixed random bootstrap basis (basis_updates=0, reconstruction_rel_error
+        # stuck ~0.97) and the run collapses. That is a fixed random projection,
+        # not a learning compressed regime. Forbid it: either enable the anchor
+        # (so it owns + adapts Q) or set anchor.owns_q=false (fast-owned adaptive
+        # Q). (EXP-42 regime B hit exactly this and silently collapsed.)
+        if (
+            self.enabled
+            and self.compression_type == "powersgd"
+            and getattr(self.powersgd, "enabled", True)
+            and self.anchor.owns_q
+            and not self.anchor.enabled
+        ):
+            raise ValueError(
+                "comm_eff: PowerSGD basis Q has no updater. anchor.owns_q=true (so the "
+                "fast-path basis update is fail-closed) but anchor.enabled=false (so the "
+                "anchor never refreshes Q). Q would stay frozen at its random bootstrap "
+                "basis and the codec collapses. Set anchor.owns_q=false for a fast-owned "
+                "adaptive Q, or enable the anchor."
+            )
         # Q-basis family. Validated to the closed enum so a typo
         # (q_basis=gradient) is an error, not a silent fall-through to "act".
         if self.powersgd.q_basis not in Q_BASIS_FAMILIES:
