@@ -65,3 +65,4 @@ claims or run labels into new plans.
 [2026-06-30T22:40:08+10:00] [analyst #43] verdict=PASS
 MILESTONE_PASS: M4
 [2026-06-30T22:44:26+10:00] [log-writer #43] logged verdict=PASS milestone=M4
+[2026-06-30T22:52:13+10:00] [orchestrator] MERGED async R2 upload into vast-ai-workload (merge 70c63a86, ex-PR #19 MERGED; commits d972dd48+7e2af3b7+9688f285+38ea06fd). Async is now DEFAULT-ON for collection runs (run cell WEIGHT_TRAJ_R2_ASYNC default true; =false rolls back to synchronous). 312+ comm_eff CPU tests pass. BOX-VALIDATION STILL PENDING: the next collection run from vast-ai-workload exercises the async path (real throughput / disk backpressure / comm_eff_close under Ray teardown) — monitor it, fall back via WEIGHT_TRAJ_R2_ASYNC=false if it misbehaves. EXP-43 itself fully closed (PASS, box torn down, cost $18.60).
