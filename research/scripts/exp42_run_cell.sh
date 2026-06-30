@@ -53,6 +53,19 @@ esac
 #       only. The per-tick bf16 trajectory (~492 GB) does NOT fit the box, so set
 #       true for the accepted collection. Creds come from $HOME/.verl_auth.env
 #       (R2_ACCOUNT_ID/R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET).
+#   WEIGHT_TRAJ_R2_ASYNC (true|false): async batched upload. true (DEFAULT for
+#       collection runs) => a background worker pool overlaps uploads with compute.
+#       false => synchronous (the dump path blocks on each upload, byte-identical to
+#       the original path); use that to fall back if async ever misbehaves on a box.
+#       Async mechanics: the observer flushes every WEIGHT_TRAJ_R2_FLUSH_EVERY steps + at run end so
+#       disk stays bounded (capped at WEIGHT_TRAJ_R2_MAX_STAGED_GB GiB) + fail-loud.
+#   WEIGHT_TRAJ_R2_FLUSH_EVERY (N): async flush-barrier cadence in steps (def 10).
+#   WEIGHT_TRAJ_R2_WORKERS (N): async upload worker threads (def 4) — parallel
+#       aws s3 cp streams approaching the aggregate R2 bandwidth ceiling.
+#   WEIGHT_TRAJ_R2_MAX_STAGED_GB (G): async disk-backpressure cap in GiB (def 80).
+#   WEIGHT_TRAJ_R2_FLUSH_TIMEOUT (S): async flush/close drain timeout in seconds
+#       (def 1800). A slow/hung uploader can't block the step/run-end forever on
+#       queue.join(); a timeout raises fail-loud. <=0 => wait forever.
 # Separate RUN_DIR keeps the full-weight dumps from clobbering another study and
 # names the R2 key prefix (verl-research/<RUN_DIR-basename>/<regime>/weights/...).
 RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-42}"
@@ -60,6 +73,13 @@ PER_TICK="${WEIGHT_TRAJ_PER_TICK:-false}"
 FULL_DTYPE="${WEIGHT_TRAJ_FULL_DTYPE:-bf16}"
 FULL_EVERY="${WEIGHT_TRAJ_FULL_EVERY:-1}"
 R2_ENABLED="${WEIGHT_TRAJ_R2_ENABLED:-false}"
+# Async-upload knobs. Default ON for collection runs (overlaps uploads with compute,
+# ~few-x faster); set WEIGHT_TRAJ_R2_ASYNC=false to force the old synchronous path.
+R2_ASYNC="${WEIGHT_TRAJ_R2_ASYNC:-true}"
+R2_FLUSH_EVERY="${WEIGHT_TRAJ_R2_FLUSH_EVERY:-10}"
+R2_WORKERS="${WEIGHT_TRAJ_R2_WORKERS:-4}"
+R2_MAX_STAGED_GB="${WEIGHT_TRAJ_R2_MAX_STAGED_GB:-80}"
+R2_FLUSH_TIMEOUT="${WEIGHT_TRAJ_R2_FLUSH_TIMEOUT:-1800}"
 # R2 object key prefix is verl-research/$R2_EXPERIMENT/$R2_REGIME/weights/...
 export R2_EXPERIMENT="${R2_EXPERIMENT:-$(basename "$RUN_DIR")}"
 export R2_REGIME="${R2_REGIME:-$REGIME}"
@@ -72,7 +92,7 @@ mkdir -p "$WEIGHTS"
 # truth for resolved_params) -> driver.log.
 INTERNAL_LOG="$OUT/train_${REGIME}_internal.log"
 
-echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL(all-params) per_tick=$PER_TICK dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY r2_enabled=$R2_ENABLED r2_key=verl-research/$R2_EXPERIMENT/$R2_REGIME/weights exp=$EXPN out_dir=$WEIGHTS ==="
+echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL(all-params) per_tick=$PER_TICK dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY r2_enabled=$R2_ENABLED r2_async=$R2_ASYNC r2_workers=$R2_WORKERS r2_flush_timeout=$R2_FLUSH_TIMEOUT r2_key=verl-research/$R2_EXPERIMENT/$R2_REGIME/weights exp=$EXPN out_dir=$WEIGHTS ==="
 LOG="$INTERNAL_LOG" \
 ALLOW_SINGLE_GPU=1 \
 ROLLOUT_TP=1 \
@@ -90,6 +110,11 @@ bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.dump_dtype=$FULL_DTYPE \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.every_steps=$FULL_EVERY \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_enabled=$R2_ENABLED \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_async=$R2_ASYNC \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_flush_every_steps=$R2_FLUSH_EVERY \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_upload_workers=$R2_WORKERS \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_max_staged_gb=$R2_MAX_STAGED_GB \
+  actor_rollout_ref.actor.comm_eff.probe.weight_traj.r2_flush_timeout_s=$R2_FLUSH_TIMEOUT \
   actor_rollout_ref.actor.comm_eff.probe.weight_traj.out_dir="$WEIGHTS" \
   > "$OUT/driver.log" 2>&1
 RC=$?

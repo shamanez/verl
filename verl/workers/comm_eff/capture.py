@@ -280,6 +280,17 @@ class CaptureWriter:
         tick_key = (int(global_step), int(optimizer_tick))
         if not self.should_capture_tick(global_step, optimizer_tick):
             return False
+        # The ``_lock`` guards the tick-dir bookkeeping (``_open_ticks`` /
+        # ``_strat_seen``), the local ``.pt`` write and the local ``manifest.jsonl``
+        # append + counter — NOT the slow R2 network upload. We capture the upload
+        # parameters inside the lock and perform the upload AFTER releasing it
+        # (M5 — dump-raises-under-lock-in-sync-mode): a synchronous cp/verify can
+        # take tens of seconds for a multi-GB file, and holding the lock across it
+        # would serialize all other dump()/should_capture_tick() calls behind the
+        # network and (on failure) raise out of dump() with no benefit from having
+        # held the lock. The lock is always released via the ``with`` block, so a
+        # later upload failure cannot leave it held.
+        upload_kwargs = None
         with self._lock:
             if not self._strat_admit(tick_key, role, target_name):
                 return False
@@ -311,11 +322,8 @@ class CaptureWriter:
             with open(self.manifest_path, "a") as fh:
                 fh.write(json.dumps(row) + "\n")
             self._n_written += 1
-            # R2 offload (upload + delete-local after a verified upload). Raises on
-            # failure and KEEPS the local file, so a bad upload never loses the
-            # tensor; a misconfig (missing aws / creds / wrong bucket) fails loud.
             if self.r2_sink is not None:
-                self.r2_sink.upload(
+                upload_kwargs = dict(
                     local_path=fpath,
                     key_suffix=f"{role}/tick_{tick_key[0]}_{tick_key[1]}/{fname}",
                     meta={
@@ -325,11 +333,32 @@ class CaptureWriter:
                         "target_name": target_name,
                     },
                 )
+        # R2 offload, OUTSIDE the lock (upload + delete-local after a verified
+        # upload). Sync mode raises on failure and KEEPS the local file, so a bad
+        # upload never loses the tensor; a misconfig (missing aws / creds / wrong
+        # bucket) fails loud. Async mode enqueues and returns immediately.
+        if upload_kwargs is not None:
+            self.r2_sink.upload(**upload_kwargs)
         return True
 
     @property
     def n_written(self) -> int:
         return self._n_written
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Drain + join the (async) R2 upload pool and fail-loud on any failure.
+
+        Idempotent. A no-op with no sink or a synchronous sink (nothing queued).
+        Wired into the engine teardown (see ``ActorRolloutRefWorker.comm_eff_close``)
+        so the audit's final async uploads complete and any permanent failure /
+        timed-out drain surfaces (raises) at run end. ``timeout`` bounds the
+        drain/join; ``None`` falls back to the sink's own ``flush_timeout_s``.
+        """
+        if self.r2_sink is not None and hasattr(self.r2_sink, "close"):
+            if timeout is None:
+                t = float(getattr(self.r2_sink, "flush_timeout_s", 0.0) or 0.0)
+                timeout = t if t > 0 else None
+            self.r2_sink.close(timeout=timeout)
 
 
 def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Optional[CaptureWriter]:
@@ -352,13 +381,18 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
         min_tick=int(getattr(cap, "min_tick", 0)),
     )
     # R2 offload for the raw grad/activation dumps. Built only on the writer rank
-    # (reusing the writer's resolved root for the local r2_manifest.jsonl).
+    # (reusing the writer's resolved root for the local r2_manifest.jsonl). The
+    # async knobs decouple uploads from compute (off => synchronous, as before).
     if bool(getattr(cap, "r2_enabled", False)) and not writer._inactive:
         writer.r2_sink = maybe_build_r2_sink(
             enabled=True,
             artifact_kind="grads",
             manifest_dir=writer.root,
             delete_local=bool(getattr(cap, "r2_delete_local", True)),
+            async_mode=bool(getattr(cap, "r2_async", False)),
+            upload_workers=int(getattr(cap, "r2_upload_workers", 4)),
+            max_staged_gb=float(getattr(cap, "r2_max_staged_gb", 80.0)),
+            flush_timeout_s=float(getattr(cap, "r2_flush_timeout_s", 1800.0)),
         )
     return writer
 
@@ -458,6 +492,11 @@ class WeightTrajObserver:
         rank0_only: bool = True,
         r2_enabled: bool = False,
         r2_delete_local: bool = True,
+        r2_async: bool = False,
+        r2_flush_every_steps: int = 10,
+        r2_upload_workers: int = 4,
+        r2_max_staged_gb: float = 80.0,
+        r2_flush_timeout_s: float = 1800.0,
     ):
         self.enabled = True
         self.out_dir = out_dir or os.path.join(os.getcwd(), "weights")
@@ -469,6 +508,11 @@ class WeightTrajObserver:
         # every_steps. The observer always dumps ALL floating params — no subset.
         self.per_tick = bool(per_tick)
         self.every_steps = max(1, int(every_steps))
+        # Async-upload flush cadence (only meaningful when the sink is async): the
+        # observer drains the upload queue + checkpoints the manifest every N steps
+        # so disk stays bounded and a failure surfaces promptly.
+        self.r2_flush_every_steps = max(1, int(r2_flush_every_steps))
+        self._last_flush_step = -1  # dedup the per-step flush barrier
 
         if rank is None:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -479,6 +523,7 @@ class WeightTrajObserver:
         self._tick = 0  # monotonic optimizer-tick counter (own; comm_eff may be off)
         self._last_dumped_step = -1  # dedup: at most one full dump per global_step (per-step mode)
         self._n_dumped = 0
+        self._closed = False
 
         self.r2_sink = None
         if not self._inactive:
@@ -486,18 +531,24 @@ class WeightTrajObserver:
             os.makedirs(self.full_dir, exist_ok=True)
             self.manifest_path = os.path.join(self.out_dir, "full_manifest.jsonl")
             # R2 offload: upload each snapshot then delete the local .pt. Built only
-            # on the writer rank; creds + bucket guard live in r2_sink.
+            # on the writer rank; creds + bucket guard live in r2_sink. The async
+            # knobs decouple uploads from compute (off => synchronous, as before).
             self.r2_sink = maybe_build_r2_sink(
                 enabled=bool(r2_enabled),
                 artifact_kind="weights",
                 manifest_dir=self.out_dir,
                 delete_local=bool(r2_delete_local),
+                async_mode=bool(r2_async),
+                upload_workers=int(r2_upload_workers),
+                max_staged_gb=float(r2_max_staged_gb),
+                flush_timeout_s=float(r2_flush_timeout_s),
             )
         print(
             f"[comm_eff][weight_traj] FULL-weight observer out_dir={self.out_dir} "
             f"dump_dtype={self.dump_dtype} per_tick={self.per_tick} every_steps={self.every_steps} "
             f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive} "
-            f"r2={'on' if self.r2_sink is not None else 'off'}",
+            f"r2={'on' if self.r2_sink is not None else 'off'} "
+            f"r2_async={bool(r2_async) and self.r2_sink is not None} flush_every={self.r2_flush_every_steps}",
             flush=True,
         )
 
@@ -523,7 +574,51 @@ class WeightTrajObserver:
         elif gs >= 0 and gs != self._last_dumped_step and (gs % self.every_steps == 0):
             self._dump_full(f"step_{gs}", weights, global_step=gs, tick=tick)
             self._last_dumped_step = gs
+        # Async-upload flush barrier: every r2_flush_every_steps trainer steps,
+        # drain the upload queue + checkpoint the manifest (no-op when the sink is
+        # synchronous or None — flush() short-circuits). Bounds disk and surfaces a
+        # failed upload promptly (fail-loud). Deduped on global_step so a per-tick
+        # cadence flushes once per matching step, not once per tick.
+        if (
+            self.r2_sink is not None
+            and gs >= 0
+            and gs != self._last_flush_step
+            and (gs % self.r2_flush_every_steps == 0)
+        ):
+            # Bounded per-step flush (H3): pass a FINITE timeout so a slow/hung
+            # uploader cannot block the optimizer step forever on the unbounded
+            # queue.join(). The sink's flush_timeout_s (<=0 => wait forever) carries
+            # the policy; a timeout raises TimeoutError, surfacing fail-loud rather
+            # than silently wedging training.
+            self.r2_sink.flush(timeout=self._flush_timeout())
+            self._last_flush_step = gs
         return tick
+
+    def _flush_timeout(self):
+        """Finite per-step flush timeout from the sink (None => wait forever)."""
+        t = float(getattr(self.r2_sink, "flush_timeout_s", 0.0) or 0.0)
+        return t if t > 0 else None
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Run-end barrier: flush + drain the R2 upload queue, fail-loud, join workers.
+
+        Idempotent. A no-op on an inactive rank or when no sink is attached. MUST be
+        called at run end (wired into the engine teardown — see
+        ``ActorRolloutRefWorker.comm_eff_close``) so the final in-flight async
+        uploads complete and any permanent failure surfaces (a silently-incomplete
+        trajectory is forbidden). With a synchronous sink this is a cheap no-op
+        (nothing is queued). RAISES if any async upload permanently failed or the
+        drain timed out with workers still alive. ``timeout`` bounds the drain/join;
+        ``None`` falls back to the sink's own ``flush_timeout_s`` so the run-end
+        barrier is bounded by default.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.r2_sink is not None and hasattr(self.r2_sink, "close"):
+            if timeout is None:
+                timeout = self._flush_timeout()
+            self.r2_sink.close(timeout=timeout)
 
     def _dump_full(self, snapshot_id: str, weights: dict, *, global_step: int, tick: int) -> None:
         """Write a FULL-weight snapshot to ``full/<snapshot_id>.pt`` (+ manifest row).
@@ -536,6 +631,18 @@ class WeightTrajObserver:
         analyst can verify the dump loads and the norms match within ``dump_dtype``
         rounding. When an R2 sink is attached the saved ``.pt`` is uploaded and the
         local file is deleted after a verified upload.
+
+        Manifest semantics (H2 — manifest-written-before-r2-upload). The
+        ``full_manifest.jsonl`` row means **DUMPED**: the snapshot was written to
+        local disk. It is written here, BEFORE the upload, and does NOT attest to
+        R2 durability. In async mode ``upload()`` returns immediately (the upload
+        happens later on a worker thread), so this row can NEVER imply the artifact
+        is in R2. The authoritative **VERIFIED-in-R2** record is the separate
+        ``r2_manifest.jsonl`` row, which ``R2ArtifactSink._do_upload`` appends ONLY
+        after a verified upload (cp + head-object size/sha match) — for both the
+        sync and async paths. A consumer checking upload completeness MUST rely on
+        ``r2_manifest.jsonl`` (``verified: true``), not on ``full_manifest.jsonl``.
+        The ``r2`` field below makes the dumped-vs-verified split explicit per row.
         """
         records = []
         state = {}
@@ -555,6 +662,12 @@ class WeightTrajObserver:
         fname = f"{snapshot_id}.pt"
         fpath = os.path.join(self.full_dir, fname)
         torch.save(state, fpath)
+        # ``r2`` makes the dumped-vs-verified split explicit (H2): "off" => no R2
+        # sink (the local .pt IS the artifact); "pending" => an R2 sink is attached
+        # so durability is NOT attested here — read r2_manifest.jsonl (verified:true)
+        # for that. (Even the synchronous sink uploads AFTER this row is written, so
+        # "pending" is the honest state at write time in both modes.)
+        r2_status = "pending" if self.r2_sink is not None else "off"
         with open(self.manifest_path, "a") as fh:
             fh.write(
                 json.dumps(
@@ -564,6 +677,7 @@ class WeightTrajObserver:
                         "dump_dtype": self.dump_dtype,
                         "n_matrices": len(records),
                         "path": os.path.join("full", fname),
+                        "r2": r2_status,
                         "matrices": records,
                     }
                 )
@@ -616,4 +730,9 @@ def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int
         rank0_only=bool(getattr(wt, "rank0_only", True)),
         r2_enabled=bool(getattr(wt, "r2_enabled", False)),
         r2_delete_local=bool(getattr(wt, "r2_delete_local", True)),
+        r2_async=bool(getattr(wt, "r2_async", False)),
+        r2_flush_every_steps=int(getattr(wt, "r2_flush_every_steps", 10)),
+        r2_upload_workers=int(getattr(wt, "r2_upload_workers", 4)),
+        r2_max_staged_gb=float(getattr(wt, "r2_max_staged_gb", 80.0)),
+        r2_flush_timeout_s=float(getattr(wt, "r2_flush_timeout_s", 1800.0)),
     )

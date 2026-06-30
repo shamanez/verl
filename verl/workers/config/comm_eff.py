@@ -549,6 +549,20 @@ class CommEffCaptureConfig(BaseConfig):
     # this with max_ticks=0 (no cap) + stratified_targets=0 (every target).
     r2_enabled: bool = False
     r2_delete_local: bool = True
+    # Async batched upload (opt-in) for the grad/activation dumps. Off =>
+    # synchronous (byte-identical). On => a background worker pool overlaps uploads
+    # with compute. The CaptureWriter has no per-step flush cadence (the audit is a
+    # bounded handful of ticks); the run-end drain + fail-loud is invoked from the
+    # engine teardown (ActorRolloutRefWorker.comm_eff_close -> CaptureWriter.close)
+    # with a finite timeout, backstopped best-effort by a bounded atexit handler.
+    # See CommEffWeightTrajConfig for the field semantics.
+    r2_async: bool = False
+    r2_upload_workers: int = 4
+    r2_max_staged_gb: float = 80.0
+    # ASYNC only: finite timeout (s) for the flush barrier (and run-end close drain)
+    # so a slow/hung uploader cannot block forever on queue.join(). <=0 => wait
+    # forever (the original unbounded behaviour).
+    r2_flush_timeout_s: float = 1800.0
 
 
 @dataclass
@@ -612,6 +626,25 @@ class CommEffWeightTrajConfig(BaseConfig):
             after a verified upload. ``false`` (default) = keep ``.pt`` files local.
         r2_delete_local (bool): When ``r2_enabled``, delete the local ``.pt`` after a
             VERIFIED upload (``true``, default). ``false`` keeps a local copy too.
+        r2_async (bool): Opt-in ASYNC upload mode. ``false`` (default) = synchronous
+            (the dump path blocks on each cp -> verify -> manifest -> delete-local,
+            byte-identical to before). ``true`` = the observer ENQUEUES each
+            snapshot to a background worker pool and returns immediately; the
+            observer flushes every ``r2_flush_every_steps`` steps and at run end so
+            disk stays bounded and the manifest is checkpointed. Only meaningful when
+            ``r2_enabled``.
+        r2_flush_every_steps (int): ASYNC mode only. The observer calls
+            ``sink.flush()`` (a barrier that drains the queue + fails loud on any
+            upload error) whenever ``global_step % r2_flush_every_steps == 0`` (and
+            always at observer close). ``10`` (default). Must be ``>= 1``.
+        r2_upload_workers (int): ASYNC mode only. Number of background upload worker
+            threads (parallel ``aws s3 cp`` streams). ``4`` (default). Must be
+            ``>= 1``. More streams approach the aggregate R2 bandwidth ceiling.
+        r2_max_staged_gb (float): ASYNC mode only. Disk-backpressure cap, in GiB, on
+            the staged (queued + in-flight) bytes. ``upload()`` BLOCKS the producer
+            once staged bytes exceed this, so local ``full/`` never overflows the
+            box disk even if uploads fall behind compute. ``80`` (default). Must be
+            ``> 0``.
     """
 
     enabled: bool = False
@@ -626,6 +659,17 @@ class CommEffWeightTrajConfig(BaseConfig):
     # the env (R2_BUCKET=shamane-pluralis guard). Off => local-only (byte-identical).
     r2_enabled: bool = False
     r2_delete_local: bool = True
+    # Async batched upload (opt-in). Off => synchronous, byte-identical. On => a
+    # background worker pool overlaps uploads with compute; the observer flushes
+    # every r2_flush_every_steps + at run end so disk stays bounded.
+    r2_async: bool = False
+    r2_flush_every_steps: int = 10
+    r2_upload_workers: int = 4
+    r2_max_staged_gb: float = 80.0
+    # ASYNC only: finite timeout (s) for the per-step flush barrier (and run-end
+    # close drain) so a slow/hung uploader cannot block the optimizer step forever
+    # on queue.join(). <=0 => wait forever (the original unbounded behaviour).
+    r2_flush_timeout_s: float = 1800.0
 
 
 @dataclass
@@ -991,6 +1035,26 @@ class CommEffConfig(BaseConfig):
             )
         if int(wt.every_steps) < 1:
             raise ValueError(f"comm_eff.probe.weight_traj.every_steps must be >= 1; got {wt.every_steps}")
+        # Async-upload knobs. Validated unconditionally (registered regardless of
+        # r2_async) so a typo fails fast even when async is off. r2_async is a strict
+        # bool; the worker count and flush cadence are >= 1; the staged cap is > 0.
+        if not isinstance(wt.r2_async, bool):
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_async must be a bool; got "
+                f"{type(wt.r2_async).__name__} ({wt.r2_async!r})"
+            )
+        if int(wt.r2_flush_every_steps) < 1:
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_flush_every_steps must be >= 1; got {wt.r2_flush_every_steps}"
+            )
+        if int(wt.r2_upload_workers) < 1:
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_upload_workers must be >= 1; got {wt.r2_upload_workers}"
+            )
+        if float(wt.r2_max_staged_gb) <= 0.0:
+            raise ValueError(
+                f"comm_eff.probe.weight_traj.r2_max_staged_gb must be > 0; got {wt.r2_max_staged_gb}"
+            )
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
         if self.clean_cadence < 0:
@@ -1100,3 +1164,14 @@ class CommEffConfig(BaseConfig):
             )
         if self.capture.stratified_targets < 0:
             raise ValueError(f"comm_eff.capture.stratified_targets must be >= 0; got {self.capture.stratified_targets}")
+        # Capture-path async-upload knobs (mirror the weight_traj ones). Validated
+        # unconditionally so a typo fails fast even on a non-capture run.
+        if not isinstance(self.capture.r2_async, bool):
+            raise ValueError(
+                f"comm_eff.capture.r2_async must be a bool; got "
+                f"{type(self.capture.r2_async).__name__} ({self.capture.r2_async!r})"
+            )
+        if int(self.capture.r2_upload_workers) < 1:
+            raise ValueError(f"comm_eff.capture.r2_upload_workers must be >= 1; got {self.capture.r2_upload_workers}")
+        if float(self.capture.r2_max_staged_gb) <= 0.0:
+            raise ValueError(f"comm_eff.capture.r2_max_staged_gb must be > 0; got {self.capture.r2_max_staged_gb}")
