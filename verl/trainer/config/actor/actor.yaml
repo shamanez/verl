@@ -606,6 +606,11 @@ comm_eff:
     r2_async: false
     r2_upload_workers: 4
     r2_max_staged_gb: 80.0
+    # ASYNC only. Finite timeout (s) for the run-end close() drain barrier so a
+    # slow/hung uploader cannot block forever on queue.join(). <=0 => wait forever
+    # (the original unbounded behaviour). The capture path has no per-step flush
+    # cadence, so this bounds the run-end close() drain only.
+    r2_flush_timeout_s: 1800.0
 
   # Geometry probe (telemetry-only). OFF by default. When enabled, appends one
   # JSON line per anchor fire plus a train-log line. Probes never feed the
@@ -695,6 +700,11 @@ comm_eff:
       # bytes: upload() blocks the producer above this so local full/ never
       # overflows the box disk even if uploads fall behind compute. > 0.
       r2_max_staged_gb: 80.0
+
+      # ASYNC only. Finite timeout (s) for the per-step flush barrier (and the
+      # run-end close() drain) so a slow/hung uploader cannot block the optimizer
+      # step forever on queue.join(). <=0 => wait forever (original behaviour).
+      r2_flush_timeout_s: 1800.0
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

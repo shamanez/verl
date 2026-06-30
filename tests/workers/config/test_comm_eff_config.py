@@ -479,6 +479,53 @@ class TestCommEffGeometryProbeKnobs(unittest.TestCase):
         # by the launcher); the YAML default mirrors the dataclass default.
         self.assertEqual(config_default.comm_eff.spectral.correction_mode, "none")
 
+    def test_yaml_plain_override_r2_async_knobs(self):
+        """The dataclass<->actor.yaml drift gate for the opt-in async R2 upload
+        knobs. Every async knob — on BOTH the capture path and the probe.weight_traj
+        recorder — must compose as a PLAIN (no `+`) override through the actor YAML,
+        or the launcher's `comm_eff.*.r2_*=...` overrides die in Hydra struct
+        validation before main (the same first-launch killer the paired-replay knobs
+        hit). r2_flush_timeout_s in particular was added to the dataclass with the
+        H3 fix but is easy to forget to mirror in YAML; this test pins it."""
+        from hydra import compose, initialize_config_dir
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg = compose(
+                config_name="dp_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "ppo_micro_batch_size_per_gpu=128",
+                    # capture path async knobs
+                    "comm_eff.capture.r2_async=true",
+                    "comm_eff.capture.r2_upload_workers=8",
+                    "comm_eff.capture.r2_max_staged_gb=40.0",
+                    "comm_eff.capture.r2_flush_timeout_s=300.0",
+                    # probe.weight_traj recorder async knobs
+                    "comm_eff.probe.weight_traj.r2_async=true",
+                    "comm_eff.probe.weight_traj.r2_flush_every_steps=5",
+                    "comm_eff.probe.weight_traj.r2_upload_workers=8",
+                    "comm_eff.probe.weight_traj.r2_max_staged_gb=40.0",
+                    "comm_eff.probe.weight_traj.r2_flush_timeout_s=300.0",
+                ],
+            )
+        config = omega_conf_to_dataclass(cfg)
+        self.assertTrue(config.comm_eff.capture.r2_async)
+        self.assertEqual(config.comm_eff.capture.r2_upload_workers, 8)
+        self.assertEqual(config.comm_eff.capture.r2_flush_timeout_s, 300.0)
+        self.assertTrue(config.comm_eff.probe.weight_traj.r2_async)
+        self.assertEqual(config.comm_eff.probe.weight_traj.r2_flush_every_steps, 5)
+        self.assertEqual(config.comm_eff.probe.weight_traj.r2_flush_timeout_s, 300.0)
+        # And the YAML defaults mirror the dataclass defaults (off / 1800s path).
+        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
+            cfg_default = compose(
+                config_name="dp_actor", overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=128"]
+            )
+        config_default = omega_conf_to_dataclass(cfg_default)
+        self.assertFalse(config_default.comm_eff.capture.r2_async)
+        self.assertEqual(config_default.comm_eff.capture.r2_flush_timeout_s, 1800.0)
+        self.assertFalse(config_default.comm_eff.probe.weight_traj.r2_async)
+        self.assertEqual(config_default.comm_eff.probe.weight_traj.r2_flush_timeout_s, 1800.0)
+
     def test_yaml_delayed_ef_shape_composes(self):
         """The gated delayed_ef override set composes — pre-validated now
         so a future delayed_ef gate-open dispatch cannot die in Hydra."""
