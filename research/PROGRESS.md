@@ -35,3 +35,5 @@ PowerSGD r=77 + a mandatory anchor that owns Q; the two-circuit structure is man
 met at low latency (stable / parity / ~5% gradient-comm). Merger family settled: `signed_ema`;
 prior anchor-usage + beta_anc sweeps were null beyond eval noise. Do not import old anchor-gradient
 claims or run labels into new plans.
+[2026-06-30T15:42:58+10:00] [research-planner #43] plan written
+[2026-06-30T15:43:21+10:00] [triage] dispatched 1 planner, 0 issues already planned
