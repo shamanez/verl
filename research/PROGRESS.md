@@ -38,3 +38,5 @@ claims or run labels into new plans.
 [2026-06-30T15:42:58+10:00] [research-planner #43] plan written
 [2026-06-30T15:43:21+10:00] [triage] dispatched 1 planner, 0 issues already planned
 [2026-06-30T15:54:06+10:00] [orchestrator] tick1: EXP-43 READY_TO_RUN → dispatched experiment-runner (attach external 1xH200 i_43190371 team, launch regimeA collection cell). box SSH-probed healthy. awaiting RUNNING report → monitor next.
+[2026-06-30T15:56:42+10:00] [experiment-runner #43] launched regimeA on 1 external H200 (inst 43190371, team acct) tmux=exp43a exp_name=exp42-regimeA-exp43 dph=0 max_gpu_hr=14
+[2026-06-30T15:59:46+10:00] [orchestrator] tick1 cont: runner returned RUNNING (exp43a ALIVE, code_change=false @ ded0762, WandB exp42-regimeA-exp43; gates 1+4 pre-confirmed in resolved cmd). training-log-monitor dispatched (bg). teardown sweep clean — healthy box survived. awaiting monitor terminal report.

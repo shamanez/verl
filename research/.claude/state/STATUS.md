@@ -4,12 +4,14 @@
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 43 | Weight-proj: collect shared dense GRPO weight traj (select_all observer, regime A) | LAUNCHING | external 1×H200 i_43190371 (team), attaching | — | `status:approved`, kind:experiment, M4. First tick: runner dispatched to attach + launch regime-A cell. Box SSH-probed healthy (H200 143771 MiB, idle, 400G free). code_change=false (instrument already on vast-ai-workload). |
+| 43 | Weight-proj: collect shared dense GRPO weight traj (select_all observer, regime A) | RUNNING (monitor active) | external 1×H200 i_43190371 (team) | — | `status:running`, kind:experiment, M4. Runner attached + launched tmux `exp43a` ALIVE. code_change=false (wiring grep hit @ HEAD ded0762). WandB `exp42-regimeA-exp43`. **Gate 1 + Gate 4 pre-confirmed in resolved cmd** (select_all=true reached observer; comm_eff.enabled=false master off). training-log-monitor dispatched (bg). |
 | 42 | M4 weight-projection accuracy vs horizon | DONE | external boxes TORN_DOWN | pass | CLOSED (status:pass). The narrow 196-matrix study; de-bloated. EXP-43 widens to select_all (~338 matrices), regime A only. |
 | 41 | M4 look-ahead anchor (delay_K=20, fixed-linear) | DONE | external 4×H200 TORN_DOWN | STOP | fixed-linear θ̂ falsified; cell B collapsed via length-explosion. |
 
 ## Last tick
-2026-06-30T15:55+10:00 · running=[] · launching=[43] · analyzing=[] · logging=[] · blocked=[]
+2026-06-30T15:59+10:00 · running=[43] · launching=[] · analyzing=[] · logging=[] · blocked=[]
+Runner returned RUNNING (exp43a ALIVE, ledger row RUNNING+external+team, heartbeat owned).
+training-log-monitor active (bg, 40-min poll). Teardown sweep ran clean — box correctly survived.
 
 ## Pipeline state
 EXP-43 is the ROOT of the M4 weight-proj dependency spine (depends_on: []). First tick: the

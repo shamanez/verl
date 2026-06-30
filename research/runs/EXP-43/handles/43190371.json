@@ -7,8 +7,9 @@
   "gpu_name": "H200",
   "gpu_ram": 143771,
   "dph_total": 0,
-  "ssh_login": "ssh -i ~/.ssh/Vast-Team -o StrictHostKeyChecking=accept-new -p 15328 root@210.157.233.86",
+  "ssh_login": "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p 15328 root@210.157.233.86",
   "label": "EXP-43",
   "vast_account": "team",
-  "external": true
+  "external": true,
+  "tmux_session": "exp43a"
 }
