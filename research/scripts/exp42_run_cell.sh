@@ -53,10 +53,11 @@ esac
 #       only. The per-tick bf16 trajectory (~492 GB) does NOT fit the box, so set
 #       true for the accepted collection. Creds come from $HOME/.verl_auth.env
 #       (R2_ACCOUNT_ID/R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET).
-#   WEIGHT_TRAJ_R2_ASYNC (true|false): OPT-IN async batched upload. false (default)
-#       => synchronous (the dump path blocks on each upload — byte-identical to
-#       before). true => a background worker pool overlaps uploads with compute;
-#       the observer flushes every WEIGHT_TRAJ_R2_FLUSH_EVERY steps + at run end so
+#   WEIGHT_TRAJ_R2_ASYNC (true|false): async batched upload. true (DEFAULT for
+#       collection runs) => a background worker pool overlaps uploads with compute.
+#       false => synchronous (the dump path blocks on each upload, byte-identical to
+#       the original path); use that to fall back if async ever misbehaves on a box.
+#       Async mechanics: the observer flushes every WEIGHT_TRAJ_R2_FLUSH_EVERY steps + at run end so
 #       disk stays bounded (capped at WEIGHT_TRAJ_R2_MAX_STAGED_GB GiB) + fail-loud.
 #   WEIGHT_TRAJ_R2_FLUSH_EVERY (N): async flush-barrier cadence in steps (def 10).
 #   WEIGHT_TRAJ_R2_WORKERS (N): async upload worker threads (def 4) — parallel
@@ -72,8 +73,9 @@ PER_TICK="${WEIGHT_TRAJ_PER_TICK:-false}"
 FULL_DTYPE="${WEIGHT_TRAJ_FULL_DTYPE:-bf16}"
 FULL_EVERY="${WEIGHT_TRAJ_FULL_EVERY:-1}"
 R2_ENABLED="${WEIGHT_TRAJ_R2_ENABLED:-false}"
-# Async-upload knobs (default off / values identical to the synchronous path).
-R2_ASYNC="${WEIGHT_TRAJ_R2_ASYNC:-false}"
+# Async-upload knobs. Default ON for collection runs (overlaps uploads with compute,
+# ~few-x faster); set WEIGHT_TRAJ_R2_ASYNC=false to force the old synchronous path.
+R2_ASYNC="${WEIGHT_TRAJ_R2_ASYNC:-true}"
 R2_FLUSH_EVERY="${WEIGHT_TRAJ_R2_FLUSH_EVERY:-10}"
 R2_WORKERS="${WEIGHT_TRAJ_R2_WORKERS:-4}"
 R2_MAX_STAGED_GB="${WEIGHT_TRAJ_R2_MAX_STAGED_GB:-80}"
