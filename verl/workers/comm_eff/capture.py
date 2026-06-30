@@ -331,6 +331,16 @@ class CaptureWriter:
     def n_written(self) -> int:
         return self._n_written
 
+    def close(self) -> None:
+        """Drain + join the (async) R2 upload pool and fail-loud on any failure.
+
+        Idempotent. A no-op with no sink or a synchronous sink (nothing queued).
+        Call at run end so the audit's final async uploads complete and any
+        permanent failure surfaces.
+        """
+        if self.r2_sink is not None and hasattr(self.r2_sink, "close"):
+            self.r2_sink.close()
+
 
 def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Optional[CaptureWriter]:
     """Construct a :class:`CaptureWriter` iff ``comm_eff.capture.enabled``, else None.
@@ -352,13 +362,17 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
         min_tick=int(getattr(cap, "min_tick", 0)),
     )
     # R2 offload for the raw grad/activation dumps. Built only on the writer rank
-    # (reusing the writer's resolved root for the local r2_manifest.jsonl).
+    # (reusing the writer's resolved root for the local r2_manifest.jsonl). The
+    # async knobs decouple uploads from compute (off => synchronous, as before).
     if bool(getattr(cap, "r2_enabled", False)) and not writer._inactive:
         writer.r2_sink = maybe_build_r2_sink(
             enabled=True,
             artifact_kind="grads",
             manifest_dir=writer.root,
             delete_local=bool(getattr(cap, "r2_delete_local", True)),
+            async_mode=bool(getattr(cap, "r2_async", False)),
+            upload_workers=int(getattr(cap, "r2_upload_workers", 4)),
+            max_staged_gb=float(getattr(cap, "r2_max_staged_gb", 80.0)),
         )
     return writer
 
@@ -458,6 +472,10 @@ class WeightTrajObserver:
         rank0_only: bool = True,
         r2_enabled: bool = False,
         r2_delete_local: bool = True,
+        r2_async: bool = False,
+        r2_flush_every_steps: int = 10,
+        r2_upload_workers: int = 4,
+        r2_max_staged_gb: float = 80.0,
     ):
         self.enabled = True
         self.out_dir = out_dir or os.path.join(os.getcwd(), "weights")
@@ -469,6 +487,11 @@ class WeightTrajObserver:
         # every_steps. The observer always dumps ALL floating params — no subset.
         self.per_tick = bool(per_tick)
         self.every_steps = max(1, int(every_steps))
+        # Async-upload flush cadence (only meaningful when the sink is async): the
+        # observer drains the upload queue + checkpoints the manifest every N steps
+        # so disk stays bounded and a failure surfaces promptly.
+        self.r2_flush_every_steps = max(1, int(r2_flush_every_steps))
+        self._last_flush_step = -1  # dedup the per-step flush barrier
 
         if rank is None:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -479,6 +502,7 @@ class WeightTrajObserver:
         self._tick = 0  # monotonic optimizer-tick counter (own; comm_eff may be off)
         self._last_dumped_step = -1  # dedup: at most one full dump per global_step (per-step mode)
         self._n_dumped = 0
+        self._closed = False
 
         self.r2_sink = None
         if not self._inactive:
@@ -486,18 +510,23 @@ class WeightTrajObserver:
             os.makedirs(self.full_dir, exist_ok=True)
             self.manifest_path = os.path.join(self.out_dir, "full_manifest.jsonl")
             # R2 offload: upload each snapshot then delete the local .pt. Built only
-            # on the writer rank; creds + bucket guard live in r2_sink.
+            # on the writer rank; creds + bucket guard live in r2_sink. The async
+            # knobs decouple uploads from compute (off => synchronous, as before).
             self.r2_sink = maybe_build_r2_sink(
                 enabled=bool(r2_enabled),
                 artifact_kind="weights",
                 manifest_dir=self.out_dir,
                 delete_local=bool(r2_delete_local),
+                async_mode=bool(r2_async),
+                upload_workers=int(r2_upload_workers),
+                max_staged_gb=float(r2_max_staged_gb),
             )
         print(
             f"[comm_eff][weight_traj] FULL-weight observer out_dir={self.out_dir} "
             f"dump_dtype={self.dump_dtype} per_tick={self.per_tick} every_steps={self.every_steps} "
             f"rank={self.rank} rank0_only={self.rank0_only} inactive={self._inactive} "
-            f"r2={'on' if self.r2_sink is not None else 'off'}",
+            f"r2={'on' if self.r2_sink is not None else 'off'} "
+            f"r2_async={bool(r2_async) and self.r2_sink is not None} flush_every={self.r2_flush_every_steps}",
             flush=True,
         )
 
@@ -523,7 +552,34 @@ class WeightTrajObserver:
         elif gs >= 0 and gs != self._last_dumped_step and (gs % self.every_steps == 0):
             self._dump_full(f"step_{gs}", weights, global_step=gs, tick=tick)
             self._last_dumped_step = gs
+        # Async-upload flush barrier: every r2_flush_every_steps trainer steps,
+        # drain the upload queue + checkpoint the manifest (no-op when the sink is
+        # synchronous or None — flush() short-circuits). Bounds disk and surfaces a
+        # failed upload promptly (fail-loud). Deduped on global_step so a per-tick
+        # cadence flushes once per matching step, not once per tick.
+        if (
+            self.r2_sink is not None
+            and gs >= 0
+            and gs != self._last_flush_step
+            and (gs % self.r2_flush_every_steps == 0)
+        ):
+            self.r2_sink.flush()
+            self._last_flush_step = gs
         return tick
+
+    def close(self) -> None:
+        """Run-end barrier: flush + drain the R2 upload queue, fail-loud, join workers.
+
+        Idempotent. A no-op on an inactive rank or when no sink is attached. MUST be
+        called at run end so the final in-flight async uploads complete and any
+        permanent failure surfaces (a silently-incomplete trajectory is forbidden).
+        With a synchronous sink this is a cheap no-op (nothing is queued).
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.r2_sink is not None and hasattr(self.r2_sink, "close"):
+            self.r2_sink.close()
 
     def _dump_full(self, snapshot_id: str, weights: dict, *, global_step: int, tick: int) -> None:
         """Write a FULL-weight snapshot to ``full/<snapshot_id>.pt`` (+ manifest row).
@@ -616,4 +672,8 @@ def maybe_build_weight_traj_observer(comm_eff_config: Any, *, rank: Optional[int
         rank0_only=bool(getattr(wt, "rank0_only", True)),
         r2_enabled=bool(getattr(wt, "r2_enabled", False)),
         r2_delete_local=bool(getattr(wt, "r2_delete_local", True)),
+        r2_async=bool(getattr(wt, "r2_async", False)),
+        r2_flush_every_steps=int(getattr(wt, "r2_flush_every_steps", 10)),
+        r2_upload_workers=int(getattr(wt, "r2_upload_workers", 4)),
+        r2_max_staged_gb=float(getattr(wt, "r2_max_staged_gb", 80.0)),
     )

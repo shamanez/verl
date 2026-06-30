@@ -599,6 +599,14 @@ comm_eff:
     # When r2_enabled, delete the local .pt after a VERIFIED upload (true, default).
     r2_delete_local: true
 
+    # Opt-in ASYNC upload for the grad/activation dumps. false (default) =>
+    # synchronous (byte-identical). true => background worker pool overlaps uploads
+    # with compute; close() drains + fails loud at run end. See weight_traj for the
+    # field semantics (the capture path has no per-step flush cadence).
+    r2_async: false
+    r2_upload_workers: 4
+    r2_max_staged_gb: 80.0
+
   # Geometry probe (telemetry-only). OFF by default. When enabled, appends one
   # JSON line per anchor fire plus a train-log line. Probes never feed the
   # optimizer. Requires paired replay and an inert merger.
@@ -668,6 +676,25 @@ comm_eff:
       # When r2_enabled, delete the local .pt after a VERIFIED upload (true,
       # default). false keeps a local copy alongside the R2 object.
       r2_delete_local: true
+
+      # Opt-in ASYNC upload. false (default) => synchronous: the dump path blocks
+      # on each upload (byte-identical to before). true => enqueue each snapshot to
+      # a background worker pool and return immediately; the observer flushes every
+      # r2_flush_every_steps steps + at run end so disk stays bounded + fail-loud.
+      r2_async: false
+
+      # ASYNC only. flush() barrier cadence in trainer steps (drains the queue +
+      # checkpoints the manifest + raises on any upload failure). >= 1.
+      r2_flush_every_steps: 10
+
+      # ASYNC only. Background upload worker threads (parallel aws s3 cp streams).
+      # More streams approach the aggregate R2 bandwidth ceiling. >= 1.
+      r2_upload_workers: 4
+
+      # ASYNC only. Disk-backpressure cap (GiB) on staged (queued + in-flight)
+      # bytes: upload() blocks the producer above this so local full/ never
+      # overflows the box disk even if uploads fall behind compute. > 0.
+      r2_max_staged_gb: 80.0
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

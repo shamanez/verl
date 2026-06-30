@@ -127,10 +127,18 @@ def test_inactive_rank_is_noop(tmp_path):
 class _MockSink:
     def __init__(self):
         self.calls = []
+        self.flushes = 0
+        self.closed = 0
 
     def upload(self, *, local_path, key_suffix, meta=None):
         self.calls.append({"local_path": local_path, "key_suffix": key_suffix, "meta": meta})
         return {"key": key_suffix, "verified": True}
+
+    def flush(self, timeout=None):
+        self.flushes += 1
+
+    def close(self, timeout=None):
+        self.closed += 1
 
 
 def test_r2_routes_each_snapshot(tmp_path):
@@ -142,3 +150,39 @@ def test_r2_routes_each_snapshot(tmp_path):
     c = sink.calls[0]
     assert c["key_suffix"] == "full/step_3/step_3.pt"
     assert c["meta"]["role"] == "weights" and c["meta"]["global_step"] == 3 and c["meta"]["n_matrices"] == 3
+
+
+def test_async_flush_cadence_and_close(tmp_path):
+    """The observer flushes every r2_flush_every_steps steps and drains on close()."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=False, rank=0, r2_flush_every_steps=3)
+    sink = _MockSink()
+    obs.r2_sink = sink
+    # global_step 0,3,6 trigger a flush (0 % 3 == 0); 1,2,4,5 do not.
+    for gs in range(7):
+        obs.observe(_weights(), global_step=gs)
+    assert sink.flushes == 3  # steps 0, 3, 6 (each deduped on global_step)
+    # the flush at a given step fires once even if observe() is called again same step
+    obs.observe(_weights(), global_step=6)
+    assert sink.flushes == 3  # step 6 already flushed -> no extra flush
+
+    obs.close()
+    assert sink.closed == 1
+    obs.close()  # idempotent
+    assert sink.closed == 1
+
+
+def test_async_per_tick_flush_dedup_on_step(tmp_path):
+    """In per_tick mode the per-step flush still fires once per matching global_step."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=True, rank=0, r2_flush_every_steps=2)
+    sink = _MockSink()
+    obs.r2_sink = sink
+    # two ticks at step 0 (flush once), two at step 1 (no flush), two at step 2 (flush once)
+    for gs in (0, 0, 1, 1, 2, 2):
+        obs.observe(_weights(), global_step=gs)
+    assert sink.flushes == 2  # step 0 and step 2, each once despite 2 ticks
+
+
+def test_inactive_rank_close_is_safe(tmp_path):
+    """close() on an inactive (non-writer) rank is a no-op (no sink attached)."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=True, rank=1, rank0_only=True)
+    obs.close()  # must not raise (r2_sink is None on the inactive rank)

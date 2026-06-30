@@ -45,18 +45,49 @@ has zero boto3/s3 imports, the harness already shells out to ``vastai`` / ``gh``
 / ``rsync``, and ``aws s3 cp`` handles multipart upload of multi-GB ``.pt`` files
 to a Cloudflare R2 endpoint out of the box. All subprocess calls go through this
 module's ``subprocess`` reference so tests can monkeypatch it with no network.
+
+Async mode (opt-in)
+-------------------
+The default :meth:`R2ArtifactSink.upload` is SYNCHRONOUS: it blocks the training
+step until the cp -> verify -> manifest -> delete-local sequence completes. For a
+~480 GB per-tick trajectory at a ~60-90 MiB/s single-stream R2 ceiling that block
+dominates the step. When ``async_mode=True`` the sink instead decouples uploading
+from compute:
+
+* :meth:`upload` ENQUEUES the job and returns immediately (non-blocking);
+* a pool of ``upload_workers`` daemon threads each pop a job and run the SAME
+  ``_do_upload`` (cp -> verify -> manifest -> delete-local) — multiple parallel
+  ``aws s3 cp`` streams approach the aggregate R2 bandwidth ceiling;
+* manifest appends are serialized with a lock (concurrent workers);
+* :meth:`flush` is a barrier that blocks until the queue drains and RAISES if any
+  upload permanently failed (fail-loud — a broken run is never silently
+  incomplete);
+* :meth:`upload` applies disk BACKPRESSURE: it blocks the producer once the
+  staged (queued + in-flight) bytes exceed ``max_staged_bytes``, so the local
+  ``full/`` staging area never overflows the box disk even if uploads fall
+  behind compute.
+
+When ``async_mode=False`` (the default) the sink is byte-identical to before: no
+threads are started and ``upload`` runs ``_do_upload`` inline, raising on failure
+and keeping the local file, exactly as today.
 """
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
 import os
+import queue
 import subprocess
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# A bytes-in-a-gigabyte constant for the staged-bytes backpressure cap.
+_BYTES_PER_GB = 1 << 30
 
 __all__ = [
     "R2_REQUIRED_BUCKET",
@@ -98,6 +129,9 @@ class R2ArtifactSink:
         region: str = "auto",
         verify: str = "size",
         aws_bin: str = "aws",
+        async_mode: bool = False,
+        upload_workers: int = 4,
+        max_staged_gb: float = 80.0,
     ):
         # Hard bucket guard — fail loud, never write to the wrong bucket.
         if bucket != R2_REQUIRED_BUCKET:
@@ -133,10 +167,42 @@ class R2ArtifactSink:
             "AWS_DEFAULT_REGION": region,
         }
         os.makedirs(os.path.dirname(self.manifest_path) or ".", exist_ok=True)
+
+        # --- async upload state ------------------------------------------- #
+        self.async_mode = bool(async_mode)
+        self.upload_workers = max(1, int(upload_workers))
+        if float(max_staged_gb) <= 0:
+            raise ValueError(f"R2 sink max_staged_gb must be > 0; got {max_staged_gb}")
+        self.max_staged_bytes = int(float(max_staged_gb) * _BYTES_PER_GB)
+        # Serialize manifest appends across the worker pool (and harmless on the
+        # synchronous path).
+        self._manifest_lock = threading.Lock()
+        # Worker pool + job queue, built lazily on the first async upload so the
+        # synchronous path stays byte-identical (no threads ever started).
+        self._jobs: "queue.Queue" = queue.Queue()
+        self._workers: list = []
+        self._workers_started = False
+        self._closed = False
+        # Backpressure: staged_bytes = queued + in-flight bytes, gated by a
+        # condition variable so upload() blocks the producer above the cap.
+        self._staged_bytes = 0
+        self._staged_cond = threading.Condition()
+        # Fail-loud: permanently-failed uploads are recorded here; flush()/close()
+        # raise if non-empty so a broken run is never silently incomplete.
+        self._errors: list = []
+        self._errors_lock = threading.Lock()
+        # Register a process-exit safety net so a run that ends without an explicit
+        # close() still drains + surfaces failures (best-effort; never raises in
+        # atexit — it logs loudly instead).
+        if self.async_mode:
+            atexit.register(self._atexit_close)
+
         # Bucket name + prefix are safe to print; creds are not.
         print(
             f"[comm_eff][r2] sink -> s3://{self.bucket}/{self.key_prefix}/ "
-            f"(delete_local={self.delete_local} verify={self.verify} manifest={self.manifest_path})",
+            f"(delete_local={self.delete_local} verify={self.verify} manifest={self.manifest_path} "
+            f"async={self.async_mode} workers={self.upload_workers if self.async_mode else 0} "
+            f"max_staged_gb={max_staged_gb if self.async_mode else 0})",
             flush=True,
         )
 
@@ -145,8 +211,27 @@ class R2ArtifactSink:
         """Run an ``aws`` subprocess with the R2 creds in the env. Mockable."""
         return subprocess.run(cmd, env=self._env, capture_output=True, text=True)
 
-    def upload(self, *, local_path: str, key_suffix: str, meta: Optional[dict] = None) -> dict:
+    def upload(self, *, local_path: str, key_suffix: str, meta: Optional[dict] = None) -> Optional[dict]:
         """Upload ``local_path`` to ``<key_prefix>/<key_suffix>``, verify, record, delete-local.
+
+        Synchronous (default) mode: runs the cp -> verify -> manifest -> delete-local
+        sequence inline and returns the manifest row dict. Raises on cp/verify
+        failure and KEEPS the local file in that case (so a failed upload never
+        loses the tensor) — byte-identical to the original behaviour.
+
+        Async mode (``async_mode=True``): ENQUEUES the job and returns ``None``
+        immediately (non-blocking). The worker pool runs the identical
+        ``_do_upload`` sequence; :meth:`flush` / :meth:`close` surface any failure.
+        ``upload`` BLOCKS only when the staged bytes are above ``max_staged_bytes``
+        (disk backpressure), never on the upload itself.
+        """
+        if self.async_mode:
+            self._enqueue(local_path=local_path, key_suffix=key_suffix, meta=meta)
+            return None
+        return self._do_upload(local_path=local_path, key_suffix=key_suffix, meta=meta)
+
+    def _do_upload(self, *, local_path: str, key_suffix: str, meta: Optional[dict] = None) -> dict:
+        """The cp -> verify -> manifest -> delete-local sequence (sync + worker shared).
 
         Returns the manifest row dict. Raises on cp/verify failure and KEEPS the
         local file in that case (so a failed upload never loses the tensor).
@@ -209,8 +294,12 @@ class R2ArtifactSink:
         }
         if meta:
             row.update({k: v for k, v in meta.items()})
-        with open(self.manifest_path, "a") as fh:
-            fh.write(json.dumps(row) + "\n")
+        # Serialize the manifest append + counter across the worker pool. Harmless
+        # on the synchronous path (the lock is uncontended).
+        with self._manifest_lock:
+            with open(self.manifest_path, "a") as fh:
+                fh.write(json.dumps(row) + "\n")
+            self._n_uploaded += 1
 
         # Delete the local staging file ONLY after a verified upload.
         if self.delete_local:
@@ -218,12 +307,141 @@ class R2ArtifactSink:
                 os.remove(local_path)
             except OSError as e:
                 logger.warning("comm_eff.r2: verified upload of %s but could not delete local file: %s", uri, e)
-        self._n_uploaded += 1
         return row
+
+    # ------------------------------------------------------------------ #
+    # async upload: queue + worker pool + flush barrier + backpressure
+    # ------------------------------------------------------------------ #
+    def _ensure_workers(self) -> None:
+        """Start the daemon worker pool once (lazy, on the first async upload)."""
+        if self._workers_started:
+            return
+        self._workers_started = True
+        for i in range(self.upload_workers):
+            t = threading.Thread(target=self._worker_loop, name=f"r2-upload-{i}", daemon=True)
+            t.start()
+            self._workers.append(t)
+
+    def _enqueue(self, *, local_path: str, key_suffix: str, meta: Optional[dict]) -> None:
+        """Enqueue an upload job, blocking on the staged-bytes cap (backpressure).
+
+        The producer (the training step) BLOCKS here only while the staged bytes
+        (queued + in-flight) are at/above ``max_staged_bytes`` — so the local
+        staging area never overflows the box disk even if the uploaders fall
+        behind compute. Once a worker drains a job below the cap the producer is
+        woken and the job is enqueued.
+        """
+        if self._closed:
+            raise RuntimeError("R2 sink.upload after close(); the worker pool is shut down.")
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"R2 upload: local artifact missing: {local_path}")
+        # Surface a worker failure to the PRODUCER promptly (fail-loud): once any
+        # upload has permanently failed, stop enqueuing more work.
+        self._raise_if_errors()
+        self._ensure_workers()
+        nbytes = os.path.getsize(local_path)
+        with self._staged_cond:
+            # Backpressure: wait until adding this job keeps us at/below the cap,
+            # OR the queue is empty (always admit at least one in-flight job so a
+            # single artifact larger than the cap can still make progress).
+            while (self._staged_bytes + nbytes) > self.max_staged_bytes and self._staged_bytes > 0:
+                self._staged_cond.wait(timeout=1.0)
+            self._staged_bytes += nbytes
+        self._jobs.put((local_path, key_suffix, meta, nbytes))
+
+    def _worker_loop(self) -> None:
+        """Daemon worker: pop a job, run ``_do_upload``, account staged bytes."""
+        while True:
+            job = self._jobs.get()
+            if job is None:  # sentinel: shut down
+                self._jobs.task_done()
+                return
+            local_path, key_suffix, meta, nbytes = job
+            try:
+                self._do_upload(local_path=local_path, key_suffix=key_suffix, meta=meta)
+            except Exception as e:  # keep local file (already done by _do_upload), record + surface
+                with self._errors_lock:
+                    self._errors.append((key_suffix, str(e)))
+                logger.error("comm_eff.r2: async upload FAILED for %s (local KEPT): %s", key_suffix, e)
+            finally:
+                # Release the staged bytes + wake any backpressured producer, and
+                # mark the queue item done so flush()'s join() can complete.
+                with self._staged_cond:
+                    self._staged_bytes -= nbytes
+                    self._staged_cond.notify_all()
+                self._jobs.task_done()
+
+    def _raise_if_errors(self) -> None:
+        """Raise an aggregated RuntimeError if any async upload permanently failed."""
+        with self._errors_lock:
+            if not self._errors:
+                return
+            n = len(self._errors)
+            head = "; ".join(f"{k}: {m}" for k, m in self._errors[:3])
+        raise RuntimeError(
+            f"R2 async upload had {n} permanent failure(s); local files KEPT. First: {head}"
+        )
+
+    def flush(self, timeout: Optional[float] = None) -> None:
+        """Barrier: block until the queue is drained, then fail-loud on any failure.
+
+        Blocks until ALL queued + in-flight uploads have completed (a no-op on the
+        synchronous path / before any async upload). RAISES if any upload
+        permanently failed — so a flush at the per-N-steps checkpoint, or at run
+        end, never lets a silently-incomplete trajectory through. ``timeout`` (when
+        given) bounds the wait per the underlying join; ``None`` waits forever.
+        """
+        if not self.async_mode or not self._workers_started:
+            self._raise_if_errors()
+            return
+        if timeout is None:
+            self._jobs.join()
+        else:
+            # queue.Queue.join has no timeout; poll the unfinished-tasks counter.
+            import time as _time
+
+            deadline = _time.monotonic() + timeout
+            while self._jobs.unfinished_tasks > 0:
+                if _time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"R2 flush timed out after {timeout}s with "
+                        f"{self._jobs.unfinished_tasks} upload(s) still in flight."
+                    )
+                _time.sleep(0.05)
+        self._raise_if_errors()
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Flush, then stop the worker pool (join). Idempotent. Fail-loud on flush."""
+        if self._closed:
+            return
+        try:
+            if self.async_mode and self._workers_started:
+                self.flush(timeout=timeout)
+        finally:
+            self._closed = True
+            if self._workers_started:
+                for _ in self._workers:
+                    self._jobs.put(None)  # one sentinel per worker
+                for t in self._workers:
+                    t.join(timeout=timeout)
+
+    def _atexit_close(self) -> None:
+        """Process-exit safety net: drain + log loudly (never raise in atexit)."""
+        if self._closed:
+            return
+        try:
+            self.close()
+        except Exception as e:  # atexit must not raise
+            logger.error("comm_eff.r2: atexit close surfaced an upload failure: %s", e)
 
     @property
     def n_uploaded(self) -> int:
         return self._n_uploaded
+
+    @property
+    def n_errors(self) -> int:
+        with self._errors_lock:
+            return len(self._errors)
 
 
 def build_r2_sink_from_env(
@@ -232,6 +450,9 @@ def build_r2_sink_from_env(
     manifest_dir: str,
     delete_local: bool = True,
     verify: str = "size",
+    async_mode: bool = False,
+    upload_workers: int = 4,
+    max_staged_gb: float = 80.0,
 ) -> R2ArtifactSink:
     """Build a :class:`R2ArtifactSink` from the R2 env vars (fail-loud).
 
@@ -239,6 +460,10 @@ def build_r2_sink_from_env(
     ``<experiment>``/``<regime>`` come from ``R2_EXPERIMENT`` / ``R2_REGIME``
     (set by the launcher). The role + step/tick + filename are appended by the
     caller as the ``key_suffix`` at upload time.
+
+    ``async_mode`` / ``upload_workers`` / ``max_staged_gb`` configure the opt-in
+    background-upload pool (see :class:`R2ArtifactSink`). Defaults keep the sink
+    synchronous + byte-identical to the original behaviour.
     """
     if artifact_kind not in ("weights", "grads"):
         raise ValueError(f"artifact_kind must be one of (weights, grads); got {artifact_kind!r}")
@@ -260,6 +485,9 @@ def build_r2_sink_from_env(
         manifest_path=manifest_path,
         delete_local=delete_local,
         verify=verify,
+        async_mode=async_mode,
+        upload_workers=upload_workers,
+        max_staged_gb=max_staged_gb,
     )
 
 
@@ -270,12 +498,16 @@ def maybe_build_r2_sink(
     manifest_dir: str,
     delete_local: bool = True,
     verify: str = "size",
+    async_mode: bool = False,
+    upload_workers: int = 4,
+    max_staged_gb: float = 80.0,
 ) -> Optional[R2ArtifactSink]:
     """Return an :class:`R2ArtifactSink` iff ``enabled``, else ``None`` (strict no-op).
 
     When disabled the caller keeps writing local ``.pt`` files exactly as before
     (byte-identical behavior). When enabled, creds are read from the env and the
-    bucket guard fails loud on a misconfiguration.
+    bucket guard fails loud on a misconfiguration. The async knobs are forwarded
+    to the sink; their defaults keep it synchronous (today's behaviour).
     """
     if not enabled:
         return None
@@ -284,4 +516,7 @@ def maybe_build_r2_sink(
         manifest_dir=manifest_dir,
         delete_local=delete_local,
         verify=verify,
+        async_mode=async_mode,
+        upload_workers=upload_workers,
+        max_staged_gb=max_staged_gb,
     )

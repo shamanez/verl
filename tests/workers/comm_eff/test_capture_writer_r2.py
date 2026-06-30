@@ -27,12 +27,16 @@ class _MockSink:
     def __init__(self, delete_local=True):
         self.calls = []
         self.delete_local = delete_local
+        self.closed = 0
 
     def upload(self, *, local_path, key_suffix, meta=None):
         self.calls.append({"local_path": local_path, "key_suffix": key_suffix, "meta": meta})
         if self.delete_local:
             os.remove(local_path)
         return {"key": key_suffix, "verified": True}
+
+    def close(self, timeout=None):
+        self.closed += 1
 
 
 def test_capture_writer_routes_grad_dump_through_sink(tmp_path):
@@ -62,3 +66,16 @@ def test_capture_writer_no_sink_keeps_local(tmp_path):
     w.dump(role="G_comp", target_name="q_proj", tensor=torch.randn(3, 3), global_step=0, optimizer_tick=0)
     files = glob.glob(str(tmp_path / "rank0" / "tick_0_0" / "G_comp" / "*.pt"))
     assert len(files) == 1  # byte-identical to pre-R2 behavior
+
+
+def test_capture_writer_close_drains_sink(tmp_path):
+    sink = _MockSink(delete_local=True)
+    w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0, r2_sink=sink)
+    w.dump(role="G_comp", target_name="q_proj", tensor=torch.randn(2, 2), global_step=0, optimizer_tick=0)
+    w.close()
+    assert sink.closed == 1
+
+
+def test_capture_writer_close_no_sink_is_safe(tmp_path):
+    w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0)
+    w.close()  # must not raise with no sink attached
