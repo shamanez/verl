@@ -71,6 +71,23 @@ fixed_linear and learned_linear are identical to 4 decimal places at every opera
 - Code: exp/42-weight-accuracy @ 531dd5e9 (instrument + select_all extension). promote_launcher_as:
   none (this is a measurement, not a promoted launcher).
 
+## IMPORTANT caveat on regime B (why it collapsed; not representative of healthy compression)
+Regime B ran the PowerSGD codec on a FROZEN RANDOM basis. anchor.enabled=false but owns_q=true, so
+the only Q updater (the anchor) was off AND the fast-path basis update is fail-closed in owns_q=true
+mode. Evidence: basis_updates=0.0 for the whole run, reconstruction_rel_error flat at ~0.975->0.970
+(a fixed rank-77 random subspace of a ~rank-1536 activation keeps ~5 percent), anchor_backwards=0,
+spectral off (no merger). A rank-77 random projection with no gradient correction discards ~97
+percent of the boundary gradient, which is why the policy collapsed to val 0.079. This is NOT an
+inherent PowerSGD limitation: the older comm-eff runs that learned at delay_K=5 (val ~0.72-0.74)
+kept the anchor ON, which adapts Q (Q<-orth(V) from harvested activations, low recon error) AND a
+signed_ema merger that folds the clean near-fresh anchor gradient into the compressed gradient.
+Consequence: the EXP-42 A-vs-B contrast is "clean dense vs COLLAPSING FROZEN-BASIS codec," not
+"clean vs healthy adaptive-compressed." The weight trajectory of the realistic learning compressed
+system (anchor-adapted Q at delay 5 + merger) was NOT measured. A functional codec-only regime B
+would have set owns_q=false (let the fast path adapt Q) or kept the anchor on for Q maintenance.
+Regime B's projectability numbers (crossover h*=5, lower linearity) therefore describe a degenerate
+collapsing trajectory, which is still valid data but must be labeled as such.
+
 ## Dense-run weight-behavior report (operator follow-up, GPU-free)
 runs/EXP-42/report_dense.html (builder runs/EXP-42/build_dense_report.py) characterises the normal
 GRPO run (regime A) from the dense decoder sketch:

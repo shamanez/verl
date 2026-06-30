@@ -54,8 +54,20 @@ decoder trajectory is no longer linear (R2 about 0.32). This is the mechanism be
 the look-ahead can project a few steps (where the path is locally straight) but overshoots once the
 horizon reaches K, because the path has curved by then. Compression (regime B) lowers the linearity
 at every scale (R2 0.59 at 1 tick), consistent with its earlier crossover. NOTE: this is the decoder
-set only; the full dense-only report over all groups (decoder, embed, norm, bias) is produced in the
-deferred new session (see NEW_SESSION_PROMPT.md), which also re-collects the dense run widened.
+set only; the embed/norm/bias groups were not collected and (operator decision) will not be, since
+no further GPU training is being run. The deferred follow-up is GPU-free deeper analysis of the
+dense decoder data only (see NEW_SESSION_PROMPT.md).
+
+REGIME B CAVEAT (important): regime B ran the PowerSGD codec on a FROZEN RANDOM basis. anchor was off
+but owns_q=true, so the only Q updater (the anchor) was off and the fast-path basis update is
+fail-closed; basis_updates=0.0 the whole run, reconstruction_rel_error flat ~0.97 (a fixed rank-77
+random subspace keeps ~5 percent of a ~rank-1536 activation), no merger. So ~97 percent of the
+boundary gradient was discarded and the policy collapsed (val 0.079). This is NOT inherent to
+PowerSGD: older runs that learned at delay_K=5 (val ~0.72-0.74) kept the anchor ON (adapts Q via
+orth(V), low recon error) plus a signed_ema merger. So regime B's trajectory is a COLLAPSING
+frozen-basis codec, not a healthy adaptive-compressed run; the A-vs-B contrast is "clean dense vs
+collapsing frozen-codec." A functional codec-only regime would set owns_q=false (let the fast path
+adapt Q) or keep the anchor on for Q maintenance.
 
 ## Sketch fidelity (calib, tol 5%)
 - regimeA: all_pass (rel_err 0.49% / 1.08% / 1.47% at h=5/10/20).

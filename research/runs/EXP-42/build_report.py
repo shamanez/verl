@@ -411,6 +411,17 @@ def _discussion(regimes):
                      f"crossover moves from h* = {ha} (clean) to h* = {hb} (codec only) at spacing 10, and the "
                      f"compressed regime shows a wider per-matrix spread. The codec makes the weight trajectory "
                      f"less linearly predictable.</p>")
+        lines.append("<p><b>Important caveat on regime B.</b> Regime B ran the PowerSGD codec on a "
+                     "FROZEN RANDOM basis: the anchor was off but owns_q was true, so the only basis "
+                     "updater was off and the fast-path update is fail-closed (basis_updates = 0 for "
+                     "the whole run, reconstruction error flat at about 0.97, no merger). About 97 "
+                     "percent of the boundary gradient was discarded, which is why the policy "
+                     "collapsed to val 0.079. This is not an inherent PowerSGD limitation: earlier "
+                     "comm-eff runs that learned at delay 5 (val about 0.72 to 0.74) kept the anchor "
+                     "on, which adapts the basis, plus a signed_ema merger. So this contrast is clean "
+                     "dense versus a COLLAPSING FROZEN-BASIS codec, not clean versus a healthy "
+                     "adaptive-compressed run; regime B's weight trajectory is a degenerate one and "
+                     "its numbers should be read as such.</p>")
     # fixed vs learned
     same = True
     for r in regimes:
