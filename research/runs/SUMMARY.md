@@ -74,16 +74,19 @@ count-sketch of the 196 decoder matrices replayed offline on the MacBook.
   only at LOW staleness in the clean regime (h up to K=10), and compression
   halves that window (h up to 5). A gradient-accuracy follow-up is gated to the
   clean regime at fixed_linear, h up to 10.
-- Deliverables: `runs/EXP-42/report.html` (plots + discussion), `verdict.md`,
-  `sweep_narrow.json`. Code: `exp/42-weight-accuracy` @ 531dd5e9. The widened
-  completeness extension (all matrices incl. embeddings, RMSNorm gains, biases)
-  is built and pushed but DEFERRED to a fresh session (box auto-reaped
-  mid-collection).
+- Deliverables (run dir de-bloated 2026-06-30): HTML reports at
+  `reports/exp42-weight-projection-accuracy.html` + `reports/exp42-dense-weight-behavior.html` +
+  `reports/exp42-dense-deep-analysis.html` + `reports/exp42-prior-gradient-probe.html`; verdict at
+  `.claude/plans/42-verdict.md`; analysis tooling at `research/scripts/{weight_proj_sweep,build_report,build_dense_report,build_dense_report_v2}.py`.
+  Code: `exp/42-weight-accuracy` @ 531dd5e9. The widened completeness extension (all matrices incl.
+  embeddings, RMSNorm gains, biases) with ADAPTIVE Q (owns_q=false) is built + pushed and DEFERRED to
+  a fresh session via `.claude/plans/42-corrected-rerun-prompt.md` (scaffold
+  `research/scripts/exp42_{run_cell,drive_all}.sh`).
 
 ### Dense-run weight-behavior v2 (deeper GPU-free follow-up)
 
-`runs/EXP-42/report_dense_v2.html` (builder `build_dense_report_v2.py`) adds five
-studies on the regime-A dense decoder sketch (196 matrices, 160 ticks, k=4096; rel
+`reports/exp42-dense-deep-analysis.html` (builder `research/scripts/build_dense_report_v2.py`) adds
+five studies on the regime-A dense decoder sketch (196 matrices, 160 ticks, k=4096; rel
 std ~1.6%). One-line read: the dense GRPO trajectory is globally near-linear and
 low-rank, but the look-ahead's two-point slope overshoots, so a damped coefficient
 is the lever.

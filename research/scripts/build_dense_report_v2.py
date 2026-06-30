@@ -47,7 +47,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # weight_proj_sweep is a sibling in research/scripts/
 from weight_proj_sweep import load_trace, ones_sketch  # noqa: E402
 
 INK, MUTED, GRID, A, HELP, HURT = "#14181f", "#5b6573", "#e3e6eb", "#1f5fae", "#1a7f37", "#b42318"
