@@ -1,4 +1,0 @@
-=== [EXP-42] PROBE fixed_alpha: cadence=1 delay_K=1 mode=fixed_linear strength=0.5 steps=4 diagnostics=on ===
-2026-06-25T09:42:59+00:00 probe fixed_alpha exit_rc=0
-=== [EXP-42] PROBE learned: cadence=1 delay_K=1 mode=learned_linear_with_fixed_linear_cold_start strength=1.0 steps=6 diagnostics=on ===
-2026-06-25T10:01:19+00:00 probe learned exit_rc=0

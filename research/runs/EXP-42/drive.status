@@ -1,5 +1,0 @@
-[2026-06-29T07:14:45Z] DRIVE START — 2 regimes sequential (regimeA plain-GRPO -> regimeB powersgd-r77 codec-only)
-[2026-06-29T07:14:45Z] PHASE regimeA START
-[2026-06-29T08:09:02Z] PHASE regimeA DONE rc=1 sketch_npz=160 manifest_rows=160 calib_rows=15 last_val=val-core/openai/gsm8k/acc/mean@1:0.7695223654283548
-[2026-06-29T08:09:02Z] REGIME A FAILED (rc=1) — single-GPU plain-GRPO premise broken; STOP before B (on_fail=stop)
-[2026-06-29T08:09:02Z] ALL_DONE

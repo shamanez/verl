@@ -2,8 +2,10 @@
 # vast_baseline_qwen25_1p5b_grpo_gsm8k.sh
 #
 # REAL GRPO BASELINE (the DENSE CONTROL) — Qwen2.5-1.5B-Instruct on GSM8K,
-# multi-GPU (4..8), FSDP + vLLM rollout, 2 epochs over the train split, eval
-# on the test split. Not a smoke test. Acceptance = pass@1 improvement on test.
+# 1..8 GPUs, FSDP + vLLM rollout, 2 epochs over the train split, eval on the
+# test split. Not a smoke test. Acceptance = pass@1 improvement on test.
+# DEFAULT for analysis runs is a SINGLE 1xH200 (auto resp=1024 / TP=1, proven in
+# EXP-42 regime A, val ~0.77); 4..8 GPUs run the full 16K-context control.
 #
 # Objective: NO KL, no entropy (pg_loss only). This dense control learns cleanly
 # on GSM8K and matches the comm-eff method's no-KL objective, so dense-vs-
@@ -67,16 +69,34 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — multi-GPU MANDATE (4..8).
+# 2. GPU count — normal/dense GRPO run accepts 1..8 GPUs.
 # ---------------------------------------------------------------------------
+# Single GPU (1xH200) is a SUPPORTED DEFAULT for this dense control / analysis
+# runs (operator-authorized 2026-06-30): the normal GRPO ran cleanly on 1xH200
+# at resp=1024 (EXP-42 regime A, val ~0.77). The comm-eff research loop's 4..8
+# mandate (16K-context headroom) does NOT bind the dense control. The full 16K
+# production surface still needs 4..8 GPUs; on 1 GPU the launcher auto-defaults
+# to the analysis-friendly surface below.
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
-if (( DETECTED_GPUS < 4 || DETECTED_GPUS > 8 )); then
-  echo "FATAL: this recipe requires 4..8 GPUs; detected $DETECTED_GPUS" >&2
-  echo "       (1.5B GRPO with 16K response context needs the headroom)" >&2
+if (( DETECTED_GPUS < 1 || DETECTED_GPUS > 8 )); then
+  echo "FATAL: this recipe requires 1..8 GPUs; detected $DETECTED_GPUS" >&2
   exit 1
 fi
 export NGPUS_PER_NODE="$DETECTED_GPUS"
 echo "=== detected $NGPUS_PER_NODE GPUs ($(nvidia-smi -L | head -1)) ==="
+
+# Single-GPU (1xH200) analysis default. The 16K-context production surface does
+# not fit one card with n=8 rollouts, so on 1 GPU default to the surface proven
+# on 1xH200 (EXP-42 regime A): resp=1024, TP=1, ppo token budget 16384, vLLM mem
+# 0.5. 4..8 GPUs keep the 16K control unchanged. Every value stays env-overridable
+# (these set defaults BEFORE the §5 ${VAR:-...} lines, so an explicit env wins).
+if (( DETECTED_GPUS == 1 )); then
+  echo "=== single-GPU normal run: defaulting to the 1xH200 analysis surface (resp=1024, TP=1) ===" >&2
+  export ROLLOUT_TP="${ROLLOUT_TP:-1}"
+  export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-1024}"
+  export PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
+  export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.5}"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. ulimit + cgroup probe (see VAST_README.md for the pids.max gotcha).
