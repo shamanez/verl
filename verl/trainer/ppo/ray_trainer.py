@@ -1789,6 +1789,15 @@ class RayPPOTrainer:
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    # comm_eff R2 run-end barrier: drain + fail-loud on the async
+                    # weight-traj / capture upload pool so the final in-flight
+                    # snapshots complete and any permanent upload failure surfaces
+                    # as a non-zero run exit (the atexit net only best-effort
+                    # backstops). Strict no-op on the dense / synchronous-R2 / no-
+                    # capture path. Guarded by hasattr so a worker group without the
+                    # RPC (older worker) is unaffected.
+                    if hasattr(self.actor_rollout_wg, "comm_eff_close"):
+                        self.actor_rollout_wg.comm_eff_close()
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
@@ -1801,4 +1810,9 @@ class RayPPOTrainer:
                     self.train_dataset.on_batch_end(batch=batch)
 
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
+        # comm_eff R2 run-end barrier on this fallthrough too (loop exits without
+        # is_last_step), so the async upload pool is drained + fails loud regardless
+        # of how the loop terminates. Strict no-op without the feature.
+        if hasattr(self.actor_rollout_wg, "comm_eff_close"):
+            self.actor_rollout_wg.comm_eff_close()
         self._shutdown_dump_executor()

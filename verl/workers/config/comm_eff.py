@@ -552,11 +552,17 @@ class CommEffCaptureConfig(BaseConfig):
     # Async batched upload (opt-in) for the grad/activation dumps. Off =>
     # synchronous (byte-identical). On => a background worker pool overlaps uploads
     # with compute. The CaptureWriter has no per-step flush cadence (the audit is a
-    # bounded handful of ticks); flush()/close() drain + fail-loud is invoked by the
-    # builder's lifecycle. See CommEffWeightTrajConfig for the field semantics.
+    # bounded handful of ticks); the run-end drain + fail-loud is invoked from the
+    # engine teardown (ActorRolloutRefWorker.comm_eff_close -> CaptureWriter.close)
+    # with a finite timeout, backstopped best-effort by a bounded atexit handler.
+    # See CommEffWeightTrajConfig for the field semantics.
     r2_async: bool = False
     r2_upload_workers: int = 4
     r2_max_staged_gb: float = 80.0
+    # ASYNC only: finite timeout (s) for the flush barrier (and run-end close drain)
+    # so a slow/hung uploader cannot block forever on queue.join(). <=0 => wait
+    # forever (the original unbounded behaviour).
+    r2_flush_timeout_s: float = 1800.0
 
 
 @dataclass
@@ -660,6 +666,10 @@ class CommEffWeightTrajConfig(BaseConfig):
     r2_flush_every_steps: int = 10
     r2_upload_workers: int = 4
     r2_max_staged_gb: float = 80.0
+    # ASYNC only: finite timeout (s) for the per-step flush barrier (and run-end
+    # close drain) so a slow/hung uploader cannot block the optimizer step forever
+    # on queue.join(). <=0 => wait forever (the original unbounded behaviour).
+    r2_flush_timeout_s: float = 1800.0
 
 
 @dataclass

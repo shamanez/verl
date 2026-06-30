@@ -18,6 +18,7 @@ import glob
 import json
 import os
 
+import pytest
 import torch
 
 from verl.workers.comm_eff.capture import CaptureWriter
@@ -79,3 +80,80 @@ def test_capture_writer_close_drains_sink(tmp_path):
 def test_capture_writer_close_no_sink_is_safe(tmp_path):
     w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0)
     w.close()  # must not raise with no sink attached
+
+
+def test_capture_writer_upload_runs_outside_lock(tmp_path):
+    """M5 (dump-raises-under-lock-in-sync-mode): the slow r2_sink.upload() call runs
+    OUTSIDE the writer's _lock, so a slow / failing upload neither serializes other
+    dumps behind the network nor can leave the lock held."""
+
+    class _LockProbingSink:
+        def __init__(self, writer):
+            self.writer = writer
+            self.lock_was_free_during_upload = None
+            self.closed = 0
+
+        def upload(self, *, local_path, key_suffix, meta=None):
+            # Try to acquire the writer lock non-blockingly: if dump() still held it
+            # across the upload, acquire() would FAIL (return False).
+            got = self.writer._lock.acquire(blocking=False)
+            self.lock_was_free_during_upload = got
+            if got:
+                self.writer._lock.release()
+            os.remove(local_path)
+            return {"key": key_suffix, "verified": True}
+
+        def close(self, timeout=None):
+            self.closed += 1
+
+    w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0)
+    sink = _LockProbingSink(w)
+    w.r2_sink = sink
+    ok = w.dump(role="G_comp", target_name="q_proj", tensor=torch.randn(2, 2), global_step=0, optimizer_tick=0)
+    assert ok is True
+    assert sink.lock_was_free_during_upload is True, "upload() ran while dump() still held _lock"
+
+
+def test_capture_writer_upload_failure_releases_lock(tmp_path):
+    """A synchronous upload failure (raise) propagates out of dump() but must leave
+    the writer's _lock released (so subsequent dumps are not deadlocked)."""
+
+    class _RaisingSink:
+        def upload(self, *, local_path, key_suffix, meta=None):
+            raise RuntimeError("R2 upload failed (aws s3 cp rc=1); local file KEPT")
+
+        def close(self, timeout=None):
+            pass
+
+    w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0, r2_sink=_RaisingSink())
+    with pytest.raises(RuntimeError, match="aws s3 cp"):
+        w.dump(role="G_comp", target_name="q_proj", tensor=torch.randn(2, 2), global_step=0, optimizer_tick=0)
+    # Lock is free: a fresh non-blocking acquire succeeds.
+    assert w._lock.acquire(blocking=False) is True
+    w._lock.release()
+
+
+def test_capture_writer_close_surfaces_failure(tmp_path):
+    """CaptureWriter.close() RAISES when the sink reports a permanent upload failure
+    (run-end fail-loud, wired into the engine teardown)."""
+
+    class _RaisingCloseSink:
+        flush_timeout_s = 1800.0
+
+        def __init__(self):
+            self.close_timeouts = []
+
+        def upload(self, *, local_path, key_suffix, meta=None):
+            os.remove(local_path)
+            return None
+
+        def close(self, timeout=None):
+            self.close_timeouts.append(timeout)
+            raise RuntimeError("R2 async upload had 1 permanent failure(s)")
+
+    sink = _RaisingCloseSink()
+    w = CaptureWriter(capture_dir=str(tmp_path), max_ticks=0, stratified_targets=0, rank=0, r2_sink=sink)
+    w.dump(role="G_comp", target_name="q_proj", tensor=torch.randn(2, 2), global_step=0, optimizer_tick=0)
+    with pytest.raises(RuntimeError, match="permanent failure"):
+        w.close()
+    assert sink.close_timeouts == [1800.0]  # finite timeout threaded, not None

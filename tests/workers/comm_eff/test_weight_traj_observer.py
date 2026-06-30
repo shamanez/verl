@@ -186,3 +186,105 @@ def test_inactive_rank_close_is_safe(tmp_path):
     """close() on an inactive (non-writer) rank is a no-op (no sink attached)."""
     obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=True, rank=1, rank0_only=True)
     obs.close()  # must not raise (r2_sink is None on the inactive rank)
+
+
+class _RaisingCloseSink:
+    """Mock sink whose close()/flush() surface a permanent upload failure (raise)."""
+
+    def __init__(self):
+        self.flush_timeout_s = 1800.0
+        self.upload_calls = 0
+        self.flush_timeouts = []
+        self.close_timeouts = []
+
+    def upload(self, *, local_path, key_suffix, meta=None):
+        self.upload_calls += 1
+        return None  # async: enqueue + return, no raise here
+
+    def flush(self, timeout=None):
+        self.flush_timeouts.append(timeout)
+        raise RuntimeError("R2 async upload had 1 permanent failure(s)")
+
+    def close(self, timeout=None):
+        self.close_timeouts.append(timeout)
+        raise RuntimeError("R2 async upload had 1 permanent failure(s)")
+
+
+def test_observer_close_surfaces_late_upload_failure(tmp_path):
+    """Lifecycle: observer.close() RAISES when the sink reports a permanent failure
+    (this is the run-end fail-loud path the engine teardown now invokes)."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=False, rank=0)
+    sink = _RaisingCloseSink()
+    obs.r2_sink = sink
+    obs.observe(_weights(), global_step=1)
+    with pytest.raises(RuntimeError, match="permanent failure"):
+        obs.close()
+    # close() passes a FINITE timeout (from the sink's flush_timeout_s), never None.
+    assert sink.close_timeouts == [1800.0]
+
+
+def test_observer_per_step_flush_passes_finite_timeout(tmp_path):
+    """H3: the per-step flush passes a FINITE timeout (never an unbounded join)."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=False, rank=0, r2_flush_every_steps=1)
+
+    class _RecordingSink:
+        flush_timeout_s = 42.0
+
+        def __init__(self):
+            self.flush_timeouts = []
+
+        def upload(self, *, local_path, key_suffix, meta=None):
+            return None
+
+        def flush(self, timeout=None):
+            self.flush_timeouts.append(timeout)
+
+        def close(self, timeout=None):
+            pass
+
+    sink = _RecordingSink()
+    obs.r2_sink = sink
+    obs.observe(_weights(), global_step=2)  # 2 % 1 == 0 -> flush fires
+    assert sink.flush_timeouts == [42.0]  # finite, from flush_timeout_s (not None)
+
+
+def test_observer_flush_timeout_zero_means_wait_forever(tmp_path):
+    """flush_timeout_s <= 0 maps to timeout=None (opt-in wait-forever)."""
+    obs = WeightTrajObserver(out_dir=str(tmp_path), per_tick=False, rank=0, r2_flush_every_steps=1)
+
+    class _Sink:
+        flush_timeout_s = 0.0
+
+        def __init__(self):
+            self.flush_timeouts = []
+
+        def upload(self, *, local_path, key_suffix, meta=None):
+            return None
+
+        def flush(self, timeout=None):
+            self.flush_timeouts.append(timeout)
+
+        def close(self, timeout=None):
+            pass
+
+    sink = _Sink()
+    obs.r2_sink = sink
+    obs.observe(_weights(), global_step=2)
+    assert sink.flush_timeouts == [None]
+
+
+def test_full_manifest_r2_status_pending_vs_off(tmp_path):
+    """H2: full_manifest row carries r2='pending' when a sink is attached (durability
+    is NOT attested by this row — read r2_manifest.jsonl) and r2='off' otherwise."""
+    # No sink: r2='off'.
+    obs_off = WeightTrajObserver(out_dir=str(tmp_path / "off"), per_tick=False, rank=0)
+    obs_off.observe(_weights(), global_step=0)
+    rows_off = [json.loads(l) for l in open(tmp_path / "off" / "full_manifest.jsonl")]
+    assert rows_off[0]["r2"] == "off"
+
+    # Sink attached: r2='pending' (the row means DUMPED, not verified-in-R2).
+    obs_on = WeightTrajObserver(out_dir=str(tmp_path / "on"), per_tick=False, rank=0)
+    obs_on.r2_sink = _MockSink()
+    obs_on.observe(_weights(), global_step=0)
+    rows_on = [json.loads(l) for l in open(tmp_path / "on" / "full_manifest.jsonl")]
+    assert rows_on[0]["r2"] == "pending"

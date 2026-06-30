@@ -1052,6 +1052,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         with self._comm_eff_path("ckpt"):
             self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def comm_eff_close(self, timeout: Optional[float] = None):
+        """Run-end barrier for the comm_eff diagnostic R2 upload pipeline.
+
+        Wires the ``close()`` lifecycle contract into the engine teardown (the
+        trainer calls this on its final-step shutdown path). It drains + joins any
+        ASYNC R2 upload pool behind:
+
+        * the EXP-42/43 weight-trajectory observer (``_weight_traj_observer``), and
+        * the comm_eff gradient/activation capture writer
+          (``_comm_eff_state._capture_writer``),
+
+        and FAILS LOUD: if any async upload permanently failed (or the drain timed
+        out with workers still alive) the underlying ``close()`` raises, and we let
+        it propagate so the run ends non-zero instead of silently dropping
+        snapshots / leaving phantom manifest rows. This is the explicit run-end
+        path the ``atexit`` net only best-effort backstops.
+
+        Strict no-op on the dense / non-capture / synchronous-R2 paths: a missing
+        observer/writer or a sink that never queued anything makes ``close()`` a
+        cheap return, so a run without the feature is unaffected. Idempotent
+        (each ``close()`` guards its own ``_closed`` flag). ``ONE_TO_ALL`` so every
+        rank closes its own (rank-0-only) sink symmetrically; inactive ranks no-op.
+        """
+        observer = getattr(self, "_weight_traj_observer", None)
+        if observer is not None and hasattr(observer, "close"):
+            observer.close(timeout=timeout)
+        state = getattr(self, "_comm_eff_state", None)
+        writer = getattr(state, "_capture_writer", None) if state is not None else None
+        if writer is not None and hasattr(writer, "close"):
+            writer.close(timeout=timeout)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.

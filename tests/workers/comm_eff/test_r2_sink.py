@@ -475,3 +475,248 @@ def test_async_partial_failure_keeps_good_rows(tmp_path, monkeypatch):
     assert len(rows) == 3 and sink.n_uploaded == 3 and sink.n_errors == 1
     with pytest.raises(RuntimeError, match="permanent failure"):
         sink.close()
+
+
+# ====================================================================== #
+# Regression tests for the adversarial-review findings (async-r2-upload)
+# ====================================================================== #
+
+
+def test_r2sink001_no_staged_bytes_leak_when_put_fails(tmp_path, monkeypatch):
+    """R2SINK-001: a failure between the bytes-increment and the enqueue must NOT
+    leak ``_staged_bytes`` and wedge all future producers on phantom backpressure.
+
+    We simulate the failure by making ``_jobs.put`` raise (stands in for a
+    KeyboardInterrupt/SystemExit/signal landing in that window). The fix puts the
+    increment AFTER a successful put inside the same lock, so a failed put leaves
+    ``_staged_bytes`` at 0 and the next producer is not blocked.
+    """
+    _install_fake_aws(monkeypatch)
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=1)
+    # Start the worker pool (so _ensure_workers is past) and then break put().
+    p0 = _write_pt(tmp_path, name="warm.pt", payload=b"warm")
+    sink.upload(local_path=p0, key_suffix="full/warm/warm.pt")
+    sink.flush()
+    assert sink._staged_bytes == 0
+
+    boom = _write_pt(tmp_path, name="boom.pt", payload=b"x" * 500)
+    orig_put = sink._jobs.put
+
+    def exploding_put(item, *a, **kw):
+        raise RuntimeError("simulated interrupt between increment and enqueue")
+
+    monkeypatch.setattr(sink._jobs, "put", exploding_put)
+    with pytest.raises(RuntimeError, match="simulated interrupt"):
+        sink.upload(local_path=boom, key_suffix="full/boom/boom.pt")
+    # CRITICAL: the counter did NOT leak — it is still 0, not 500.
+    assert sink._staged_bytes == 0, "staged-bytes leaked on a failed enqueue (backpressure deadlock)"
+
+    # Restore put: a subsequent producer must NOT be blocked by phantom backpressure.
+    monkeypatch.setattr(sink._jobs, "put", orig_put)
+    good = _write_pt(tmp_path, name="after.pt", payload=b"ok")
+    sink.upload(local_path=good, key_suffix="full/after/after.pt")
+    sink.flush()  # would hang/raise if the counter were still inflated
+    assert sink.n_uploaded == 2 and sink.n_errors == 0
+    sink.close()
+
+
+class _BlockingProc:
+    """A cp that blocks on an Event so the worker is 'stuck' until released.
+
+    After release the cp completes normally and a subsequent head-object verifies
+    against the uploaded source size (so a released worker can finish cleanly).
+    """
+
+    def __init__(self, release_evt, started_evt):
+        self._release = release_evt
+        self._started = started_evt
+        self._sizes = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key_of(cmd):
+        if "cp" in cmd:
+            return cmd[4].split("/", 3)[-1]
+        i = cmd.index("--key")
+        return cmd[i + 1]
+
+    def __call__(self, cmd, **kwargs):
+        if "cp" in cmd:
+            self._started.set()
+            self._release.wait(timeout=30)  # bounded so a leaked test can't hang CI
+            with self._lock:
+                self._sizes[self._key_of(cmd)] = os.path.getsize(cmd[3])
+            return _FakeProc(returncode=0, stderr="")
+        if "head-object" in cmd:
+            with self._lock:
+                size = self._sizes.get(self._key_of(cmd), 0)
+            return _FakeProc(returncode=0, stdout=json.dumps({"ContentLength": size}))
+        raise AssertionError(f"unexpected aws cmd while blocked: {cmd}")
+
+
+def test_close_with_timeout_does_not_hang_on_stuck_worker(tmp_path, monkeypatch):
+    """critical-queue-join-deadlock + R2SINK-004 + missing-atexit-timeout:
+    close(timeout=T) must RETURN within ~T (never block forever on queue.join())
+    when a worker is stuck mid-upload, and it must NOT report clean success —
+    it RAISES because a worker is still alive.
+    """
+    release = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(r2mod.subprocess, "run", _BlockingProc(release, started))
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=1)
+    p = _write_pt(tmp_path, name="stuck.pt", payload=b"data")
+    sink.upload(local_path=p, key_suffix="full/stuck/stuck.pt")
+    assert started.wait(timeout=5), "worker never started the (blocking) cp"
+
+    t0 = time.monotonic()
+    with pytest.raises((RuntimeError, TimeoutError)):
+        sink.close(timeout=0.5)  # bounded — must not hang
+    elapsed = time.monotonic() - t0
+    # Bounded: well under the 30s _BlockingProc wait, proves no unbounded join().
+    assert elapsed < 10.0, f"close() did not return within a bounded time ({elapsed:.1f}s)"
+    # Release the worker so the daemon thread exits cleanly for the rest of the suite.
+    release.set()
+
+
+def test_flush_with_timeout_is_bounded(tmp_path, monkeypatch):
+    """per-step-flush-timeout-handling: flush(timeout=T) raises TimeoutError within
+    ~T when a worker is stuck, never blocking forever on queue.join()."""
+    release = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(r2mod.subprocess, "run", _BlockingProc(release, started))
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=1)
+    p = _write_pt(tmp_path, name="slow.pt", payload=b"data")
+    sink.upload(local_path=p, key_suffix="full/slow/slow.pt")
+    assert started.wait(timeout=5)
+
+    t0 = time.monotonic()
+    with pytest.raises(TimeoutError, match="still in flight"):
+        sink.flush(timeout=0.5)
+    assert time.monotonic() - t0 < 10.0
+    release.set()
+    # After release the in-flight upload completes; a bounded flush now succeeds.
+    sink.flush(timeout=10.0)
+    assert sink.n_uploaded == 1
+    sink.close(timeout=5.0)
+
+
+def test_atexit_close_uses_finite_timeout_and_never_raises(tmp_path, monkeypatch):
+    """missing-atexit-timeout: the atexit handler passes a FINITE timeout to close()
+    and never raises (atexit must not raise), even with a stuck worker — it logs.
+    """
+    release = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(r2mod.subprocess, "run", _BlockingProc(release, started))
+    # Force the atexit handler's bounded timeout tiny so the test is fast.
+    monkeypatch.setattr(r2mod, "_DEFAULT_ATEXIT_CLOSE_TIMEOUT_S", 0.3)
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=1)
+    p = _write_pt(tmp_path, name="ax.pt", payload=b"data")
+    sink.upload(local_path=p, key_suffix="full/ax/ax.pt")
+    assert started.wait(timeout=5)
+
+    t0 = time.monotonic()
+    # Must NOT raise (atexit-safe) and must be bounded by the finite timeout.
+    sink._atexit_close()
+    assert time.monotonic() - t0 < 10.0
+    release.set()
+
+
+def test_ensure_workers_guarded_during_finalizing(tmp_path, monkeypatch):
+    """thread-creation-during-shutdown: _ensure_workers refuses to spawn threads
+    when the interpreter is finalizing (would raise an opaque RuntimeError)."""
+    _install_fake_aws(monkeypatch)
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=2)
+    monkeypatch.setattr(r2mod.sys, "is_finalizing", lambda: True)
+    p = _write_pt(tmp_path, name="fin.pt", payload=b"data")
+    with pytest.raises(RuntimeError, match="interpreter shutdown"):
+        sink.upload(local_path=p, key_suffix="full/fin/fin.pt")
+    assert sink._workers_started is False  # no threads spawned
+    assert os.path.exists(p)  # artifact kept
+
+
+def test_close_after_clean_flush_does_not_raise(tmp_path, monkeypatch):
+    """A clean async run: close(timeout=T) drains, joins, and returns WITHOUT raising
+    (no spurious is_alive failure when workers exit promptly)."""
+    _install_fake_aws(monkeypatch)
+    sink = _mk_sink(tmp_path, async_mode=True, upload_workers=3)
+    for i in range(5):
+        p = _write_pt(tmp_path, name=f"clean_{i}.pt", payload=f"p{i}".encode())
+        sink.upload(local_path=p, key_suffix=f"full/clean_{i}/clean_{i}.pt")
+    sink.close(timeout=10.0)  # must not raise
+    assert sink.n_uploaded == 5 and sink.n_errors == 0
+    assert not any(t.is_alive() for t in sink._workers)
+
+
+class _ProbingLock:
+    """Wraps a real lock and counts acquire() calls (a _thread.lock's acquire is a
+    read-only C attribute, so we substitute the whole lock object instead)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.acquires = 0
+
+    def acquire(self, *a, **kw):
+        self.acquires += 1
+        return self._lock.acquire(*a, **kw)
+
+    def release(self, *a, **kw):
+        return self._lock.release(*a, **kw)
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
+def test_sync_path_takes_no_manifest_lock_and_no_threads(tmp_path, monkeypatch):
+    """FINDING-001: the synchronous (default) path stays byte-identical — it never
+    acquires _manifest_lock and never starts a worker thread."""
+    _install_fake_aws(monkeypatch)
+    sink = _mk_sink(tmp_path)  # async_mode defaults False
+    n_threads_before = threading.active_count()
+
+    probe = _ProbingLock()
+    sink._manifest_lock = probe  # the sync path must NOT touch this lock at all
+    local = _write_pt(tmp_path)
+    row = sink.upload(local_path=local, key_suffix="full/step_5/step_5.pt")
+
+    assert probe.acquires == 0, "sync path must NOT acquire _manifest_lock (FINDING-001)"
+    assert row is not None and row["verified"] is True
+    assert sink._workers_started is False
+    assert threading.active_count() == n_threads_before
+    rows = [json.loads(l) for l in open(sink.manifest_path)]
+    assert len(rows) == 1 and rows[0]["verified"] is True
+
+
+def test_async_path_does_take_manifest_lock(tmp_path):
+    """Complement to FINDING-001: the async path DOES serialize the manifest append
+    under _manifest_lock (the lock exists to make _do_upload thread-safe)."""
+    # Use a real fake-aws via monkeypatch-free direct subprocess swap.
+    import json as _json
+
+    sizes = {}
+
+    def fake_run(cmd, **kwargs):
+        if "cp" in cmd:
+            sizes[cmd[4].split("/", 3)[-1]] = os.path.getsize(cmd[3])
+            return _FakeProc(returncode=0)
+        if "head-object" in cmd:
+            i = cmd.index("--key")
+            return _FakeProc(returncode=0, stdout=_json.dumps({"ContentLength": sizes[cmd[i + 1]]}))
+        raise AssertionError(cmd)
+
+    import pytest as _pytest  # local to avoid touching module imports
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(r2mod.subprocess, "run", fake_run)
+        sink = _mk_sink(tmp_path, async_mode=True, upload_workers=1)
+        probe = _ProbingLock()
+        sink._manifest_lock = probe
+        p = _write_pt(tmp_path, name="async.pt", payload=b"data")
+        sink.upload(local_path=p, key_suffix="full/async/async.pt")
+        sink.flush()
+        assert probe.acquires == 1  # the worker serialized its manifest append
+        sink.close()

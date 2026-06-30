@@ -81,13 +81,24 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # A bytes-in-a-gigabyte constant for the staged-bytes backpressure cap.
 _BYTES_PER_GB = 1 << 30
+
+# Bounded shutdown wait used by the atexit safety net. The atexit handler MUST
+# pass a FINITE timeout to close() so a dead/hung daemon worker (Python kills
+# daemon threads at interpreter shutdown, possibly mid-task, so the queue's
+# unfinished-task count can never reach zero) cannot wedge interpreter exit on an
+# unbounded ``queue.join()``. Generous enough to let an in-flight cp finish, short
+# enough that a truly hung worker does not stall the process / a multi-rank
+# collective indefinitely.
+_DEFAULT_ATEXIT_CLOSE_TIMEOUT_S = 120.0
 
 __all__ = [
     "R2_REQUIRED_BUCKET",
@@ -132,6 +143,7 @@ class R2ArtifactSink:
         async_mode: bool = False,
         upload_workers: int = 4,
         max_staged_gb: float = 80.0,
+        flush_timeout_s: float = 1800.0,
     ):
         # Hard bucket guard — fail loud, never write to the wrong bucket.
         if bucket != R2_REQUIRED_BUCKET:
@@ -174,6 +186,11 @@ class R2ArtifactSink:
         if float(max_staged_gb) <= 0:
             raise ValueError(f"R2 sink max_staged_gb must be > 0; got {max_staged_gb}")
         self.max_staged_bytes = int(float(max_staged_gb) * _BYTES_PER_GB)
+        # Default finite timeout for the per-step flush barrier (H3) so a slow/hung
+        # uploader cannot block the optimizer step forever. ``<= 0`` => wait forever
+        # (the original unbounded behaviour, opt-in only). Explicit close() / atexit
+        # use their own bounded timeouts.
+        self.flush_timeout_s = float(flush_timeout_s)
         # Serialize manifest appends across the worker pool (and harmless on the
         # synchronous path).
         self._manifest_lock = threading.Lock()
@@ -294,9 +311,21 @@ class R2ArtifactSink:
         }
         if meta:
             row.update({k: v for k, v in meta.items()})
-        # Serialize the manifest append + counter across the worker pool. Harmless
-        # on the synchronous path (the lock is uncontended).
-        with self._manifest_lock:
+        # Append the VERIFIED manifest row + bump the counter. Only AFTER a verified
+        # upload (cp + head-object size/sha match) is the row written, so a row in
+        # the manifest always attests to a real, verified R2 object (the async path
+        # shares this method, so its rows are likewise verified-only — never a
+        # phantom "dumped but not uploaded" entry). The append is serialized across
+        # the worker pool with ``_manifest_lock`` ONLY in async mode; the
+        # synchronous (default, ``async_mode=False``) path takes the SAME
+        # lock-free code path as before so it stays byte-identical, not merely
+        # output-identical.
+        if self.async_mode:
+            with self._manifest_lock:
+                with open(self.manifest_path, "a") as fh:
+                    fh.write(json.dumps(row) + "\n")
+                self._n_uploaded += 1
+        else:
             with open(self.manifest_path, "a") as fh:
                 fh.write(json.dumps(row) + "\n")
             self._n_uploaded += 1
@@ -313,9 +342,22 @@ class R2ArtifactSink:
     # async upload: queue + worker pool + flush barrier + backpressure
     # ------------------------------------------------------------------ #
     def _ensure_workers(self) -> None:
-        """Start the daemon worker pool once (lazy, on the first async upload)."""
+        """Start the daemon worker pool once (lazy, on the first async upload).
+
+        Guarded against interpreter shutdown: ``threading.Thread`` creation raises
+        ``RuntimeError("can't create new thread at interpreter shutdown")`` once the
+        interpreter is finalizing. If ``upload()`` is somehow reached during
+        shutdown (e.g. from a later-registered atexit handler or a ``__del__`` that
+        runs before our own ``_atexit_close``), fail loud with a clear message
+        instead of letting the opaque thread-creation error break other cleanup.
+        """
         if self._workers_started:
             return
+        if sys.is_finalizing():
+            raise RuntimeError(
+                "R2 sink: refusing to start upload workers during interpreter shutdown "
+                "(sys.is_finalizing()); the artifact is KEPT locally."
+            )
         self._workers_started = True
         for i in range(self.upload_workers):
             t = threading.Thread(target=self._worker_loop, name=f"r2-upload-{i}", daemon=True)
@@ -346,8 +388,20 @@ class R2ArtifactSink:
             # single artifact larger than the cap can still make progress).
             while (self._staged_bytes + nbytes) > self.max_staged_bytes and self._staged_bytes > 0:
                 self._staged_cond.wait(timeout=1.0)
+            # ATOMICITY (R2SINK-001): the staged-bytes increment and the queue
+            # ``put`` MUST be inseparable. Previously the increment ran under the
+            # lock and the ``put`` ran AFTER releasing it — an interrupt/exception
+            # (KeyboardInterrupt, SystemExit, a signal) in that window left
+            # ``_staged_bytes`` inflated for a job that was never enqueued, so the
+            # counter could never be reconciled (workers only decrement jobs they
+            # actually dequeue) and every future producer would block forever on
+            # backpressure against a near-empty queue — a deadlock-by-accounting.
+            # We now ``put`` INSIDE the lock (``queue.Queue.put`` on an unbounded
+            # queue never blocks, so holding the condition across it is safe), and
+            # increment ONLY after a successful put so a put failure cannot leak the
+            # counter either.
+            self._jobs.put((local_path, key_suffix, meta, nbytes))
             self._staged_bytes += nbytes
-        self._jobs.put((local_path, key_suffix, meta, nbytes))
 
     def _worker_loop(self) -> None:
         """Daemon worker: pop a job, run ``_do_upload``, account staged bytes."""
@@ -397,26 +451,39 @@ class R2ArtifactSink:
         if timeout is None:
             self._jobs.join()
         else:
-            # queue.Queue.join has no timeout; poll the unfinished-tasks counter.
-            import time as _time
-
-            deadline = _time.monotonic() + timeout
+            # queue.Queue.join has no timeout; poll the unfinished-tasks counter so
+            # a hung/dead worker cannot block us forever (the unbounded join() above
+            # is only safe when the caller explicitly opts into waiting forever).
+            deadline = time.monotonic() + timeout
             while self._jobs.unfinished_tasks > 0:
-                if _time.monotonic() >= deadline:
+                if time.monotonic() >= deadline:
                     raise TimeoutError(
                         f"R2 flush timed out after {timeout}s with "
                         f"{self._jobs.unfinished_tasks} upload(s) still in flight."
                     )
-                _time.sleep(0.05)
+                time.sleep(0.05)
         self._raise_if_errors()
 
     def close(self, timeout: Optional[float] = None) -> None:
-        """Flush, then stop the worker pool (join). Idempotent. Fail-loud on flush."""
+        """Flush, then stop the worker pool (join). Idempotent. Fail-loud.
+
+        Raises if (a) the flush barrier surfaced any permanent upload failure
+        (``_raise_if_errors``), or (b) the flush/join TIMED OUT with workers still
+        alive — close() must NEVER report clean success while uploads are still
+        hung. A hung shutdown reported as clean is the silent-data-loss anti-pattern
+        async mode exists to prevent (the daemon worker would then be killed at
+        process exit, possibly mid-manifest-write, leaving the trajectory
+        unverifiably incomplete). The worker pool is always torn down (sentinels +
+        join) in the ``finally`` regardless of whether we raise.
+        """
         if self._closed:
             return
+        flush_error: Optional[BaseException] = None
         try:
             if self.async_mode and self._workers_started:
                 self.flush(timeout=timeout)
+        except BaseException as e:  # capture flush failure/timeout; still tear down
+            flush_error = e
         finally:
             self._closed = True
             if self._workers_started:
@@ -425,14 +492,47 @@ class R2ArtifactSink:
                 for t in self._workers:
                     t.join(timeout=timeout)
 
+        # Re-raise a flush failure/timeout AFTER the pool teardown so the caller
+        # sees it (fail-loud); flush() already includes _raise_if_errors().
+        if flush_error is not None:
+            raise flush_error
+        # Even if flush() returned cleanly, a worker can still be alive when a finite
+        # join timeout elapsed before a hung upload finished. Do NOT report clean
+        # success in that case: surface it loud so a timed-out shutdown is never
+        # mistaken for a complete one.
+        if self._workers_started:
+            still_alive = [t.name for t in self._workers if t.is_alive()]
+            if still_alive:
+                raise RuntimeError(
+                    f"R2 sink close() timed out with {len(still_alive)} upload worker(s) still "
+                    f"alive ({', '.join(still_alive)}); in-flight uploads may be incomplete and "
+                    "local files were KEPT. Treat this run as having unverified R2 artifacts."
+                )
+        # A late worker failure recorded after the flush barrier returned (e.g. the
+        # final job failed between flush's drain and now) must also surface.
+        self._raise_if_errors()
+
     def _atexit_close(self) -> None:
-        """Process-exit safety net: drain + log loudly (never raise in atexit)."""
+        """Process-exit safety net: drain + log loudly (never raise in atexit).
+
+        Always passes a FINITE timeout to close() so a dead/hung daemon worker
+        cannot wedge interpreter exit on an unbounded ``queue.join()`` — Python
+        kills daemon threads at shutdown (possibly mid-task), so the queue's
+        unfinished-task count may never reach zero. atexit handlers must not raise,
+        so any surfaced failure/timeout is logged with an unmissable marker. NOTE:
+        this is a best-effort net only; the run is expected to call close()
+        explicitly at the engine teardown so failures propagate as a non-zero exit.
+        """
         if self._closed:
             return
         try:
-            self.close()
+            self.close(timeout=_DEFAULT_ATEXIT_CLOSE_TIMEOUT_S)
         except Exception as e:  # atexit must not raise
-            logger.error("comm_eff.r2: atexit close surfaced an upload failure: %s", e)
+            logger.error(
+                "comm_eff.r2: !!! ATEXIT CLOSE SURFACED AN R2 UPLOAD FAILURE/TIMEOUT !!! "
+                "the trajectory may be INCOMPLETE (local files KEPT): %s",
+                e,
+            )
 
     @property
     def n_uploaded(self) -> int:
@@ -453,6 +553,7 @@ def build_r2_sink_from_env(
     async_mode: bool = False,
     upload_workers: int = 4,
     max_staged_gb: float = 80.0,
+    flush_timeout_s: float = 1800.0,
 ) -> R2ArtifactSink:
     """Build a :class:`R2ArtifactSink` from the R2 env vars (fail-loud).
 
@@ -488,6 +589,7 @@ def build_r2_sink_from_env(
         async_mode=async_mode,
         upload_workers=upload_workers,
         max_staged_gb=max_staged_gb,
+        flush_timeout_s=flush_timeout_s,
     )
 
 
@@ -501,6 +603,7 @@ def maybe_build_r2_sink(
     async_mode: bool = False,
     upload_workers: int = 4,
     max_staged_gb: float = 80.0,
+    flush_timeout_s: float = 1800.0,
 ) -> Optional[R2ArtifactSink]:
     """Return an :class:`R2ArtifactSink` iff ``enabled``, else ``None`` (strict no-op).
 
@@ -519,4 +622,5 @@ def maybe_build_r2_sink(
         async_mode=async_mode,
         upload_workers=upload_workers,
         max_staged_gb=max_staged_gb,
+        flush_timeout_s=flush_timeout_s,
     )
