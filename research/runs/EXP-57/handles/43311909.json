@@ -1,0 +1,1 @@
+{"schema_version":"1","instance_id":"43311909","ssh_host":"210.157.233.86","ssh_port":15490,"num_gpus":1,"gpu_name":"H200","gpu_ram":143771,"dph_total":3.16,"ssh_login":"ssh -i ~/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 15490 root@210.157.233.86","ssh_key":"~/.ssh/vast_ai","label":"EXP-57","vast_account":"private","external":true,"tmux_session":"exp57a"}
