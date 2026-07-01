@@ -566,8 +566,8 @@ def build_r2_sink_from_env(
     background-upload pool (see :class:`R2ArtifactSink`). Defaults keep the sink
     synchronous + byte-identical to the original behaviour.
     """
-    if artifact_kind not in ("weights", "grads"):
-        raise ValueError(f"artifact_kind must be one of (weights, grads); got {artifact_kind!r}")
+    if artifact_kind not in ("weights", "grads", "checkpoints"):
+        raise ValueError(f"artifact_kind must be one of (weights, grads, checkpoints); got {artifact_kind!r}")
     bucket = os.environ.get("R2_BUCKET", "")
     endpoint = os.environ.get("R2_ENDPOINT", "")
     account_id = os.environ.get("R2_ACCOUNT_ID", "")
