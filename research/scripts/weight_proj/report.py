@@ -81,6 +81,81 @@ def render_html(report: dict, out_path: str) -> None:
     cls = "ok" if verdict == "PASS" else ("flag" if verdict == "REVISE" else "bad")
     P.append(f'<p>Self-test gate: <span class="{cls}">{esc(verdict)}</span></p>')
 
+    # ---- plain-language orientation (how to read this report) -----------------
+    # Everything specific (which groups / cadence / horizons / h* / directedness) is
+    # pulled from the report dict so this stays correct when #52-#56 regenerate.
+    ft_hdr = report.get("floor_table", [])
+    fam_hdr = report.get("families", [])
+    hstars_hdr = report.get("hstars", {})
+    fc_hdr = report.get("family_curves", {})
+    blocks_hdr = sorted({r["block"] for r in ft_hdr}) or sorted(report.get("sparse_subset", {}).keys())
+    horizons_hdr = sorted({r["h"] for r in ft_hdr})
+    cadence_hdr = str(meta.get("cadence", "per-step"))
+
+    def _is_learned(name):
+        return ("learnable" in name) or (name == "general-regression")
+
+    # linearity: directedness exponent p per moving block
+    dir_bits, seen_hdr = [], set()
+    for r in ft_hdr:
+        b = r["block"]; p = r.get("directed_p")
+        moves = r.get("moves", float(r.get("err_norm", 0.0) or 0.0) > 0.0)
+        if b not in seen_hdr and moves and isinstance(p, (int, float)) and p == p:
+            dir_bits.append(f"{esc(b)} p={p:.2f}"); seen_hdr.add(b)
+    dir_str = ", ".join(dir_bits) if dir_bits else "n/a"
+
+    # steps-ahead: h* (furthest horizon still beating "keep the stale weights")
+    fixed_hs = [v for k, v in hstars_hdr.items() if not _is_learned(k)]
+    learn_hs = [v for k, v in hstars_hdr.items() if _is_learned(k)]
+
+    def _best_ratio(pred):
+        best = None
+        for k, pts in fc_hdr.items():
+            if pred(k):
+                for _h, rr in pts:
+                    if rr == rr and (best is None or rr < best):
+                        best = rr
+        return best
+    learned_best = _best_ratio(_is_learned)
+    if learned_best is not None and learned_best >= 0.99:
+        skill_note = ("no rule beat &ldquo;keep the stale weights&rdquo; by a meaningful margin "
+                      "(best learned median ratio %.3f &#8776; 1.00 &mdash; it merely reproduces the stale "
+                      "weights). The motion is real and linear but NOT usefully extrapolable at this cadence." % learned_best)
+    elif learned_best is not None:
+        skill_note = ("the best learned rule reached median ratio %.3f &mdash; a real prediction gain over "
+                      "keeping the stale weights." % learned_best)
+    else:
+        skill_note = "see the per-family curves below for the actual margin."
+
+    P.append('<div style="background:#f0f6ff;border:1px solid #cfe0ff;border-radius:6px;padding:10px 16px;margin:14px 0">')
+    P.append('<h2 style="margin-top:4px;border:none">How to read this report (plain language)</h2>')
+    P.append('<p><b>Snapshot vs. predictor vs. prediction.</b> A <b>snapshot</b> &theta;[t] is the '
+             '<b>real</b> model weights recorded at training tick t. A <b>predictor</b> is <b>not</b> a '
+             'snapshot &mdash; it is a <b>rule</b> that <b>guesses</b> a future weight from past snapshots '
+             '(e.g. &ldquo;extend the last velocity forward&rdquo;). Its output &theta;&#770; is that '
+             '<b>guess</b>, never a stored snapshot. A guess is scored by whether it lands closer to the real '
+             'future snapshot than simply keeping the stale weights.</p>')
+    P.append('<p><b>What was tested.</b> %d predictor rules (the &ldquo;families&rdquo; table below), on the '
+             'weight groups <span class="mono">%s</span>, at <b>%s</b> cadence, projecting <b>%s</b> steps ahead '
+             'of the stale anchor.</p>'
+             % (len(fam_hdr), esc(", ".join(blocks_hdr)), esc(cadence_hdr),
+                esc(", ".join(str(h) for h in horizons_hdr)) or "n/a"))
+    P.append('<p><b>How we measured linearity.</b> We fit the <i>fixed-origin cumulative displacement</i> '
+             '&#8214;&theta;(origin+h) &minus; &theta;(origin)&#8214; vs horizon h as &#8733; h<sup>p</sup>. '
+             '<b>p&#8776;1</b> = a straight-line <b>directed</b> drift (real signal); <b>p&#8776;0.5</b> = a '
+             'random walk (rounding noise). Observed on the moving blocks: <b>%s</b> &rarr; directed / linear.</p>'
+             % dir_str)
+    P.append('<p><b>How many steps ahead we could predict (h*).</b> h* = the furthest horizon at which a rule '
+             'still beat &ldquo;keep the stale weights.&rdquo; Here: <b>fixed / non-learned rules h*=%s</b> '
+             '(0 = never beat the stale weights; higher polynomial orders overshoot far worse), '
+             '<b>learned rules h*=%s</b>. Bottom line: <b>%s</b></p>'
+             % (max(fixed_hs) if fixed_hs else "0", max(learn_hs) if learn_hs else "0", skill_note))
+    P.append('<p class="small">Scope: acceptance self-test on a subsampled window; the full-resolution, '
+             'per-layer, and coarser-cadence study is #52&ndash;#56. &ldquo;YES&rdquo; in the families table '
+             'means a rule is a faithful linear recipe (auditable), <i>not</i> that its guess is accurate &mdash; '
+             'accuracy is the ratio / h* above.</p>')
+    P.append('</div>')
+
     # invariants
     P.append("<h2>Pre-run gate — correctness invariants</h2><table>")
     P.append('<tr><th class="l">invariant</th><th class="l">gate</th><th class="l">result</th><th class="l">detail</th></tr>')
@@ -101,6 +176,12 @@ def render_html(report: dict, out_path: str) -> None:
                  f'<td>{esc(str(r["order"]))}</td><td class="mono">{r["recon_rel_err"]:.2e}</td>'
                  f'<td class="l {rc}">{"YES" if r["reconstructable"] else "NO"}</td></tr>')
     P.append("</table>")
+    P.append('<p class="small">Each row is a predictor <b>rule</b> (not a snapshot). '
+             '<b>reconstructable = YES</b> means the rule&rsquo;s output can be reproduced exactly from the '
+             'linear coefficients it declares (&theta;&#770; = &Sigma;<sub>j</sub> c<sub>j</sub>&theta;<sub>j</sub>), '
+             'so the engine is auditable &mdash; it says <i>nothing</i> about whether the guess is accurate. '
+             'recon rel-err is 0 because this recomputes the identical arithmetic '
+             '<span class="mono">predict()</span> already runs, not because the prediction is correct.</p>')
 
     # family curves (one per family)
     P.append("<h2>weight_proj_ratio vs horizon — one curve per family</h2>")
