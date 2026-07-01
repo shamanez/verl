@@ -28,3 +28,11 @@ compression train–inference mismatch.
 [2026-07-01T18:42:35+10:00] [triage] dispatched 1 planners, 1 issues already planned
 EARLY_ABORT_CLEAR - training/global_step:3, 6 fp32 manifest rows (n_matrices=338), r2 tick_0 verified 6.17GB @ EXP-57 prefix. Gate PASS.
 - EXP-57 regimeA (fp32 dense weight-traj): DRAIN COMPLETE @ 2026-07-01 — step 80/80, tick 160/160; full_manifest=160, r2_manifest=160 (all verified byte-exact, 0 errors), staged=0. Val gsm8k acc@1=0.782. Tracebacks = benign teardown noise only. Ready for teardown gate → dispatch_analyst.
+[2026-07-02] [operator] weight-proj ANALYSIS refactor landed (fp32 EXP-57 + download-first). Engine now
+reads a PRE-DOWNLOADED local trace (`weight_proj_sweep.py --trace-root`; `RS.LocalSnapshotSource`) OR streams
+(kept for few-snapshot passes / #46); bounded-footprint released for analysis, collection unchanged. On fp32
+the bf16 noise-floor/SNR gate is REMOVED (reliability = projection accuracy + linearity). New scripts:
+`weight_proj_fetch_trace.py` (bulk fetch, atomic resume), `synth_exp57_manifests.py` (EXP-57 had no
+manifests). Verified locally (fp32+bf16 both PASS; __exit__ no-op; atomic-fetch unit test); adversarially
+reviewed (3 findings fixed). Issue bodies #44–#56 realigned to the new flow. Single source of truth:
+`reports/r2-access-pattern-for-analysis.md`. See memory `weight-proj-fp32-local-analysis-model`.
