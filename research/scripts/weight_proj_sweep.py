@@ -4,12 +4,12 @@
 Streams the EXP-43 raw full-weight trace from R2 ONE snapshot at a time (bounded
 footprint; never bulk-downloads the ~494 GB prefix), reconstructs every predictor
 family from the raw snapshots, computes the full GPU-free metric hierarchy per
-grouping, runs the bf16-noise-floor gate, and renders a self-contained self-test
-HTML. The metric math lives in weight_proj/metrics.py (boundary B1 with #45).
+grouping, runs the bf16-DIFFERENCED-noise-floor gate, and renders a self-contained
+self-test HTML. The metric math lives in weight_proj/metrics.py (boundary B1 with #45).
 
 Modes (the plan's ## Verification commands map onto these):
   --selftest --check-invariants   pre-run gate: the six ## Correctness invariants
-  --selftest --noise-floor        per-block bf16 floor + manifest fro-norm + SNR@h
+  --selftest --noise-floor        per-block bf16 differenced floor + fro-norm + SNR@h
   --emit-report <path>            full (family x order x coeff x Delta x h) sweep -> HTML
 
 Tick cadence (## Notes for runner "Per-step vs per-tick"): the main families run
@@ -21,6 +21,14 @@ per-process snapshot cache of the extracted fp32 slices (a few MB — only the s
 matrices) so the report path does NOT re-download for its noise-floor table. Each raw
 .pt is still deleted immediately after its slices are extracted; the cache holds only
 the tiny sliced fp32 tensors, never the 3 GB .pt.
+
+NOISE FLOOR (EXP-44 correction). The bf16 floor is the DIFFERENCED-noise floor of the
+predictor's residual e = (sum_j c_j theta_j) - theta_now — the quantization noise of a
+DIFFERENCE of correlated snapshots, NOT the ||theta||-scaled STORAGE noise (the prior
+category error that over-estimated the true floor by ~600-2200x). See
+weight_proj/noise_floor.py. Sparse-subset (PuLSE) characterization is a first-class
+output (changed-element fraction + ULP-multiple distribution) so a dense L2 ratio can
+never hide a sparse signal.
 
 R2 creds: `set -a; . ~/.config/verl-research/secrets.env; set +a` first; the engine
 maps R2_* -> AWS_* internally (crib of verify_full_weight_dump.py). Bucket
@@ -224,10 +232,34 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
 
 
 # =============================================================================
-# Noise-floor gate
+# Noise-floor gate + sparse-subset (PuLSE) characterization
 # =============================================================================
+def _sparse_subset_from_hist(hist, log):
+    """Per-block SPARSE-SUBSET (PuLSE) summary on the first available one-step diff.
+
+    Reports changed-element fraction + ULP-multiple distribution so a dense L2 ratio
+    can never hide a sparse signal. Uses the earliest consecutive pair in the window.
+    """
+    sample_names = list(SAMPLE_BLOCK_MATRICES.values())
+    ticks_sorted = sorted(hist.keys())
+    out = {}
+    if len(ticks_sorted) < 2:
+        return out
+    a_t, b_t = ticks_sorted[0], ticks_sorted[1]
+    for nm in sample_names:
+        block = SW.block_family(nm)
+        summ = NF.sparse_subset_summary(hist[a_t][nm], hist[b_t][nm])
+        summ["block"] = block
+        summ["pair"] = f"tick{a_t}->tick{b_t}"
+        out[block] = summ
+        log(f"[sparse-subset] block={block} {summ['pair']}: {summ['text']}")
+    return out
+
+
 def _noise_floor_from_hist(hist, full_rows, horizons, log):
-    """Compute the noise-floor gate table from an ALREADY-streamed `hist` (no I/O)."""
+    """Compute the noise-floor gate table (CORRECTED differenced floor) from an
+    ALREADY-streamed `hist` (no I/O). Returns (floor_table, fro_ok, core_below,
+    sparse_subset)."""
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     sample_names = list(SAMPLE_BLOCK_MATRICES.values())
     ticks_sorted = sorted(hist.keys())
@@ -238,12 +270,17 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
         log(f"[noise-floor] manifest fro cross-check {nm.split('.')[-2]}: rel={rel:.2e} ok={ok}")
         fro_ok = fro_ok and ok
 
+    # empirical ground-truth null: an unchanging tensor differences to EXACTLY 0.0.
+    for nm in sample_names:
+        z = NF.zero_motion_null_floor(hist[ticks_sorted[0]][nm])
+        log(f"[noise-floor] zero-motion null (self-difference) {nm.split('.')[-2]}: {z:.4e} "
+            f"(correlated floor of an unchanging value == 0.0)")
+
     fam = PR.build_family_registry()["order1-fixed"]
     floor_table = []
     core_below = []
     for nm in sample_names:
         block = SW.block_family(nm)
-        floor = NF.group_floor([hist[ticks_sorted[0]][nm]])
         for h in horizons:
             score_pos = len(ticks_sorted) - 1
             anchor_pos = score_pos - h
@@ -254,6 +291,9 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
             theta_now = hist[ticks_sorted[score_pos]][nm]
             theta_stale = hist[ticks_sorted[anchor_pos]][nm]
             hat = fam.predict(history, h)
+            # CORRECTED differenced-noise floor for THIS residual (order-1 coeffs).
+            coeffs = fam.linear_coeffs(len(history), h)
+            floor = NF.differenced_floor(coeffs, [th for _, th in history], theta_now)
             row = M.full_metric_row(hat, theta_now, theta_stale, floor)
             row["block"] = block
             row["floor"] = floor
@@ -263,9 +303,13 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
             flag = "bf16-unreliable" if row["bf16_unreliable"] else "clears"
             log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||e||={row['err_norm']:.4e} "
                 f"SNR={row['snr']:.2f} ratio={row['weight_proj_ratio']:.4f} -> {flag}")
-            if h >= 5 and row["bf16_unreliable"] and block in CORE_BLOCKS:
+            # A block that genuinely does NOT move (||e||==0 AND changed_frac==0) is not a
+            # bf16-floor FAILURE — it is a true zero-motion tensor (floor ~0, signal ~0).
+            # Only flag a CORE (moving) block as below-floor when it actually failed to clear.
+            if h >= 5 and row["bf16_unreliable"] and block in CORE_BLOCKS and row["err_norm"] > 0.0:
                 core_below.append((block, h))
-    return floor_table, fro_ok, core_below
+    sparse_subset = _sparse_subset_from_hist(hist, log)
+    return floor_table, fro_ok, core_below, sparse_subset
 
 
 def run_noise_floor(full_rows, r2_rows, horizons, log):
@@ -298,17 +342,17 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
 
     reg = PR.build_family_registry()
     family_curves = {}
-    floor_cache = {nm: NF.group_floor([hist[ticks_sorted[0]][nm]]) for nm in sample_names}
     records = []
     for fam_key, fam in reg.items():
         curve = []
         for h in horizons:
             ratios = []
             for nm in sample_names:
-                floor = floor_cache[nm]
                 group_hist = {t: hist[t][nm] for t in ticks_sorted}
+                # floor is now computed per (family,h) INSIDE score_family_on_group
+                # from the family's own coeffs (corrected differenced floor).
                 row = SW.score_family_on_group(fam, group_hist, ticks_sorted,
-                                               delta=deltas[0], h=h, floor=floor)
+                                               delta=deltas[0], h=h)
                 if row is None:
                     continue
                 row["block"] = SW.block_family(nm)
@@ -328,7 +372,7 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
                     and r["weight_proj_ratio"] == r["weight_proj_ratio"]):
                 h2r.setdefault(r["h"], []).append(r["weight_proj_ratio"])
         hstars[fam.name] = M.crossover_hstar(h2r)
-    return grouping, family_curves, records, hstars, floor_cache, hist, ticks_sorted, reg
+    return grouping, family_curves, records, hstars, hist, ticks_sorted, reg
 
 
 def main():
@@ -368,7 +412,7 @@ def main():
                        "generated": datetime.datetime.now().isoformat(timespec="seconds"),
                        "metric_contract": M.METRIC_CONTRACT},
               "invariants": [], "families": [], "family_curves": {}, "floor_table": [],
-              "grouping": {}, "verdict": ""}
+              "sparse_subset": {}, "grouping": {}, "verdict": ""}
 
     rc = 0
     if args.check_invariants:
@@ -382,8 +426,10 @@ def main():
             rc = 2
 
     if args.noise_floor:
-        floor_table, fro_ok, core_below = run_noise_floor(full_rows, r2_rows, horizons, log)
+        floor_table, fro_ok, core_below, sparse_subset = run_noise_floor(
+            full_rows, r2_rows, horizons, log)
         report["floor_table"] = floor_table
+        report["sparse_subset"] = sparse_subset
         report["manifest_fronorm_ok"] = fro_ok
         log(f"[engine] manifest fro-norm cross-check ok = {fro_ok}")
         if core_below:
@@ -392,10 +438,10 @@ def main():
             report["verdict"] = "STOP"
             rc = 3
         else:
-            log("[engine] all core blocks clear the bf16 floor at h>=5")
+            log("[engine] all moving core blocks clear the bf16 differenced floor at h>=5")
 
     if args.emit_report:
-        (grouping, family_curves, records, hstars, floor_cache,
+        (grouping, family_curves, records, hstars,
          hist, ticks_sorted, reg) = run_full_sweep(full_rows, r2_rows, horizons, deltas, log)
         fam_rows = []
         import torch
@@ -431,11 +477,16 @@ def main():
         report["family_curves"] = family_curves
         report["grouping"] = grouping["integrity"]
         report["hstars"] = hstars
-        # floor table from the SAME cached hist (no re-download)
-        ft, fro_ok, core_below = _noise_floor_from_hist(hist, full_rows, horizons, log)
+        # floor table + sparse-subset from the SAME cached hist (no re-download)
+        ft, fro_ok, core_below, sparse_subset = _noise_floor_from_hist(
+            hist, full_rows, horizons, log)
         report["floor_table"] = ft
+        report["sparse_subset"] = sparse_subset
         report["manifest_fronorm_ok"] = fro_ok
         all_recon = all(r["reconstructable"] for r in fam_rows)
+        # Engine ACCEPTANCE: families reconstruct + fro-norm OK + no moving core block
+        # noise-dominated at h>=5. A ratio>1 / h*=0 (predictor no better than stale) is a
+        # VALID SCIENTIFIC FINDING for #52-#56, NOT an engine-acceptance failure.
         report["verdict"] = "PASS" if (all_recon and fro_ok and not core_below) else "STOP"
         os.makedirs(os.path.dirname(os.path.abspath(args.emit_report)), exist_ok=True)
         RPT.render_html(report, args.emit_report)

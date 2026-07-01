@@ -15,7 +15,7 @@ Grouping (## Success criteria):
   * per-block : 11 families {q_proj,k_proj,v_proj,o_proj, gate/up/down_proj,
                 input_layernorm, post_attention_layernorm, embed, norm}
                 (q/k/v carry weight+bias; o weight only; embed tied to lm_head)
-  * per-layer : 28 decoder layers (0..27); embed/norm are their own layer-agnostic groups
+  * per-layer : 28 decoder layers (0..27)
 The three aggregations each PARTITION the 338 matrices with none dropped/double-counted.
 """
 from __future__ import annotations
@@ -120,7 +120,7 @@ def stream_group_histories(stream, ticks: list[int], names_needed: list[str]) ->
 # The predictor cross-product on accumulated per-group history
 # =============================================================================
 def score_family_on_group(fam, group_vectors_by_tick: dict, ticks_sorted: list[int],
-                          delta: int, h: int, floor: float) -> dict | None:
+                          delta: int, h: int, floor: float | None = None) -> dict | None:
     """Score ONE family at (Delta=delta, horizon=h) on ONE group's history.
 
     History = the `order+1`-ish snapshots ending at the anchor (theta_stale); the
@@ -128,6 +128,14 @@ def score_family_on_group(fam, group_vectors_by_tick: dict, ticks_sorted: list[i
     families FIT on a strictly-earlier retrospective split (leakage guard) then
     score on the held-out later point. Returns a full metric row or None if the
     window is too short.
+
+    NOISE FLOOR (EXP-44 correction). The floor is the bf16 DIFFERENCED-noise floor
+    of THIS predictor's residual e = (sum_j c_j theta_j) - theta_now — computed here
+    from the family's own linear coefficients and the actual history + theta_now (see
+    noise_floor.differenced_floor). The old passed-in `||theta||`-scaled `floor` arg
+    is IGNORED (a category error; kept only for call-site compatibility). Because it
+    is per-element at each element's magnitude and propagated through the coefficients,
+    an unchanging tensor floors to ~0 and a moving block clears it at h>=5.
     """
     from .predictors import fit_score_split
     n = len(ticks_sorted)
@@ -163,7 +171,11 @@ def score_family_on_group(fam, group_vectors_by_tick: dict, ticks_sorted: list[i
             return None
 
     theta_hat = fam.predict(history, h)
-    row = M.full_metric_row(theta_hat, theta_now, theta_stale, floor)
+    # CORRECTED differenced-noise floor for THIS predictor's residual (family coeffs).
+    coeffs = fam.linear_coeffs(len(history), h)
+    hist_vectors = [th for _, th in history]
+    diff_floor = NF.differenced_floor(coeffs, hist_vectors, theta_now)
+    row = M.full_metric_row(theta_hat, theta_now, theta_stale, diff_floor)
     row.update({"family": fam.name, "coeff_source": fam.coeff_source,
-                "order": fam.order, "delta": delta, "h": h})
+                "order": fam.order, "delta": delta, "h": h, "floor": diff_floor})
     return row

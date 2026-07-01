@@ -2,10 +2,12 @@
 """weight_proj/report.py — self-contained smoke report builder.
 
 Renders `research/reports/infra-b-sweep-engine-selftest.html`: one curve per new
-predictor family (weight_proj_ratio vs horizon h) plus the bf16-noise-floor gate
-table (per (block,h): floor, residual, SNR, and the `bf16-unreliable` flag). Pure
-Python string templating — no matplotlib/JS deps; curves rendered as inline SVG so
-the file is fully self-contained and re-openable offline.
+predictor family (weight_proj_ratio vs horizon h), the bf16 DIFFERENCED-noise-floor
+gate table (per (block,h): floor, residual, SNR, and the `bf16-unreliable` flag), and
+the SPARSE-SUBSET (PuLSE) characterization (changed-element fraction + ULP-multiple
+distribution so a dense L2 can never hide a sparse signal). Pure Python string
+templating — no matplotlib/JS deps; curves rendered as inline SVG so the file is
+fully self-contained and re-openable offline.
 """
 from __future__ import annotations
 
@@ -57,7 +59,8 @@ def _svg_curve(series: dict[str, list[tuple[int, float]]], title: str,
 
 def render_html(report: dict, out_path: str) -> None:
     """report keys: meta, family_curves{family:[(h,median_ratio)]}, floor_table[rows],
-    invariants[rows], families[rows], grouping{...}. Writes a self-contained HTML."""
+    sparse_subset{block:{...}}, invariants[rows], families[rows], grouping{...}.
+    Writes a self-contained HTML."""
     meta = report.get("meta", {})
     esc = html.escape
     P = ['<!doctype html><html><head><meta charset="utf-8">',
@@ -103,25 +106,62 @@ def render_html(report: dict, out_path: str) -> None:
     P.append("<h2>weight_proj_ratio vs horizon — one curve per family</h2>")
     curves = {k: v for k, v in report.get("family_curves", {}).items()}
     P.append(_svg_curve(curves, "median weight_proj_ratio(h)  (per-block group, sampled)"))
+    P.append('<p class="small">A ratio &gt; 1 / h* = 0 (predictor no better than the stale '
+             'anchor) is a VALID SCIENTIFIC FINDING about bf16 RLVR weight geometry for '
+             '#52-#56 to interpret through the sparsity lens — NOT an engine-acceptance '
+             'failure. Engine acceptance = families reconstruct + fro-norm OK + no MOVING '
+             'core block noise-dominated at h&gt;=5.</p>')
 
-    # noise-floor gate table
-    P.append("<h2>bf16 noise-floor gate (replaces on-box parity)</h2>")
-    P.append('<p class="small">SNR = ||e|| / bf16-roundtrip-floor. SNR &lt;= 3 =&gt; FLAGGED '
-             '<span class="flag">bf16-unreliable</span> (not reported as a precise ratio). '
-             f'manifest fro-norm cross-check tol = 1e-2 rel.</p>')
+    # noise-floor gate table (CORRECTED differenced floor)
+    P.append("<h2>bf16 DIFFERENCED-noise-floor gate (replaces on-box parity)</h2>")
+    P.append('<p class="small">floor = bf16 quantization noise of the DIFFERENCE '
+             'e = (&Sigma; c<sub>j</sub>&theta;<sub>j</sub>) &minus; &theta;<sub>now</sub> of two '
+             'CORRELATED snapshots (per-element ULP-of-the-difference, propagated through the '
+             'predictor coeffs) — NOT the &#124;&#124;&theta;&#124;&#124;-scaled STORAGE floor '
+             '(the prior category error, which over-estimated the true floor by ~600&ndash;2200&times;). '
+             'A HELD-CONSTANT tensor differences to EXACTLY 0.0 (empirical null). '
+             'SNR = &#124;&#124;e&#124;&#124; / floor; SNR &lt;= 3 =&gt; FLAGGED '
+             '<span class="flag">bf16-unreliable</span>. manifest fro-norm cross-check tol = 1e-2 rel.</p>')
     P.append("<table><tr><th class='l'>block</th><th>h</th><th>floor</th><th>||e||</th>"
              "<th>SNR</th><th>ratio</th><th class='l'>status</th></tr>")
     for r in report.get("floor_table", []):
         if r["bf16_unreliable"]:
-            status = '<span class="flag">bf16-unreliable</span>'
+            # distinguish a true zero-motion tensor from a noise-dominated moving block
+            if r["err_norm"] <= 0.0:
+                status = '<span class="small">zero-motion (unchanging; floor~0, signal~0)</span>'
+            else:
+                status = '<span class="flag">bf16-unreliable</span>'
             ratio_cell = "—"
         else:
             status = '<span class="ok">clears floor</span>'
             ratio_cell = f'{r["ratio"]:.4f}' if r["ratio"] == r["ratio"] else "nan"
+        snr_cell = f'{r["snr"]:.2f}' if r["snr"] == r["snr"] else "nan"
         P.append(f'<tr><td class="l">{esc(r["block"])}</td><td>{r["h"]}</td>'
                  f'<td class="mono">{r["floor"]:.4e}</td><td class="mono">{r["err_norm"]:.4e}</td>'
-                 f'<td class="mono">{r["snr"]:.2f}</td><td class="mono">{ratio_cell}</td>'
+                 f'<td class="mono">{snr_cell}</td><td class="mono">{ratio_cell}</td>'
                  f'<td class="l">{status}</td></tr>')
+    P.append("</table>")
+
+    # sparse-subset (PuLSE) characterization
+    P.append("<h2>Sparse-subset (PuLSE) characterization</h2>")
+    P.append('<p class="small">RLVR updates are intrinsically SPARSE; a dense L2 ratio can hide a '
+             'sparse signal. Per block, the changed-element fraction (bf16 stored-bit inequality) '
+             'and the ULP-multiple distribution of the motion: % &lt;=1 ULP is jitter, % &gt;=3 ULP '
+             'is real directed motion resolved in the bf16 bits.</p>')
+    P.append("<table><tr><th class='l'>block</th><th class='l'>pair</th><th>changed frac</th>"
+             "<th>n_changed</th><th>median ULP</th><th>mean ULP</th><th>p90 ULP</th>"
+             "<th>max ULP</th><th>% &lt;=1ULP</th><th>% &gt;=3ULP</th></tr>")
+    for block, s in sorted(report.get("sparse_subset", {}).items()):
+        u = s.get("ulp", {})
+        P.append(f'<tr><td class="l">{esc(block)}</td><td class="l mono small">{esc(str(s.get("pair","")))}</td>'
+                 f'<td class="mono">{s.get("changed_element_fraction",0.0)*100:.3f}%</td>'
+                 f'<td class="mono">{s.get("n_changed",0)}</td>'
+                 f'<td class="mono">{u.get("median_ulp_mult",0.0):.1f}</td>'
+                 f'<td class="mono">{u.get("mean_ulp_mult",0.0):.2f}</td>'
+                 f'<td class="mono">{u.get("p90_ulp_mult",0.0):.1f}</td>'
+                 f'<td class="mono">{u.get("max_ulp_mult",0.0):.0f}</td>'
+                 f'<td class="mono">{u.get("frac_le_1ulp",0.0)*100:.0f}%</td>'
+                 f'<td class="mono">{u.get("frac_ge_3ulp",0.0)*100:.0f}%</td></tr>')
     P.append("</table>")
 
     # grouping integrity
