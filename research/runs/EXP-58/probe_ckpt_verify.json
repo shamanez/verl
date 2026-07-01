@@ -1,0 +1,17 @@
+{
+  "prefix": "verl-research/EXP-58/regimeA/checkpoints",
+  "world_size": 1,
+  "expect_steps": "1..2",
+  "n_expect": 2,
+  "mode": "r2-listing",
+  "errors": [],
+  "incomplete_steps": [],
+  "complete_steps": 2,
+  "zero_byte_objects": [],
+  "tracker_value": 2,
+  "dry_restore": {
+    "resolved_step": 2,
+    "shards_ok": true,
+    "missing": []
+  }
+}

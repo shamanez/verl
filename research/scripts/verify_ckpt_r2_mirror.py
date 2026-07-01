@@ -68,13 +68,19 @@ def list_r2(prefix: str) -> "dict[str,int]":
     )
     if out.returncode != 0:
         raise RuntimeError(f"aws s3 ls {uri} failed rc={out.returncode}: {out.stderr.strip()[:300]}")
-    # `aws s3 ls s3://b/PREFIX/ --recursive` prints keys RELATIVE to PREFIX.
+    # `aws s3 ls ... --recursive` key column differs by CLI version:
+    #   v1 prints the key RELATIVE to the listed prefix (global_step_1/...)
+    #   v2 prints the FULL key from bucket root (verl-research/.../checkpoints/global_step_1/...)
+    # Normalise to a prefix-relative suffix so both parse identically.
+    pfx = prefix.rstrip("/") + "/"
     objs: "dict[str,int]" = {}
     for line in out.stdout.splitlines():
         parts = line.split(None, 3)
         if len(parts) < 4:
             continue
         _date, _time, size, key = parts
+        if key.startswith(pfx):
+            key = key[len(pfx):]
         try:
             objs[key] = int(size)
         except ValueError:
