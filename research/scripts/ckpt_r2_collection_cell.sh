@@ -22,7 +22,9 @@
 # Gate success on ARTIFACT COMPLETENESS, not launcher rc (benign atexit rc=1 is
 # expected even after full success).
 set -uo pipefail
-PHASE="${1:?usage: ckpt_r2_collection_cell.sh probe|collection}"
+PHASE="${1:?usage: ckpt_r2_collection_cell.sh probe|collection [extra hydra overrides...]}"
+shift   # CRITICAL: drop $1 (the phase) so it is NOT forwarded to main_ppo via "$@"
+        # (otherwise Hydra sees a bare `probe` positional and dies "Error parsing override").
 cd /workspace/verl
 
 # R2 creds/prefix + HF/WandB from the box auth env (NEVER echoed).
