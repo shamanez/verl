@@ -26,3 +26,4 @@ compression train–inference mismatch.
 [2026-07-01T18:40:54+10:00] [orchestrator] tick: EXP-44 TERMINAL — verdict.md PASS + LOG.md entry written (log-writer) + STATUS.md DONE/PASS + label status:pass + fix 71500bd5 on vast-ai-workload; kind:analysis so no Vast box (TORN_DOWN N/A). Only status:approved plan is #44 → ALL APPROVED PLANS TERMINAL. fp32 phase deferred=#57; #45-#56 remain status:none (need planning+approval). Teardown sweep rc=0 no-op (no boxes). GOAL SATISFIED.
 [2026-07-01T18:41:55+10:00] [research-planner #57] plan written
 [2026-07-01T18:42:35+10:00] [triage] dispatched 1 planners, 1 issues already planned
+EARLY_ABORT_CLEAR - training/global_step:3, 6 fp32 manifest rows (n_matrices=338), r2 tick_0 verified 6.17GB @ EXP-57 prefix. Gate PASS.
