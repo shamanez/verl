@@ -1,0 +1,362 @@
+{
+  "meta": {
+    "manifest": "runs/EXP-43/regimeA/weights/full_manifest.jsonl",
+    "ticks": 10,
+    "cadence": "per-step",
+    "generated": "2026-07-01T15:42:35",
+    "metric_contract": "weight-proj-metrics-v1"
+  },
+  "invariants": [],
+  "families": [
+    {
+      "family": "order1-fixed",
+      "coeff_source": "fixed",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "order1-offline-damped",
+      "coeff_source": "offline-damped",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "order2-fixed",
+      "coeff_source": "fixed",
+      "order": 2,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "order2-offline-damped",
+      "coeff_source": "offline-damped",
+      "order": 2,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "order3-fixed",
+      "coeff_source": "fixed",
+      "order": 3,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "order3-offline-damped",
+      "coeff_source": "offline-damped",
+      "order": 3,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "ema-fixed",
+      "coeff_source": "fixed",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "ema-learnable",
+      "coeff_source": "learnable",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-scalar-order1-fixed",
+      "coeff_source": "learnable",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-scalar-order2-fixed",
+      "coeff_source": "learnable",
+      "order": 2,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-scalar-order3-fixed",
+      "coeff_source": "learnable",
+      "order": 3,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-fullvec-o1",
+      "coeff_source": "learnable",
+      "order": 1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-fullvec-o2",
+      "coeff_source": "learnable",
+      "order": 2,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "learnable-fullvec-o3",
+      "coeff_source": "learnable",
+      "order": 3,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    },
+    {
+      "family": "general-regression",
+      "coeff_source": "learned",
+      "order": -1,
+      "recon_rel_err": 0.0,
+      "reconstructable": true,
+      "hstar": 0
+    }
+  ],
+  "family_curves": {
+    "order3-fixed": [
+      [
+        10,
+        147.25669295596143
+      ]
+    ]
+  },
+  "floor_table": [
+    {
+      "err_norm": 0.0031367941962902376,
+      "base_norm": 0.002210346323054806,
+      "weight_proj_ratio": 1.4191414999415275,
+      "dir_cos": 0.720779448899568,
+      "radial": 0.0022609367921134415,
+      "tangential": 0.0021743142946565705,
+      "skill": -1.0139625968562886,
+      "snr": 0.010347188508250216,
+      "bf16_unreliable": true,
+      "block": "q_proj",
+      "floor": 0.30315425236421945,
+      "h": 1,
+      "ratio": 1.4191414999415275
+    },
+    {
+      "err_norm": 0.005868612964032048,
+      "base_norm": 0.0030646676819548694,
+      "weight_proj_ratio": 1.9149263714911553,
+      "dir_cos": 0.5581154773444095,
+      "radial": 0.003275363725770336,
+      "tangential": 0.004869559588454883,
+      "skill": -2.6669430082322823,
+      "snr": 0.019358504517961717,
+      "bf16_unreliable": true,
+      "block": "q_proj",
+      "floor": 0.30315425236421945,
+      "h": 2,
+      "ratio": 1.9149263714911553
+    },
+    {
+      "err_norm": 0.013906424599255719,
+      "base_norm": 0.0051514064044377245,
+      "weight_proj_ratio": 2.699539408747853,
+      "dir_cos": 0.38581260200308903,
+      "radial": 0.005365273859198624,
+      "tangential": 0.012829749863133897,
+      "skill": -6.287513019382708,
+      "snr": 0.04587243784576073,
+      "bf16_unreliable": true,
+      "block": "q_proj",
+      "floor": 0.30315425236421945,
+      "h": 5,
+      "ratio": 2.699539408747853
+    },
+    {
+      "err_norm": 0.028058539815096272,
+      "base_norm": 0.0066355109213079915,
+      "weight_proj_ratio": 4.228542481181747,
+      "dir_cos": 0.24278114488404437,
+      "radial": 0.006812084420083645,
+      "tangential": 0.02721905880828718,
+      "skill": -16.880571515158685,
+      "snr": 0.09255532322662531,
+      "bf16_unreliable": true,
+      "block": "q_proj",
+      "floor": 0.30315425236421945,
+      "h": 10,
+      "ratio": 4.228542481181747
+    },
+    {
+      "err_norm": 0.008341707136398516,
+      "base_norm": 0.0057385449773745155,
+      "weight_proj_ratio": 1.453627560520575,
+      "dir_cos": 0.7056859734232025,
+      "radial": 0.005886625720560666,
+      "tangential": 0.005910305878334528,
+      "skill": -1.1130330847049983,
+      "snr": 0.020774569164185804,
+      "bf16_unreliable": true,
+      "block": "down_proj",
+      "floor": 0.4015345430498339,
+      "h": 1,
+      "ratio": 1.453627560520575
+    },
+    {
+      "err_norm": 0.015529015489654593,
+      "base_norm": 0.008135416764322214,
+      "weight_proj_ratio": 1.9088162216540558,
+      "dir_cos": 0.550592370768224,
+      "radial": 0.008550157454145437,
+      "tangential": 0.012963222191540757,
+      "skill": -2.6435793680496658,
+      "snr": 0.03867417077421234,
+      "bf16_unreliable": true,
+      "block": "down_proj",
+      "floor": 0.4015345430498339,
+      "h": 2,
+      "ratio": 1.9088162216540558
+    },
+    {
+      "err_norm": 0.04276691827421816,
+      "base_norm": 0.01422794270110479,
+      "weight_proj_ratio": 3.0058399286987108,
+      "dir_cos": 0.34656183485252173,
+      "radial": 0.0148213816681011,
+      "tangential": 0.04011652956229069,
+      "skill": -8.03507367695947,
+      "snr": 0.10650869025958352,
+      "bf16_unreliable": true,
+      "block": "down_proj",
+      "floor": 0.4015345430498339,
+      "h": 5,
+      "ratio": 3.0058399286987108
+    },
+    {
+      "err_norm": 0.07885963460704316,
+      "base_norm": 0.018742391130506738,
+      "weight_proj_ratio": 4.207554631526412,
+      "dir_cos": 0.2423660372165419,
+      "radial": 0.019112897136053495,
+      "tangential": 0.07650842524469499,
+      "skill": -16.70351597727936,
+      "snr": 0.19639564259669687,
+      "bf16_unreliable": true,
+      "block": "down_proj",
+      "floor": 0.4015345430498339,
+      "h": 10,
+      "ratio": 4.207554631526412
+    },
+    {
+      "err_norm": 0.0,
+      "base_norm": 0.0,
+      "weight_proj_ratio": NaN,
+      "dir_cos": NaN,
+      "radial": NaN,
+      "tangential": NaN,
+      "skill": NaN,
+      "snr": 0.0,
+      "bf16_unreliable": true,
+      "block": "input_layernorm",
+      "floor": 0.07547381569473158,
+      "h": 1,
+      "ratio": NaN
+    },
+    {
+      "err_norm": 0.0,
+      "base_norm": 0.0,
+      "weight_proj_ratio": NaN,
+      "dir_cos": NaN,
+      "radial": NaN,
+      "tangential": NaN,
+      "skill": NaN,
+      "snr": 0.0,
+      "bf16_unreliable": true,
+      "block": "input_layernorm",
+      "floor": 0.07547381569473158,
+      "h": 2,
+      "ratio": NaN
+    },
+    {
+      "err_norm": 0.0,
+      "base_norm": 0.0,
+      "weight_proj_ratio": NaN,
+      "dir_cos": NaN,
+      "radial": NaN,
+      "tangential": NaN,
+      "skill": NaN,
+      "snr": 0.0,
+      "bf16_unreliable": true,
+      "block": "input_layernorm",
+      "floor": 0.07547381569473158,
+      "h": 5,
+      "ratio": NaN
+    },
+    {
+      "err_norm": 0.0,
+      "base_norm": 0.0,
+      "weight_proj_ratio": NaN,
+      "dir_cos": NaN,
+      "radial": NaN,
+      "tangential": NaN,
+      "skill": NaN,
+      "snr": 0.0,
+      "bf16_unreliable": true,
+      "block": "input_layernorm",
+      "floor": 0.07547381569473158,
+      "h": 10,
+      "ratio": NaN
+    }
+  ],
+  "grouping": {
+    "n_matrices": 338,
+    "n_blocks": 11,
+    "n_layers": 28,
+    "matrix_partition_ok": true,
+    "block_partition_ok": true,
+    "layer_partition_ok": true,
+    "block_families": [
+      "down_proj",
+      "embed",
+      "gate_proj",
+      "input_layernorm",
+      "k_proj",
+      "norm",
+      "o_proj",
+      "post_attention_layernorm",
+      "q_proj",
+      "up_proj",
+      "v_proj"
+    ]
+  },
+  "verdict": "STOP",
+  "manifest_fronorm_ok": true,
+  "hstars": {
+    "order1-fixed": 0,
+    "order1-offline-damped": 0,
+    "order2-fixed": 0,
+    "order2-offline-damped": 0,
+    "order3-fixed": 0,
+    "order3-offline-damped": 0,
+    "ema-fixed": 0,
+    "ema-learnable": 0,
+    "learnable-scalar-order1-fixed": 0,
+    "learnable-scalar-order2-fixed": 0,
+    "learnable-scalar-order3-fixed": 0,
+    "learnable-fullvec-o1": 0,
+    "learnable-fullvec-o2": 0,
+    "learnable-fullvec-o3": 0,
+    "general-regression": 0
+  }
+}

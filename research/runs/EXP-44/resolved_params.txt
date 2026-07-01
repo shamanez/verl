@@ -1,0 +1,24 @@
+# EXP-44 resolved parameters (ground truth) — kind:analysis, GPU-free, MacBook-local.
+# There is NO Vast run and NO main_ppo command (no train.log to parse), so the
+# "resolved config" is the engine self-test invocation + the noise-floor gate constants
+# that actually ran. Source: runs/EXP-44/analysis.log + weight_proj/{metrics,noise_floor}.py.
+kind=analysis
+engine=research/scripts/weight_proj_sweep.py
+manifest=runs/EXP-43/regimeA/weights/full_manifest.jsonl
+r2_manifest=runs/EXP-43/regimeA/weights/r2_manifest.jsonl
+manifest_rows=160
+r2_keys=160
+trace_dtype=bf16
+cadence=per-step
+horizons=1,2,5,10
+deltas=1
+families=all(15)
+group=matrix,block,layer
+sample_blocks=q_proj,down_proj,input_layernorm
+selftest_tick_window=[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30]  # 16 ticks, per-step, SUBSAMPLED acceptance self-test (full-res science sweep is #52-#56)
+# noise-floor gate constants (weight_proj/metrics.py, weight_proj/noise_floor.py):
+SNR_FLOOR_THRESH=3.0
+MANIFEST_FRONORM_TOL=1e-2
+metric_contract=weight-proj-metrics-v1
+# FIX applied this run (divergence from the as-committed engine):
+noise_floor_impl=bf16_quant_floor(half-ULP,7-mantissa-bit,sqrt2-diff-inflation)  # replaced degenerate self-round-trip that returned floor=0.0 on a bf16-STORED trace
