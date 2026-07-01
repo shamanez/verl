@@ -12,5 +12,8 @@ every analysis issue reads. Available in **both precisions** (160/160 R2-verifie
 - **fp32** (EXP-57, ~6.17 GB/snap — the true fp32 master weights; **use this for #44–#56**): `s3://shamane-pluralis/verl-research/EXP-57/regimeA/weights/full/tick_<N>/tick_<N>.pt`  (N = 0..159)
 
 **#44 PASS** — offline sweep engine accepted (`research/scripts/weight_proj/`, self-test `reports/infra-b-sweep-engine-selftest.html`).
-Next: **#45–#56** (GPU-free projection science) — **switched to the fp32 EXP-57 trace** (engine is dtype-agnostic ⇒ `<trace_dir>` swap, no code change).
+Next: **#45–#56** (GPU-free projection science) on the **fp32 EXP-57 trace**. Analysis runs
+**download-the-whole-trace-first** on a cheap big-disk, GPU-free box (`weight_proj_sweep.py --trace-root`;
+streaming kept for few-snapshot passes like #46). On fp32 the bf16 noise-floor gate is off ⇒ reliability =
+projection accuracy + linearity. Fetch/manifests: `weight_proj_fetch_trace.py`, `synth_exp57_manifests.py`.
 Access: `reports/r2-access-pattern-for-analysis.md`.

@@ -3,10 +3,11 @@
 Two priorities (detail: `PROGRESS.md`, `reports/`, `.claude/GOAL.md`):
 
 1. **M4 — beat the anchor k-collapse by projecting the WEIGHTS** (not the gradient). The dense
-   GRPO weight trajectory (raw full weights, bf16, per-tick) is collected and published to R2.
-   Current phase: GPU-free offline analysis (#44–#56) measuring weight-projectability on that
-   trace; entry point **#44** (the offline sweep engine). Scope:
-   `reports/m4-weight-proj-status-and-architecture.md`.
+   GRPO weight trajectory is collected to R2 in both precisions; **#45–#56 use the fp32 master
+   weights (EXP-57)**. **#44 PASS** — offline sweep engine accepted. Analysis is GPU-free and
+   **downloads the whole trace first** to a cheap big-disk box (`weight_proj_sweep.py --trace-root`;
+   streaming kept for few-snapshot passes). Access: `reports/r2-access-pattern-for-analysis.md`;
+   scope: `reports/m4-weight-proj-status-and-architecture.md`.
 2. **M6 — shrink the ~0.04 compression train–inference mismatch.**
    `reports/priority-2-compression-train-inference-mismatch.html`.
 
