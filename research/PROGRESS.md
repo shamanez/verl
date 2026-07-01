@@ -23,3 +23,5 @@ compression train–inference mismatch.
   for analysis, collection unchanged; on fp32 the bf16 noise-floor gate is off (reliability = projection
   accuracy + linearity). New: `weight_proj_fetch_trace.py`, `synth_exp57_manifests.py`. Verified locally +
   adversarially reviewed; issues #44–#56 realigned. SoT: `reports/r2-access-pattern-for-analysis.md`.
+[2026-07-02T00:47:28+10:00] [research-planner #58] plan written
+[2026-07-02T00:49:51+10:00] [triage] dispatched 1 planner (#58), 0 already planned — #58 plan written & status:planned (operator has since flipped to status:approved)
