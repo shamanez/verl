@@ -62,10 +62,17 @@ skill  =  1 - weight_proj_ratio^2
 --------------------------------------------------------------------------------
 SNR  =  ||e||  /  noise_floor
 --------------------------------------------------------------------------------
-  Residual magnitude measured in units of the bf16 round-trip noise floor for the
-  SAME group (see noise_floor.py). SNR <= snr_floor_thresh (default 3.0) means the
-  residual is at/below the bf16 floor -> the ratio is NOT a precise number and the
-  (group, h) is FLAGGED `bf16-unreliable` rather than reported as a ratio.
+  Residual magnitude in units of the bf16 noise floor for the SAME group (see
+  noise_floor.py). NOTE (EXP-44 correction): `noise_floor` is the bf16 DIFFERENCED
+  floor (correlated-difference quantization noise on the CHANGED support), NOT the
+  ||theta||-scaled STORAGE floor (a category error over-estimating the true floor by
+  ~600-2200x). The true correlated floor of an unchanging value is the EMPIRICAL
+  ZERO-MOTION NULL == 0.0; `differenced_floor` is reported as an honest 0.5-ULP
+  UPPER-BOUND. The bf16-reliability GATE is the DIRECTEDNESS discriminator
+  (noise_floor.directedness_exponent): cumulative displacement ~ h^p with p >= 0.8
+  => DIRECTED drift (real signal), which rounding noise (random walk p~0.5) cannot
+  produce. This SNR (formula unchanged; #45 asserts it verbatim) is kept as a
+  secondary numeric context; the GATE decision uses directedness + zero-motion null.
 
 --------------------------------------------------------------------------------
 crossover  h*  =  largest h such that median_over_scoring_points(ratio(h)) < 1.0

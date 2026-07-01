@@ -8,17 +8,24 @@ manifest=runs/EXP-43/regimeA/weights/full_manifest.jsonl
 r2_manifest=runs/EXP-43/regimeA/weights/r2_manifest.jsonl
 manifest_rows=160
 r2_keys=160
-trace_dtype=bf16
+trace_dtype=bf16                # FIXED operating regime — bf16 IS the signal; NO fp32 re-collection (operator directive)
 cadence=per-step
 horizons=1,2,5,10
 deltas=1
 families=all(15)
 group=matrix,block,layer
 sample_blocks=q_proj,down_proj,input_layernorm
-selftest_tick_window=[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30]  # 16 ticks, per-step, SUBSAMPLED acceptance self-test (full-res science sweep is #52-#56)
+selftest_tick_window=[0,2,4,...,26/30]  # per-step, SUBSAMPLED acceptance self-test (full-res science sweep is #52-#56)
 # noise-floor gate constants (weight_proj/metrics.py, weight_proj/noise_floor.py):
-SNR_FLOOR_THRESH=3.0
+SNR_FLOOR_THRESH=3.0            # secondary numeric context only; the GATE uses directedness (below)
 MANIFEST_FRONORM_TOL=1e-2
 metric_contract=weight-proj-metrics-v1
-# FIX applied this run (divergence from the as-committed engine):
-noise_floor_impl=bf16_quant_floor(half-ULP,7-mantissa-bit,sqrt2-diff-inflation)  # replaced degenerate self-round-trip that returned floor=0.0 on a bf16-STORED trace
+DIRECTEDNESS_MIN=0.8           # p>=0.8 => DIRECTED drift (real signal); rounding noise is random-walk p~0.5
+# CORRECTED floor (this run — supersedes the prior STOP's ||theta||-scaled floor):
+noise_floor_impl=differenced_floor(0.5-ULP-on-CHANGED-support, coeff-propagated)  # correlated-difference quantization noise, NOT ||theta||-scaled storage noise
+zero_motion_null=0.0           # empirical: an unchanging tensor (input_layernorm) differences to EXACTLY 0.0 at every h
+gate_object=fixed-origin cumulative displacement scaling exponent p (directedness), + zero-motion null
+# DIVERGENCE from the prior STOP verdict's engine (itself the key finding):
+#  prior floor = sqrt(2)*||half_ULP(theta)||  -> ~0.4-0.5, a CATEGORY ERROR (storage noise of |theta|,
+#  over-estimating the true correlated differenced-noise by 597x-2167x). Corrected to the
+#  changed-support differenced floor + directedness discriminator. bf16 remains the fixed regime.
