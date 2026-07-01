@@ -25,3 +25,4 @@ compression train–inference mismatch.
   adversarially reviewed; issues #44–#56 realigned. SoT: `reports/r2-access-pattern-for-analysis.md`.
 [2026-07-02T00:47:28+10:00] [research-planner #58] plan written
 [2026-07-02T00:49:51+10:00] [triage] dispatched 1 planner (#58), 0 already planned — #58 plan written & status:planned (operator has since flipped to status:approved)
+[2026-07-02T00:55:03+10:00] [orchestrator] tick: dispatched experiment-runner EXP-58 (READY_TO_RUN, code_change=true, team acct, rung1 1xH200 first, probe→collection on one box). running=[] provisioning=[58] analyzing=[] logging=[] blocked=[]
