@@ -12,6 +12,10 @@ Modes (the plan's ## Verification commands map onto these):
   --selftest --noise-floor        per-block bf16 floor + manifest fro-norm + SNR@h
   --emit-report <path>            full (family x order x coeff x Delta x h) sweep -> HTML
 
+Tick cadence (## Notes for runner "Per-step vs per-tick"): the main families run
+PER-STEP (first tick of each global_step = even ticks 0,2,4,...); --cadence per-tick
+selects every tick (finer-Delta, noisier single-tick deltas). Default: per-step.
+
 R2 creds: `set -a; . ~/.config/verl-research/secrets.env; set +a` first; the engine
 maps R2_* -> AWS_* internally (crib of verify_full_weight_dump.py). Bucket
 shamane-pluralis only. Secret VALUES are never printed.
@@ -41,6 +45,7 @@ from weight_proj import predictors as PR       # noqa: E402
 from weight_proj import r2_stream as RS        # noqa: E402
 from weight_proj import report as RPT          # noqa: E402
 from weight_proj import sweep as SW            # noqa: E402
+from weight_proj import tick_select as TS      # noqa: E402
 
 STAGING = os.environ.get(
     "WP_STAGING_DIR",
@@ -56,12 +61,14 @@ SAMPLE_BLOCK_MATRICES = {
 }
 CORE_BLOCKS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
+# module-level cadence (set by main from --cadence); default per-step per the plan.
+CADENCE = "per-step"
+
 
 def _resolve_ticks_from_r2(r2_rows, want):
-    """The in-repo r2_manifest may enumerate only a few ticks; the FULL trace lives in
-    R2 as tick_0..tick_159. Return the first `want` even-step-first ticks that exist."""
-    # per-tick trace: ticks 0,1,2,... ; per-step = first tick of each global_step (0,2,4,...)
-    return list(range(want))
+    """First `want` ticks at the module CADENCE (per-step = even ticks 0,2,..; the
+    plan default). The full trace is tick_0..tick_159 in R2 keyed off r2_manifest."""
+    return TS.select_ticks(CADENCE, want)
 
 
 def _sample_manifest_matrices(full_rows):
@@ -79,7 +86,8 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     sample_names = list(SAMPLE_BLOCK_MATRICES.values())
     ticks = _resolve_ticks_from_r2(r2_rows, sample_ticks)
-    log(f"[invariants] sampling {len(sample_names)} matrices over {len(ticks)} ticks: {ticks}")
+    log(f"[invariants] cadence={CADENCE}; sampling {len(sample_names)} matrices over "
+        f"{len(ticks)} ticks: {ticks}")
 
     inv = []
     with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
@@ -94,7 +102,6 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
     ok_ident = True
     detail_ident = []
     for nm in sample_names:
-        history = [(t, hist[t][nm]) for t in ticks_sorted[:2]]
         for fam_key in ("order1-fixed", "order2-fixed", "order3-fixed", "ema-fixed"):
             fam = reg[fam_key]
             need = fam.order + 1
@@ -106,8 +113,6 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
             d = float(torch.linalg.norm((hat - stale).reshape(-1)).item())
             base = float(torch.linalg.norm(stale.reshape(-1)).item()) + 1e-30
             rel = d / base
-            # ratio(h=0) == 1.0: theta_hat==theta_stale so ||e||=||b|| exactly
-            r = M.weight_proj_ratio(hat, history[-2][1], stale)  # now=prev, stale=stale
             if rel > 1e-6:
                 ok_ident = False
                 detail_ident.append(f"{fam_key}/{nm.split('.')[-2]}: rel={rel:.2e}")
@@ -138,6 +143,7 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
                 fam.fit(fit_hist, fit_truth, h=1)
             except Exception as e:
                 recon_details.append(f"{fam_key}: fit failed {e}")
+                ok_recon = False
                 continue
         hat = fam.predict(history, h)
         # explicit linear combination from linear_coeffs
@@ -206,7 +212,8 @@ def run_noise_floor(full_rows, r2_rows, horizons, log):
     max_h = max(horizons)
     n_ticks = max_h + 4
     ticks = _resolve_ticks_from_r2(r2_rows, n_ticks)
-    log(f"[noise-floor] horizons={horizons}; streaming {len(ticks)} ticks for sample blocks")
+    log(f"[noise-floor] cadence={CADENCE}; horizons={horizons}; streaming {len(ticks)} "
+        f"ticks {ticks} for sample blocks")
 
     with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
         hist = SW.stream_group_histories(stream, ticks, sample_names)
@@ -225,8 +232,7 @@ def run_noise_floor(full_rows, r2_rows, horizons, log):
     core_below = []
     for nm in sample_names:
         block = SW.block_family(nm)
-        vecs = [hist[t][nm] for t in ticks_sorted]
-        floor = NF.group_floor([vecs[0]])
+        floor = NF.group_floor([hist[ticks_sorted[0]][nm]])
         for h in horizons:
             score_pos = len(ticks_sorted) - 1
             anchor_pos = score_pos - h
@@ -240,6 +246,8 @@ def run_noise_floor(full_rows, r2_rows, horizons, log):
             row = M.full_metric_row(hat, theta_now, theta_stale, floor)
             row["block"] = block
             row["floor"] = floor
+            row["h"] = h
+            row["ratio"] = row["weight_proj_ratio"]
             floor_table.append(row)
             flag = "bf16-unreliable" if row["bf16_unreliable"] else "clears"
             log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||e||={row['err_norm']:.4e} "
@@ -253,7 +261,7 @@ def run_noise_floor(full_rows, r2_rows, horizons, log):
 # Full sweep + report
 # =============================================================================
 def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
-    import torch
+    import numpy as np
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     grouping = SW.build_grouping(names_all)
     # self-test: sample blocks (one per sampled family) so the pass streams cheaply.
@@ -261,7 +269,8 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
     max_h = max(horizons)
     n_ticks = max_h + 6
     ticks = _resolve_ticks_from_r2(r2_rows, n_ticks)
-    log(f"[full-sweep] one streaming pass over {len(ticks)} ticks; families=all; deltas={deltas} horizons={horizons}")
+    log(f"[full-sweep] cadence={CADENCE}; one streaming pass over {len(ticks)} ticks {ticks}; "
+        f"families=all; deltas={deltas} horizons={horizons}")
 
     with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
         hist = SW.stream_group_histories(stream, ticks, sample_names)
@@ -290,16 +299,16 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
                 if not row["bf16_unreliable"] and row["weight_proj_ratio"] == row["weight_proj_ratio"]:
                     ratios.append(row["weight_proj_ratio"])
             if ratios:
-                import numpy as np
                 curve.append((h, float(np.median(ratios))))
         if curve:
             family_curves[fam.name] = curve
-    # crossover h* per family
+    # crossover h* per family (median ratio over sampled blocks; NaN/unreliable dropped)
     hstars = {}
     for fam_key, fam in reg.items():
         h2r = {}
         for r in records:
-            if r.get("family_key") == fam_key and r["weight_proj_ratio"] == r["weight_proj_ratio"]:
+            if (r.get("family_key") == fam_key and not r.get("bf16_unreliable")
+                    and r["weight_proj_ratio"] == r["weight_proj_ratio"]):
                 h2r.setdefault(r["h"], []).append(r["weight_proj_ratio"])
         hstars[fam.name] = M.crossover_hstar(h2r)
     return grouping, family_curves, records, hstars, floor_cache, hist, ticks_sorted, reg
@@ -317,9 +326,14 @@ def main():
     ap.add_argument("--deltas", default="1")
     ap.add_argument("--families", default="all")
     ap.add_argument("--group", default="matrix,block,layer")
+    ap.add_argument("--cadence", default="per-step", choices=["per-step", "per-tick"],
+                    help="per-step (even ticks; plan default) | per-tick (all ticks; noisier)")
     ap.add_argument("--emit-report", default="")
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
+
+    global CADENCE
+    CADENCE = args.cadence
 
     def log(msg):
         print(msg, flush=True)
@@ -329,10 +343,11 @@ def main():
     r2_rows = RS.load_r2_manifest(r2_path)
     horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
     deltas = [int(x) for x in args.deltas.split(",") if x.strip()]
-    log(f"[engine] manifest rows={len(full_rows)} r2 keys={len(r2_rows)} "
+    log(f"[engine] manifest rows={len(full_rows)} r2 keys={len(r2_rows)} cadence={CADENCE} "
         f"(full R2 trace = tick_0..tick_159; streaming keyed by tick)")
 
     report = {"meta": {"manifest": args.manifest, "ticks": args.sample_ticks,
+                       "cadence": CADENCE,
                        "generated": datetime.datetime.now().isoformat(timespec="seconds"),
                        "metric_contract": M.METRIC_CONTRACT},
               "invariants": [], "families": [], "family_curves": {}, "floor_table": [],
