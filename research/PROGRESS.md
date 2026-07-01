@@ -13,3 +13,4 @@ is collected → R2; GPU-free analysis spine #44–#56, entry **#44**. (2) M6 �
 compression train–inference mismatch.
 [2026-07-01T12:58:54+10:00] [research-planner #44] plan written
 [2026-07-01T12:59:34+10:00] [triage] dispatched 1 planner (#44), 0 issues already planned; now planned=1 unplanned=0 ALL_PLANNED
+[2026-07-01T13:33:47+10:00] [orchestrator] tick: analyzing=[44] (analyst dispatched — build+verify weight_proj_sweep.py engine, GPU-free, streaming EXP-43 R2 trace) running=[] logging=[] blocked=[]; teardown sweep no-op (empty ledger)
