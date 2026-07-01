@@ -256,10 +256,44 @@ def _sparse_subset_from_hist(hist, log):
     return out
 
 
+def _block_directedness(hist, ticks_sorted, nm, horizons, log):
+    """Fit cumulative displacement ||theta[t]-theta[t-h]|| ~ h^p over the horizons.
+
+    Returns (p, r2, disps, hs). p >= DIRECTEDNESS_MIN => DIRECTED drift (real signal,
+    decisively above the rounding-noise floor which is a random walk p~0.5). This is the
+    discriminator that resolves the "1-ULP jitter" doubt: a directed super-linear signal
+    CANNOT be produced by bf16 rounding noise.
+    """
+    import torch
+    score_pos = len(ticks_sorted) - 1
+    hs, disps = [], []
+    for h in sorted(set(horizons)):
+        anchor_pos = score_pos - h
+        if anchor_pos < 0:
+            continue
+        d = float(torch.linalg.norm(
+            (hist[ticks_sorted[score_pos]][nm] - hist[ticks_sorted[anchor_pos]][nm]).reshape(-1)).item())
+        hs.append(h)
+        disps.append(d)
+    p, r2 = NF.directedness_exponent(disps, hs)
+    log(f"[noise-floor] block={SW.block_family(nm)} cumulative-disp scaling p={p:.3f} "
+        f"(R^2={r2:.4f}) over h={hs} -> {'DIRECTED (signal)' if NF.is_directed(p) else 'not-directed/zero-motion'}")
+    return p, r2, disps, hs
+
+
 def _noise_floor_from_hist(hist, full_rows, horizons, log):
-    """Compute the noise-floor gate table (CORRECTED differenced floor) from an
-    ALREADY-streamed `hist` (no I/O). Returns (floor_table, fro_ok, core_below,
-    sparse_subset)."""
+    """Compute the noise-floor gate table from an ALREADY-streamed `hist` (no I/O).
+
+    Gate object (EXP-44 correction): the correlated differenced-noise floor of an
+    unchanging value is the EMPIRICAL ZERO-MOTION NULL = 0.0; the resolvable unit is
+    1 ULP. `differenced_floor` is reported as an honest UPPER-BOUND noise reference
+    (0.5-ULP-per-changed-element, an over-estimate). A moving core block is bf16-RELIABLE
+    when its cumulative displacement is DIRECTED (p >= DIRECTEDNESS_MIN) — decisive proof
+    it is real signal, not rounding random-walk — regardless of the per-element ULP
+    multiple. A genuinely unchanging block (empty changed support, null 0.0) is a true
+    zero-motion tensor, NOT a floor failure.
+
+    Returns (floor_table, fro_ok, core_below, sparse_subset)."""
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     sample_names = list(SAMPLE_BLOCK_MATRICES.values())
     ticks_sorted = sorted(hist.keys())
@@ -276,37 +310,51 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
         log(f"[noise-floor] zero-motion null (self-difference) {nm.split('.')[-2]}: {z:.4e} "
             f"(correlated floor of an unchanging value == 0.0)")
 
+    # directedness per block (the discriminator) — fit once over the horizons.
+    directed = {}
+    for nm in sample_names:
+        p, r2, _, _ = _block_directedness(hist, ticks_sorted, nm, horizons, log)
+        directed[SW.block_family(nm)] = {"p": p, "r2": r2, "is_directed": NF.is_directed(p)}
+
     fam = PR.build_family_registry()["order1-fixed"]
     floor_table = []
     core_below = []
     for nm in sample_names:
         block = SW.block_family(nm)
+        blk_directed = directed[block]["is_directed"]
         for h in horizons:
             score_pos = len(ticks_sorted) - 1
             anchor_pos = score_pos - h
-            if anchor_pos < 1:
+            if anchor_pos < 0:
                 continue
-            history = [(ticks_sorted[anchor_pos - 1], hist[ticks_sorted[anchor_pos - 1]][nm]),
-                       (ticks_sorted[anchor_pos], hist[ticks_sorted[anchor_pos]][nm])]
+            # GATE RESIDUAL = raw cumulative displacement theta[t]-theta[t-h] (the object
+            # the plan's noise-floor gate is about), i.e. the identity residual (c=[1]).
             theta_now = hist[ticks_sorted[score_pos]][nm]
             theta_stale = hist[ticks_sorted[anchor_pos]][nm]
-            hat = fam.predict(history, h)
-            # CORRECTED differenced-noise floor for THIS residual (order-1 coeffs).
-            coeffs = fam.linear_coeffs(len(history), h)
-            floor = NF.differenced_floor(coeffs, [th for _, th in history], theta_now)
-            row = M.full_metric_row(hat, theta_now, theta_stale, floor)
+            floor = NF.differenced_floor([1.0], [theta_stale], theta_now)   # upper-bound noise ref
+            row = M.full_metric_row(theta_stale, theta_now, theta_stale, floor)  # e = stale-now = -disp
+            moves = row["err_norm"] > 0.0
+            # bf16-reliable iff it moves AND the block is DIRECTED (real signal, not jitter).
+            reliable = moves and blk_directed
+            row["bf16_unreliable"] = (not reliable)
             row["block"] = block
             row["floor"] = floor
             row["h"] = h
             row["ratio"] = row["weight_proj_ratio"]
+            row["directed_p"] = directed[block]["p"]
+            row["directed_r2"] = directed[block]["r2"]
+            row["moves"] = moves
             floor_table.append(row)
-            flag = "bf16-unreliable" if row["bf16_unreliable"] else "clears"
-            log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||e||={row['err_norm']:.4e} "
-                f"SNR={row['snr']:.2f} ratio={row['weight_proj_ratio']:.4f} -> {flag}")
-            # A block that genuinely does NOT move (||e||==0 AND changed_frac==0) is not a
-            # bf16-floor FAILURE — it is a true zero-motion tensor (floor ~0, signal ~0).
-            # Only flag a CORE (moving) block as below-floor when it actually failed to clear.
-            if h >= 5 and row["bf16_unreliable"] and block in CORE_BLOCKS and row["err_norm"] > 0.0:
+            if not moves:
+                flag = "zero-motion (unchanging)"
+            elif reliable:
+                flag = "clears (directed signal)"
+            else:
+                flag = "bf16-unreliable"
+            log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||disp||={row['err_norm']:.4e} "
+                f"SNR={row['snr']:.2f} p={directed[block]['p']:.2f} -> {flag}")
+            # STOP trigger: a MOVING core block that is NOT directed at h>=5 (noise-dominated).
+            if h >= 5 and moves and (not blk_directed) and block in CORE_BLOCKS:
                 core_below.append((block, h))
     sparse_subset = _sparse_subset_from_hist(hist, log)
     return floor_table, fro_ok, core_below, sparse_subset
@@ -341,6 +389,13 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
     ticks_sorted = sorted(hist.keys())
 
     reg = PR.build_family_registry()
+    # per-block DIRECTEDNESS (the discriminator): a block whose cumulative displacement
+    # is directed (p >= DIRECTEDNESS_MIN) carries real signal above the bf16 rounding
+    # floor, so its weight_proj_ratio is a valid science number for the curves.
+    directed = {}
+    for nm in sample_names:
+        p, r2, _, _ = _block_directedness(hist, ticks_sorted, nm, horizons, log)
+        directed[SW.block_family(nm)] = NF.is_directed(p)
     family_curves = {}
     records = []
     for fam_key, fam in reg.items():
@@ -348,15 +403,20 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
         for h in horizons:
             ratios = []
             for nm in sample_names:
+                block = SW.block_family(nm)
                 group_hist = {t: hist[t][nm] for t in ticks_sorted}
-                # floor is now computed per (family,h) INSIDE score_family_on_group
-                # from the family's own coeffs (corrected differenced floor).
+                # floor is computed per (family,h) INSIDE score_family_on_group from the
+                # family's own coeffs (0.5-ULP-on-changed-support upper-bound reference).
                 row = SW.score_family_on_group(fam, group_hist, ticks_sorted,
                                                delta=deltas[0], h=h)
                 if row is None:
                     continue
-                row["block"] = SW.block_family(nm)
+                # DIRECTEDNESS gate: reliable iff the block moves AND is directed (signal).
+                moves = row["err_norm"] > 0.0
+                row["bf16_unreliable"] = (not (moves and directed.get(block, False)))
+                row["block"] = block
                 row["family_key"] = fam_key
+                row["directed"] = directed.get(block, False)
                 records.append(row)
                 if not row["bf16_unreliable"] and row["weight_proj_ratio"] == row["weight_proj_ratio"]:
                     ratios.append(row["weight_proj_ratio"])

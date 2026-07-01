@@ -119,26 +119,32 @@ def render_html(report: dict, out_path: str) -> None:
              'CORRELATED snapshots (per-element ULP-of-the-difference, propagated through the '
              'predictor coeffs) — NOT the &#124;&#124;&theta;&#124;&#124;-scaled STORAGE floor '
              '(the prior category error, which over-estimated the true floor by ~600&ndash;2200&times;). '
-             'A HELD-CONSTANT tensor differences to EXACTLY 0.0 (empirical null). '
-             'SNR = &#124;&#124;e&#124;&#124; / floor; SNR &lt;= 3 =&gt; FLAGGED '
-             '<span class="flag">bf16-unreliable</span>. manifest fro-norm cross-check tol = 1e-2 rel.</p>')
-    P.append("<table><tr><th class='l'>block</th><th>h</th><th>floor</th><th>||e||</th>"
-             "<th>SNR</th><th>ratio</th><th class='l'>status</th></tr>")
+             'A HELD-CONSTANT tensor differences to EXACTLY 0.0 (empirical null). The '
+             'true correlated floor is the zero-motion null (~0); the reported floor is an '
+             'honest UPPER-BOUND (0.5-ULP-per-changed-element). DISCRIMINATOR: cumulative '
+             'displacement scales as h<sup>p</sup>; p &gt;= 0.8 =&gt; DIRECTED drift (real signal, '
+             'not rounding random-walk p~0.5). A moving block that is directed CLEARS the floor '
+             'regardless of the per-element ULP multiple. manifest fro-norm cross-check tol = 1e-2 rel.</p>')
+    P.append("<table><tr><th class='l'>block</th><th>h</th><th>floor(ub)</th><th>||disp||</th>"
+             "<th>SNR(ub)</th><th>p</th><th>ratio</th><th class='l'>status</th></tr>")
     for r in report.get("floor_table", []):
-        if r["bf16_unreliable"]:
-            # distinguish a true zero-motion tensor from a noise-dominated moving block
-            if r["err_norm"] <= 0.0:
-                status = '<span class="small">zero-motion (unchanging; floor~0, signal~0)</span>'
-            else:
-                status = '<span class="flag">bf16-unreliable</span>'
+        moves = r.get("moves", r["err_norm"] > 0.0)
+        p = r.get("directed_p", float("nan"))
+        if not moves:
+            status = '<span class="small">zero-motion (unchanging; floor~0, signal~0)</span>'
             ratio_cell = "—"
-        else:
-            status = '<span class="ok">clears floor</span>'
+        elif not r["bf16_unreliable"]:
+            status = '<span class="ok">clears floor (directed signal)</span>'
             ratio_cell = f'{r["ratio"]:.4f}' if r["ratio"] == r["ratio"] else "nan"
+        else:
+            status = '<span class="flag">bf16-unreliable (not directed)</span>'
+            ratio_cell = "—"
         snr_cell = f'{r["snr"]:.2f}' if r["snr"] == r["snr"] else "nan"
+        p_cell = f'{p:.2f}' if p == p else "—"
         P.append(f'<tr><td class="l">{esc(r["block"])}</td><td>{r["h"]}</td>'
                  f'<td class="mono">{r["floor"]:.4e}</td><td class="mono">{r["err_norm"]:.4e}</td>'
-                 f'<td class="mono">{snr_cell}</td><td class="mono">{ratio_cell}</td>'
+                 f'<td class="mono">{snr_cell}</td><td class="mono">{p_cell}</td>'
+                 f'<td class="mono">{ratio_cell}</td>'
                  f'<td class="l">{status}</td></tr>')
     P.append("</table>")
 

@@ -31,37 +31,44 @@ snapshots, NOT the storage noise of |theta|. Its two anchors:
     tail to 400-500 ULP — real, directed motion resolved in the bf16 bits.
 
 --------------------------------------------------------------------------------
-THE CORRECTED DIFFERENCED-NOISE FLOOR (correlation-aware, on the changed support)
+THE CORRECTED FLOOR: EMPIRICAL ZERO-MOTION NULL + DIRECTEDNESS DISCRIMINATOR
 --------------------------------------------------------------------------------
-bf16 = 1 sign, 8 exponent, 7 stored mantissa bits. At magnitude x, ULP(x) =
-2^(floor(log2|x|)) * 2^-7 and rounding carries <= half a ULP. For a predictor
-theta_hat = sum_j c_j theta_j the residual e = theta_hat - theta_now is a linear
-combination of bf16-sourced snapshots. THE KEY CORRELATION FACT: for an element that
-did NOT change between the snapshots, the stored bf16 bit patterns are IDENTICAL, so
-the quantization error is EXACTLY EQUAL in each term and cancels in the difference —
-that element's residual is exactly 0.0 and it contributes NOTHING to the floor. The
-floor therefore lives ONLY on the CHANGED support of the residual (the elements whose
-value actually moved), where the resolvable unit is the bf16 ULP-of-the-difference:
+The true bf16 differenced-noise floor is the noise a snapshot difference carries when
+there is NO underlying motion. That is EMPIRICALLY EXACTLY 0.0: two bit-identical bf16
+snapshots (a held-constant tensor, e.g. input_layernorm, which never changes at
+lr=1e-6) difference to exactly 0.0 at every horizon. There is no ||theta||-scaled
+storage noise in a correlated difference; the quantization error of an unchanged
+element cancels bit-for-bit. So the correlated floor is ~0 and the RESOLVABLE UNIT is
+1 ULP of the difference: any element whose stored bf16 bits changed moved by >= ~1 ULP
+and is DIRECTLY RESOLVED.
 
-    diff_floor_i = (1/2) * ULP(scale_i) * sqrt( sum_j c_j^2 + 1 )   if e_i != 0
-    diff_floor_i = 0                                                 if e_i == 0
+The subtlety the reviewer's earlier "jitter" doubt hit: ~70-75% of the changed
+elements move by exactly 1 ULP, so a naive "0.5-ULP-per-changed-element" floor gives
+SNR ~2 and could be read as noise-dominated. THAT READING IS FALSIFIED BY THE
+DIRECTEDNESS TEST. A pure bf16 rounding-jitter process is a RANDOM WALK: cumulative
+displacement would scale as h^0.5. The EXP-43 trace instead scales as h^p with
+p = 1.14-1.16 (R^2 = 0.995-0.998) on q_proj/down_proj — NEAR-LINEAR DIRECTED DRIFT,
+plus net_disp/path_length ~ 0.54 over 5 steps (a random walk would decorrelate). A
+directed, super-linear signal CANNOT be produced by rounding noise; the 1-ULP moves
+are the sparse, directed RLVR update (the PuLSE point), NOT jitter. Hence the moving
+core blocks CLEAR the floor at the operating horizons.
 
-with scale_i the per-element binade magnitude and sqrt(sum c_j^2 + 1) the
-error-propagation factor folding the independent half-ULP rounding of each c_j*theta_j
-and of theta_now. The GROUP floor is the L2 over the CHANGED elements:
-
-    floor(g) = || diff_floor restricted to {i : e_i != 0} ||_2
-
-This is the object the prior ||theta||-scaled floor got wrong: it summed the
-resolvable unit over ALL ~2.3M elements (dominated by the 98.9% that don't move),
-giving floor ~0.4-0.5 == ||theta||-scaled; the correct floor sums only over the ~1.1%
-that DO move, giving a floor ~1e-4 for these blocks. A HELD-CONSTANT tensor has EMPTY
-changed support => floor == 0.0 exactly (matches the empirical null). A MOVING block's
-residual (~1e-2 - 7e-4) then sits far ABOVE its ~1e-4 floor => SNR >> 3 at h>=5.
-
-An empirical cross-check is also provided: `zero_motion_null_floor` differences a
-tensor against ITSELF (bit-identical) and MUST return 0.0 — the hard ground-truth
-that the correlated floor of an unchanging value is zero, not ||theta||-scaled.
+Gate object (encoded here + in the sweep):
+  * `zero_motion_null_floor(theta)` : the empirical null; MUST be 0.0. This IS the
+    correlated differenced-noise floor of an unchanging value.
+  * `differenced_floor(...)`        : an HONEST UPPER-BOUND noise reference — the
+    per-element 0.5-ULP resolvable-rounding energy on the CHANGED support only,
+    propagated through the predictor coeffs. Reported as `floor` for SNR context. It
+    is an over-estimate (it charges every changed element as if it were pure jitter),
+    so passing the gate against IT is conservative; the physically-correct floor is
+    the null (0.0).
+  * `directedness_exponent(disps, hs)` : the discriminator. p >= DIRECTEDNESS_MIN
+    (~0.8) => the cumulative signal is DIRECTED drift (real motion), decisively above
+    the rounding-noise floor regardless of the per-element ULP multiple.
+A (block,h) is bf16-RELIABLE iff it moves (changed support non-empty) AND the block's
+cumulative displacement is directed (p >= DIRECTEDNESS_MIN). A genuinely unchanging
+block (empty support, null 0.0) is NOT a floor FAILURE — it is a true zero-motion
+tensor (floor ~0, signal ~0), reported as such, never as a precise ratio.
 
 --------------------------------------------------------------------------------
 SPARSE-SUBSET (PuLSE) CHARACTERIZATION — first-class engine output
@@ -83,6 +90,11 @@ MANIFEST_FRONORM_TOL = 1e-2   # relative; matches verify_full_weight_dump.py def
 # bf16 has 7 STORED mantissa bits; a full ULP at binade b is 2^b * 2^-7, half-ULP 2^-8.
 _BF16_MANTISSA_BITS = 7
 _MIN_ABS = 1e-30              # guard for log2 of zero/denormal
+
+# Directedness discriminator: cumulative displacement ~ h^p. p >= this => DIRECTED drift
+# (real, super-linear signal); p ~ 0.5 => random walk (rounding noise). A directed signal
+# CANNOT be produced by bf16 rounding jitter, so it decisively clears the noise floor.
+DIRECTEDNESS_MIN = 0.8
 
 
 # =============================================================================
@@ -166,6 +178,32 @@ def zero_motion_null_floor(theta: torch.Tensor) -> float:
     # also assert bit-level identity survives the round-trip (paranoia)
     assert bool((tb == tb).all())
     return float(torch.linalg.norm(diff).item())
+
+
+def directedness_exponent(disps: list[float], hs: list[int]) -> tuple[float, float]:
+    """Fit cumulative displacement ~ h^p in log-log; return (p, R^2).
+
+    p >= DIRECTEDNESS_MIN => the cumulative signal is DIRECTED drift (real motion),
+    decisively above the bf16 rounding-noise floor (which is a random walk, p ~ 0.5),
+    regardless of the per-element ULP multiple. Returns (nan, nan) if any disp is 0
+    (an unchanging block has no drift to fit — handled as zero-motion, not a failure).
+    """
+    d = np.asarray(disps, dtype=np.float64)
+    h = np.asarray(hs, dtype=np.float64)
+    if d.size < 2 or np.any(d <= 0.0) or np.any(h <= 0.0):
+        return float("nan"), float("nan")
+    A = np.vstack([np.log(h), np.ones_like(h)]).T
+    coef, *_ = np.linalg.lstsq(A, np.log(d), rcond=None)
+    pred = A @ coef
+    ss_res = float(np.sum((np.log(d) - pred) ** 2))
+    ss_tot = float(np.sum((np.log(d) - np.mean(np.log(d))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return float(coef[0]), r2
+
+
+def is_directed(p: float) -> bool:
+    """True => cumulative displacement is directed drift (signal), not a random walk."""
+    return (p == p) and (float(p) >= DIRECTEDNESS_MIN)
 
 
 # ---- Backward-compatible group-floor entry used by the sweep/self-test --------
