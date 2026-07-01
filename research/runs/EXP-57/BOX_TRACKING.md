@@ -1,8 +1,18 @@
-# EXP-57 live box tracking (fp32 weight-trajectory collection)
+# EXP-57 box tracking (fp32 weight-trajectory collection)
 
-**DO NOT ORPHAN THIS BOX.** It is intentionally NOT registered in `runs.jsonl`
+## STATUS: ✅ COMPLETE — BOX TORN DOWN (2026-07-01T11:20Z)
+
+VERDICT **PASS**. 160/160 fp32 snapshots R2-verified under
+`s3://shamane-pluralis/verl-research/EXP-57/regimeA/weights/full/`,
+`verify_full_weight_dump.py --r2` PASS (max_rel_norm_err=0), codec-OFF,
+no NaN/Inf, WandB `ztre15q8` backfilled to step 80. Instance 43311909
+destroyed (private account); ledger row EXP-57 = TORN_DOWN. Nothing live.
+
+---
+
+_Historical (during the run):_ It was intentionally NOT registered in `runs.jsonl`
 (to keep it out of the no-heartbeat-30min auto-teardown reaper, which killed the
-first widened EXP-43 attempt). Teardown is MANUAL, per the plan's
+first widened EXP-43 attempt). Teardown was MANUAL, per the plan's
 COLLECTION-RUN TEARDOWN GATE.
 
 - instance_id: **43311909**
