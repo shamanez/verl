@@ -87,7 +87,7 @@ A box that never passes the probe is destroyed and the next candidate is tried.
 that created it and is NOT visible to other accounts** (incl. a team you belong to). The
 locked `verl-research-vllm020` template (hash `3b0f…6d75f`, id 447527) is owned by the PRIVATE
 account (538739), so `VAST_ACCOUNT=team` create against THAT hash returns HTTP 400
-`invalid template hash or id or template not accessible by user` (observed EXP-41); the skill
+`invalid template hash or id or template not accessible by user` (observed in practice); the skill
 now **fails fast** on that error (no candidate-loop churn) and prints the remedy.
 
 **Resolved for the team account (2026-06-29):** a team-owned copy now exists —

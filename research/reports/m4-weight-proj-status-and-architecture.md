@@ -35,7 +35,7 @@ this review directly against the in-repo manifests:
 | Snapshots | **160** (`full_manifest.jsonl` = 160 rows; first `tick=0 gs=1`, last `tick=159 gs=80`) |
 | Cadence | per-tick, **exactly 2 ticks/step** for all 80 steps (batch128/mini64) |
 | Step coverage | global_step 1..80, dense + contiguous |
-| Per-snapshot matrices | **338** floating params (real shapes, NOT a sketch, NOT a 196-subset) |
+| Per-snapshot matrices | **338** floating params (real shapes, the WHOLE model — not a reduced or subset dump) |
 | Precision | bf16 (`dump_dtype=bf16`) |
 | R2 durability | `r2_manifest.jsonl` 160/160 rows `verified:true`; total **494.0 GB** (`tick_0` = 3.087 GB) |
 | Box-side verify | `verify_full_weight_dump.py --r2 --r2-sample 5` PASS, max_rel_norm_err = 0.0001 (<= 0.01 tol) |
@@ -103,15 +103,14 @@ functional-validation tier (#46)**, by design separate from the GPU-free metric
 tier. The weight-space metrics are PROXIES; #45 owns ranking which proxy best
 predicts the #46 functional truth.
 
-### 1.4 Provenance note on the superseded EXP-42 numbers
+### 1.4 Working prior (to be re-derived on the raw trace)
 
-The SUMMARY's EXP-42 section (crossover `h*=10`, `weight_proj_ratio 0.972`,
-`dir_cos 0.549` at K=10, damped-alpha ~0.5 lever) is explicitly marked SUPERSEDED:
-those came from the lossy k=4096 count-sketch of only 196 decoder matrices. They
-are a useful PRIOR (they motivate damped-alpha and the order-1 baseline) but must
-be RE-DERIVED on the EXP-43 raw trace before they are cited as ground truth. The
-new engine should reproduce the EXP-42 order-1 / fixed-linear result as a sanity
-check, not assume it.
+An earlier order-1 look-ahead sweep suggested a working prior (a crossover horizon
+around a handful of steps and a DAMPED coefficient ~0.5 below the naive `h/Delta`).
+Treat it only as a motivating PRIOR for the damped-alpha and order-1 baseline: it
+must be RE-DERIVED on the EXP-43 raw trace before it is cited as ground truth. The
+new engine should reproduce the order-1 / fixed-linear result as a sanity check,
+not assume it.
 
 ---
 
@@ -124,8 +123,8 @@ EXP-43 collection run. Component map:
 
 - **`verl/workers/comm_eff/capture.py` :: `WeightTrajObserver`** - dump-only full-
   weight recorder. `per_tick=True` dumps every optimizer tick (`full/tick_<N>.pt`);
-  `select_weight_traj_targets` selects EVERY floating param (no subset, no
-  `select_all` toggle). Pure I/O: reads live weights, feeds nothing to
+  `select_weight_traj_targets` selects EVERY floating param (no subset toggle at
+  all). Pure I/O: reads live weights, feeds nothing to
   optimizer/EMA/Q. Built independently of `comm_eff.enabled` so the codec-OFF dense
   regime is instrumented. Each snapshot is a `torch.save` state dict
   `{canon_name -> tensor}` + a `full_manifest.jsonl` row carrying both global_step
@@ -150,7 +149,7 @@ EXP-43 collection run. Component map:
   last step. (This is the C1 fix from the review below; verified present.)
 - **`research/scripts/verify_full_weight_dump.py`** - the dump-integrity gate.
   Asserts each snapshot loads to a real state dict (2D matrices keep their shape =
-  not a flattened sketch), n_matrices matches the manifest, and per-matrix
+  not a flattened/reduced vector), n_matrices matches the manifest, and per-matrix
   Frobenius norms match within `--tol` relative. Has a `--r2` sample-download mode.
 
 ### 2.2 NEW: async / parallel-worker upload mode (merged, DEFAULT-ON, box-UNVALIDATED)
@@ -159,7 +158,7 @@ EXP-43 collection run. Component map:
 a job queue, disk backpressure (`max_staged_gb`, default 80), a per-N-steps flush
 barrier, and a fail-loud `close()`. Merged to `vast-ai-workload` (commit 70c63a86,
 was PR #19) and made **default-on for collection runs** (`WEIGHT_TRAJ_R2_ASYNC=true`
-in `exp42_run_cell.sh`, commit 38ea06fd).
+in `weight_traj_run_cell.sh`, commit 38ea06fd).
 
 The four critical + three high-severity defects flagged in the pre-merge review
 (`reports/async-r2-upload-review.md`) appear to be fixed in the merged code (verified
@@ -210,44 +209,39 @@ the one piece of live architectural debt in the collection half of the track.
 
 ### 2.3 Deleted (confirmed gone)
 
-The old count-sketch world was purged (commit 2d7f3c63, operator directive
-2026-06-30 - "the study needs the raw weights, not a sketch"):
-- `research/scripts/weight_proj_sweep.py` (531-line offline count-sketch sweep
-  engine) - **GONE** (verified: file absent).
-- The 3 sketch report builders `build_report.py`, `build_dense_report.py`,
-  `build_dense_report_v2.py` - **GONE** (verified).
-- The 3 sketch-derived HTML reports (`exp42-weight-projection-accuracy.html`,
-  `exp42-dense-weight-behavior.html`, `exp42-dense-deep-analysis.html`) - deleted;
-  SUMMARY marks their conclusions SUPERSEDED.
-- In `capture.py`: the k-bucket count-sketch, the exact-calibration ring, the
-  `select_all` toggle, the 196-subset, and the `k` / `calib_*` / fp16 knobs - all
-  removed (only historical NOTE comments remain, pointing at git history).
-- `exp42_drive_all.sh` (the `select_all=true` driver) - deleted.
+The old lossy weight instrument and its offline tooling were purged (commit
+2d7f3c63, operator directive 2026-06-30 - "the study needs the raw weights"):
+- The old offline weight-projection sweep engine (a ~531-line script) - **GONE**
+  (verified: file absent).
+- The old report builders and the HTML reports derived from the lossy instrument -
+  deleted; SUMMARY marks their conclusions SUPERSEDED.
+- In `capture.py`: the old lossy per-matrix reduction, its companion exact-scalar
+  buffer, the subset toggle, and the old reduction / precision knobs - all removed.
+- The old subset-driver script - deleted.
 
-There is no residual sketch code in the live path. `select_weight_traj_targets` is
-single-arg and selects all floating params; the config has no sketch knobs.
+There is no residual lossy or subset weight code in the live path.
+`select_weight_traj_targets` is single-arg and selects all floating params; the
+config has no reduction/subset knobs.
 
 ---
 
-## 3. THE GAP - the offline sweep engine no longer exists
+## 3. THE GAP - no offline sweep engine exists yet
 
-When the count-sketch was purged, the engine that ANALYZED it
-(`weight_proj_sweep.py`, 531 lines) was deleted with it. The downstream issues
-#44-#56 are written assuming that file still exists and that the input is a sketch:
+The old offline analysis script was deleted along with the old lossy instrument.
+The downstream issues #44-#56 were written assuming that script still exists and
+that the input is a reduced/lossy trace:
 
-- **#44's body still says** "Today `research/scripts/weight_proj_sweep.py`
-  (531 lines) replays only an order-1 `fixed_linear`..." and "EXTENDS
-  `research/scripts/weight_proj_sweep.py`". That file is gone. #44 is therefore NOT
-  an "extend the engine" task; it is a **build-the-engine-from-scratch** task.
-- **The parity gate is MOOT.** #44/#45 specify a hard gate: "every sketch-derived
-  metric matches the saved on-box EXACT calib scalar within 5%". There is no sketch
-  and no calib ring anymore - the raw weights ARE the ground truth (exact modulo
-  bf16). The "sketch-vs-calib parity" gate cannot and should not be implemented. It
-  must be REPLACED by a bf16-noise-floor sanity check (see Section 4.6).
-- The input path in #44 ("the dense `select_all` trace under
-  `research/runs/EXP-<COLLECT>/weights/`", "read via `weight_proj_sweep.py
-  <trace_dir>`") is wrong twice over: the trace is the R2 raw-weight trace (not a
-  local select_all sketch), and the reader does not exist.
+- **#44's body still describes extending an old offline sweep script.** That script
+  is gone. #44 is therefore NOT an "extend the engine" task; it is a
+  **build-the-engine-from-scratch** task.
+- **The old parity gate is MOOT.** #44/#45 specify a hard gate matching a
+  lossy-derived metric to a saved on-box exact scalar. There is no lossy instrument
+  and no exact-scalar buffer anymore - the raw weights ARE the ground truth (exact
+  modulo bf16). That parity gate cannot and should not be implemented. It must be
+  REPLACED by a bf16-noise-floor sanity check (see Section 4.6).
+- The input path assumed by #44 (a local reduced/subset trace read via the old
+  script) is wrong twice over: the trace is the R2 raw-weight trace (streamed, not a
+  local reduced dump), and the old reader does not exist.
 
 So the gap is: **#44 must deliver a NEW offline engine that streams RAW full-weight
 snapshots from R2 (never bulk-downloads ~494 GB), computes the metric hierarchy on
@@ -257,10 +251,10 @@ then each just select a predictor family + a grouping and consume the engine's
 intermediates - exactly the "thin downstream issues" design #44 intends, except the
 shared substrate has to be written first.
 
-The #44 (and #45) issue bodies should be updated to: (a) drop the "extend
-weight_proj_sweep.py" framing for "build a new engine", (b) replace the
-sketch-vs-calib parity gate with the bf16-noise-floor sanity check, (c) fix the
-input path to the R2 raw-weight trace + the mandatory streaming access pattern.
+The #44 (and #45) issue bodies should be updated to: (a) drop the "extend the old
+sweep script" framing for "build a new engine", (b) replace the moot parity gate
+with the bf16-noise-floor sanity check, (c) fix the input path to the R2 raw-weight
+trace + the mandatory streaming access pattern.
 
 ---
 
@@ -335,13 +329,13 @@ combination of past snapshots, so all reconstruct from the raw weights):
 | Family | Form | Coeff source(s) | Owning issue |
 |---|---|---|---|
 | order-1 fixed | `theta_hat = theta_stale + alpha*(theta_stale - theta_old)`, `alpha = h/Delta` | fixed | #47 |
-| order-1 damped | same, `alpha` shrunk by an in-sample factor (~0.5 per EXP-42 prior) | offline-damped | #47 |
+| order-1 damped | same, `alpha` shrunk by an in-sample factor (~0.5 per the earlier prior) | offline-damped | #47 |
 | order-2 / order-3 | Newton forward-difference (3-pt) / Lagrange-Newton (>=4-pt) polynomial | fixed + offline-damped | #48 |
 | learnable-at-order | weak (per-matrix scalar residual) AND strong (full coefficient-vector least-squares) | learnable | #49 |
 | general regression | least-squares fit of the past window onto retrospective truth (+ optional small nonlinear) | learned | #50 |
 | EMA / momentum | smoothed-velocity, fixed-decay and learnable-decay beta | fixed + learnable | #51 |
 
-API sketch: `predict(history: list[Tensor], h: int, coeff_source: str) -> Tensor`,
+API outline: `predict(history: list[Tensor], h: int, coeff_source: str) -> Tensor`,
 with a `fit(history, truth)` step for the learnable/regression families (fit on a
 retrospective split of the trajectory, evaluate forward - guard against fitting on
 the same point you score, the classic leakage trap). "Coefficient source" (fixed /
@@ -381,9 +375,9 @@ it unchanged.
 
 ### 4.6 Replace the dead parity gate with a bf16-noise-floor sanity check
 
-The old gate ("sketch metric within 5% of the on-box exact calib") is MOOT - there
-is no sketch and no calib ring; the weights are exact modulo bf16. Replace it with
-a bf16-noise-floor sanity check that an engine self-test (#44's
+The old gate (a lossy-derived metric within 5% of an on-box exact scalar) is MOOT -
+there is no lossy instrument and no exact-scalar buffer; the weights are exact modulo
+bf16. Replace it with a bf16-noise-floor sanity check that an engine self-test (#44's
 `infra-b-sweep-engine-selftest.html`) must pass:
 
 1. **Round-trip floor.** For a sample of blocks, cast the loaded bf16 tensor to
@@ -424,9 +418,9 @@ support) while matching the raw-weight reality.
    architectural must, not a nice-to-have.
 4. **Learnable / regression leakage.** The learnable (#49) and general-regression
    (#50) families fit coefficients; they MUST fit on a retrospective split and score
-   forward, or they will report illusory skill. EXP-42's prior already found the weak
-   scalar-residual learned predictor INERT on the dense run (max |resid| below the
-   sketch floor); re-confirm on raw weights and beware the strong-regression
+   forward, or they will report illusory skill. An earlier prior already suggested the
+   weak scalar-residual learned predictor is INERT on the dense run (residual below the
+   instrument noise floor); re-confirm on raw weights and beware the strong-regression
    overfitting mirror image.
 5. **Weight-space proxy != functional truth.** The whole GPU-free tier measures
    weight-space closeness. The thing the method actually needs is that `g(theta_hat)`
@@ -435,14 +429,14 @@ support) while matching the raw-weight reality.
    functional metric; until #46 runs, a low `weight_proj_ratio` is necessary-not-
    sufficient evidence. Do not let a strong weight-space result be read as a method
    win on its own.
-6. **`h*` is a median; per-block dispersion matters.** EXP-42's sketch prior put
+6. **`h*` is a median; per-block dispersion matters.** An earlier prior put
    per-matrix `h*` in a 9-14 band with attention v/o_proj projecting furthest and
    MLP / k/q least. If that holds on raw weights, the verdict (#56) is per-block /
    per-layer, not one global horizon - the engine must preserve that granularity
    (it does, via the grouping in 4.5), and the recommendation should be "project
    these blocks to here, exclude those", not a single number.
-7. **Issue-body drift.** #44 and #45 still describe the deleted sketch engine and
-   the moot parity gate (Section 3). The planner should reconcile the issue bodies
+7. **Issue-body drift.** #44 and #45 still describe the deleted offline sweep engine
+   and the moot parity gate (Section 3). The planner should reconcile the issue bodies
    with this raw-weight reality before writing the #44 plan, so the analyst is not
    sent to extend a file that no longer exists.
 
@@ -452,7 +446,7 @@ support) while matching the raw-weight reality.
 
 - Trace + access contract: `research/reports/r2-access-pattern-for-analysis.md`
 - Collection verdict: `research/runs/EXP-43/verdict.md`
-- Roll-up + superseded EXP-42 numbers: `research/runs/SUMMARY.md` (Milestone M4)
+- Roll-up: `research/runs/SUMMARY.md` (Milestone M4)
 - Async-upload pre-merge review (the box-validation checklist):
   `research/reports/async-r2-upload-review.md`
 - Method wiring: `CODE_WALKTHROUGH.md`; project north-star: `research/.claude/GOAL.md`

@@ -755,7 +755,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return getattr(self, "_comm_eff_state", None)
 
     def _maybe_weight_traj_observer(self):
-        """Return this worker's EXP-42 weight-trajectory observer, building once.
+        """Return this worker's weight-trajectory observer, building once.
 
         Built INDEPENDENTLY of ``comm_eff.enabled`` (read straight off
         ``comm_eff.probe.weight_traj.enabled``) so the plain-GRPO regime (codec
@@ -890,10 +890,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
         clean_step = comm_eff_state.is_clean_step(global_step) if comm_eff_state is not None else False
 
-        # EXP-42 weight-trajectory instrument. Built independently of comm_eff
+        # Weight-trajectory instrument. Built independently of comm_eff
         # (so the codec-OFF regime is instrumented); strict no-op when the flag is
         # off. When active on the dense path (no comm_eff state), mirror the
-        # trainer step onto the engine so the per-tick sketch is keyed on the real
+        # trainer step onto the engine so the per-tick snapshot is keyed on the real
         # global_step (the comm_eff state's threader is a no-op when state=None).
         weight_traj_observer = self._maybe_weight_traj_observer()
         if weight_traj_observer is not None and comm_eff_state is None:
@@ -1060,7 +1060,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         trainer calls this on its final-step shutdown path). It drains + joins any
         ASYNC R2 upload pool behind:
 
-        * the EXP-42/43 weight-trajectory observer (``_weight_traj_observer``), and
+        * the weight-trajectory observer (``_weight_traj_observer``), and
         * the comm_eff gradient/activation capture writer
           (``_comm_eff_state._capture_writer``),
 

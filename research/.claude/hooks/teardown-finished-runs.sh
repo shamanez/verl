@@ -111,7 +111,7 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     # an instance that is GONE counts as DESTROYED even if `destroy` itself
     # errored (e.g. it was already destroyed manually). This fixes the retry-
     # spam regression where an already-gone instance was classified FAILED on
-    # every Stop forever (2026-06-04, EXP-20-dense-DEAD-39407768 hit 8 attempts
+    # every Stop forever (2026-06-04, an already-gone instance hit 8 attempts
     # because the old grep counted "not found" as a failure).
     # Conservative on ambiguity: an auth/network error from `show instance` does
     # NOT count as gone (that would falsely flip a live, billing box to

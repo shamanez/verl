@@ -2,12 +2,11 @@
 """Verify a FULL-weight trajectory dump (EXP-43+).
 
 Asserts each ``full/<snapshot>.pt`` is a state dict of the real weight matrices
-(true shapes, NOT a flattened/length-k sketch) and that each matrix's stored
+(true shapes, NOT a flattened/reduced vector) and that each matrix's stored
 Frobenius norm matches ``full_manifest.jsonl`` within ``--tol`` relative. This is
-the analyst's gate-3 (dump integrity) check; it replaces the old sketch-fidelity
-sweep (the count-sketch instrument was removed 2026-06-30 - the study now keeps
-the raw weights, so there is nothing lossy to validate, only that the dump loads
-and its norms match the live weights within dump-dtype rounding).
+the analyst's dump-integrity check: the dump keeps the raw weights (nothing
+lossy), so there is nothing to reconstruct — only that the dump loads and its
+norms match the live weights within dump-dtype rounding.
 
 Two snapshot cadences are handled transparently: per-step (``full/step_<gs>.pt``)
 and per-tick (``full/tick_<tick>.pt``). Snapshots are matched to manifest rows by
@@ -74,7 +73,7 @@ def _verify_snapshot(torch, sd, mr, tol, label, report) -> float:
         return max_rel
     twod = [k for k, v in sd.items() if hasattr(v, "dim") and v.dim() == 2]
     if not twod:
-        report["errors"].append(f"{label}: no 2-D weight matrices (shape lost - is this a sketch?)")
+        report["errors"].append(f"{label}: no 2-D weight matrices (shape lost - is this a flattened/reduced dump?)")
     if int(mr.get("n_matrices", -1)) != len(sd):
         report["errors"].append(f"{label}: manifest n_matrices={mr.get('n_matrices')} != loaded {len(sd)}")
     for m in mr.get("matrices", []):

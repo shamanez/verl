@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     *) IDS+=("$1"); shift ;;
   esac
 done
-[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one experiment id (e.g. EXP-5)"; exit 2; }
+[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one experiment id (e.g. EXP-44)"; exit 2; }
 
 # Ensure SUMMARY exists with the canonical table header.
 if [[ ! -f "$SUMMARY" ]]; then

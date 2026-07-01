@@ -58,7 +58,7 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
    ```
    The chain is the source of truth for GPU shape — `per_node_gpus` is implicit in each tier's `num_gpus=` clause, and the runner reads the actual provisioned count from `runs/EXP-<N>/handles/*.json` (`.gpu_count` field) to set `NGPUS_PER_NODE` in the training launch.
 
-   M0 smoke issues (label `milestone:M0`) are the one exception — copy the issue's overridden `gpu_filter_chain:` (and any tier-specific training overrides) verbatim. EXP-1's 3090/4090 chain and EXP-2's H200/H100 chain are the canonical M0 examples.
+   M0 smoke issues (label `milestone:M0`) are the one exception — copy the issue's overridden `gpu_filter_chain:` (and any tier-specific training overrides) verbatim. A cheap 3090/4090 chain and an H200/H100 chain are the canonical M0 examples.
 
 6. Write the plan with explicit `## Success criteria` (metric checkboxes, not "tests pass"), `## Verification commands` (analyst's exact invocations), `## Analyst predicate` (PASS / REVISE / STOP conditions), and `## Rescue triggers`. Use the exact filename `.claude/plans/<NUMBER>.md` where `<NUMBER>` matches `gh issue`'s `number` field.
 

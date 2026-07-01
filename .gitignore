@@ -146,10 +146,12 @@ research/refs/*.pdf
 research/runs/*/captures/
 research/runs/*/metrics/onbox/
 research/runs/*/metrics/incoming.log
-# Dataset-keyed subdir layout (e.g. runs/EXP-38/<dataset>/captures/) — same ignore, one level deeper
+# Dataset-keyed subdir layout (e.g. runs/<ID>/<dataset>/captures/) — same ignore, one level deeper
 research/runs/*/*/captures/
 research/runs/*/*/metrics/onbox/
 research/runs/*/*/metrics/incoming.log
 
-# EXP-42 weight-trajectory sketch traces (large local-only data; analysis outputs are committed)
-research/runs/EXP-42*/**/weights/
+# Weight-trajectory heavy .pt staging (large local-only data; R2 is the durable store,
+# the .jsonl manifests + analysis outputs are committed)
+research/runs/*/weights/**/*.pt
+research/runs/*/*/weights/**/*.pt

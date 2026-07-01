@@ -16,7 +16,7 @@ Canonical project facts (working dir, gh-default repo, secrets, vast template, b
    gh issue list --label research:claim --state open --json number,title,url
    ```
 
-2. Identify issues that need a plan: any whose `.claude/plans/<NUMBER>.md` does NOT yet exist. The filename is the bare issue number (`7.md`, not `EXP-7.md`).
+2. Identify issues that need a plan: any whose `.claude/plans/<NUMBER>.md` does NOT yet exist. The filename is the bare issue number (`44.md`, not `EXP-44.md`).
 
 3. Skip any issue that already carries label `status:planned`, `status:approved`, `status:stop`, or `status:done` (defensive — a missing plan file plus one of those labels means something went wrong and a human should look).
 

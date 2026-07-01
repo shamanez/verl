@@ -100,9 +100,9 @@ export HF_TOKEN \
 
 # ---------------------------------------------------------------------------
 # 2. GPU count — 1..8.
-#    The default research mandate is multi-GPU (4..8). EXP-42 (the weight-
-#    trajectory measurement study, research/.claude/plans/42.md) is an
-#    operator-AUTHORIZED single-GPU exception (2026-06-29): the weight-trajectory
+#    The default research mandate is multi-GPU (4..8). The weight-trajectory
+#    collection study is an operator-AUTHORIZED single-GPU exception
+#    (2026-06-29): the weight-trajectory
 #    geometry is invariant to GPU count when the global batch is held fixed (DP
 #    degree changes only the reduction order, not the trajectory), and the
 #    16K-context rationale behind the multi-GPU rule is defused by resp=1024. Set
@@ -118,7 +118,7 @@ if (( DETECTED_GPUS < GPU_MIN || DETECTED_GPUS > 8 )); then
   echo "FATAL: this recipe requires ${GPU_MIN}..8 GPUs; detected $DETECTED_GPUS" >&2
   if (( GPU_MIN > 1 )); then
     echo "       (1.5B GRPO with 16K response + n=8 rollouts needs the headroom;" >&2
-    echo "        set ALLOW_SINGLE_GPU=1 for the EXP-42 single-GPU measurement path)" >&2
+    echo "        set ALLOW_SINGLE_GPU=1 for the single-GPU weight-trajectory collection path)" >&2
   fi
   exit 1
 fi
@@ -166,7 +166,7 @@ export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 
 # Rollout shape — n=8 rollouts/prompt, paged KV.
 export ROLLOUT_TP="${ROLLOUT_TP:-2}"
-# Clamp TP to the detected GPU count: the single-GPU EXP-42 path forces TP=1
+# Clamp TP to the detected GPU count: the single-GPU collection path forces TP=1
 # (rollout tensor-parallel can't exceed the device count). No effect on >=TP GPUs.
 if (( ROLLOUT_TP > DETECTED_GPUS )); then
   echo "=== clamping ROLLOUT_TP $ROLLOUT_TP -> $DETECTED_GPUS (single-GPU path) ==="
@@ -335,7 +335,7 @@ COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 # WHY true by default: (1) some Vast H100/H200 boxes crash in vLLM's custom
 # all-reduce (CUDA-IPC under the mp executor) at KV-cache init; NCCL avoids it.
 # (2) It is greedy-val-neutral, so we hold it TRUE as a controlled var across ALL
-# arms — every run since EXP-32 ran TRUE — keeping val@50 comparisons apples-to-
+# arms — every run has held it TRUE — keeping val@50 comparisons apples-to-
 # apples. Override DISABLE_CUSTOM_ALL_REDUCE=false only on a box that does not crash.
 DISABLE_CUSTOM_ALL_REDUCE="${DISABLE_CUSTOM_ALL_REDUCE:-true}"
 VLLM_ALLREDUCE_OVERRIDE=()

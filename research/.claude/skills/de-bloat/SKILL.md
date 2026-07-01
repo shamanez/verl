@@ -18,7 +18,7 @@ $CLAUDE_PROJECT_DIR/.claude/skills/de-bloat/run.sh EXP-<N> [EXP-<M> ...]
 $CLAUDE_PROJECT_DIR/.claude/skills/de-bloat/run.sh --dry-run EXP-<N>     # preview, no writes/deletes
 ```
 
-Accepts `EXP-5`, `5`, or `EXP-5`-style ids.
+Accepts `EXP-44`, `44`, or `EXP-44`-style ids.
 
 ## What it does (per id)
 

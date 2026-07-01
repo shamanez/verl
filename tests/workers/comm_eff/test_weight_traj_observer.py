@@ -14,8 +14,8 @@
 
 """CPU unit tests for the FULL-weight trajectory observer + selector.
 
-Covers: the always-full selector (every floating param, no subset/no select_all
-toggle), per-step vs per-tick dump cadence, dedup + every_steps, bf16 fidelity,
+Covers: the always-full selector (every floating param, no subset toggle at all),
+per-step vs per-tick dump cadence, dedup + every_steps, bf16 fidelity,
 inactive-rank no-op, and R2 routing (with a mocked sink).
 """
 
@@ -34,8 +34,8 @@ class _Tiny(nn.Module):
     def __init__(self):
         super().__init__()
         self.q_proj = nn.Linear(4, 4, bias=True)  # weight (2-D) + bias (1-D)
-        self.embed = nn.Embedding(6, 4)  # weight (2-D), the projector EXCLUDES this
-        self.norm = nn.LayerNorm(4)  # weight + bias (1-D), excluded by the projector
+        self.embed = nn.Embedding(6, 4)  # weight (2-D) — the selector INCLUDES this
+        self.norm = nn.LayerNorm(4)  # weight + bias (1-D) — also included
         self.register_buffer("step_counter", torch.zeros(1, dtype=torch.long))
 
 
@@ -43,7 +43,7 @@ def test_selector_returns_all_floating_params():
     m = _Tiny()
     sel = select_weight_traj_targets(m.named_parameters())
     names = {n for n, _ in sel}
-    # EVERY floating param, including the projector-EXCLUDED embedding + norm + biases
+    # EVERY floating param, including the embedding + norm gains + biases
     assert names == {"q_proj.weight", "q_proj.bias", "embed.weight", "norm.weight", "norm.bias"}
 
 
@@ -54,9 +54,9 @@ def test_selector_skips_non_floating_params():
 
 
 def test_selector_is_single_arg():
-    # The subset/select_all/target_substrs knobs are gone — extra kwargs are an error.
+    # The old subset/target_substrs knobs are gone — extra kwargs are an error.
     with pytest.raises(TypeError):
-        select_weight_traj_targets([("w", torch.randn(2, 2))], select_all=True)
+        select_weight_traj_targets([("w", torch.randn(2, 2))], subset=True)
 
 
 def _weights():

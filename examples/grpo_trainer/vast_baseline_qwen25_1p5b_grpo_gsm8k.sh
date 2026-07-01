@@ -4,8 +4,8 @@
 # REAL GRPO BASELINE (the DENSE CONTROL) — Qwen2.5-1.5B-Instruct on GSM8K,
 # 1..8 GPUs, FSDP + vLLM rollout, 2 epochs over the train split, eval on the
 # test split. Not a smoke test. Acceptance = pass@1 improvement on test.
-# DEFAULT for analysis runs is a SINGLE 1xH200 (auto resp=1024 / TP=1, proven in
-# EXP-42 regime A, val ~0.77); 4..8 GPUs run the full 16K-context control.
+# DEFAULT for analysis runs is a SINGLE 1xH200 (auto resp=1024 / TP=1, proven on
+# 1xH200 at val ~0.77); 4..8 GPUs run the full 16K-context control.
 #
 # Objective: NO KL, no entropy (pg_loss only). This dense control learns cleanly
 # on GSM8K and matches the comm-eff method's no-KL objective, so dense-vs-
@@ -73,7 +73,7 @@ export HF_TOKEN \
 # ---------------------------------------------------------------------------
 # Single GPU (1xH200) is a SUPPORTED DEFAULT for this dense control / analysis
 # runs (operator-authorized 2026-06-30): the normal GRPO ran cleanly on 1xH200
-# at resp=1024 (EXP-42 regime A, val ~0.77). The comm-eff research loop's 4..8
+# at resp=1024 (val ~0.77). The comm-eff research loop's 4..8
 # mandate (16K-context headroom) does NOT bind the dense control. The full 16K
 # production surface still needs 4..8 GPUs; on 1 GPU the launcher auto-defaults
 # to the analysis-friendly surface below.
@@ -87,7 +87,7 @@ echo "=== detected $NGPUS_PER_NODE GPUs ($(nvidia-smi -L | head -1)) ==="
 
 # Single-GPU (1xH200) analysis default. The 16K-context production surface does
 # not fit one card with n=8 rollouts, so on 1 GPU default to the surface proven
-# on 1xH200 (EXP-42 regime A): resp=1024, TP=1, ppo token budget 16384, vLLM mem
+# on 1xH200: resp=1024, TP=1, ppo token budget 16384, vLLM mem
 # 0.5. 4..8 GPUs keep the 16K control unchanged. Every value stays env-overridable
 # (these set defaults BEFORE the §5 ${VAR:-...} lines, so an explicit env wins).
 if (( DETECTED_GPUS == 1 )); then

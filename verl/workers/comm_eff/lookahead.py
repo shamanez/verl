@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Look-ahead (linear weight extrapolation) anchor projector — EXP-41 / M4.
+"""Look-ahead (linear weight extrapolation) anchor projector — M4.
 
 The anchor circuit computes a CLEAN per-target gradient ``G_anchor`` at a
 ``delay_K``-stale weight point ``theta[t-K]``. At high latency (cadence/delay_K
@@ -151,14 +151,14 @@ def lookahead_num_source_points(anchor_cfg) -> int:
 
 
 def lookahead_strength(anchor_cfg) -> float:
-    """Projection horizon strength alpha (EXP-42 / M4).
+    """Projection horizon strength alpha (M4).
 
     ``theta_hat = (1+alpha)*theta[t-K] - alpha*theta[t-2K]`` ⇒ ``alpha`` is the
     fraction of the staleness ``K`` extrapolated FORWARD. ``alpha=1.0`` (default)
     reproduces the frozen AsyncPP seed ``(2, -1, 0)`` = full catch-up to the
     current step; ``alpha<1`` projects a SHORTER horizon (a gentler, less-sharp
     anchor); ``alpha=0`` = the raw stale ``theta[t-K]`` (no projection). Read from
-    the anchor config; defaults to ``1.0`` so every pre-EXP-42 path is byte-identical.
+    the anchor config; defaults to ``1.0`` so every prior (non-look-ahead) path is byte-identical.
     """
     if anchor_cfg is None:
         return 1.0
@@ -368,7 +368,7 @@ class LookaheadProjector:
         self.n_points = lookahead_num_source_points(anchor_cfg)
         # Projection horizon: coeffs = (1+alpha, -alpha, 0). alpha=1.0 reproduces
         # the frozen AsyncPP seed (2,-1,0) = full catch-up; alpha<1 = a shorter
-        # look-ahead horizon (EXP-42 / M4 horizon sweep). The learned mode cold-
+        # look-ahead horizon (M4 horizon sweep). The learned mode cold-
         # starts here and then adapts the per-block residual on top of these coeffs.
         self.strength = lookahead_strength(anchor_cfg)
         self.coeffs = [1.0 + self.strength, -self.strength, 0.0]

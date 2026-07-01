@@ -37,12 +37,12 @@ Canonical project facts (working dir, vast SSH identity, secrets path, ledger lo
 
 ## Inputs (read from the dispatch prompt and the handle file)
 
-The orchestrator dispatches you with an issue id like `EXP-12`. Read everything else from disk:
+The orchestrator dispatches you with an issue id like `EXP-43`. Read everything else from disk:
 
 - `runs/EXP-<N>/handles/<instance_id>.json` — contains `ssh_host`, `ssh_port`, `instance_id`, `label`, `gpu_name`, `num_gpus`, `gpu_ram`. Use these to build the SSH command.
 - `$PARENT/.claude/state/runs.jsonl` — the ledger row gives you the canonical instance id; if multiple handles, watch the most recent `RUNNING` one.
 - `.claude/plans/<N>.md` — for cell names (`EXPERIMENT_NAME` per cell), expected `total_training_steps`, and the project's WandB project name. The current convention is project `verl_compression_research`, entity `shamanework-pl`.
-- Remote tmux session name follows the pattern `exp-<N>-<host>` (dots in the IP become underscores: `156.19.254.2` → `exp-12-156_19_254_2`). The handle file's `ssh_host` field plus this rule recovers it.
+- Remote tmux session name follows the pattern `exp-<N>-<host>` (dots in the IP become underscores: `156.19.254.2` → `exp-43-156_19_254_2`). The handle file's `ssh_host` field plus this rule recovers it.
 - Remote per-cell logs: `/workspace/runs/EXP-<N>/train_<EXPERIMENT_NAME>.log`; aggregate done flag at `/workspace/runs/EXP-<N>/done.flag`; per-cell flags `done_<EXPERIMENT_NAME>.flag`.
 
 ## What to do

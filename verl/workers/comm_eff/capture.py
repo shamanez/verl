@@ -421,11 +421,6 @@ def maybe_build_capture_writer(config: Any, *, rank: Optional[int] = None) -> Op
 # box / laptop, so set ``r2_enabled`` to upload each snapshot to R2 and delete the
 # local ``.pt`` (see ``verl.workers.comm_eff.r2_sink``) — local disk becomes a
 # few-GB staging area.
-#
-# NOTE: an earlier version of this instrument stored a lossy k-bucket COUNT-SKETCH
-# of each matrix (non-invertible) plus a bounded exact-calibration ring. That was
-# REMOVED (operator directive 2026-06-30): the study needs the raw weights, not a
-# sketch. Recover the sketch implementation from git history if ever needed.
 
 
 def select_weight_traj_targets(named_params) -> list:
@@ -433,8 +428,8 @@ def select_weight_traj_targets(named_params) -> list:
 
     Always selects EVERY floating-point parameter (the whole model: decoder
     linears + token embeddings + lm_head + RMSNorm gains + biases). There is no
-    subset, no projector substring set, and no ``select_all`` toggle: the EXP-43
-    deliverable is the raw weights of every trainable param. Pure selection — no
+    subset toggle and no projector substring set: the deliverable is the raw
+    weights of every trainable param. Pure selection — no
     device moves, no clones, no FSDP. Names are canonicalised (FSDP wrap-infix
     stripped) so the selection is identical off a summoned live module or a plain
     clone. Non-floating params (e.g. int buffers) are skipped because a weight

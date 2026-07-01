@@ -595,11 +595,6 @@ class CommEffWeightTrajConfig(BaseConfig):
     instrumented. ``enabled=false`` (default) ⇒ no observer, no summon, no I/O:
     the train path is byte-identical (off-path-parity invariant).
 
-    NOTE: a prior version stored a lossy k-bucket count-sketch (+ a bounded exact
-    calibration ring) instead of the weights; that was removed (operator directive
-    2026-06-30) — the study needs the raw weights. The old ``k`` / fp16
-    ``dump_dtype`` / ``calib_*`` knobs are gone.
-
     Args:
         enabled (bool): Master switch. ``false`` (default) = strict no-op.
         out_dir (str): Directory for ``full/step_*.pt`` + ``full_manifest.jsonl``.
@@ -1000,7 +995,7 @@ class CommEffConfig(BaseConfig):
                     f"an active merger would corrupt it). Got correction_mode="
                     f"{self.spectral.correction_mode!r}."
                 )
-        # Weight-trajectory instrument (EXP-42). Validated unconditionally so a
+        # Weight-trajectory instrument. Validated unconditionally so a
         # typo fails fast even when the instrument is off. It is dump-only and
         # carries NO cross-config dependency (independent of comm_eff.enabled,
         # the anchor, the merger and the geometry probe).
@@ -1101,7 +1096,7 @@ class CommEffConfig(BaseConfig):
         # stuck ~0.97) and the run collapses. That is a fixed random projection,
         # not a learning compressed regime. Forbid it: either enable the anchor
         # (so it owns + adapts Q) or set anchor.owns_q=false (fast-owned adaptive
-        # Q). (EXP-42 regime B hit exactly this and silently collapsed.)
+        # Q). (A frozen-basis codec-only regime hit exactly this and silently collapsed.)
         if (
             self.enabled
             and self.compression_type == "powersgd"

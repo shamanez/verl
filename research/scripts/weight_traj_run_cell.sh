@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# EXP-42 per-REGIME launcher (WEIGHT-projection accuracy study) — runs ON the box.
+# Weight-trajectory per-REGIME collection launcher — runs ON the box.
 # Two regimes, STRICTLY sequential: regimeA (plain GRPO) -> regimeB (PowerSGD r=77,
-# codec ONLY). Re-materialised 2026-06-29 for the 2-regime single-GPU weight-traj
-# design (the old 3-cell grad-proj scaffold is SUPERSEDED — prior gradient study).
+# codec ONLY). Collects the model's FULL weight matrices (all params, bf16, per
+# optimizer tick) to R2 for offline weight-projection analysis.
 #
 # The two regimes differ ONLY in the compression keys (comm_eff.enabled,
 # compression_type, powersgd.rank, anchor.enabled, spectral.enabled). The
@@ -10,7 +10,7 @@
 # data are IDENTICAL -> the resolved_params diff across regimes is a SUBSET of the
 # allowed compression keys (success criterion: controlled variables identical).
 #
-# Single-GPU is operator-AUTHORISED for EXP-42 (2026-06-29): ALLOW_SINGLE_GPU=1
+# Single-GPU is operator-AUTHORISED for this collection (2026-06-29): ALLOW_SINGLE_GPU=1
 # relaxes the 4..8-GPU mandate, ROLLOUT_TP=1. Regime B codec is an IN-GRAPH
 # activation projection (M_hat=(M@Q)@Qᵀ) so it fires on 1 GPU (no PP/DP needed) —
 # verified post-hoc by theta_A != theta_B + nonzero reconstruction error.
@@ -42,7 +42,7 @@ case "$REGIME" in
 esac
 
 # The observer ALWAYS saves the FULL weight matrices of EVERY floating param (the
-# whole model, NOT a sketch, NOT a subset). Knobs (all env-overridable):
+# whole model, raw — NOT reduced, NOT a subset). Knobs (all env-overridable):
 #   WEIGHT_TRAJ_PER_TICK  (true|false): true => one snapshot per optimizer TICK
 #       (~160 over 80 steps for batch128/mini64); false (default) => one per step.
 #   WEIGHT_TRAJ_FULL_DTYPE (bf16|fp32): dump precision. bf16 ~3 GB/snapshot,
@@ -68,7 +68,7 @@ esac
 #       queue.join(); a timeout raises fail-loud. <=0 => wait forever.
 # Separate RUN_DIR keeps the full-weight dumps from clobbering another study and
 # names the R2 key prefix (verl-research/<RUN_DIR-basename>/<regime>/weights/...).
-RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-42}"
+RUN_DIR="${RUN_DIR:-/workspace/runs/EXP-43}"
 PER_TICK="${WEIGHT_TRAJ_PER_TICK:-false}"
 FULL_DTYPE="${WEIGHT_TRAJ_FULL_DTYPE:-bf16}"
 FULL_EVERY="${WEIGHT_TRAJ_FULL_EVERY:-1}"
@@ -83,7 +83,7 @@ R2_FLUSH_TIMEOUT="${WEIGHT_TRAJ_R2_FLUSH_TIMEOUT:-1800}"
 # R2 object key prefix is verl-research/$R2_EXPERIMENT/$R2_REGIME/weights/...
 export R2_EXPERIMENT="${R2_EXPERIMENT:-$(basename "$RUN_DIR")}"
 export R2_REGIME="${R2_REGIME:-$REGIME}"
-EXPN="exp42-${REGIME}${EXPN_SUFFIX:-}"
+EXPN="weight-traj-${REGIME}${EXPN_SUFFIX:-}"
 OUT="${RUN_DIR}/${REGIME}"
 WEIGHTS="$OUT/weights"
 mkdir -p "$WEIGHTS"
@@ -92,7 +92,7 @@ mkdir -p "$WEIGHTS"
 # truth for resolved_params) -> driver.log.
 INTERNAL_LOG="$OUT/train_${REGIME}_internal.log"
 
-echo "=== EXP-42/43 $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL(all-params) per_tick=$PER_TICK dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY r2_enabled=$R2_ENABLED r2_async=$R2_ASYNC r2_workers=$R2_WORKERS r2_flush_timeout=$R2_FLUSH_TIMEOUT r2_key=verl-research/$R2_EXPERIMENT/$R2_REGIME/weights exp=$EXPN out_dir=$WEIGHTS ==="
+echo "=== weight-traj $REGIME: comm_eff.enabled=$COMM_EFF_ENABLED weight_traj=FULL(all-params) per_tick=$PER_TICK dump_dtype=$FULL_DTYPE every_steps=$FULL_EVERY r2_enabled=$R2_ENABLED r2_async=$R2_ASYNC r2_workers=$R2_WORKERS r2_flush_timeout=$R2_FLUSH_TIMEOUT r2_key=verl-research/$R2_EXPERIMENT/$R2_REGIME/weights exp=$EXPN out_dir=$WEIGHTS ==="
 LOG="$INTERNAL_LOG" \
 ALLOW_SINGLE_GPU=1 \
 ROLLOUT_TP=1 \

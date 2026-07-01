@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ephemeral supply watcher for EXP-16 (SUPPLY_BLOCKED).
+# Ephemeral supply watcher for a SUPPLY_BLOCKED run.
 # Polls the two sanctioned tiers every 90s. Exits 0 the instant either tier
 # has >=1 qualifying offer (so the orchestrator wakes and dispatches the
 # experiment-runner against live supply); exits 7 on timeout. Free (API only).
