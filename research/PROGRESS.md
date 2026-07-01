@@ -26,3 +26,4 @@ compression train–inference mismatch.
 [2026-07-02T00:47:28+10:00] [research-planner #58] plan written
 [2026-07-02T00:49:51+10:00] [triage] dispatched 1 planner (#58), 0 already planned — #58 plan written & status:planned (operator has since flipped to status:approved)
 [2026-07-02T00:55:03+10:00] [orchestrator] tick: dispatched experiment-runner EXP-58 (READY_TO_RUN, code_change=true, team acct, rung1 1xH200 first, probe→collection on one box). running=[] provisioning=[58] analyzing=[] logging=[] blocked=[]
+[2026-07-02T01:10:52+10:00] [experiment-runner #58] code_change DONE: exp/58-ckpt-r2 pushed (SHA 325acd70), bundle verified; 12/12 CPU tests PASS (all 5 hard invariants at code level); 28/28 r2_sink regression PASS. Provisioning rung 1 (1xH200, team acct).
