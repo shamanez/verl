@@ -1,69 +1,13 @@
-# Progress (updated 2026-06-30)
+# Progress
 
-Durable record: `runs/SUMMARY.md` · `runs/FIXED_CONTROL_SURFACE.md` · the two `reports/*.html`
-summaries · W&B · git. North-star + "done": `.claude/GOAL.md`. Per-experiment verdicts: `LOG.md`.
-This file holds only the current operating base + the two active priorities. Closed-experiment
-tick logs were pruned (recoverable from git + LOG.md); the harness appends new ticks below.
+Durable record: `runs/SUMMARY.md` · `runs/FIXED_CONTROL_SURFACE.md` · `reports/*.html` · W&B · git.
+North-star: `.claude/GOAL.md`. Per-run verdicts: `LOG.md`. Tick history pruned (recoverable from
+git + LOG.md); the harness appends new ticks below.
 
-## Operating base (both priorities start here)
-EMA merger `signed_ema` (alpha=0.25, beta_anc=0.50) on the fast 1K surface (response 1024,
-dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps, val@25/50) at HIGH anchor latency
-(cadence/delay_K = 20/20, the k-collapse regime), on the locked PowerSGD r=77 anchor substrate
-(anchor owns Q, clean=0, paired replay, disable_custom_all_reduce=true). Reproduce:
-`examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`; exact values in
-`runs/FIXED_CONTROL_SURFACE.md`. The baseline runs at high latency on purpose: that is where the
-method collapses (Priority 1). At LOW latency (5/5) the same merger reached parity (val@50 ~0.736 vs
-dense ~0.766), so parity is reachable; holding it at realistic high latency is the open problem.
+**Base:** `signed_ema` (α=0.25, β_anc=0.50), fast 1K surface, HIGH anchor latency
+(cadence/delay_K=20/20, the k-collapse regime), locked PowerSGD r=77 anchor. Values:
+`runs/FIXED_CONTROL_SURFACE.md`.
 
-## Two priorities (one knob at a time, from the base above)
-1. M4: solve the k-collapse by PROJECTING THE WEIGHTS, not the gradient (Nesterov-style: predict
-   theta_hat ~ theta_t, take the gradient at theta_hat). The stale anchor gradient rotates
-   ~orthogonal by k~10-20 (GSM8K cos 0.51 -> 0.02@k10 -> -0.01@k20; pure rotation). The shared dense
-   GRPO weight trajectory (RAW full weights, all params, bf16, per-tick, on R2) is collected; the
-   GPU-free analysis spine (#44-#56) measures weight-projectability directly on that trace: whether a
-   predictor extrapolates theta_hat close to theta_now in weight space, and how far ahead (horizon h)
-   before it overshoots (a DAMPED coefficient below the naive h/Delta is the working prior lever). The
-   compressed-regime follow-up must use an ADAPTIVE basis Q (owns_q=false); a frozen Q is a degenerate
-   codec. Summary: `reports/priority-1-anchor-staleness-k-collapse.html`; architecture:
-   `reports/m4-weight-proj-status-and-architecture.md`.
-2. M6: reduce the compression train-inference mismatch (Gap A): a bounded ~0.04 tax that GRPO
-   absorbs, NOT the collapse cause; the real blocker is Gap B = anchor staleness (= Priority 1).
-   Lever: the truncated-IS corrector / an FP8 rollout-only probe. Summary:
-   `reports/priority-2-compression-train-inference-mismatch.html`.
-
-## Settled background (do not relitigate)
-PowerSGD r=77 + a mandatory anchor that owns Q; the two-circuit structure is mandatory. Goals 1-3
-met at low latency (stable / parity / ~5% gradient-comm). Merger family settled: `signed_ema`;
-prior anchor-usage + beta_anc sweeps were null beyond eval noise. Do not import old anchor-gradient
-claims or run labels into new plans.
-[2026-06-30T15:42:58+10:00] [research-planner #43] plan written
-[2026-06-30T15:43:21+10:00] [triage] dispatched 1 planner, 0 issues already planned
-[2026-06-30T15:54:06+10:00] [orchestrator] tick1: EXP-43 READY_TO_RUN → dispatched experiment-runner (attach external 1xH200 i_43190371 team, launch regimeA collection cell). box SSH-probed healthy. awaiting RUNNING report → monitor next.
-[2026-06-30T15:56:42+10:00] [experiment-runner #43] launched regimeA on 1 external H200 (inst 43190371, team acct) tmux=exp43a exp_name=exp43-regimeA dph=0 max_gpu_hr=14
-[2026-06-30T15:59:46+10:00] [orchestrator] tick1 cont: runner returned RUNNING (exp43a ALIVE, code_change=false @ ded0762, WandB exp43-regimeA; gates 1+4 pre-confirmed in resolved cmd). training-log-monitor dispatched (bg). teardown sweep clean — healthy box survived. awaiting monitor terminal report.
-[2026-06-30T16:04:43+10:00] [orchestrator] OPERATOR STOP: user halted EXP-43 mid-run (killed tmux exp43a, GPU freed 0%, monitor stopped). Run had written only manifest.jsonl + one partial snapshot. Reason: the earlier weight instrument saved a lossy reduced vector (non-invertible), NOT full weight matrices; operator wants ALL weight matrices saved each step for unconstrained offline analysis. Box 43190371 KEPT UP (not torn down) pending reconfig decision (precision/storage/cadence). Heartbeat refreshed to defer auto-reap.
-[2026-06-30T16:36:16+10:00] [orchestrator] CODE CHANGE (operator-directed, this session): removed the old lossy weight-compression path; WeightTrajObserver now dumps FULL weight matrices once per training step (bf16, full/step_*.pt + full_manifest.jsonl). Files: capture.py/comm_eff.py/actor.yaml/transformer_impl.py + weight_traj_run_cell.sh + new verify_full_weight_dump.py; removed the old offline sweep script + report builders. py_compile OK; observer + verifier CPU-smoked PASS. Plan 43 reconciled (code DONE on vast-ai-workload, new session fetch+launch).
-[2026-06-30T16:39:17+10:00] [orchestrator] EXP-43 row RUNNING->ABORTED (operator stop, study redefined full-weights). Code DONE+pushed vast-ai-workload@12202b0e. Issue->status:approved. Box 43190371 KEPT UP (teardown sweep intentionally skipped per operator keep-up). New session: attach 43190371, fetch vast-ai-workload, smoke, launch weight_traj_run_cell.sh regimeA.
-[2026-06-30T17:46:19+10:00] [orchestrator] tick1(new-session): EXP-43 ABORTED row (operator stop, study redefined to FULL-weight per-tick R2) → READY_TO_RUN on NEW external box 43197578 (team). SSH-probed healthy (H200 idle, aws-cli 1.45.37, R2_*+HF+WandB in $HOME/.verl_auth.env, /workspace/verl on vast-ai-workload, 400G 1%). experiment-runner dispatched (bg) to attach + R2 smoke + launch 80-step regimeA collection. Old box 43190371 confirmed DESTROYED via vastai (no leak). Stale handle 43190371.json removed. Teardown sweep DEFERRED to next turn (avoid runs.jsonl write-race with runner promotion; budget proven safe — one healthy box $3.66/hr under $8).
-[2026-06-30T17:59:03+10:00] [experiment-runner #43] launched EXP-43 dense regime-A FULL-weight per-tick collection on external 1xH200 43197578 (team, dph=0): smoke PASSED (2 ticks uploaded+verified to R2, n_matrices=338, down_proj [1536,8960], verify --r2 PASS); real 80-step run live in tmux exp43a, R2 prefix verl-research/EXP-43/regimeA/weights/full/ (upload-then-delete)
-[2026-06-30T18:05:40+10:00] [orchestrator] tick1 cont: runner returned RUNNING — smoke PASSED (tick_0/1 uploaded+verified to R2, verify --r2 PASS, n_matrices=338, down_proj [1536,8960], bf16); 80-step regimeA LIVE (tmux exp43a, WandB a51waqza, codec OFF, per_tick+r2 on). First-tick upload-then-delete CONFIRMED in production. training-log-monitor dispatched (bg). R2 WRITE TEST (user req): box+laptop BOTH upload OK to shamane-pluralis (bucket-guarded, probes cleaned up); earlier 'malformed laptop cred' was WRONG — R2_ACCESS_KEY_ID is 32-char, failure was aws needing AWS_* names not R2_* (sink maps internally, r2_sink.py:130-133). Teardown sweep ran (no-op, healthy box). GPU idles ~60-90s/upload = EXPECTED not stall.
-[2026-06-30T18:22:08+10:00] [orchestrator] tick: EXP-43 RUNNING healthy at 5/80 (global_step:5), 11 R2 objects climbing, 0 NaN/crash, local staging .pt=1 (upload-then-delete OK), disk 376G free. Prior monitor died on API stream-idle-timeout (agent failure, run unaffected); heartbeat refreshed manually + monitor RE-DISPATCHED (45s cadence, 25-min cap, box-side manifest counts, upload-bound GPU-idle flagged as normal). Teardown sweep ran (no-op, heartbeat fresh, healthy box $3.66/hr). Pace ~4 min/step => ~5h to step 80 within 16 GPU-hr cap.
-[2026-06-30T18:40:43+10:00] [orchestrator] tick: EXP-43 RUNNING healthy @ 11/80 (~205s/step, ETA ~3.5h). 23 ticks dumped / 22 R2-verified, local staging=0 (upload-then-delete OK), disk 376G free, 0 crash/NaN, comm_eff counters all 0 (codec OFF confirmed). Monitor returned clean HEALTHY_RETURN (robustness tweaks fixed the stream-idle death); re-dispatched. Heartbeat refreshed + sweep no-op (healthy box preserved). TEARDOWN GATE holds: no verdict.md, no analyst until done.flag+~160 R2 objects+verified.
-[2026-06-30T19:00:52+10:00] [orchestrator] tick: EXP-43 healthy @ 17/80 (~200s/step, ETA ~3.4h). 36 ticks / 35 R2-verified (each ~3.09GB, local==remote bytes), staging 0-1 (upload-then-delete OK), disk 376G free, 0 crash/NaN, codec-OFF counters all 0, reward 0.668→0.753 rising, grad_norm 0.36-0.41 stable. Monitor clean HEALTHY return; re-dispatched. Heartbeat refreshed + sweep no-op. GATE holds. Manifests on box: /workspace/runs/EXP-43/regimeA/weights/{full,r2}_manifest.jsonl.
-[2026-06-30T19:07:34+10:00] [orchestrator] tick: EXP-43 healthy @ 19/80, 39 ticks/38 R2-verified, staging 0-1, disk 376G, 0 crash/NaN, codec-off counters 0, reward ~0.75. Monitor clean return; re-dispatched (28-min window). Heartbeat+sweep no-op. GATE holds.
-[2026-06-30T19:33:35+10:00] [orchestrator] tick: EXP-43 healthy @ 27/80 (~197s/step, ETA ~2.9h). 56 ticks/55 R2-verified (of ~160), staging 0-1, disk 376-379G, 0 crash/NaN, codec-off counters 0, grad_norm 0.39, score 0.784. Monitor full-window clean return; re-dispatched (~26min). Heartbeat+sweep no-op. GATE holds. [parallel: exp/async-r2-upload implementer running in worktree, opt-in default-off, NOT touching live run]
-- 2026-06-30T10:04:22Z EXP-43 regimeA monitor (25 polls/~25min): HEALTHY step 37/80, full_manifest 75 / r2_manifest 74 verified, 0 crash/NaN, disk 376-379G bounded; recommend continue (ETA ~2.3h)
-[2026-06-30T20:07:03+10:00] [orchestrator] tick: EXP-43 healthy @ 37/80 (~197s/step, ETA ~2.3h). 75 ticks/74 R2-verified (of ~160), staging 0-1, disk 376G, 0 crash/NaN, codec-off counters 0, grad_norm ~0.37, reward ~0.74-0.82. Monitor full-window clean; re-dispatched. Heartbeat+sweep no-op. GATE holds. [parallel: fixer abf5 on exp/async-r2-upload (12 review findings); 4 agents annotating M4 analysis issues #44-56 with R2 layer/block-wise access pattern]
-[2026-06-30T10:29:03Z] EXP-43 monitor clean-return: HEALTHY @ step 44/80, full_manifest=90 r2_manifest=89(verified), staging 1, disk 376G free, 0 crashes/NaN, WandB running hlc=42. Continuing; ETA ~1.7h. recommendation=continue.
-[2026-06-30T20:29:38+10:00] [orchestrator] tick: EXP-43 healthy @ 44/80 (~190s/step, ETA ~1.7h). 90 ticks/89 R2-verified (of ~160), staging 0-1 (twice fully caught up), disk 376-379G, 0 crash/NaN, codec-off counters 0, grad_norm 0.358, reward 0.81. Monitor full-window clean; re-dispatched. Heartbeat+sweep no-op. GATE holds. [DONE this session: async-upload edit impl+reviewed(12 bugs)+fixed (exp/async-r2-upload@7e2af3b7, 312 tests), unpushed; all 14 open issues #43-56 annotated with R2 layer/block-wise access pattern]
-2026-06-30T10:57:28Z EXP-43 monitor window: HEALTHY, step 45->53/80, full_manifest 91->108, r2_manifest 90->107 (verified, upload-delete confirmed), 0 crashes/NaN, disk 358G free, done.flag NO; recommend continue (re-dispatch monitor).
-[2026-06-30T20:58:00+10:00] [orchestrator] tick: EXP-43 healthy @ 53/80 (~190s/step, ETA ~1.4h). 108 ticks/107 R2-verified (of ~160), staging 0-1, disk 358-379G, 0 crash/NaN, codec-off counters 0, grad_norm ~0.35, reward ~0.79-0.85. Monitor clean; re-dispatched (completion-watch armed). Heartbeat+sweep no-op. GATE holds. Completion likely within ~2 windows.
-[2026-06-30T21:28:51+10:00] [orchestrator] tick: EXP-43 healthy @ 63/80 (~190s/step, ~54min left). 127 ticks/126 R2-verified (of ~160), staging 0-1, disk 358G, 0 crash/NaN, codec-off counters 0, grad_norm 0.32, score 0.873. Monitor clean; re-dispatched (completion-watch armed). Heartbeat+sweep no-op. GATE holds. Completion plausible in ~1-2 windows.
-- 2026-06-30T11:56:38Z EXP-43 monitor (window close): HEALTHY @ step71/80, gs71 tick141, 0 crashes, full_manifest=143/r2=142, disk 361G, WandB running. Completion next window (~9 steps/~31min). recommend=continue
-[2026-06-30T21:57:09+10:00] [orchestrator] tick: EXP-43 healthy @ 71/80 (~207s/step, ETA ~31min). 143 ticks/142 R2-verified (of ~160, ~89%), staging 0-1, disk 358-361G, 0 crash/NaN, codec-off counters 0, grad_norm 0.31, score ~0.86, WandB running historyLineCount 68. Monitor clean; re-dispatched (completion expected NEXT window). Heartbeat+sweep no-op. GATE holds.
-- [2026-06-30 22:20] EXP-43 regimeA monitor: DONE_AGGREGATE. 80/80 steps, done.flag present (rc=1 benign teardown noise), full+r2 manifests 160/160 verified (R2), final val gsm8k acc/mean@1=0.7809, codec counters all 0 (dense). 0 real errors. Rec: dispatch_analyst.
-[2026-06-30T22:40:08+10:00] [analyst #43] RESOLVED_CONFIG_MISSING: EXP-43 (train.log not at run-dir root; trace in regimeA/train_regimeA_internal.log; resolved_params.txt recovered manually from set -x)
-[2026-06-30T22:40:08+10:00] [analyst #43] verdict=PASS
-MILESTONE_PASS: M4
-[2026-06-30T22:44:26+10:00] [log-writer #43] logged verdict=PASS milestone=M4
-[2026-06-30T22:52:13+10:00] [orchestrator] MERGED async R2 upload into vast-ai-workload (merge 70c63a86, ex-PR #19 MERGED; commits d972dd48+7e2af3b7+9688f285+38ea06fd). Async is now DEFAULT-ON for collection runs (run cell WEIGHT_TRAJ_R2_ASYNC default true; =false rolls back to synchronous). 312+ comm_eff CPU tests pass. BOX-VALIDATION STILL PENDING: the next collection run from vast-ai-workload exercises the async path (real throughput / disk backpressure / comm_eff_close under Ray teardown) — monitor it, fall back via WEIGHT_TRAJ_R2_ASYNC=false if it misbehaves. EXP-43 itself fully closed (PASS, box torn down, cost $18.60).
+**Two priorities:** (1) M4 — solve the k-collapse by projecting WEIGHTS; the dense weight trajectory
+is collected → R2; GPU-free analysis spine #44–#56, entry **#44**. (2) M6 — shrink the ~0.04
+compression train–inference mismatch.
