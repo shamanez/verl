@@ -11,4 +11,6 @@ every analysis issue reads. Available in **both precisions** (160/160 R2-verifie
 - **bf16** (EXP-43, ~3.1 GB/snap): `s3://shamane-pluralis/verl-research/EXP-43/regimeA/weights/full/tick_<N>/tick_<N>.pt`
 - **fp32** (EXP-57, ~6.17 GB/snap — the true fp32 master weights; **use this for #44–#56**): `s3://shamane-pluralis/verl-research/EXP-57/regimeA/weights/full/tick_<N>/tick_<N>.pt`  (N = 0..159)
 
-Next: **#44** (GPU-free offline sweep engine). Access: `reports/r2-access-pattern-for-analysis.md`.
+**#44 PASS** — offline sweep engine accepted (`research/scripts/weight_proj/`, self-test `reports/infra-b-sweep-engine-selftest.html`).
+Next: **#45–#56** (GPU-free projection science) — **switched to the fp32 EXP-57 trace** (engine is dtype-agnostic ⇒ `<trace_dir>` swap, no code change).
+Access: `reports/r2-access-pattern-for-analysis.md`.
