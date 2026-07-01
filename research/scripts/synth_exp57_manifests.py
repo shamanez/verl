@@ -63,11 +63,13 @@ def _load_snapshot_for_norms(args, prefix: str) -> dict:
     if args.trace_root:
         with RS.LocalSnapshotSource(args.trace_root) as src:
             return src.load(tick, names=None)
-    # stream one snapshot from R2 (canonical_prefix already points at --experiment)
+    # stream one snapshot from R2 (canonical_prefix already points at --experiment).
+    # TemporaryDirectory removes the staging dir itself on exit (R2SnapshotStream.__exit__
+    # only clears its CONTENTS), so no empty wp_synth_* dir leaks in /tmp.
     import tempfile
-    staging = tempfile.mkdtemp(prefix="wp_synth_")
-    with RS.R2SnapshotStream(staging, min_free_gb=8) as stream:
-        return stream.load(tick, names=None)
+    with tempfile.TemporaryDirectory(prefix="wp_synth_") as staging:
+        with RS.R2SnapshotStream(staging, min_free_gb=8) as stream:
+            return stream.load(tick, names=None)
 
 
 def main() -> int:

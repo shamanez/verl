@@ -49,25 +49,40 @@ def _load_size_by_tick(experiment: str, regime: str) -> dict[int, int]:
 
 
 def _fetch_one(tick: int, bucket: str, dest: str, expected: int | None) -> tuple[int, str]:
-    """Download one tick to <dest>/full/tick_<N>/tick_<N>.pt (skip if already complete)."""
+    """Download one tick to <dest>/full/tick_<N>/tick_<N>.pt (skip if already complete).
+
+    ATOMIC + self-healing: downloads to a `.part` sidecar and `os.replace`s onto the final
+    path ONLY after a clean transfer (+ size check when known). So an interrupted download
+    (SSH drop / disk pressure) never leaves a partial file at the FINAL path where a later
+    resume would silently skip it — a stale `.part` is simply overwritten on the next run.
+    """
     key = RS.tick_key(tick)
     local_dir = os.path.join(dest, "full", f"tick_{tick}")
     local = os.path.join(local_dir, f"tick_{tick}.pt")
+    part = local + ".part"
     if os.path.exists(local):
         sz = os.path.getsize(local)
         if (expected is None and sz > 0) or (expected is not None and sz == expected):
             return tick, "skip (present)"
+        # present but wrong size (only detectable with expected) -> re-fetch
     os.makedirs(local_dir, exist_ok=True)
+    if os.path.exists(part):
+        os.remove(part)                       # discard any stale partial before re-download
     cp = subprocess.run(
-        ["aws", "s3", "cp", f"s3://{bucket}/{key}", local,
+        ["aws", "s3", "cp", f"s3://{bucket}/{key}", part,
          "--endpoint-url", RS.r2_endpoint(), "--no-progress"],
         env=RS.r2_env(), capture_output=True, text=True,
     )
     if cp.returncode != 0:
+        if os.path.exists(part):
+            os.remove(part)                   # never leave a partial behind
         return tick, f"FAIL rc={cp.returncode}: {cp.stderr.strip()[:200]}"
-    sz = os.path.getsize(local) if os.path.exists(local) else 0
+    sz = os.path.getsize(part) if os.path.exists(part) else 0
     if expected is not None and sz != expected:
+        if os.path.exists(part):
+            os.remove(part)
         return tick, f"FAIL size {sz} != expected {expected}"
+    os.replace(part, local)                   # atomic promote to the final path
     return tick, f"ok ({sz/(1<<30):.2f} GB)"
 
 
@@ -90,6 +105,11 @@ def main() -> int:
     os.environ["WP_R2_PREFIX"] = f"verl-research/{args.experiment}/{args.regime}/weights/full"
 
     ticks = TS.select_ticks(args.cadence, args.n_ticks)
+    if args.cadence == "per-step":
+        print("[fetch] WARNING: --cadence per-step fetches ONLY the even ticks "
+              f"({len(ticks)} of 160). The synthesized full_manifest still advertises all 160 ticks, so "
+              "per-tick analysis will FileNotFoundError on the missing odd ticks. Use the default "
+              "(per-tick, all 160) for the download-everything flow; per-step is a deliberate subset.", flush=True)
     size_by_tick = _load_size_by_tick(args.experiment, args.regime) if args.verify_sizes else {}
     if args.verify_sizes and not size_by_tick:
         print("[fetch] --verify-sizes set but no r2_manifest with remote_bytes found — "
