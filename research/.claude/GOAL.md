@@ -63,13 +63,12 @@ codec**. The full result + why + what's next live in `research/runs/SUMMARY.md`
 The base is a working comm-eff trainer at parity; the two open fronts are both about the
 **anchor ↔ fast-circuit coupling**:
 
-1. **Solve the k-collapse by projecting the weights** (milestone M4). The stale anchor gradient
-   rotates to orthogonal by k≈10–20 (GSM8K cos 0.51→0.18@k5→0.02@k10→−0.01@k20; norm ratio ≈1.0 ⇒
-   *pure rotation*, magnitude intact). Fix = **extrapolate the anchor's _weights_ forward** (Nesterov-style — the gradient is computed at the
-   look-ahead weights θ̂≈θ_t, *not* a patched gradient), via a **learned per-block weight-projection**
-   **supervised by the fast circuit's synced weights** (the residual θ_t−θ̂ trains the projector online,
-   beating AsyncPP's fixed-linear rule, arXiv:2505.01099). Gated by a GPU-free offline kill-test
-   (weight-prediction → does g(θ̂) recover cos@k5 ≥0.40, off-diagonal). Summary:
+1. **Solve the anchor-staleness failure at high latency** (milestone M4). At high anchor
+   latency the method loses parity with dense (the observed "k-collapse"). *Why* the stale
+   anchor degrades the update, and *what* restores parity, are open questions to settle
+   empirically — this north-star does **not** prescribe a mechanism or a fix. Weight projection
+   is the current candidate direction under investigation, gated by a GPU-free offline test on
+   the shared dense weight trajectory before any GPU commitment. Summary:
    `reports/priority-1-anchor-staleness-k-collapse.html`.
 2. **Reduce the compression-induced train–inference mismatch** (milestone M6). The codec's
    forward-pass distortion ("Gap A") is a bounded ~0.04 tax GRPO absorbs; shrink it (the truncated-IS
@@ -91,8 +90,8 @@ real decentralized-PP link, would itself be stale. The anchor circuit is the rea
 realization of that idea: a **low-frequency, stale, full-gradient reference**
 maintained continuously and folded into the fast compressed gradient — and it also
 owns the projection basis `Q`. The operating merger is the EMA-family `signed_ema`.
-The open questions are now the **two priorities above**: projecting the stale
-anchor forward to fix the k-collapse, and reducing the compression-induced mismatch.
+The open questions are now the **two priorities above**: correcting for the stale
+anchor to restore parity at high latency, and reducing the compression-induced mismatch.
 See `SUMMARY.md`.
 
 ## Why code changes are in scope

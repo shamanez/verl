@@ -27,3 +27,4 @@ compression train–inference mismatch.
 [2026-07-01T18:41:55+10:00] [research-planner #57] plan written
 [2026-07-01T18:42:35+10:00] [triage] dispatched 1 planners, 1 issues already planned
 EARLY_ABORT_CLEAR - training/global_step:3, 6 fp32 manifest rows (n_matrices=338), r2 tick_0 verified 6.17GB @ EXP-57 prefix. Gate PASS.
+- EXP-57 regimeA (fp32 dense weight-traj): DRAIN COMPLETE @ 2026-07-01 — step 80/80, tick 160/160; full_manifest=160, r2_manifest=160 (all verified byte-exact, 0 errors), staged=0. Val gsm8k acc@1=0.782. Tracebacks = benign teardown noise only. Ready for teardown gate → dispatch_analyst.
