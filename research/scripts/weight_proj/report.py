@@ -63,6 +63,8 @@ def render_html(report: dict, out_path: str) -> None:
     Writes a self-contained HTML."""
     meta = report.get("meta", {})
     esc = html.escape
+    dtype = str(meta.get("dump_dtype", "bf16"))
+    fp32 = dtype.lower() == "fp32"
     P = ['<!doctype html><html><head><meta charset="utf-8">',
          '<title>Infra-B sweep engine self-test (EXP-44)</title>',
          '<style>body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:24px;color:#222;max-width:1100px}',
@@ -73,6 +75,7 @@ def render_html(report: dict, out_path: str) -> None:
          'td.l,th.l{text-align:left}.small{color:#888;font-size:11px}</style></head><body>']
     P.append(f"<h1>Infra-B weight-projection sweep engine — self-test</h1>")
     P.append(f'<p class="small">EXP-44 · trace: {esc(str(meta.get("manifest","")))} · '
+             f'dtype: {esc(dtype)} · source: {esc(str(meta.get("trace_source","")))} · '
              f'ticks sampled: {esc(str(meta.get("ticks","")))} · '
              f'generated: {esc(str(meta.get("generated","")))}</p>')
 
@@ -187,13 +190,55 @@ def render_html(report: dict, out_path: str) -> None:
     P.append("<h2>weight_proj_ratio vs horizon — one curve per family</h2>")
     curves = {k: v for k, v in report.get("family_curves", {}).items()}
     P.append(_svg_curve(curves, "median weight_proj_ratio(h)  (per-block group, sampled)"))
-    P.append('<p class="small">A ratio &gt; 1 / h* = 0 (predictor no better than the stale '
-             'anchor) is a VALID SCIENTIFIC FINDING about bf16 RLVR weight geometry for '
-             '#52-#56 to interpret through the sparsity lens — NOT an engine-acceptance '
-             'failure. Engine acceptance = families reconstruct + fro-norm OK + no MOVING '
-             'core block noise-dominated at h&gt;=5.</p>')
+    if fp32:
+        P.append('<p class="small">A ratio &gt; 1 / h* = 0 (predictor no better than the stale '
+                 'anchor) is a VALID SCIENTIFIC FINDING about RLVR weight geometry for '
+                 '#52-#56 — NOT an engine-acceptance failure. Engine acceptance (fp32) = '
+                 'families reconstruct + fro-norm OK. Weights are exact fp32, so there is no '
+                 'quantization-noise floor: reliability is projection accuracy + linearity.</p>')
+    else:
+        P.append('<p class="small">A ratio &gt; 1 / h* = 0 (predictor no better than the stale '
+                 'anchor) is a VALID SCIENTIFIC FINDING about bf16 RLVR weight geometry for '
+                 '#52-#56 to interpret through the sparsity lens — NOT an engine-acceptance '
+                 'failure. Engine acceptance = families reconstruct + fro-norm OK + no MOVING '
+                 'core block noise-dominated at h&gt;=5.</p>')
 
-    # noise-floor gate table (CORRECTED differenced floor)
+    # motion & linearity table — dtype-aware. fp32: no quantization floor (operator
+    # directive); bf16 (legacy): the CORRECTED differenced-noise floor gate.
+    if fp32:
+        P.append("<h2>Weight motion &amp; linearity (fp32 — exact weights, no quantization floor)</h2>")
+        P.append('<p class="small">The weights are exact fp32, so there is NO quantization-noise '
+                 'floor to clear — the bf16 differenced-floor / SNR / PuLSE-ULP gate is removed. '
+                 'Per (block, h) we report the raw cumulative displacement '
+                 '&#8214;&theta;[t]&minus;&theta;[t&minus;h]&#8214; and the LINEARITY of the drift: '
+                 'fixed-origin cumulative displacement &#8733; h<sup>p</sup>, with p&#8776;1 = a '
+                 'straight-line directed drift (R&sup2; is the log-log fit quality). Reliability = '
+                 'projection accuracy (ratio) + linearity, not a floor. manifest fro-norm '
+                 'cross-check tol = 1e-2 rel.</p>')
+        P.append("<table><tr><th class='l'>block</th><th>h</th><th>||disp||</th>"
+                 "<th>p (linearity)</th><th>R&sup2;</th><th>ratio</th><th class='l'>status</th></tr>")
+        for r in report.get("floor_table", []):
+            moves = r.get("moves", r["err_norm"] > 0.0)
+            p = r.get("directed_p", float("nan"))
+            r2v = r.get("directed_r2", float("nan"))
+            if not moves:
+                status = '<span class="small">zero-motion (unchanging)</span>'
+                ratio_cell = "—"
+            else:
+                status = '<span class="ok">moves (fp32-exact)</span>'
+                ratio_cell = f'{r["ratio"]:.4f}' if r["ratio"] == r["ratio"] else "nan"
+            p_cell = f'{p:.2f}' if p == p else "—"
+            r2_cell = f'{r2v:.3f}' if r2v == r2v else "—"
+            P.append(f'<tr><td class="l">{esc(r["block"])}</td><td>{r["h"]}</td>'
+                     f'<td class="mono">{r["err_norm"]:.4e}</td>'
+                     f'<td class="mono">{p_cell}</td><td class="mono">{r2_cell}</td>'
+                     f'<td class="mono">{ratio_cell}</td>'
+                     f'<td class="l">{status}</td></tr>')
+        P.append("</table>")
+        # skip the bf16-only floor table + PuLSE sections; jump to grouping integrity.
+        return _finish_report(P, report, esc, out_path)
+
+    # noise-floor gate table (CORRECTED differenced floor) — bf16 legacy path
     P.append("<h2>bf16 DIFFERENCED-noise-floor gate (replaces on-box parity)</h2>")
     P.append('<p class="small">floor = bf16 quantization noise of the DIFFERENCE '
              'e = (&Sigma; c<sub>j</sub>&theta;<sub>j</sub>) &minus; &theta;<sub>now</sub> of two '
@@ -251,6 +296,14 @@ def render_html(report: dict, out_path: str) -> None:
                  f'<td class="mono">{u.get("frac_ge_3ulp",0.0)*100:.0f}%</td></tr>')
     P.append("</table>")
 
+    return _finish_report(P, report, esc, out_path)
+
+
+def _finish_report(P: list, report: dict, esc, out_path: str) -> None:
+    """Shared tail (grouping integrity + machine-readable JSON + close + write).
+
+    Called by both the fp32 (motion/linearity) and bf16 (floor-gate) render paths.
+    """
     # grouping integrity
     g = report.get("grouping", {})
     P.append("<h2>Grouping integrity</h2><table>")

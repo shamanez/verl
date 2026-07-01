@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""weight_proj/r2_stream.py — bounded-footprint streaming reader for the EXP-43 trace.
+"""weight_proj/r2_stream.py — snapshot readers for the weight trace (R2 stream + local disk).
 
-HARD streaming contract (research/reports/r2-access-pattern-for-analysis.md):
+TWO readers behind ONE `load(tick, names) -> {name: fp32 tensor}` contract:
+  * R2SnapshotStream    — the bounded-footprint STREAMING reader (unchanged). Governs
+                          the "pull from R2 one .pt at a time" path used for cheap,
+                          few-snapshot analyses (e.g. the GPU-gated tier, #46).
+  * LocalSnapshotSource — reads a PRE-DOWNLOADED trace off local disk (NO download,
+                          NO delete, NO df guard, NO working-set cap). This is the
+                          "download everything first, then analyse on a big-disk box"
+                          mode (tasks 1 & 3) — the bounded-footprint constraint is
+                          RELEASED for analysis here.
+Callers pick by presence of a local trace root (weight_proj_sweep.py --trace-root).
+
+HARD streaming contract for R2SnapshotStream ONLY (r2-access-pattern-for-analysis.md):
   * Drive downloads from the in-repo manifests, NOT a bucket-list.
   * Load each `.pt` snapshot exactly ONCE, extract the per-matrix slices the caller
     asked for, then DELETE the local `.pt` immediately.
-  * NEVER `aws s3 cp --recursive` the ~494 GB prefix. The staging dir holds at most
-    a couple of in-flight snapshots (bounded working set); we assert `df` headroom.
+  * NEVER `aws s3 cp --recursive` the prefix from THIS path. The staging dir holds at
+    most a couple of in-flight snapshots (bounded working set); we assert `df` headroom.
+    (The one-shot whole-trace fetch lives in weight_proj_fetch_trace.py, not here.)
+The COLLECTION launcher (weight_traj_run_cell.sh) keeps its upload-then-delete
+discipline unchanged — the released-footprint toggle is ANALYSIS-only.
 
 R2 credential mapping (cribbed VERBATIM from verify_full_weight_dump.py /
 verl/workers/comm_eff/r2_sink.py — do NOT reinvent):
@@ -25,8 +39,27 @@ import shutil
 import subprocess
 import tempfile
 
-CANONICAL_PREFIX = "verl-research/EXP-43/regimeA/weights/full"
 CANONICAL_BUCKET = "shamane-pluralis"
+
+
+def canonical_prefix() -> str:
+    """R2 key prefix for the trace's `full/` dir.
+
+    Defaults to the EXP-43 layout (byte-identical to the original streaming path)
+    but is overridable for other experiments — chiefly the fp32 EXP-57 trace — via
+    either WP_R2_PREFIX (a full prefix) or WP_R2_EXPERIMENT (just the experiment id).
+    Read LIVE (not frozen at import) so a caller can set the env then stream.
+    """
+    p = os.environ.get("WP_R2_PREFIX", "")
+    if p:
+        return p.rstrip("/")
+    exp = os.environ.get("WP_R2_EXPERIMENT", "EXP-43")
+    return f"verl-research/{exp}/regimeA/weights/full"
+
+
+# Back-compat module constant (docstrings / stale imports reference it). Reflects the
+# default experiment at import time; prefer canonical_prefix() for live reads.
+CANONICAL_PREFIX = canonical_prefix()
 
 
 def r2_endpoint() -> str:
@@ -69,14 +102,38 @@ def load_r2_manifest(manifest_path: str) -> dict[int, dict]:
     return out
 
 
-def tick_key(tick: int) -> str:
-    """Canonical R2 key for a tick (matches r2_manifest: full/tick_<N>/tick_<N>.pt)."""
-    return f"{CANONICAL_PREFIX}/tick_{tick}/tick_{tick}.pt"
+def tick_key(tick: int, prefix: str | None = None) -> str:
+    """Canonical R2 key for a tick (matches r2_manifest: full/tick_<N>/tick_<N>.pt).
+
+    Uses the live canonical_prefix() (experiment-overridable) unless an explicit
+    prefix is passed. NOTE: _download prefers the verified key from r2_manifest and
+    only falls back here when no r2 row exists — so on EXP-57 you must set
+    WP_R2_EXPERIMENT/WP_R2_PREFIX (or supply an r2_manifest) or this returns EXP-43
+    keys.
+    """
+    base = prefix if prefix is not None else canonical_prefix()
+    return f"{base}/tick_{tick}/tick_{tick}.pt"
 
 
 def _df_free_bytes(path: str) -> int:
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize
+
+
+def _reduce_state_dict(sd: dict, names: list[str] | None) -> dict:
+    """Keep only `names` (all if None) and cast each kept tensor to a cpu fp32 tensor.
+
+    Shared by R2SnapshotStream (stream-from-R2) and LocalSnapshotSource (read-from-disk)
+    so the fp32-cast contract is IDENTICAL regardless of where the .pt came from
+    (differencing is done in fp32 upstream). bf16->fp32 is exact; fp32->fp32 is a copy.
+    """
+    import torch
+    keep = names if names is not None else list(sd.keys())
+    out = {}
+    for n in keep:
+        if n in sd:
+            out[n] = sd[n].detach().to("cpu").to(torch.float32)
+    return out
 
 
 class R2SnapshotStream:
@@ -158,14 +215,72 @@ class R2SnapshotStream:
                 if os.path.exists(dst):
                     os.remove(dst)
         # cast the requested slices to fp32 (differencing is done in fp32 upstream)
-        keep = names if names is not None else list(sd.keys())
-        out = {}
-        for n in keep:
-            if n in sd:
-                out[n] = sd[n].detach().to("cpu").to(torch.float32)
+        out = _reduce_state_dict(sd, names)
         del sd
         return out
 
     def footprint_ok(self, cap: int = 2) -> bool:
         """Bounded working set: at most `cap` .pt on disk at any observed moment."""
         return self.max_staged_observed <= cap
+
+
+class LocalSnapshotSource:
+    """Reads a PRE-DOWNLOADED full-model trace straight off local disk.
+
+    Drop-in for R2SnapshotStream behind the SAME `load(tick, names) -> {name: fp32
+    tensor}` contract, for the "whole trace already on disk" analysis mode — the cheap,
+    big-disk, GPU-free box the operator downloads everything to first (tasks 1 & 3).
+    It performs NO download, NO delete, NO df-headroom guard, and NO working-set cap;
+    the bounded-footprint streaming discipline is intentionally RELEASED here (it still
+    governs COLLECTION and the R2 streaming path, both unchanged).
+
+        with LocalSnapshotSource(trace_root) as src:
+            for tick in ticks:
+                sd = src.load(tick, names)   # torch.load off disk, keep only names as fp32
+
+    SAFETY: __exit__ is a PURE NO-OP. This source never owns the files it reads, so it
+    must NEVER remove them — a stray delete would wipe the ~1 TB local trace.
+
+    Layout: <trace_root>/full/tick_<N>/tick_<N>.pt (mirrors the R2 key layout that
+    weight_proj_fetch_trace.py writes); a flat <trace_root>/full/tick_<N>.pt is accepted
+    as a fallback.
+    """
+
+    def __init__(self, trace_root: str, verbose: bool = True):
+        self.trace_root = trace_root
+        self.verbose = verbose
+        # interface parity with R2SnapshotStream (read by logging / footprint checks)
+        self.max_staged_observed = 0
+        self.downloads = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # PURE NO-OP — the trace is pre-downloaded and operator-owned; never delete it.
+        return False
+
+    def footprint_ok(self, cap: int = 2) -> bool:
+        return True
+
+    def _path(self, tick: int) -> str:
+        nested = os.path.join(self.trace_root, "full", f"tick_{tick}", f"tick_{tick}.pt")
+        if os.path.exists(nested):
+            return nested
+        # flat fallback (matches full_manifest `path` field: full/tick_<N>.pt)
+        return os.path.join(self.trace_root, "full", f"tick_{tick}.pt")
+
+    def load(self, tick: int, names: list[str] | None = None) -> dict:
+        """Read tick_<N>.pt off local disk, keep only `names` as fp32. NEVER deletes."""
+        import torch
+        path = self._path(tick)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"LOCAL_TRACE_MISSING: tick {tick} not found under {self.trace_root} "
+                f"(looked for full/tick_{tick}/tick_{tick}.pt and full/tick_{tick}.pt) — "
+                f"is the trace fully downloaded? (weight_proj_fetch_trace.py)"
+            )
+        sd = torch.load(path, map_location="cpu", weights_only=False)
+        out = _reduce_state_dict(sd, names)
+        del sd
+        return out

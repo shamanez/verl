@@ -78,6 +78,22 @@ CORE_BLOCKS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "
 # module-level cadence (set by main from --cadence); default per-step per the plan.
 CADENCE = "per-step"
 
+# Local trace root (set by main from --trace-root / WP_TRACE_ROOT). When non-empty the
+# engine reads a PRE-DOWNLOADED trace off local disk via RS.LocalSnapshotSource (no
+# download, no delete) instead of streaming from R2 — tasks 1 & 3. Empty => R2 stream
+# (byte-identical to the original path).
+TRACE_ROOT = ""
+
+# Dump dtype of the trace (set by main from the manifest's dump_dtype). "fp32" (EXP-57,
+# the trace we've moved to) DISABLES the bf16 quantization-noise floor gate: on exact
+# fp32 weights that floor is physically meaningless, so reliability leans on projection
+# accuracy + linearity (directedness). "bf16" keeps the legacy EXP-43 floor gate.
+DUMP_DTYPE = "bf16"
+
+
+def _is_fp32() -> bool:
+    return str(DUMP_DTYPE).lower() == "fp32"
+
 # per-process cache of extracted fp32 slices keyed by tick -> {name: tensor}. Only the
 # few sampled matrices (a few MB); the 3 GB .pt is deleted immediately after slicing.
 _SLICE_CACHE: dict[int, dict] = {}
@@ -101,10 +117,18 @@ def _stream_ticks_cached(r2_rows, ticks, names, log, label):
     (invariants/noise-floor/full-sweep) download each tick's .pt at most ONCE."""
     need = [t for t in ticks if t not in _SLICE_CACHE or any(n not in _SLICE_CACHE[t] for n in names)]
     if need:
-        with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
+        if TRACE_ROOT:
+            src = RS.LocalSnapshotSource(TRACE_ROOT)          # pre-downloaded local disk
+        else:
+            src = RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows)  # R2 stream
+        with src as stream:
             fresh = SW.stream_group_histories(stream, need, names)
-            log(f"[{label}] streamed {len(need)} new ticks {need}; "
-                f"max staged .pt = {stream.max_staged_observed} (cap 2); downloads={stream.downloads}")
+            if TRACE_ROOT:
+                log(f"[{label}] local trace_root={TRACE_ROOT}; loaded {len(need)} ticks "
+                    f"{need} in place (no download, no delete)")
+            else:
+                log(f"[{label}] streamed {len(need)} new ticks {need}; "
+                    f"max staged .pt = {stream.max_staged_observed} (cap 2); downloads={stream.downloads}")
         for t, sl in fresh.items():
             _SLICE_CACHE.setdefault(t, {}).update(sl)
     else:
@@ -209,11 +233,18 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
     inv.append({"name": "learnable/regression leakage guard", "gate": "hard",
                 "pass": ok_leak, "detail": leak_detail})
 
-    # 5. bounded streaming footprint
-    inv.append({"name": "bounded streaming footprint", "gate": "hard",
-                "pass": footprint_ok,
-                "detail": "each 3GB .pt deleted immediately post-load; only sliced fp32 "
-                          "tensors cached (a few MB); no aws s3 cp --recursive"})
+    # 5. bounded streaming footprint (R2 stream) OR footprint N/A (local pre-downloaded trace)
+    if TRACE_ROOT:
+        inv.append({"name": "bounded streaming footprint", "gate": "hard",
+                    "pass": True,
+                    "detail": f"local trace_root={TRACE_ROOT}: analysis reads snapshots in "
+                              "place, no download/delete — bounded-footprint constraint "
+                              "intentionally RELEASED for the pre-downloaded trace (tasks 1 & 3)"})
+    else:
+        inv.append({"name": "bounded streaming footprint", "gate": "hard",
+                    "pass": footprint_ok,
+                    "detail": "each .pt deleted immediately post-load; only sliced fp32 "
+                              "tensors cached (a few MB); no aws s3 cp --recursive"})
 
     # 6. grouping integrity (soft)
     grouping = SW.build_grouping(names_all)
@@ -318,10 +349,12 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
         fro_ok = fro_ok and ok
 
     # empirical ground-truth null: an unchanging tensor differences to EXACTLY 0.0.
-    for nm in sample_names:
-        z = NF.zero_motion_null_floor(hist[ticks_sorted[0]][nm])
-        log(f"[noise-floor] zero-motion null (self-difference) {nm.split('.')[-2]}: {z:.4e} "
-            f"(correlated floor of an unchanging value == 0.0)")
+    # (bf16-only: on fp32 there is no quantization-noise floor to characterise.)
+    if not _is_fp32():
+        for nm in sample_names:
+            z = NF.zero_motion_null_floor(hist[ticks_sorted[0]][nm])
+            log(f"[noise-floor] zero-motion null (self-difference) {nm.split('.')[-2]}: {z:.4e} "
+                f"(correlated floor of an unchanging value == 0.0)")
 
     # directedness per block (the discriminator) — fit once over the horizons.
     directed = {}
@@ -329,7 +362,7 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
         p, r2, _, _ = _block_directedness(hist, ticks_sorted, nm, horizons, log)
         directed[SW.block_family(nm)] = {"p": p, "r2": r2, "is_directed": NF.is_directed(p)}
 
-    fam = PR.build_family_registry()["order1-fixed"]
+    fp32 = _is_fp32()
     floor_table = []
     core_below = []
     for nm in sample_names:
@@ -340,15 +373,22 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
             anchor_pos = score_pos - h
             if anchor_pos < 0:
                 continue
-            # GATE RESIDUAL = raw cumulative displacement theta[t]-theta[t-h] (the object
-            # the plan's noise-floor gate is about), i.e. the identity residual (c=[1]).
+            # Raw cumulative displacement theta[t]-theta[t-h] (identity residual, c=[1]).
             theta_now = hist[ticks_sorted[score_pos]][nm]
             theta_stale = hist[ticks_sorted[anchor_pos]][nm]
-            floor = NF.differenced_floor([1.0], [theta_stale], theta_now)   # upper-bound noise ref
-            row = M.full_metric_row(theta_stale, theta_now, theta_stale, floor)  # e = stale-now = -disp
-            moves = row["err_norm"] > 0.0
-            # bf16-reliable iff it moves AND the block is DIRECTED (real signal, not jitter).
-            reliable = moves and blk_directed
+            if fp32:
+                # FP32: no bf16 quantization floor. Report displacement + linearity
+                # (directedness) only; the floor/SNR gate is removed (operator directive).
+                floor = 0.0
+                row = M.full_metric_row(theta_stale, theta_now, theta_stale, None)  # snr -> nan
+                moves = row["err_norm"] > 0.0
+                reliable = moves
+            else:
+                floor = NF.differenced_floor([1.0], [theta_stale], theta_now)  # upper-bound noise ref
+                row = M.full_metric_row(theta_stale, theta_now, theta_stale, floor)  # e = stale-now = -disp
+                moves = row["err_norm"] > 0.0
+                # bf16-reliable iff it moves AND the block is DIRECTED (real signal, not jitter).
+                reliable = moves and blk_directed
             row["bf16_unreliable"] = (not reliable)
             row["block"] = block
             row["floor"] = floor
@@ -360,16 +400,23 @@ def _noise_floor_from_hist(hist, full_rows, horizons, log):
             floor_table.append(row)
             if not moves:
                 flag = "zero-motion (unchanging)"
+            elif fp32:
+                flag = "moves (fp32-exact)"
             elif reliable:
                 flag = "clears (directed signal)"
             else:
                 flag = "bf16-unreliable"
-            log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||disp||={row['err_norm']:.4e} "
-                f"SNR={row['snr']:.2f} p={directed[block]['p']:.2f} -> {flag}")
-            # STOP trigger: a MOVING core block that is NOT directed at h>=5 (noise-dominated).
-            if h >= 5 and moves and (not blk_directed) and block in CORE_BLOCKS:
+            if fp32:
+                log(f"[motion] block={block} h={h} ||disp||={row['err_norm']:.4e} "
+                    f"p={directed[block]['p']:.2f} (R^2={directed[block]['r2']:.3f}) -> {flag}")
+            else:
+                log(f"[noise-floor] block={block} h={h} floor={floor:.4e} ||disp||={row['err_norm']:.4e} "
+                    f"SNR={row['snr']:.2f} p={directed[block]['p']:.2f} -> {flag}")
+            # STOP trigger (bf16 only): a MOVING core block NOT directed at h>=5.
+            if (not fp32) and h >= 5 and moves and (not blk_directed) and block in CORE_BLOCKS:
                 core_below.append((block, h))
-    sparse_subset = _sparse_subset_from_hist(hist, log)
+    # sparse-subset (PuLSE) is a bf16-ULP characterization — n/a on exact fp32.
+    sparse_subset = {} if fp32 else _sparse_subset_from_hist(hist, log)
     return floor_table, fro_ok, core_below, sparse_subset
 
 
@@ -424,9 +471,15 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
                                                delta=deltas[0], h=h)
                 if row is None:
                     continue
-                # DIRECTEDNESS gate: reliable iff the block moves AND is directed (signal).
+                # FP32: no bf16 floor to exclude against — every block with a defined
+                # (non-NaN) ratio is valid projection-accuracy data; directedness is kept
+                # as a REPORTED linearity metric, not an exclusion gate. BF16 (legacy):
+                # reliable iff the block moves AND is directed (above the rounding floor).
                 moves = row["err_norm"] > 0.0
-                row["bf16_unreliable"] = (not (moves and directed.get(block, False)))
+                if _is_fp32():
+                    row["bf16_unreliable"] = False
+                else:
+                    row["bf16_unreliable"] = (not (moves and directed.get(block, False)))
                 row["block"] = block
                 row["family_key"] = fam_key
                 row["directed"] = directed.get(block, False)
@@ -462,12 +515,20 @@ def main():
     ap.add_argument("--group", default="matrix,block,layer")
     ap.add_argument("--cadence", default="per-step", choices=["per-step", "per-tick"],
                     help="per-step (even ticks; plan default) | per-tick (all ticks; noisier)")
+    ap.add_argument("--trace-root", default=os.environ.get("WP_TRACE_ROOT", ""),
+                    help="read a PRE-DOWNLOADED trace off local disk (<root>/full/tick_N/tick_N.pt) "
+                         "instead of streaming from R2 — the download-everything-first mode. "
+                         "Empty (default) => stream from R2, byte-identical to the original path.")
+    ap.add_argument("--dump-dtype", default="", choices=["", "bf16", "fp32"],
+                    help="override the trace dtype (default: read from the manifest's dump_dtype). "
+                         "fp32 disables the bf16 quantization-noise floor gate.")
     ap.add_argument("--emit-report", default="")
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
-    global CADENCE
+    global CADENCE, TRACE_ROOT, DUMP_DTYPE
     CADENCE = args.cadence
+    TRACE_ROOT = args.trace_root
 
     def log(msg):
         print(msg, flush=True)
@@ -475,13 +536,19 @@ def main():
     full_rows = RS.load_full_manifest(args.manifest)
     r2_path = os.path.join(os.path.dirname(args.manifest), "r2_manifest.jsonl")
     r2_rows = RS.load_r2_manifest(r2_path)
+    # dtype: CLI override wins, else the manifest's dump_dtype (default bf16 legacy).
+    DUMP_DTYPE = args.dump_dtype or str(full_rows[0].get("dump_dtype", "bf16")) if full_rows else "bf16"
     horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
     deltas = [int(x) for x in args.deltas.split(",") if x.strip()]
+    mode = f"local trace_root={TRACE_ROOT}" if TRACE_ROOT else "R2 stream"
     log(f"[engine] manifest rows={len(full_rows)} r2 keys={len(r2_rows)} cadence={CADENCE} "
-        f"(full R2 trace = tick_0..tick_159; streaming keyed by tick)")
+        f"dtype={DUMP_DTYPE} source={mode}"
+        + ("" if _is_fp32() else " (bf16 differenced-noise floor gate ACTIVE)")
+        + (" (fp32: floor gate OFF — projection accuracy + linearity only)" if _is_fp32() else ""))
 
     report = {"meta": {"manifest": args.manifest, "ticks": args.sample_ticks,
-                       "cadence": CADENCE,
+                       "cadence": CADENCE, "dump_dtype": DUMP_DTYPE,
+                       "trace_source": mode,
                        "generated": datetime.datetime.now().isoformat(timespec="seconds"),
                        "metric_contract": M.METRIC_CONTRACT},
               "invariants": [], "families": [], "family_curves": {}, "floor_table": [],
@@ -510,6 +577,9 @@ def main():
             log(f"BF16_FLOOR_BLOCKS: {blocks}")
             report["verdict"] = "STOP"
             rc = 3
+        elif _is_fp32():
+            log("[engine] fp32 trace: no quantization-noise floor gate — "
+                "reliability = projection accuracy + linearity (directedness) only")
         else:
             log("[engine] all moving core blocks clear the bf16 differenced floor at h>=5")
 
