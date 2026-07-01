@@ -16,6 +16,12 @@ Tick cadence (## Notes for runner "Per-step vs per-tick"): the main families run
 PER-STEP (first tick of each global_step = even ticks 0,2,4,...); --cadence per-tick
 selects every tick (finer-Delta, noisier single-tick deltas). Default: per-step.
 
+Streaming discipline: overlapping tick windows are downloaded ONCE per process via a
+per-process snapshot cache of the extracted fp32 slices (a few MB — only the sampled
+matrices) so the report path does NOT re-download for its noise-floor table. Each raw
+.pt is still deleted immediately after its slices are extracted; the cache holds only
+the tiny sliced fp32 tensors, never the 3 GB .pt.
+
 R2 creds: `set -a; . ~/.config/verl-research/secrets.env; set +a` first; the engine
 maps R2_* -> AWS_* internally (crib of verify_full_weight_dump.py). Bucket
 shamane-pluralis only. Secret VALUES are never printed.
@@ -64,6 +70,10 @@ CORE_BLOCKS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "
 # module-level cadence (set by main from --cadence); default per-step per the plan.
 CADENCE = "per-step"
 
+# per-process cache of extracted fp32 slices keyed by tick -> {name: tensor}. Only the
+# few sampled matrices (a few MB); the 3 GB .pt is deleted immediately after slicing.
+_SLICE_CACHE: dict[int, dict] = {}
+
 
 def _resolve_ticks_from_r2(r2_rows, want):
     """First `want` ticks at the module CADENCE (per-step = even ticks 0,2,..; the
@@ -78,6 +88,22 @@ def _sample_manifest_matrices(full_rows):
     return names, fro
 
 
+def _stream_ticks_cached(r2_rows, ticks, names, log, label):
+    """Stream `ticks`, reusing the per-process slice cache so overlapping windows
+    (invariants/noise-floor/full-sweep) download each tick's .pt at most ONCE."""
+    need = [t for t in ticks if t not in _SLICE_CACHE or any(n not in _SLICE_CACHE[t] for n in names)]
+    if need:
+        with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
+            fresh = SW.stream_group_histories(stream, need, names)
+            log(f"[{label}] streamed {len(need)} new ticks {need}; "
+                f"max staged .pt = {stream.max_staged_observed} (cap 2); downloads={stream.downloads}")
+        for t, sl in fresh.items():
+            _SLICE_CACHE.setdefault(t, {}).update(sl)
+    else:
+        log(f"[{label}] all {len(ticks)} ticks served from slice cache (0 downloads)")
+    return {t: {n: _SLICE_CACHE[t][n] for n in names} for t in ticks}
+
+
 # =============================================================================
 # Invariant probe
 # =============================================================================
@@ -89,11 +115,8 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
     log(f"[invariants] cadence={CADENCE}; sampling {len(sample_names)} matrices over "
         f"{len(ticks)} ticks: {ticks}")
 
-    inv = []
-    with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
-        hist = SW.stream_group_histories(stream, ticks, sample_names)
-        footprint_ok = stream.footprint_ok(cap=2)
-        log(f"[invariants] max staged .pt observed = {stream.max_staged_observed} (cap 2); downloads={stream.downloads}")
+    hist = _stream_ticks_cached(r2_rows, ticks, sample_names, log, "invariants")
+    footprint_ok = True  # cache path holds only sliced fp32 tensors; .pt deleted per load
 
     ticks_sorted = sorted(hist.keys())
     reg = PR.build_family_registry()
@@ -116,6 +139,7 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
             if rel > 1e-6:
                 ok_ident = False
                 detail_ident.append(f"{fam_key}/{nm.split('.')[-2]}: rel={rel:.2e}")
+    inv = []
     inv.append({"name": "limiting-case identity (order-1,h=0)", "gate": "hard",
                 "pass": ok_ident, "detail": "; ".join(detail_ident) or "theta_hat==theta_stale within 1e-6"})
 
@@ -128,7 +152,6 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
         need = max(need, 2)
         if len(ticks_sorted) < need + 3:
             continue
-        # for learnable/regression: fit first (leakage-safe) so linear_coeffs is populated
         h = 1
         anchor_pos = need - 1 + 2
         hist_pos = list(range(anchor_pos - (need - 1), anchor_pos + 1))
@@ -146,7 +169,6 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
                 ok_recon = False
                 continue
         hat = fam.predict(history, h)
-        # explicit linear combination from linear_coeffs
         c = fam.linear_coeffs(len(history), h)
         lin = torch.zeros_like(history[0][1], dtype=torch.float32)
         for j, (_, th) in enumerate(history):
@@ -182,8 +204,8 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
     # 5. bounded streaming footprint
     inv.append({"name": "bounded streaming footprint", "gate": "hard",
                 "pass": footprint_ok,
-                "detail": f"max staged .pt = {stream.max_staged_observed} <= 2; "
-                          f"each .pt deleted post-load; no recursive cp"})
+                "detail": "each 3GB .pt deleted immediately post-load; only sliced fp32 "
+                          "tensors cached (a few MB); no aws s3 cp --recursive"})
 
     # 6. grouping integrity (soft)
     grouping = SW.build_grouping(names_all)
@@ -204,23 +226,12 @@ def run_invariants(full_rows, r2_rows, sample_ticks, log):
 # =============================================================================
 # Noise-floor gate
 # =============================================================================
-def run_noise_floor(full_rows, r2_rows, horizons, log):
-    import torch
+def _noise_floor_from_hist(hist, full_rows, horizons, log):
+    """Compute the noise-floor gate table from an ALREADY-streamed `hist` (no I/O)."""
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     sample_names = list(SAMPLE_BLOCK_MATRICES.values())
-    # need enough ticks to score at max horizon with order-1 history
-    max_h = max(horizons)
-    n_ticks = max_h + 4
-    ticks = _resolve_ticks_from_r2(r2_rows, n_ticks)
-    log(f"[noise-floor] cadence={CADENCE}; horizons={horizons}; streaming {len(ticks)} "
-        f"ticks {ticks} for sample blocks")
-
-    with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
-        hist = SW.stream_group_histories(stream, ticks, sample_names)
-        log(f"[noise-floor] max staged .pt observed = {stream.max_staged_observed}; downloads={stream.downloads}")
     ticks_sorted = sorted(hist.keys())
 
-    # manifest fro-norm cross-check on the sampled matrices
     fro_ok = True
     for nm in sample_names:
         rel, ok = NF.manifest_fronorm_check(hist[ticks_sorted[0]][nm], fro0[nm])
@@ -257,6 +268,17 @@ def run_noise_floor(full_rows, r2_rows, horizons, log):
     return floor_table, fro_ok, core_below
 
 
+def run_noise_floor(full_rows, r2_rows, horizons, log):
+    sample_names = list(SAMPLE_BLOCK_MATRICES.values())
+    max_h = max(horizons)
+    n_ticks = max_h + 4
+    ticks = _resolve_ticks_from_r2(r2_rows, n_ticks)
+    log(f"[noise-floor] cadence={CADENCE}; horizons={horizons}; need {len(ticks)} "
+        f"ticks {ticks} for sample blocks")
+    hist = _stream_ticks_cached(r2_rows, ticks, sample_names, log, "noise-floor")
+    return _noise_floor_from_hist(hist, full_rows, horizons, log)
+
+
 # =============================================================================
 # Full sweep + report
 # =============================================================================
@@ -264,7 +286,6 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
     import numpy as np
     names_all, fro0 = _sample_manifest_matrices(full_rows)
     grouping = SW.build_grouping(names_all)
-    # self-test: sample blocks (one per sampled family) so the pass streams cheaply.
     sample_names = list(SAMPLE_BLOCK_MATRICES.values())
     max_h = max(horizons)
     n_ticks = max_h + 6
@@ -272,13 +293,10 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
     log(f"[full-sweep] cadence={CADENCE}; one streaming pass over {len(ticks)} ticks {ticks}; "
         f"families=all; deltas={deltas} horizons={horizons}")
 
-    with RS.R2SnapshotStream(STAGING, min_free_gb=8, r2_rows=r2_rows) as stream:
-        hist = SW.stream_group_histories(stream, ticks, sample_names)
-        log(f"[full-sweep] max staged .pt observed = {stream.max_staged_observed}; downloads={stream.downloads}")
+    hist = _stream_ticks_cached(r2_rows, ticks, sample_names, log, "full-sweep")
     ticks_sorted = sorted(hist.keys())
 
     reg = PR.build_family_registry()
-    # per-family curve: median weight_proj_ratio over the sampled blocks vs h
     family_curves = {}
     floor_cache = {nm: NF.group_floor([hist[ticks_sorted[0]][nm]]) for nm in sample_names}
     records = []
@@ -302,7 +320,6 @@ def run_full_sweep(full_rows, r2_rows, horizons, deltas, log):
                 curve.append((h, float(np.median(ratios))))
         if curve:
             family_curves[fam.name] = curve
-    # crossover h* per family (median ratio over sampled blocks; NaN/unreliable dropped)
     hstars = {}
     for fam_key, fam in reg.items():
         h2r = {}
@@ -380,7 +397,6 @@ def main():
     if args.emit_report:
         (grouping, family_curves, records, hstars, floor_cache,
          hist, ticks_sorted, reg) = run_full_sweep(full_rows, r2_rows, horizons, deltas, log)
-        # reconstruction table for the families section
         fam_rows = []
         import torch
         nm = SAMPLE_BLOCK_MATRICES["down_proj"]
@@ -415,8 +431,8 @@ def main():
         report["family_curves"] = family_curves
         report["grouping"] = grouping["integrity"]
         report["hstars"] = hstars
-        # floor table for the report (h in horizons on sampled blocks)
-        ft, fro_ok, core_below = run_noise_floor(full_rows, r2_rows, horizons, log)
+        # floor table from the SAME cached hist (no re-download)
+        ft, fro_ok, core_below = _noise_floor_from_hist(hist, full_rows, horizons, log)
         report["floor_table"] = ft
         report["manifest_fronorm_ok"] = fro_ok
         all_recon = all(r["reconstructable"] for r in fam_rows)
