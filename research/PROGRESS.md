@@ -14,3 +14,4 @@ compression train–inference mismatch.
 [2026-07-01T12:58:54+10:00] [research-planner #44] plan written
 [2026-07-01T12:59:34+10:00] [triage] dispatched 1 planner (#44), 0 issues already planned; now planned=1 unplanned=0 ALL_PLANNED
 [2026-07-01T13:33:47+10:00] [orchestrator] tick: analyzing=[44] (analyst dispatched — build+verify weight_proj_sweep.py engine, GPU-free, streaming EXP-43 R2 trace) running=[] logging=[] blocked=[]; teardown sweep no-op (empty ledger)
+[2026-07-01T14:28:29+10:00] [orchestrator] EXP-44 manifest FIX: restored full 160-row full_manifest+r2_manifest from commit 6a2f9255 (prior run streamed a truncated 5/4-row stub); re-dispatched analyst (background) to reuse the already-built engine, run invariants→noise-floor→full-sweep→verdict on the corrected trace. Teardown sweep no-op (empty ledger).

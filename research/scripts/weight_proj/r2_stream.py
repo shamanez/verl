@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""weight_proj/r2_stream.py — bounded-footprint streaming reader for the EXP-43 trace.
+
+HARD streaming contract (research/reports/r2-access-pattern-for-analysis.md):
+  * Drive downloads from the in-repo manifests, NOT a bucket-list.
+  * Load each `.pt` snapshot exactly ONCE, extract the per-matrix slices the caller
+    asked for, then DELETE the local `.pt` immediately.
+  * NEVER `aws s3 cp --recursive` the ~494 GB prefix. The staging dir holds at most
+    a couple of in-flight snapshots (bounded working set); we assert `df` headroom.
+
+R2 credential mapping (cribbed VERBATIM from verify_full_weight_dump.py /
+verl/workers/comm_eff/r2_sink.py — do NOT reinvent):
+  AWS_ACCESS_KEY_ID     = $R2_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY = $R2_SECRET_ACCESS_KEY
+  AWS_DEFAULT_REGION    = auto
+  --endpoint-url          $R2_ENDPOINT  (or https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com)
+  bucket                  shamane-pluralis  (from $R2_BUCKET / manifest)
+Secret VALUES are never logged.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+
+CANONICAL_PREFIX = "verl-research/EXP-43/regimeA/weights/full"
+CANONICAL_BUCKET = "shamane-pluralis"
+
+
+def r2_endpoint() -> str:
+    ep = os.environ.get("R2_ENDPOINT", "")
+    if not ep and os.environ.get("R2_ACCOUNT_ID"):
+        ep = f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com"
+    return ep
+
+
+def r2_env() -> dict:
+    return {
+        **os.environ,
+        "AWS_ACCESS_KEY_ID": os.environ.get("R2_ACCESS_KEY_ID", ""),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        "AWS_DEFAULT_REGION": "auto",
+    }
+
+
+def r2_bucket() -> str:
+    return os.environ.get("R2_BUCKET", CANONICAL_BUCKET) or CANONICAL_BUCKET
+
+
+def load_full_manifest(manifest_path: str) -> list[dict]:
+    """Rows: global_step, tick, dump_dtype, n_matrices, path, matrices[...]. Tick-ordered."""
+    rows = [json.loads(l) for l in open(manifest_path) if l.strip()]
+    rows.sort(key=lambda r: int(r["tick"]))
+    return rows
+
+
+def load_r2_manifest(manifest_path: str) -> dict[int, dict]:
+    """tick -> row{key, uri, remote_bytes, verified, ...}. Empty if file absent."""
+    if not os.path.exists(manifest_path):
+        return {}
+    out = {}
+    for l in open(manifest_path):
+        if not l.strip():
+            continue
+        r = json.loads(l)
+        out[int(r["tick"])] = r
+    return out
+
+
+def tick_key(tick: int) -> str:
+    """Canonical R2 key for a tick (matches r2_manifest: full/tick_<N>/tick_<N>.pt)."""
+    return f"{CANONICAL_PREFIX}/tick_{tick}/tick_{tick}.pt"
+
+
+def _df_free_bytes(path: str) -> int:
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+class R2SnapshotStream:
+    """Streams full-model .pt snapshots one at a time with a bounded staging dir.
+
+    Usage (blocks-outside / ticks-inside is enforced by the CALLER; this class just
+    guarantees a single load + immediate delete per snapshot and a footprint cap):
+
+        with R2SnapshotStream(staging_dir, min_free_gb=8) as stream:
+            for tick in ticks:
+                sd = stream.load(tick, names)     # downloads, torch.loads slices
+                ... use sd (dict name->fp32 tensor) ...
+                # sd is auto-freed; the .pt is already deleted on disk
+    """
+
+    def __init__(self, staging_dir: str, min_free_gb: float = 8.0,
+                 r2_rows: dict[int, dict] | None = None, verbose: bool = True):
+        self.staging_dir = staging_dir
+        self.min_free = min_free_gb * (1 << 30)
+        self.r2_rows = r2_rows or {}
+        self.verbose = verbose
+        self.max_staged_observed = 0
+        self.downloads = 0
+        os.makedirs(staging_dir, exist_ok=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # leave nothing behind
+        for f in os.listdir(self.staging_dir):
+            try:
+                os.remove(os.path.join(self.staging_dir, f))
+            except OSError:
+                pass
+        return False
+
+    def _staged_count(self) -> int:
+        return len([f for f in os.listdir(self.staging_dir) if f.endswith(".pt")])
+
+    def _download(self, tick: int, dst: str) -> None:
+        # prefer the verified key from r2_manifest; fall back to canonical layout
+        row = self.r2_rows.get(tick)
+        key = row["key"] if (row and "key" in row) else tick_key(tick)
+        bucket = row.get("bucket", r2_bucket()) if row else r2_bucket()
+        free = _df_free_bytes(self.staging_dir)
+        if free < self.min_free:
+            raise RuntimeError(
+                f"staging dir free {free/(1<<30):.1f}GB < min {self.min_free/(1<<30):.1f}GB "
+                f"— refusing download to protect the disk (bounded-footprint contract)"
+            )
+        cp = subprocess.run(
+            ["aws", "s3", "cp", f"s3://{bucket}/{key}", dst,
+             "--endpoint-url", r2_endpoint(), "--no-progress"],
+            env=r2_env(), capture_output=True, text=True,
+        )
+        if cp.returncode != 0:
+            raise RuntimeError(
+                f"R2_STREAM_FAIL: aws s3 cp s3://{bucket}/{key} rc={cp.returncode}: "
+                f"{cp.stderr.strip()[:300]}"
+            )
+        self.downloads += 1
+
+    def load(self, tick: int, names: list[str] | None = None) -> dict:
+        """Download tick_<N>.pt, torch.load it, keep only `names` as fp32, delete the .pt.
+
+        Returns {name: torch.float32 tensor}. If names is None, keeps all 338.
+        Footprint: the .pt exists on disk only between download and the delete below.
+        """
+        import torch
+        with tempfile.TemporaryDirectory(dir=self.staging_dir) as td:
+            dst = os.path.join(td, f"tick_{tick}.pt")
+            self._download(tick, dst)
+            self.max_staged_observed = max(self.max_staged_observed, self._staged_count())
+            try:
+                sd = torch.load(dst, map_location="cpu", weights_only=False)
+            finally:
+                # delete IMMEDIATELY after load — before any per-matrix work
+                if os.path.exists(dst):
+                    os.remove(dst)
+        # cast the requested slices to fp32 (differencing is done in fp32 upstream)
+        keep = names if names is not None else list(sd.keys())
+        out = {}
+        for n in keep:
+            if n in sd:
+                out[n] = sd[n].detach().to("cpu").to(torch.float32)
+        del sd
+        return out
+
+    def footprint_ok(self, cap: int = 2) -> bool:
+        """Bounded working set: at most `cap` .pt on disk at any observed moment."""
+        return self.max_staged_observed <= cap
