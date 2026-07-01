@@ -11,3 +11,5 @@ git + LOG.md); the harness appends new ticks below.
 **Two priorities:** (1) M4 — solve the k-collapse by projecting WEIGHTS; the dense weight trajectory
 is collected → R2; GPU-free analysis spine #44–#56, entry **#44**. (2) M6 — shrink the ~0.04
 compression train–inference mismatch.
+[2026-07-01T12:58:54+10:00] [research-planner #44] plan written
+[2026-07-01T12:59:34+10:00] [triage] dispatched 1 planner (#44), 0 issues already planned; now planned=1 unplanned=0 ALL_PLANNED
