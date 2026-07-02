@@ -40,3 +40,13 @@ Dense weight-trajectory collection + the GPU-free projection-analysis spine (#43
   on vast-ai-workload (`research/scripts/moat_scorecard.py` + `research/scripts/weight_proj/structure.py`).
   Non-gating science readout for #56: naive_linear global (Delta=20,h=40) ratio_median=1.404, h_star=5.
   Run: `runs/MOAT-45-ANALYSIS/`.
+- **EXP-47 (PASS)** — MOAT ANCHOR linear/damped-linear lane (1 of 4 lanes feeding #56), in TWO cadence
+  regimes (per-step=global-step PRIMARY + per-tick extended-Δ). Gates: SELFTEST GO (18 invariants), EMIT
+  GO both regimes, SCHEMA GO box+laptop. **Science (favorable): per-scalar linearity R² median 0.535,
+  Pr(R²>0.7) 0.335** — between Wang et al. 2026 SFT-GSM8K (0.426) and RL analog (0.845); **R²-vs-ratio
+  Spearman ρ=−0.75** (high-R² groups project better). **OOS damped-linear beats hold-stale (projection
+  helps): per-step (Δ=10,h=10) ratio 0.940 < naive 1.158, λ*=0.3; h_safe 30 global-steps / 40 ticks vs
+  naive 2/5; best_delta=5 (wider Δ hurts); breakers none.** `paper_linear` (Wang Eq.4/App.E.1, β∈[1.01,
+  3.66]) beats fixed-Δ naive at long h but OOS-damped beats both. Additive code on vast-ai-workload
+  (`research/scripts/moat_scorecard.py` +`moat_report.py`). Cross-check: per-tick naive@(20,20)=1.1580≈#45.
+  Run: `runs/MOAT-47-ANALYSIS/` (+ offline `report.html`).

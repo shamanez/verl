@@ -1,0 +1,183 @@
+{
+  "experiment": "EXP-47 (MOAT ANCHOR linear/damped-linear lane)",
+  "metric_contract": "weight-proj-metrics-v1",
+  "schema_version": "moat-scorecard-v47.1",
+  "trace_root": "/workspace/trace/EXP-57",
+  "manifest": "runs/EXP-57/regimeA/weights/full_manifest.jsonl",
+  "n_ticks": 80,
+  "band": 60,
+  "cadence": "per-step",
+  "unit": "global_step",
+  "tickset_first": 0,
+  "tickset_last": 158,
+  "tickset_stride": 2,
+  "methods": [
+    "hold_stale",
+    "naive_linear",
+    "damped_linear",
+    "paper_linear"
+  ],
+  "delta_ticks": [
+    5,
+    10,
+    20
+  ],
+  "h_ticks": [
+    1,
+    2,
+    5,
+    10,
+    20,
+    30,
+    40
+  ],
+  "lam_grid": [
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+    1.0
+  ],
+  "paper_anchor_frac": 0.25,
+  "paper_stride": 2,
+  "paper_sentinel_delta": 0,
+  "operating_point": [
+    10,
+    10
+  ],
+  "also_points": [
+    [
+      5,
+      5
+    ]
+  ],
+  "n_matrices": 338,
+  "structure_block_type_counts": {
+    "q_proj": 28,
+    "k_proj": 28,
+    "v_proj": 28,
+    "o_proj": 28,
+    "gate_proj": 28,
+    "up_proj": 28,
+    "down_proj": 28,
+    "norm": 57,
+    "bias": 84,
+    "embed": 1,
+    "lm_head": 0,
+    "other": 0
+  },
+  "structure_super_block_counts": {
+    "attention": 112,
+    "mlp": 84,
+    "norm": 57,
+    "bias": 84,
+    "embed": 1,
+    "lm_head": 0,
+    "other": 0
+  },
+  "required_row_keys": [
+    "method",
+    "delta_ticks",
+    "h_ticks",
+    "group_kind",
+    "group_key",
+    "matrix_name",
+    "layer_idx",
+    "special",
+    "block_type",
+    "super_block",
+    "stale_error_median",
+    "proj_error_median",
+    "weight_proj_ratio_median",
+    "weight_proj_ratio_p10",
+    "weight_proj_ratio_p90",
+    "skill_median",
+    "skill_p10",
+    "skill_p90",
+    "traj_r2",
+    "consec_delta_cos",
+    "delta_norm",
+    "coverage",
+    "dir_cos_median",
+    "n_windows",
+    "in_bounds",
+    "n_nan_windows",
+    "h_star",
+    "best_delta",
+    "tied",
+    "cadence",
+    "unit",
+    "anchor_mode",
+    "delta_resolved",
+    "beta",
+    "r2_median",
+    "r2_frac_gt_0.7",
+    "n_excluded_const",
+    "lam_star"
+  ],
+  "visual_keys": [
+    "a_accuracy_vs_horizon",
+    "b_delta_sensitivity",
+    "c_target_horizon_sweep",
+    "d_traj_r2",
+    "e_ratio_heatmap",
+    "f_hstar_heatmap",
+    "g_special_groups",
+    "h_lambda_selection",
+    "i_r2_histogram",
+    "j_r2_depth_block_heatmap",
+    "k_r2_ratio_coupling",
+    "m_paper_equivalence"
+  ],
+  "linearity_r2": {
+    "r2_median": 0.535,
+    "r2_frac_gt_0.7": 0.3350871212897961,
+    "n_excluded_const": 4227167
+  },
+  "gates": {
+    "hold_stale_identity": {
+      "pass": true,
+      "detail": "13377 rows, worst |ratio-1| = 2.220e-16, violations = 0"
+    },
+    "structure_partition": {
+      "pass": true,
+      "detail": "338-partition exact (other=0)"
+    },
+    "naive_linear_finite": {
+      "pass": true,
+      "detail": "13398 rows, denom-guard NaN windows = 0 (only permitted NaN)"
+    },
+    "bounds_honesty": {
+      "pass": true,
+      "detail": "n_windows == n_ticks-h-delta on all in-bounds grid rows (violations=0, zero=0)"
+    },
+    "aggregates_present": {
+      "pass": true,
+      "detail": "missing=[]; lm_head rows=63 (tied)"
+    },
+    "coverage_safety": {
+      "pass": true,
+      "detail": "rows missing delta_norm/coverage = 0"
+    },
+    "operating_points": {
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    "r2_well_defined": {
+      "pass": true,
+      "detail": "per-scalar r2_median in [0,1] on all group rows (out-of-range=0)"
+    },
+    "paper_linear_present": {
+      "pass": true,
+      "detail": "global paper rows for h=[1, 2, 5, 10, 20, 30, 40] (missing h=[]); 7 global paper rows, anchor_mode=['frac25']"
+    }
+  },
+  "stats_cache_fingerprint": "fde93ab1c2623dde",
+  "n_rows": 44653
+}
