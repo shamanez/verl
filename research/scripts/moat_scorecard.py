@@ -1038,6 +1038,123 @@ def build_visuals(rows: list[dict], methods: list[str],
 
 
 # =============================================================================
+# paper_linear — the Wang et al. 2026 weight-space extrapolation protocol arm
+# (regime S ONLY; direct-scored OUTSIDE the banded cache; delta grows with t)
+# =============================================================================
+def _paper_windows(n_ticks: int, hs: list[int], anchor_frac: float, stride: int):
+    """(h, t, t0, delta_resolved) windows: t0=floor(frac*t), t>=20, strided anchors,
+    t+h<=n_ticks-1. Asserts the App. E.1 anchor rule 0.20 <= t0/t <= 0.30."""
+    windows = []
+    needed: set[int] = set()
+    for h in hs:
+        for t in range(20, n_ticks - h, stride):
+            t0 = int(math.floor(anchor_frac * t))
+            if t0 < 1:
+                continue
+            frac_res = t0 / t
+            assert 0.20 <= frac_res <= 0.30, (
+                f"paper anchor t0/t={frac_res:.3f} outside [0.20,0.30] at t={t} "
+                f"(t>=20 required; frac={anchor_frac})")
+            windows.append((h, t, t0, t - t0))
+            needed.update((t0, t, t + h))
+    return windows, sorted(needed)
+
+
+def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
+                       stride, stats, cadence, unit, ram_gb=40.0):
+    """Direct-score paper_linear over mmap slice reads. theta_hat = theta_t +
+    (h/delta_resolved)*(theta_t - theta_{t0}) — the SAME Order1 secant as naive_linear
+    with delta=delta_resolved (t0=floor(frac*t)). Its cells NEVER enter the banded
+    stats_cache and MUST NOT change `band`. Returns (paper_rows, paper_panel)."""
+    windows, needed = _paper_windows(n_ticks, hs, anchor_frac, stride)
+    log(f"paper_linear: {len(windows)} windows over h={hs}, {len(needed)} unique steps, "
+        f"frac={anchor_frac}, stride={stride}")
+    name_dims = [(n, dims[n]) for n in names]
+    cap = max(int(ram_gb * 1e9 / (max(len(needed), 1) * 8)), 1_000_000)
+    chunks = plan_chunks(name_dims, cap)
+    acc: dict = {}                       # (matrix, h, t) -> np.array([e2, b2, eb])
+    for ci, chunk in enumerate(chunks):
+        tc = time.time()
+        buf: dict = {}
+        for step in needed:
+            sd = reader.load_raw(step)
+            buf[step] = {i: reader.slice_f64(sd, u.name, u.a, u.b)
+                         for i, u in enumerate(chunk)}
+            del sd
+        for i, u in enumerate(chunk):
+            for (h, t, t0, dres) in windows:
+                a = buf[t0][i]; tt = buf[t][i]; s = buf[t + h][i]
+                k = float(h) / float(dres)
+                e = (tt + k * (tt - a)) - s        # Order1 secant residual
+                b = tt - s                          # stale baseline displacement
+                trip = np.array([float(e @ e), float(b @ b), float(e @ b)])
+                key = (u.name, h, t)
+                acc[key] = acc[key] + trip if key in acc else trip
+        buf = None
+        log(f"paper_linear: chunk {ci + 1}/{len(chunks)} done in {time.time() - tc:.1f}s")
+    win_by_h: dict = {}
+    for (h, t, t0, dres) in windows:
+        win_by_h.setdefault(h, []).append((t, t0, dres))
+    paper_rows: list[dict] = []
+    panel = {"operating_h": None, "h": list(hs), "betas_by_h": {}, "ratio_by_h": {}}
+    for g in groups:
+        diag = group_diagnostics(g["members"], stats, n_ticks)
+        gr2_med, gr2_frac, gr2_nexcl, _ = group_r2(g["members"], stats)
+        for h in hs:
+            wl = win_by_h.get(h, [])
+            ratios = np.full(len(wl), np.nan); skills = np.full(len(wl), np.nan)
+            dcoss = np.full(len(wl), np.nan); stales = np.full(len(wl), np.nan)
+            projs = np.full(len(wl), np.nan)
+            betas = []; dress = []
+            for j, (t, t0, dres) in enumerate(wl):
+                e2 = b2 = eb = 0.0
+                for m in g["members"]:
+                    v = acc.get((m, h, t))
+                    if v is not None:
+                        e2 += v[0]; b2 += v[1]; eb += v[2]
+                r = surrogate_metric_row(e2, b2, eb)
+                ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
+                dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+                betas.append(1.0 + float(h) / float(dres)); dress.append(dres)
+            rm, r10, r90 = _pcts(ratios)
+            sm, s10, s90 = _pcts(skills)
+            row = {
+                "method": "paper_linear", "delta_ticks": PAPER_SENTINEL_DELTA,
+                "h_ticks": h, "group_kind": g["kind"], "group_key": str(g["key"]),
+                "matrix_name": g["matrix_name"], "layer_idx": g["layer_idx"],
+                "special": g["special"], "block_type": g["block_type"],
+                "super_block": g["super_block"],
+                "stale_error_median": _pcts(stales)[0], "proj_error_median": _pcts(projs)[0],
+                "weight_proj_ratio_median": rm,
+                "weight_proj_ratio_p10": r10, "weight_proj_ratio_p90": r90,
+                "skill_median": sm, "skill_p10": s10, "skill_p90": s90,
+                "dir_cos_median": _pcts(dcoss)[0],
+                "traj_r2": diag["traj_r2"], "consec_delta_cos": diag["consec_delta_cos"],
+                "delta_norm": diag["delta_norm"], "coverage": diag["coverage"],
+                "n_windows": len(wl), "in_bounds": bool(len(wl) > 0),
+                "n_nan_windows": int(np.sum(~np.isfinite(ratios))),
+                "h_star": None, "best_delta": None, "tied": False,
+                "cadence": cadence, "unit": unit,
+                "anchor_mode": "frac25",
+                "delta_resolved": (float(np.median(dress)) if dress else None),
+                "delta_resolved_min": (int(np.min(dress)) if dress else None),
+                "delta_resolved_max": (int(np.max(dress)) if dress else None),
+                "beta": (float(np.median(betas)) if betas else None),
+                "beta_min": (float(np.min(betas)) if betas else None),
+                "beta_max": (float(np.max(betas)) if betas else None),
+                "r2_median": gr2_med, "r2_frac_gt_0.7": gr2_frac,
+                "n_excluded_const": gr2_nexcl, "lam_star": None,
+                "lam_oracle": None, "ratio_oracle_median": None,
+                "n_warmup": 0, "n_oos_scored": len(wl),
+            }
+            paper_rows.append(row)
+            if g["kind"] == "global":
+                panel["betas_by_h"][str(h)] = [float(x) for x in betas]
+                panel["ratio_by_h"][str(h)] = rm
+    return paper_rows, panel
+
+
+# =============================================================================
 # Gates (printed as `GATE <name>: PASS|FAIL` — the analyst greps these)
 # =============================================================================
 def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
@@ -1066,12 +1183,16 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     gates["naive_linear_finite"] = (
         bool(nl) and n_nan == 0,
         f"{len(nl)} rows, denom-guard NaN windows = {n_nan} (only permitted NaN)")
-    bad_nw = [r for r in rows if r["in_bounds"] and not r["tied"]
+    # bounds_honesty: paper_linear is OFF the (delta x h) banded grid (delta derived
+    # per window, sentinel delta_ticks=0) — its n_windows is the strided-anchor count,
+    # so it is exempt from the n_ticks-h-delta formula (damped stays IN, n_windows==nw).
+    grid_rows = [r for r in rows if r["method"] != "paper_linear"]
+    bad_nw = [r for r in grid_rows if r["in_bounds"] and not r["tied"]
               and r["n_windows"] != n_ticks - r["h_ticks"] - r["delta_ticks"]]
-    zero_nw = [r for r in rows if r["in_bounds"] and r["n_windows"] <= 0]
+    zero_nw = [r for r in grid_rows if r["in_bounds"] and r["n_windows"] <= 0]
     gates["bounds_honesty"] = (
         not bad_nw and not zero_nw,
-        f"n_windows == n_ticks-h-delta on all in-bounds rows "
+        f"n_windows == n_ticks-h-delta on all in-bounds grid rows "
         f"(violations={len(bad_nw)}, zero={len(zero_nw)})")
     have = {(r["group_kind"], r["group_key"]) for r in rows}
     need_specials = {("special", s) for s in ("embed", "norm", "bias", "lm_head")}
@@ -1085,11 +1206,29 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     gates["coverage_safety"] = (
         not no_cov, f"rows missing delta_norm/coverage = {len(no_cov)}")
     ops = [op] + list(also)
-    miss_op = [(m, p) for m in methods for p in ops
-               if (m, p[0], p[1], "global", "all") not in
-               {(r["method"], r["delta_ticks"], r["h_ticks"], r["group_kind"],
-                 r["group_key"]) for r in rows}]
+    grid_methods = [m for m in methods if m != "paper_linear"]
+    row_keys = {(r["method"], r["delta_ticks"], r["h_ticks"], r["group_kind"],
+                 r["group_key"]) for r in rows}
+    miss_op = [(m, p) for m in grid_methods for p in ops
+               if (m, p[0], p[1], "global", "all") not in row_keys]
     gates["operating_points"] = (not miss_op, f"missing={miss_op}")
+    # #47: per-scalar R² well-defined on every group row (in [0,1] or None; never NaN leak)
+    r2bad = [r for r in rows if r["r2_median"] is not None
+             and not (0.0 <= r["r2_median"] <= 1.0)]
+    gates["r2_well_defined"] = (
+        not r2bad, f"per-scalar r2_median in [0,1] on all group rows "
+                   f"(out-of-range={len(r2bad)})")
+    # #47: paper_linear present for every h at global (regime S only)
+    if "paper_linear" in methods:
+        miss_paper = [h for h in hs if ("paper_linear", PAPER_SENTINEL_DELTA, h,
+                                        "global", "all") not in row_keys]
+        pw = [r for r in rows if r["method"] == "paper_linear"
+              and r["group_kind"] == "global"]
+        gates["paper_linear_present"] = (
+            not miss_paper and bool(pw),
+            f"global paper rows for h={hs} (missing h={miss_paper}); "
+            f"{len(pw)} global paper rows, anchor_mode="
+            f"{sorted({r['anchor_mode'] for r in pw})}")
     for name, (ok, detail) in gates.items():
         print(f"GATE {name}: {'PASS' if ok else 'FAIL'} — {detail}", flush=True)
     return {k: {"pass": bool(v[0]), "detail": v[1]} for k, v in gates.items()}
@@ -1171,6 +1310,91 @@ def _synthetic_reader(seed: int = 45):
     return InMemoryReader(ticks), list(dims.items()), n_ticks
 
 
+def _synthetic_reader_r2(seed: int = 47):
+    """Self-test trace for the per-scalar R² invariants: an EXACTLY-constant matrix
+    (must be excluded + counted), an exactly-linear one (R²≈1), and a noisy one."""
+    rng = np.random.default_rng(seed)
+    n_ticks = 40
+    dims = {"r2.const": 50, "r2.linear": 60, "r2.noisy": 70, "r2.mixed": 40}
+    base = {k: rng.normal(0, 0.02, size=d).astype(np.float32) for k, d in dims.items()}
+    vel = {k: rng.normal(0, 1e-3, size=d) for k, d in dims.items()}
+    vel["r2.const"][:] = 0.0
+    ticks = {}
+    for t in range(n_ticks):
+        sd = {}
+        for k, d in dims.items():
+            noise = (0.0 if k in ("r2.const", "r2.linear")
+                     else rng.normal(0, (2e-3 if k == "r2.noisy" else 5e-4), size=d))
+            sd[k] = (base[k].astype(np.float64) + t * vel[k] + noise).astype(np.float32)
+        ticks[t] = sd
+    return InMemoryReader(ticks), list(dims.items()), n_ticks
+
+
+def _synthetic_linear_reader(n_real: int = 24):
+    """EXACTLY-linear-in-tick trace for the cadence-reindex invariant: theta_tau =
+    base + tau*vel, so per-step deltas (tickset [0,2,…]) are EXACTLY 2x per-tick deltas."""
+    rng = np.random.default_rng(4747)
+    dims = {"lin.a": 40, "lin.b": 32}
+    base = {k: rng.normal(0, 0.02, size=d).astype(np.float64) for k, d in dims.items()}
+    vel = {k: rng.normal(0, 1e-3, size=d) for k, d in dims.items()}
+    ticks = {t: {k: (base[k] + t * vel[k]).astype(np.float32) for k in dims}
+             for t in range(n_real)}
+    return InMemoryReader(ticks), list(dims.items()), vel
+
+
+def _block_sums_all(stats, names, n_ticks, band, deltas, hs):
+    """Per (group, cell) block sums (saa,sab,sbb) over all groups — for identity tests."""
+    groups = build_groups(names)
+    per = {}
+    for nm in names:
+        Pp = prefix_from_banded(stats[nm]["D"], band)
+        per[nm] = {(d, h): cell_window_sums(Pp, d, h, n_ticks) for d in deltas for h in hs}
+    out = []
+    for g in groups:
+        for d in deltas:
+            for h in hs:
+                saa = sab = sbb = None
+                for mm in g["members"]:
+                    a, x, b = per[mm][(d, h)]
+                    if saa is None:
+                        saa, sab, sbb = a.copy(), x.copy(), b.copy()
+                    else:
+                        saa += a; sab += x; sbb += b
+                out.append((d, h, saa, sab, sbb))
+    return out
+
+
+def _damped_identity_worst(stats, names, n_ticks, band, deltas, hs):
+    """worst |damped(lam=1).e2 - naive.e2| and |damped(lam=0).e2 - hold.e2| over all cells."""
+    d1, d0, nai, hld = DampedLinear(1.0), DampedLinear(0.0), NaiveLinear(), HoldStale()
+    w1 = w0 = 0.0
+    for (d, h, saa, sab, sbb) in _block_sums_all(stats, names, n_ticks, band, deltas, hs):
+        if saa.size == 0:
+            continue
+        e2_d1 = _damped_e2(d1.kappa(d, h), saa, sab, sbb)
+        e2_n = _damped_e2(nai.kappa(d, h), saa, sab, sbb)
+        e2_d0 = _damped_e2(d0.kappa(d, h), saa, sab, sbb)
+        e2_h = _damped_e2(hld.kappa(d, h), saa, sab, sbb)
+        w1 = max(w1, float(np.max(np.abs(e2_d1 - e2_n))))
+        w0 = max(w0, float(np.max(np.abs(e2_d0 - e2_h))))
+    return w1, w0
+
+
+def _r2_direct(reader, name, n_ticks):
+    """Independent per-element R² via numpy polyfit over the loaded trajectory (t=0..N-1)."""
+    traj = np.stack([reader.load_matrix_f64(t, name) for t in range(n_ticks)], axis=0)
+    tbar = (n_ticks - 1) / 2.0
+    ti = np.arange(n_ticks) - tbar
+    mu = traj.mean(0)
+    ss_tot = ((traj - mu) ** 2).sum(0)
+    S_tt = n_ticks * (n_ticks ** 2 - 1) / 12.0
+    ss_reg = ((ti[:, None] * (traj - mu)).sum(0)) ** 2 / S_tt
+    const = ss_tot <= R2_CONST_EPS
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(const, np.nan, np.clip(ss_reg / ss_tot, 0.0, 1.0))
+    return r2, const
+
+
 def run_selftest(args) -> int:
     out_dir = args.out or DEFAULT_OUT
     os.makedirs(out_dir, exist_ok=True)
@@ -1232,6 +1456,137 @@ def run_selftest(args) -> int:
         p_ok, f"{len(p_res)} samples, worst rel diff {worst_p:.2e} "
               f"(tol {PARITY_RTOL:g}) — surrogate path == direct "
               f"predictors.Order1+metrics.full_metric_row")
+
+    # ======================= #47 additive invariants =========================
+    # -- damped lambda=1==naive_linear, lambda=0==hold_stale (BOTH regimes) ------
+    id_ok, id_det = True, []
+    for cad, nt in (("per-tick", 14), ("per-step", 12)):
+        ts = TS.select_ticks(cad, nt)
+        rc = InMemoryReader(reader.ticks, tickset=ts)
+        stc = stream_stats(rc, name_dims, nt, sband, ram_gb=0.05, tag=f"-id-{cad}")
+        w1, w0 = _damped_identity_worst(stc, [n for n, _ in name_dims], nt, sband,
+                                        sdeltas, shs)
+        id_ok = id_ok and w1 <= 1e-9 and w0 <= 1e-9
+        id_det.append(f"{cad}: |lam1-naive|={w1:.1e} |lam0-hold|={w0:.1e}")
+    inv["damped_lambda_identities"] = (id_ok, "; ".join(id_det))
+
+    # -- cadence reindex: per-step maps step s -> tick 2s; recovers step-spaced deltas
+    lreader, lname_dims, lvel = _synthetic_linear_reader(24)
+    ps = TS.select_ticks("per-step", 10)          # [0,2,…,18]
+    pt = TS.select_ticks("per-tick", 10)          # [0,1,…,9]
+    ps_reader = InMemoryReader(lreader.ticks, tickset=ps)
+    reindex_ok = all(ps_reader.real_tick(s) == 2 * s for s in range(10))
+    present_ok = len(ps_reader.present_ticks(10)) == 10   # all SELECTED ticks present
+    # exactly-linear -> per-step consecutive delta == 2x per-tick delta (element-wise)
+    d_ps = ps_reader.load_matrix_f64(1, "lin.a") - ps_reader.load_matrix_f64(0, "lin.a")
+    d_pt = InMemoryReader(lreader.ticks, tickset=pt).load_matrix_f64(1, "lin.a") - \
+        InMemoryReader(lreader.ticks, tickset=pt).load_matrix_f64(0, "lin.a")
+    step_delta_ok = np.allclose(d_ps, 2.0 * d_pt, atol=1e-6)
+    ndl = [(n, d) for n, d in lname_dims]
+    fp_ps = _fingerprint(ndl, 10, 5, "/x", cadence="per-step", tickset=ps)
+    fp_pt = _fingerprint(ndl, 10, 5, "/x", cadence="per-tick", tickset=pt)
+    fp_distinct = fp_ps != fp_pt
+    inv["cadence_reindex"] = (
+        reindex_ok and present_ok and step_delta_ok and fp_distinct,
+        f"per-step step->tick 2s={reindex_ok}; present-set validated={present_ok}; "
+        f"per-step delta==2x per-tick={step_delta_ok}; fingerprint distinct={fp_distinct}")
+
+    # -- OOS leakage guard: _oos_fit_end never leaks; an intentional leak trips assert
+    guard_ok = True
+    for j in range(2, 30):
+        for h in (1, 3, 5):
+            fe = _oos_fit_end(j, h)
+            if fe >= 0 and fe + h >= j:            # a returned fit end must NOT leak
+                guard_ok = False
+    # a fit end that reaches the anchor (scoring point >= anchor) MUST trip the guard
+    leak_trips = False
+    try:
+        bad_fit_end, anchor, h = 5, 5, 1           # scoring point 5+1=6 >= anchor 5 (leak)
+        assert bad_fit_end + h < anchor, "LEAK"    # the SAME predicate _oos_fit_end asserts
+    except AssertionError:
+        leak_trips = True
+    # fit_score_split (the wired guard for #49 fit-methods) still refuses an overlap
+    lg2_ok, _ = P.leakage_guard_selftest()
+    inv["oos_leakage_guard"] = (
+        guard_ok and leak_trips and lg2_ok,
+        f"_oos_fit_end causal on 2<=j<30 x h in (1,3,5)={guard_ok}; "
+        f"intentional-leak trips assert={leak_trips}; fit_score_split guard={lg2_ok}")
+
+    # -- damped off-path parity: window_stats block-sum == direct DampedLinear.predict
+    dmp_lam = 0.4
+    dmeth = DampedLinear(dmp_lam)
+    _saved = _REGISTRY.get("damped_linear")
+    register_method(dmeth)                        # temp: fixed-lambda for parity
+    dp_ok, dp_res = parity_check(reader, sstats, ["syn.a", "syn.d"], n_ticks_s, sband,
+                                 [(2, 1), (3, 4)], ["damped_linear"])
+    register_method(_saved)                        # restore the OOS damped placeholder
+    worst_dp = max((r["worst_rel"] for r in dp_res), default=float("nan"))
+    inv["damped_offpath_parity"] = (
+        dp_ok, f"lam={dmp_lam}: {len(dp_res)} samples, worst rel diff {worst_dp:.2e} "
+               f"(tol {PARITY_RTOL:g}) — block-sum window_stats == Order1(kappa)+metrics")
+
+    # -- per-scalar R² off-path parity + [0,1] bounds + constant exclusion --------
+    r2reader, r2nd, r2n = _synthetic_reader_r2()
+    r2names = [n for n, _ in r2nd]
+    r2stats = stream_stats(r2reader, r2nd, r2n, band=6, ram_gb=0.05, tag="-r2",
+                           retain_r2=set(r2names))
+    r2_ok, r2_bounds_ok, excl_ok = True, True, True
+    r2_det = []
+    for nm in r2names:
+        V, W, Pv = r2stats[nm]["_r2_ve"]
+        r2_stream, cmask_s = per_element_r2(V, W, Pv, r2n)
+        r2_dir, cmask_d = _r2_direct(r2reader, nm, r2n)
+        med_s = float(np.nanmedian(r2_stream[~cmask_s])) if np.any(~cmask_s) else float("nan")
+        med_d = float(np.nanmedian(r2_dir[~cmask_d])) if np.any(~cmask_d) else float("nan")
+        fr_s = float(np.mean(r2_stream[~cmask_s] > R2_STRONG)) if np.any(~cmask_s) else float("nan")
+        fr_d = float(np.mean(r2_dir[~cmask_d] > R2_STRONG)) if np.any(~cmask_d) else float("nan")
+        dmed = 0.0 if (math.isnan(med_s) and math.isnan(med_d)) else abs(med_s - med_d)
+        dfr = 0.0 if (math.isnan(fr_s) and math.isnan(fr_d)) else abs(fr_s - fr_d)
+        excl_match = int(cmask_s.sum()) == int(cmask_d.sum())
+        valid = r2_stream[~cmask_s]
+        valid = valid[np.isfinite(valid)]
+        in_bounds = valid.size == 0 or (valid.min() >= 0.0 and valid.max() <= 1.0)
+        r2_ok = r2_ok and dmed <= 1e-6 and dfr <= 1e-6
+        excl_ok = excl_ok and excl_match
+        r2_bounds_ok = r2_bounds_ok and in_bounds
+        r2_det.append(f"{nm}: |dmed|={dmed:.1e} |dfr|={dfr:.1e} nexcl={int(cmask_s.sum())}")
+    const_excluded = int(r2stats["r2.const"]["n_excluded_const"]) == 50
+    inv["r2_offpath_parity"] = (
+        r2_ok and excl_ok, "; ".join(r2_det))
+    inv["r2_bounds_and_exclusion"] = (
+        r2_bounds_ok and const_excluded,
+        f"all valid R² in [0,1]={r2_bounds_ok}; r2.const fully excluded "
+        f"(n_excluded_const={r2stats['r2.const']['n_excluded_const']}/50)={const_excluded}")
+
+    # -- paper_linear anchor rule + cross-path parity (direct == naive(delta_resolved)) --
+    pp_band = 30
+    ppstats = stream_stats(r2reader, r2nd, r2n, band=pp_band, ram_gb=0.05, tag="-pp")
+    windows, needed = _paper_windows(r2n, [2, 4], anchor_frac=0.25, stride=2)
+    anchor_rule_ok = all((0.20 <= t0 / t <= 0.30) and t >= 20 and dres == t - t0
+                         for (h, t, t0, dres) in windows)
+    pp_worst = 0.0
+    nai = NaiveLinear()
+    for (h, t, t0, dres) in windows:
+        if dres + h > pp_band:                    # only band-fitting windows are comparable
+            continue
+        nm = "r2.linear"
+        a = r2reader.load_matrix_f64(t0, nm); tt = r2reader.load_matrix_f64(t, nm)
+        s = r2reader.load_matrix_f64(t + h, nm)
+        k = h / dres
+        e = (tt + k * (tt - a)) - s; b = tt - s
+        direct = surrogate_metric_row(float(e @ e), float(b @ b), float(e @ b))
+        Pp = prefix_from_banded(ppstats[nm]["D"], pp_band)
+        saa, sab, sbb = cell_window_sums(Pp, dres, h, r2n)
+        jj = t - dres                              # window index for anchor t at delta=dres
+        e2, b2, eb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)
+        band_score = surrogate_metric_row(e2, b2, eb)
+        dv, sv = direct["weight_proj_ratio"], band_score["weight_proj_ratio"]
+        if np.isfinite(dv) and np.isfinite(sv):
+            pp_worst = max(pp_worst, abs(dv - sv) / max(abs(dv), abs(sv), 1e-12))
+    inv["paper_anchor_and_parity"] = (
+        anchor_rule_ok and pp_worst <= PARITY_RTOL,
+        f"anchor rule t0=floor(0.25t),t>=20,0.20<=t0/t<=0.30,dres=t-t0={anchor_rule_ok}; "
+        f"direct==naive(delta_resolved) worst rel {pp_worst:.2e} (tol {PARITY_RTOL:g})")
 
     # -- real-trace subset battery ---------------------------------------------
     det_soft = (True, "not run (no trace)")
@@ -1367,15 +1722,24 @@ def run_emit(args) -> int:
     n_ticks = args.n_ticks
     deltas, hs = args.deltas, args.hs
     band = max(deltas) + max(hs)
-    reader = MmapTraceReader(args.trace_root)
+    # #47 cadence: resolve the SELECTED tick set; step index s -> real tick tickset[s].
+    tickset = TS.select_ticks(args.cadence, n_ticks)
+    unit = "global_step" if args.cadence == "per-step" else "tick"
+    assert len(tickset) == n_ticks, (
+        f"cadence {args.cadence} yields {len(tickset)} ticks != n_ticks {n_ticks} "
+        f"(per-step needs n_ticks=80, per-tick needs 160 for the EXP-57 trace)")
+    reader = MmapTraceReader(args.trace_root, tickset=tickset)
     present = reader.present_ticks(n_ticks)
     if len(present) < n_ticks:
-        print(f"TRACE-INCOMPLETE: {len(present)}/{n_ticks} ticks at {args.trace_root}",
-              flush=True)
+        print(f"TRACE-INCOMPLETE: {len(present)}/{n_ticks} selected {args.cadence} "
+              f"ticks at {args.trace_root}", flush=True)
         print("EMIT: NO-GO", flush=True)
         return 2
+    log(f"cadence={args.cadence} unit={unit} n_ticks={n_ticks} band={band} "
+        f"tickset[0:4]={tickset[:4]}..{tickset[-1]}")
     name_dims = [(n, dims[n]) for n in names]
-    fp = _fingerprint(name_dims, n_ticks, band, args.trace_root)
+    fp = _fingerprint(name_dims, n_ticks, band, args.trace_root,
+                      cadence=args.cadence, tickset=tickset)
     cache_path = os.path.join(out_dir, "stats_cache.npz")
     stats = None if args.force_recompute else load_stats_cache(cache_path, fp)
     if stats is None:
@@ -1387,26 +1751,56 @@ def run_emit(args) -> int:
     else:
         log(f"stats cache reused: {cache_path}")
     methods = args.methods
-    rows, ratio_store, lam_select = compute_rows(stats, names, n_ticks, band, methods,
-                                     deltas, hs, args.op_point, args.also_points)
-    log(f"{len(rows)} atomic rows computed")
-    vis = build_visuals(rows, methods, deltas, hs, args.op_point)
+    cached_methods = [m for m in methods if m != "paper_linear"]
+    rows, ratio_store, lam_select = compute_rows(
+        stats, names, n_ticks, band, cached_methods, deltas, hs,
+        args.op_point, args.also_points,
+        cadence=args.cadence, unit=unit, lam_grid=args.lam_gridv)
+    log(f"{len(rows)} banded-cache atomic rows computed")
+    paper_panel = None
+    if "paper_linear" in methods:
+        groups = build_groups(names)
+        t0 = time.time()
+        paper_rows, paper_panel = compute_paper_rows(
+            reader, names, dims, n_ticks, hs, groups,
+            args.paper_anchor_frac, args.paper_stride, stats,
+            args.cadence, unit, ram_gb=args.ram_gb)
+        paper_panel["operating_h"] = args.op_point[1]
+        rows.extend(paper_rows)
+        log(f"paper_linear direct pass done in {(time.time() - t0) / 60:.1f} min "
+            f"({len(paper_rows)} rows)")
+    vis = build_visuals(rows, methods, deltas, hs, args.op_point,
+                        lam_select=lam_select, stats=stats, paper_panel=paper_panel)
     gates = run_gates(rows, part, n_ticks, methods, deltas, hs,
                       args.op_point, args.also_points)
+    gall = next((r for r in rows if r["method"] == cached_methods[0]
+                 and r["group_kind"] == "global"), {})
+    linearity_r2 = {"r2_median": gall.get("r2_median"),
+                    "r2_frac_gt_0.7": gall.get("r2_frac_gt_0.7"),
+                    "n_excluded_const": gall.get("n_excluded_const")}
+    visual_keys = list(vis.keys())
     meta = {
-        "experiment": "EXP-45 (MOAT scorecard contract)",
+        "experiment": "EXP-47 (MOAT ANCHOR linear/damped-linear lane)",
         "metric_contract": M.METRIC_CONTRACT,
+        "schema_version": SCHEMA_VERSION,
         "trace_root": os.path.realpath(args.trace_root),
         "manifest": args.manifest,
         "n_ticks": n_ticks, "band": band,
+        "cadence": args.cadence, "unit": unit,
+        "tickset_first": tickset[0], "tickset_last": tickset[-1],
+        "tickset_stride": (tickset[1] - tickset[0]) if len(tickset) > 1 else 1,
         "methods": methods, "delta_ticks": deltas, "h_ticks": hs,
+        "lam_grid": args.lam_gridv,
+        "paper_anchor_frac": args.paper_anchor_frac, "paper_stride": args.paper_stride,
+        "paper_sentinel_delta": PAPER_SENTINEL_DELTA,
         "operating_point": list(args.op_point),
         "also_points": [list(p) for p in args.also_points],
         "n_matrices": len(names),
         "structure_block_type_counts": part["block_type_counts"],
         "structure_super_block_counts": part["super_block_counts"],
         "required_row_keys": REQUIRED_ROW_KEYS,
-        "visual_keys": VISUAL_KEYS,
+        "visual_keys": visual_keys,
+        "linearity_r2": linearity_r2,
         "gates": gates,
         "stats_cache_fingerprint": fp,
         "n_rows": len(rows),
