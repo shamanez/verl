@@ -70,12 +70,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from weight_proj import metrics as M            # noqa: E402
 from weight_proj import predictors as P         # noqa: E402
 from weight_proj import structure as ST         # noqa: E402
+from weight_proj import tick_select as TS        # noqa: E402  (#47 --cadence)
 
 METRIC_CONTRACT_EXPECTED = "weight-proj-metrics-v1"
+# #47 cache-schema version — folded into _fingerprint so pre-#47 caches (no R2
+# summaries, no cadence/tick-set) rebuild cleanly instead of loading stale.
+SCHEMA_VERSION = "moat-scorecard-v47.1"
 DEFAULT_MANIFEST = "runs/EXP-57/regimeA/weights/full_manifest.jsonl"
 DEFAULT_OUT = "runs/MOAT-45-ANALYSIS/scorecard"
 PARITY_RTOL = 1e-6          # off-path parity: surrogate-path vs direct-tensor-path
 IDENTITY_TOL = 1e-6         # hold-stale gate: |ratio-1| and |skill| per plan
+R2_STRONG = 0.7             # per-scalar linearity R² "strong" threshold (Wang et al.)
+R2_HIST_BINS = 100          # 100 bins over [0,1] for histogram-merged group R²
+R2_CONST_EPS = 1e-300       # SS_tot <= this ⇒ constant scalar (excluded + counted)
+PAPER_SENTINEL_DELTA = 0    # paper_linear rows key delta_ticks=0 (delta is derived)
 
 REQUIRED_ROW_KEYS = [
     # identity of the row
@@ -94,11 +102,21 @@ REQUIRED_ROW_KEYS = [
     "h_star", "best_delta",
     # tied-lm_head bookkeeping
     "tied",
+    # ---- #47 REQUIRED superset (existing 29 keys above unchanged) ----
+    "cadence", "unit",                             # regime tag
+    "anchor_mode", "delta_resolved", "beta",       # two-anchor descriptor (paper-equiv)
+    "r2_median", "r2_frac_gt_0.7", "n_excluded_const",  # per-scalar linearity R²
+    "lam_star",                                    # OOS-selected lambda (None off damped)
 ]
 
+# base visuals (#45) present in every regime; #47 adds the lambda / R² / paper visuals.
 VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
                "c_target_horizon_sweep", "d_traj_r2",
-               "e_ratio_heatmap", "f_hstar_heatmap", "g_special_groups"]
+               "e_ratio_heatmap", "f_hstar_heatmap", "g_special_groups",
+               "h_lambda_selection", "i_r2_histogram", "j_r2_depth_block_heatmap",
+               "k_r2_ratio_coupling"]
+# regime-S-only visual (paper_linear present) — declared per-emit in meta.visual_keys
+VISUAL_KEY_PAPER = "m_paper_equivalence"
 
 
 def log(msg: str) -> None:
@@ -177,6 +195,30 @@ class NaiveLinear(TwoAnchorLinear):
         return float(h) / float(delta)
 
 
+class DampedLinear(TwoAnchorLinear):
+    """Damped two-anchor linear: theta_hat = theta_t + lambda*(h/delta)*(theta_t-theta_{t-delta}).
+
+    kappa = lambda * h / delta, so the family NESTS both #45 references:
+      lambda = 1.0  ->  kappa = h/delta  == naive_linear   (bit-for-bit identity)
+      lambda = 0.0  ->  kappa = 0        == hold_stale      (ratio == 1, skill == 0)
+    `self.lam` is settable; the emit's OOS selector picks lambda per SCORED window on
+    strictly-earlier windows (leakage-guarded), so a damped row's ratio is the OOS
+    ratio (never an in-sample oracle). `predict()`/`window_stats()` use the current
+    self.lam — used by the off-path parity self-test at a fixed lambda.
+    """
+    def __init__(self, lam: float = 1.0):
+        super().__init__("damped_linear")
+        self.lam = float(lam)
+
+    def kappa(self, delta: int, h: int) -> float:
+        return self.lam * float(h) / float(delta)
+
+
+def _damped_e2(k: float, s_aa, s_ab, s_bb):
+    """||e||^2 for kappa=k over the delta-Gram block sums (vectorized over windows)."""
+    return k * k * s_aa + s_bb - 2.0 * k * s_ab
+
+
 _REGISTRY: dict[str, MoatMethod] = {}
 
 
@@ -186,6 +228,7 @@ def register_method(m: MoatMethod) -> None:
 
 register_method(HoldStale())
 register_method(NaiveLinear())
+register_method(DampedLinear())
 
 
 def fit_window_positions(n_ticks: int, t: int, fit_len: int) -> list[int]:
@@ -213,17 +256,27 @@ class MmapTraceReader:
     kept separate because LocalSnapshotSource materializes full fp32 copies of
     whole state dicts, which the chunked engine must not do.
     """
-    def __init__(self, trace_root: str):
+    def __init__(self, trace_root: str, tickset: list[int] | None = None):
+        # tickset maps the STEP index s (0..n-1, the cadence-reindexed axis every
+        # downstream stage works in) to the REAL on-disk tick. None => identity
+        # (step == tick). For --cadence per-step, tickset = [0,2,4,…] so step s
+        # loads tick_{2s} — the cadence-reindex invariant.
         self.trace_root = trace_root
+        self.tickset = tickset
 
-    def path(self, tick: int) -> str:
+    def real_tick(self, step: int) -> int:
+        return step if self.tickset is None else int(self.tickset[step])
+
+    def path(self, step: int) -> str:
+        tick = self.real_tick(step)
         nested = os.path.join(self.trace_root, "full", f"tick_{tick}", f"tick_{tick}.pt")
         if os.path.exists(nested):
             return nested
         return os.path.join(self.trace_root, "full", f"tick_{tick}.pt")
 
     def present_ticks(self, n_ticks: int) -> list[int]:
-        return [t for t in range(n_ticks) if os.path.exists(self.path(t))]
+        # validate the SELECTED set (the n_ticks step indices), not raw ticks 0..n-1
+        return [s for s in range(n_ticks) if os.path.exists(self.path(s))]
 
     def load_raw(self, tick: int):
         import torch
@@ -243,21 +296,30 @@ class MmapTraceReader:
 
 
 class InMemoryReader:
-    """Synthetic-trace reader for the self-test battery: {tick: {name: 1-D f32}}."""
-    def __init__(self, ticks: dict):
+    """Synthetic-trace reader for the self-test battery: {tick: {name: 1-D f32}}.
+
+    Cadence-aware exactly like MmapTraceReader: an optional `tickset` maps the step
+    index to the real synthetic tick, so the cadence-reindex invariant is testable
+    entirely in memory.
+    """
+    def __init__(self, ticks: dict, tickset: list[int] | None = None):
         self.ticks = ticks
+        self.tickset = tickset
+
+    def real_tick(self, step: int) -> int:
+        return step if self.tickset is None else int(self.tickset[step])
 
     def present_ticks(self, n_ticks: int) -> list[int]:
-        return [t for t in range(n_ticks) if t in self.ticks]
+        return [s for s in range(n_ticks) if self.real_tick(s) in self.ticks]
 
-    def load_raw(self, tick: int):
-        return self.ticks[tick]
+    def load_raw(self, step: int):
+        return self.ticks[self.real_tick(step)]
 
     def slice_f64(self, sd, name: str, a: int, b: int) -> np.ndarray:
         return np.asarray(sd[name]).reshape(-1)[a:b].astype(np.float64)
 
-    def load_matrix_f64(self, tick: int, name: str) -> np.ndarray:
-        arr = np.asarray(self.ticks[tick][name]).reshape(-1)
+    def load_matrix_f64(self, step: int, name: str) -> np.ndarray:
+        arr = np.asarray(self.ticks[self.real_tick(step)][name]).reshape(-1)
         return arr.astype(np.float64)
 
 
@@ -267,7 +329,7 @@ class InMemoryReader:
 class _Unit:
     """One streamed unit: a whole matrix, or a contiguous element shard of one."""
     __slots__ = ("name", "a", "b", "n", "ring", "prev", "c", "V", "W",
-                 "sum_phi2", "D", "nnz")
+                 "sum_phi2", "D", "nnz", "P")
 
     def __init__(self, name: str, a: int, b: int):
         self.name, self.a, self.b, self.n = name, a, b, b - a
@@ -301,23 +363,81 @@ def plan_chunks(name_dims: list[tuple[str, int]], cap_elems: int) -> list[list[_
     return chunks
 
 
+# ---- per-scalar linearity R² (Wang et al. 2026; the MUST metric) -------------
+def per_element_r2(V: np.ndarray, W: np.ndarray, P: np.ndarray, N: int):
+    """EXACT per-element simple-OLS R² of phi_t vs the step index t = 0..N-1.
+
+    Sufficient stats (per element): V = sum_t phi_t, W = sum_t (t-tbar) phi_t,
+    P = sum_t phi_t^2. Then
+        SS_tot = P - V^2/N ,  SS_reg = W^2 / S_tt ,  S_tt = N(N^2-1)/12
+        R² = SS_reg / SS_tot   (== R²(theta vs t): constant-shift invariant)
+    Returns (r2, const_mask). const_mask = SS_tot <= R2_CONST_EPS (constant scalar
+    under fp32 — the paper's exclusion). Clipped to [0,1] (simple-OLS bound
+    SS_reg <= SS_tot; only fp rounding can escape it)."""
+    N = int(N)
+    S_tt = N * (N * N - 1) / 12.0
+    ss_tot = P - V * V / N
+    ss_reg = W * W / S_tt
+    const_mask = ss_tot <= R2_CONST_EPS
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(const_mask, np.nan, ss_reg / ss_tot)
+    r2 = np.clip(r2, 0.0, 1.0)
+    return r2, const_mask
+
+
+def r2_summary_from_elements(r2: np.ndarray, const_mask: np.ndarray):
+    """(100-bin [0,1] histogram, n_excluded_const, n_valid) for the valid scalars."""
+    valid = r2[~const_mask]
+    valid = valid[np.isfinite(valid)]
+    hist, _ = np.histogram(valid, bins=R2_HIST_BINS, range=(0.0, 1.0))
+    return hist.astype(np.int64), int(np.sum(const_mask)), int(valid.size)
+
+
+def r2_from_hist(hist: np.ndarray):
+    """(median, frac>0.7) read off a merged 100-bin histogram (<=1% median error).
+
+    Group aggregates sum member histograms then read here — additive, no trace access.
+    frac>R2_STRONG counts bins whose center exceeds R2_STRONG."""
+    hist = np.asarray(hist, dtype=np.float64)
+    n = float(hist.sum())
+    if n <= 0:
+        return float("nan"), float("nan")
+    centers = (np.arange(R2_HIST_BINS) + 0.5) / R2_HIST_BINS
+    cum = np.cumsum(hist)
+    mi = int(np.searchsorted(cum, (n + 1.0) / 2.0))
+    med = float(centers[min(mi, R2_HIST_BINS - 1)])
+    thresh_bin = int(np.ceil(R2_STRONG * R2_HIST_BINS))   # bins [70:] -> center > 0.7
+    frac = float(hist[thresh_bin:].sum()) / n
+    return med, frac
+
+
 def stream_stats(reader, name_dims: list[tuple[str, int]], n_ticks: int, band: int,
-                 ram_gb: float = 40.0, tag: str = "") -> dict:
+                 ram_gb: float = 40.0, tag: str = "",
+                 retain_r2: set | None = None) -> dict:
     """ONE bounded streaming pass per chunk -> per-matrix sufficient statistics.
 
     Returns {name: {"D": (n_ticks-1, band) f64 banded delta-Gram, "nnz": (n_ticks-1,)
     int64 changed-element counts, "d": int, "sum_phi2": float, "v2": float,
-    "wc2": float}} where phi_t = theta_t - theta_0, V = sum_t phi_t,
-    W_c = sum_t (t - tbar) phi_t; sum_phi2 = sum_t ||phi_t||^2, v2 = ||V||^2,
-    wc2 = ||W_c||^2 (the trajectory linear-fit sufficient stats — additive over
-    concatenation, so group traj_r2 is exact).
+    "wc2": float, "r2_hist": (100,) int64, "n_excluded_const": int, "r2_n_valid": int}}
+    where phi_t = theta_t - theta_0, V = sum_t phi_t, W_c = sum_t (t - tbar) phi_t;
+    sum_phi2 = sum_t ||phi_t||^2, v2 = ||V||^2, wc2 = ||W_c||^2 (the trajectory
+    linear-fit sufficient stats — additive over concatenation, so group traj_r2 is
+    exact).
+
+    #47: a PER-ELEMENT accumulator P = sum_t phi_t^2 rides the same pass beside V/W
+    (one extra f64 vector per unit). At chunk end, while V/W/P are still per-element,
+    each matrix reduces to the per-scalar linearity R² summary {r2_hist (100-bin),
+    n_excluded_const, r2_n_valid} — R²(theta vs t) == R²(phi vs t) (shift-invariant).
+    `retain_r2` names small matrices whose raw per-element (V,W,P) are kept (in
+    "_r2_ve") for the off-path parity self-test; NEVER used in production (huge).
     """
     band = min(band, n_ticks - 1)
     assert band >= 2, "band must cover at least lag 1 (consec_delta_cos)"
     nd = n_ticks - 1
-    cap_elems = max(int(ram_gb * 1e9 / ((band + 8) * 8)), 1_000_000)
+    cap_elems = max(int(ram_gb * 1e9 / ((band + 9) * 8)), 1_000_000)  # +9: ring+V/W/c/P/prev/cur
     chunks = plan_chunks(name_dims, cap_elems)
     tbar = (n_ticks - 1) / 2.0
+    retain_r2 = retain_r2 or set()
     stats: dict = {}
     log(f"stream{tag}: {len(name_dims)} matrices, {sum(len(c) for c in chunks)} units, "
         f"{len(chunks)} chunks (cap {cap_elems:,} elems), n_ticks={n_ticks}, band={band}")
@@ -329,6 +449,7 @@ def stream_stats(reader, name_dims: list[tuple[str, int]], n_ticks: int, band: i
             u.c = np.zeros(u.n, dtype=np.float64)
             u.V = np.zeros(u.n, dtype=np.float64)
             u.W = np.zeros(u.n, dtype=np.float64)
+            u.P = np.zeros(u.n, dtype=np.float64)      # #47: per-element sum_t phi_t^2
             u.sum_phi2 = 0.0
             u.D = np.zeros((nd, band), dtype=np.float64)
             u.nnz = np.zeros(nd, dtype=np.int64)
@@ -354,13 +475,16 @@ def stream_stats(reader, name_dims: list[tuple[str, int]], n_ticks: int, band: i
                 u.sum_phi2 += float(u.c @ u.c)
                 u.V += u.c
                 u.W += (t - tbar) * u.c
+                u.P += u.c * u.c               # #47: per-element phi_t^2
             del sd
         for u in chunk:
             key = u.name
             if key not in stats:
                 stats[key] = {"D": np.zeros((nd, band), dtype=np.float64),
                               "nnz": np.zeros(nd, dtype=np.int64), "d": 0,
-                              "sum_phi2": 0.0, "v2": 0.0, "wc2": 0.0}
+                              "sum_phi2": 0.0, "v2": 0.0, "wc2": 0.0,
+                              "r2_hist": np.zeros(R2_HIST_BINS, dtype=np.int64),
+                              "n_excluded_const": 0, "r2_n_valid": 0}
             s = stats[key]
             s["D"] += u.D
             s["nnz"] += u.nnz
@@ -368,16 +492,34 @@ def stream_stats(reader, name_dims: list[tuple[str, int]], n_ticks: int, band: i
             s["sum_phi2"] += u.sum_phi2
             s["v2"] += float(u.V @ u.V)        # additive over element shards (concat)
             s["wc2"] += float(u.W @ u.W)
-            u.ring = u.prev = u.c = u.V = u.W = u.D = None
+            # #47 per-scalar R²: reduce this shard's per-element (V,W,P) to a hist
+            r2e, cmask = per_element_r2(u.V, u.W, u.P, n_ticks)
+            hist, n_excl, n_val = r2_summary_from_elements(r2e, cmask)
+            s["r2_hist"] += hist
+            s["n_excluded_const"] += n_excl
+            s["r2_n_valid"] += n_val
+            if u.name in retain_r2:
+                if "_r2_ve" in s:
+                    raise AssertionError(f"retain_r2 matrix {u.name} is sharded — "
+                                         "retain only tiny single-shard matrices")
+                s["_r2_ve"] = (u.V.copy(), u.W.copy(), u.P.copy())
+            u.ring = u.prev = u.c = u.V = u.W = u.P = u.D = None
         log(f"stream{tag}: chunk {ci + 1}/{len(chunks)} done in {time.time() - t0:.1f}s")
     return stats
 
 
 # ---- stats cache -------------------------------------------------------------
-def _fingerprint(name_dims, n_ticks, band, trace_root) -> str:
+def _fingerprint(name_dims, n_ticks, band, trace_root,
+                 cadence: str = "per-tick", tickset: list | None = None) -> str:
+    """Cache identity. #47 folds in the cadence, the SELECTED tick-set, and
+    SCHEMA_VERSION so regimes S/T never collide and pre-#47 caches (no R² block)
+    rebuild cleanly instead of silently loading a stale schema."""
     h = hashlib.sha256()
     h.update(json.dumps({"nd": name_dims, "t": n_ticks, "b": band,
-                         "root": os.path.realpath(trace_root)},
+                         "root": os.path.realpath(trace_root),
+                         "cadence": cadence,
+                         "tickset": list(tickset) if tickset is not None else None,
+                         "schema": SCHEMA_VERSION},
                         sort_keys=True).encode())
     return h.hexdigest()[:16]
 
@@ -387,8 +529,11 @@ def save_stats_cache(path: str, stats: dict, fingerprint: str) -> None:
     for i, (name, s) in enumerate(sorted(stats.items())):
         arrays[f"D_{i}"] = s["D"]
         arrays[f"nnz_{i}"] = s["nnz"]
+        arrays[f"r2hist_{i}"] = s["r2_hist"]
         meta["scalars"][name] = {"idx": i, "d": s["d"], "sum_phi2": s["sum_phi2"],
-                                 "v2": s["v2"], "wc2": s["wc2"]}
+                                 "v2": s["v2"], "wc2": s["wc2"],
+                                 "n_excluded_const": s["n_excluded_const"],
+                                 "r2_n_valid": s["r2_n_valid"]}
     arrays["___meta___"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
     np.savez_compressed(path, **arrays)
 
@@ -406,7 +551,10 @@ def load_stats_cache(path: str, fingerprint: str) -> dict | None:
         for name, sc in meta["scalars"].items():
             i = sc["idx"]
             out[name] = {"D": z[f"D_{i}"], "nnz": z[f"nnz_{i}"], "d": sc["d"],
-                         "sum_phi2": sc["sum_phi2"], "v2": sc["v2"], "wc2": sc["wc2"]}
+                         "sum_phi2": sc["sum_phi2"], "v2": sc["v2"], "wc2": sc["wc2"],
+                         "r2_hist": z[f"r2hist_{i}"],
+                         "n_excluded_const": int(sc["n_excluded_const"]),
+                         "r2_n_valid": int(sc["r2_n_valid"])}
         return out
     except Exception as e:                      # corrupt cache -> recompute
         log(f"stats cache unreadable ({e}) — recomputing")
@@ -550,10 +698,98 @@ def group_diagnostics(members: list[str], stats: dict, n_ticks: int) -> dict:
             "coverage": _pcts(nnz / max(d_tot, 1))[0]}
 
 
+def group_r2(members: list[str], stats: dict):
+    """Group per-scalar linearity R²: merge member 100-bin histograms (additive,
+    no trace access) -> (r2_median, r2_frac_gt_0.7, n_excluded_const, merged_hist)."""
+    hist = np.zeros(R2_HIST_BINS, dtype=np.int64)
+    n_excl = 0
+    for m in members:
+        s = stats[m]
+        hist = hist + s["r2_hist"]
+        n_excl += int(s["n_excluded_const"])
+    med, frac = r2_from_hist(hist)
+    return med, frac, n_excl, hist
+
+
+def _oos_fit_end(j: int, h: int) -> int:
+    """Last causal fit-window index for SCORED window j (anchor position j): every fit
+    window j' has scoring point (j'+h) STRICTLY < the anchor j. Returns -1 (warm-up) if
+    the causal set is empty. The assert IS the OOS leakage guard — a fit end reaching
+    the anchor trips it (mirrors predictors.fit_score_split's max(fit)<score contract)."""
+    fit_end = j - h - 1
+    if fit_end >= 0:
+        assert fit_end + h < j, (
+            f"OOS LEAKAGE: fit scoring point {fit_end + h} not strictly < anchor {j}")
+    return fit_end
+
+
+def damped_cell(saa, sab, sbb, delta: int, h: int, lam_grid) -> dict:
+    """OOS walk-forward damped scoring for one (group, delta, h) cell.
+
+    For each SCORED window j (anchor position j, 0..nw-1): select lambda* =
+    argmin over the grid of the summed ||e(lambda)||^2 on the causal fit set
+    {j' : j'+h < j} (leakage-guarded via _oos_fit_end), then score window j with
+    kappa = lambda*·h/delta through the surrogate metric path (contract-faithful).
+    Warm-up windows (empty fit set) get NaN ratio (dropped from the median) and are
+    counted. Also returns the in-sample (no-split) median-ratio-vs-lambda curve for
+    the lambda-selection visual + the in-sample oracle lambda (the honesty gap)."""
+    nw = int(saa.size)
+    lams = np.asarray(lam_grid, dtype=np.float64)
+    L = lams.size
+    kk = lams * (float(h) / float(delta))                    # (L,) kappa per lambda
+    # per-window per-lambda ||e||^2 == DampedLinear.window_stats block-sum path
+    e2 = (kk[:, None] ** 2) * saa[None, :] + sbb[None, :] - 2.0 * kk[:, None] * sab[None, :]
+    e2 = np.maximum(e2, 0.0)                                  # (L, nw)
+    nb = np.sqrt(np.maximum(sbb, 0.0))                        # (nw,)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio_lw = np.where(nb[None, :] > M.DENOM_EPS, np.sqrt(e2) / nb[None, :], np.nan)
+    insample_med = np.full(L, np.nan)
+    for l in range(L):
+        fin = ratio_lw[l][np.isfinite(ratio_lw[l])]
+        if fin.size:
+            insample_med[l] = float(np.median(fin))
+    if np.all(np.isnan(insample_med)):
+        lam_oracle, oracle_med = float("nan"), float("nan")
+    else:
+        oi = int(np.nanargmin(insample_med))
+        lam_oracle, oracle_med = float(lams[oi]), float(insample_med[oi])
+    cumE = np.cumsum(e2, axis=1)                             # (L, nw) cumulative fit err
+    ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
+    dcoss = np.full(nw, np.nan); stales = np.full(nw, np.nan); projs = np.full(nw, np.nan)
+    lam_star = np.full(nw, np.nan); n_warmup = 0
+    for j in range(nw):
+        fit_end = _oos_fit_end(j, h)
+        if fit_end < 0:
+            n_warmup += 1
+            continue
+        li = int(np.argmin(cumE[:, fit_end]))
+        lam_star[j] = lams[li]
+        r = surrogate_metric_row(e2[li, j], sbb[j], sbb[j] - kk[li] * sab[j])
+        ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
+        dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+    lam_star_med = float(np.nanmedian(lam_star)) if np.any(np.isfinite(lam_star)) else float("nan")
+    return {"ratios": ratios, "skills": skills, "dcoss": dcoss, "stales": stales,
+            "projs": projs, "lam_star": lam_star, "lam_star_med": lam_star_med,
+            "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
+            "lam_oracle": lam_oracle, "oracle_med": oracle_med,
+            "insample": (lams.tolist(), [None if not np.isfinite(v) else float(v)
+                                         for v in insample_med])}
+
+
 def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                  methods: list[str], deltas: list[int], hs: list[int],
-                 op_point: tuple[int, int], also_points: list[tuple[int, int]]):
-    """The full scorecard: atomic rows + per-window ratio store (for h*/visuals)."""
+                 op_point: tuple[int, int], also_points: list[tuple[int, int]],
+                 cadence: str = "per-tick", unit: str = "tick", lam_grid=None):
+    """The full scorecard: atomic rows + per-window ratio store (for h*/visuals).
+
+    #47 additions: `damped_linear` rows use the OOS walk-forward selector (damped_cell);
+    every group carries its per-scalar linearity R² (r2_median / r2_frac_gt_0.7 /
+    n_excluded_const, method-independent); every row is tagged with cadence/unit and the
+    two-anchor descriptor {anchor_mode='fixed', delta_resolved=delta, beta=1+h/delta}.
+    Returns (rows, ratio_store, lam_select) where lam_select[(delta,h)] = (lams, med)
+    is the GLOBAL-group in-sample lambda-selection curve for the visual."""
+    if "damped_linear" in methods:
+        assert lam_grid is not None and len(lam_grid) > 0, "damped_linear needs --lam-grid"
     groups = build_groups(names)
     # per-matrix prefix sums once; per-matrix per-cell block sums once
     cells = [(d, h) for d in deltas for h in hs]
@@ -564,8 +800,11 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
         del Ppre
     rows: list[dict] = []
     ratio_store: dict = {}                       # (method, delta, h, kind, key) -> ratios
+    lam_select: dict = {}                        # (delta,h) -> (lams, insample_med) [GLOBAL]
     for g in groups:
         diag = group_diagnostics(g["members"], stats, n_ticks)
+        gr2_med, gr2_frac, gr2_nexcl, _ = group_r2(g["members"], stats)   # per-scalar R²
+        is_global = (g["kind"] == "global")
         gsums = {}
         for c in cells:
             saa = sab = sbb = None
@@ -589,19 +828,27 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                 nw = int(saa.size)
                 assert nw == max(nw_expected, 0), \
                     f"n_windows {nw} != {nw_expected} for cell ({delta},{h})"
-                ratios = np.full(nw, np.nan)
-                skills = np.full(nw, np.nan)
-                dcoss = np.full(nw, np.nan)
-                stales = np.full(nw, np.nan)
-                projs = np.full(nw, np.nan)
-                for j in range(nw):
-                    e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j], delta, h)
-                    r = surrogate_metric_row(e2, b2, eb)
-                    ratios[j] = r["weight_proj_ratio"]
-                    skills[j] = r["skill"]
-                    dcoss[j] = r["dir_cos"]
-                    stales[j] = r["base_norm"]
-                    projs[j] = r["err_norm"]
+                dmp = None
+                if mname == "damped_linear":
+                    dmp = damped_cell(saa, sab, sbb, delta, h, lam_grid)
+                    ratios, skills = dmp["ratios"], dmp["skills"]
+                    dcoss, stales, projs = dmp["dcoss"], dmp["stales"], dmp["projs"]
+                    if is_global:
+                        lam_select[(delta, h)] = dmp["insample"]
+                else:
+                    ratios = np.full(nw, np.nan)
+                    skills = np.full(nw, np.nan)
+                    dcoss = np.full(nw, np.nan)
+                    stales = np.full(nw, np.nan)
+                    projs = np.full(nw, np.nan)
+                    for j in range(nw):
+                        e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j], delta, h)
+                        r = surrogate_metric_row(e2, b2, eb)
+                        ratios[j] = r["weight_proj_ratio"]
+                        skills[j] = r["skill"]
+                        dcoss[j] = r["dir_cos"]
+                        stales[j] = r["base_norm"]
+                        projs[j] = r["err_norm"]
                 rm, r10, r90 = _pcts(ratios)
                 sm, s10, s90 = _pcts(skills)
                 row = {
@@ -623,6 +870,17 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     "n_nan_windows": int(np.sum(~np.isfinite(ratios))),
                     "h_star": None, "best_delta": None,
                     "tied": False,
+                    # ---- #47 superset fields (uniform schema across methods) ----
+                    "cadence": cadence, "unit": unit,
+                    "anchor_mode": "fixed", "delta_resolved": delta,
+                    "beta": 1.0 + float(h) / float(delta),
+                    "r2_median": gr2_med, "r2_frac_gt_0.7": gr2_frac,
+                    "n_excluded_const": gr2_nexcl,
+                    "lam_star": (dmp["lam_star_med"] if dmp else None),
+                    "lam_oracle": (dmp["lam_oracle"] if dmp else None),
+                    "ratio_oracle_median": (dmp["oracle_med"] if dmp else None),
+                    "n_warmup": (dmp["n_warmup"] if dmp else 0),
+                    "n_oos_scored": (dmp["n_oos_scored"] if dmp else nw),
                 }
                 rows.append(row)
                 cell_row_map[(delta, h)] = row
@@ -650,34 +908,53 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
     for (mname, delta, h, kind, key), ratios in list(ratio_store.items()):
         if kind == "special" and key == "embed":
             ratio_store[(mname, delta, h, "special", "lm_head")] = ratios
-    return rows, ratio_store
+    return rows, ratio_store, lam_select
+
+
+def _spearman(x: list, y: list) -> float:
+    """Spearman rank correlation over paired finite (x,y); NaN if < 3 pairs."""
+    xy = [(a, b) for a, b in zip(x, y)
+          if a is not None and b is not None and np.isfinite(a) and np.isfinite(b)]
+    if len(xy) < 3:
+        return float("nan")
+    xa = np.array([p[0] for p in xy]); ya = np.array([p[1] for p in xy])
+    rx = np.argsort(np.argsort(xa)).astype(float)
+    ry = np.argsort(np.argsort(ya)).astype(float)
+    rx -= rx.mean(); ry -= ry.mean()
+    den = np.sqrt((rx * rx).sum() * (ry * ry).sum())
+    return float((rx * ry).sum() / den) if den > 0 else float("nan")
 
 
 def build_visuals(rows: list[dict], methods: list[str],
-                  deltas: list[int], hs: list[int], op: tuple[int, int]) -> dict:
+                  deltas: list[int], hs: list[int], op: tuple[int, int],
+                  lam_select: dict | None = None, stats: dict | None = None,
+                  paper_panel: dict | None = None) -> dict:
     idx = {(r["method"], r["delta_ticks"], r["h_ticks"],
             r["group_kind"], r["group_key"]): r for r in rows}
     op_d, op_h = op
     gget = lambda m, d, h: idx.get((m, d, h, "global", "all"), {})
+    # paper_linear is off the (delta x h) grid (delta derived per window) -> excluded
+    # from the grid visuals a-g; it gets its own m_paper_equivalence panel instead.
+    gm = [m for m in methods if m != "paper_linear"]
     vis = {
         "a_accuracy_vs_horizon": {
             m: {"delta": op_d, "h": hs,
                 "ratio_median": [gget(m, op_d, h).get("weight_proj_ratio_median") for h in hs],
                 "ratio_p10": [gget(m, op_d, h).get("weight_proj_ratio_p10") for h in hs],
                 "ratio_p90": [gget(m, op_d, h).get("weight_proj_ratio_p90") for h in hs]}
-            for m in methods},
+            for m in gm},
         "b_delta_sensitivity": {
             m: {"h": op_h, "delta": deltas,
                 "ratio_median": [gget(m, d, op_h).get("weight_proj_ratio_median") for d in deltas]}
-            for m in methods},
+            for m in gm},
         "c_target_horizon_sweep": {
             m: {str(d): {"h": hs,
                          "ratio_median": [gget(m, d, h).get("weight_proj_ratio_median") for h in hs]}
                 for d in deltas}
-            for m in methods},
+            for m in gm},
     }
     mat_rows = [r for r in rows if r["group_kind"] == "matrix"
-                and r["method"] == methods[0] and r["delta_ticks"] == deltas[0]
+                and r["method"] == gm[0] and r["delta_ticks"] == deltas[0]
                 and r["h_ticks"] == hs[0]]
     lb_keys = sorted({r["block_type"] for r in rows if r["group_kind"] == "layer_block"})
     layers = sorted({r["layer_idx"] for r in rows if r["group_kind"] == "layer_block"})
@@ -689,24 +966,74 @@ def build_visuals(rows: list[dict], methods: list[str],
                        for r in mat_rows],
         "depth_block_heatmap": {
             "layers": layers, "block_types": lb_keys,
-            "traj_r2": [[lb(methods[0], deltas[0], hs[0], li, bt, "traj_r2")
+            "traj_r2": [[lb(gm[0], deltas[0], hs[0], li, bt, "traj_r2")
                          for bt in lb_keys] for li in layers]},
     }
     vis["e_ratio_heatmap"] = {
         m: {"operating_point": [op_d, op_h], "layers": layers, "block_types": lb_keys,
             "ratio_median": [[lb(m, op_d, op_h, li, bt, "weight_proj_ratio_median")
                               for bt in lb_keys] for li in layers]}
-        for m in methods}
+        for m in gm}
     vis["f_hstar_heatmap"] = {
         m: {"delta": op_d, "layers": layers, "block_types": lb_keys,
             "h_star": [[lb(m, op_d, op_h, li, bt, "h_star")
                         for bt in lb_keys] for li in layers]}
-        for m in methods}
+        for m in gm}
     specials = ["embed", "norm", "bias", "lm_head"]
     vis["g_special_groups"] = {
         m: [dict(idx.get((m, op_d, op_h, "special", sp), {}), group=sp)
             for sp in specials]
-        for m in methods}
+        for m in gm}
+
+    # ---- #47 h: lambda-selection (in-sample median ratio vs lambda per (delta,h)) ----
+    lam_select = lam_select or {}
+    vis["h_lambda_selection"] = {
+        "operating_point": [op_d, op_h],
+        "cells": {f"{d},{h}": {"lambda": lam_select[(d, h)][0],
+                               "ratio_median": lam_select[(d, h)][1]}
+                  for (d, h) in sorted(lam_select)}}
+
+    # ---- #47 i: per-scalar R² histogram (global + per super_block) ----
+    r2_hist_data = {}
+    if stats is not None:
+        allnames = sorted({r["matrix_name"] for r in rows if r["group_kind"] == "matrix"})
+        _, _, _, ghist = group_r2(allnames, stats)
+        r2_hist_data["global"] = {"bins": R2_HIST_BINS,
+                                  "counts": [int(x) for x in ghist]}
+        by_sb: dict = {}
+        for r in rows:
+            if r["group_kind"] == "matrix":
+                by_sb.setdefault(r["super_block"], []).append(r["matrix_name"])
+        r2_hist_data["by_super_block"] = {}
+        for sb, mem in sorted(by_sb.items()):
+            _, _, _, hh = group_r2(mem, stats)
+            r2_hist_data["by_super_block"][sb] = [int(x) for x in hh]
+    vis["i_r2_histogram"] = r2_hist_data
+
+    # ---- #47 j: depth x block per-scalar R² heatmap (DISTINCT from d_traj_r2) ----
+    vis["j_r2_depth_block_heatmap"] = {
+        "layers": layers, "block_types": lb_keys,
+        "r2_median": [[lb(gm[0], deltas[0], hs[0], li, bt, "r2_median")
+                       for bt in lb_keys] for li in layers]}
+
+    # ---- #47 k: R²-vs-ratio coupling (per-group median R² vs OOS-damped op-point ratio) ----
+    coup_method = "damped_linear" if "damped_linear" in methods else gm[0]
+    pts = []
+    for r in rows:
+        if (r["method"] == coup_method and r["delta_ticks"] == op_d
+                and r["h_ticks"] == op_h
+                and r["group_kind"] in ("block_type", "super_block", "layer")):
+            pts.append({"group_kind": r["group_kind"], "group_key": r["group_key"],
+                        "r2_median": r["r2_median"],
+                        "ratio_median": r["weight_proj_ratio_median"]})
+    vis["k_r2_ratio_coupling"] = {
+        "method": coup_method, "operating_point": [op_d, op_h], "points": pts,
+        "spearman": _spearman([p["r2_median"] for p in pts],
+                              [p["ratio_median"] for p in pts])}
+
+    # ---- #47 m: paper-equivalence panel (regime S only; passed in by run_emit) ----
+    if paper_panel is not None:
+        vis[VISUAL_KEY_PAPER] = paper_panel
     return vis
 
 
@@ -879,7 +1206,7 @@ def run_selftest(args) -> int:
     sdeltas, shs = [2, 3], [1, 2, 4]
     sband = max(sdeltas) + max(shs)
     sstats = stream_stats(reader, name_dims, n_ticks_s, sband, ram_gb=0.02, tag="-syn")
-    srows, _ = compute_rows(sstats, [n for n, _ in name_dims], n_ticks_s, sband,
+    srows, _, _ = compute_rows(sstats, [n for n, _ in name_dims], n_ticks_s, sband,
                             ["hold_stale", "naive_linear"], sdeltas, shs,
                             (3, 2), [(2, 1)])
     hold = [r for r in srows if r["method"] == "hold_stale" and not r["tied"]]
@@ -931,7 +1258,7 @@ def run_selftest(args) -> int:
                 f"{sum(d for _, d in sub_dims):,} elems/tick")
             rstats = stream_stats(reader_r, sub_dims, n_ticks, band,
                                   ram_gb=args.ram_gb, tag="-real")
-            rrows, _ = compute_rows(rstats, subset, n_ticks, band,
+            rrows, _, _ = compute_rows(rstats, subset, n_ticks, band,
                                     ["hold_stale", "naive_linear"], deltas, hs,
                                     args.op_point, args.also_points)
             rhold = [r for r in rrows if r["method"] == "hold_stale"
@@ -968,9 +1295,9 @@ def run_selftest(args) -> int:
             s1 = stream_stats(reader_r, tiny, n_ticks, band, ram_gb=1, tag="-det1")
             s2 = stream_stats(reader_r, tiny, n_ticks, band, ram_gb=1, tag="-det2")
             det_stream = all(np.array_equal(s1[n]["D"], s2[n]["D"]) for n, _ in tiny)
-            r1, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
+            r1, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
                                  [deltas[0]], [hs[0]], args.op_point, [])
-            r2, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
+            r2, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
                                  [deltas[0]], [hs[0]], args.op_point, [])
             det_rows = json.dumps(_clean(r1)) == json.dumps(_clean(r2))
             det_soft = (det_stream and det_rows,
@@ -1060,7 +1387,7 @@ def run_emit(args) -> int:
     else:
         log(f"stats cache reused: {cache_path}")
     methods = args.methods
-    rows, ratio_store = compute_rows(stats, names, n_ticks, band, methods,
+    rows, ratio_store, lam_select = compute_rows(stats, names, n_ticks, band, methods,
                                      deltas, hs, args.op_point, args.also_points)
     log(f"{len(rows)} atomic rows computed")
     vis = build_visuals(rows, methods, deltas, hs, args.op_point)
@@ -1230,6 +1557,16 @@ def main() -> int:
                     help="default: rows in --manifest")
     ap.add_argument("--ram-gb", type=float, default=40.0)
     ap.add_argument("--force-recompute", action="store_true")
+    # ---- #47 flags ----
+    ap.add_argument("--cadence", default="per-tick", choices=["per-tick", "per-step"],
+                    help="per-tick=all ticks 0..n-1; per-step=even ticks [0,2,…] "
+                         "reindexed (GLOBAL STEPS, paper-comparable)")
+    ap.add_argument("--lam-grid", default="0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0",
+                    help="damped_linear lambda grid (nests hold_stale@0, naive@1)")
+    ap.add_argument("--paper-anchor-frac", type=float, default=0.25,
+                    help="paper_linear t0 = floor(frac*t) (Wang et al. App. E.1, 0.20-0.30)")
+    ap.add_argument("--paper-stride", type=int, default=2,
+                    help="paper_linear anchor stride over t (regime S only)")
     args = ap.parse_args()
 
     if args.verify_schema:
@@ -1239,11 +1576,19 @@ def main() -> int:
         f"metric-contract drift: {M.METRIC_CONTRACT!r} != {METRIC_CONTRACT_EXPECTED!r}")
     args.methods = [m.strip() for m in args.method.split(",") if m.strip()]
     for m in args.methods:
-        assert m in _REGISTRY, f"unknown method {m!r}; registered: {sorted(_REGISTRY)}"
+        # paper_linear is a direct-scored arm (not a fixed-kappa registry method)
+        assert m in _REGISTRY or m == "paper_linear", \
+            f"unknown method {m!r}; registered: {sorted(_REGISTRY)} + paper_linear"
     args.deltas = [int(x) for x in args.delta.split(",")]
     args.hs = [int(x) for x in args.h_grid.split(",")]
     args.op_point = _parse_pair(args.operating_point)
     args.also_points = [_parse_pair(args.also)] if args.also else []
+    args.lam_gridv = [float(x) for x in args.lam_grid.split(",")]
+    if args.cadence == "per-step" and "paper_linear" not in args.methods:
+        pass  # paper is regime-S-only but optional; regime T never includes it
+    if "paper_linear" in args.methods and args.cadence != "per-step":
+        raise SystemExit("paper_linear is regime-S (per-step) ONLY — the paper protocol "
+                         "is checkpoint/per-step-like; per-tick is out of scope")
     if not args.n_ticks:
         args.n_ticks = _manifest_nticks(args.manifest) if os.path.exists(args.manifest) else 160
 
