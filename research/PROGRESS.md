@@ -42,3 +42,4 @@ compression train–inference mismatch.
 [2026-07-02T02:09:32+10:00] [orchestrator #58] HANDOFF COMPLETE + /goal cleared. Probe GREEN (5/5 hard invariants). Box 43387501 (1xH200 team) HELD RUNNING+ALIVE for another agent — teardown sweep SKIPPED per operator directive; heartbeat keepalive PID 30373 touching incoming.log every 10min (24h bound). Collection NOT launched. Readiness+config in runs/EXP-58/HANDOFF.md. This session stops driving.
 [2026-07-02T13:02:00+10:00] [research-planner #45] plan written
 [2026-07-02T13:03:18+10:00] [triage] directed dispatch for #45: 1 planner dispatched, plan .claude/plans/45.md written, status:planned set, stub comment posted
+[2026-07-02T13:51:58+10:00] teardown EXP-MOAT-45-ANALYSIS reason=no-heartbeat-ever-60min destroyed=1
