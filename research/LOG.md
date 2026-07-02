@@ -4,6 +4,17 @@ Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, the `repo
 summaries, W&B, and git history. Use method names + settings, not old run labels. Current operating
 base + the two active priorities are in `PROGRESS.md`.
 
+## EXP-58 · 2026-07-03T01:05Z · M4 · PASS
+Ckpt→R2: config-gated on-the-go checkpoint→R2 mirror hook (new) + Big-Math 1000-step fp32 weight-trajectory + full-checkpoint collection (Qwen2.5-1.5B, dense = comm-eff OFF), single 1×H200 (team 43387501).
+- hypothesis: artifact-completeness, not reward — a flag-gated post-`_save_checkpoint` R2 upload hook (built on `R2ArtifactSink`) mirrors every `global_step_<N>/` tree to R2 on-the-go (upload-then-delete, disk-bounded, resume-valid) over 1000 steps; method-OFF byte-identical to upstream.
+- result: PASS, all success criteria. Probe gate GREEN (5/5 hard invariants). Collection: 1000/1000 clean steps @resp=4096, FSDP1, 0 NaN.
+- key numbers: **checkpoints 50/50 `verified:true`** (verify_ckpt_r2_mirror.py PASS 50/50, tracker=1000, dry_restore=True; independent recount unanimous, 0 zero-byte; manifest 550 rows/550 verified) + **fp32 weights 50/50 `verified:true`** (steps 20..1000, all ~6.17 GB fp32, 0 undersized; manifest 50/50). Drain barrier `close() OK n_uploaded=550 n_errors=0`. On-the-go confirmed (peak on-disk ~12–19 GB, delete-local; disk ≤14%). rc=1 = benign wandb atexit.
+- science readout (NON-gating): critic/score (=Big-Math batch accuracy) 0.47→~0.61 windowed then plateau; grad_norm ~0.24 flat, entropy 0.27→0.04 — stable GRPO. Reward not a gate for a weight-trajectory collection.
+- compute: 1×H200 team (instance 43387501), ~23 h wall / ~23 GPU-hr (≪96 cap), $3.03/hr; torn down on completeness (ledger TORN_DOWN, confirmed absent — no leak). WandB run 73zd1o6x backfilled to step 1000.
+- code: `code_change=true`, branch `exp/58-ckpt-r2` (origin, 740bc3c) — `verl/trainer/ppo/ray_trainer.py` (`_save_checkpoint` upload block) + `verl/workers/comm_eff/r2_sink.py` (allow-list widened to `checkpoints`) + `verl/trainer/config/ppo_trainer.yaml` + comm-eff launcher; `research/scripts/verify_ckpt_r2_mirror.py` added on vast-ai-workload. **PR to `vast-ai-workload` PENDING operator go-ahead.**
+- data: `s3://shamane-pluralis/verl-research/EXP-58/regimeA/{checkpoints,weights}`; manifests+logs → runs/EXP-58/{manifests,collection}/
+- run dir: runs/EXP-58/ · verdict: runs/EXP-58/verdict.md
+
 ## EXP-45 · 2026-07-02T16:39:37+10:00 · M4 · PASS
 MOAT: Minimal projection scorecard plus block/layer structure for EXP-57 — the shared scorecard CONTRACT for lanes #47/#48/#49 and verdict #56 (NOT a science claim).
 - hypothesis: contract/correctness, not performance — the shared replay harness over the EXP-57 fp32 trace (160 optimizer-tick snapshots, 338 matrices) is correct + complete + machine-consumable by hard numeric gates (metric-contract pin, hold-stale identity, exact structure partition, full schema/aggregates/visuals, finite naive-linear). NO algorithm-performance threshold asserted; whether projection helps is #47's science.
