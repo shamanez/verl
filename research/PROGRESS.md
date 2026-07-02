@@ -46,3 +46,4 @@ compression train–inference mismatch.
 [2026-07-02T16:41:06+10:00] [analyst] EXP-45 verdict=PASS — MOAT scorecard contract GO: SELFTEST GO (11 invariants), EMIT GO (7 gates), SCHEMA GO box+laptop; hold-stale identity worst |ratio-1|=0 over 13377 rows, partition exact 338 other=0, 42 tied lm_head, 26796 rows, additive-code gate clean
 MILESTONE_PASS: M4
 [2026-07-02T16:47:04+10:00] [log-writer] EXP-45 logged — LOG.md + SUMMARY.md + STATUS.md updated (PASS, M4)
+[2026-07-02T18:13:51+10:00] [research-planner #47] plan written
