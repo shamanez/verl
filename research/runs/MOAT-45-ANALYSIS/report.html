@@ -194,6 +194,10 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
   horizon h whose median ratio is still &lt; 1 (<b>0</b> = never beats stale). In the charts below the
   faint blue band is the "predictor wins" region and the faint red band is "harmful"; hold-stale, being
   the denominator, is identically the dashed line at 1.0.</p>
+  <p><b>Lower is better.</b> Concretely: a ratio of <b>0.614</b> means the prediction's error is only
+  61% of the do-nothing error — a <b>~39% improvement</b> over hold-stale; a ratio of <b>1.404</b> means
+  140% of the do-nothing error — <b>~40% worse</b> than simply keeping the current weights. 1.0 is the
+  hold-stale baseline (no skill).</p>
 </section>
 
 <section>
@@ -247,6 +251,38 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
     </div>
     <div class="figure"><div class="fig-plot"><svg class="chart" viewBox="0 0 760 400" preserveAspectRatio="xMidYMid meet" role="img" width="100%" style="max-width:760px;height:auto;display:block"><rect x="64" y="20" width="580" height="326" fill="#ffffff"/><rect x="64" y="20" width="580" height="186.3" fill="#fbeeee"/><rect x="64" y="206.3" width="580" height="139.7" fill="#eef5fd"/><line x1="64" y1="330.5" x2="644" y2="330.5" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="334.0" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">0.60</text><line x1="64" y1="268.4" x2="644" y2="268.4" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="271.9" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">0.80</text><line x1="64" y1="206.3" x2="644" y2="206.3" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="209.8" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">1.00</text><line x1="64" y1="144.2" x2="644" y2="144.2" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="147.7" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">1.20</text><line x1="64" y1="82.1" x2="644" y2="82.1" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="85.6" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">1.40</text><line x1="64" y1="20.0" x2="644" y2="20.0" stroke="#e1e0d9" stroke-width="1"/><text x="56" y="23.5" text-anchor="end" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">1.60</text><line x1="64" y1="206.3" x2="644" y2="206.3" stroke="#c3c2b7" stroke-width="1.5"/><text x="640" y="200.3" text-anchor="end" font-size="10.5" fill="#52514e">no skill (ratio = 1.0)</text><line x1="64.0" y1="346" x2="64.0" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="64.0" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">1</text><line x1="173.0" y1="346" x2="173.0" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="173.0" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">2</text><line x1="317.1" y1="346" x2="317.1" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="317.1" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">5</text><line x1="426.0" y1="346" x2="426.0" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="426.0" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">10</text><line x1="535.0" y1="346" x2="535.0" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="535.0" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">20</text><line x1="598.8" y1="346" x2="598.8" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="598.8" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">30</text><line x1="644.0" y1="346" x2="644.0" y2="350" stroke="#c3c2b7" stroke-width="1"/><text x="644.0" y="364.0" text-anchor="middle" font-size="11" fill="#898781" style="font-variant-numeric:tabular-nums">40</text><line x1="64" y1="346" x2="644" y2="346" stroke="#c3c2b7" stroke-width="1.5"/><polyline points="64.0,206.3 173.0,206.3 317.1,206.3 426.0,206.3 535.0,206.3 598.8,206.3 644.0,206.3" fill="none" stroke="#898781" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/><circle cx="64.0" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=1: ratio 1.000</title></circle><circle cx="173.0" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=2: ratio 1.000</title></circle><circle cx="317.1" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=5: ratio 1.000</title></circle><circle cx="426.0" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=10: ratio 1.000</title></circle><circle cx="535.0" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=20: ratio 1.000</title></circle><circle cx="598.8" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=30: ratio 1.000</title></circle><circle cx="644.0" cy="206.3" r="3.4" fill="#898781" stroke="#ffffff" stroke-width="2"><title>hold-stale — horizon h (ticks ahead)=40: ratio 1.000</title></circle><polyline points="64.0,326.0 173.0,315.1 317.1,281.3 426.0,232.5 535.0,159.1 598.8,98.7 644.0,50.0" fill="none" stroke="#86b6ef" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="64.0" cy="326.0" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=1: ratio 0.614</title></circle><circle cx="173.0" cy="315.1" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=2: ratio 0.649</title></circle><circle cx="317.1" cy="281.3" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=5: ratio 0.758</title></circle><circle cx="426.0" cy="232.5" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=10: ratio 0.915</title></circle><circle cx="535.0" cy="159.1" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=20: ratio 1.152</title></circle><circle cx="598.8" cy="98.7" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=30: ratio 1.346</title></circle><circle cx="644.0" cy="50.0" r="3.4" fill="#86b6ef" stroke="#ffffff" stroke-width="2"><title>Δ=5 — horizon h (ticks ahead)=40: ratio 1.503</title></circle><polyline points="64.0,286.3 173.0,278.6 317.1,252.8 426.0,216.6 535.0,157.6 598.8,106.6 644.0,64.8" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="64.0" cy="286.3" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=1: ratio 0.742</title></circle><circle cx="173.0" cy="278.6" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=2: ratio 0.767</title></circle><circle cx="317.1" cy="252.8" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=5: ratio 0.850</title></circle><circle cx="426.0" cy="216.6" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=10: ratio 0.967</title></circle><circle cx="535.0" cy="157.6" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=20: ratio 1.157</title></circle><circle cx="598.8" cy="106.6" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=30: ratio 1.321</title></circle><circle cx="644.0" cy="64.8" r="3.4" fill="#3987e5" stroke="#ffffff" stroke-width="2"><title>Δ=10 — horizon h (ticks ahead)=40: ratio 1.456</title></circle><polyline points="64.0,246.4 173.0,241.1 317.1,225.4 426.0,201.4 535.0,157.2 598.8,117.6 644.0,80.8" fill="none" stroke="#184f95" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="64.0" cy="246.4" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=1: ratio 0.871</title></circle><circle cx="173.0" cy="241.1" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=2: ratio 0.888</title></circle><circle cx="317.1" cy="225.4" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=5: ratio 0.938</title></circle><circle cx="426.0" cy="201.4" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=10: ratio 1.016</title></circle><circle cx="535.0" cy="157.2" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=20: ratio 1.158</title></circle><circle cx="598.8" cy="117.6" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=30: ratio 1.286</title></circle><circle cx="644.0" cy="80.8" r="3.4" fill="#184f95" stroke="#ffffff" stroke-width="2"><title>Δ=20 — horizon h (ticks ahead)=40: ratio 1.404</title></circle><text x="354.0" y="394" text-anchor="middle" font-size="11.5" fill="#52514e">horizon h (ticks ahead)</text><text transform="translate(16,183.0) rotate(-90)" text-anchor="middle" font-size="11.5" fill="#52514e">weight_proj_ratio (median)</text></svg></div></div>
   </div>
+</section>
+
+<section>
+  <h2>The numbers behind the sweep <span class="muted" style="font-size:15px">— naive-linear global median</span></h2>
+  <p>The exact global-median <code>weight_proj_ratio</code> for naive-linear at every (Δ, h) in the
+  required grid — the numbers under charts (a) and (c). The <b>bold</b> cell in each row is the best
+  (lowest) Δ for that horizon.</p>
+  <div class="card" style="padding:6px 10px"><table class="dtable">
+    <tr><th>horizon h</th><th>Δ = 5</th><th>Δ = 10</th><th>Δ = 20</th><th>best Δ</th></tr>
+    <tr><td>1</td><td><b>0.614</b></td><td>0.742</td><td>0.871</td><td>Δ = 5</td></tr>
+    <tr><td>2</td><td><b>0.649</b></td><td>0.767</td><td>0.888</td><td>Δ = 5</td></tr>
+    <tr><td>5</td><td><b>0.758</b></td><td>0.850</td><td>0.938</td><td>Δ = 5</td></tr>
+    <tr><td>10</td><td><b>0.915</b></td><td>0.967</td><td>1.016</td><td>Δ = 5</td></tr>
+    <tr><td>20</td><td><b>1.152</b></td><td>1.157</td><td>1.158</td><td>Δ = 5 (~tie)</td></tr>
+    <tr><td>30</td><td>1.346</td><td>1.321</td><td><b>1.286</b></td><td>Δ = 20</td></tr>
+    <tr><td>40</td><td>1.503</td><td>1.456</td><td><b>1.404</b></td><td>Δ = 20</td></tr>
+  </table></div>
+  <p class="fcap">Lower = better (&lt; 1 beats hold-stale, &gt; 1 harmful). Each cell is the median over
+  ~100–150 anchor windows.</p>
+
+  <h3>Bigger Δ or smaller Δ? — a crossover</h3>
+  <p>Smaller Δ wins at <b>short</b> horizons (Δ = 5 is best for h ≤ 10 — e.g. at h = 1, 0.614 vs.
+  Δ = 20's 0.871); bigger Δ wins at <b>long</b> horizons (Δ = 20 is best for h ≥ 30 — e.g. at h = 40,
+  1.404 vs. Δ = 5's 1.503). The curves <b>cross near h ≈ 20</b>, where all three tie at ~1.15. The
+  mechanism is a <b>bias–variance tradeoff</b> on the velocity estimate
+  <code>v = (θ_t − θ_{t−Δ}) / Δ</code>: a bigger Δ averages out per-step gradient noise (the raw
+  single-step direction correlation the paper measures is <b>&lt; 0.03</b> — extremely noisy) but incurs
+  more curvature bias by reaching back into faster-moving past weights. The extrapolation factor is
+  <code>κ = h/Δ</code>.</p>
+  <p class="fcap"><b>Honest caveat:</b> even the best long-horizon cell (Δ = 20, h = 40 → 1.404) is still
+  &gt; 1, so a bigger Δ only makes long-range extrapolation <em>less bad</em>, not actually good —
+  within our sweep no Δ turns long-horizon extrapolation into a net win over hold-stale.</p>
 </section>
 
 <section>
@@ -387,6 +423,66 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
     #47/#56 to settle. It also confirms a concrete design lever for the comm-efficient trainer:
     project/extrapolate across pipeline boundaries over <b>short</b> horizons and <b>re-ground</b>
     periodically — the same recipe the paper validates.</p>
+  </div>
+
+  <h3 style="margin-top:32px">The exact equations and numbers</h3>
+  <p><b>They do not use our equation.</b> R² asks "<em>is the observed path linear?</em>" — an in-sample
+  straight-line fit; our ratio asks "<em>can I exploit that to forecast held-out future weights?</em>" —
+  an out-of-sample reconstruction error. Related, but not the same test: an R² ≈ 0.8 still leaves ~20%
+  wobble, which is exactly what pushes our long-horizon ratio above 1. The paper never computes a
+  weight-reconstruction error; it grades extrapolation purely by downstream accuracy.</p>
+
+  <div class="card" style="padding:6px 10px"><table class="cmp">
+    <tr><th>Aspect</th><th>EXP-45 · weight_proj_ratio</th><th>Paper · linearity R²</th><th>Paper · extrapolation quality</th></tr>
+    <tr><td>What it<br>measures</td>
+        <td>out-of-sample extrapolation error ratio</td>
+        <td>in-sample straight-line fit quality</td>
+        <td>downstream benchmark accuracy</td></tr>
+    <tr><td>Equation</td>
+        <td><code>‖θ̂(t+h) − θ(t+h)‖ ÷ ‖θ(t) − θ(t+h)‖</code></td>
+        <td><code>R² = 1 − SS_res/SS_tot</code> of a line fit vs. step, per scalar param</td>
+        <td>eval avg@k after Eq 3 / 4 / 5 extrapolation</td></tr>
+    <tr><td>Direction</td>
+        <td>lower better (can exceed 1 = harmful)</td>
+        <td>higher better (≤ 1)</td>
+        <td>higher better</td></tr>
+    <tr><td>Typical<br>range</td>
+        <td>0.61 → 1.50 across our grid</td>
+        <td>~0.8 (RL), ~0.4 (SFT)</td>
+        <td>0–1 accuracy</td></tr>
+  </table></div>
+
+  <h3>Their R² ranges (their Table 7) beside ours</h3>
+  <div class="card" style="padding:6px 10px"><table class="dtable">
+    <tr><th>Source · config</th><th>weight-R² median</th><th>Pr(R² &gt; 0.7)</th><th>note</th></tr>
+    <tr><td>Paper · RL runs (range)</td><td>0.732–0.868</td><td>0.702–0.824</td><td>reasoning-distilled, hard math</td></tr>
+    <tr><td>Paper · R1-Distill-Qwen-1.5B · GRPO / DeepScaleR</td><td>0.845</td><td>0.794</td><td>nearest analog to ours</td></tr>
+    <tr><td>Paper · Qwen2.5-1.5B + GSM8K · SFT</td><td>0.426</td><td>0.259</td><td>their only matching-base row</td></tr>
+    <tr><td>EXP-45 · Qwen2.5-1.5B + GRPO + GSM8K</td><td>0.685</td><td>0.34</td><td>ours (per-matrix)</td></tr>
+  </table></div>
+  <p class="fcap"><b>Caveat — different statistics.</b> Their R² is per individual <em>scalar</em>
+  parameter; our <code>traj_r2</code> is a variance-weighted per-<em>matrix</em> vector fit, so treat the
+  comparison as qualitative. Both are substantially linear; ours sits <b>between</b> their SFT ≈ 0.43 and
+  RL ≈ 0.8, consistent with their noise-driven mechanism predicting weaker linearity on easy GSM8K.</p>
+
+  <h3>Their extrapolation payoff — by accuracy (there is no ratio equivalent)</h3>
+  <ul>
+    <li><b>Output-space (Eq 3):</b> <b>+4.2%</b> average accuracy — AIME24 +6.3%, AIME25 +6.3%,
+    MATH500 +1.1%, LiveCodeBench +10.6%.</li>
+    <li><b>Weight-space (Eq 4, Fig 5):</b> an <b>inverted-U</b> — accuracy peaks at <b>β ≈ 3.0</b>
+    (anchors t0 = 0, t1 = 300, target t′ ≈ 900) and degrades beyond.</li>
+    <li><b>Periodic re-grounding (Eq 5, Table 2):</b> <b>1.6×</b> fewer RL steps for a (100, 100)
+    schedule and <b>6.1×</b> for (20, 100), at matched accuracy.</li>
+  </ul>
+
+  <div class="note">
+    <p style="margin:0"><b>Horizon mapping.</b> Their <code>β = (t′ − t0)/(t1 − t0)</code> equals
+    <code>1 + κ</code> where <code>κ = h/Δ</code> is our extrapolation factor, so their accuracy peak
+    β ≈ 3 corresponds to our <b>κ ≈ 2</b> ("extrapolate ~2 baseline-lengths forward"). Both show the
+    <b>same qualitative shape</b> — a sweet spot, then degradation. The gap in <em>absolute</em> usable
+    horizon (their β up to ~3 over hundreds of steps vs. our h* ≈ 5 ticks) is explained by (i) accuracy
+    vs. weight-error, (ii) their long global-slope baseline vs. our local Δ = 20, and (iii) their step ≠
+    our tick (1 step = 2 ticks; our whole trace is only 80 steps vs. their ~1100-step budgets).</p>
   </div>
 </section>
 
