@@ -47,3 +47,4 @@ compression train–inference mismatch.
 MILESTONE_PASS: M4
 [2026-07-02T16:47:04+10:00] [log-writer] EXP-45 logged — LOG.md + SUMMARY.md + STATUS.md updated (PASS, M4)
 [2026-07-02T18:13:51+10:00] [research-planner #47] plan written
+[2026-07-02T18:37:53+10:00] [operator-revision #47] plan revised: +global-step (per-step) PRIMARY regime, +extended Delta {5,10,20,25,35,40}, cache is now a one-time band-80 (per-tick) + band-60 (per-step) BUILD (no #45 cache reuse)
