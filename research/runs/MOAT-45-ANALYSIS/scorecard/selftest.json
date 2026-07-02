@@ -1,0 +1,57 @@
+{
+  "metric_contract_pin": {
+    "pass": true,
+    "detail": "weight_proj.metrics.METRIC_CONTRACT == 'weight-proj-metrics-v1'",
+    "hard": true
+  },
+  "structure_partition": {
+    "pass": true,
+    "detail": "exact 338-partition, other=0 (bt={'q_proj': 28, 'k_proj': 28, 'v_proj': 28, 'o_proj': 28, 'gate_proj': 28, 'up_proj': 28, 'down_proj': 28, 'norm': 57, 'bias': 84, 'embed': 1, 'lm_head': 0, 'other': 0})",
+    "hard": true
+  },
+  "causality_leakage_guard": {
+    "pass": true,
+    "detail": "valid split fit_idx=[4, 5, 6]<score=7; overlap-guard-fires=True; fit_window_positions wired (max fit idx 99 < anchor 100)",
+    "hard": true
+  },
+  "hold_stale_identity_synthetic": {
+    "pass": true,
+    "detail": "54 rows: worst |ratio-1|=0.00e+00, worst |skill|=0.00e+00",
+    "hard": true
+  },
+  "naive_linear_exact_trajectory": {
+    "pass": true,
+    "detail": "exactly-linear matrix: worst naive_linear ratio 8.31e-06 (expect ~fp32-rounding floor << 1)",
+    "hard": true
+  },
+  "offpath_parity_synthetic": {
+    "pass": true,
+    "detail": "24 samples, worst rel diff 0.00e+00 (tol 1e-06) \u2014 surrogate path == direct predictors.Order1+metrics.full_metric_row",
+    "hard": true
+  },
+  "trace_ready": {
+    "pass": true,
+    "detail": "160 ticks present",
+    "hard": true
+  },
+  "hold_stale_identity_real": {
+    "pass": true,
+    "detail": "5355 rows over all 21 cells, worst |ratio-1| = 0.00e+00 (tol 1e-06)",
+    "hard": true
+  },
+  "finite_and_bounds_real": {
+    "pass": true,
+    "detail": "naive_linear NaN windows = 0; n_windows formula violations = 0",
+    "hard": true
+  },
+  "offpath_parity_real": {
+    "pass": true,
+    "detail": "72 samples on ['model.layers.0.input_layernorm.weight', 'model.layers.0.post_attention_layernorm.weight', 'model.layers.0.self_attn.q_proj.weight', 'model.layers.0.mlp.down_proj.weight'], worst rel diff 0.00e+00 (tol 1e-06)",
+    "hard": true
+  },
+  "determinism_soft": {
+    "pass": true,
+    "detail": "re-streamed D byte-identical=True, recomputed rows byte-identical=True",
+    "hard": false
+  }
+}
