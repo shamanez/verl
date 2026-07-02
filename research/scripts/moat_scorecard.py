@@ -1566,27 +1566,26 @@ def run_selftest(args) -> int:
                          for (h, t, t0, dres) in windows)
     pp_worst = 0.0
     nai = NaiveLinear()
+    nm = "r2.noisy"                                # non-linear -> e2 not ~0 (meaningful parity)
+    Pp = prefix_from_banded(ppstats[nm]["D"], pp_band)
     for (h, t, t0, dres) in windows:
         if dres + h > pp_band:                    # only band-fitting windows are comparable
             continue
-        nm = "r2.linear"
         a = r2reader.load_matrix_f64(t0, nm); tt = r2reader.load_matrix_f64(t, nm)
         s = r2reader.load_matrix_f64(t + h, nm)
         k = h / dres
         e = (tt + k * (tt - a)) - s; b = tt - s
-        direct = surrogate_metric_row(float(e @ e), float(b @ b), float(e @ b))
-        Pp = prefix_from_banded(ppstats[nm]["D"], pp_band)
+        de2, db2, deb = float(e @ e), float(b @ b), float(e @ b)   # direct triple
         saa, sab, sbb = cell_window_sums(Pp, dres, h, r2n)
         jj = t - dres                              # window index for anchor t at delta=dres
-        e2, b2, eb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)
-        band_score = surrogate_metric_row(e2, b2, eb)
-        dv, sv = direct["weight_proj_ratio"], band_score["weight_proj_ratio"]
-        if np.isfinite(dv) and np.isfinite(sv):
+        be2, bb2, beb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)  # band triple
+        for dv, sv in ((de2, be2), (db2, bb2), (deb, beb)):
             pp_worst = max(pp_worst, abs(dv - sv) / max(abs(dv), abs(sv), 1e-12))
     inv["paper_anchor_and_parity"] = (
         anchor_rule_ok and pp_worst <= PARITY_RTOL,
         f"anchor rule t0=floor(0.25t),t>=20,0.20<=t0/t<=0.30,dres=t-t0={anchor_rule_ok}; "
-        f"direct==naive(delta_resolved) worst rel {pp_worst:.2e} (tol {PARITY_RTOL:g})")
+        f"direct (e2,b2,eb)==naive(delta_resolved) worst rel {pp_worst:.2e} "
+        f"(tol {PARITY_RTOL:g})")
 
     # -- real-trace subset battery ---------------------------------------------
     det_soft = (True, "not run (no trace)")
@@ -1854,11 +1853,24 @@ def run_verify_schema(scorecard_dir: str) -> int:
         deltas = meta.get("delta_ticks", [])
         hs = meta.get("h_ticks", [])
         n_ticks = meta.get("n_ticks", 0)
-        for m in methods:
+        # paper_linear is OFF the (delta x h) grid (derived delta, sentinel delta_ticks)
+        grid_methods = [m for m in methods if m != "paper_linear"]
+        paper_delta = meta.get("paper_sentinel_delta", 0)
+        for m in grid_methods:
             for d in deltas:
                 for h in hs:
                     if (m, d, h, "global", "all") not in index:
                         problems.append(f"missing global row for ({m},{d},{h})")
+        if "paper_linear" in methods:
+            for h in hs:
+                if ("paper_linear", paper_delta, h, "global", "all") not in index:
+                    problems.append(f"missing global paper_linear row for h={h}")
+            pw = [r for r in rows if r["method"] == "paper_linear"]
+            if pw and not all(r.get("anchor_mode") == "frac25"
+                              and r.get("delta_resolved") is not None
+                              and r.get("beta") is not None for r in pw
+                              if r.get("in_bounds")):
+                problems.append("paper_linear rows missing anchor_mode/delta_resolved/beta")
         kinds = {}
         for r in rows:
             kinds.setdefault(r["group_kind"], set()).add(r["group_key"])
@@ -1890,21 +1902,24 @@ def run_verify_schema(scorecard_dir: str) -> int:
               and r["group_key"] == "lm_head"]
         if lm and not all(r.get("tied") and r.get("tied_to") == "embed" for r in lm):
             problems.append("lm_head rows not marked tied/tied_to=embed")
-        for m in methods:
+        for m in grid_methods:
             ops = [meta.get("operating_point", [])] + meta.get("also_points", [])
             for p in ops:
                 if len(p) == 2 and (m, p[0], p[1], "global", "all") not in index:
                     problems.append(f"operating-point row missing: ({m},{p})")
         for r in rows:
-            if r["in_bounds"] and not r.get("tied") and n_ticks:
+            if (r["in_bounds"] and not r.get("tied") and n_ticks
+                    and r["method"] != "paper_linear"):     # paper is off the banded grid
                 if r["n_windows"] != n_ticks - r["h_ticks"] - r["delta_ticks"]:
                     problems.append(f"n_windows mismatch on "
                                     f"({r['method']},{r['delta_ticks']},{r['h_ticks']},"
                                     f"{r['group_kind']},{r['group_key']})")
                     break
-        for key in VISUAL_KEYS:
+        # visuals: check the ACTUAL emitted set (meta.visual_keys), so a regime-T table
+        # (no paper panel) verifies without demanding the regime-S-only m_paper visual.
+        for key in meta.get("visual_keys", VISUAL_KEYS):
             v = vis.get(key)
-            if not v:
+            if v is None or (isinstance(v, (dict, list)) and len(v) == 0):
                 problems.append(f"visual array {key} missing/empty")
         # round-trip: re-serialize a sample of rows and compare parsed equality
         for r in rows[:: max(len(rows) // 50, 1)]:
