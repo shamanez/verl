@@ -17,3 +17,26 @@ Next: **#45–#56** (GPU-free projection science) on the **fp32 EXP-57 trace**. 
 streaming kept for few-snapshot passes like #46). On fp32 the bf16 noise-floor gate is off ⇒ reliability =
 projection accuracy + linearity. Fetch/manifests: `weight_proj_fetch_trace.py`, `synth_exp57_manifests.py`.
 Access: `reports/r2-access-pattern-for-analysis.md`.
+
+## Milestone M4
+
+Dense weight-trajectory collection + the GPU-free projection-analysis spine (#43 -> #44 -> #45).
+>=2 PASS reached; roll-up for operator review. Per-experiment detail: `LOG.md`, `runs/<ID>/verdict.md`.
+
+- **EXP-43 (PASS)** — collected the canonical dense GRPO full-weight per-tick trajectory (160 bf16
+  snapshots, all 338 matrices) to R2. Gates: all 5 acceptance gates hold; `verify_full_weight_dump.py
+  --r2` PASS (max_rel_norm_err=0.0001 <= 0.01), 160/160 verified, comm_eff counters 0 (codec OFF), no
+  NaN/Inf. Deliverable: `s3://shamane-pluralis/verl-research/EXP-43/regimeA/weights/full/`.
+- **EXP-44 (PASS)** — offline weight-projection sweep engine accepted as the shared #44-#56 substrate.
+  Gates: 8/8 success criteria; 15/15 predictor families reconstruct (recon rel-err 0.0); grouping 338
+  matrices / 11 blocks / 28 layers exact; one bounded-footprint streaming pass. A mid-run STOP (bf16
+  noise-floor category error) was overturned -> corrected differenced floor + directedness p~1.05; core
+  blocks clear the floor at h>=5.
+- **EXP-45 (PASS)** — MOAT scorecard CONTRACT for lanes #47/#48/#49/#56 (harness correct + complete +
+  machine-consumable, not a science claim). Gates: SELFTEST GO, EMIT GO (7 completeness gates), SCHEMA GO
+  on box AND laptop. Key metrics: hold-stale identity worst |ratio-1| = 0 over 13377 rows across all 21
+  (Delta,h) cells; off-path metric parity worst rel diff 0.00e+00; structure partition exact 338 (other=0);
+  42 tied lm_head rows; 26796 atomic rows; 0 denom-guard NaN; 7 visual arrays non-empty. Additive harness
+  on vast-ai-workload (`research/scripts/moat_scorecard.py` + `research/scripts/weight_proj/structure.py`).
+  Non-gating science readout for #56: naive_linear global (Delta=20,h=40) ratio_median=1.404, h_star=5.
+  Run: `runs/MOAT-45-ANALYSIS/`.

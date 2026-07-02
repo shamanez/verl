@@ -4,6 +4,17 @@ Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, the `repo
 summaries, W&B, and git history. Use method names + settings, not old run labels. Current operating
 base + the two active priorities are in `PROGRESS.md`.
 
+## EXP-45 · 2026-07-02T16:39:37+10:00 · M4 · PASS
+MOAT: Minimal projection scorecard plus block/layer structure for EXP-57 — the shared scorecard CONTRACT for lanes #47/#48/#49 and verdict #56 (NOT a science claim).
+- hypothesis: contract/correctness, not performance — the shared replay harness over the EXP-57 fp32 trace (160 optimizer-tick snapshots, 338 matrices) is correct + complete + machine-consumable by hard numeric gates (metric-contract pin, hold-stale identity, exact structure partition, full schema/aggregates/visuals, finite naive-linear). NO algorithm-performance threshold asserted; whether projection helps is #47's science.
+- result: PASS — MOAT scorecard contract GO. SELFTEST GO (all hard invariants; determinism soft-gate PASS), EMIT GO (7 completeness gates), SCHEMA GO on BOTH box AND laptop (26796 rows, schema portable). Contract ready for #47/#48/#49 to register methods against `moat_scorecard.py`'s plugin interface and for #56 to render.
+- key numbers: hold-stale identity worst |ratio−1| = 0.000e+00 and worst |skill| = 0.0 over 13377 in-bounds rows across all 21 (Δ∈{5,10,20}, h∈{1,2,5,10,20,30,40}) cells; off-path metric parity worst rel diff 0.00e+00 (surrogate path == direct predictors.Order1 + metrics.full_metric_row); structure partition EXACT 338 (block_type sum 338, super_block sum 338, other=0); 42 tied lm_head rows (all tied_to=embed, not silently dropped); 26796 atomic rows emitted; 0 denom-guard NaN over 13398 naive-linear rows; 0 bounds-honesty violations, min n_windows=100 (worst cell Δ=20,h=40); 7 visual-data arrays all present + non-empty.
+- science readout (NON-gating, recorded for #56/#47): naive_linear global (Δ=20,h=40) ratio_median = 1.404, h_star = 5, best_delta = 5 — projection does not beat hold-stale at these horizons; that reading belongs to #47, not #45. A ratio>1 / h_star=0 is a VALID contract output.
+- compute: GPU-free weight-geometry replay; full-trace streaming pass 99.8 min (bounded footprint — 22 chunks, RAM cap 40 GB, peak ~31 GB RSS, no OOM) on the EXTERNAL operator-managed analysis box 43511290 (RTX A4000, shared with #47/#48/#49/#56 — NOT torn down by #45). 0 of 3 allowed harness-fix cycles used (clean first run).
+- code: additive-only harness landed DIRECTLY on `vast-ai-workload` per the plan's `## Code change` (research/ is writable there — NO exp/* branch, NO PR, no head branch to PR from): `research/scripts/moat_scorecard.py` + `research/scripts/weight_proj/structure.py`. Protected `weight_proj/{metrics,predictors,sweep,report}.py` + `weight_proj_sweep.py` unmodified (imported, not edited); no verl/ source touched; box harness md5-identical to laptop.
+- run dir: runs/MOAT-45-ANALYSIS/
+- verdict: runs/MOAT-45-ANALYSIS/verdict.md
+
 ## EXP-44 · 2026-07-01T18:40+10:00 · M4 · PASS
 Weight-proj: Offline weight-projection sweep engine (`research/scripts/weight_proj_sweep.py` + `weight_proj/` pkg) — orders>=2, damped-alpha, learnable-at-every-order, general regression, EMA; full GPU-free metric hierarchy.
 - hypothesis: infra-unit acceptance — engine ACCEPTED iff all predictor families reconstruct from the raw R2 trace AND the bf16-noise-floor gate passes (operational falsifier for the shared #45-#56 substrate).
