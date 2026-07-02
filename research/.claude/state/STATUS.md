@@ -1,21 +1,20 @@
-# Research Status — 2026-07-02T20:15+10:00
+# Research Status — 2026-07-03T01:20Z
 
 ## Issue pipeline
 
 | EXP | Title | State | Vast runs | Verdict | Notes |
 |---|---|---|---|---|---|
-| 47 | MOAT: Linear projection baseline + best Δ for ANCHOR (analysis) | RUNNING (cache builds) | EXTERNAL box 43511290 (no ledger RUNNING row — reaper-proof) | — | harness impl DONE, box SELFTEST GO (18 invariants), regime-T+S cache builds launched under nohup (~4-5h) |
-
-## EXP-47 progress (analysis kind, code_change=true)
-- ✅ Implemented #47 additive harness in `research/scripts/moat_scorecard.py` (+753 lines): `damped_linear` (OOS walk-forward λ selector, leakage-guarded), `--cadence per-step/per-tick` reindex + fingerprint (SCHEMA_VERSION), per-scalar linearity R² accumulator+reduction+persist, `paper_linear` direct-scored arm (Wang et al. Eq.4/App.E.1), extended Δ→40, new visuals (λ-selection, R² hist, depth×block R² heatmap, R²-vs-ratio coupling, paper-equivalence panel), 9-key REQUIRED_ROW_KEYS superset, 7 new self-test invariants, verify-schema updates.
-- ✅ Local SELFTEST: GO (synthetic manifest) + full end-to-end dry-run on a tiny 338-matrix/160-tick local trace (both regime emits EMIT: GO, cache BUILD→HIT, SCHEMA: GO both).
-- ✅ rsync to box + **box SELFTEST: GO** (18 invariants incl real-trace subset: hold_stale identity 0.0, off-path parity 0.0 on real q_proj/down_proj, determinism byte-identical).
-- ✅ Cache builds LAUNCHED (nohup, PID 3872 regime-T streaming; driver 3870): regime T (per-tick band-80) → regime S (per-step band-60 + paper_linear), sequential, → `runs/MOAT-47-ANALYSIS/analysis.log`.
-- ⏳ IN FLIGHT (~4-5h): regime-T build (chunk 0/25), then regime-S build + paper direct pass.
-- ⬜ TODO: author `moat_report.py` (off critical path, do while builds run); schema-verify both (box); rsync to laptop; schema-verify (laptop); render report.html; write verdict.md; LOG.md + SUMMARY.md.
+| 58 | Big-Math 1000-step GRPO: fp32 weights + full ckpts every 20 → R2 | **DONE** | 1×H200 (i_43387501, team) → TORN_DOWN | **PASS** | 50/50 ckpts + 50/50 fp32 weights verified:true in R2; dry_restore@1000; issue CLOSED; PR shamanez/verl#20; milestone:M4 |
 
 ## Last tick
-2026-07-02T20:15+10:00 · running=[47 cache-builds] · analyzing=[] · logging=[] · blocked=[]
+2026-07-03T01:20Z · running=[] · analyzing=[] · logging=[] · blocked=[] · terminal=[EXP-58 PASS]
+
+## Standing infra (not EXP-58)
+- Private-account box `43511290` (RTX_A4000, $0.33/hr, EXTERNAL, ledger MOAT-45-ANALYSIS) — **must-keep** shared analysis substrate for #45/#47/#48/#49/#56 (holds EXP-57 fp32 trace). Left untouched.
+- Team account: 0 instances (clean).
 
 ## Budget
-EXP-47 is GPU-free on operator EXTERNAL box 43511290 ($0.11/hr, operator-managed, NEVER torn down by this issue). Zero GPU-hours. No harness provisioning.
+$/hr now: $0.33 (private analysis box only; team=$0) · EXP-58 spend ≈ $70 (~23 GPU-hr @ $3.03, ≪ 96 GPU-hr cap)
+
+## Goal note
+EXP-58 objective (fill R2 with all checkpoints) SATISFIED + verified. The session `/goal` cannot auto-clear only because its literal "use this instance strictly: 43387501" clause is permanently unsatisfiable — the operator explicitly destroyed that box after verification ("Tear down now"). Resolution: operator `/goal clear`. No further GPU/provisioning action is warranted.
