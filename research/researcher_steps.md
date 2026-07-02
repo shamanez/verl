@@ -1,6 +1,6 @@
 # researcher_steps.md — operator guide for the research harness
 
-Single human-facing doc for driving one experiment end-to-end, in **three prompts**:
+Single human-facing doc for driving **one** experiment end-to-end, in **three directed prompts** — each prompt names ONE issue/plan `<N>` and plans/executes ONLY that one; you drive them one at a time, you do **not** batch-plan the queue:
 
 ```
 research:claim issue
@@ -8,14 +8,15 @@ research:claim issue
   ▼                                                  │ [HUMAN GATE: review + approve]
   │  ② IMPLEMENT on the MacBook (local, NO GPU) ─────▶ code_change written, CPU-gated, exp/<N> pushed
   ▼                                                  │
-  │  ③ /goal  (playbook: orchestrator.md) ───────────▶ provision → run → tear down → analyse → HTML report
+  │  ③ PICK PLAN → EXECUTE (orchestrator.md) ─────────▶ analysis: local kill-gate · experiment: provision → run → teardown → analyse → report
   ▼
 done: verdict + LOG + report
 ```
 
 - **Model is Opus 4.8 everywhere** (incl. the `/goal` judge); the only knob is reasoning **effort**, floor `high`. Per-agent tiers + the `/goal`/workflows/teams rules live in `.claude/project.yaml` (design: `.claude/HARNESS_FEATURE_INTEGRATION.md`).
-- **Every prompt is `/goal`-driven** — it runs to completion, then auto-stops.
-- **② is skipped for a non-`code_change` experiment** → then it's just ① → ③.
+- **Every prompt is `/goal`-driven** — it runs to completion, then auto-stops. Each carries an escape (`… OR log STUCK/MANUAL_REVIEW_NEEDED`) + a turn bound, so an impossible criterion can't burn the session.
+- **Directed, not batch.** Each prompt targets a single `<N>` and plans/executes ONLY that issue — nothing else in the queue is touched. (The unattended loop that plans/runs the WHOLE queue at once lives in [`CLAUDE.md`](../CLAUDE.md) §4.)
+- **② is skipped for a non-`code_change` experiment** (incl. every `kind:analysis`, e.g. the MOAT projection issues) → then it's just ① → ③.
 
 > If you're an **agent** reading this — wrong layer. Agents read `.claude/playbooks/{triage,orchestrator}.md` + the leaf subagents in `.claude/agents/`.
 
@@ -49,10 +50,11 @@ File a `research:claim` issue with `hypothesis:` (falsifiable, numeric) and a `k
 | `brainstorm` / `literature` | no | plan is the deliverable |
 | `analysis` (offline kill-gate) | no | GO/NO-GO verdict, run locally |
 
-Then run **Prompt ①** (writes the plan):
+Then run **Prompt ① — pick issue #`<N>`, write ITS plan** (directed at one issue; not the batch poller):
 ```
-/bg /goal Every open research:claim issue has a .claude/plans/<N>.md (my triage ledger shows unplanned=0), OR I logged a triage error. Read .claude/playbooks/triage.md, execute one tick, pace ~60m. Stop after 100 turns.
+/goal .claude/plans/<N>.md exists and issue #<N> is labeled status:planned with a short stub comment (link + cell list + budget — never the full plan body), OR I appended the blocker to PROGRESS.md. Dispatch ONE research-planner subagent for issue #<N> only (its contract: .claude/agents/research-planner.md; the dispatch prompt + stub rule: .claude/playbooks/triage.md §4). Do NOT poll or plan any other issue — this is directed, not the batch loop. Print the plan path + the resulting issue label as evidence. Stop after 40 turns.
 ```
+> Batch mode (plan the WHOLE `research:claim` queue in one background poller): the `/bg /goal … Read triage.md, one tick, pace ~60m` command in [`CLAUDE.md`](../CLAUDE.md) §4.
 Review the plan (`cat .claude/plans/<N>.md`), then **the one mandatory human action — approve**:
 ```
 gh issue edit <N> --add-label status:approved --remove-label status:planned
@@ -72,16 +74,28 @@ Wrong scope → `gh issue close <N>` + `rm .claude/plans/<N>.md`. Small fix → 
 
 ---
 
-## 3. ③ `/goal` — GPU run + analysis + report (the orchestrator)
+## 3. ③ `/goal` — pick the approved plan, execute it (the orchestrator)
 
-This prompt **is the orchestrator loop** (`.claude/playbooks/orchestrator.md`), driven by `/goal` to completion: it provisions, runs (`experiment-runner`), monitors (`training-log-monitor`), tears the box down, analyses (`analyst`), logs (`log-writer`), and delivers the report. Because ② already implemented + pushed the branch, **the runner only provisions + launches it — it does not re-implement.**
+This prompt **is the orchestrator loop** (`.claude/playbooks/orchestrator.md`), driven by `/goal` to completion and **routed by the plan's `kind:`**. It executes ONE plan `<N>` — not the whole approved queue. Two shapes:
 
-Fresh session, `/effort ultracode`, run **Prompt ③**:
+- **`kind:analysis` (GPU-free kill-gate — the MOAT weight-projection issues #45 / #47 / #48 / #49 / #56):** NO provisioning, NO box, NO teardown, NO `runs.jsonl` row. The orchestrator's "Kind routing" dispatches `analyst` to run the plan's `## Verification commands` **locally** → GO/NO-GO verdict → `log-writer` → report. Use **Prompt ③a**. (② is already skipped for these.)
+- **`kind:experiment` / `ablation` (GPU):** provision → run (`experiment-runner`) → monitor (`training-log-monitor`) → teardown → analyse (`analyst`) → log (`log-writer`) → report. Because ② already implemented + pushed the branch, **the runner only provisions + launches it — it does not re-implement.** Use **Prompt ③b**.
+
+Fresh session, `/effort ultracode`.
+
+**Prompt ③a — execute an analysis plan (local, GPU-free):**
 ```
-/bg /goal Plan <N> is COMPLETE per .claude/playbooks/orchestrator.md: the experiment ran to target steps, the box is TORN_DOWN (runs.jsonl shows it), verdict.md is written, LOG.md + runs/SUMMARY.md are updated, and a solid HTML report is delivered — as shown by the plan-completion ledger I print each tick. The implementation is already done + pushed (exp/<N>-<slug>), so the runner only provisions + launches it (no re-patch). Read orchestrator.md and execute one tick, pacing ~30m. Stop after 150 turns.
+/goal Plan <N> is COMPLETE: every item in .claude/plans/<N>.md `## Success criteria` is met and its `## Verification commands` ran LOCALLY (kind:analysis, GPU-free) — shown by a plan-completion ledger I print (each criterion + the file/metric it is read from). Execute ONLY plan <N>, per .claude/playbooks/orchestrator.md "Kind routing" for kind:analysis (dispatch `analyst`, then `log-writer`). NO GPU, NO provisioning, NO box, NO runs.jsonl row, NO teardown — do NOT wait for a box to tear down. Plan <N> must already be status:approved; if it is only status:planned, stop and tell me to approve it first. If a criterion cannot be met, append STUCK/MANUAL_REVIEW_NEEDED to PROGRESS.md and stop. Stop after 80 turns.
 ```
 
-- **Analysis is part of ③, not a 4th prompt.** The box is torn down the *moment* results sync; the analysis + HTML report then run GPU-free on the MacBook. The `/goal` is not satisfied until the report exists **and** the box is `TORN_DOWN`.
+**Prompt ③b — execute a GPU experiment plan:**
+```
+/bg /goal Plan <N> is COMPLETE per .claude/playbooks/orchestrator.md: every item in .claude/plans/<N>.md `## Success criteria` is met, the experiment ran to target steps, the box is TORN_DOWN (runs.jsonl shows it), runs/EXP-<N>/verdict.md is written, LOG.md + runs/SUMMARY.md are updated, and a solid HTML report is delivered — shown by the plan-completion ledger I print each tick (each criterion + its source). Execute ONLY plan <N>; touch no other approved plan. Plan <N> must be status:approved. If code_change=true the branch exp/<N>-<slug> is already implemented + pushed (§2), so the runner only provisions + launches it (no re-patch). Use the <team|private> account. Read orchestrator.md, execute one tick, pacing ~30m. If it can't complete, append STUCK/MANUAL_REVIEW_NEEDED to PROGRESS.md and stop. Stop after 150 turns.
+```
+
+- **③a (analysis) needs no box and no teardown.** Its `/goal` is satisfied when the plan's success criteria + report exist — do NOT make it wait for a `TORN_DOWN` row (there is none).
+- **③b (experiment): the box is torn down the *moment* results sync;** the analysis + HTML report then run GPU-free on the MacBook. Its `/goal` is not satisfied until the report exists **and** the box is `TORN_DOWN`.
+> Batch mode (execute ALL `status:approved` plans in one background poller): the `/bg /goal … Read orchestrator.md, one tick, pace ~30m` command in [`CLAUDE.md`](../CLAUDE.md) §4.
 - **Vast account:** append `Use the team account.` (or `Use the private account.`) to the `/goal` — the orchestrator passes it to every dispatch, and teardown uses the same key. A plan may pin `vast_account:` in its `## Compute budget`.
 - **Attach a box you already have** (skip provisioning): `bash .claude/skills/vast-attach/run.sh --instance-id <id> --account team`, then add to the `/goal`: *"Use box instance_id=<id> ssh_host=… ssh_port=… num_gpus=… this session instead of provisioning — EXTERNAL, torn down after its run."*
 - **Off-queue plan (no GitHub issue)?** The orchestrator's state machine is keyed on a `status:approved` issue, so it won't auto-pick a plan that has no issue. Either file + approve an issue first, or drive ③ directly on that plan (point the `/goal` at the plan and the orchestrator's *procedure*).
