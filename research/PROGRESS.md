@@ -43,3 +43,4 @@ compression train–inference mismatch.
 [2026-07-02T13:02:00+10:00] [research-planner #45] plan written
 [2026-07-02T13:03:18+10:00] [triage] directed dispatch for #45: 1 planner dispatched, plan .claude/plans/45.md written, status:planned set, stub comment posted
 [2026-07-02T13:51:58+10:00] teardown EXP-MOAT-45-ANALYSIS reason=no-heartbeat-ever-60min destroyed=1
+[2026-07-02T16:41:06+10:00] [analyst] EXP-45 verdict=PASS — MOAT scorecard contract GO: SELFTEST GO (11 invariants), EMIT GO (7 gates), SCHEMA GO box+laptop; hold-stale identity worst |ratio-1|=0 over 13377 rows, partition exact 338 other=0, 42 tied lm_head, 26796 rows, additive-code gate clean
