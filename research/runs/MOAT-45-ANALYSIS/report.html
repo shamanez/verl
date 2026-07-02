@@ -83,6 +83,14 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
 .clg-t{font-size:11.5px;color:#52514e;margin-bottom:5px;}
 .clg-bar{height:12px;border-radius:3px;border:1px solid rgba(11,11,11,0.12);}
 .clg-l{display:flex;margin-top:3px;font-size:10.5px;color:#898781;}
+.cmp{border-collapse:collapse;width:100%;font-size:13px;}
+.cmp th,.cmp td{padding:9px 11px;border-top:1px solid var(--border);vertical-align:top;text-align:left;}
+.cmp th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;
+  letter-spacing:0.04em;border-top:none;}
+.cmp td:first-child{font-weight:600;white-space:nowrap;color:var(--ink1);}
+.cmp .v-agree{color:var(--good);font-weight:700;}
+.cmp .v-part{color:#b07800;font-weight:700;}
+.cmp .v-test{color:var(--accent);font-weight:700;}
 </style>
 </head>
 <body>
@@ -124,6 +132,49 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
 </header>
 
 <section>
+  <h2>What did we actually test? <span class="muted" style="font-size:15px">— telescope vs. astronomy</span></h2>
+  <p class="lede">A fair question: if EXP-45 <b>passed</b>, what does the pass mean — and did we measure
+  any real science? This experiment has two layers, and the PASS is staked on only the first one.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h3 style="margin-top:0">Layer 1 — the instrument <span class="muted">(what PASS certifies)</span></h3>
+      <p style="margin-bottom:0">We built and <b>calibrated a measurement tool</b>
+      (<code>moat_scorecard.py</code>) and proved it trustworthy. That is all the 13 gates check: the
+      arithmetic is exact (hold-stale reads identically 1.0), the metric functions are the shared ones
+      with <b>0.0</b> parity error, all 338 matrices are classified exactly, and the schema round-trips
+      on two machines. <b>"Correctness &amp; completeness"</b> means the ruler is provably accurate with
+      every marking — <em>not</em> that weight projection is a good idea.</p>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Layer 2 — the measurements <span class="muted">(real science-shaped data)</span></h3>
+      <p style="margin-bottom:0">Pointed at a <b>real GRPO run</b> (160 fp32 snapshots of Qwen2.5-1.5B),
+      the calibrated tool recorded genuine facts about how the weights move: does linear extrapolation
+      beat reusing old weights (<code>weight_proj_ratio</code>), how straight is each matrix's path
+      (<code>traj_r2</code>), how far ahead a forecast survives (<code>h*</code>). These <b>are</b>
+      scientific measurements — EXP-45 simply does not stake its pass/fail on <em>interpreting</em> them.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <p style="margin-top:0"><b>So "not a science claim" means the verdict is about the
+    <em>instrument</em>, not the <em>phenomenon</em>.</b> Think telescope vs. astronomy — EXP-45 proves
+    the telescope is in focus and every dial works; it does not publish the astronomy. But the
+    telescope, pointed at the sky, <b>did</b> record real photons: at (Δ=20, h=40) naive linear
+    extrapolation scores ratio <b>1.404</b> (worse than doing nothing at long range) yet <b>h* = 5</b>
+    (it wins out to ~5 ticks) — i.e. <b>the weight trajectory is locally linear but globally curved.</b></p>
+    <p style="margin-bottom:0"><b>Why split it this way?</b> The project deliberately separates "is the
+    measurement correct?" (#45) from "what does it mean?" (#47 linear/damped · #48 second-order · #49
+    self-correcting, rendered by #56). So when #56 concludes whether extrapolation helps, the conclusion
+    rests on an instrument already <em>proven</em> correct rather than a possibly-buggy one. The
+    <code>naive_linear</code> numbers below are a real-data smoke test that a non-trivial method flows
+    through every code path — the interpretation is the lanes' job. The
+    <a href="#compare">comparison to Wang et al. 2026</a> below reads those Layer-2 measurements against
+    the published literature.</p>
+  </div>
+</section>
+
+<section>
   <h2>The contract, gate by gate</h2>
   <p class="muted">Every box in the plan's success criteria is machine-checked. A single hard failure
   would make the contract NO-GO for the downstream lanes; all 13 pass.</p>
@@ -143,6 +194,24 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
   horizon h whose median ratio is still &lt; 1 (<b>0</b> = never beats stale). In the charts below the
   faint blue band is the "predictor wins" region and the faint red band is "harmful"; hold-stale, being
   the denominator, is identically the dashed line at 1.0.</p>
+</section>
+
+<section>
+  <h2>What each measurement means</h2>
+  <p class="muted">Every scorecard row carries these. Weights are flattened per matrix / block / layer;
+  a group's metric concatenates its member matrices into one vector, so a group ratio is the true joint
+  ratio, not an average of per-matrix ratios.</p>
+  <div class="card" style="padding:6px 8px"><table class="gate">
+    <tr><td class="gn"><code>weight_proj_ratio</code></td><td class="ge">‖forecast error‖ ÷ ‖hold-stale error‖. <b>&lt; 1</b> predictor wins · <b>= 1</b> no skill · <b>&gt; 1</b> harmful. The headline metric.</td></tr>
+    <tr><td class="gn"><code>skill</code></td><td class="ge">1 − ratio². The <b>fraction of the weight displacement's energy</b> the predictor removed — 0 at ratio 1, → 1 as the forecast becomes perfect, negative when harmful.</td></tr>
+    <tr><td class="gn"><code>h*</code> (h_star)</td><td class="ge">Largest horizon h (in optimizer ticks) whose <b>median ratio is still &lt; 1</b> — how many steps ahead a forecast still beats doing nothing. <b>0</b> = never beats stale.</td></tr>
+    <tr><td class="gn"><code>traj_r2</code></td><td class="ge">R² of a straight-line fit to a matrix/group trajectory vs. tick — <b>how linear the weight path is</b>. Method-agnostic (computed once from the trajectory). Near 1 = nearly straight; lower = curved or noisy.</td></tr>
+    <tr><td class="gn"><code>consec_delta_cos</code></td><td class="ge">Cosine between consecutive weight-update steps — <b>directional persistence / momentum</b>. High = updates keep pushing the same way; near 0 = each step reorients (noisy).</td></tr>
+    <tr><td class="gn"><code>dir_cos</code></td><td class="ge">Cosine between the forecast's <em>residual</em> and the displacement it had to cover — is the leftover error <b>aligned with the move</b> (under/over-shoot) or sideways (wrong direction).</td></tr>
+    <tr><td class="gn"><code>delta_norm</code> · <code>coverage</code></td><td class="ge">How far a group moved over the window, and the fraction of its elements that actually changed. Emitted for <b>every</b> group, so near-static norms and biases are never silently dropped.</td></tr>
+    <tr><td class="gn"><code>stale_error</code> · <code>proj_error</code></td><td class="ge">The two norms behind the ratio: ‖θ(t) − θ(t+h)‖ (do-nothing) and ‖θ̂(t+h) − θ(t+h)‖ (predictor). Reported as median + p10 + p90 on aggregate rows.</td></tr>
+    <tr><td class="gn"><code>n_windows</code> · <code>in_bounds</code></td><td class="ge">How many valid anchor windows a cell averaged over (= 160 − h − Δ, ≥ 100 for every required cell) and whether the cell is in range — out-of-bounds cells are flagged, never silently omitted.</td></tr>
+  </table></div>
 </section>
 
 <section>
@@ -256,6 +325,71 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
   </div>
 </section>
 
+<section id="compare">
+  <h2>How this compares to <em>Linear Dynamics in the RLVR Training of LLMs</em>
+    <span class="muted" style="font-size:15px">— Wang et al. 2026</span></h2>
+  <p>That paper (<a href="https://arxiv.org/abs/2601.04537">arXiv:2601.04537</a>, code
+  <code>Miaow-Lab/RLVR-Linearity</code>; its training codebase is <b>adapted from verl</b> — our own
+  substrate) argues RLVR enters a <b>"robust linear regime"</b>: each scalar weight and each token
+  log-probability evolves <b>linearly against the training step</b>. Their linearity metric is a
+  per-quantity OLS R² (R² &gt; 0.7 = "strong"; median ≈ <b>0.8</b>, &gt; 70% of weights &gt; 0.7).
+  Critically it is <b>RL-specific and noise-driven</b> — plain SFT on the same base sits near R² ≈
+  <b>0.4</b> — and they exploit it via weight/logit <b>extrapolation + periodic re-grounding</b> to cut
+  RL steps <b>1.6×–6.1×</b>. That is squarely on-thesis for our communication-efficient trainer.</p>
+
+  <p><b>Are we getting similar results?</b> Partly — and the differences are illuminating rather than
+  contradictory. We computed our own trajectory linearity over the EXP-57 GRPO run and read it against
+  the paper axis by axis:</p>
+
+  <div class="card" style="padding:6px 10px"><table class="cmp">
+    <tr><th>Axis</th><th>EXP-45 · Qwen2.5-1.5B · GRPO · GSM8K</th><th>Paper (Wang et al. 2026)</th><th>Verdict</th></tr>
+    <tr><td>Trajectory<br>linearity</td>
+        <td>per-<em>matrix</em> <code>traj_r2</code> median <b>0.685</b> (mean 0.695); <b>100%</b> &gt; 0.5, <b>34%</b> &gt; 0.7.</td>
+        <td>per-<em>scalar</em> R² median ≈ <b>0.8</b>, &gt; 70% &gt; 0.7 for RL; SFT ≈ 0.4.</td>
+        <td class="v-part">PARTIAL</td></tr>
+    <tr><td>Short-horizon<br>extrapolation</td>
+        <td>naive-linear beats hold-stale only at <b>h ≤ 5</b> ticks; ratio <b>1.404</b> (harmful) by h=40.</td>
+        <td>weight extrapolation is an <b>inverted-U</b> (Fig 5): helps short/moderate, degrades long → mandatory re-grounding.</td>
+        <td class="v-agree">AGREE</td></tr>
+    <tr><td>Usable<br>horizon</td>
+        <td><code>h* = 5</code> off a <b>local</b> Δ=20 slope.</td>
+        <td>larger, but off a <b>long global</b> slope (anchor ~20–30% of budget → final) plus re-grounding.</td>
+        <td class="v-part">PARTIAL</td></tr>
+    <tr><td>Per-layer<br>structure</td>
+        <td>near-<b>uniform</b> across block types (0.67–0.71); <b>no</b> LayerNorm-low pattern; only a weak mid-depth bump (L10–17 = 0.702 vs L0–6 = 0.667).</td>
+        <td>LayerNorm consistently <b>low</b>; activation linearity <b>rises with depth</b> (Figs 9, 11).</td>
+        <td class="v-test">DIVERGES</td></tr>
+  </table></div>
+
+  <div class="note sci">
+    <p style="margin-top:0"><b>How to read the partial agreement.</b> Three differences explain most of
+    the apparent gap, and none is a flat contradiction:</p>
+    <ul style="margin:6px 0 0">
+      <li><b>Different objective.</b> Their extrapolation "win" is <em>downstream accuracy</em> (it can
+      even beat the real checkpoint by dodging late-stage collapse); our <code>weight_proj_ratio</code>
+      is a pure <em>weight-reconstruction</em> error. So our 1.404 at long h and their "accuracy
+      improves" are not measuring the same thing.</li>
+      <li><b>Different statistic &amp; baseline.</b> Their R² is per-scalar over a <em>long global</em>
+      slope; our <code>traj_r2</code> is per-matrix and our <code>h*</code> comes off a <em>local</em>
+      Δ=20 difference (noisier → shorter horizon expected). An R² ≈ 0.8 still leaves ~20% unexplained
+      curvature — exactly what defeats out-of-sample extrapolation, so high R² and a short h* coexist.</li>
+      <li><b>No matching data point.</b> The paper's only Qwen2.5-1.5B + GSM8K row is <em>SFT</em>
+      (R² ≈ 0.43); it has <b>no GRPO run at our exact config</b> — its RL evidence is reasoning-distilled
+      models on hard olympiad math. Its own noise-driven mechanism predicts <em>weaker</em> linearity on
+      easy GSM8K (higher pass rate → less reward noise) — and our median <b>0.685</b> landing
+      <em>between</em> their SFT ≈ 0.4 and RL ≈ 0.8 is consistent with exactly that.</li>
+    </ul>
+    <p style="margin-bottom:0"><b>Net:</b> our data <b>corroborates</b> the paper's core picture — RLVR
+    weight trajectories are substantially (not perfectly) linear, and extrapolation pays off only over
+    short/moderate horizons — while serving as a corrective to a naive "weights are linear → extrapolate
+    freely" reading. The one place we <em>diverge</em> (no LayerNorm-low; near-uniform per-block
+    linearity) is most likely the per-matrix vs per-scalar difference and is a cheap follow-up for
+    #47/#56 to settle. It also confirms a concrete design lever for the comm-efficient trainer:
+    project/extrapolate across pipeline boundaries over <b>short</b> horizons and <b>re-ground</b>
+    periodically — the same recipe the paper validates.</p>
+  </div>
+</section>
+
 <section>
   <h2>How it was computed</h2>
   <div class="card">
@@ -306,6 +440,10 @@ ul{margin:8px 0;padding-left:20px;} li{font-size:14px;margin:5px 0;color:var(--i
   <a href="https://github.com/shamanez/verl-compression-research/issues/48">#48</a> ·
   <a href="https://github.com/shamanez/verl-compression-research/issues/49">#49</a> ·
   <a href="https://github.com/shamanez/verl-compression-research/issues/56">#56 (verdict + visuals)</a>.</p>
+  <p><b>Related work</b>: T. Wang et al., <a href="https://arxiv.org/abs/2601.04537"><em>Linear
+  Dynamics in the RLVR Training of Large Language Models</em></a> (arXiv:2601.04537, 2026; code
+  <code>Miaow-Lab/RLVR-Linearity</code>). Cross-read in the comparison section above; our Layer-2
+  measurements corroborate its short-horizon-linearity picture.</p>
   <p class="muted">Data source: EXP-57 fp32 weight trace · 160 optimizer ticks · 338 matrices ·
   metric contract weight-proj-metrics-v1. Charts are inline SVG generated from
   <code>scorecard/visuals.json</code>; the page is fully self-contained and renders offline.</p>
