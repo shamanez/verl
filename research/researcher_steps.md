@@ -14,7 +14,7 @@ done: verdict + LOG + report
 ```
 
 - **Model is Opus 4.8 everywhere** (incl. the `/goal` judge); the only knob is reasoning **effort**, floor `high`. Per-agent tiers + the `/goal`/workflows/teams rules live in `.claude/project.yaml` (design: `.claude/HARNESS_FEATURE_INTEGRATION.md`).
-- **Every prompt is `/goal`-driven** — it runs to completion, then auto-stops. Each carries an escape (`… OR log STUCK/MANUAL_REVIEW_NEEDED`) + a turn bound, so an impossible criterion can't burn the session.
+- **Every prompt is `/goal`-driven** — each states the **DONE-state** (what is true *when the work is finished*), not step-by-step commands. The judge checks that state each turn and keeps the session working until it holds, then auto-stops. So `plans/<N>.md exists` / `Plan <N> is COMPLETE` are *targets*, not claims that they already exist. Each carries an escape (`… OR log STUCK/MANUAL_REVIEW_NEEDED`) + a turn bound, so an impossible criterion can't burn the session.
 - **Directed, not batch.** Each prompt targets a single `<N>` and plans/executes ONLY that issue — nothing else in the queue is touched. (The unattended loop that plans/runs the WHOLE queue at once lives in [`CLAUDE.md`](../CLAUDE.md) §4.)
 - **② is skipped for a non-`code_change` experiment** (incl. every `kind:analysis`, e.g. the MOAT projection issues) → then it's just ① → ③.
 
@@ -52,7 +52,7 @@ File a `research:claim` issue with `hypothesis:` (falsifiable, numeric) and a `k
 
 Then run **Prompt ① — pick issue #`<N>`, write ITS plan** (directed at one issue; not the batch poller):
 ```
-/goal .claude/plans/<N>.md exists and issue #<N> is labeled status:planned with a short stub comment (link + cell list + budget — never the full plan body), OR I appended the blocker to PROGRESS.md. Dispatch ONE research-planner subagent for issue #<N> only (its contract: .claude/agents/research-planner.md; the dispatch prompt + stub rule: .claude/playbooks/triage.md §4). Do NOT poll or plan any other issue — this is directed, not the batch loop. Print the plan path + the resulting issue label as evidence. Stop after 40 turns.
+/goal Plan issue #<N>: write .claude/plans/<N>.md. DONE when that plan file exists and issue #<N> is labeled status:planned with a short stub comment (link + cell list + budget — never the full plan body), OR I appended the blocker to PROGRESS.md. Dispatch ONE research-planner subagent for issue #<N> only (its contract: .claude/agents/research-planner.md; the dispatch prompt + stub rule: .claude/playbooks/triage.md §4). Do NOT poll or plan any other issue — this is directed, not the batch loop. Print the plan path + the resulting issue label as evidence. Stop after 40 turns.
 ```
 > Batch mode (plan the WHOLE `research:claim` queue in one background poller): the `/bg /goal … Read triage.md, one tick, pace ~60m` command in [`CLAUDE.md`](../CLAUDE.md) §4.
 Review the plan (`cat .claude/plans/<N>.md`), then **the one mandatory human action — approve**:
