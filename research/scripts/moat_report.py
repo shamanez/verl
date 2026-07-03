@@ -762,6 +762,28 @@ def render(S, T, out_path, explainer_path=None):
             cb_caption="per-scalar R² median · blue = low (less linear) → red = high (more linear)",
             reverse=False, caption_html=cap("depth")))
 
+    # legacy per-matrix trajectory R² (traj_r2): distribution + depth×block heatmap
+    if S and S["vis"].get("d_traj_r2"):
+        dtr = S["vis"]["d_traj_r2"]
+        pm = [d.get("traj_r2") for d in dtr.get("per_matrix", [])
+              if isinstance(d.get("traj_r2"), (int, float)) and math.isfinite(d["traj_r2"])]
+        if pm:
+            nb = 20
+            counts = [0] * nb
+            for v in pm:
+                counts[min(nb - 1, max(0, int(min(max(v, 0.0), 1.0) * nb)))] += 1
+            P.append('<div class="figscroll">' + svg_bars(
+                counts, "Legacy per-matrix trajectory R² (traj_r2) distribution",
+                0.0, 1.0) + '</div>')
+        dbh = dtr.get("depth_block_heatmap", {})
+        if dbh.get("traj_r2"):
+            P.append(heatmap_figure(
+                "Depth × block trajectory R² (traj_r2, legacy per-matrix proxy)",
+                dbh["traj_r2"], dbh["layers"], dbh["block_types"], 0.0, 1.0,
+                cb_ticks=[0.0, 0.25, 0.5, 0.75, 1.0],
+                cb_caption="traj_r2 · blue = low (less linear) → red = high (more linear)",
+                reverse=False, caption_html=""))
+
     # ---- ratio/projection findings, both regimes -------------------------------
     P.append(H2("Projection accuracy vs horizon (both regimes)"))
     P.append('<div class="side">')
@@ -777,6 +799,29 @@ def render(S, T, out_path, explainer_path=None):
                                       "median ratio vs h (ticks)", "horizon h (ticks)")))
     P.append('</div>')
     P.append(cap("accuracy"))
+
+    # target-horizon sweep: ratio-vs-h with one line per Δ (per anchor spacing)
+    if S and S["vis"].get("c_target_horizon_sweep"):
+        ths = S["vis"]["c_target_horizon_sweep"]
+        P.append(H2("Target-horizon sweep per anchor spacing Δ (per-step)"))
+        P.append('<div class="side">')
+        for m in S["meta"].get("methods", []):
+            if m == "hold_stale":
+                continue                       # flat at ratio=1 by construction
+            per_d = ths.get(m)
+            if not per_d:
+                continue
+            ser = {}
+            for dstr, cd in sorted(per_d.items(), key=lambda kv: int(kv[0])):
+                pts = list(zip(cd.get("h", []), cd.get("ratio_median", [])))
+                if any(y is not None and y == y for _, y in pts):
+                    ser[f"Δ={dstr}"] = pts
+            if ser:
+                P.append('<div class="col">' + svg_line(
+                    ser, f"{m}: ratio vs h per Δ", "horizon h") + '</div>')
+        P.append('</div>')
+        P.append('<p class="small">One line per anchor spacing Δ; where each line crosses '
+                 'ratio=1 is that Δ\'s safe horizon (h_star). Later crossing = projects further.</p>')
 
     P.append(H2("Δ-sensitivity (extended to Δ=40, per-tick) & λ-selection"))
     P.append('<div class="side">')
@@ -820,7 +865,29 @@ def render(S, T, out_path, explainer_path=None):
             cb_ticks=[round(vmin, 3), round(1.0 - m / 2, 3), 1.0,
                       round(1.0 + m / 2, 3), round(vmax, 3)],
             cb_caption="ratio: blue < 1 = projection beats stale · red > 1 = worse than stale",
-            reverse=False, caption_html=cap("h_star")))
+            reverse=False, caption_html=cap("block ratio")))
+
+    # h_star heatmap by layer×block (regime S) — the figure the shared "Layer×block
+    # ratio / h_star heatmaps" caption promises; keyed on the ratio heatmap's method.
+    if S and S["vis"].get("f_hstar_heatmap"):
+        hsv = S["vis"]["f_hstar_heatmap"]
+        # prefer damped_linear, else the first informative (non-hold_stale) method
+        # (hold_stale's h_star is 0 everywhere by construction)
+        hm_m = ("damped_linear" if "damped_linear" in hsv
+                else next((k for k in hsv if k != "hold_stale"), None)
+                or next(iter(hsv), None))
+        hh = hsv.get(hm_m) if hm_m else None
+        if hh and hh.get("h_star"):
+            hvals = [v for row in hh["h_star"] for v in row
+                     if isinstance(v, (int, float)) and math.isfinite(v)]
+            hmax = max(hvals) if hvals else 1.0
+            P.append(heatmap_figure(
+                f"Safe horizon h_star by layer × block (per-step, {hm_m}, Δ={hh.get('delta')})",
+                hh["h_star"], hh["layers"], hh["block_types"], 0.0, hmax,
+                cb_ticks=[0, round(hmax / 2), round(hmax)],
+                cb_caption="h_star = furthest horizon with median ratio < 1 · blue = "
+                           "projects further (good) · red = short/zero safe horizon",
+                reverse=True, caption_html=cap("h_star heatmaps")))
 
     # special groups table (regime S)
     if S and S["vis"].get("g_special_groups", {}).get("damped_linear"):
