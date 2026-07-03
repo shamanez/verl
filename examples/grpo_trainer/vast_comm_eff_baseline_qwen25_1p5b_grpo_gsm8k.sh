@@ -218,6 +218,28 @@ export TEST_FREQ="${TEST_FREQ:-25}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 
+# ---------------------------------------------------------------------------
+# Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58). Mirrors the naming of the
+# WEIGHT_TRAJ_R2_* knobs. When CKPT_R2_ENABLED=false (DEFAULT) the trainer's
+# _save_checkpoint is byte-identical to upstream verl (no R2 threads, no r2_sink
+# import on the save path) — the whole feature is a strict no-op. Set true to
+# mirror every global_step_<N>/ tree (all rank shards + data.pt + huggingface +
+# fsdp_config + the root latest_checkpointed_iteration.txt) to R2 and delete each
+# local file after a verified upload, so peak local disk stays ~1 in-flight ckpt +
+# staging instead of the keep-all total. The CKPT_R2_* async knobs are consumed by
+# _save_checkpoint via the env; only CKPT_R2_ENABLED is threaded through Hydra
+# (trainer.checkpoint_r2_enabled) since that is the gate. R2 creds/prefix come from
+# the SAME env as the weight-traj stream (R2_BUCKET/R2_ENDPOINT|R2_ACCOUNT_ID/
+# R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_EXPERIMENT/R2_REGIME) — the checkpoints
+# land under verl-research/$R2_EXPERIMENT/$R2_REGIME/checkpoints (a DISTINCT prefix
+# from .../weights, so no key collision with the weight-traj snapshots).
+export CKPT_R2_ENABLED="${CKPT_R2_ENABLED:-false}"
+export CKPT_R2_ASYNC="${CKPT_R2_ASYNC:-true}"
+export CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-true}"
+export CKPT_R2_MAX_STAGED_GB="${CKPT_R2_MAX_STAGED_GB:-50}"
+export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-4}"
+export CKPT_R2_FLUSH_TIMEOUT="${CKPT_R2_FLUSH_TIMEOUT:-1800}"
+
 # WandB project + experiment.
 export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_comm_eff_baseline}"
@@ -457,6 +479,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.entropy_coeff="$ENTROPY_COEFF" \
   trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
   trainer.val_before_train="$VAL_BEFORE_TRAIN" \
+  trainer.checkpoint_r2_enabled="$CKPT_R2_ENABLED" \
   actor_rollout_ref.actor.comm_eff.enabled="$COMM_EFF_ENABLED" \
   actor_rollout_ref.actor.comm_eff.compression_type="$COMM_EFF_COMPRESSION_TYPE" \
   actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \

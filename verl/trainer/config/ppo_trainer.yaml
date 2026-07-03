@@ -200,6 +200,21 @@ trainer:
   # Maximum number of critic checkpoints to keep
   max_critic_ckpt_to_keep: null
 
+  # ---------------------------------------------------------------------------
+  # Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58; comm-eff fork extension).
+  # Flag-gated, strict no-op when false (default): _save_checkpoint is then
+  # byte-identical to upstream verl (no R2 threads, no r2_sink import on the save
+  # path). When true, the rank-0 driver mirrors every global_step_<N>/ file to R2
+  # via the existing R2ArtifactSink (async upload -> head-object verify -> manifest
+  # row -> delete-local), so peak local disk stays ~1 in-flight ckpt + staging
+  # instead of the keep-all total. The CKPT_R2_* knobs below configure that sink;
+  # they are read from the environment by _save_checkpoint (mirroring the
+  # WEIGHT_TRAJ_R2_* convention) and are only declared here so Hydra struct mode
+  # accepts the launcher's trainer.checkpoint_r2_enabled override. See
+  # verl/trainer/ppo/ray_trainer.py::_save_checkpoint and
+  # verl/workers/comm_eff/r2_sink.py::build_r2_sink_from_env (artifact_kind=checkpoints).
+  checkpoint_r2_enabled: false
+
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
