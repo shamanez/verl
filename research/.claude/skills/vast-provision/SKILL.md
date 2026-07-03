@@ -186,9 +186,9 @@ explicitly.
 
 ```bash
 bash $CLAUDE_PROJECT_DIR/.claude/skills/vast-provision/run.sh \
-  --query "num_gpus=4 gpu_name=H100 gpu_ram>=80 cuda_max_good>=13.0 reliability>=0.97 rentable=true verified=true" \
+  --query "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true" \
   --disk-gb 200 \
-  --max-price 24.0 \
+  --max-price 6.0 \
   --count 1
 # stderr emits:  vast-provision: auto-selected template 'verl-research-vllm020' hash=... image=verlai/verl:vllm020.dev1
 ```
@@ -212,8 +212,8 @@ disk_gb=200 max_price=...`) maps one-to-one onto the long flags below.
 | `--count`, `-n` | `1` | number of **instances** to provision |
 | `--gpu-count` | unset | optional **per-host** GPU sanity-check; when set, filters offers to `num_gpus == N`. Use to harden the query if you want a fail-fast guard. |
 | `--disk-gb`, `--disk` | `200` | disk allocation per instance, in GB. Default sized for typical research run (image + HF model + dataset + checkpoints). See "Disk sizing" below for rules of thumb. |
-| `--max-price` | `1.0` | per-instance `$/hr` ceiling (USD). Sized for a single-GPU ad-hoc smoke; multi-GPU production plans (8×H100, etc.) MUST pass an explicit override (typically `24.0`). |
-| `--min-reliability` | `0.95` | minimum `reliability2` score |
+| `--max-price` | `1.0` | per-instance `$/hr` ceiling (USD). Sized for a single-GPU ad-hoc smoke; production plans MUST pass an explicit override (typically `6.0` for the default 1×H200 rung; up to `24.0` for legacy multi-GPU shapes, explicit operator request only). |
+| `--min-reliability` | `0.99` | minimum `reliability2` score (project default — the ladder in project.yaml `default_compute` requires reliability strictly >0.99 in the query itself) |
 | `--env` | unset | raw `vastai --env` string (`"-e VAR=val -p 8000:8000"`). Use only when you need port forwards; do NOT pass laptop credentials. |
 | `--login` | unset | `vastai --login` string for private docker registries (e.g. `"ghcr-user -p TOKEN"`) |
 | `--onstart-cmd` | unset | inline shell to run at container start (passed to `vastai --onstart-cmd`) |

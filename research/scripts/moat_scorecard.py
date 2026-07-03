@@ -2483,6 +2483,206 @@ def run_selftest(args) -> int:
         bf_ok, "gather_f64 bf16->f64 upcast bit-exact vs manual <<16 expansion "
                "(all/strips/scatter plans)")
 
+    rngQ = np.random.default_rng(4949)
+    dimsQ = {"quad.a": 64, "quad.b": 40}
+    nQ = 24
+    aQ = {k: rngQ.normal(0, 0.02, size=d) for k, d in dimsQ.items()}
+    bQ = {k: rngQ.normal(0, 1e-3, size=d) for k, d in dimsQ.items()}
+    cQ = {k: rngQ.normal(0, 1e-4, size=d) for k, d in dimsQ.items()}
+    ticksQ = {t: {k: aQ[k] + t * bQ[k] + (t * t) * cQ[k] for k in dimsQ}
+              for t in range(nQ)}
+    readerQ = InMemoryReader(ticksQ)
+    qdeltas, qhs = [2, 3], [1, 2, 4]
+    qband = 2 * max(qdeltas) + max(qhs)
+    statsQ = stream_stats(readerQ, list(dimsQ.items()), nQ, qband, ram_gb=0.02,
+                          tag="-quad")
+    qrows, _, _, _ = compute_rows(statsQ, list(dimsQ), nQ, qband,
+                                  ["hold_stale", "naive_linear",
+                                   "naive_second_order"],
+                                  qdeltas, qhs, (3, 2), [(2, 1)])
+    q2rows = [r for r in qrows if r["method"] == "naive_second_order"
+              and r["in_bounds"] and not r["tied"]]
+    worst_q2 = max(r["weight_proj_ratio_median"] for r in q2rows)
+    worst_q2evr = max(abs(1.0 - r["pred_evr_pooled"]) for r in q2rows)
+    q_nl = min(r["weight_proj_ratio_median"] for r in qrows
+               if r["method"] == "naive_linear" and r["group_kind"] == "global"
+               and r["in_bounds"])
+    q_hold0 = all(r["pred_evr_pooled"] == 0.0 for r in qrows
+                  if r["method"] == "hold_stale" and not r["tied"])
+    inv["second_order_exact_quadratic"] = (
+        worst_q2 <= 1e-6 and worst_q2evr <= 1e-9 and q_nl >= 1e-2 and q_hold0,
+        f"exact-quadratic: naive_second_order worst ratio {worst_q2:.2e} (tol 1e-6, "
+        f"block-sum f64 cancellation floor; spec 1e-9 unreachable in sqrt space), "
+        f"worst |1-EVR|={worst_q2evr:.1e} (tol 1e-9); naive_linear global min ratio "
+        f"{q_nl:.2e} (discrimination >= 1e-2); hold_stale EVR==0 exactly={q_hold0}")
+
+    s3band = 2 * max(sdeltas) + max(shs)
+    sstats3 = stream_stats(reader, name_dims, n_ticks_s, s3band, ram_gb=0.02,
+                           tag="-syn3")
+    d2mu1, d2mu0 = DampedSecondOrder(1.0), DampedSecondOrder(0.0)
+    n2, n1 = NaiveSecondOrder(), NaiveLinear()
+    nest_w1 = nest_w0 = 0.0
+    for nm3, _ in name_dims:
+        Pp3 = prefix_from_banded(sstats3[nm3]["D"], s3band)
+        for d3 in sdeltas:
+            for h3 in shs:
+                s6 = cell_window_sums6(Pp3, d3, h3, n_ticks_s)
+                if s6[0].size == 0:
+                    continue
+                s3 = cell_window_sums(Pp3, d3, h3, n_ticks_s)
+                e2_mu1 = d2mu1.window_stats(*s6, d3, h3)[0]
+                e2_n2 = n2.window_stats(*s6, d3, h3)[0]
+                nest_w1 = max(nest_w1, float(np.max(np.abs(e2_mu1 - e2_n2))))
+                e2_mu0 = d2mu0.window_stats(*s6, d3, h3)[0]
+                e2_n1 = n1.window_stats(s3[0], s3[1], s3[2], d3, h3)[0]
+                nest_w0 = max(nest_w0, float(np.max(np.abs(e2_mu0 - e2_n1[d3:]))))
+    statsL3 = stream_stats(readerL, list(dimsL.items()), nL, 8, ram_gb=0.02,
+                           tag="-lin3")
+    nest_lin = 0.0
+    for nmL in dimsL:
+        PpL = prefix_from_banded(statsL3[nmL]["D"], 8)
+        for hL in (1, 4):
+            s6L = cell_window_sums6(PpL, 2, hL, nL)
+            if s6L[0].size == 0:
+                continue
+            s3L = cell_window_sums(PpL, 2, hL, nL)
+            e2_2 = n2.window_stats(*s6L, 2, hL)[0]
+            e2_1 = n1.window_stats(s3L[0], s3L[1], s3L[2], 2, hL)[0]
+            nest_lin = max(nest_lin, float(np.max(np.abs(e2_2 - e2_1[2:]))))
+    inv["second_order_nesting"] = (
+        nest_w1 <= 1e-9 and nest_w0 <= 1e-9 and nest_lin <= 1e-9,
+        f"|e2(mu=1)-e2(naive2)|={nest_w1:.1e}; |e2(mu=0)-e2(naive1)| at aligned "
+        f"windows (j2=j3+delta)={nest_w0:.1e}; exact-linear naive2==naive1 "
+        f"e2 diff={nest_lin:.1e} (all tol 1e-9)")
+
+    _saved3 = {n3: _REGISTRY[n3] for n3 in ("damped_second_order", "adaptive_linear",
+                                            "adaptive_second_order")}
+    register_method(DampedSecondOrder(0.5))
+    register_method(AdaptiveLinear(0.4))
+    register_method(AdaptiveSecondOrder(0.7, 0.3))
+    so_ok, so_res = parity_check(reader, sstats3, ["syn.a", "syn.d"], n_ticks_s,
+                                 s3band, [(2, 1), (3, 4)],
+                                 ["naive_second_order", "damped_second_order",
+                                  "adaptive_linear", "adaptive_second_order"])
+    for inst3 in _saved3.values():
+        register_method(inst3)
+    worst_so = max((r["worst_rel"] for r in so_res), default=float("nan"))
+    tso = 2 * 2 + 1
+    histO = [(tso + off, _to_torch(reader.load_matrix_f64(tso + off, "syn.a")))
+             for off in (-4, -2, 0)]
+    mineO = NaiveSecondOrder().predict(histO, 2, 3)
+    refO = P.Order2("fixed", damp=1.0).predict(histO, 3.0 / 2.0)
+    tieO = float(np.max(np.abs(mineO.numpy() - refO.numpy())))
+    inv["second_order_offpath_parity"] = (
+        so_ok and tieO <= 1e-12,
+        f"{len(so_res)} samples over 4 arms (frozen mu=0.5 / lam=0.4 / (0.7,0.3)), "
+        f"worst rel diff {worst_so:.2e} (tol {PARITY_RTOL:g}); "
+        f"NaiveSecondOrder.predict == P.Order2(damp=1).predict(h/delta) within "
+        f"{tieO:.1e} (tol 1e-12)")
+
+    rE, nE = 0.9, 26
+    rngE = np.random.default_rng(5050)
+    dimsE = {"exp.a": 48, "exp.b": 32}
+    thinfE = {k: rngE.normal(0, 0.02, size=d) for k, d in dimsE.items()}
+    coefE = {k: rngE.normal(0, 0.05, size=d) for k, d in dimsE.items()}
+    ticksE = {t: {k: thinfE[k] + coefE[k] * (rE ** t) for k in dimsE}
+              for t in range(nE)}
+    readerE = InMemoryReader(ticksE)
+    bandE = 6
+    statsE = stream_stats(readerE, list(dimsE.items()), nE, bandE, ram_gb=0.02,
+                          tag="-exp")
+    dE, hE = 2, 1
+    sumsE = None
+    sums6E = None
+    for nmE in dimsE:
+        PpE = prefix_from_banded(statsE[nmE]["D"], bandE)
+        v3 = cell_window_sums(PpE, dE, hE, nE)
+        v6 = cell_window_sums6(PpE, dE, hE, nE)
+        sumsE = ([x.copy() for x in v3] if sumsE is None
+                 else [a + b for a, b in zip(sumsE, v3)])
+        sums6E = ([x.copy() for x in v6] if sums6E is None
+                  else [a + b for a, b in zip(sums6E, v6)])
+    lam_true = (rE ** dE) * (1 - rE ** hE) / ((hE / dE) * (1 - rE ** dE))
+    cellR = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                          "rolling_ls", 0.9, 2.0)
+    scR = np.isfinite(cellR["lam_star"])
+    worst_lamR = float(np.max(np.abs(cellR["lam_star"][scR] - lam_true)))
+    worst_ratR = float(np.nanmax(cellR["ratios"]))
+    cellW = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE, "ewma", 0.9, 2.0)
+    lam_lastW = float(cellW["lam_star"][np.isfinite(cellW["lam_star"])][-1])
+    inv["adaptive_convergence_known_lambda"] = (
+        worst_lamR <= 1e-9 and worst_ratR <= 1e-5
+        and abs(lam_lastW - lam_true) <= 1e-6 and cellR["n_warmup"] == hE + 1,
+        f"exponential r={rE}: lam*={lam_true:.6f}; rolling_ls worst |lam-lam*|="
+        f"{worst_lamR:.1e} (tol 1e-9), worst scored ratio {worst_ratR:.2e} "
+        f"(tol 1e-5, prefix-cancellation floor; spec 1e-9 unreachable); "
+        f"ewma |lam_last-lam*|={abs(lam_lastW - lam_true):.1e} (tol 1e-6); "
+        f"n_warmup={cellR['n_warmup']} (want h+1={hE + 1})")
+
+    saaP, sabP, sbbP = _block_sums_all(sstats, [n for n, _ in name_dims],
+                                       n_ticks_s, sband, [2], [2])[0][2:5]
+    lam_base = adaptive_cell(saaP, sabP, sbbP, 2, 2, "rolling_ls", 0.9, 2.0)["lam_star"]
+    saaC, sabC = saaP.copy(), sabP.copy()
+    j0 = int(saaP.size // 2)
+    saaC[j0:] *= 10.0
+    sabC[j0:] *= 10.0
+    lam_cor = adaptive_cell(saaC, sabC, sbbP, 2, 2, "rolling_ls", 0.9, 2.0)["lam_star"]
+    past = np.array([j for j in range(saaP.size) if j - 2 - 1 < j0])
+    prefix_ok = np.array_equal(lam_base[past], lam_cor[past], equal_nan=True)
+    future_differs = not np.array_equal(lam_base, lam_cor, equal_nan=True)
+    leak_trips5 = False
+    try:
+        bad_fe, anchor5, h5 = 5, 6, 2
+        assert bad_fe + h5 < anchor5, "LEAK"
+    except AssertionError:
+        leak_trips5 = True
+    inv["adaptive_leakage_prefix"] = (
+        prefix_ok and future_differs and leak_trips5,
+        f"corrupting windows w>={j0} (x10) leaves lam_j bit-identical for all j with "
+        f"fit_end<{j0} ({prefix_ok}); later lam differ={future_differs}; "
+        f"intentional-leak predicate trips={leak_trips5}")
+
+    s6Q = None
+    for nmQ in dimsQ:
+        PpQ = prefix_from_banded(statsQ[nmQ]["D"], qband)
+        vQ = cell_window_sums6(PpQ, 2, 2, nQ)
+        s6Q = ([x.copy() for x in vQ] if s6Q is None
+               else [a + b for a, b in zip(s6Q, vQ)])
+    cellQ = adaptive2_cell(*s6Q, 2, 2, "rolling_ls", 0.9, 2.0)
+    scQ = np.isfinite(cellQ["lam_star"])
+    worst_lvQ = float(np.max(np.abs(cellQ["lam_star"][scQ] - 1.0)))
+    worst_lcQ = float(np.max(np.abs(cellQ["lam2_star"][scQ] - 1.0)))
+    worst_ratQ = float(np.nanmax(cellQ["ratios"]))
+    cellE2 = adaptive2_cell(*sums6E, dE, hE, "rolling_ls", 0.9, 2.0)
+    medE1 = float(np.nanmedian(cellR["ratios"]))
+    medE2 = float(np.nanmedian(cellE2["ratios"]))
+    inv["adaptive_second_order_recovery"] = (
+        worst_lvQ <= 1e-6 and worst_lcQ <= 1e-6 and worst_ratQ <= 1e-6
+        and cellQ["n_det_fallback"] == 0 and medE2 <= medE1 + 1e-9,
+        f"exact-quadratic: worst |lv-1|={worst_lvQ:.1e}, |lc-1|={worst_lcQ:.1e} "
+        f"(tol 1e-6), worst ratio {worst_ratQ:.2e} (tol 1e-6, cancellation floor), "
+        f"det-fallbacks={cellQ['n_det_fallback']} (want 0); exponential: adaptive2 "
+        f"med {medE2:.2e} <= adaptive1 med {medE1:.2e} + 1e-9 (collinear u/w -> "
+        f"det-guard fallback path, {cellE2['n_det_fallback']} fallbacks)")
+
+    YQ = np.stack([np.concatenate([ticksQ[t][k] for k in dimsQ])
+                   for t in range(nQ)])
+    dQ7, hQ7 = 2, 2
+    twQ = np.arange(2 * dQ7, nQ - hQ7)
+    sQ7, qQ7 = _quad_sq(dQ7, hQ7)
+    yhatQ = (YQ[twQ] + (sQ7 + qQ7) * (YQ[twQ] - YQ[twQ - dQ7])
+             - qQ7 * (YQ[twQ - dQ7] - YQ[twQ - 2 * dQ7]))
+    r2Q, cmQ = M.per_scalar_pred_r2(yhatQ, YQ[twQ + hQ7])
+    q2_evr = [abs(1.0 - r["pred_evr_pooled"]) for r in q2rows
+              if r["delta_ticks"] == dQ7 and r["h_ticks"] == hQ7
+              and r["group_kind"] == "global"]
+    inv["ladder_regression_handcheck"] = (
+        (not np.any(cmQ)) and float(np.min(r2Q)) >= 1.0 - 1e-9
+        and max(q2_evr) <= 1e-9 and q_hold0,
+        f"explicit two-step yhat on exact-quadratic: min pred R2="
+        f"{float(np.min(r2Q)):.12f} (tol 1e-9), const-mask=0; naive_second_order "
+        f"global |1-EVR|={max(q2_evr):.1e} (tol 1e-9); hold_stale EVR==0 exactly")
+
     # -- real-trace fast end-to-end: full fast emit + schema round-trip -------------
     if args.trace_root and part is not None and inv.get("trace_ready", (False, ""))[0]:
         import copy

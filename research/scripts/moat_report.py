@@ -12,8 +12,7 @@ one offline HTML report:
 The page is STRICTLY self-contained: inline <svg> only, ZERO <script>/<img>/external
 refs/fonts/url()/gradients (re-openable offline). It LEADS with the per-scalar
 linearity R² readout vs the Wang et al. 2026 anchors, THEN the ratio/projection
-findings (PRIMARY per-step, then the per-tick extended-Δ sweep), the paper-protocol
-equivalence panel, and the lane verdict.
+findings (PRIMARY per-step, then the per-tick extended-Δ sweep) and the lane verdict.
 
 Prose is embedded from a sibling `report_explainer.md` (a RENDER INPUT): the "how to
 read", "what was verified", per-figure captions, glossary and one-paragraph findings
@@ -39,7 +38,9 @@ WANG_SFT = (0.426, 0.259)    # SFT Qwen2.5-1.5B + GSM8K
 ESC = html.escape
 
 PALETTE = {"hold_stale": "#7f7f7f", "naive_linear": "#1f77b4",
-           "damped_linear": "#d62728", "paper_linear": "#2ca02c"}
+           "damped_linear": "#d62728", "naive_second_order": "#2ca02c",
+           "damped_second_order": "#ff7f0e", "adaptive_linear": "#9467bd",
+           "adaptive_second_order": "#8c564b"}
 
 CSS = (
     "body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:24px;color:#222;"

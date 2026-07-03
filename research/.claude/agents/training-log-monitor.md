@@ -64,7 +64,7 @@ Run a polling loop with **30 s cadence**, **up to 40 min wall** or until an exit
 | `DONE_AGGREGATE` | `/workspace/runs/EXP-<N>/done.flag` exists | rsync per-cell logs + `done*.flag` + any `metrics/*.jsonl` to `runs/EXP-<N>/` locally, return |
 | `DONE_3FLAGS` | 3 per-cell `done_*.flag` AND tmux DEAD | rsync, return |
 | `TMUX_DEAD_PREMATURE` | tmux DEAD AND fewer than expected done flags | rsync whatever exists, return with `unexpected_termination=true` |
-| `GPU_STALL` | **all GPUs at ≤5% utilization for 4 consecutive polls (~2 min)** AND tmux ALIVE AND aggregate not done (covers both sanctioned shapes — 4×H200 and 8×H100) | return with `recommendation: teardown_only` (orchestrator decides) |
+| `GPU_STALL` | **all GPUs at ≤5% utilization for 4 consecutive polls (~2 min)** AND tmux ALIVE AND aggregate not done (shape-agnostic — applies to any 1–8 GPU shape, per the plan's provisioned rung) | return with `recommendation: teardown_only` (orchestrator decides) |
 | `EXPERIMENT_FAILURE` | per-cell log grep matches `Traceback / RuntimeError: / CUDA out of memory / NaN detected` AND that cell hasn't yet exited | **KEEP polling** — per the orchestrator's env-failure vs experiment-failure rule, experiment failures are the data we're paying for; cell will exit naturally and the chain wrapper advances. Only escalate via the final report. |
 | `ENV_FAILURE` | first cell's `validate_config` raised, or vLLM OOM at init, or NCCL init crash, or SSH unreachable >2 min after start | return with `recommendation: teardown_and_fallback` |
 | `TIMEOUT` | 40 min elapsed | return with whatever evidence is in hand |
@@ -94,7 +94,7 @@ structured summary with:
 - **`gpu_history`**: any stall windows (timestamp + duration).
 - **`wandb_scalars`**: latest reported values per cell for the load-bearing counters; explicit `null` if WandB was unreachable.
 - **`artifacts_pulled`**: list of files now under `runs/EXP-<N>/` on the laptop.
-- **`recommendation`**: one of `dispatch_analyst` (terminal), `teardown_and_fallback` (env-failure — the orchestrator re-provisions on the next sanctioned tier, 4×H200 → 8×H100), `teardown_only` (GPU stall, hard error), `continue_in_place_iteration` (operator should SSH in and hot-fix without teardown — for the M2 anchor lineage debug cycle).
+- **`recommendation`**: one of `dispatch_analyst` (terminal), `teardown_and_fallback` (env-failure — the orchestrator re-provisions on the next rung of the plan's `gpu_filter_chain`), `teardown_only` (GPU stall, hard error), `continue_in_place_iteration` (operator should SSH in and hot-fix without teardown — for the M2 anchor lineage debug cycle).
 
 ## Hard rules
 
