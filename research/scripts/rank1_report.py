@@ -65,8 +65,14 @@ def _yt(v, ylog, y0, y1, top, bot):
 
 def line_plot(series, *, w=880, h=380, ylog=False, yrange, yticks, title,
               ylab="weight_proj_ratio", xlab="horizon h (ticks ahead of anchor)",
-              refline=1.0, xvals=None, xlabels=None, xlog=None):
-    """series: [{name,color,pts:{x:y},dash?}] with shared log2 or categorical x."""
+              refline=1.0, xvals=None, xlabels=None, xlog=None,
+              ref_label="ratio = 1 (hold-stale / do nothing)",
+              better_note="↓ lower = better", shade=False):
+    """series: [{name,color,pts:{x:y},dash?}] with shared log2 or categorical x.
+
+    Every plot states its polarity: `better_note` is a top-right badge (set the
+    arrow/direction per metric); `shade=True` tints the regions on either side
+    of `refline` (green = beats the do-nothing reference, red = harmful)."""
     xvals = xvals or H_GRID
     xlabels = xlabels or [str(x) for x in xvals]
     if xlog is None:
@@ -85,6 +91,22 @@ def line_plot(series, *, w=880, h=380, ylog=False, yrange, yticks, title,
              f'style="width:100%;height:auto;display:block">']
     parts.append(f'<text x="{ml}" y="20" font-size="13.5" font-weight="600" '
                  f'fill="{C["ink"]}">{html.escape(title)}</text>')
+    if better_note:
+        parts.append(f'<text x="{right}" y="20" font-size="11.5" '
+                     f'font-weight="600" fill="#14532d" text-anchor="end">'
+                     f'{html.escape(better_note)}</text>')
+    if shade and refline is not None and y0 < refline < y1:
+        yref = _yt(refline, ylog, y0, y1, top, bot)
+        parts.append(f'<rect x="{left}" y="{top}" width="{right - left}" '
+                     f'height="{yref - top:.1f}" fill="#B23A2B" opacity="0.05"/>')
+        parts.append(f'<rect x="{left}" y="{yref:.1f}" width="{right - left}" '
+                     f'height="{bot - yref:.1f}" fill="#2e8b57" opacity="0.06"/>')
+        parts.append(f'<text x="{right - 8}" y="{top + 14}" font-size="10.5" '
+                     f'fill="#B23A2B" text-anchor="end">above the line = HARMFUL '
+                     f'(worse than doing nothing)</text>')
+        parts.append(f'<text x="{right - 8}" y="{bot - 8}" font-size="10.5" '
+                     f'fill="#14532d" text-anchor="end">below the line = GOOD '
+                     f'(beats holding stale weights)</text>')
     for tv in yticks:
         y = _yt(tv, ylog, y0, y1, top, bot)
         parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{right}" y2="{y:.1f}" '
@@ -104,7 +126,7 @@ def line_plot(series, *, w=880, h=380, ylog=False, yrange, yticks, title,
                      f'stroke-dasharray="5 5" opacity="0.75"/>')
         parts.append(f'<text x="{right}" y="{y - 6:.1f}" font-size="10.5" '
                      f'fill="{C["ink"]}" text-anchor="end" opacity="0.8">'
-                     f'ratio = 1 (hold-stale / do nothing)</text>')
+                     f'{html.escape(ref_label)}</text>')
     parts.append(f'<line x1="{left}" y1="{bot}" x2="{right}" y2="{bot}" '
                  f'stroke="#aaa" stroke-width="1.2"/>')
     parts.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bot}" '
@@ -149,10 +171,10 @@ def legend(items):
 
 
 def hist_plot(vals, *, bins, rng, w=430, h=250, title, vline=None,
-              vline_label="", xlab):
+              vline_label="", xlab, better_note="→ higher = better"):
     counts, edges = np.histogram(np.clip(vals, rng[0], rng[1]), bins=bins,
                                  range=rng)
-    ml, mr, mt, mb = 40, 12, 30, 40
+    ml, mr, mt, mb = 40, 12, 44, 40
     left, right, top, bot = ml, w - mr, mt, h - mb
     cmax = max(int(counts.max()), 1)
     bw = (right - left) / bins
@@ -160,6 +182,10 @@ def hist_plot(vals, *, bins, rng, w=430, h=250, title, vline=None,
              f'style="width:100%;height:auto;display:block">']
     parts.append(f'<text x="{ml}" y="18" font-size="12.5" font-weight="600" '
                  f'fill="{C["ink"]}">{html.escape(title)}</text>')
+    if better_note:
+        parts.append(f'<text x="{right}" y="{mt - 10}" font-size="11" '
+                     f'font-weight="600" fill="#14532d" text-anchor="end">'
+                     f'{html.escape(better_note)}</text>')
     for i, c in enumerate(counts):
         if c == 0:
             continue
@@ -212,7 +238,8 @@ def main() -> int:
          "pts": gratio(late, "rank1_anchored", "8")},
     ], ylog=True, yrange=(0.4, 4.2), yticks=[0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0],
         title="A · Staleness skill by horizon — global pooled ratio, late anchors "
-              "(79, 119), W = 8, log axes")
+              "(79, 119), W = 8, log axes",
+        better_note="↓ lower = better", shade=True)
     leg_a = legend([("hold_stale (=1)", C["hold"]), ("naive_last2", C["naive"]),
                     ("two_point_window[8]", C["two"]),
                     ("rank1_traj[8] · RELEX form", C["r1t"]),
@@ -239,14 +266,16 @@ def main() -> int:
          "pts": by_window("rank1_traj", 40)},
     ], w=430, h=280, yrange=(0.9, 2.0), yticks=[1.0, 1.2, 1.5, 1.8],
         title="B1 · Ratio vs window size (late)", xvals=[0, 1, 2, 3],
-        xlabels=WSPECS, xlab="checkpoints feeding the SVD (W)")
+        xlabels=WSPECS, xlab="checkpoints feeding the SVD (W)",
+        better_note="↓ lower = better", shade=True)
     plot_b2 = line_plot([
         {"name": "off-line share", "color": C["naive"], "pts": off},
     ], w=430, h=280, yrange=(0.0, 0.4), yticks=[0.0, 0.1, 0.2, 0.3, 0.4],
         title="B2 · Off-v₁ share of accumulated Δθ at anchor",
         xvals=[0, 1, 2, 3], xlabels=WSPECS, refline=None,
         ylab="fraction of ||Δθ_anchor|| off the line",
-        xlab="checkpoints feeding the SVD (W)")
+        xlab="checkpoints feeding the SVD (W)",
+        better_note="↓ lower = smaller unavoidable residual")
     leg_b = legend([("rank1_anchored h=10", C["r1a"]),
                     ("rank1_anchored h=40 (dashed)", "#0b5e39"),
                     ("rank1_traj h=40", C["r1t"]),
@@ -262,13 +291,15 @@ def main() -> int:
     plot_c1 = hist_plot(coef, bins=30, rng=(0.4, 1.0),
                         title=f"C1 · coef-linearity R² per matrix "
                               f"(median {np.median(coef):.3f})",
-                        vline=0.98, vline_label="paper: 0.98",
-                        xlab="R² of c(t)=at+b, prefix window, anchor 119")
+                        vline=0.98, vline_label="paper bar: 0.98",
+                        xlab="R² of c(t)=at+b, prefix window, anchor 119",
+                        better_note="→ higher = more linear (1 = perfect)")
     plot_c2 = hist_plot(evr, bins=25, rng=(0.9, 1.0),
                         title=f"C2 · rank-1 energy share EVR₁ "
                               f"(median {np.median(evr):.4f})",
                         xlab="λ₁/trace(G) per matrix (paper: ~0.81 "
-                             "of a rank-5 window)")
+                             "of a rank-5 window)",
+                        better_note="→ higher = more rank-1 (1 = pure line)")
 
     # ---- plot D: early vs late anchors, anchored form ------------------------
     shades = {39: "#8fcdb0", 59: "#4aab7f", 79: "#148A56", 119: "#0b4b30"}
@@ -280,7 +311,8 @@ def main() -> int:
                  for a in (79, 119)])
     plot_d = line_plot(series_d, w=430, h=280, yrange=(0.94, 1.12),
                        yticks=[0.95, 1.0, 1.05, 1.10],
-                       title="D · rank1_anchored[8] at four anchors")
+                       title="D · rank1_anchored[8] at four anchors",
+                       better_note="↓ lower = better", shade=True)
     leg_d = legend([(f"anchor {a}", shades[a]) for a in (39, 59, 79, 119)])
 
     # ---- plot E: residual geometry -------------------------------------------
@@ -295,7 +327,9 @@ def main() -> int:
         {"name": "tangential", "color": C["two"], "pts": tan},
     ], w=430, h=280, yrange=(0.0, 1.1), yticks=[0.0, 0.25, 0.5, 0.75, 1.0],
         title="E · Where the anchored residual lives", refline=1.0,
-        ylab="residual component / ||true move||")
+        ylab="residual component / ||true move||",
+        ref_label="1.0 = residual as large as the whole move (zero skill)",
+        better_note="↓ lower = better (0 = move fully predicted)")
     leg_e = legend([("radial: along the true move (≈0.97 ⇒ the line "
                      "predicted ~none of it)", C["r1t"]),
                     ("tangential: sideways error added", C["two"])])
