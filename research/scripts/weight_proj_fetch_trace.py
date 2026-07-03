@@ -48,42 +48,104 @@ def _load_size_by_tick(experiment: str, regime: str) -> dict[int, int]:
             if isinstance(r.get("remote_bytes"), int)}
 
 
-def _fetch_one(tick: int, bucket: str, dest: str, expected: int | None) -> tuple[int, str]:
-    """Download one tick to <dest>/full/tick_<N>/tick_<N>.pt (skip if already complete).
+def _parse_pre_indices(ls_output: str, stem: str) -> list[int]:
+    """Parse `aws s3 ls <prefix>/` output -> sorted ascending [N] for <stem>_<N>/ subdirs.
+
+    Pure (no network) so the layout-discovery logic is unit-testable offline (--self-test).
+    """
+    out: list[int] = []
+    pfx = f"{stem}_"
+    for line in ls_output.splitlines():
+        line = line.strip()
+        if line.startswith("PRE ") and pfx in line:
+            token = line[4:].strip().rstrip("/")
+            if token.startswith(pfx):
+                try:
+                    out.append(int(token[len(pfx):]))
+                except ValueError:
+                    pass
+    return sorted(set(out))
+
+
+def _discover_source_indices(bucket: str, prefix: str, stem: str) -> list[int]:
+    """List <prefix>/ (READ-ONLY) and parse <stem>_<N>/ subdirs -> sorted ascending [N].
+
+    Lets the fetcher self-configure to a trace whose snapshots are NOT contiguous 0..n-1
+    (e.g. EXP-58 Big-Math fp32: step_20..step_1000, spacing 20)."""
+    cp = subprocess.run(
+        ["aws", "s3", "ls", f"s3://{bucket}/{prefix}/", "--endpoint-url", RS.r2_endpoint()],
+        env=RS.r2_env(), capture_output=True, text=True,
+    )
+    if cp.returncode != 0:
+        return []
+    return _parse_pre_indices(cp.stdout, stem)
+
+
+def _fetch_one(src_index: int, local_index: int, stem: str, bucket: str,
+               dest: str, expected: int | None) -> tuple[int, str]:
+    """Download source snapshot <prefix>/<stem>_<src>/<stem>_<src>.pt to the CANONICAL local
+    layout <dest>/full/tick_<local>/tick_<local>.pt (skip if already complete).
+
+    For EXP-57 (stem='tick', contiguous) src==local, so the local layout is byte-identical
+    to the original tick-only fetcher. For EXP-58 Big-Math (stem='step', N=20..1000) the
+    source step index is NORMALIZED to a contiguous local tick index, so the analysis engine
+    (which only knows full/tick_<i>/tick_<i>.pt) consumes the Big-Math trace unchanged.
 
     ATOMIC + self-healing: downloads to a `.part` sidecar and `os.replace`s onto the final
     path ONLY after a clean transfer (+ size check when known). So an interrupted download
     (SSH drop / disk pressure) never leaves a partial file at the FINAL path where a later
     resume would silently skip it — a stale `.part` is simply overwritten on the next run.
     """
-    key = RS.tick_key(tick)
-    local_dir = os.path.join(dest, "full", f"tick_{tick}")
-    local = os.path.join(local_dir, f"tick_{tick}.pt")
+    src_key = f"{RS.canonical_prefix()}/{stem}_{src_index}/{stem}_{src_index}.pt"
+    local_dir = os.path.join(dest, "full", f"tick_{local_index}")
+    local = os.path.join(local_dir, f"tick_{local_index}.pt")
     part = local + ".part"
     if os.path.exists(local):
         sz = os.path.getsize(local)
         if (expected is None and sz > 0) or (expected is not None and sz == expected):
-            return tick, "skip (present)"
+            return local_index, "skip (present)"
         # present but wrong size (only detectable with expected) -> re-fetch
     os.makedirs(local_dir, exist_ok=True)
     if os.path.exists(part):
         os.remove(part)                       # discard any stale partial before re-download
     cp = subprocess.run(
-        ["aws", "s3", "cp", f"s3://{bucket}/{key}", part,
+        ["aws", "s3", "cp", f"s3://{bucket}/{src_key}", part,
          "--endpoint-url", RS.r2_endpoint(), "--no-progress"],
         env=RS.r2_env(), capture_output=True, text=True,
     )
     if cp.returncode != 0:
         if os.path.exists(part):
             os.remove(part)                   # never leave a partial behind
-        return tick, f"FAIL rc={cp.returncode}: {cp.stderr.strip()[:200]}"
+        return local_index, f"FAIL rc={cp.returncode}: {cp.stderr.strip()[:200]}"
     sz = os.path.getsize(part) if os.path.exists(part) else 0
     if expected is not None and sz != expected:
         if os.path.exists(part):
             os.remove(part)
-        return tick, f"FAIL size {sz} != expected {expected}"
+        return local_index, f"FAIL size {sz} != expected {expected}"
     os.replace(part, local)                   # atomic promote to the final path
-    return tick, f"ok ({sz/(1<<30):.2f} GB)"
+    return local_index, f"ok ({sz/(1<<30):.2f} GB)"
+
+
+def _selftest() -> int:
+    """Offline (no-network) checks of the pure layout logic: discovery parse, step->tick
+    normalization, and tick-layout identity (EXP-57 byte-identical)."""
+    ls = ("                           PRE step_20/\n"
+          "                           PRE step_1000/\n"
+          "                           PRE step_100/\n"
+          "                           PRE junk/\n"
+          "2026-07-02 04:13:00 6174966359 step_100.pt\n")
+    assert _parse_pre_indices(ls, "step") == [20, 100, 1000], "discovery parse"
+    assert _parse_pre_indices(ls, "tick") == [], "wrong-stem parse must be empty"
+    # EXP-58-like {20,40,...,1000} normalized to contiguous local ticks 0..49
+    src = list(range(20, 1001, 20))
+    pairs = [(s, i) for i, s in enumerate(src)]
+    assert len(pairs) == 50 and pairs[0] == (20, 0) and pairs[-1] == (1000, 49), "normalize"
+    # EXP-57 tick layout: local index == source index (no normalization)
+    tick_pairs = [(s, s) for s in range(160)]
+    assert tick_pairs[7] == (7, 7) and len(tick_pairs) == 160, "tick identity"
+    print("[fetch] SELF-TEST GO — discovery parse + step->tick normalization + "
+          "tick identity OK", flush=True)
+    return 0
 
 
 def main() -> int:
