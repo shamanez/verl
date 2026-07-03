@@ -74,7 +74,11 @@ vast_ssh:                                                     # SSH identity the
 
 default_compute:                                              # planner emits these defaults unless the issue overrides
   gpu_count: 1
-  gpu_filter_chain:                                           # ONLY two sanctioned tiers: 4×H200 (preferred) or 8×H100. No 4×H100 fallback.
+  gpu_filter_chain:                                           # DEFAULT ladder (2026-07-03): 1×H200 → 1×B200 → 2×H200 — runner tries each rung in order; first rung with ≥1 offer ≤ max_dph wins. Machine reliability strictly >0.99 on EVERY rung.
+    - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default — proven for both datasets (GSM8K fast surface; Big-Math @ resp 4096, EXP-58)
+    - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # more HBM, still single-GPU
+    - "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
+  legacy_gpu_filter_chain:                                    # RETIRED default (pre-2026-07-03 4×H200/8×H100 shapes). Used ONLY on explicit operator request — never walked by default.
     - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
     - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
   max_dph: 24.0
@@ -82,6 +86,19 @@ default_compute:                                              # planner emits th
   max_parallel: 1
   wall_clock_hr: 12
   iterations: 3
+
+datasets:                                                     # EASY/HARD dataset registry — SINGLE SOURCE OF TRUTH; other docs reference this block, never restate values
+  default: easy
+  easy:
+    name: GSM8K
+    prep: "launcher-managed — examples/data_preprocess/gsm8k.py runs automatically when DATA_DIR is absent"
+    max_response_length: "per launcher surface (accel base = 1024; full legacy control = 16384)"
+  hard:
+    name: Big-Math
+    hf_id: gshasiri/Big-Math-RL-Verified-filtered             # 123,602 train / 6,506 val
+    prep: "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42; then launch with DATA_DIR=/root/data/bigmath (skips the launcher's gsm8k prep)"
+    data_source: DigitalLearningGmbH/MATH-lighteval           # reward-fn routing key set by bigmath_dapo.py — do NOT use math_bigmath (pred:None crashes val agg) or math_dapo (ignores \boxed{}); see plan 58
+    max_response_length: 4096                                 # hard-dataset default — carried from EXP-58 (1000 clean steps on 1×H200)
 
 default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
   run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)

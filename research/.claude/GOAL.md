@@ -105,9 +105,13 @@ are expected; diagnostic-only issues stay `code_change:false`.
 
 - **Model** — Qwen2.5-1.5B-Instruct.
 - **RL loss** — vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
-- **Dataset** — GSM8K.
-- **Hardware** — multi-GPU only, 4 ≤ num_gpus ≤ 8, Vast.ai H100/H200 via the
-  locked `verl-research-vllm020` template.
+- **Dataset** — EASY = GSM8K (the default); HARD = Big-Math
+  (`gshasiri/Big-Math-RL-Verified-filtered`) at `MAX_RESPONSE_LENGTH=4096`.
+  Registry: `.claude/project.yaml` `datasets:`.
+- **Hardware** — default 1×H200 (ladder 1×H200 → 1×B200 → 2×H200, machine
+  reliability >0.99) on Vast.ai via the locked `verl-research-vllm020`
+  template; 1–8 GPUs supported; legacy 4×H200/8×H100 for explicit operator
+  request only. See `.claude/project.yaml` `default_compute`.
 
 ## Pointers
 

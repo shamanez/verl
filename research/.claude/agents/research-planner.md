@@ -47,9 +47,10 @@ Canonical project facts (default compute chain, label scheme, gh-default repo) l
 5. **Compute defaults** (write these into the plan's `## Compute budget` section unless the issue overrode them):
    ```yaml
    gpu_count:        1                       # number of Vast.ai instances (single-node default)
-   gpu_filter_chain:                         # ONLY two sanctioned tiers: 4×H200 (preferred) or 8×H100 — runner tries each in order; first tier with ≥1 offer ≤ max_dph wins
-     - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"   # preferred: most VRAM per $
-     - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
+   gpu_filter_chain:                         # DEFAULT ladder: 1×H200 → 1×B200 → 2×H200 (reliability >0.99 on every rung) — runner tries each in order; first rung with ≥1 offer ≤ max_dph wins. Source of truth: project.yaml `default_compute` (legacy 4×H200/8×H100 = explicit operator request only)
+     - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default — proven for both datasets
+     - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # more HBM, still single-GPU
+     - "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
    max_dph:          24.0                    # per-instance $/hr ceiling
    max_gpu_hr:       96                      # total across all cells (runner aborts past this)
    max_parallel:     1

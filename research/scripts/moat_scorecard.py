@@ -700,7 +700,7 @@ def load_stats_cache(path: str, fingerprint: str) -> dict | None:
 
 # =============================================================================
 # Fast mode: the sampled panel (gather ONCE, hold in RAM, replay through the
-# UNCHANGED stream_stats/compute_rows/compute_paper_rows via InMemoryReader)
+# UNCHANGED stream_stats/compute_rows via InMemoryReader)
 # =============================================================================
 def _fast_fingerprint(name_dims, n_ticks, band, trace_root, cadence, tickset,
                       sampling: dict, dump_dtype: str) -> str:
@@ -1681,74 +1681,80 @@ def _write_pred_scalar(idx: dict, groups: list[dict], key3, per_matrix: dict) ->
 def attach_scalar_pred_r2(rows: list[dict], panel: dict, methods: list[str],
                           names: list[str], n_ticks: int,
                           cells: list[tuple[int, int]], op_cell: tuple[int, int],
-                          lam_star_by_cell: dict | None = None,
-                          paper_ctx: dict | None = None) -> dict:
+                          coef_store: dict | None = None) -> dict:
     """Per-scalar prediction R² (predicted vs ACTUAL FUTURE weights) from the panel.
 
-    Grid methods score every cell in `cells` (the operating + also points) with the
-    cell_window_sums window bounds (j = Δ .. n_ticks-1-h). Per-method kappa:
-    hold_stale k=0 (the "doing nothing" baseline); naive_linear k=h/Δ; damped_linear
-    k_w = lam*_j·h/Δ using the GLOBAL group's OOS per-window lam_star (warm-up
+    Every method scores every cell in `cells` (the operating + also points) with its
+    own window bounds (j = lookback .. n_ticks-1-h). Fixed arms use their exact
+    coefficients; coefficient-selected arms (damped/adaptive, linear/second-order)
+    replay the GLOBAL group's OOS per-window coefficients from `coef_store` (warm-up
     windows dropped — the "as-deployed-globally" definition, see explainer).
-    paper_linear scores its OWN strided windows at h = op h. Fields land on every
-    group row of the qualifying cells; returns the operating-cell global histograms
-    for the n_pred_r2_scalar_hist visual."""
+    hold_stale (k=0) is the "doing nothing" baseline. Fields land on every group row
+    of the qualifying cells; returns the operating-cell global histograms for the
+    n_pred_r2_scalar_hist visual."""
     groups = build_groups(names)
     idx = {(r["method"], r["delta_ticks"], r["h_ticks"],
             r["group_kind"], r["group_key"]): r for r in rows}
     hists = {"operating_cell": list(op_cell), "bins": M.PRED_HIST_BINS,
              "range": list(M.PRED_HIST_RANGE), "methods": {}}
-    lam_star_by_cell = lam_star_by_cell or {}
+    coef_store = coef_store or {}
     t0 = time.time()
     for mname in methods:
-        if mname == "paper_linear":
-            continue
+        meth = _REGISTRY[mname]
+        three = meth.n_anchors == 3
         for (delta, h) in cells:
-            tw = np.arange(delta, n_ticks - h)      # == cell_window_sums bounds
-            kappa_w = None
-            if mname == "damped_linear":
-                lam = lam_star_by_cell.get((delta, h))
+            tw = np.arange(meth.lookback(delta), n_ticks - h)
+            s, q = _quad_sq(delta, h)
+            kappa = kappa_w = k1 = k2 = k1_w = k2_w = None
+            if mname in ("damped_linear", "adaptive_linear"):
+                lam = coef_store.get((mname, delta, h))
                 if lam is None:
                     continue
-                scored = np.isfinite(lam)           # warm-up windows dropped
+                scored = np.isfinite(lam)
                 tw = tw[scored]
                 kappa_w = lam[scored] * (float(h) / float(delta))
+            elif mname == "damped_second_order":
+                mu = coef_store.get((mname, delta, h))
+                if mu is None:
+                    continue
+                scored = np.isfinite(mu)
+                tw = tw[scored]
+                k1_w = s + mu[scored] * q
+                k2_w = -mu[scored] * q
+            elif mname == "adaptive_second_order":
+                cf = coef_store.get((mname, delta, h))
+                if cf is None:
+                    continue
+                lv, lc = cf
+                scored = np.isfinite(lv)
+                tw = tw[scored]
+                k1_w = lv[scored] * s + lc[scored] * q
+                k2_w = -lc[scored] * q
+            elif three:
+                k1, k2 = meth.coeffs(delta, h)
             else:
-                kappa = _REGISTRY[mname].kappa(delta, h)
+                kappa = meth.kappa(delta, h)
             if tw.size == 0:
                 continue
             per_matrix = {}
             for name in names:
                 Y = panel[name]
                 base = Y[tw]
-                step = base - Y[tw - delta]
-                yhat = (base + kappa_w[:, None] * step if kappa_w is not None
-                        else base + kappa * step)
+                if three:
+                    u = base - Y[tw - delta]
+                    v = Y[tw - delta] - Y[tw - 2 * delta]
+                    yhat = (base + k1_w[:, None] * u + k2_w[:, None] * v
+                            if k1_w is not None else base + k1 * u + k2 * v)
+                else:
+                    step = base - Y[tw - delta]
+                    yhat = (base + kappa_w[:, None] * step if kappa_w is not None
+                            else base + kappa * step)
                 r2, cmask = M.per_scalar_pred_r2(yhat, Y[tw + h])
                 per_matrix[name] = M.pred_r2_summary(r2, cmask)
             _write_pred_scalar(idx, groups, (mname, delta, h), per_matrix)
             if (delta, h) == op_cell:
                 hists["methods"][mname] = [int(x) for x in
                                            per_matrix["___global_hist___"]]
-    if paper_ctx is not None and "paper_linear" in methods:
-        h = paper_ctx["h"]
-        windows, _ = _paper_windows(n_ticks, [h], paper_ctx["anchor_frac"],
-                                    paper_ctx["stride"])
-        if windows:
-            ts = np.array([t for (_h, t, _t0, _d) in windows])
-            t0s = np.array([t0_ for (_h, _t, t0_, _d) in windows])
-            kw = np.array([float(h) / float(d) for (_h, _t, _t0, d) in windows])
-            per_matrix = {}
-            for name in names:
-                Y = panel[name]
-                base = Y[ts]
-                yhat = base + kw[:, None] * (base - Y[t0s])
-                r2, cmask = M.per_scalar_pred_r2(yhat, Y[ts + h])
-                per_matrix[name] = M.pred_r2_summary(r2, cmask)
-            _write_pred_scalar(idx, groups, ("paper_linear", PAPER_SENTINEL_DELTA, h),
-                               per_matrix)
-            hists["methods"]["paper_linear"] = [int(x) for x in
-                                                per_matrix["___global_hist___"]]
     log(f"per-scalar prediction R² attached in {time.time() - t0:.1f}s "
         f"(cells={cells}, methods={list(hists['methods'])})")
     return hists
@@ -1790,17 +1796,23 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     gates["naive_linear_finite"] = (
         bool(nl) and n_nan == 0,
         f"{len(nl)} rows, denom-guard NaN windows = {n_nan} (only permitted NaN)")
-    # bounds_honesty: paper_linear is OFF the (delta x h) banded grid (delta derived
-    # per window, sentinel delta_ticks=0) — its n_windows is the strided-anchor count,
-    # so it is exempt from the n_ticks-h-delta formula (damped stays IN, n_windows==nw).
-    grid_rows = [r for r in rows if r["method"] != "paper_linear"]
+    grid_rows = rows
     bad_nw = [r for r in grid_rows if r["in_bounds"] and not r["tied"]
-              and r["n_windows"] != n_ticks - r["h_ticks"] - r["delta_ticks"]]
+              and r["n_windows"] != n_ticks - r["h_ticks"] - r["lookback_ticks"]]
     zero_nw = [r for r in grid_rows if r["in_bounds"] and r["n_windows"] <= 0]
     gates["bounds_honesty"] = (
         not bad_nw and not zero_nw,
-        f"n_windows == n_ticks-h-delta on all in-bounds grid rows "
+        f"n_windows == n_ticks-h-lookback on all in-bounds grid rows "
         f"(violations={len(bad_nw)}, zero={len(zero_nw)})")
+    crows = [r for r in rows if r["method"] in COEF_METHODS and r["in_bounds"]
+             and not r["tied"]]
+    bad_bk = [r for r in crows
+              if r["n_warmup"] + r["n_oos_scored"] != r["n_windows"]
+              or r["n_nan_windows"] < r["n_warmup"]]
+    gates["oos_bookkeeping"] = (
+        not bad_bk,
+        f"{len(crows)} coefficient-method rows: n_warmup+n_oos_scored==n_windows "
+        f"and n_nan_windows>=n_warmup (violations={len(bad_bk)})")
     have = {(r["group_kind"], r["group_key"]) for r in rows}
     need_specials = {("special", s) for s in ("embed", "norm", "bias", "lm_head")}
     miss = [k for k in ({("global", "all")} | need_specials) if k not in have]
@@ -1813,7 +1825,7 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     gates["coverage_safety"] = (
         not no_cov, f"rows missing delta_norm/coverage = {len(no_cov)}")
     ops = [op] + list(also)
-    grid_methods = [m for m in methods if m != "paper_linear"]
+    grid_methods = methods
     row_keys = {(r["method"], r["delta_ticks"], r["h_ticks"], r["group_kind"],
                  r["group_key"]) for r in rows}
     miss_op = [(m, p) for m in grid_methods for p in ops
@@ -1825,17 +1837,6 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     gates["r2_well_defined"] = (
         not r2bad, f"per-scalar r2_median in [0,1] on all group rows "
                    f"(out-of-range={len(r2bad)})")
-    # #47: paper_linear present for every h at global (regime S only)
-    if "paper_linear" in methods:
-        miss_paper = [h for h in hs if ("paper_linear", PAPER_SENTINEL_DELTA, h,
-                                        "global", "all") not in row_keys]
-        pw = [r for r in rows if r["method"] == "paper_linear"
-              and r["group_kind"] == "global"]
-        gates["paper_linear_present"] = (
-            not miss_paper and bool(pw),
-            f"global paper rows for h={hs} (missing h={miss_paper}); "
-            f"{len(pw)} global paper rows, anchor_mode="
-            f"{sorted({r['anchor_mode'] for r in pw})}")
     # rows-v48: pooled EVR bounded above by 1; hold_stale scores EXACTLY 0; NaN only
     # under the denom guard (a NaN EVR on a row with real displacement is a bug)
     over = [r for r in rows if _fin(r["pred_evr_pooled"])
@@ -1853,8 +1854,6 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
     # rows-v48: per-scalar prediction R² present at the operating cell (panel path)
     if scalar_pred_r2 == "panel":
         need = [(m, op[0], op[1]) for m in grid_methods]
-        if "paper_linear" in methods:
-            need.append(("paper_linear", PAPER_SENTINEL_DELTA, op[1]))
         by_key = {(r["method"], r["delta_ticks"], r["h_ticks"],
                    r["group_kind"], r["group_key"]): r for r in rows}
         miss_ps = [k for k in need
@@ -1901,7 +1900,7 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
 # =============================================================================
 def parity_check(reader, stats: dict, names: list[str], n_ticks: int, band: int,
                  cells: list[tuple[int, int]], methods: list[str]) -> tuple[bool, list]:
-    """For sampled (matrix, cell, window): recompute via predictors.Order1.predict on
+    """For sampled (matrix, cell, window): recompute via the method's own predict on
     the ACTUAL loaded snapshot vectors + metrics.full_metric_row, and compare with the
     engine's surrogate-path row. Asserts the metric-contract pin quantitatively."""
     results = []
@@ -1909,24 +1908,29 @@ def parity_check(reader, stats: dict, names: list[str], n_ticks: int, band: int,
     for name in names:
         Ppre = prefix_from_banded(stats[name]["D"], band)
         for (delta, h) in cells:
-            saa, sab, sbb = cell_window_sums(Ppre, delta, h, n_ticks)
-            if saa.size == 0:
-                continue
-            for j in sorted({0, saa.size // 2, saa.size - 1}):
-                t = delta + j
-                assert t - delta >= 0 and t + h <= n_ticks - 1, "window out of causal bounds"
-                th_a = reader.load_matrix_f64(t - delta, name)
-                th_t = reader.load_matrix_f64(t, name)
-                th_s = reader.load_matrix_f64(t + h, name)
-                history = [(t - delta, _to_torch(th_a)), (t, _to_torch(th_t))]
-                assert max(tick for tick, _ in history) <= t < t + h, "causality violated"
-                for mname in methods:
-                    meth = _REGISTRY[mname]
+            for mname in methods:
+                meth = _REGISTRY[mname]
+                lb = meth.lookback(delta)
+                if meth.n_anchors == 3:
+                    sums = cell_window_sums6(Ppre, delta, h, n_ticks)
+                else:
+                    sums = cell_window_sums(Ppre, delta, h, n_ticks)
+                nwin = int(sums[0].size)
+                if nwin == 0:
+                    continue
+                for j in sorted({0, nwin // 2, nwin - 1}):
+                    t = lb + j
+                    assert t - lb >= 0 and t + h <= n_ticks - 1, "window out of causal bounds"
+                    th_t = reader.load_matrix_f64(t, name)
+                    th_s = reader.load_matrix_f64(t + h, name)
+                    history = [(t + off, _to_torch(reader.load_matrix_f64(t + off, name)))
+                               for off in meth.anchor_offsets(delta)]
+                    assert max(tick for tick, _ in history) <= t < t + h, "causality violated"
                     theta_hat = meth.predict(history, delta, h)
                     # numpy f64 in -> metrics._f32 keeps f64 (no fp32 re-quantization),
                     # so direct-vs-surrogate agreement is float-assoc-level exact
                     direct = M.full_metric_row(theta_hat.numpy(), th_s, th_t, None)
-                    e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j], delta, h)
+                    e2, b2, eb = meth.window_stats(*(x[j] for x in sums), delta, h)
                     surro = surrogate_metric_row(e2, b2, eb)
                     worst = 0.0
                     for fld in ("err_norm", "base_norm", "weight_proj_ratio",
@@ -2121,7 +2125,7 @@ def run_selftest(args) -> int:
     sdeltas, shs = [2, 3], [1, 2, 4]
     sband = max(sdeltas) + max(shs)
     sstats = stream_stats(reader, name_dims, n_ticks_s, sband, ram_gb=0.02, tag="-syn")
-    srows, _, _ = compute_rows(sstats, [n for n, _ in name_dims], n_ticks_s, sband,
+    srows, _, _, _ = compute_rows(sstats, [n for n, _ in name_dims], n_ticks_s, sband,
                             ["hold_stale", "naive_linear"], sdeltas, shs,
                             (3, 2), [(2, 1)])
     hold = [r for r in srows if r["method"] == "hold_stale" and not r["tied"]]
@@ -2249,35 +2253,6 @@ def run_selftest(args) -> int:
         f"all valid R² in [0,1]={r2_bounds_ok}; r2.const fully excluded "
         f"(n_excluded_const={r2stats['r2.const']['n_excluded_const']}/50)={const_excluded}")
 
-    # -- paper_linear anchor rule + cross-path parity (direct == naive(delta_resolved)) --
-    pp_band = 30
-    ppstats = stream_stats(r2reader, r2nd, r2n, band=pp_band, ram_gb=0.05, tag="-pp")
-    windows, needed = _paper_windows(r2n, [2, 4], anchor_frac=0.25, stride=2)
-    anchor_rule_ok = all((0.20 <= t0 / t <= 0.30) and t >= 20 and dres == t - t0
-                         for (h, t, t0, dres) in windows)
-    pp_worst = 0.0
-    nai = NaiveLinear()
-    nm = "r2.noisy"                                # non-linear -> e2 not ~0 (meaningful parity)
-    Pp = prefix_from_banded(ppstats[nm]["D"], pp_band)
-    for (h, t, t0, dres) in windows:
-        if dres + h > pp_band:                    # only band-fitting windows are comparable
-            continue
-        a = r2reader.load_matrix_f64(t0, nm); tt = r2reader.load_matrix_f64(t, nm)
-        s = r2reader.load_matrix_f64(t + h, nm)
-        k = h / dres
-        e = (tt + k * (tt - a)) - s; b = tt - s
-        de2, db2, deb = float(e @ e), float(b @ b), float(e @ b)   # direct triple
-        saa, sab, sbb = cell_window_sums(Pp, dres, h, r2n)
-        jj = t - dres                              # window index for anchor t at delta=dres
-        be2, bb2, beb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)  # band triple
-        for dv, sv in ((de2, be2), (db2, bb2), (deb, beb)):
-            pp_worst = max(pp_worst, abs(dv - sv) / max(abs(dv), abs(sv), 1e-12))
-    inv["paper_anchor_and_parity"] = (
-        anchor_rule_ok and pp_worst <= PARITY_RTOL,
-        f"anchor rule t0=floor(0.25t),t>=20,0.20<=t0/t<=0.30,dres=t-t0={anchor_rule_ok}; "
-        f"direct (e2,b2,eb)==naive(delta_resolved) worst rel {pp_worst:.2e} "
-        f"(tol {PARITY_RTOL:g})")
-
     # -- real-trace subset battery ---------------------------------------------
     det_soft = (True, "not run (no trace)")
     if args.trace_root and part is not None:
@@ -2303,7 +2278,7 @@ def run_selftest(args) -> int:
                 f"{sum(d for _, d in sub_dims):,} elems/tick")
             rstats = stream_stats(reader_r, sub_dims, n_ticks, band,
                                   ram_gb=args.ram_gb, tag="-real")
-            rrows, _, _ = compute_rows(rstats, subset, n_ticks, band,
+            rrows, _, _, _ = compute_rows(rstats, subset, n_ticks, band,
                                     ["hold_stale", "naive_linear"], deltas, hs,
                                     args.op_point, args.also_points)
             rhold = [r for r in rrows if r["method"] == "hold_stale"
@@ -2340,9 +2315,9 @@ def run_selftest(args) -> int:
             s1 = stream_stats(reader_r, tiny, n_ticks, band, ram_gb=1, tag="-det1")
             s2 = stream_stats(reader_r, tiny, n_ticks, band, ram_gb=1, tag="-det2")
             det_stream = all(np.array_equal(s1[n]["D"], s2[n]["D"]) for n, _ in tiny)
-            r1, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
+            r1, _, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
                                  [deltas[0]], [hs[0]], args.op_point, [])
-            r2, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
+            r2, _, _, _ = compute_rows(rstats, [tiny[0][0]], n_ticks, band, ["naive_linear"],
                                  [deltas[0]], [hs[0]], args.op_point, [])
             det_rows = json.dumps(_clean(r1)) == json.dumps(_clean(r2))
             det_soft = (det_stream and det_rows,
@@ -2387,7 +2362,7 @@ def run_selftest(args) -> int:
                           for t in range(n_ticks_s)})
     statsf = stream_stats(prf, [(n, plf[n].k_actual) for n in snames], n_ticks_s,
                           sband, ram_gb=0.05, tag="-ff")
-    frows1, _, _ = compute_rows(statsf, snames, n_ticks_s, sband,
+    frows1, _, _, _ = compute_rows(statsf, snames, n_ticks_s, sband,
                                 ["hold_stale", "naive_linear"], sdeltas, shs,
                                 (3, 2), [(2, 1)], fidelity="fast",
                                 r2_population="sampled_paper_filtered",
@@ -2404,7 +2379,7 @@ def run_selftest(args) -> int:
     stats_s = stream_stats(pr_s, [(n, pl_syn[n].k_actual) for n in snames],
                            n_ticks_s, sband, ram_gb=0.05, tag="-fastid")
     apply_linearity_filters(stats_s, panel_syn, pl_syn, 1e-4, 4, n_ticks_s)
-    frows2, _, _ = compute_rows(stats_s, snames, n_ticks_s, sband,
+    frows2, _, _, _ = compute_rows(stats_s, snames, n_ticks_s, sband,
                                 ["hold_stale", "naive_linear"], sdeltas, shs,
                                 (3, 2), [(2, 1)], fidelity="fast",
                                 r2_population="sampled_paper_filtered",
@@ -2431,7 +2406,7 @@ def run_selftest(args) -> int:
     readerL = InMemoryReader(ticksL)
     statsL = stream_stats(readerL, list(dimsL.items()), nL, band=6,
                           ram_gb=0.02, tag="-evr")
-    lrows, _, _ = compute_rows(statsL, list(dimsL), nL, 6,
+    lrows, _, _, _ = compute_rows(statsL, list(dimsL), nL, 6,
                                ["hold_stale", "naive_linear"], [2], [1, 4], (2, 4), [])
     nai_evr = [r["pred_evr_pooled"] for r in lrows
                if r["method"] == "naive_linear" and not r["tied"]]
@@ -2484,39 +2459,6 @@ def run_selftest(args) -> int:
         and int(keep7.sum()) + nr7 + nu7 == k7,
         f"keep mask exact={np.array_equal(keep7, want_keep)}; "
         f"n_range={nr7} (want 4), n_unique={nu7} (want 2); counts close")
-
-    # -- paper arm scored from a panel == naive_linear at matched anchors -----------
-    plp = SP.build_sample_plan(r2nd, 1.0, 50, 1024, 8192, 262144, seed=42)
-    panelp = gather_panel(r2reader, plp, r2names, r2n)
-    prp = InMemoryReader({t: {n: panelp[n][t] for n in r2names}
-                          for t in range(r2n)})
-    ppstats_f = stream_stats(prp, [(n, plp[n].k_actual) for n in r2names], r2n,
-                             pp_band, ram_gb=0.05, tag="-ppfast")
-    Ppf = prefix_from_banded(ppstats_f[nm]["D"], pp_band)
-    ppf_worst = 0.0
-    for (h, t, t0w, dres) in windows:
-        if dres + h > pp_band:
-            continue
-        a = prp.load_matrix_f64(t0w, nm)
-        tt = prp.load_matrix_f64(t, nm)
-        s = prp.load_matrix_f64(t + h, nm)
-        k = h / dres
-        e = (tt + k * (tt - a)) - s
-        b = tt - s
-        saa, sab, sbb = cell_window_sums(Ppf, dres, h, r2n)
-        jj = t - dres
-        be2, bb2, beb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)
-        for dv, sv in ((float(e @ e), be2), (float(b @ b), bb2), (float(e @ b), beb)):
-            ppf_worst = max(ppf_worst, abs(dv - sv) / max(abs(dv), abs(sv), 1e-12))
-    # tol: spec asked 4e-14, but the IDENTICAL pre-existing full-path parity
-    # (paper_anchor_and_parity above) measures 4.37e-14 of float-association
-    # noise on this synthetic — 4e-14 fails spuriously; 2e-13 is the tightest
-    # tolerance with margin (~4.6x measured) that stays robust across BLAS builds.
-    inv["fast_paper_parity"] = (
-        ppf_worst <= 2e-13,
-        f"panel-path direct (e2,b2,eb) == naive(delta_resolved) worst rel "
-        f"{ppf_worst:.2e} (tol 2e-13; spec 4e-14 sits below the measured "
-        f"4.37e-14 float-association noise of the full-path twin)")
 
     # -- bf16 gather upcast is bit-exact (guards the relaxed dtype assert) ----------
     import torch
@@ -2636,7 +2578,7 @@ def run_emit(args) -> int:
         return 1
     n_ticks = args.n_ticks
     deltas, hs = args.deltas, args.hs
-    band = max(deltas) + max(hs)
+    band = max(_REGISTRY[m].lookback(max(deltas)) for m in args.methods) + max(hs)
     # #47 cadence: resolve the SELECTED tick set; step index s -> real tick tickset[s].
     tickset = TS.select_ticks(args.cadence, n_ticks)
     unit = "global_step" if args.cadence == "per-step" else "tick"
@@ -2696,7 +2638,6 @@ def run_emit(args) -> int:
         pr = InMemoryReader({t: {n: panel[n][t] for n in names}
                              for t in range(n_ticks)})  # panel is already reindexed
         eff_name_dims = [(n, plans[n].k_actual) for n in names]
-        eff_dims = {n: plans[n].k_actual for n in names}
         t0 = time.time()
         stats = stream_stats(pr, eff_name_dims, n_ticks, band,
                              ram_gb=args.ram_gb, tag="-fast")
@@ -2714,7 +2655,6 @@ def run_emit(args) -> int:
             log(f"WARNING: paper filters removed {1.0 - kept:.1%} of the sampled "
                 f"population — r2_median describes only the moving tail, not "
                 f"'sampled weights'; check --min-abs-change ({mac:.3g}, {mac_mode})")
-        score_reader, score_dims = pr, eff_dims   # paper arm scores off the panel too
     else:
         fp = _fingerprint(name_dims, n_ticks, band, args.trace_root,
                           cadence=args.cadence, tickset=tickset)
@@ -2728,7 +2668,6 @@ def run_emit(args) -> int:
             log(f"stats cache saved: {cache_path}")
         else:
             log(f"stats cache reused: {cache_path}")
-        score_reader, score_dims = reader, dims
     r2_population = ("sampled_paper_filtered" if fidelity == "fast"
                      else "all_const_excluded")
     # per-matrix sampled-cluster counts (None = exact whole-tensor coverage);
@@ -2739,44 +2678,45 @@ def run_emit(args) -> int:
                   for n, p in plans.items()}
                  if (plans is not None and fidelity == "fast") else None)
     methods = args.methods
-    cached_methods = [m for m in methods if m != "paper_linear"]
+    method_ctx = {"lam_grid": args.lam_gridv, "mu_grid": args.mu_gridv,
+                  "adaptive_mode": args.adaptive_mode,
+                  "ewma_decay": args.ewma_decay,
+                  "coef_clip": args.adaptive_coef_clip}
     gstore: dict = {}
-    rows, ratio_store, lam_select = compute_rows(
-        stats, names, n_ticks, band, cached_methods, deltas, hs,
+    rows, ratio_store, lam_select, mu_select = compute_rows(
+        stats, names, n_ticks, band, methods, deltas, hs,
         args.op_point, args.also_points,
-        cadence=args.cadence, unit=unit, lam_grid=args.lam_gridv,
+        cadence=args.cadence, unit=unit, method_ctx=method_ctx,
         fidelity=fidelity, r2_population=r2_population, total_dims=dims,
-        global_damped_store=gstore, plan_runs=plan_runs)
+        global_coef_store=gstore, plan_runs=plan_runs)
     log(f"{len(rows)} banded-cache atomic rows computed")
-    paper_panel = None
-    if "paper_linear" in methods:
-        groups = build_groups(names)
-        t0 = time.time()
-        paper_rows, paper_panel = compute_paper_rows(
-            score_reader, names, score_dims, n_ticks, hs, groups,
-            args.paper_anchor_frac, args.paper_stride, stats,
-            args.cadence, unit, ram_gb=args.ram_gb,
-            fidelity=fidelity, r2_population=r2_population, total_dims=dims,
-            plan_runs=plan_runs)
-        paper_panel["operating_h"] = args.op_point[1]
-        rows.extend(paper_rows)
-        log(f"paper_linear direct pass done in {(time.time() - t0) / 60:.1f} min "
-            f"({len(paper_rows)} rows)")
     pred_hists = None
     if panel is not None and args.scalar_pred_r2 == "panel":
         grid = [(d, h) for d in deltas for h in hs]
         cells = [c for c in dict.fromkeys([args.op_point] + args.also_points)
                  if c in grid]
-        paper_ctx = ({"h": args.op_point[1], "anchor_frac": args.paper_anchor_frac,
-                      "stride": args.paper_stride}
-                     if "paper_linear" in methods else None)
         pred_hists = attach_scalar_pred_r2(rows, panel, methods, names, n_ticks,
-                                           cells, args.op_point,
-                                           lam_star_by_cell=gstore,
-                                           paper_ctx=paper_ctx)
+                                           cells, args.op_point, coef_store=gstore)
+    coef_traj = {}
+    for m in methods:
+        if m not in ("adaptive_linear", "adaptive_second_order"):
+            continue
+        cellsd = {}
+        for (d, h) in dict.fromkeys([args.op_point] + args.also_points):
+            cf = gstore.get((m, d, h))
+            if cf is None:
+                continue
+            lv, lc = cf if isinstance(cf, tuple) else (cf, None)
+            cellsd[f"{d},{h}"] = {
+                "lam": [None if not np.isfinite(x) else float(x) for x in lv],
+                "lam2": (None if lc is None else
+                         [None if not np.isfinite(x) else float(x) for x in lc]),
+                "n_warmup": int(np.sum(~np.isfinite(lv)))}
+        if cellsd:
+            coef_traj[m] = cellsd
     vis = build_visuals(rows, methods, deltas, hs, args.op_point,
-                        lam_select=lam_select, stats=stats, paper_panel=paper_panel,
-                        pred_hists=pred_hists)
+                        lam_select=lam_select, stats=stats, mu_select=mu_select,
+                        coef_traj=coef_traj, pred_hists=pred_hists)
     sampling_meta = None
     if plans is not None:
         sampling_meta = dict(sampling_knobs)
@@ -2796,7 +2736,7 @@ def run_emit(args) -> int:
                       args.op_point, args.also_points,
                       fidelity=fidelity, scalar_pred_r2=args.scalar_pred_r2,
                       sampling_meta=sampling_meta, stats=stats, plans=plans)
-    gall = next((r for r in rows if r["method"] == cached_methods[0]
+    gall = next((r for r in rows if r["method"] == methods[0]
                  and r["group_kind"] == "global"), {})
     linearity_r2 = {"r2_median": gall.get("r2_median"),
                     "r2_frac_gt_0.7": gall.get("r2_frac_gt_0.7"),
@@ -2814,8 +2754,10 @@ def run_emit(args) -> int:
         "tickset_stride": (tickset[1] - tickset[0]) if len(tickset) > 1 else 1,
         "methods": methods, "delta_ticks": deltas, "h_ticks": hs,
         "lam_grid": args.lam_gridv,
-        "paper_anchor_frac": args.paper_anchor_frac, "paper_stride": args.paper_stride,
-        "paper_sentinel_delta": PAPER_SENTINEL_DELTA,
+        "mu_grid": args.mu_gridv,
+        "adaptive_mode": args.adaptive_mode,
+        "ewma_decay": args.ewma_decay,
+        "adaptive_coef_clip": args.adaptive_coef_clip,
         "operating_point": list(args.op_point),
         "also_points": [list(p) for p in args.also_points],
         "n_matrices": len(names),
@@ -2890,14 +2832,19 @@ def run_verify_schema(scorecard_dir: str) -> int:
         except Exception as e:
             problems.append(f"round-trip parse failure: {e}")
     if rows and not problems:
-        # rows-v48.0 version gate: dirs emitted by pre-change code get ONE clear
-        # problem string instead of a flood of missing-key noise — the row-key
-        # check below is version-gated down to the legacy key set for them.
-        old_schema = "row_schema_version" not in meta
+        # row-schema version gate: dirs emitted by pre-change code get ONE clear
+        # problem string instead of a flood of missing-key noise — the row-key and
+        # n_windows checks below are version-gated for legacy / v48 / v49 dirs.
+        rsv = meta.get("row_schema_version")
+        old_schema = rsv is None
+        v48_schema = rsv == ROW_SCHEMA_V48
+        v49_schema = not old_schema and not v48_schema
         if old_schema:
             problems.append(f"old-schema dir (no meta.row_schema_version; expected "
                             f"{ROW_SCHEMA_VERSION}) — re-emit with current code")
-        req_keys = REQUIRED_ROW_KEYS_LEGACY if old_schema else REQUIRED_ROW_KEYS
+        req_keys = (REQUIRED_ROW_KEYS_LEGACY if old_schema
+                    else REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48 if v48_schema
+                    else REQUIRED_ROW_KEYS)
         for i, r in enumerate(rows):
             missing = [k for k in req_keys if k not in r]
             if missing:
@@ -2915,24 +2862,13 @@ def run_verify_schema(scorecard_dir: str) -> int:
         deltas = meta.get("delta_ticks", [])
         hs = meta.get("h_ticks", [])
         n_ticks = meta.get("n_ticks", 0)
-        # paper_linear is OFF the (delta x h) grid (derived delta, sentinel delta_ticks)
-        grid_methods = [m for m in methods if m != "paper_linear"]
-        paper_delta = meta.get("paper_sentinel_delta", 0)
+        grid_methods = (methods if v49_schema
+                        else [m for m in methods if m != "paper_linear"])
         for m in grid_methods:
             for d in deltas:
                 for h in hs:
                     if (m, d, h, "global", "all") not in index:
                         problems.append(f"missing global row for ({m},{d},{h})")
-        if "paper_linear" in methods:
-            for h in hs:
-                if ("paper_linear", paper_delta, h, "global", "all") not in index:
-                    problems.append(f"missing global paper_linear row for h={h}")
-            pw = [r for r in rows if r["method"] == "paper_linear"]
-            if pw and not all(r.get("anchor_mode") == "frac25"
-                              and r.get("delta_resolved") is not None
-                              and r.get("beta") is not None for r in pw
-                              if r.get("in_bounds")):
-                problems.append("paper_linear rows missing anchor_mode/delta_resolved/beta")
         kinds = {}
         for r in rows:
             kinds.setdefault(r["group_kind"], set()).add(r["group_key"])
@@ -2970,9 +2906,14 @@ def run_verify_schema(scorecard_dir: str) -> int:
                 if len(p) == 2 and (m, p[0], p[1], "global", "all") not in index:
                     problems.append(f"operating-point row missing: ({m},{p})")
         for r in rows:
-            if (r["in_bounds"] and not r.get("tied") and n_ticks
-                    and r["method"] != "paper_linear"):     # paper is off the banded grid
-                if r["n_windows"] != n_ticks - r["h_ticks"] - r["delta_ticks"]:
+            if r["in_bounds"] and not r.get("tied") and n_ticks:
+                if v49_schema:
+                    expected_nw = n_ticks - r["h_ticks"] - r["lookback_ticks"]
+                elif r["method"] == "paper_linear":
+                    continue
+                else:
+                    expected_nw = n_ticks - r["h_ticks"] - r["delta_ticks"]
+                if r["n_windows"] != expected_nw:
                     problems.append(f"n_windows mismatch on "
                                     f"({r['method']},{r['delta_ticks']},{r['h_ticks']},"
                                     f"{r['group_kind']},{r['group_key']})")
@@ -3005,15 +2946,13 @@ def run_verify_schema(scorecard_dir: str) -> int:
             if meta.get("scalar_pred_r2") == "panel":
                 op = meta.get("operating_point", [None, None])
                 need_ps = [(m, op[0], op[1]) for m in grid_methods]
-                if "paper_linear" in methods:
-                    need_ps.append(("paper_linear", paper_delta, op[1]))
                 for (m, d, h) in need_ps:
                     r = index.get((m, d, h, "global", "all"), {})
                     if r.get("pred_r2_scalar_median") is None:
                         problems.append(f"pred_r2_scalar_median null on global "
                                         f"operating-point row ({m},{d},{h})")
-        # visuals: check the ACTUAL emitted set (meta.visual_keys), so a regime-T table
-        # (no paper panel) verifies without demanding the regime-S-only m_paper visual.
+        # visuals: check the ACTUAL emitted set (meta.visual_keys) — per-emit keys
+        # (adaptive coefficient trajectories, pred hists) verify only when declared.
         for key in meta.get("visual_keys", VISUAL_KEYS):
             v = vis.get(key)
             if v is None or (isinstance(v, (dict, list)) and len(v) == 0):
@@ -3069,10 +3008,17 @@ def main() -> int:
                          "reindexed (GLOBAL STEPS, paper-comparable)")
     ap.add_argument("--lam-grid", default="0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0",
                     help="damped_linear lambda grid (nests hold_stale@0, naive@1)")
-    ap.add_argument("--paper-anchor-frac", type=float, default=0.25,
-                    help="paper_linear t0 = floor(frac*t) (Wang et al. App. E.1, 0.20-0.30)")
-    ap.add_argument("--paper-stride", type=int, default=2,
-                    help="paper_linear anchor stride over t (regime S only)")
+    ap.add_argument("--mu-grid", default="0.0,0.25,0.5,0.75,1.0",
+                    help="damped_second_order curvature grid (mu=0 nests "
+                         "naive_linear, mu=1 nests naive_second_order)")
+    ap.add_argument("--adaptive-mode", default="rolling_ls",
+                    choices=["rolling_ls", "ewma"],
+                    help="adaptive-arm online fit: expanding-window least squares "
+                         "or EWMA residual correction (low-state fallback)")
+    ap.add_argument("--ewma-decay", type=float, default=0.9,
+                    help="EWMA decay rho for --adaptive-mode ewma")
+    ap.add_argument("--adaptive-coef-clip", type=float, default=2.0,
+                    help="symmetric clip on every online-fit coefficient")
     # ---- fast-mode / regression flags (rows-v48.0) ----
     ap.add_argument("--fidelity", default="fast", choices=["fast", "full"],
                     help="fast (DEFAULT): sampled-panel screening mode; "
@@ -3119,19 +3065,14 @@ def main() -> int:
         f"{SAMPLING_CONTRACT_EXPECTED!r}")
     args.methods = [m.strip() for m in args.method.split(",") if m.strip()]
     for m in args.methods:
-        # paper_linear is a direct-scored arm (not a fixed-kappa registry method)
-        assert m in _REGISTRY or m == "paper_linear", \
-            f"unknown method {m!r}; registered: {sorted(_REGISTRY)} + paper_linear"
+        assert m in _REGISTRY, \
+            f"unknown method {m!r}; registered: {sorted(_REGISTRY)}"
     args.deltas = [int(x) for x in args.delta.split(",")]
     args.hs = [int(x) for x in args.h_grid.split(",")]
     args.op_point = _parse_pair(args.operating_point)
     args.also_points = [_parse_pair(args.also)] if args.also else []
     args.lam_gridv = [float(x) for x in args.lam_grid.split(",")]
-    if args.cadence == "per-step" and "paper_linear" not in args.methods:
-        pass  # paper is regime-S-only but optional; regime T never includes it
-    if "paper_linear" in args.methods and args.cadence != "per-step":
-        raise SystemExit("paper_linear is regime-S (per-step) ONLY — the paper protocol "
-                         "is checkpoint/per-step-like; per-tick is out of scope")
+    args.mu_gridv = [float(x) for x in args.mu_grid.split(",")]
     if not args.n_ticks:
         args.n_ticks = _manifest_nticks(args.manifest) if os.path.exists(args.manifest) else 160
 
