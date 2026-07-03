@@ -12,19 +12,33 @@ weight_proj.r2_stream.LocalSnapshotSource (and --trace-root) expects. Resumable:
 whose local file already exists at the expected size is skipped, so a re-run only fetches
 what's missing. Copies run in parallel (--jobs).
 
-Storage (Qwen2.5-1.5B, 160 ticks):
-  EXP-57 fp32 ~6.17 GB/snapshot -> ~987 GB (~1 TB) all-160  | ~494 GB per-step (~80)
-  EXP-43 bf16 ~3.08 GB/snapshot -> ~492 GB all-160          | ~246 GB per-step
+Storage (Qwen2.5-1.5B):
+  EXP-57 fp32 GSM8K  ~6.17 GB/snap, tick_0..159 -> ~987 GB (~1 TB) all-160 | ~494 GB per-step
+  EXP-43 bf16 GSM8K  ~3.08 GB/snap, tick_0..159 -> ~492 GB all-160         | ~246 GB per-step
+  EXP-58 fp32 Big-Math ~6.17 GB/snap, step_20..1000 (50 snaps, spacing 20) -> ~309 GB all-50
 Provision the box disk accordingly (e.g. --disk-gb 1100 for the fp32 all-160 trace).
+
+Layouts. EXP-57/EXP-43 store full/tick_<N>/tick_<N>.pt (contiguous). EXP-58 Big-Math stores
+full/step_<N>/step_<N>.pt with non-contiguous N=20..1000; --src-layout step auto-discovers
+those and NORMALIZES them to a contiguous local tick_0..tick_49 axis, so the analysis engine
+(tick_<i>-only) consumes Big-Math unchanged. R2 is READ-ONLY here (this only downloads).
 
 R2 creds: `set -a; . ~/.config/verl-research/secrets.env; set +a` first (maps R2_* -> AWS_*
 via weight_proj.r2_stream). Bucket shamane-pluralis. Secret VALUES never printed.
 
 Usage (from research/):
-  # whole fp32 trace, all 160 ticks, 6-way parallel (the operator default):
+  # whole fp32 GSM8K trace, all 160 ticks, 6-way parallel (the operator default):
   python scripts/weight_proj_fetch_trace.py --experiment EXP-57 --dest /workspace/trace/EXP-57
   # per-step subsample (~half the bytes):
   python scripts/weight_proj_fetch_trace.py --experiment EXP-57 --dest /workspace/trace/EXP-57 --cadence per-step
+  # Big-Math fp32 (EXP-58): auto-discover step_<N>, normalize -> local tick_0..tick_49:
+  python scripts/weight_proj_fetch_trace.py --experiment EXP-58 --src-layout step --dest /workspace/trace/EXP-58
+  #   then synth its manifest (50 ticks) and analyse:
+  #   python scripts/synth_exp57_manifests.py --experiment EXP-58 --trace-root /workspace/trace/EXP-58 --n-ticks 50
+  #   python scripts/moat_scorecard.py --experiment EXP-58 --trace-root /workspace/trace/EXP-58 --n-ticks 50 \\
+  #     --manifest runs/EXP-58/regimeA/weights/full_manifest.jsonl --delta 5,10,20 --h 1,2,5,10,20 --operating-point 20,20
+  # offline logic check (no network/creds):
+  python scripts/weight_proj_fetch_trace.py --self-test
 """
 from __future__ import annotations
 
@@ -152,57 +166,104 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Bulk-download a whole weight trace to local disk")
     ap.add_argument("--experiment", default="EXP-57")
     ap.add_argument("--regime", default="regimeA")
-    ap.add_argument("--dest", required=True, help="local trace root (writes <dest>/full/tick_N/tick_N.pt)")
+    ap.add_argument("--dest", default="", help="local trace root (writes <dest>/full/tick_N/tick_N.pt); required unless --self-test")
     ap.add_argument("--bucket", default=RS.CANONICAL_BUCKET)
     ap.add_argument("--cadence", default="per-tick", choices=["per-tick", "per-step"],
-                    help="per-tick = all 160 (operator default; download everything); "
-                         "per-step = first tick of each global_step (~half the bytes)")
-    ap.add_argument("--n-ticks", type=int, default=160, help="max ticks at the chosen cadence")
+                    help="tick-layout only: per-tick = all 160 (operator default; download "
+                         "everything); per-step = first tick of each global_step (~half the bytes)")
+    ap.add_argument("--src-layout", default="tick", choices=["tick", "step"],
+                    help="filename stem of the SOURCE snapshots in R2. 'tick' = EXP-57 fp32 GSM8K "
+                         "(full/tick_<N>/tick_<N>.pt, contiguous 0..159; local layout byte-identical). "
+                         "'step' = EXP-58 fp32 Big-Math (full/step_<N>/step_<N>.pt, N=20..1000 spacing "
+                         "20) — the step indices are auto-DISCOVERED and NORMALIZED to a contiguous "
+                         "local tick axis so the analysis engine (tick_<i>-only) consumes them unchanged.")
+    ap.add_argument("--src-indices", default="",
+                    help="explicit comma list of SOURCE snapshot indices (override auto-discovery); "
+                         "normalized to contiguous local tick_0..tick_{n-1}")
+    ap.add_argument("--n-ticks", type=int, default=160,
+                    help="cap on how many snapshots to fetch (tick: at the chosen cadence; "
+                         "step/explicit: the first n discovered indices)")
     ap.add_argument("--jobs", type=int, default=6, help="parallel aws s3 cp streams")
     ap.add_argument("--verify-sizes", action="store_true",
                     help="verify each download against runs/<exp>/.../r2_manifest.jsonl remote_bytes")
+    ap.add_argument("--self-test", action="store_true",
+                    help="offline (no-network) check of the layout logic, then exit")
     args = ap.parse_args()
 
-    # resolve tick_key() to THIS experiment
-    os.environ["WP_R2_PREFIX"] = f"verl-research/{args.experiment}/{args.regime}/weights/full"
+    if args.self_test:
+        return _selftest()
+    if not args.dest:
+        ap.error("--dest is required (unless --self-test)")
 
-    ticks = TS.select_ticks(args.cadence, args.n_ticks)
-    if args.cadence == "per-step":
-        print("[fetch] WARNING: --cadence per-step fetches ONLY the even ticks "
-              f"({len(ticks)} of 160). The synthesized full_manifest still advertises all 160 ticks, so "
-              "per-tick analysis will FileNotFoundError on the missing odd ticks. Use the default "
-              "(per-tick, all 160) for the download-everything flow; per-step is a deliberate subset.", flush=True)
+    stem = args.src_layout
+    prefix = f"verl-research/{args.experiment}/{args.regime}/weights/full"
+    os.environ["WP_R2_PREFIX"] = prefix        # resolves canonical_prefix()/tick_key()
+
+    # ---- resolve SOURCE snapshot indices + their normalized LOCAL tick indices ----
+    if stem == "tick" and not args.src_indices:
+        # EXP-57 path (UNCHANGED): contiguous ticks at the requested cadence; local
+        # index == source index, so full/tick_<N>/tick_<N>.pt is byte-identical.
+        src = TS.select_ticks(args.cadence, args.n_ticks)
+        pairs = [(s, s) for s in src]
+        normalized = False
+        if args.cadence == "per-step":
+            print("[fetch] WARNING: --cadence per-step fetches ONLY the even ticks "
+                  f"({len(src)} of 160). The synthesized full_manifest still advertises all 160 "
+                  "ticks, so per-tick analysis will FileNotFoundError on the missing odd ticks. Use "
+                  "the default (per-tick) for the download-everything flow; per-step is a subset.",
+                  flush=True)
+    else:
+        # EXP-58 / arbitrary layout: discover (or take explicit) source indices and
+        # NORMALIZE to a contiguous local tick axis 0..n-1 for the analysis engine.
+        if args.src_indices:
+            src = sorted(int(x) for x in args.src_indices.split(",") if x.strip())
+        else:
+            src = _discover_source_indices(args.bucket, prefix, stem)
+        if not src:
+            print(f"[fetch] FATAL: no {stem}_<N> snapshots discovered under "
+                  f"s3://{args.bucket}/{prefix}/ — check --experiment/--src-layout", flush=True)
+            return 2
+        if args.n_ticks and 0 < args.n_ticks < len(src):
+            src = src[:args.n_ticks]
+        pairs = [(s, i) for i, s in enumerate(src)]     # normalize -> tick_0..tick_{n-1}
+        normalized = True
+
     size_by_tick = _load_size_by_tick(args.experiment, args.regime) if args.verify_sizes else {}
     if args.verify_sizes and not size_by_tick:
         print("[fetch] --verify-sizes set but no r2_manifest with remote_bytes found — "
               "falling back to nonzero-size check", flush=True)
     os.makedirs(os.path.join(args.dest, "full"), exist_ok=True)
-    print(f"[fetch] {args.experiment}/{args.regime} -> {args.dest} : {len(ticks)} ticks "
-          f"({args.cadence}), jobs={args.jobs}, verify_sizes={bool(size_by_tick)}", flush=True)
+    map_note = (f" (NORMALIZED {stem}_<N> -> local tick_<i>; e.g. {stem}_{pairs[0][0]}->tick_0"
+                f" .. {stem}_{pairs[-1][0]}->tick_{pairs[-1][1]})") if normalized else ""
+    print(f"[fetch] {args.experiment}/{args.regime} [{stem}] -> {args.dest} : {len(pairs)} snapshots"
+          f"{map_note}, jobs={args.jobs}, verify_sizes={bool(size_by_tick)}", flush=True)
 
     results, failures, skipped = [], [], 0
     with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(_fetch_one, t, args.bucket, args.dest, size_by_tick.get(t)): t
-                for t in ticks}
+        futs = {ex.submit(_fetch_one, s, l, stem, args.bucket, args.dest,
+                          size_by_tick.get(s)): (s, l)
+                for s, l in pairs}
         for fut in cf.as_completed(futs):
-            t = futs[fut]
+            s, l = futs[fut]
             _, status = fut.result()
             if status.startswith("FAIL"):
-                failures.append((t, status))
+                failures.append((l, status))
             elif status.startswith("skip"):
                 skipped += 1
-            results.append((t, status))
-            print(f"[fetch] tick {t}: {status}", flush=True)
+            results.append((l, status))
+            print(f"[fetch] {stem}_{s} -> tick_{l}: {status}", flush=True)
 
-    print(f"[fetch] DONE: {len(results)} ticks, {skipped} skipped, {len(failures)} failed", flush=True)
+    print(f"[fetch] DONE: {len(results)} snapshots, {skipped} skipped, {len(failures)} failed", flush=True)
     if failures:
-        for t, s in sorted(failures)[:20]:
-            print(f"  - tick {t}: {s}", flush=True)
+        for l, s in sorted(failures)[:20]:
+            print(f"  - tick_{l}: {s}", flush=True)
         return 1
-    print(f"[fetch] trace ready at {args.dest} — analyse with: "
-          f"python scripts/moat_scorecard.py --manifest "
+    # NOTE: for a normalized (step) trace, synthesize the manifest with matching --n-ticks:
+    #   python scripts/synth_exp57_manifests.py --experiment {exp} --trace-root {dest} --n-ticks {n}
+    print(f"[fetch] trace ready at {args.dest} ({len(pairs)} local ticks) — synth its manifest with "
+          f"--n-ticks {len(pairs)}, then analyse: python scripts/moat_scorecard.py --manifest "
           f"runs/{args.experiment}/{args.regime}/weights/full_manifest.jsonl "
-          f"--trace-root {args.dest} ...", flush=True)
+          f"--trace-root {args.dest} --n-ticks {len(pairs)} ...", flush=True)
     return 0
 
 
