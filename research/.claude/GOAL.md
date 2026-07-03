@@ -68,12 +68,12 @@ The base is a working comm-eff trainer at parity; the two open fronts are both a
    anchor degrades the update, and *what* restores parity, are open questions to settle
    empirically — this north-star does **not** prescribe a mechanism or a fix. Weight projection
    is the current candidate direction under investigation, gated by a GPU-free offline test on
-   the shared dense weight trajectory before any GPU commitment. Summary:
-   `reports/priority-1-anchor-staleness-k-collapse.html`.
+   the shared dense weight trajectory before any GPU commitment. Summary published on the
+   cloud-fare site (`github.com/shamanez/cloud-fare`): `anchor-delay/`.
 2. **Reduce the compression-induced train–inference mismatch** (milestone M6). The codec's
    forward-pass distortion ("Gap A") is a bounded ~0.04 tax GRPO absorbs; shrink it (the truncated-IS
-   corrector is available but unused). Summary:
-   `reports/priority-2-compression-train-inference-mismatch.html`.
+   corrector is available but unused). Summary published on the cloud-fare site
+   (`github.com/shamanez/cloud-fare`): `train-inference-mis-match/`.
 
 **Basic setup / operating base for both:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) —
 on the **fast 1K surface** (resp 1024, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps) at HIGH

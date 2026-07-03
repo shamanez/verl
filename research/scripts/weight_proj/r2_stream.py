@@ -12,7 +12,7 @@ TWO readers behind ONE `load(tick, names) -> {name: fp32 tensor}` contract:
                           RELEASED for analysis here.
 Callers pick by presence of a local trace root (weight_proj_sweep.py --trace-root).
 
-HARD streaming contract for R2SnapshotStream ONLY (r2-access-pattern-for-analysis.md):
+HARD streaming contract for R2SnapshotStream ONLY (bounded-footprint single-streaming-pass R2 access discipline):
   * Drive downloads from the in-repo manifests, NOT a bucket-list.
   * Load each `.pt` snapshot exactly ONCE, extract the per-matrix slices the caller
     asked for, then DELETE the local `.pt` immediately.

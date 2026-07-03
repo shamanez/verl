@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """weight_proj/report.py — self-contained smoke report builder.
 
-Renders `research/reports/infra-b-sweep-engine-selftest.html`: one curve per new
+Renders an HTML report (e.g. `runs/<ID>/report.html`): one curve per new
 predictor family (weight_proj_ratio vs horizon h), the bf16 DIFFERENCED-noise-floor
 gate table (per (block,h): floor, residual, SNR, and the `bf16-unreliable` flag), and
 the SPARSE-SUBSET (PuLSE) characterization (changed-element fraction + ULP-multiple

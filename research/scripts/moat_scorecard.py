@@ -24,7 +24,7 @@ naive_linear: v = (theta_t - theta_{t-Delta})/Delta; theta_hat = theta_t + h*v.
 Window validity: t-Delta >= 0 and t+h <= n_ticks-1; n_windows = n_ticks - h - Delta.
 
 DESIGN — one bounded streaming pass + exact delta-Gram sufficient statistics.
-The ~987 GB trace is never held in RAM (r2-access-pattern discipline). Matrices are
+The ~987 GB trace is never held in RAM (bounded-footprint single-streaming-pass R2 access discipline). Matrices are
 packed into chunks (a whole matrix, or a row-shard of an oversized one); each chunk
 streams the ticks ONCE, mmap-loading only its own tensors from each tick_<N>.pt,
 maintaining a rolling float64 ring of the last BAND-1 consecutive deltas

@@ -1,7 +1,7 @@
 # Research Log
 
-Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, the `reports/*.html`
-summaries, W&B, and git history. Use method names + settings, not old run labels. Current operating
+Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, `runs/<ID>/report.html`
+(published to the cloud-fare site), W&B, and git history. Use method names + settings, not old run labels. Current operating
 base + the two active priorities are in `PROGRESS.md`.
 
 ## EXP-47 · 2026-07-03T01:52Z · M4 · PASS

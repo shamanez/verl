@@ -41,7 +41,7 @@ Usage (from research/):
       --selftest --noise-floor --horizons 1,2,5,10
   python scripts/weight_proj_sweep.py runs/EXP-43/regimeA/weights/full_manifest.jsonl \
       --families all --group matrix,block,layer \
-      --emit-report reports/infra-b-sweep-engine-selftest.html
+      --emit-report runs/<ID>/report.html
 """
 from __future__ import annotations
 

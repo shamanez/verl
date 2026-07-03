@@ -30,8 +30,8 @@ n=1, older 2K surface); the open problem is holding parity at realistic high lat
 
 Start from the base launcher **unchanged** and vary a SINGLE knob. Everything else is
 locked (`runs/FIXED_CONTROL_SURFACE.md`). The two active fronts are **GPU-free offline
-kill-gates** — `../../reports/priority-1-anchor-staleness-k-collapse.html` and
-`../../reports/priority-2-compression-train-inference-mismatch.html`; gate before any GPU spend.
+kill-gates** — published on the cloud-fare site (`github.com/shamanez/cloud-fare`):
+`anchor-delay/` and `train-inference-mis-match/`; gate before any GPU spend.
 
 Do not import invalid (pre-paired-replay) anchor claims or rebuild deleted plan files.
 
@@ -42,5 +42,5 @@ per-tick full weights in R2 `s3://shamane-pluralis/verl-research/EXP-43/regimeA/
 (key `tick_<N>/tick_<N>.pt`, 160 bf16 snapshots, n_matrices=338, ~492 GB R2-only) + index
 manifests (R2 + `runs/EXP-43/regimeA/weights/`). Entry point = **#44** (the offline sweep
 engine); #45-#56 build on it. All `kind:analysis`. Stream the trace layer/block-wise
-(`reports/r2-access-pattern-for-analysis.md`) - never bulk-download. Reports go to
-`research/reports/`; results to `runs/SUMMARY.md` + each verdict.
+(bounded-footprint, single-streaming-pass R2 access discipline) - never bulk-download. Reports go to
+`runs/<ID>/` (published to the cloud-fare site); results to `runs/SUMMARY.md` + each verdict.

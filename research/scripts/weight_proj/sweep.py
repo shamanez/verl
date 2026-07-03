@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """weight_proj/sweep.py — grouping + the (family x order x coeff x Delta x h) driver.
 
-ONE streaming pass discipline (r2-access-pattern-for-analysis.md): blocks/layers on
+ONE streaming pass discipline (bounded-footprint single-streaming-pass R2 access discipline): blocks/layers on
 the OUTSIDE, ticks on the INSIDE. In this implementation we do the dual that is
 strictly-bounded AND single-pass: iterate ticks ONCE (inside), loading each .pt
 exactly once and fanning its per-matrix slices into ALL grouping accumulators; then
