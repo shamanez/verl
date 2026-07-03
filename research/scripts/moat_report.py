@@ -291,7 +291,7 @@ def parse_figure_caps(lines):
 # Inline-SVG primitives (self-contained; no <img>/url()/gradient/<script>)
 # =============================================================================
 def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1.6,
-             yref=1.0, xvals=None) -> str:
+             yref=1.0, xvals=None, y_min=0.0) -> str:
     """series: name -> [(x, y)]. Dashed y=yref reference line. Legend sits on a white
     card (drawn last) so it never disappears behind a curve."""
     pad = 46
@@ -307,8 +307,8 @@ def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1
         return pad + (0 if x_max == x_min else (x - x_min) / (x_max - x_min)) * (w - 2 * pad)
 
     def sy(y):
-        y = max(0.0, min(ymax, y))
-        return (h - pad) - (y / ymax) * (h - 2 * pad)
+        y = max(y_min, min(ymax, y))
+        return (h - pad) - ((y - y_min) / (ymax - y_min)) * (h - 2 * pad)
 
     P = [f'<svg width="{w}" height="{h}" style="background:#fff;border:1px solid #ddd">']
     P.append(f'<line x1="{pad}" y1="{sy(yref):.1f}" x2="{w-pad}" y2="{sy(yref):.1f}" '
@@ -317,7 +317,7 @@ def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1
              f'fill="#888">ratio={yref:g} (no skill)</text>')
     P.append(f'<line x1="{pad}" y1="{pad}" x2="{pad}" y2="{h-pad}" stroke="#333"/>')
     P.append(f'<line x1="{pad}" y1="{h-pad}" x2="{w-pad}" y2="{h-pad}" stroke="#333"/>')
-    P.append(f'<text x="{pad-6}" y="{sy(0):.1f}" font-size="10" text-anchor="end">0</text>')
+    P.append(f'<text x="{pad-6}" y="{sy(y_min):.1f}" font-size="10" text-anchor="end">{y_min:g}</text>')
     P.append(f'<text x="{pad-6}" y="{sy(ymax)+8:.1f}" font-size="10" text-anchor="end">{ymax:.2g}</text>')
     P.append(f'<text x="{w/2:.1f}" y="{h-8}" font-size="11" text-anchor="middle">{ESC(xlabel)}</text>')
     P.append(f'<text x="{w/2:.1f}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
@@ -602,19 +602,41 @@ def build_verdict(S, T) -> list[str]:
         bk = _breakers(S, "damped_linear", od, oh)
         L.append(f"<b>Breakers (per-step, groups with ratio≥1 at op)</b>: "
                  + (", ".join(f"{g} ({v:.3f})" for g, v in bk[:8]) if bk else "none"))
-    # (6) coupling + paper
+    # (6) coupling
     if S:
         cp = S["vis"].get("k_r2_ratio_coupling", {})
         L.append(f"<b>R²-vs-ratio coupling (per-step)</b>: Spearman ρ = {_fmt(cp.get('spearman'))} "
                  f"over {len(cp.get('points', []))} groups (do high-R² groups project better?).")
-        panel = S["vis"].get("m_paper_equivalence", {})
-        oh = panel.get("operating_h")
-        pr = _g(S, "paper_linear", S["meta"].get("paper_sentinel_delta", 0), oh).get("weight_proj_ratio_median") if oh else None
-        nr = _g(S, "naive_linear", S["meta"]["operating_point"][0], oh).get("weight_proj_ratio_median") if oh else None
-        dr = _g(S, "damped_linear", S["meta"]["operating_point"][0], oh).get("weight_proj_ratio_median") if oh else None
-        L.append(f"<b>Paper-protocol (paper_linear, per-step, h={oh})</b>: wide proportional-window "
-                 f"ratio = {_fmt(pr)} vs fixed-Δ naive {_fmt(nr)} vs OOS-damped {_fmt(dr)} "
-                 f"(β = 1 + h/Δ_resolved; anchor selection is the ONLY difference from naive_linear).")
+    # (7) predictor ladder at the op cell (per regime)
+    coef_arms = ("damped_linear", "damped_second_order",
+                 "adaptive_linear", "adaptive_second_order")
+    for reg, tag in ((S, "per-step"), (T, "per-tick")):
+        if not reg:
+            continue
+        od, oh = reg["meta"]["operating_point"]
+        parts = []
+        best = None
+        for m in reg["meta"].get("methods", []):
+            r = _g(reg, m, od, oh)
+            if not r:
+                continue
+            rm = r.get("weight_proj_ratio_median")
+            coef = ""
+            if r.get("lam_star") is not None:
+                coef = f", λ*={_fmt(r.get('lam_star'))}"
+                if r.get("lam2_star") is not None:
+                    coef += f"/λc*={_fmt(r.get('lam2_star'))}"
+                coef += f", warmup {_fmt(r.get('n_warmup'), 0)}"
+            parts.append(f"{ESC(m)}: ratio {_fmt(rm)}, EVR {_fmt(r.get('pred_evr_pooled'))}, "
+                         f"pred R² {_fmt(r.get('pred_r2_scalar_median'))}{coef}")
+            if (m in coef_arms and rm is not None and math.isfinite(rm)
+                    and (best is None or rm < best[1])):
+                best = (m, rm)
+        if parts:
+            L.append(f"<b>Predictor ladder ({tag}, Δ={od},h={oh})</b>: "
+                     + "; ".join(parts)
+                     + (f". Best OOS arm: <b>{ESC(best[0])}</b> ({_fmt(best[1])})."
+                        if best else "."))
     return L
 
 
@@ -744,12 +766,12 @@ def render(S, T, out_path, explainer_path=None):
     P.append(H2("Projection accuracy vs horizon (both regimes)"))
     P.append('<div class="side">')
     if S:
-        methods = [m for m in S["meta"]["methods"] if m != "paper_linear"]
+        methods = S["meta"]["methods"]
         P.append('<div class="col"><h3>Regime S — per-step (global steps), Δ=%d</h3>%s</div>'
                  % (op_s[0], svg_line(_accuracy_series(S, methods),
                                       "median ratio vs h (global steps)", "horizon h (global steps)")))
     if T:
-        methods = [m for m in T["meta"]["methods"] if m != "paper_linear"]
+        methods = T["meta"]["methods"]
         P.append('<div class="col"><h3>Regime T — per-tick, Δ=%d</h3>%s</div>'
                  % (op_t[0], svg_line(_accuracy_series(T, methods),
                                       "median ratio vs h (ticks)", "horizon h (ticks)")))
@@ -759,7 +781,7 @@ def render(S, T, out_path, explainer_path=None):
     P.append(H2("Δ-sensitivity (extended to Δ=40, per-tick) & λ-selection"))
     P.append('<div class="side">')
     if T:
-        methods = [m for m in T["meta"]["methods"] if m != "paper_linear"]
+        methods = T["meta"]["methods"]
         P.append('<div class="col"><h3>Δ-sensitivity at operating h=%d (per-tick)</h3>%s'
                  '<p class="small">Δ∈%s — does a wider anchor help past Δ=20?</p>%s</div>'
                  % (op_t[1], svg_line(_delta_series(T, methods),
@@ -776,6 +798,16 @@ def render(S, T, out_path, explainer_path=None):
                      'strictly-earlier data). λ=0 ⇒ hold-stale, λ=1 ⇒ naive.</p>%s</div>'
                      % (op_s[0], op_s[1], svg_line(ser, "ratio vs λ", "λ",
                                                    xvals=cell["lambda"]), cap("λ-selection")))
+        mu = S["vis"].get("h_lambda_selection", {}).get("mu_cells", {})
+        mcell = mu.get(key) or (next(iter(mu.values())) if mu else None)
+        if mcell:
+            mser = {"in-sample ratio": list(zip(mcell["mu"], mcell["ratio_median"]))}
+            P.append('<div class="col"><h3>μ-selection (damped_second_order) at '
+                     '(Δ=%d,h=%d), per-step</h3>%s'
+                     '<p class="small">in-sample median ratio vs curvature damp μ. '
+                     'μ=0 ⇒ naive_linear, μ=1 ⇒ naive_second_order.</p></div>'
+                     % (op_s[0], op_s[1], svg_line(mser, "ratio vs μ", "μ",
+                                                   xvals=mcell["mu"])))
     P.append('</div>')
 
     # ratio heatmap by layer×block (regime S, damped) — colorbar + caption
@@ -812,12 +844,10 @@ def render(S, T, out_path, explainer_path=None):
         if not reg:
             continue
         od, oh = reg["meta"]["operating_point"]
-        pd = reg["meta"].get("paper_sentinel_delta", 0)
         P.append(f"<h3>Regime {ESC(tag)} — operating cell (Δ={od}, h={oh})</h3>")
         rowsh = []
         for m in reg["meta"].get("methods", []):
-            r = (reg["idx"].get(("paper_linear", pd, oh, "global", "all"), {})
-                 if m == "paper_linear" else _g(reg, m, od, oh))
+            r = _g(reg, m, od, oh)
             rowsh.append(
                 f'<tr><td class="l">{ESC(m)}</td>'
                 f'<td class="mono">{_fmt(r.get("pred_evr_pooled"))}</td>'
@@ -848,42 +878,30 @@ def render(S, T, out_path, explainer_path=None):
             P.append('</div>')
             P.append(cap("pred R²"))
 
-    # ---- paper-protocol equivalence panel (regime S) ---------------------------
-    P.append(H2("Paper-protocol equivalence panel (Wang et al. §6.2, regime S)"))
-    if S and "paper_linear" in S["meta"].get("methods", []):
-        pd = S["meta"].get("paper_sentinel_delta", 0)
-        P.append('<div class="lead"><p><b>The algebra.</b> The paper\'s weight-space extrapolation '
-                 'W<sub>t\'</sub> = W<sub>t0</sub> + β·(W<sub>t1</sub> − W<sub>t0</sub>) with '
-                 'β = (t\'−t0)/(t1−t0) IS the first-order secant — with t0 = t−Δ, t1 = t, t\' = t+h it '
-                 'equals <b>naive_linear with β = 1 + h/Δ</b>. Nothing is fitted; β is an '
-                 'extrapolation ratio, not a regression coefficient. <b>The ONLY difference is the '
-                 'anchor protocol</b>: paper_linear uses a WIDE proportional window (t0 = ⌊0.25·t⌋, so '
-                 'Δ_resolved ≈ 0.75·t grows with t); naive/damped use FIXED SHORT lags. '
-                 'Baseline differs too: our ratio denominator is hold-stale (comm-substitution — can a '
-                 'worker\'s stale copy be beaten by local prediction), NOT more RL training '
-                 '(the paper\'s compute-substitution comparator).</p></div>')
-        hs = S["meta"]["h_ticks"]
-        rowsh = []
-        for h in hs:
-            pr = _g(S, "paper_linear", pd, h).get("weight_proj_ratio_median")
-            prow = S["idx"].get(("paper_linear", pd, h, "global", "all"), {})
-            nr = _g(S, "naive_linear", op_s[0], h).get("weight_proj_ratio_median")
-            dr = _g(S, "damped_linear", op_s[0], h).get("weight_proj_ratio_median")
-            rowsh.append(f'<tr><td class="mono">{h}</td><td class="mono">{_fmt(pr)}</td>'
-                         f'<td class="mono">{_fmt(nr)}</td><td class="mono">{_fmt(dr)}</td>'
-                         f'<td class="mono">{_fmt(prow.get("delta_resolved"),1)}</td>'
-                         f'<td class="mono">{_fmt(prow.get("beta"),2)} '
-                         f'[{_fmt(prow.get("beta_min"),2)},{_fmt(prow.get("beta_max"),2)}]</td>'
-                         f'<td class="mono">{_fmt(prow.get("n_windows"),0)}</td></tr>')
-        P.append('<div class="tblwrap">' + _table(
-            ["h (steps)", "paper ratio", "naive(fixed Δ)", "OOS-damped",
-             "Δ_resolved", "β [min,max]", "n_win"], rowsh) + '</div>')
-        P.append(cap("paper-equivalence"))
-        P.append('<p class="small">paper_linear is regime-S ONLY (the protocol is checkpoint/per-step-like; '
-                 'per-tick is the catastrophic-cancellation regime). Map β onto the paper\'s Fig. 5 '
-                 'inverted-U: moderate β helps, excessive β amplifies slope-estimation error.</p>')
-    else:
-        P.append('<p class="small">paper_linear not present in the per-step table.</p>')
+    # ---- adaptive coefficient trajectories (per-emit visual; degrade if absent) --
+    if any(reg and reg["vis"].get("l_adaptive_coef_traj") for reg in (S, T)):
+        P.append(H2("Adaptive coefficient trajectories (GLOBAL group, OOS per window)"))
+        for reg, tag in ((S, "per-step"), (T, "per-tick")):
+            ct = (reg or {}).get("vis", {}).get("l_adaptive_coef_traj") if reg else None
+            if not ct:
+                continue
+            for m, cellsd in ct.items():
+                P.append(f'<h3>{ESC(m)} ({ESC(tag)})</h3><div class="side">')
+                for ck, cd in sorted(cellsd.items()):
+                    lam = cd.get("lam") or []
+                    ser = {"λ": [(i, v) for i, v in enumerate(lam)]}
+                    if cd.get("lam2"):
+                        ser["λc"] = [(i, v) for i, v in enumerate(cd["lam2"])]
+                    ys = [v for pts in ser.values() for _, v in pts
+                          if v is not None and v == v]
+                    lo = min([0.0] + ys) if ys else 0.0
+                    P.append('<div class="col">'
+                             + svg_line(ser, f"(Δ,h)=({ck}) coefficient vs window",
+                                        "window index", y_max=1.6, yref=1.0,
+                                        y_min=min(0.0, lo))
+                             + f'<p class="small">warm-up windows (NaN, dropped): '
+                               f'{_fmt(cd.get("n_warmup"), 0)}</p></div>')
+                P.append('</div>')
 
     # ---- what was verified (embedded prose, BEFORE the verdict) -----------------
     verified = prose("What was verified before trusting these numbers")
