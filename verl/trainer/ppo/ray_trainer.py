@@ -1033,6 +1033,19 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # --- checkpoint -> R2 on-the-go mirror (EXP-58; strict no-op when the flag
+        # is unset/false). Mirrors the WHOLE just-written global_step_<N>/ tree to
+        # R2 (all rank shards + data.pt + actor/huggingface + actor/fsdp_config.json)
+        # so a resume can be reconstructed from R2 alone, and deletes each local file
+        # after a verified upload so peak local disk stays bounded. Rank-0 driver
+        # only + single-node guarded. Placed BEFORE the async_save early-return so
+        # the step-dir walk always runs; the root latest_checkpointed_iteration.txt
+        # is uploaded separately below (it is only WRITTEN below on the
+        # async_save=false path, which is GRPO's default). When the flag is false,
+        # NO r2_sink import happens and NO upload thread is spawned — byte-identical
+        # to upstream verl. ---
+        self._maybe_upload_checkpoint_to_r2(local_global_step_folder)
+
         # latest checkpointed iteration tracker (for atomic usage)
         if (
             hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
@@ -1048,6 +1061,150 @@ class RayPPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        # Mirror the freshly-written root tracker to R2 too (resume needs BOTH the
+        # step dir AND latest_checkpointed_iteration.txt so find_latest_ckpt_path can
+        # resolve the latest step from R2 alone). Do NOT delete this local file after
+        # upload — it is a tiny root marker that the NEXT save overwrites in place,
+        # and _load_checkpoint reads it locally on an in-place resume; the sink is
+        # told delete_local=False for the tracker only. Strict no-op when the flag
+        # is false. ---
+        self._maybe_upload_ckpt_tracker_to_r2(local_latest_checkpointed_iteration)
+
+    # ------------------------------------------------------------------ #
+    # checkpoint -> R2 on-the-go mirror (EXP-58). All three helpers below are a
+    # STRICT no-op (return immediately, import nothing from r2_sink, spawn no
+    # thread) when trainer.checkpoint_r2_enabled is unset/false — so with the flag
+    # off _save_checkpoint is byte-identical to upstream verl.
+    # ------------------------------------------------------------------ #
+    def _get_ckpt_r2_sink(self):
+        """Lazily build (once) + cache the ``checkpoints`` R2 sink; ``None`` if disabled.
+
+        Built on the rank-0 driver only (``_save_checkpoint`` runs on the driver).
+        Guards single-node: the rank-0 ``os.walk`` sees every rank's shards ONLY
+        because a single Vast box shares one filesystem; a multi-node run would
+        miss the off-node ranks, so we fail loud rather than mirror a partial tree.
+        The import of ``maybe_build_r2_sink`` is deferred to HERE so the disabled
+        path never imports r2_sink on the save path (method-OFF byte-parity).
+        """
+        if not bool(self.config.trainer.get("checkpoint_r2_enabled", False)):
+            return None
+        if getattr(self, "_ckpt_r2_sink", None) is not None:
+            return self._ckpt_r2_sink
+        # Single-node assert (see docstring): rank-0 walk only mirrors all shards on 1 node.
+        nnodes = int(self.config.trainer.get("nnodes", 1))
+        assert nnodes == 1, (
+            f"checkpoint_r2_enabled requires a single-node run (rank-0 os.walk mirrors all rank "
+            f"shards only when they share one filesystem); got trainer.nnodes={nnodes}."
+        )
+        from verl.workers.comm_eff.r2_sink import maybe_build_r2_sink
+
+        # Env knobs mirror the WEIGHT_TRAJ_R2_* convention (CKPT_R2_*). manifest_dir
+        # is the run-local default_local_dir so the checkpoints r2_manifest.jsonl
+        # sits alongside the (deleted) staging tree and is synced back by the monitor.
+        manifest_dir = os.path.abspath(self.config.trainer.default_local_dir)
+        self._ckpt_r2_delete_local = os.environ.get("CKPT_R2_DELETE_LOCAL", "true").lower() == "true"
+        self._ckpt_r2_sink = maybe_build_r2_sink(
+            enabled=True,
+            artifact_kind="checkpoints",
+            manifest_dir=manifest_dir,
+            delete_local=self._ckpt_r2_delete_local,
+            async_mode=os.environ.get("CKPT_R2_ASYNC", "true").lower() == "true",
+            upload_workers=int(os.environ.get("CKPT_R2_WORKERS", "4")),
+            max_staged_gb=float(os.environ.get("CKPT_R2_MAX_STAGED_GB", "50")),
+            flush_timeout_s=float(os.environ.get("CKPT_R2_FLUSH_TIMEOUT", "1800")),
+        )
+        return self._ckpt_r2_sink
+
+    def _maybe_upload_checkpoint_to_r2(self, local_global_step_folder: str):
+        """Mirror every file under the just-written ``global_step_<N>/`` tree to R2.
+
+        ``key_suffix = relpath(file, default_local_dir)`` so the R2 tree byte-mirrors
+        the local layout (e.g. ``global_step_<N>/actor/model_world_size_<W>_rank_<R>.pt``,
+        ``.../data.pt``, ``.../actor/huggingface/{config,tokenizer}``,
+        ``.../actor/fsdp_config.json``). Async on-the-go; the sink verifies each
+        upload (head-object size match) then deletes the local file, so peak disk
+        stays bounded. NO per-save barrier here — the run-end ``close()`` drains +
+        fails loud. Strict no-op when disabled.
+        """
+        sink = self._get_ckpt_r2_sink()
+        if sink is None:
+            return
+        base = os.path.abspath(self.config.trainer.default_local_dir)
+        step = self.global_steps
+        n_files = 0
+        # Snapshot the file list BEFORE uploading: in async delete_local mode the
+        # sink removes each file after a verified upload, and mutating the tree
+        # os.walk is iterating over is undefined — so materialize the walk first.
+        files = []
+        for dirpath, _dirnames, filenames in os.walk(local_global_step_folder):
+            for fn in filenames:
+                files.append(os.path.join(dirpath, fn))
+        for fpath in files:
+            key_suffix = os.path.relpath(os.path.abspath(fpath), base)
+            sink.upload(local_path=fpath, key_suffix=key_suffix, meta={"global_step": step})
+            n_files += 1
+        print(
+            f"[ckpt_r2] queued {n_files} file(s) from {local_global_step_folder} "
+            f"-> R2 (async, step={step})",
+            flush=True,
+        )
+
+    def _maybe_upload_ckpt_tracker_to_r2(self, local_tracker_path: str):
+        """Mirror the root ``latest_checkpointed_iteration.txt`` to R2 each save.
+
+        Resume from R2 needs BOTH the step dir AND this root marker. We upload a
+        COPY (staged in a temp file) so the sink's delete-after-verify never removes
+        the real local tracker that ``_load_checkpoint`` reads on an in-place resume;
+        the R2 key is the fixed root name so each save OVERWRITES the R2 marker in
+        place (find_latest_ckpt_path then resolves the latest step from R2 alone).
+        Strict no-op when disabled.
+        """
+        sink = self._get_ckpt_r2_sink()
+        if sink is None:
+            return
+        if not os.path.exists(local_tracker_path):
+            return
+        import shutil
+        import tempfile
+
+        # Stage a disposable copy so delete-after-verify removes the COPY, not the
+        # live root tracker. Uploaded under the fixed root key so it overwrites.
+        tmp_dir = tempfile.mkdtemp(prefix="ckpt_r2_tracker_")
+        tmp_path = os.path.join(tmp_dir, "latest_checkpointed_iteration.txt")
+        shutil.copyfile(local_tracker_path, tmp_path)
+        try:
+            sink.upload(
+                local_path=tmp_path,
+                key_suffix="latest_checkpointed_iteration.txt",
+                meta={"global_step": self.global_steps, "tracker": True},
+            )
+        finally:
+            # In sync mode the copy is already uploaded+deleted (or KEPT on failure);
+            # in async mode the worker owns the copy. Only clean up the temp DIR if
+            # it is now empty (the copy was consumed) so we never race the worker.
+            try:
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+    def _close_ckpt_r2_sink(self):
+        """Run-end drain barrier for the checkpoint R2 sink (fail-loud).
+
+        ``close()`` flushes the async queue and RAISES if any upload never verified
+        (n_errors>0 or a hung worker) — so a silently-incomplete checkpoint mirror
+        surfaces as a non-zero run exit. Idempotent; strict no-op if the sink was
+        never built (flag off / no save happened).
+        """
+        sink = getattr(self, "_ckpt_r2_sink", None)
+        if sink is None:
+            return
+        print("[ckpt_r2] run-end close(): draining checkpoint upload queue (fail-loud)…", flush=True)
+        sink.close()
+        print(
+            f"[ckpt_r2] close() OK: n_uploaded={sink.n_uploaded} n_errors={sink.n_errors}",
+            flush=True,
+        )
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1798,6 +1955,12 @@ class RayPPOTrainer:
                     # RPC (older worker) is unaffected.
                     if hasattr(self.actor_rollout_wg, "comm_eff_close"):
                         self.actor_rollout_wg.comm_eff_close()
+                    # checkpoint->R2 run-end drain barrier (EXP-58): flush the async
+                    # checkpoint upload queue + fail-loud on any unverified upload, so
+                    # the final in-flight checkpoint completes and a partial mirror is
+                    # never reported as success. Strict no-op if the flag is off / no
+                    # save built the sink.
+                    self._close_ckpt_r2_sink()
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
@@ -1815,4 +1978,8 @@ class RayPPOTrainer:
         # of how the loop terminates. Strict no-op without the feature.
         if hasattr(self.actor_rollout_wg, "comm_eff_close"):
             self.actor_rollout_wg.comm_eff_close()
+        # checkpoint->R2 run-end drain barrier (EXP-58) on this fallthrough too, so the
+        # async checkpoint upload pool is drained + fails loud regardless of how the
+        # loop terminates. Strict no-op without the feature.
+        self._close_ckpt_r2_sink()
         self._shutdown_dump_executor()
