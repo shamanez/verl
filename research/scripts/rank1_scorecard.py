@@ -273,8 +273,10 @@ def run_emit(args) -> int:
     log(f"scope={args.scope}: {len(scoped)} matrices, {n_elems_total:,} elems; "
         f"trace n_ticks={n_ticks} dtype={dtype}")
 
-    plan = R1.build_tick_plan(args.base_tick, args.anchor_list, args.window_ints,
-                              args.h_list, args.stride, n_ticks)
+    anchor_windows = [(a, resolve_window(w, a, args.base_tick, args.stride))
+                      for a in args.anchor_list for w in args.window_specs]
+    plan = R1.build_tick_plan(args.base_tick, anchor_windows, args.h_list,
+                              args.stride, n_ticks)
     log(f"tick plan: {plan.n} selected ticks "
         f"({plan.selected[0]}..{plan.selected[-1]}); windows={args.window_specs} "
         f"anchors={args.anchor_list} h={args.h_list} ranks={args.rank_grid} "
@@ -491,11 +493,12 @@ def run_audit(args, reader, plan, grams, name_dims) -> int:
         for kk in ("weight_proj_ratio", "dir_cos", "skill"):
             a, b = met_direct[kk], met_gram[kk]
             if np.isfinite(a) and np.isfinite(b):
-                rel = abs(a - b) / max(abs(a), abs(b), 1e-30)
-                if rel > PARITY_RTOL:
+                # abs+rel form: near-zero metrics (e.g. dir_cos ~ 0) must not
+                # false-fail on relative noise
+                if abs(a - b) > 1e-9 + PARITY_RTOL * max(abs(a), abs(b)):
                     ok = False
                     log(f"  AUDIT MISMATCH {name} {kk}: direct={a:.9g} "
-                        f"gram={b:.9g} rel={rel:.2e}")
+                        f"gram={b:.9g}")
         # reconstruction invariant: snapshot-coeff replay == direct prediction
         B = R1.TrajGram(plan, grams[name]).base_gram(plan.pos(args.base_tick))
         fit = R1.fit_rank_r(B, plan, anchor, w, args.stride, rank)
@@ -522,9 +525,9 @@ def run_audit(args, reader, plan, grams, name_dims) -> int:
 # Self-test battery (trace-free, synthetic)
 # =============================================================================
 def _mk_plan(n_ticks, base, anchors, wspecs, hs, stride):
-    wints = sorted({resolve_window(w, a, base, stride)
-                    for w in wspecs for a in anchors})
-    return R1.build_tick_plan(base, anchors, wints, hs, stride, n_ticks)
+    pairs = [(a, resolve_window(w, a, base, stride))
+             for a in anchors for w in wspecs]
+    return R1.build_tick_plan(base, pairs, hs, stride, n_ticks)
 
 
 def _cells_for(thetas, n_ticks, base, anchors, wspecs, hs, stride, ranks):
@@ -580,10 +583,10 @@ def run_selftest() -> int:
     # ---- T2: rank-1 + iid per-tick noise -> SVD family beats raw 2-point ----
     noise = {t: 0.003 * rng.standard_normal(d) for t in range(n_ticks)}
     thetas2 = {t: theta0 + (0.02 * t) * v1 + noise[t] for t in range(n_ticks)}
-    _, cells2 = _cells_for(thetas2, n_ticks, 0, [40], ["24"], [20], 1, [1])
-    r1 = _get(cells2, "rank1_traj", 20)
-    nl2 = _get(cells2, "naive_last2", 20)
-    tp = _get(cells2, "two_point_window", 20)
+    _, cells2 = _cells_for(thetas2, n_ticks, 0, [40], ["24"], [19], 1, [1])
+    r1 = _get(cells2, "rank1_traj", 19)
+    nl2 = _get(cells2, "naive_last2", 19)
+    tp = _get(cells2, "two_point_window", 19)
     check("T2 noisy: rank1 beats naive_last2",
           r1["weight_proj_ratio"] < nl2["weight_proj_ratio"],
           f"rank1={r1['weight_proj_ratio']:.4f} naive={nl2['weight_proj_ratio']:.4f}")
@@ -624,8 +627,7 @@ def run_selftest() -> int:
         ok = True
         for kk in ("weight_proj_ratio", "dir_cos", "skill"):
             a, b = met[kk], gcell[kk]
-            rel = abs(a - b) / max(abs(a), abs(b), 1e-30)
-            if rel > PARITY_RTOL:
+            if abs(a - b) > 1e-9 + PARITY_RTOL * max(abs(a), abs(b)):
                 ok = False
         check(f"T4 parity gram-vs-direct (h={h})", ok,
               f"ratio direct={met['weight_proj_ratio']:.8f} "
@@ -668,11 +670,12 @@ def run_selftest() -> int:
 
     # ---- T6: plan guards ------------------------------------------------------
     for name, fn in (
-            ("h=0 rejected", lambda: R1.build_tick_plan(0, [40], [8], [0], 1, 60)),
+            ("h=0 rejected",
+             lambda: R1.build_tick_plan(0, [(40, 8)], [0], 1, 60)),
             ("window-through-base rejected",
-             lambda: R1.build_tick_plan(10, [12], [8], [5], 1, 60)),
+             lambda: R1.build_tick_plan(10, [(12, 8)], [5], 1, 60)),
             ("target-past-trace rejected",
-             lambda: R1.build_tick_plan(0, [40], [8], [30], 1, 60))):
+             lambda: R1.build_tick_plan(0, [(40, 8)], [30], 1, 60))):
         try:
             fn()
             check(f"T6 guard: {name}", False, "no assertion raised")
@@ -729,9 +732,6 @@ def main() -> int:
     args.window_specs = [w.strip() for w in args.window_grid.split(",")]
     args.h_list = [int(x) for x in args.h_grid.split(",")]
     args.rank_grid = [int(x) for x in args.rank_grid.split(",")]
-    args.window_ints = sorted({
-        resolve_window(w, a, args.base_tick, args.stride)
-        for w in args.window_specs for a in args.anchor_list})
     return run_emit(args)
 
 

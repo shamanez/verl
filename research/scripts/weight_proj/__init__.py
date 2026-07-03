@@ -7,5 +7,7 @@ Package layout (architect §4.1):
   sampling.py     paper-style per-matrix coordinate sampling
   structure.py    matrix_name -> layer_idx / block_type / super_block taxonomy
   tick_select.py  tick/cadence selection helpers
-The CLI entry point is research/scripts/moat_scorecard.py.
+  rank1_traj.py   RELEX-style rank-1 trajectory-SVD family (Gram-domain math)
+The CLI entry points are research/scripts/moat_scorecard.py and
+research/scripts/rank1_scorecard.py (the rank-1 trajectory lane).
 """

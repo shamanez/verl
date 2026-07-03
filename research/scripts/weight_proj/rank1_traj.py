@@ -74,26 +74,29 @@ class TickPlan:
         return len(self.selected)
 
 
-def build_tick_plan(base_tick: int, anchors: list[int], window_grid: list[int],
+def build_tick_plan(base_tick: int, anchor_windows: list[tuple[int, int]],
                     h_grid: list[int], stride: int, n_ticks: int) -> TickPlan:
     """Union of {base} ∪ window ticks ∪ target ticks; validates every bound.
 
-    Window for (anchor t_a, W): ticks t_a − i*stride, i = 0..W−1 — all must be
+    `anchor_windows` is a list of (anchor tick t_a, window size W) PAIRS —
+    windows are per-anchor because a 'prefix' window resolves to a different W
+    at each anchor. Window ticks are t_a − i*stride, i = 0..W−1 — all must be
     STRICTLY after base_tick (deltas from base must be non-degenerate) and >= 0.
-    Targets: t_a + h — must be < n_ticks and strictly AFTER the anchor (h >= 1:
-    the leakage direction is one-way by construction).
+    Targets: t_a + h for every anchor — must be < n_ticks and strictly AFTER the
+    anchor (h >= 1: the leakage direction is one-way by construction).
     """
     assert stride >= 1
     sel = {base_tick}
-    for t_a in anchors:
+    anchors = sorted({a for a, _ in anchor_windows})
+    for t_a, w in anchor_windows:
         assert 0 <= t_a < n_ticks, f"anchor {t_a} outside trace [0,{n_ticks})"
-        for w in window_grid:
-            assert w >= 2, f"window {w} too small: need >= 2 checkpoints for a slope"
-            lo = t_a - (w - 1) * stride
-            assert lo > base_tick, (
-                f"window (anchor={t_a}, W={w}, stride={stride}) reaches tick {lo} "
-                f"<= base_tick {base_tick}")
-            sel.update(t_a - i * stride for i in range(w))
+        assert w >= 2, f"window {w} too small: need >= 2 checkpoints for a slope"
+        lo = t_a - (w - 1) * stride
+        assert lo > base_tick, (
+            f"window (anchor={t_a}, W={w}, stride={stride}) reaches tick {lo} "
+            f"<= base_tick {base_tick}")
+        sel.update(t_a - i * stride for i in range(w))
+    for t_a in anchors:
         for h in h_grid:
             assert h >= 1, f"h must be >= 1 (got {h}): target must be after anchor"
             assert t_a + h < n_ticks, f"target {t_a}+{h} outside trace [0,{n_ticks})"
