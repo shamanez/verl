@@ -348,8 +348,12 @@ def main() -> int:
               "#fdeeea" if v > 1.05 else "#f7f7f2")
         return f'<td style="background:{bg}">{v:.3f}</td>'
 
-    table = ['<table><thead><tr><th>method [window]</th>' +
-             "".join(f"<th>h={h}</th>" for h in H_GRID) + "</tr></thead><tbody>"]
+    table = ['<div style="font-family:ui-monospace,Menlo,monospace;font-size:12px;'
+             'color:#14532d;font-weight:600;padding:2px 0 6px">'
+             'weight_proj_ratio — ↓ LOWER = BETTER · 1.000 = break-even with '
+             'doing nothing (hold-stale) · &lt;1 beats it · &gt;1 harmful</div>',
+             '<table><thead><tr><th>method [window]</th>' +
+             "".join(f"<th>h={h} ↓</th>" for h in H_GRID) + "</tr></thead><tbody>"]
     for m, w in tbl_rows:
         g = gratio(late, m, w)
         table.append(f'<tr><td class="rh">{m}[{w}]</td>' +
@@ -425,7 +429,10 @@ residual (&sect;2). The anchor-pinned variant we added, <code>rank1_anchored</co
 <b>only arm that never goes harmful</b> out to h=40 — but its skill is ~1&ndash;2%.</p>
 {table_html}
 <p style="font-size:12.5px;color:{C['mut']};margin-top:6px">Global pooled ratio,
-median over anchors 79/119. Green &lt; 0.98, red &gt; 1.05.</p>
+median over anchors 79/119. Cell tint: <span style="background:#e7f3ea;padding:1px 6px">
+green &lt; 0.98 = beats hold-stale</span> · <span style="background:#f7f7f2;
+padding:1px 6px">grey ≈ 1 = neutral</span> · <span style="background:#fdeeea;
+padding:1px 6px">red &gt; 1.05 = harmful</span>. Lower is better in every cell.</p>
 
 <h2>2 &middot; Why the paper form fails this metric (and what it&rsquo;s actually for)</h2>
 <div class="grid2">
