@@ -1,0 +1,1392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Next Steps for the Communication-Efficient GRPO Anchor</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172026;
+      --muted: #58666f;
+      --line: #d8e0e5;
+      --soft: #f6f8f8;
+      --paper: #ffffff;
+      --accent: #0b6e69;
+      --accent-2: #9b4a13;
+      --accent-3: #4457a5;
+      --good: #0c6f3f;
+      --warn: #a06000;
+      --bad: #9d2c2c;
+      --code-bg: #f0f3f4;
+      --shadow: 0 18px 44px rgba(23, 32, 38, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: #e9eef0;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.55;
+      background:
+        linear-gradient(180deg, #eef4f3 0, #ffffff 26rem, #ffffff 100%);
+    }
+
+    a { color: var(--accent); }
+
+    .page {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 72px;
+    }
+
+    header.hero {
+      padding: 42px 0 28px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 960px;
+      margin: 0;
+      font-size: clamp(2.2rem, 4vw, 4.35rem);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      max-width: 900px;
+      margin: 18px 0 0;
+      color: #334047;
+      font-size: 1.18rem;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.74);
+      white-space: nowrap;
+    }
+
+    nav.toc {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 24px 0 36px;
+    }
+
+    nav.toc a {
+      min-height: 44px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--ink);
+      text-decoration: none;
+      background: var(--paper);
+      box-shadow: 0 1px 0 rgba(23, 32, 38, 0.03);
+    }
+
+    nav.toc a:hover {
+      border-color: #9bb4b1;
+      color: var(--accent);
+    }
+
+    section {
+      margin: 26px 0;
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      box-shadow: 0 1px 0 rgba(23, 32, 38, 0.03);
+    }
+
+    section.major {
+      box-shadow: var(--shadow);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 1.72rem;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 24px 0 8px;
+      font-size: 1.13rem;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    p { margin: 10px 0; }
+
+    h1, h2, h3, p, li, th, td, .pill, .card, .node {
+      overflow-wrap: anywhere;
+    }
+
+    .lead {
+      max-width: 940px;
+      font-size: 1.06rem;
+      color: #2c3940;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .card {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+    }
+
+    .card h3 {
+      margin-top: 0;
+      color: var(--accent);
+    }
+
+    .callout {
+      margin: 16px 0;
+      padding: 15px 16px;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #edf7f5;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: #fff6e8;
+    }
+
+    .callout strong {
+      color: #12332f;
+    }
+
+    ul, ol {
+      padding-left: 1.35rem;
+      margin: 10px 0;
+    }
+
+    li { margin: 7px 0; }
+
+    table {
+      width: 100%;
+      margin: 14px 0;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 0.94rem;
+      table-layout: fixed;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      background: #edf2f3;
+      color: #243038;
+      font-weight: 750;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      padding: 0.12rem 0.26rem;
+      border-radius: 5px;
+      background: var(--code-bg);
+      color: #1d3037;
+      font-size: 0.92em;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 13px 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #11191d;
+      color: #eaf3f2;
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }
+
+    pre code {
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+      white-space: pre;
+      overflow-wrap: normal;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }
+
+    .flow .node {
+      position: relative;
+      min-height: 132px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfc;
+      animation: riseIn 620ms ease both;
+    }
+
+    .flow .node:after {
+      content: ">";
+      position: absolute;
+      right: -9px;
+      top: 50%;
+      width: 18px;
+      height: 18px;
+      transform: translateY(-50%);
+      border-radius: 50%;
+      color: #fff;
+      background: var(--accent);
+      font-weight: 800;
+      font-size: 0.78rem;
+      line-height: 18px;
+      text-align: center;
+      z-index: 1;
+      animation: signalPulse 2.8s ease-in-out infinite;
+    }
+
+    .flow .node:last-child:after { content: none; }
+    .flow .node:nth-child(2) { animation-delay: 70ms; }
+    .flow .node:nth-child(3) { animation-delay: 140ms; }
+    .flow .node:nth-child(4) { animation-delay: 210ms; }
+    .flow .node:nth-child(5) { animation-delay: 280ms; }
+    .flow .node:nth-child(2):after { animation-delay: 150ms; }
+    .flow .node:nth-child(3):after { animation-delay: 300ms; }
+    .flow .node:nth-child(4):after { animation-delay: 450ms; }
+
+    .node .label {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--accent);
+      font-weight: 800;
+      font-size: 0.88rem;
+    }
+
+    .node p {
+      margin: 0;
+      color: #334047;
+      font-size: 0.91rem;
+    }
+
+    .tag {
+      display: inline-block;
+      margin: 2px 3px 2px 0;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #e8eeee;
+      color: #35434a;
+      font-size: 0.78rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .priority {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.2rem;
+      height: 1.6rem;
+      margin-right: 6px;
+      border-radius: 999px;
+      color: #fff;
+      background: var(--accent-3);
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .priority.p0 { background: var(--bad); }
+    .priority.p1 { background: var(--accent); }
+    .priority.p2 { background: var(--accent-2); }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .refs {
+      columns: 2;
+      column-gap: 28px;
+      color: #3f4b52;
+      font-size: 0.9rem;
+    }
+
+    .refs li {
+      break-inside: avoid;
+      margin-bottom: 8px;
+    }
+
+    .refs code {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .visual-panel {
+      margin: 18px 0;
+      padding: 16px;
+      border: 1px solid #c8d8da;
+      border-radius: 10px;
+      background: linear-gradient(180deg, #fbfdfd 0%, #f2f7f6 100%);
+    }
+
+    .visual-panel h3 {
+      margin-top: 0;
+    }
+
+    .clock-anim {
+      position: relative;
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 10px 12px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .clock-label {
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .clock-track {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 6px;
+      min-height: 38px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    .clock-track:before {
+      content: "";
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      left: 4px;
+      width: 3px;
+      border-radius: 999px;
+      background: var(--accent);
+      opacity: 0.85;
+      animation: clockSweep 5.5s linear infinite;
+      z-index: 0;
+    }
+
+    .clock-chip {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 0;
+      min-height: 28px;
+      padding: 4px 6px;
+      border-radius: 7px;
+      background: #eaf0f1;
+      color: #253139;
+      font-size: 0.78rem;
+      font-weight: 750;
+      text-align: center;
+    }
+
+    .clock-chip.global {
+      grid-column: span 2;
+      background: #eaf5f2;
+      color: #10453f;
+    }
+
+    .clock-chip.anchor {
+      background: #fff2df;
+      color: #6f3d08;
+      box-shadow: inset 0 0 0 1px rgba(155, 74, 19, 0.24);
+      animation: anchorPulse 2.4s ease-in-out infinite;
+    }
+
+    .rank-stage {
+      position: relative;
+      min-height: 250px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background:
+        linear-gradient(90deg, rgba(216, 224, 229, 0.55) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(216, 224, 229, 0.55) 1px, transparent 1px),
+        #ffffff;
+      background-size: 42px 42px;
+      overflow: hidden;
+    }
+
+    .rank-line {
+      position: absolute;
+      left: 11%;
+      right: 10%;
+      top: 60%;
+      height: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-3));
+      transform: rotate(-18deg);
+      transform-origin: left center;
+      box-shadow: 0 0 16px rgba(11, 110, 105, 0.22);
+    }
+
+    .rank-line:after {
+      content: "";
+      position: absolute;
+      right: -8px;
+      top: -6px;
+      width: 0;
+      height: 0;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-left: 14px solid var(--accent-3);
+    }
+
+    .rank-dot {
+      position: absolute;
+      left: 12%;
+      top: 69%;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--bad);
+      box-shadow: 0 0 0 7px rgba(157, 44, 44, 0.12);
+      animation: rankMove 5.2s ease-in-out infinite alternate;
+    }
+
+    .residual-dot {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--warn);
+      opacity: 0.76;
+      animation: residualFloat 3.6s ease-in-out infinite alternate;
+    }
+
+    .residual-dot.r1 { left: 30%; top: 49%; animation-delay: 0.2s; }
+    .residual-dot.r2 { left: 47%; top: 41%; animation-delay: 0.9s; }
+    .residual-dot.r3 { left: 65%; top: 34%; animation-delay: 1.5s; }
+    .residual-dot.r4 { left: 76%; top: 27%; animation-delay: 2.0s; }
+
+    .stage-label {
+      position: absolute;
+      max-width: 210px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--line);
+      color: #2f3b42;
+      font-size: 0.82rem;
+      font-weight: 750;
+      box-shadow: 0 8px 24px rgba(23, 32, 38, 0.08);
+    }
+
+    .stage-label.start { left: 3%; bottom: 7%; }
+    .stage-label.end { right: 3%; top: 7%; }
+
+    .visual-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .legend-swatch {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .legend-swatch:before {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--bad);
+    }
+
+    .legend-swatch.line:before {
+      width: 22px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+
+    .legend-swatch.residual:before { background: var(--warn); }
+
+    .feedback-anim {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 12px;
+    }
+
+    .feedback-lane {
+      min-height: 185px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .feedback-lane strong {
+      display: block;
+      margin-bottom: 10px;
+      color: #253139;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(0, 1fr));
+      gap: 6px;
+      align-items: end;
+      min-height: 96px;
+      margin-top: 10px;
+    }
+
+    .bar {
+      min-height: 14px;
+      border-radius: 5px 5px 2px 2px;
+      background: #9fb4b7;
+      animation: barFlicker 2.8s ease-in-out infinite alternate;
+    }
+
+    .bar:nth-child(2n) { animation-delay: 0.25s; }
+    .bar:nth-child(3n) { animation-delay: 0.55s; }
+    .bar.flip {
+      background: var(--bad);
+      animation-name: signFlip;
+    }
+
+    .vector-plane {
+      position: relative;
+      min-height: 112px;
+      margin-top: 10px;
+      border-radius: 8px;
+      background:
+        linear-gradient(90deg, rgba(216, 224, 229, 0.6) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(216, 224, 229, 0.6) 1px, transparent 1px),
+        #f7fbfb;
+      background-size: 28px 28px;
+      overflow: hidden;
+    }
+
+    .vector-line {
+      position: absolute;
+      left: 10%;
+      top: 58%;
+      width: 72%;
+      height: 5px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-3));
+      transform: rotate(-12deg);
+      transform-origin: left center;
+    }
+
+    .vector-line:after {
+      content: "";
+      position: absolute;
+      right: -7px;
+      top: -6px;
+      width: 0;
+      height: 0;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-left: 14px solid var(--accent-3);
+    }
+
+    .vector-pulse {
+      position: absolute;
+      left: 10%;
+      top: 51%;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 0 6px rgba(12, 111, 63, 0.12);
+      animation: vectorPulse 3.6s ease-in-out infinite;
+    }
+
+    @keyframes riseIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes signalPulse {
+      0%, 100% { transform: translateY(-50%) scale(1); opacity: 0.88; }
+      50% { transform: translateY(-50%) scale(1.14); opacity: 1; }
+    }
+
+    @keyframes clockSweep {
+      0% { left: 4px; }
+      100% { left: calc(100% - 7px); }
+    }
+
+    @keyframes anchorPulse {
+      0%, 100% { box-shadow: inset 0 0 0 1px rgba(155, 74, 19, 0.24), 0 0 0 rgba(155, 74, 19, 0.0); }
+      50% { box-shadow: inset 0 0 0 1px rgba(155, 74, 19, 0.35), 0 0 0 5px rgba(155, 74, 19, 0.10); }
+    }
+
+    @keyframes rankMove {
+      0% { left: 12%; top: 69%; }
+      100% { left: 82%; top: 28%; }
+    }
+
+    @keyframes residualFloat {
+      from { transform: translateY(6px); opacity: 0.52; }
+      to { transform: translateY(-6px); opacity: 0.86; }
+    }
+
+    @keyframes barFlicker {
+      from { opacity: 0.72; transform: scaleY(0.86); }
+      to { opacity: 1; transform: scaleY(1.04); }
+    }
+
+    @keyframes signFlip {
+      0%, 100% { background: var(--bad); transform: scaleY(0.78); }
+      50% { background: var(--warn); transform: scaleY(1.12); }
+    }
+
+    @keyframes vectorPulse {
+      0% { left: 10%; top: 51%; opacity: 0.65; }
+      100% { left: 80%; top: 36%; opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *:before, *:after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    @media (max-width: 920px) {
+      nav.toc, .grid-3, .grid-2, .flow, .feedback-anim {
+        grid-template-columns: 1fr;
+      }
+
+      .flow .node:after {
+        content: "v";
+        right: 50%;
+        top: auto;
+        bottom: -9px;
+        transform: translateX(50%);
+        animation-name: signalPulseMobile;
+      }
+
+      section { padding: 20px; }
+      .refs { columns: 1; }
+
+      .clock-anim {
+        grid-template-columns: 1fr;
+      }
+
+      .clock-track {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .rank-stage {
+        min-height: 230px;
+      }
+
+      .stage-label {
+        max-width: 160px;
+        font-size: 0.78rem;
+      }
+
+      .pill {
+        white-space: normal;
+      }
+
+      pre {
+        overflow-x: visible;
+        white-space: pre-wrap;
+      }
+
+      pre code {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+    }
+
+    @keyframes signalPulseMobile {
+      0%, 100% { transform: translateX(50%) scale(1); opacity: 0.88; }
+      50% { transform: translateX(50%) scale(1.14); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">Future research directions</p>
+      <h1>Next Steps for the Communication-Efficient GRPO Anchor</h1>
+      <p class="subtitle">A theoretical and engineering plan for exploiting rank-1 RLVR trajectory structure in the fast/anchor two-circuit system.</p>
+      <div class="meta">
+        <span class="pill">Generated: July 3, 2026</span>
+        <span class="pill">Repo inspected read-only</span>
+        <span class="pill">Deliverable: /Users/shamane/Desktop/next_steps.html</span>
+        <span class="pill">Main source HTML: rlvr_linearity_field_guide-2.html</span>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Table of contents">
+      <a href="#executive">Executive Answer</a>
+      <a href="#current-system">Current System</a>
+      <a href="#ticks">Ticks vs Steps</a>
+      <a href="#linearity">RLVR Linearity</a>
+      <a href="#math">Mathematical Consequences</a>
+      <a href="#anchor-role">Anchor Role</a>
+      <a href="#feedback">Better Feedback</a>
+      <a href="#plan">Prioritized Plan</a>
+    </nav>
+
+    <section id="executive" class="major">
+      <h2>Executive Answer</h2>
+      <p class="lead">
+        The anchor circuit is not buggy merely because it does not take multiple optimizer steps. In the current design it is a slow clean measurement loop: it runs a cadence-gated uncompressed backward pass on stale paired data, updates the anchor gradient reference <code>M</code>, and, with <code>anchor.owns_q=true</code>, refreshes the PowerSGD basis <code>Q</code>. The fast circuit is the only circuit that takes live optimizer steps.
+      </p>
+      <div class="callout">
+        <strong>Core thesis:</strong> the weakness is not that the anchor fails to be a second trainer. The weakness is that the current merger treats a stale anchor gradient as a coordinatewise sign oracle. If RLVR checkpoints really move along a nearly fixed rank-1 direction with a linearly growing coefficient, the anchor should instead become a trajectory clock, basis governor, and residual calibrator.
+      </div>
+
+      <div class="grid-3">
+        <div class="card">
+          <h3>1. Current interaction</h3>
+          <p>The anchor fires every <code>cadence</code> optimizer ticks, consumes a <code>delay_K</code>-stale replay pair, computes clean <code>G_anchor</code>, updates EMA/reference <code>M</code>, and refreshes/broadcasts <code>Q</code>. The fast network uses that frozen <code>Q</code> during compressed training, then receives a pre-optimizer gradient rewrite.</p>
+        </div>
+        <div class="card">
+          <h3>2. Tick verdict</h3>
+          <p><code>global_step</code> is the outer rollout/training iteration. <code>anchor_step</code>, <code>spectral_step</code>, and the capture tick are per <code>train_batch</code> optimizer tick. Current 20/20 means 20 optimizer ticks, roughly 10 outer global steps on the observed surface.</p>
+        </div>
+        <div class="card">
+          <h3>3. Research opportunity</h3>
+          <p>Replace coordinatewise sign repair with vector-space correction: rank-1 coefficient estimation, delayed residual feedback, confidence-gated projection, and rank-aware <code>Q</code> allocation. Full sign replacement should become a fallback, not the main idea.</p>
+        </div>
+      </div>
+
+      <h3>Recommended next move</h3>
+      <p>
+        First, prove the geometry on the local traces at optimizer-tick resolution. Then, before adding new machinery, evaluate the already-present <code>delayed_ef</code> residual pathway plus conservative lookahead. After that, implement a rank-1 line owner inside the anchor path: per tensor direction <code>d_l</code>, coefficient <code>c_l(t)</code>, slope <code>a_l</code>, confidence metrics, and a correction rule that preserves the high-confidence line component while damping the orthogonal residual.
+      </p>
+    </section>
+
+    <section id="current-system">
+      <h2>Current System: Fast Circuit and Anchor Circuit</h2>
+      <p>
+        There are no literal <code>FastNetwork</code> or <code>AnchorNetwork</code> classes. The names refer to two execution circuits inside the actor training stack.
+      </p>
+
+      <div class="flow" aria-label="Current fast and anchor flow">
+        <div class="node">
+          <span class="label">Rollout + old logprobs</span>
+          <p>GRPO rollout is ordinary vLLM. The trainer stamps <code>comm_eff_global_step</code> before logprob/actor update.</p>
+        </div>
+        <div class="node">
+          <span class="label">Anchor refresh first</span>
+          <p>At cadence, replay a stale paired batch, load stale or projected weights into an isolated clone, disable masks, and run one clean backward.</p>
+        </div>
+        <div class="node">
+          <span class="label">Anchor outputs</span>
+          <p>Produce raw <code>G_anchor</code>, update <code>M_anchor</code>, and, in the current baseline, update/broadcast PowerSGD <code>Q</code>.</p>
+        </div>
+        <div class="node">
+          <span class="label">Fast compressed train</span>
+          <p>The live actor performs the real training backward with PowerSGD boundary compression using read-only <code>Q</code>.</p>
+        </div>
+        <div class="node">
+          <span class="label">Merger + AdamW</span>
+          <p>The spectral merger rewrites target gradients before the single live optimizer step.</p>
+        </div>
+      </div>
+
+      <h3>Locked surface inspected</h3>
+      <p>
+        The current research baseline uses <code>compression_type=powersgd</code>, <code>powersgd.rank=77</code>, <code>anchor.enabled=true</code>, <code>anchor.owns_q=true</code>, <code>anchor.cadence=20</code>, <code>anchor.delay_K=20</code>, <code>replay_paired_batch=true</code>, <code>spectral.correction_mode=signed_ema</code>, <code>signed_ema_alpha=0.25</code>, and <code>beta_anc=0.50</code>.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Current meaning</th>
+            <th>Design implication</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>Q</code></td>
+            <td>PowerSGD projection basis. In the current setup it is anchor-owned.</td>
+            <td>The anchor already controls the dominant communication geometry. This is the natural place to inject rank-1 trajectory knowledge.</td>
+          </tr>
+          <tr>
+            <td><code>G_anchor</code></td>
+            <td>Raw clean gradient from the stale isolated anchor backward.</td>
+            <td>Useful as a calibration measurement, but not automatically a current gradient.</td>
+          </tr>
+          <tr>
+            <td><code>M_anchor</code> / <code>M</code></td>
+            <td>EMA/reference gradient maintained by the spectral filter.</td>
+            <td>Current <code>signed_ema</code> uses this mostly as a sign field; richer vector information is being discarded.</td>
+          </tr>
+          <tr>
+            <td><code>G_comp</code></td>
+            <td>Fast compressed gradient before correction.</td>
+            <td>Contains the fresh local batch signal and current-weight information; corrections should preserve this where anchor confidence is low.</td>
+          </tr>
+          <tr>
+            <td><code>G_corr</code></td>
+            <td>Corrected gradient written back before optimizer step.</td>
+            <td>The right target is not coordinatewise sign agreement; it is better approximation of the full uncompressed update in the optimizer metric.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Important asymmetry:</strong> the anchor is allowed to lag. That is the async-realism premise. The goal is not to make the anchor lead by doing hidden local optimizer steps; it is to compensate lag by prediction and by using the anchor measurements in the right subspace.
+      </div>
+    </section>
+
+    <section id="ticks">
+      <h2>Training Ticks vs Global Training Steps</h2>
+      <p>
+        The code has two time scales that matter for this research question.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Clock</th>
+            <th>What advances it</th>
+            <th>What it controls</th>
+            <th>Consequence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>global_step</code></td>
+            <td>One outer trainer iteration: rollout, rewards, advantages, actor update, logging/checkpoint cadence.</td>
+            <td>Trainer progress and data-generation epoch.</td>
+            <td>It can span multiple actor optimizer ticks.</td>
+          </tr>
+          <tr>
+            <td><code>optimizer_tick</code> / <code>anchor_step</code></td>
+            <td>One actor <code>train_batch(...)</code> call, ending in one live optimizer step.</td>
+            <td>Anchor cadence, stale replay indexing, PowerSGD capture keys, and spectral correction timing.</td>
+            <td>Current <code>cadence=20</code> and <code>delay_K=20</code> are 20 optimizer ticks.</td>
+          </tr>
+          <tr>
+            <td><code>spectral_step</code></td>
+            <td>Also advances once per actor train-batch tick.</td>
+            <td>When the gradient merger fires.</td>
+            <td>If spectral cadence equals anchor cadence, correction fires on ticks where the anchor has just refreshed.</td>
+          </tr>
+          <tr>
+            <td>Replay snapshot tick</td>
+            <td>In replay mode, one generator snapshot is pushed at the first train-batch tick of each global step.</td>
+            <td>Which stale weights/data the anchor can replay.</td>
+            <td>Realized weight staleness alternates around <code>K</code> and <code>K+1</code> ticks because snapshots are tied to the first tick of the global step.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="visual-panel" aria-label="Animated map of global steps and optimizer ticks">
+        <h3>Animated clock map</h3>
+        <p class="small">The moving cursor shows that the fast circuit advances at optimizer-tick resolution, while the outer global step covers multiple ticks. The highlighted anchor tick is a cadence event, not a hidden optimizer loop.</p>
+        <div class="clock-anim">
+          <div class="clock-label">Global step</div>
+          <div class="clock-track">
+            <span class="clock-chip global">g</span>
+            <span class="clock-chip global">g + 1</span>
+            <span class="clock-chip global">g + 2</span>
+            <span class="clock-chip global">g + 3</span>
+          </div>
+          <div class="clock-label">Fast ticks</div>
+          <div class="clock-track">
+            <span class="clock-chip">t</span>
+            <span class="clock-chip">t+1</span>
+            <span class="clock-chip">t+2</span>
+            <span class="clock-chip">t+3</span>
+            <span class="clock-chip">...</span>
+            <span class="clock-chip">t+18</span>
+            <span class="clock-chip">t+19</span>
+            <span class="clock-chip anchor">anchor</span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Bug or design flaw?</h3>
+      <p>
+        <strong>No runtime bug:</strong> the anchor not taking multiple optimizer steps is intentional. The anchor pass is documented and tested as a no-optimizer clean backward. It should not silently perform extra AdamW steps, because that would require optimizer state, current rollouts, reward freshness, and an off-policy story. It would also undercut the premise of a slow lagging anchor node serving a fast swarm.
+      </p>
+      <p>
+        <strong>There is a design flaw in usage:</strong> the current <code>signed_ema</code> rule treats stale anchor information as if it were a current coordinatewise sign oracle. At high latency, the anchor gradient is not just noisy; it is evaluated at an older point on the RLVR trajectory. The linearity papers suggest this error is predictable, not random. The correction should account for the anchor's time coordinate.
+      </p>
+      <p>
+        <strong>There is documentation drift:</strong> some configuration prose calls the cadence units "trainer steps", while the runtime and research traces show optimizer ticks. Future configs and plots should report both: for example, <code>K=20 ticks ~= 10 global steps</code> on the observed 2-tick/global-step surface.
+      </p>
+    </section>
+
+    <section id="linearity">
+      <h2>What the RLVR Linearity HTML Adds</h2>
+      <p>
+        The supplied HTML compares two 2026 papers arguing that RLVR fine-tuning trajectories are much more linear than ordinary intuition would suggest.
+      </p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>Paper A: linear dynamics</h3>
+          <p>Reports that individual weights and token log-probabilities are close to linear functions of step during RLVR. The guide attributes this to high-variance outcome-only reward acting like a low-pass filter, producing a stable direction and near-constant speed. It also reports extrapolation and re-grounding speedups.</p>
+        </div>
+        <div class="card">
+          <h3>Paper B: rank-1 trajectories</h3>
+          <p>Reports that cumulative per-tensor deltas are dominated by one singular direction and that the coefficient along that direction grows linearly with very high <code>R^2</code>. RELEX-style extrapolation then predicts later checkpoints from early trajectory structure.</p>
+        </div>
+      </div>
+
+      <h3>Interpretation for this system</h3>
+      <p>
+        The papers are most useful here not as a promise that every raw gradient is rank-1. In fact, the guide emphasizes that cumulative checkpoint deltas are rank-1 while individual per-step gradients can remain noisy and weakly aligned with the dominant drift. That distinction matters: a communication system should not assume every mini-batch gradient is rank-1. It should assume that the integrated optimizer trajectory has a stable low-dimensional component that can be measured, predicted, and protected.
+      </p>
+
+      <h3>Local evidence already points in the same direction, cautiously</h3>
+      <p>
+        The local EXP-47/M4 analysis found that damped linear projection outperformed hold-stale in the out-of-sample setting, while naive full linear extrapolation could hurt. The useful operating point was conservative, with a damping coefficient around <code>0.3</code>, a short best lag around <code>5</code>, and a strong relationship between higher local linearity and better projection quality. This argues for confidence-gated, damped, per-tensor use of the rank-1 idea rather than an immediate all-or-nothing RELEX transplant.
+      </p>
+    </section>
+
+    <section id="math">
+      <h2>Mathematical Consequences</h2>
+      <p>
+        For a target tensor or flattened parameter block <code>l</code>, write the observed RLVR trajectory as
+      </p>
+      <pre><code>theta_l(t) = theta_l(0) + c_l(t) d_l + r_l(t)
+||d_l|| = 1
+c_l(t) ~= a_l t + b_l
+||r_l(t)|| << |c_l(t)|  on high-confidence tensors</code></pre>
+
+      <p>
+        For a matrix tensor, <code>d_l</code> may itself be rank-1, <code>d_l = u_l v_l^T</code>, or a very small low-rank subspace if the top direction drifts. The key prediction is that stale-to-current motion is approximately
+      </p>
+      <pre><code>theta_l(t) - theta_l(t-K) ~= a_l K d_l + [r_l(t) - r_l(t-K)]</code></pre>
+
+      <div class="visual-panel" aria-label="Animated rank-1 trajectory model">
+        <h3>Animated rank-1 trajectory intuition</h3>
+        <div class="rank-stage">
+          <div class="rank-line"></div>
+          <div class="rank-dot" aria-hidden="true"></div>
+          <div class="residual-dot r1" aria-hidden="true"></div>
+          <div class="residual-dot r2" aria-hidden="true"></div>
+          <div class="residual-dot r3" aria-hidden="true"></div>
+          <div class="residual-dot r4" aria-hidden="true"></div>
+          <span class="stage-label start">theta(0): base checkpoint</span>
+          <span class="stage-label end">theta(t): coefficient grows almost linearly</span>
+        </div>
+        <div class="visual-legend">
+          <span class="legend-swatch line">fixed direction d_l</span>
+          <span class="legend-swatch">moving coefficient c_l(t)</span>
+          <span class="legend-swatch residual">small residual r_l(t)</span>
+        </div>
+      </div>
+
+      <h3>The optimizer-metric caveat</h3>
+      <p>
+        With AdamW or RMSProp-like preconditioning, the line direction observed in checkpoints is a direction of <em>preconditioned parameter updates</em>, not necessarily a direction of raw gradients. If <code>Delta theta_t = -eta_t P_t(g_t)</code>, then the rank-1 law constrains <code>P_t(g_t)</code> more directly than <code>g_t</code>. Therefore, the cleanest future correction either acts on the optimizer update after preconditioning or projects raw gradients using an approximate optimizer metric.
+      </p>
+
+      <h3>Anchor staleness becomes a scalar time-coordinate problem</h3>
+      <p>
+        If the anchor has a snapshot at tick <code>tau = t-K</code>, then under the rank-1 model the missing motion is mostly <code>a_l K d_l</code>. The anchor does not need to simulate <code>K</code> optimizer steps to become useful. It needs an estimate of <code>d_l</code>, <code>a_l</code>, and confidence. That is vastly cheaper and more robust than hidden local training on stale data.
+      </p>
+
+      <h3>Moving-anchor KL intuition</h3>
+      <p>
+        If the anchor also acts as a reference policy, local KL around the line direction satisfies approximately
+      </p>
+      <pre><code>KL(pi_theta(t) || pi_theta(anchor)) ~= 0.5 * (c_t - c_anchor)^2 * d^T F d</code></pre>
+      <p>
+        A fixed base anchor makes this grow roughly quadratically in time as <code>c_t</code> grows linearly. A rank-1 moving anchor with constant coefficient lag <code>c_anchor(t)=c_t-delta</code> keeps that local KL contribution approximately constant. Even when the current anchor is not used for KL, this is a useful mental model: the right anchor state is a position on the line, not an old full checkpoint treated as timeless truth.
+      </p>
+    </section>
+
+    <section id="anchor-role">
+      <h2>How Rank-1 Linearity Should Change the Anchor's Role</h2>
+      <div class="callout">
+        <strong>Design principle:</strong> the anchor should own the slow, high-fidelity estimate of the trajectory geometry. The fast circuit should own fresh stochastic gradients and optimizer progress. The merger should combine them in a geometry-aware way.
+      </div>
+
+      <h3>1. Keep the no-optimizer anchor invariant</h3>
+      <p>
+        Do not make the anchor take multiple optimizer steps to "catch up." That turns the anchor into an off-policy second learner and makes it depend on missing optimizer state, reward freshness, rollout state, and mini-batch ordering. Instead, predict the anchor's position along the observed line:
+      </p>
+      <pre><code>theta_hat_l(t_target) = theta_l(t_observed) + (c_l(t_target) - c_l(t_observed)) d_l</code></pre>
+
+      <h3>2. Make the anchor the line-state owner</h3>
+      <p>
+        Each target tensor should have a small state object:
+      </p>
+      <ul>
+        <li><code>d_l</code>: dominant direction or rank-1 factors <code>u_l, v_l</code>.</li>
+        <li><code>a_l, b_l</code>: slope and intercept for coefficient versus optimizer tick.</li>
+        <li><code>R2_l</code>, singular gap, residual ratio, and direction drift.</li>
+        <li>Age and freshness of the latest anchor measurement.</li>
+        <li>An eligibility bit: high-confidence tensors use rank correction; low-confidence tensors fall back to delayed residual or no correction.</li>
+      </ul>
+
+      <h3>3. Use anchor-owned Q as a geometry interface</h3>
+      <p>
+        Since the anchor already owns <code>Q</code>, it should reserve part of the PowerSGD basis for the reliable RLVR drift direction and part for the activation/gradient residual. A hybrid basis is more principled than allowing <code>Q</code> to chase only activation energy:
+      </p>
+      <pre><code>Q_l = orth([ Q_activation_l, q_drift_l, Q_residual_tail_l ])</code></pre>
+      <p>
+        This protects the coefficient direction from being compressed away while keeping the remaining rank budget for the orthogonal error that still matters.
+      </p>
+
+      <h3>4. Project the anchor to the current target before measuring</h3>
+      <p>
+        The existing lookahead machinery already points in this direction. The rank-1 version should select the target tick carefully. In replay mode, the natural target is the current global step's generator snapshot tick, not merely the fire tick, because that is the policy state from which the paired data was produced. The unit for fitting and cadence should remain optimizer ticks.
+      </p>
+    </section>
+
+    <section id="feedback">
+      <h2>Using Anchor Feedback Better Than Coordinatewise Sign Correction</h2>
+      <p>
+        The current rule is
+      </p>
+      <pre><code>G_correct = alpha * G_noisy
+          + (1 - alpha) * abs(G_noisy) * Sign(G_uncompressed)</code></pre>
+      <p>
+        In practice <code>G_uncompressed</code> is represented by the anchor EMA/reference <code>M</code>. Per coordinate, this keeps the noisy magnitude and interpolates signs:
+      </p>
+      <pre><code>G_correct_i = abs(G_noisy_i) *
+              [ alpha * Sign(G_noisy_i)
+                + (1 - alpha) * Sign(M_i) ]</code></pre>
+
+      <div class="visual-panel" aria-label="Animated comparison of coordinatewise sign repair and rank-aware feedback">
+        <h3>Animated feedback comparison</h3>
+        <div class="feedback-anim">
+          <div class="feedback-lane">
+            <strong>Coordinatewise sign repair</strong>
+            <p class="small">Each bar is corrected independently, so tiny noisy coordinates can flip with the same authority as meaningful ones.</p>
+            <div class="bar-row" aria-hidden="true">
+              <span class="bar" style="height: 44px"></span>
+              <span class="bar flip" style="height: 70px"></span>
+              <span class="bar" style="height: 28px"></span>
+              <span class="bar flip" style="height: 86px"></span>
+              <span class="bar" style="height: 52px"></span>
+              <span class="bar" style="height: 36px"></span>
+              <span class="bar flip" style="height: 62px"></span>
+              <span class="bar" style="height: 24px"></span>
+              <span class="bar" style="height: 78px"></span>
+            </div>
+          </div>
+          <div class="feedback-lane">
+            <strong>Rank-aware residual feedback</strong>
+            <p class="small">Estimate one reliable scalar along the line, then spend correction budget on the trusted residual subspace.</p>
+            <div class="vector-plane" aria-hidden="true">
+              <div class="vector-line"></div>
+              <div class="vector-pulse"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h3>Why this is the wrong default under rank-1 linearity</h3>
+      <ul>
+        <li>It discards the global low-rank geometry and acts independently on coordinates.</li>
+        <li>It trusts signs of tiny entries where a rank-1 direction has low coordinatewise sign confidence.</li>
+        <li>It preserves noisy magnitudes, which can be upward biased near zero true signal.</li>
+        <li>It ignores anchor age. A stale sign can be systematically wrong because the anchor is behind on a line, not merely noisy.</li>
+        <li>It is not invariant to parameter rotations, while the rank-1 finding is fundamentally a vector or matrix statement.</li>
+      </ul>
+
+      <h3>Replacement family A: delayed residual feedback first</h3>
+      <p>
+        The repo already contains a stronger idea: compare the anchor clean reference to the fast compressed gradient at the same stale paired tick, then add a held or decayed residual to the current fast gradient.
+      </p>
+      <pre><code>delta_anchor(t-K) = M_anchor(t-K) - G_comp_ring(t-K)
+G_correct(t)      = G_comp(t) + lambda_l(t) * delta_anchor(t-K)</code></pre>
+      <p>
+        This is better than sign correction because it keeps vector magnitudes, can be gated by age and norm, and has an identity path at <code>lambda=0</code>. It should be the immediate experimental bridge while rank-1 line state is built.
+      </p>
+
+      <h3>Replacement family B: rank-1 coefficient correction</h3>
+      <p>
+        If the trusted direction for tensor <code>l</code> is <code>d_l</code>, estimate the scalar coefficient of the fresh fast gradient or update:
+      </p>
+      <pre><code>beta_hat_l = &lt;G_comp_l, d_l&gt; / ||d_l||^2
+G_line_l   = beta_hat_l d_l</code></pre>
+      <p>
+        A shrinkage form keeps only the reliable line component plus a damped residual:
+      </p>
+      <pre><code>P_l        = d_l d_l^T
+G_correct = P_l G_comp + lambda_perp_l * (I - P_l) G_comp</code></pre>
+      <p>
+        In high-confidence tensors <code>lambda_perp_l</code> should be small. In lower-confidence tensors it should move back toward 1. If optimizer-state access is available, apply this to the preconditioned update rather than raw gradient.
+      </p>
+
+      <h3>Replacement family C: anchor residual in the rank/tail subspace</h3>
+      <p>
+        Use the anchor to measure the compression residual, but only inject the part that lies in trusted subspaces:
+      </p>
+      <pre><code>P_trust_l  = projection onto span(d_l, selected Q_tail_l)
+delta_l    = M_anchor_l - G_comp_pair_l
+G_correct_l = G_comp_l + lambda_l * P_trust_l delta_l</code></pre>
+      <p>
+        The trust coefficient should be per tensor:
+      </p>
+      <pre><code>lambda_l = clip(lambda0
+                * f(R2_l, singular_gap_l, age_l, residual_ratio_l,
+                    cos(G_comp_l, M_anchor_l)),
+                0, lambda_max)</code></pre>
+      <p>
+        This connects directly to the local finding that high-linearity groups benefit more from projection. It also avoids forcing a global scalar alpha across all tensors.
+      </p>
+
+      <h3>Replacement family D: exact line plus compressed residual</h3>
+      <p>
+        Treat the dominant line as a control variate:
+      </p>
+      <pre><code>G_correct = beta_anchor_hat d
+          + C((I - P_d) G_comp + error_t)</code></pre>
+      <p>
+        Here <code>C</code> is the existing cheap compressor for the orthogonal residual, and <code>error_t</code> is standard error feedback. This is a natural communication-efficient endpoint: transmit or reconstruct the scalar line component accurately, and spend bandwidth only on the residual.
+      </p>
+
+      <h3>Replacement family E: adaptive sign only as a fallback</h3>
+      <p>
+        If sign correction remains useful operationally, make it confidence-weighted:
+      </p>
+      <pre><code>G_correct_i =
+  alpha_i G_noisy_i
+  + (1 - alpha_i) clipped_mag_i * posterior_sign_i</code></pre>
+      <p>
+        Set <code>alpha_i</code> from sign reliability: large <code>|d_i|</code>, stable historical sign, fresh anchor, and high tensor <code>R2</code> lower <code>alpha_i</code>; tiny <code>|d_i|</code>, old anchor, or direction drift raise <code>alpha_i</code>. This avoids injecting structured noise through the many small entries of a rank-1 factor.
+      </p>
+    </section>
+
+    <section id="plan" class="major">
+      <h2>Concrete, Prioritized Next-Steps Plan</h2>
+
+      <h3><span class="priority p0">P0</span>Lock the time semantics before changing algorithms</h3>
+      <p>
+        Produce a small cadence report for every run: global step, optimizer tick, anchor step, spectral step, anchor fire, correction fire, replay data tick, realized weight delay, and ticks-per-global-step. The report should state both tick and global-step equivalents.
+      </p>
+      <p><strong>Acceptance gate:</strong> every plot and config unambiguously says whether <code>K</code>, <code>cadence</code>, and horizons are in optimizer ticks or global steps.</p>
+
+      <h3><span class="priority p0">P0</span>Validate rank-1 line structure on local traces</h3>
+      <p>
+        On saved weight trajectories, compute per tensor:
+      </p>
+      <pre><code>D_l(t)      = theta_l(t) - theta_l(0)
+EV1_l       = sigma_1(D_l)^2 / ||D_l||_F^2
+c_l(t)      = &lt;D_l(t), d_l&gt;
+R2_l        = R^2(c_l(t), t)
+residual_l  = ||D_l(t) - c_l(t)d_l|| / ||D_l(t)||</code></pre>
+      <p>
+        Run this both per optimizer tick and per deduplicated global step. Compare the rank-1 fit against existing two-point linear lookahead, OOS damped linear projection, and hold-stale. Do not assume the paper's <code>R2 &gt; 0.98</code> result transfers to every tensor or to Qwen 1.5B GRPO under compression.
+      </p>
+      <p><strong>Acceptance gate:</strong> identify a whitelist of tensor families where rank-1 confidence is high and a blacklist where it is weak, especially LayerNorm, embeddings, and heads.</p>
+
+      <h3><span class="priority p1">P1</span>Run the lowest-risk algorithmic bridge: delayed-EF plus damped lookahead</h3>
+      <p>
+        Before implementing a new rank-1 module, compare current <code>signed_ema</code> against the existing <code>delayed_ef</code> path. Use conservative <code>lambda</code> values, age decay, norm clipping, and adaptive per-tensor gating. Combine with existing lookahead only at the OOS-damped strengths suggested by local analysis, not full naive extrapolation.
+      </p>
+      <p><strong>Acceptance gate:</strong> at high latency, <code>delayed_ef</code> must improve cosine or MSE to dense captured gradients and avoid k-collapse relative to <code>signed_ema</code>. If it cannot beat sign correction, the anchor measurements themselves are not reliable enough yet.</p>
+
+      <h3><span class="priority p1">P1</span>Build a rank-1 line-state sidecar</h3>
+      <p>
+        Add an experimental state object that is updated only on anchor fires or checkpoint dumps. It should estimate <code>d_l</code>, <code>c_l(t)</code>, <code>a_l</code>, <code>R2_l</code>, singular gap, residual ratio, and drift. The initial version can be offline or research-only. It should expose a pure function:
+      </p>
+      <pre><code>predict(theta_snapshot, source_tick, target_tick, tensor_id)
+  -&gt; theta_hat_tensor, confidence</code></pre>
+      <p><strong>Acceptance gate:</strong> prediction must beat hold-stale out of sample under the same no-peek constraints as EXP-47, and confidence must correlate with improvement.</p>
+
+      <h3><span class="priority p1">P1</span>Use projected anchors, not catch-up anchors</h3>
+      <p>
+        Feed <code>theta_hat</code> into the existing isolated anchor clone instead of raw <code>theta[t-K]</code>. The anchor still runs exactly one clean backward and no optimizer step. This tests the thesis directly: staleness should be handled by line-coordinate prediction, not by local catch-up training.
+      </p>
+      <p><strong>Acceptance gate:</strong> projected-anchor gradients should align better with dense current gradients than stale-anchor gradients on paired captures, without increasing instability.</p>
+
+      <h3><span class="priority p1">P1</span>Replace sign repair with rank-aware residual correction</h3>
+      <p>
+        Implement the per-tensor rule:
+      </p>
+      <pre><code>delta_l       = M_projected_l - G_comp_pair_l
+P_trust_l     = span(d_l, selected Q_tail_l)
+lambda_l      = confidence_gate(R2_l, gap_l, age_l, residual_ratio_l)
+G_correct_l   = G_comp_l + lambda_l * P_trust_l(delta_l)</code></pre>
+      <p>
+        Keep an identity path for low confidence. This should be compared to <code>signed_ema</code>, <code>delayed_ef</code>, and no correction.
+      </p>
+
+      <h3><span class="priority p2">P2</span>Make Q trajectory-aware</h3>
+      <p>
+        Split the rank budget. Reserve a small number of columns for the high-confidence rank-1 drift direction and use the rest for activation/residual sketching. The expected benefit is not only better compression quality but also better stability: the most predictable part of the RLVR update should not be left to chance.
+      </p>
+
+      <h3><span class="priority p2">P2</span>Explore scalar-only and low-rank training limits</h3>
+      <p>
+        Once the line-state estimator is trustworthy, run ablations that constrain the update to <code>theta_0 + c_t d</code>, rank-1 LoRA, rank-4 LoRA, and projected full updates. These are not immediate production candidates; they are scientific probes that tell us how much of the RLVR improvement is captured by the single coefficient versus the residual.
+      </p>
+    </section>
+
+    <section id="algorithm">
+      <h2>Algorithm Sketch</h2>
+      <pre><code>On each anchor fire at optimizer tick t:
+  1. Fetch paired replay batch and source snapshot tau = t - K.
+  2. Update or read line state for each target tensor:
+       d_l, a_l, b_l, R2_l, singular_gap_l, residual_ratio_l.
+  3. Choose target tick t_target:
+       replay mode: current generator snapshot tick;
+       otherwise: current optimizer tick.
+  4. Build projected anchor weights:
+       theta_hat_l = theta_l(tau) + (a_l * (t_target - tau)) d_l
+       only for tensors passing confidence gates.
+  5. Run one clean anchor backward at theta_hat. No optimizer step.
+  6. Update M_anchor and delayed residual estimates.
+  7. Update Q with a hybrid basis:
+       Q_l = orth([Q_activation_l, q_drift_l, Q_residual_l]).
+
+On each fast optimizer tick:
+  1. Run fast compressed backward using read-only Q.
+  2. If correction fires:
+       compute per-tensor confidence lambda_l;
+       apply delayed/rank-aware residual correction;
+       leave low-confidence tensors unchanged.
+  3. Run the single live optimizer step.</code></pre>
+    </section>
+
+    <section id="metrics">
+      <h2>Success Metrics and Kill Criteria</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Measure</th>
+            <th>Pass condition</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Geometry</td>
+            <td><code>R2_l</code>, singular gap, <code>EV1_l</code>, residual ratio, direction drift.</td>
+            <td>High-confidence tensors have stable direction and line coefficient; low-confidence tensors are gated out.</td>
+          </tr>
+          <tr>
+            <td>Gradient/update quality</td>
+            <td>Cosine to dense gradient/update, MSE, norm ratio, sign flip precision/recall.</td>
+            <td>Correction improves over <code>G_comp</code> and current <code>signed_ema</code> on dense capture windows.</td>
+          </tr>
+          <tr>
+            <td>Training behavior</td>
+            <td>Verifier pass rate, reward, KL, entropy, response length, NaNs, collapse signatures.</td>
+            <td>No k-collapse at the high-latency surface; no reward-hacking acceleration via entropy collapse.</td>
+          </tr>
+          <tr>
+            <td>Systems cost</td>
+            <td>Wall time, anchor backward count, Q broadcast bytes, CPU snapshot pressure, memory.</td>
+            <td>Additional line-state logic remains cheaper than increasing anchor cadence or doing anchor catch-up optimization.</td>
+          </tr>
+          <tr>
+            <td>Async realism</td>
+            <td>Whether future information leaks into line prediction or replay pairing.</td>
+            <td>No-peek discipline preserved. Anchor may predict from past line state, not read future checkpoints.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Kill criterion:</strong> if the estimated line direction is unstable on local compressed GRPO traces, stop treating rank-1 as a universal control path. Fall back to delayed residual feedback and use rank-1 only for the tensor families where the evidence is strong.
+      </div>
+    </section>
+
+    <section id="references">
+      <h2>Provenance</h2>
+      <p>
+        This document was written from read-only inspection of the repo and the supplied HTML guide. No code files in the repo were edited, created, or deleted.
+      </p>
+      <ul class="refs">
+        <li>System overview: <code>/Users/shamane/Documents/verl/CODE_WALKTHROUGH.md</code></li>
+        <li>Current research goal and baseline: <code>/Users/shamane/Documents/verl/research/.claude/GOAL.md</code></li>
+        <li>Locked surface: <code>/Users/shamane/Documents/verl/research/runs/FIXED_CONTROL_SURFACE.md</code></li>
+        <li>Actor training flow: <code>/Users/shamane/Documents/verl/verl/workers/engine/base.py</code></li>
+        <li>Mini-batch and actor update flow: <code>/Users/shamane/Documents/verl/verl/workers/engine_workers.py</code></li>
+        <li>Anchor refresh implementation: <code>/Users/shamane/Documents/verl/verl/workers/engine/fsdp/transformer_impl.py</code></li>
+        <li>Anchor clean loss/replay helpers: <code>/Users/shamane/Documents/verl/verl/workers/comm_eff/anchor.py</code></li>
+        <li>Spectral correction formulas: <code>/Users/shamane/Documents/verl/verl/workers/comm_eff/spectral_filter.py</code></li>
+        <li>PowerSGD activation compression: <code>/Users/shamane/Documents/verl/verl/workers/comm_eff/powersgd_activation.py</code></li>
+        <li>Lookahead projection machinery: <code>/Users/shamane/Documents/verl/verl/workers/comm_eff/lookahead.py</code></li>
+        <li>Tick selection and trace semantics: <code>/Users/shamane/Documents/verl/research/scripts/weight_proj/tick_select.py</code></li>
+        <li>Local projection result summary: <code>/Users/shamane/Documents/verl/research/runs/MOAT-47-ANALYSIS/report_explainer.md</code></li>
+        <li>RLVR linearity comparison guide: <code>/Users/shamane/Downloads/rlvr_linearity_field_guide-2.html</code></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

@@ -183,6 +183,15 @@ Skip the upstream-PR attribution conventions (`Generated-by:`,
 `gemini-code-assist`, the duplicate-PR check, etc.) — they don't apply to
 this fork.
 
+## 6. Research notes to preserve
+
+- **2026-07-03 rank-1 RLVR / anchor next-step plan**:
+  [`research/next_steps.html`](research/next_steps.html). This is the
+  theoretical plan for treating the anchor as a trajectory clock, using
+  optimizer-tick cadence explicitly, replacing coordinatewise `signed_ema`
+  repair with delayed/rank-aware residual feedback, and validating rank-1 line
+  state before implementation.
+
 ## Acknowledgements
 
 Adapts the orientation pattern of upstream verl's [`AGENTS.md`](AGENTS.md);
