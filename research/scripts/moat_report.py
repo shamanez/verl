@@ -54,6 +54,10 @@ CSS = (
     ".mono{font-family:ui-monospace,Menlo,monospace}"
     ".small{color:#777;font-size:11px}.ok{color:#127a12;font-weight:bold}.bad{color:#c00;font-weight:bold}"
     ".lead{background:#f0f6ff;border:1px solid #cfe0ff;border-radius:6px;padding:12px 18px;margin:14px 0}"
+    ".fastbanner{background:#fff3e6;border:1px solid #f0c080;border-radius:6px;"
+    "padding:8px 16px;margin:10px 0;font-size:13px}"
+    ".fullbanner{background:#eefaee;border:1px solid #b0d8b0;border-radius:6px;"
+    "padding:8px 16px;margin:10px 0;font-size:13px}"
     ".explain{background:#f7f9fc;border:1px solid #dbe4f0;border-radius:6px;padding:4px 20px;margin:14px 0}"
     ".side{display:flex;flex-wrap:wrap;gap:14px}.col{flex:1;min-width:420px}"
     ".verdict{background:#fffbe6;border:1px solid #f0e0a0;border-radius:6px;padding:10px 18px}"
@@ -95,6 +99,47 @@ def _fmt(v, nd=3):
     if isinstance(v, float):
         return f"{v:.{nd}f}"
     return str(v)
+
+
+def fidelity_banner(reg, tag) -> str:
+    """FAST/FULL provenance banner (meta.fidelity/meta.sampling; pre-rows-v48 dirs
+    were emitted by the exact path only, so a missing tag reads as FULL)."""
+    if not reg:
+        return ""
+    fid = reg["meta"].get("fidelity", "full")
+    if fid == "fast":
+        s = reg["meta"].get("sampling") or {}
+        return (f'<div class="fastbanner"><b>{ESC(tag)}: FAST — sampled estimate</b> '
+                f'(frac={s.get("frac")}, seed={s.get("seed")}, '
+                f'strips={s.get("strip_elems")}; small tensors exact; '
+                f'{_fmt(s.get("n_elems_sampled_total"), 0)} of '
+                f'{_fmt(s.get("n_elems_total"), 0)} scalars); '
+                f'verdict-grade = <code>--fidelity full</code></div>')
+    return f'<div class="fullbanner"><b>{ESC(tag)}: FULL — exact</b> (all scalars, all ticks)</div>'
+
+
+# built-in fallback prose for the regression section + fast-mode caveats — used
+# when the run's report_explainer.md lacks a matching "## Absolute prediction
+# accuracy" heading; a future explainer overrides it.
+FALLBACK_REGRESSION_PROSE = (
+    "<p><b>Reading this section.</b> <code>pred_evr_pooled</code> is the pooled "
+    "explained-variance ratio vs the stale baseline over all scored windows: "
+    "1 − Σ‖e‖²/Σ‖b‖². <code>hold_stale</code> scores EXACTLY 0 (the doing-nothing "
+    "baseline); 1 = perfect prediction; negative = worse than holding stale. "
+    "<code>pred R² (scalar)</code> is the classical per-coordinate R² of predicted "
+    "vs actual FUTURE weights over the scored windows, computed on the sampled "
+    "panel at the operating cell; for <code>damped_linear</code> it deploys the "
+    "GLOBAL group's per-window OOS λ path (a documented modeling choice that can "
+    "slightly understate damped accuracy on groups whose optimal λ differs from "
+    "global).</p>"
+    "<p><b>Fast-mode caveats.</b> Under <code>--fidelity fast</code> all ratio/EVR "
+    "numbers are sampled estimates (~0.1%/matrix, deterministic seed; tensors "
+    "≤ 8192 elems exact); per-matrix tails (p10/p90, h*) can wobble. The linearity "
+    "R² population also differs: fast applies the paper's range/unique trajectory "
+    "filters (<code>r2_population=sampled_paper_filtered</code>), full excludes "
+    "only constant scalars — do not compare r2_median across fidelities. Strip "
+    "sampling (1024-contiguous runs) trades paper-faithful uniform scatter for "
+    "page locality; <code>--sample-strip-elems 1</code> restores pure scatter.</p>")
 
 
 # =============================================================================
@@ -637,6 +682,8 @@ def render(S, T, out_path, explainer_path=None):
              f'and <b>T = per-tick</b> (optimizer ticks, extended-Δ sweep). '
              f'Metric contract: {ESC(str((ref or {}).get("meta", {}).get("metric_contract", "")))}. '
              f'Ratio &lt; 1 ⇒ projection beats holding the stale weights.</p>')
+    for reg, tag in ((S, "regime S / per-step"), (T, "regime T / per-tick")):
+        P.append(fidelity_banner(reg, tag))
 
     # ---- How to read this report (embedded prose) ------------------------------
     intro = prose_titled("What this analysis is",
@@ -754,6 +801,52 @@ def render(S, T, out_path, explainer_path=None):
         P.append(_table(["special group", "damped ratio", "R² median", "λ* (med)"], rowsh))
         P.append(cap("special-groups"))
 
+    # ---- absolute prediction accuracy (regression view) ------------------------
+    P.append(H2("Absolute prediction accuracy (regression view)"))
+    reg_prose = prose("Absolute prediction accuracy (regression view)",
+                      "Absolute prediction accuracy")
+    P.append('<div class="explain">' + (reg_prose or FALLBACK_REGRESSION_PROSE)
+             + '</div>')
+    for reg, tag in ((S, "S / per-step"), (T, "T / per-tick")):
+        if not reg:
+            continue
+        od, oh = reg["meta"]["operating_point"]
+        pd = reg["meta"].get("paper_sentinel_delta", 0)
+        P.append(f"<h3>Regime {ESC(tag)} — operating cell (Δ={od}, h={oh})</h3>")
+        rowsh = []
+        for m in reg["meta"].get("methods", []):
+            r = (reg["idx"].get(("paper_linear", pd, oh, "global", "all"), {})
+                 if m == "paper_linear" else _g(reg, m, od, oh))
+            rowsh.append(
+                f'<tr><td class="l">{ESC(m)}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_evr_pooled"))}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_r2_scalar_median"))}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_r2_scalar_frac_gt_0.7"))}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_r2_scalar_frac_lt_0"))}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_r2_scalar_n"), 0)}</td>'
+                f'<td class="mono">{_fmt(r.get("pred_r2_scalar_n_excluded"), 0)}</td></tr>')
+        P.append('<div class="tblwrap">' + _table(
+            ["method", "pred_evr_pooled", "pred R² median (scalar)", "frac > 0.7",
+             "frac < 0", "n", "n_excluded"], rowsh) + '</div>')
+        evr = reg["vis"].get("o_pred_evr_vs_h", {})
+        ser = {m: list(zip(v.get("h", []), v.get("pred_evr_pooled", [])))
+               for m, v in evr.items()}
+        if any(s for s in ser.values()):
+            P.append('<div class="figscroll">' + svg_line(
+                ser, f"pooled EVR vs h at operating Δ ({tag})",
+                "horizon h", y_max=1.0, yref=0.0)
+                + '</div><p class="small">EVR = 1 − Σ‖e‖²/Σ‖b‖² (global group); '
+                  '0 = hold-stale, 1 = perfect; negative values clip to the axis.</p>')
+        ph = reg["vis"].get("n_pred_r2_scalar_hist")
+        if ph and ph.get("methods"):
+            P.append('<div class="side">')
+            for m, counts in ph["methods"].items():
+                P.append('<div class="col">' + svg_bars(
+                    counts, f"per-scalar pred R² — {m} ({tag})", -1.0, 1.0,
+                    vmark=[(0.7, "strong", "#2ca02c"), (0.0, "0", "#888")]) + '</div>')
+            P.append('</div>')
+            P.append(cap("pred R²"))
+
     # ---- paper-protocol equivalence panel (regime S) ---------------------------
     P.append(H2("Paper-protocol equivalence panel (Wang et al. §6.2, regime S)"))
     if S and "paper_linear" in S["meta"].get("methods", []):
@@ -824,9 +917,11 @@ def render(S, T, out_path, explainer_path=None):
         if not reg:
             continue
         m = reg["meta"]
-        P.append(f'<p class="small mono">{ESC(tag)}: cadence={m.get("cadence")} unit={m.get("unit")} '
+        P.append(f'<p class="small mono">{ESC(tag)}: fidelity={m.get("fidelity", "full")} '
+                 f'cadence={m.get("cadence")} unit={m.get("unit")} '
                  f'n_ticks={m.get("n_ticks")} band={m.get("band")} n_rows={m.get("n_rows")} '
                  f'lam_grid={len(m.get("lam_grid", []))}pts fingerprint={m.get("stats_cache_fingerprint")} '
+                 f'panel={m.get("panel_cache_fingerprint")} '
                  f'gates={ {k: v.get("pass") for k, v in m.get("gates", {}).items()} }</p>')
     P.append('</div>')
 

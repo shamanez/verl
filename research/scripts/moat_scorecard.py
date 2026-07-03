@@ -69,13 +69,24 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from weight_proj import metrics as M            # noqa: E402
 from weight_proj import predictors as P         # noqa: E402
+from weight_proj import sampling as SP           # noqa: E402  (fast-mode panel)
 from weight_proj import structure as ST         # noqa: E402
 from weight_proj import tick_select as TS        # noqa: E402  (#47 --cadence)
 
 METRIC_CONTRACT_EXPECTED = "weight-proj-metrics-v1"
+REGRESSION_CONTRACT_EXPECTED = "weight-proj-regression-v1"
+SAMPLING_CONTRACT_EXPECTED = "weight-proj-sampling-v1"
 # #47 cache-schema version — folded into _fingerprint so pre-#47 caches (no R2
 # summaries, no cadence/tick-set) rebuild cleanly instead of loading stale.
+# DELIBERATELY NOT bumped by fast mode: stream_stats accumulator semantics are
+# untouched, so existing full-mode stats_cache.npz files stay valid.
 SCHEMA_VERSION = "moat-scorecard-v47.1"
+# fast-mode panel-cache schema (folded into the panel fingerprint only).
+# v2: plan_matrix shrinks strip length to enforce MIN_STRIPS_PER_MATRIX clusters,
+# so v1 panels (1-strip small-k matrices) regather instead of loading stale.
+FAST_SCHEMA_VERSION = "moat-scorecard-fast-v2"
+# row-schema evolution is versioned SEPARATELY from the stats cache
+ROW_SCHEMA_VERSION = "moat-scorecard-rows-v48.0"
 DEFAULT_MANIFEST = "runs/EXP-57/regimeA/weights/full_manifest.jsonl"
 DEFAULT_OUT = "runs/MOAT-45-ANALYSIS/scorecard"
 PARITY_RTOL = 1e-6          # off-path parity: surrogate-path vs direct-tensor-path
@@ -85,7 +96,10 @@ R2_HIST_BINS = 100          # 100 bins over [0,1] for histogram-merged group R²
 R2_CONST_EPS = 1e-300       # SS_tot <= this ⇒ constant scalar (excluded + counted)
 PAPER_SENTINEL_DELTA = 0    # paper_linear rows key delta_ticks=0 (delta is derived)
 
-REQUIRED_ROW_KEYS = [
+# pre-rows-v48 required keys — the set a pre-change (#47) emit satisfies; verify-
+# schema checks ONLY these on old-schema dirs so they get the single clear
+# "old-schema dir" problem string instead of a flood of missing-key noise.
+REQUIRED_ROW_KEYS_LEGACY = [
     # identity of the row
     "method", "delta_ticks", "h_ticks", "group_kind", "group_key",
     # structure axes
@@ -108,6 +122,22 @@ REQUIRED_ROW_KEYS = [
     "r2_median", "r2_frac_gt_0.7", "n_excluded_const",  # per-scalar linearity R²
     "lam_star",                                    # OOS-selected lambda (None off damped)
 ]
+# fast-mode + regression superset (rows-v48.0; nullable where N/A)
+ROW_KEYS_V48 = [
+    "fidelity",                                    # "fast" | "full"
+    "n_elems_used", "n_elems_total",               # group sums of k_actual / numel
+    "pred_evr_pooled",                             # pooled EVR vs stale (metrics.pooled_evr)
+    "pred_r2_scalar_median", "pred_r2_scalar_frac_gt_0.7", "pred_r2_scalar_frac_lt_0",
+    "pred_r2_scalar_n", "pred_r2_scalar_n_excluded",
+    "pred_r2_scalar_source",        # "panel_sampled" when the pred_r2_scalar_* fields
+                                    # are populated (they are panel ESTIMATES even on
+                                    # fidelity='full' rows); None when the fields are null
+    "r2_population",                # "all_const_excluded" (full) | "sampled_paper_filtered" (fast)
+    "n_excluded_range", "n_excluded_unique",       # paper filter counts (0 in full mode)
+    "sample_min_runs",              # min per-matrix sampled-cluster count feeding this
+                                    # group row (None when every member is exact/full)
+]
+REQUIRED_ROW_KEYS = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48
 
 # base visuals (#45) present in every regime; #47 adds the lambda / R² / paper visuals.
 VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
@@ -117,6 +147,9 @@ VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
                "k_r2_ratio_coupling"]
 # regime-S-only visual (paper_linear present) — declared per-emit in meta.visual_keys
 VISUAL_KEY_PAPER = "m_paper_equivalence"
+# regression visuals — n_* only when the per-scalar panel path ran (declared per-emit)
+VISUAL_KEY_PRED_HIST = "n_pred_r2_scalar_hist"
+VISUAL_KEY_PRED_EVR = "o_pred_evr_vs_h"
 
 
 def log(msg: str) -> None:
@@ -285,8 +318,16 @@ class MmapTraceReader:
 
     def slice_f64(self, sd, name: str, a: int, b: int) -> np.ndarray:
         ten = sd[name]
-        assert str(ten.dtype) == "torch.float32", f"{name}: dtype {ten.dtype} != fp32"
-        return ten.reshape(-1)[a:b].numpy().astype(np.float64)
+        # trace-dtype-agnostic: fp32 AND bf16 traces both upcast EXACTLY to f64
+        # (same pattern as r2_stream._reduce_state_dict); all math stays f64.
+        assert str(ten.dtype) in ("torch.float32", "torch.bfloat16"), (
+            f"{name}: dtype {ten.dtype} not in (torch.float32, torch.bfloat16)")
+        import torch
+        return ten.reshape(-1)[a:b].to(torch.float64).numpy()
+
+    def gather_f64(self, sd, name: str, plan) -> np.ndarray:
+        """Sampled gather via CONTIGUOUS slice reads only (page-efficient mmap)."""
+        return np.concatenate([self.slice_f64(sd, name, a, b) for a, b in plan.runs])
 
     def load_matrix_f64(self, tick: int, name: str) -> np.ndarray:
         sd = self.load_raw(tick)
@@ -317,6 +358,9 @@ class InMemoryReader:
 
     def slice_f64(self, sd, name: str, a: int, b: int) -> np.ndarray:
         return np.asarray(sd[name]).reshape(-1)[a:b].astype(np.float64)
+
+    def gather_f64(self, sd, name: str, plan) -> np.ndarray:
+        return np.asarray(sd[name]).reshape(-1)[plan.idx].astype(np.float64)
 
     def load_matrix_f64(self, step: int, name: str) -> np.ndarray:
         arr = np.asarray(self.ticks[self.real_tick(step)][name]).reshape(-1)
@@ -562,6 +606,115 @@ def load_stats_cache(path: str, fingerprint: str) -> dict | None:
 
 
 # =============================================================================
+# Fast mode: the sampled panel (gather ONCE, hold in RAM, replay through the
+# UNCHANGED stream_stats/compute_rows/compute_paper_rows via InMemoryReader)
+# =============================================================================
+def _fast_fingerprint(name_dims, n_ticks, band, trace_root, cadence, tickset,
+                      sampling: dict, dump_dtype: str) -> str:
+    """Panel-cache identity: the _fingerprint inputs PLUS the sampling knobs,
+    the trace dump dtype and FAST_SCHEMA_VERSION (stats SCHEMA_VERSION untouched)."""
+    h = hashlib.sha256()
+    h.update(json.dumps({"nd": name_dims, "t": n_ticks, "b": band,
+                         "root": os.path.realpath(trace_root),
+                         "cadence": cadence,
+                         "tickset": list(tickset) if tickset is not None else None,
+                         "sampling": sampling, "dump_dtype": dump_dtype,
+                         "fast_schema": FAST_SCHEMA_VERSION},
+                        sort_keys=True).encode())
+    return h.hexdigest()[:16]
+
+
+def gather_panel(reader, plans: dict, names: list[str], n_ticks: int) -> dict:
+    """ONE pass over the ticks -> {name: f64 [n_ticks, k_actual]} sampled panel.
+
+    Iteration order is fixed (ascending t, sorted names) for determinism; per-tick
+    state dicts are dropped immediately so the footprint is the panel itself.
+    """
+    t0 = time.time()
+    snames = sorted(names)
+    panel = {n: np.empty((n_ticks, plans[n].k_actual), dtype=np.float64)
+             for n in snames}
+    for t in range(n_ticks):
+        sd = reader.load_raw(t)
+        for name in snames:
+            panel[name][t] = reader.gather_f64(sd, name, plans[name])
+        del sd
+    k_tot = sum(plans[n].k_actual for n in snames)
+    log(f"panel gathered: {len(snames)} matrices, {k_tot:,} sampled scalars x "
+        f"{n_ticks} ticks in {time.time() - t0:.1f}s")
+    return panel
+
+
+def save_panel_cache(path: str, panel: dict, plans: dict, fingerprint: str) -> None:
+    """float32 panel snapshot (lossless for fp32 AND bf16 sources) + idx + meta.
+
+    UNCOMPRESSED savez: fp32 weight trajectories are near-incompressible, and
+    zlib on the ~0.6 GB real panel costs minutes against a 'minutes, not hours'
+    budget (the stats cache keeps its compressed format — full-mode semantics
+    untouched)."""
+    arrays, meta = {}, {"fast_fingerprint": fingerprint, "names": {}}
+    for i, name in enumerate(sorted(panel)):
+        arrays[f"Y_{i}"] = panel[name].astype(np.float32)
+        arrays[f"idx_{i}"] = plans[name].idx
+        meta["names"][name] = i
+    arrays["___meta___"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
+    np.savez(path, **arrays)
+
+
+def load_panel_cache(path: str, fingerprint: str, plans: dict) -> dict | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        z = np.load(path)
+        meta = json.loads(bytes(z["___meta___"]).decode())
+        if meta["fast_fingerprint"] != fingerprint:
+            log(f"panel cache fingerprint mismatch — regathering ({path})")
+            return None
+        if set(meta["names"]) != set(plans):
+            log("panel cache matrix set mismatch — regathering")
+            return None
+        out = {}
+        for name, i in meta["names"].items():
+            if not np.array_equal(z[f"idx_{i}"], plans[name].idx):
+                log("panel cache idx mismatch — regathering")
+                return None
+            out[name] = z[f"Y_{i}"].astype(np.float64)
+        return out
+    except Exception as e:                      # corrupt cache -> regather
+        log(f"panel cache unreadable ({e}) — regathering")
+        return None
+
+
+def apply_linearity_filters(stats: dict, panel: dict, plans: dict,
+                            min_abs_change: float, min_unique: int,
+                            n_ticks: int) -> None:
+    """FAST MODE ONLY: re-shape the per-scalar LINEARITY-R² population with the
+    paper's two trajectory filters (range > min_abs_change; >= min_unique values).
+
+    Overwrites r2_hist / n_excluded_const / r2_n_valid from the KEPT columns and
+    records n_excluded_range / n_excluded_unique. Gram/D/nnz/traj stats are NOT
+    touched — the ratio/prediction population stays the unfiltered sample.
+    """
+    tbar = (n_ticks - 1) / 2.0
+    tc = (np.arange(n_ticks) - tbar)[:, None]
+    for name, s in stats.items():
+        Y = panel[name]
+        keep, n_r, n_u = SP.trajectory_filters(Y, min_abs_change, min_unique)
+        assert Y.shape[1] == plans[name].k_actual
+        phi = Y[:, keep] - Y[0, keep]
+        V = phi.sum(axis=0)
+        W = (tc * phi).sum(axis=0)
+        Pv = (phi * phi).sum(axis=0)
+        r2e, cmask = per_element_r2(V, W, Pv, n_ticks)
+        hist, n_excl, n_val = r2_summary_from_elements(r2e, cmask)
+        s["r2_hist"] = hist
+        s["n_excluded_const"] = n_excl
+        s["r2_n_valid"] = n_val
+        s["n_excluded_range"] = n_r
+        s["n_excluded_unique"] = n_u
+
+
+# =============================================================================
 # Post-processing: block sums, groups, rows (all metric math via weight_proj.metrics)
 # =============================================================================
 def prefix_from_banded(Db: np.ndarray, band: int) -> np.ndarray:
@@ -700,15 +853,25 @@ def group_diagnostics(members: list[str], stats: dict, n_ticks: int) -> dict:
 
 def group_r2(members: list[str], stats: dict):
     """Group per-scalar linearity R²: merge member 100-bin histograms (additive,
-    no trace access) -> (r2_median, r2_frac_gt_0.7, n_excluded_const, merged_hist)."""
+    no trace access) -> (r2_median, r2_frac_gt_0.7, n_excluded_const, merged_hist,
+    n_excluded_range, n_excluded_unique). The two paper-filter counts are 0 in
+    full mode (apply_linearity_filters never ran -> keys absent)."""
     hist = np.zeros(R2_HIST_BINS, dtype=np.int64)
-    n_excl = 0
+    n_excl = n_range = n_unique = 0
     for m in members:
         s = stats[m]
         hist = hist + s["r2_hist"]
         n_excl += int(s["n_excluded_const"])
+        n_range += int(s.get("n_excluded_range", 0))
+        n_unique += int(s.get("n_excluded_unique", 0))
     med, frac = r2_from_hist(hist)
-    return med, frac, n_excl, hist
+    if not math.isfinite(med):
+        # EMPTY filtered population (every sampled coord excluded by the range/
+        # unique/const filters). Mirror the paper's layer-skip: the row reports
+        # r2_median=None (excluded + counted via the n_excluded_* fields), never
+        # a NaN that would trip the r2_well_defined gate into a global refusal.
+        med, frac = None, None
+    return med, frac, n_excl, hist, n_range, n_unique
 
 
 def _oos_fit_end(j: int, h: int) -> int:
@@ -757,6 +920,7 @@ def damped_cell(saa, sab, sbb, delta: int, h: int, lam_grid) -> dict:
     ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
     dcoss = np.full(nw, np.nan); stales = np.full(nw, np.nan); projs = np.full(nw, np.nan)
     lam_star = np.full(nw, np.nan); n_warmup = 0
+    sum_e2 = sum_b2 = 0.0                       # pooled EVR over SCORED windows only
     for j in range(nw):
         fit_end = _oos_fit_end(j, h)
         if fit_end < 0:
@@ -767,11 +931,14 @@ def damped_cell(saa, sab, sbb, delta: int, h: int, lam_grid) -> dict:
         r = surrogate_metric_row(e2[li, j], sbb[j], sbb[j] - kk[li] * sab[j])
         ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
         dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+        sum_e2 += float(e2[li, j])
+        sum_b2 += float(max(sbb[j], 0.0))
     lam_star_med = float(np.nanmedian(lam_star)) if np.any(np.isfinite(lam_star)) else float("nan")
     return {"ratios": ratios, "skills": skills, "dcoss": dcoss, "stales": stales,
             "projs": projs, "lam_star": lam_star, "lam_star_med": lam_star_med,
             "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
             "lam_oracle": lam_oracle, "oracle_med": oracle_med,
+            "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
             "insample": (lams.tolist(), [None if not np.isfinite(v) else float(v)
                                          for v in insample_med])}
 
@@ -779,7 +946,10 @@ def damped_cell(saa, sab, sbb, delta: int, h: int, lam_grid) -> dict:
 def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                  methods: list[str], deltas: list[int], hs: list[int],
                  op_point: tuple[int, int], also_points: list[tuple[int, int]],
-                 cadence: str = "per-tick", unit: str = "tick", lam_grid=None):
+                 cadence: str = "per-tick", unit: str = "tick", lam_grid=None,
+                 fidelity: str = "full", r2_population: str = "all_const_excluded",
+                 total_dims: dict | None = None, global_damped_store: dict | None = None,
+                 plan_runs: dict | None = None):
     """The full scorecard: atomic rows + per-window ratio store (for h*/visuals).
 
     #47 additions: `damped_linear` rows use the OOS walk-forward selector (damped_cell);
@@ -787,7 +957,17 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
     n_excluded_const, method-independent); every row is tagged with cadence/unit and the
     two-anchor descriptor {anchor_mode='fixed', delta_resolved=delta, beta=1+h/delta}.
     Returns (rows, ratio_store, lam_select) where lam_select[(delta,h)] = (lams, med)
-    is the GLOBAL-group in-sample lambda-selection curve for the visual."""
+    is the GLOBAL-group in-sample lambda-selection curve for the visual.
+
+    rows-v48.0 additions (all fidelity-agnostic): pred_evr_pooled (exact from the
+    SAME block sums — zero extra trace access), fidelity/r2_population tags,
+    n_elems_used vs n_elems_total (`total_dims` = true numels; fast mode passes the
+    manifest dims while stats hold k_actual), paper-filter counts, and nullable
+    per-scalar prediction-R² fields (filled later by attach_scalar_pred_r2).
+    `global_damped_store` (if given) captures the GLOBAL group's per-window OOS
+    lam_star array per (delta,h) for the per-scalar damped prediction path.
+    `plan_runs` = {matrix: sampled-cluster count or None (exact)} — the group min
+    lands on every row as `sample_min_runs` (the strip-clustering variance proxy)."""
     if "damped_linear" in methods:
         assert lam_grid is not None and len(lam_grid) > 0, "damped_linear needs --lam-grid"
     groups = build_groups(names)
@@ -803,7 +983,15 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
     lam_select: dict = {}                        # (delta,h) -> (lams, insample_med) [GLOBAL]
     for g in groups:
         diag = group_diagnostics(g["members"], stats, n_ticks)
-        gr2_med, gr2_frac, gr2_nexcl, _ = group_r2(g["members"], stats)   # per-scalar R²
+        gr2_med, gr2_frac, gr2_nexcl, _, gr2_nrange, gr2_nunique = \
+            group_r2(g["members"], stats)                                 # per-scalar R²
+        g_used = sum(int(stats[m]["d"]) for m in g["members"])
+        g_total = (sum(int(total_dims[m]) for m in g["members"])
+                   if total_dims is not None else g_used)
+        g_min_runs = None
+        if plan_runs is not None:
+            rr = [plan_runs[m] for m in g["members"] if plan_runs.get(m) is not None]
+            g_min_runs = min(rr) if rr else None
         is_global = (g["kind"] == "global")
         gsums = {}
         for c in cells:
@@ -833,14 +1021,18 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     dmp = damped_cell(saa, sab, sbb, delta, h, lam_grid)
                     ratios, skills = dmp["ratios"], dmp["skills"]
                     dcoss, stales, projs = dmp["dcoss"], dmp["stales"], dmp["projs"]
+                    pev = dmp["pred_evr_pooled"]
                     if is_global:
                         lam_select[(delta, h)] = dmp["insample"]
+                        if global_damped_store is not None:
+                            global_damped_store[(delta, h)] = dmp["lam_star"]
                 else:
                     ratios = np.full(nw, np.nan)
                     skills = np.full(nw, np.nan)
                     dcoss = np.full(nw, np.nan)
                     stales = np.full(nw, np.nan)
                     projs = np.full(nw, np.nan)
+                    sum_e2 = sum_b2 = 0.0
                     for j in range(nw):
                         e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j], delta, h)
                         r = surrogate_metric_row(e2, b2, eb)
@@ -849,6 +1041,9 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                         dcoss[j] = r["dir_cos"]
                         stales[j] = r["base_norm"]
                         projs[j] = r["err_norm"]
+                        sum_e2 += float(max(e2, 0.0))
+                        sum_b2 += float(max(b2, 0.0))
+                    pev = M.pooled_evr(sum_e2, sum_b2)
                 rm, r10, r90 = _pcts(ratios)
                 sm, s10, s90 = _pcts(skills)
                 row = {
@@ -881,6 +1076,17 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     "ratio_oracle_median": (dmp["oracle_med"] if dmp else None),
                     "n_warmup": (dmp["n_warmup"] if dmp else 0),
                     "n_oos_scored": (dmp["n_oos_scored"] if dmp else nw),
+                    # ---- rows-v48.0 fast/regression superset ----
+                    "fidelity": fidelity,
+                    "n_elems_used": g_used, "n_elems_total": g_total,
+                    "pred_evr_pooled": pev,
+                    "pred_r2_scalar_median": None, "pred_r2_scalar_frac_gt_0.7": None,
+                    "pred_r2_scalar_frac_lt_0": None, "pred_r2_scalar_n": None,
+                    "pred_r2_scalar_n_excluded": None,
+                    "pred_r2_scalar_source": None,
+                    "r2_population": r2_population,
+                    "n_excluded_range": gr2_nrange, "n_excluded_unique": gr2_nunique,
+                    "sample_min_runs": g_min_runs,
                 }
                 rows.append(row)
                 cell_row_map[(delta, h)] = row
@@ -928,7 +1134,8 @@ def _spearman(x: list, y: list) -> float:
 def build_visuals(rows: list[dict], methods: list[str],
                   deltas: list[int], hs: list[int], op: tuple[int, int],
                   lam_select: dict | None = None, stats: dict | None = None,
-                  paper_panel: dict | None = None) -> dict:
+                  paper_panel: dict | None = None,
+                  pred_hists: dict | None = None) -> dict:
     idx = {(r["method"], r["delta_ticks"], r["h_ticks"],
             r["group_kind"], r["group_key"]): r for r in rows}
     op_d, op_h = op
@@ -997,7 +1204,7 @@ def build_visuals(rows: list[dict], methods: list[str],
     r2_hist_data = {}
     if stats is not None:
         allnames = sorted({r["matrix_name"] for r in rows if r["group_kind"] == "matrix"})
-        _, _, _, ghist = group_r2(allnames, stats)
+        _, _, _, ghist, _, _ = group_r2(allnames, stats)
         r2_hist_data["global"] = {"bins": R2_HIST_BINS,
                                   "counts": [int(x) for x in ghist]}
         by_sb: dict = {}
@@ -1006,7 +1213,7 @@ def build_visuals(rows: list[dict], methods: list[str],
                 by_sb.setdefault(r["super_block"], []).append(r["matrix_name"])
         r2_hist_data["by_super_block"] = {}
         for sb, mem in sorted(by_sb.items()):
-            _, _, _, hh = group_r2(mem, stats)
+            _, _, _, hh, _, _ = group_r2(mem, stats)
             r2_hist_data["by_super_block"][sb] = [int(x) for x in hh]
     vis["i_r2_histogram"] = r2_hist_data
 
@@ -1030,6 +1237,22 @@ def build_visuals(rows: list[dict], methods: list[str],
         "method": coup_method, "operating_point": [op_d, op_h], "points": pts,
         "spearman": _spearman([p["r2_median"] for p in pts],
                               [p["ratio_median"] for p in pts])}
+
+    # ---- rows-v48 o: per-method pooled EVR vs h at the operating Δ (global) ----
+    evr = {m: {"delta": op_d, "h": hs,
+               "pred_evr_pooled": [gget(m, op_d, h).get("pred_evr_pooled") for h in hs]}
+           for m in gm}
+    if "paper_linear" in methods:
+        evr["paper_linear"] = {
+            "delta": PAPER_SENTINEL_DELTA, "h": hs,
+            "pred_evr_pooled": [idx.get(("paper_linear", PAPER_SENTINEL_DELTA, h,
+                                         "global", "all"), {}).get("pred_evr_pooled")
+                                for h in hs]}
+    vis[VISUAL_KEY_PRED_EVR] = evr
+
+    # ---- rows-v48 n: per-scalar prediction-R² histograms (panel path only) ----
+    if pred_hists is not None:
+        vis[VISUAL_KEY_PRED_HIST] = pred_hists
 
     # ---- #47 m: paper-equivalence panel (regime S only; passed in by run_emit) ----
     if paper_panel is not None:
@@ -1061,11 +1284,17 @@ def _paper_windows(n_ticks: int, hs: list[int], anchor_frac: float, stride: int)
 
 
 def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
-                       stride, stats, cadence, unit, ram_gb=40.0):
+                       stride, stats, cadence, unit, ram_gb=40.0,
+                       fidelity: str = "full",
+                       r2_population: str = "all_const_excluded",
+                       total_dims: dict | None = None,
+                       plan_runs: dict | None = None):
     """Direct-score paper_linear over mmap slice reads. theta_hat = theta_t +
     (h/delta_resolved)*(theta_t - theta_{t0}) — the SAME Order1 secant as naive_linear
     with delta=delta_resolved (t0=floor(frac*t)). Its cells NEVER enter the banded
-    stats_cache and MUST NOT change `band`. Returns (paper_rows, paper_panel)."""
+    stats_cache and MUST NOT change `band`. Returns (paper_rows, paper_panel).
+    In fast mode the reader is the in-RAM panel (dims = k_actual, total_dims = true
+    numels) — the scoring math, anchor rule and asserts are IDENTICAL."""
     windows, needed = _paper_windows(n_ticks, hs, anchor_frac, stride)
     log(f"paper_linear: {len(windows)} windows over h={hs}, {len(needed)} unique steps, "
         f"frac={anchor_frac}, stride={stride}")
@@ -1099,13 +1328,22 @@ def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
     panel = {"operating_h": None, "h": list(hs), "betas_by_h": {}, "ratio_by_h": {}}
     for g in groups:
         diag = group_diagnostics(g["members"], stats, n_ticks)
-        gr2_med, gr2_frac, gr2_nexcl, _ = group_r2(g["members"], stats)
+        gr2_med, gr2_frac, gr2_nexcl, _, gr2_nrange, gr2_nunique = \
+            group_r2(g["members"], stats)
+        g_used = sum(int(stats[m]["d"]) for m in g["members"])
+        g_total = (sum(int(total_dims[m]) for m in g["members"])
+                   if total_dims is not None else g_used)
+        g_min_runs = None
+        if plan_runs is not None:
+            rr = [plan_runs[m] for m in g["members"] if plan_runs.get(m) is not None]
+            g_min_runs = min(rr) if rr else None
         for h in hs:
             wl = win_by_h.get(h, [])
             ratios = np.full(len(wl), np.nan); skills = np.full(len(wl), np.nan)
             dcoss = np.full(len(wl), np.nan); stales = np.full(len(wl), np.nan)
             projs = np.full(len(wl), np.nan)
             betas = []; dress = []
+            sum_e2 = sum_b2 = 0.0
             for j, (t, t0, dres) in enumerate(wl):
                 e2 = b2 = eb = 0.0
                 for m in g["members"]:
@@ -1116,6 +1354,8 @@ def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
                 ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
                 dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
                 betas.append(1.0 + float(h) / float(dres)); dress.append(dres)
+                sum_e2 += float(max(e2, 0.0))
+                sum_b2 += float(max(b2, 0.0))
             rm, r10, r90 = _pcts(ratios)
             sm, s10, s90 = _pcts(skills)
             row = {
@@ -1146,6 +1386,17 @@ def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
                 "n_excluded_const": gr2_nexcl, "lam_star": None,
                 "lam_oracle": None, "ratio_oracle_median": None,
                 "n_warmup": 0, "n_oos_scored": len(wl),
+                # ---- rows-v48.0 fast/regression superset ----
+                "fidelity": fidelity,
+                "n_elems_used": g_used, "n_elems_total": g_total,
+                "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
+                "pred_r2_scalar_median": None, "pred_r2_scalar_frac_gt_0.7": None,
+                "pred_r2_scalar_frac_lt_0": None, "pred_r2_scalar_n": None,
+                "pred_r2_scalar_n_excluded": None,
+                "pred_r2_scalar_source": None,
+                "r2_population": r2_population,
+                "n_excluded_range": gr2_nrange, "n_excluded_unique": gr2_nunique,
+                "sample_min_runs": g_min_runs,
             }
             paper_rows.append(row)
             if g["kind"] == "global":
@@ -1155,11 +1406,130 @@ def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
 
 
 # =============================================================================
+# Per-scalar prediction R² (panel-based; operating points only)
+# =============================================================================
+def _write_pred_scalar(idx: dict, groups: list[dict], key3, per_matrix: dict) -> None:
+    """Merge per-matrix (hist, n_excl, n_valid, frac_lt0) into every group row for
+    row key (method, delta, h) = key3 — the group_r2 additive-histogram pattern.
+    The tied lm_head row mirrors the embed special row (synthesize_tied_lm_head)."""
+    mname, delta, h = key3
+    for g in groups:
+        hist = np.zeros(M.PRED_HIST_BINS, dtype=np.int64)
+        n_excl = n_val = 0
+        for m in g["members"]:
+            hh, ne, nv, _ = per_matrix[m]
+            hist = hist + hh
+            n_excl += ne
+            n_val += nv
+        med, fgt, flt0 = M.pred_r2_from_hist(hist)
+        fields = {"pred_r2_scalar_median": med, "pred_r2_scalar_frac_gt_0.7": fgt,
+                  "pred_r2_scalar_frac_lt_0": flt0, "pred_r2_scalar_n": n_val,
+                  "pred_r2_scalar_n_excluded": n_excl,
+                  # row-level marker: these fields are panel ESTIMATES even when
+                  # the row's fidelity is 'full' (everything else on the row exact)
+                  "pred_r2_scalar_source": "panel_sampled"}
+        row = idx.get((mname, delta, h, g["kind"], str(g["key"])))
+        if row is not None:
+            row.update(fields)
+        if g["kind"] == "special" and str(g["key"]) == "embed":
+            lm = idx.get((mname, delta, h, "special", "lm_head"))
+            # mirror embed ONLY onto a synthesized TIED row — an untied lm_head
+            # (not this model, but keep the engine portable) has its own weights
+            if lm is not None and lm.get("tied"):
+                lm.update(fields)
+        if g["kind"] == "global":
+            per_matrix["___global_hist___"] = hist   # for the op-cell visual
+
+
+def attach_scalar_pred_r2(rows: list[dict], panel: dict, methods: list[str],
+                          names: list[str], n_ticks: int,
+                          cells: list[tuple[int, int]], op_cell: tuple[int, int],
+                          lam_star_by_cell: dict | None = None,
+                          paper_ctx: dict | None = None) -> dict:
+    """Per-scalar prediction R² (predicted vs ACTUAL FUTURE weights) from the panel.
+
+    Grid methods score every cell in `cells` (the operating + also points) with the
+    cell_window_sums window bounds (j = Δ .. n_ticks-1-h). Per-method kappa:
+    hold_stale k=0 (the "doing nothing" baseline); naive_linear k=h/Δ; damped_linear
+    k_w = lam*_j·h/Δ using the GLOBAL group's OOS per-window lam_star (warm-up
+    windows dropped — the "as-deployed-globally" definition, see explainer).
+    paper_linear scores its OWN strided windows at h = op h. Fields land on every
+    group row of the qualifying cells; returns the operating-cell global histograms
+    for the n_pred_r2_scalar_hist visual."""
+    groups = build_groups(names)
+    idx = {(r["method"], r["delta_ticks"], r["h_ticks"],
+            r["group_kind"], r["group_key"]): r for r in rows}
+    hists = {"operating_cell": list(op_cell), "bins": M.PRED_HIST_BINS,
+             "range": list(M.PRED_HIST_RANGE), "methods": {}}
+    lam_star_by_cell = lam_star_by_cell or {}
+    t0 = time.time()
+    for mname in methods:
+        if mname == "paper_linear":
+            continue
+        for (delta, h) in cells:
+            tw = np.arange(delta, n_ticks - h)      # == cell_window_sums bounds
+            kappa_w = None
+            if mname == "damped_linear":
+                lam = lam_star_by_cell.get((delta, h))
+                if lam is None:
+                    continue
+                scored = np.isfinite(lam)           # warm-up windows dropped
+                tw = tw[scored]
+                kappa_w = lam[scored] * (float(h) / float(delta))
+            else:
+                kappa = _REGISTRY[mname].kappa(delta, h)
+            if tw.size == 0:
+                continue
+            per_matrix = {}
+            for name in names:
+                Y = panel[name]
+                base = Y[tw]
+                step = base - Y[tw - delta]
+                yhat = (base + kappa_w[:, None] * step if kappa_w is not None
+                        else base + kappa * step)
+                r2, cmask = M.per_scalar_pred_r2(yhat, Y[tw + h])
+                per_matrix[name] = M.pred_r2_summary(r2, cmask)
+            _write_pred_scalar(idx, groups, (mname, delta, h), per_matrix)
+            if (delta, h) == op_cell:
+                hists["methods"][mname] = [int(x) for x in
+                                           per_matrix["___global_hist___"]]
+    if paper_ctx is not None and "paper_linear" in methods:
+        h = paper_ctx["h"]
+        windows, _ = _paper_windows(n_ticks, [h], paper_ctx["anchor_frac"],
+                                    paper_ctx["stride"])
+        if windows:
+            ts = np.array([t for (_h, t, _t0, _d) in windows])
+            t0s = np.array([t0_ for (_h, _t, t0_, _d) in windows])
+            kw = np.array([float(h) / float(d) for (_h, _t, _t0, d) in windows])
+            per_matrix = {}
+            for name in names:
+                Y = panel[name]
+                base = Y[ts]
+                yhat = base + kw[:, None] * (base - Y[t0s])
+                r2, cmask = M.per_scalar_pred_r2(yhat, Y[ts + h])
+                per_matrix[name] = M.pred_r2_summary(r2, cmask)
+            _write_pred_scalar(idx, groups, ("paper_linear", PAPER_SENTINEL_DELTA, h),
+                               per_matrix)
+            hists["methods"]["paper_linear"] = [int(x) for x in
+                                                per_matrix["___global_hist___"]]
+    log(f"per-scalar prediction R² attached in {time.time() - t0:.1f}s "
+        f"(cells={cells}, methods={list(hists['methods'])})")
+    return hists
+
+
+# =============================================================================
 # Gates (printed as `GATE <name>: PASS|FAIL` — the analyst greps these)
 # =============================================================================
+def _fin(v) -> bool:
+    return v is not None and isinstance(v, (int, float)) and math.isfinite(v)
+
+
 def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
               deltas: list[int], hs: list[int],
-              op: tuple[int, int], also: list[tuple[int, int]]) -> dict:
+              op: tuple[int, int], also: list[tuple[int, int]],
+              fidelity: str = "full", scalar_pred_r2: str = "off",
+              sampling_meta: dict | None = None, stats: dict | None = None,
+              plans: dict | None = None) -> dict:
     gates: dict[str, tuple[bool, str]] = {}
     hold = [r for r in rows if r["method"] == "hold_stale" and r["in_bounds"]
             and not r["tied"]]
@@ -1229,6 +1599,61 @@ def run_gates(rows: list[dict], part: dict, n_ticks: int, methods: list[str],
             f"global paper rows for h={hs} (missing h={miss_paper}); "
             f"{len(pw)} global paper rows, anchor_mode="
             f"{sorted({r['anchor_mode'] for r in pw})}")
+    # rows-v48: pooled EVR bounded above by 1; hold_stale scores EXACTLY 0; NaN only
+    # under the denom guard (a NaN EVR on a row with real displacement is a bug)
+    over = [r for r in rows if _fin(r["pred_evr_pooled"])
+            and r["pred_evr_pooled"] > 1.0 + 1e-9]
+    hbad = [r for r in rows if r["method"] == "hold_stale"
+            and _fin(r["pred_evr_pooled"])
+            and abs(r["pred_evr_pooled"]) > IDENTITY_TOL]
+    nanbad = [r for r in rows if r["in_bounds"] and r["n_windows"] > 0
+              and not _fin(r["pred_evr_pooled"])
+              and _fin(r["stale_error_median"]) and r["stale_error_median"] > 1e-6]
+    gates["pred_evr_bounds"] = (
+        not over and not hbad and not nanbad,
+        f"pred_evr_pooled <= 1+1e-9 (over={len(over)}); hold_stale |EVR| <= "
+        f"{IDENTITY_TOL:g} (bad={len(hbad)}); denom-guard-only NaN (bad={len(nanbad)})")
+    # rows-v48: per-scalar prediction R² present at the operating cell (panel path)
+    if scalar_pred_r2 == "panel":
+        need = [(m, op[0], op[1]) for m in grid_methods]
+        if "paper_linear" in methods:
+            need.append(("paper_linear", PAPER_SENTINEL_DELTA, op[1]))
+        by_key = {(r["method"], r["delta_ticks"], r["h_ticks"],
+                   r["group_kind"], r["group_key"]): r for r in rows}
+        miss_ps = [k for k in need
+                   if not _fin(by_key.get((k[0], k[1], k[2], "global", "all"),
+                                          {}).get("pred_r2_scalar_median"))]
+        gates["pred_scalar_present"] = (
+            not miss_ps, f"global pred_r2_scalar_median at op cell for every "
+                         f"method (missing={miss_ps})")
+    # fast only: sampling recorded + linearity-population bookkeeping closes
+    if fidelity == "fast":
+        samp_ok = bool(sampling_meta)
+        k_ok = (plans is not None
+                and all(p.k_actual >= min(sampling_meta["min_k"], p.numel)
+                        for p in plans.values()))
+        close_ok = False
+        if stats is not None and plans is not None:
+            lhs = sum(int(s["r2_n_valid"]) + int(s.get("n_excluded_range", 0))
+                      + int(s.get("n_excluded_unique", 0)) + int(s["n_excluded_const"])
+                      for s in stats.values())
+            rhs = sum(p.k_actual for p in plans.values())
+            close_ok = lhs == rhs
+        # strips-cluster floor: a 1-cluster matrix is a single correlated draw —
+        # the planner targets MIN_STRIPS_PER_MATRIX; adjacent-slot merges may
+        # shave a few runs, so gate at half the target (flags the pathology).
+        min_runs = min((len(p.runs) for p in plans.values()
+                        if p.mode == "strips"), default=None) if plans else None
+        runs_ok = (plans is not None
+                   and all(len(p.runs) >= min(SP.MIN_STRIPS_PER_MATRIX // 2,
+                                              p.k_actual)
+                           for p in plans.values() if p.mode == "strips"))
+        gates["fast_sampling_recorded"] = (
+            samp_ok and k_ok and close_ok and runs_ok,
+            f"meta.sampling present={samp_ok}; k_actual >= min(min_k, numel) on all "
+            f"matrices={k_ok}; kept+range+unique+const == k_actual (closes={close_ok}); "
+            f"strips-mode cluster floor >= {SP.MIN_STRIPS_PER_MATRIX // 2} "
+            f"(min={min_runs}, ok={runs_ok})")
     for name, (ok, detail) in gates.items():
         print(f"GATE {name}: {'PASS' if ok else 'FAIL'} — {detail}", flush=True)
     return {k: {"pass": bool(v[0]), "detail": v[1]} for k, v in gates.items()}
@@ -1393,6 +1818,35 @@ def _r2_direct(reader, name, n_ticks):
     with np.errstate(invalid="ignore", divide="ignore"):
         r2 = np.where(const, np.nan, np.clip(ss_reg / ss_tot, 0.0, 1.0))
     return r2, const
+
+
+def _rows_rel_diff(rows_a: list[dict], rows_b: list[dict],
+                   skip=("fidelity", "r2_population")):
+    """Worst relative difference across matched row keys / shared fields (fast-vs-
+    full equivalence). Non-numeric fields must match exactly; inf on any mismatch."""
+    key = lambda r: (r["method"], r["delta_ticks"], r["h_ticks"],
+                     r["group_kind"], r["group_key"])
+    ib = {key(r): r for r in rows_b}
+    if {key(r) for r in rows_a} != set(ib):
+        return float("inf"), 0
+    worst, n_cmp = 0.0, 0
+    for ra in rows_a:
+        rb = ib[key(ra)]
+        for k, va in ra.items():
+            if k in skip:
+                continue
+            vb = rb.get(k)
+            n_cmp += 1
+            if (isinstance(va, (int, float, np.floating, np.integer))
+                    and not isinstance(va, bool) and va is not None
+                    and vb is not None):
+                fa, fb = float(va), float(vb)
+                if math.isnan(fa) and math.isnan(fb) or fa == fb:
+                    continue
+                worst = max(worst, abs(fa - fb) / max(abs(fa), abs(fb), 1e-12))
+            elif va != vb:
+                return float("inf"), n_cmp
+    return worst, n_cmp
 
 
 def run_selftest(args) -> int:
@@ -1662,6 +2116,207 @@ def run_selftest(args) -> int:
 
     inv["determinism_soft"] = det_soft
 
+    # ================= rows-v48.0 fast/regression invariants (appended) ==========
+    snames = [n for n, _ in name_dims]
+
+    # -- sampling determinism: replan/reorder identical; different seed differs -----
+    nd_a = [("s.a", 5000), ("s.b", 200), ("s.c", 120000)]
+    pl1 = SP.build_sample_plan(nd_a, 0.01, 50, 16, 256, 8192, seed=42)
+    pl2 = SP.build_sample_plan(list(reversed(nd_a)), 0.01, 50, 16, 256, 8192, seed=42)
+    pl3 = SP.build_sample_plan(nd_a, 0.01, 50, 16, 256, 8192, seed=43)
+    det_same = all(np.array_equal(pl1[n].idx, pl2[n].idx) for n, _ in nd_a)
+    det_diff = all(not np.array_equal(pl1[n].idx, pl3[n].idx)
+                   for n, _ in nd_a if pl1[n].mode != "all")
+    inv["sampling_determinism"] = (
+        det_same and det_diff,
+        f"replan under reversed insertion order identical={det_same}; seed 43 "
+        f"differs={det_diff}; modes={ {n: pl1[n].mode for n, _ in nd_a} }")
+
+    # -- panel gather parity: panel values == direct full-slice values at idx -------
+    pl_syn = SP.build_sample_plan(name_dims, 0.25, 8, 8, 48, 80, seed=7)
+    panel_syn = gather_panel(reader, pl_syn, snames, n_ticks_s)
+    gp_ok = all(np.array_equal(panel_syn[n][t],
+                               reader.load_matrix_f64(t, n)[pl_syn[n].idx])
+                for n in snames for t in (0, n_ticks_s // 2, n_ticks_s - 1))
+    inv["panel_gather_parity"] = (
+        gp_ok, f"panel == direct slice at sampled idx (exact) over "
+               f"{len(snames)} matrices x 3 ticks; "
+               f"modes={sorted({p.mode for p in pl_syn.values()})}")
+
+    # -- fast(frac=1, filters off) == full on the same synthetic trace --------------
+    plf = SP.build_sample_plan(name_dims, 1.0, 50, 1024, 8192, 262144, seed=42)
+    panelf = gather_panel(reader, plf, snames, n_ticks_s)
+    prf = InMemoryReader({t: {n: panelf[n][t] for n in snames}
+                          for t in range(n_ticks_s)})
+    statsf = stream_stats(prf, [(n, plf[n].k_actual) for n in snames], n_ticks_s,
+                          sband, ram_gb=0.05, tag="-ff")
+    frows1, _, _ = compute_rows(statsf, snames, n_ticks_s, sband,
+                                ["hold_stale", "naive_linear"], sdeltas, shs,
+                                (3, 2), [(2, 1)], fidelity="fast",
+                                r2_population="sampled_paper_filtered",
+                                total_dims=dict(name_dims))
+    ff_worst, ff_n = _rows_rel_diff(srows, frows1)
+    inv["fast_full_equivalence_frac1"] = (
+        ff_worst <= 1e-9,
+        f"{ff_n} shared fields over {len(srows)} rows, worst rel diff "
+        f"{ff_worst:.2e} (tol 1e-9; frac=1.0 panel == full stream)")
+
+    # -- fast sampled path: hold_stale ratio AND pooled-EVR identities hold ---------
+    pr_s = InMemoryReader({t: {n: panel_syn[n][t] for n in snames}
+                           for t in range(n_ticks_s)})
+    stats_s = stream_stats(pr_s, [(n, pl_syn[n].k_actual) for n in snames],
+                           n_ticks_s, sband, ram_gb=0.05, tag="-fastid")
+    apply_linearity_filters(stats_s, panel_syn, pl_syn, 1e-4, 4, n_ticks_s)
+    frows2, _, _ = compute_rows(stats_s, snames, n_ticks_s, sband,
+                                ["hold_stale", "naive_linear"], sdeltas, shs,
+                                (3, 2), [(2, 1)], fidelity="fast",
+                                r2_population="sampled_paper_filtered",
+                                total_dims=dict(name_dims))
+    fhold = [r for r in frows2 if r["method"] == "hold_stale" and not r["tied"]]
+    worst_fid = max(abs(r["weight_proj_ratio_median"] - 1.0) for r in fhold)
+    worst_fev = max(abs(r["pred_evr_pooled"]) for r in fhold)
+    close = all(int(s["r2_n_valid"]) + int(s["n_excluded_range"])
+                + int(s["n_excluded_unique"]) + int(s["n_excluded_const"])
+                == pl_syn[n].k_actual for n, s in stats_s.items())
+    inv["fast_hold_stale_identity"] = (
+        worst_fid <= IDENTITY_TOL and worst_fev <= 1e-12 and close,
+        f"{len(fhold)} sampled rows: worst |ratio-1|={worst_fid:.2e} "
+        f"(tol {IDENTITY_TOL:g}), worst |pred_evr|={worst_fev:.2e} (tol 1e-12); "
+        f"filter bookkeeping closes={close}")
+
+    # -- pooled EVR + per-scalar prediction R² identities on an EXACT-linear trace --
+    rngL = np.random.default_rng(4848)
+    dimsL = {"lin.exact.a": 64, "lin.exact.b": 40}
+    nL = 18
+    baseL = {k: rngL.normal(0, 0.02, size=d) for k, d in dimsL.items()}
+    velL = {k: rngL.normal(0, 1e-3, size=d) for k, d in dimsL.items()}
+    ticksL = {t: {k: baseL[k] + t * velL[k] for k in dimsL} for t in range(nL)}
+    readerL = InMemoryReader(ticksL)
+    statsL = stream_stats(readerL, list(dimsL.items()), nL, band=6,
+                          ram_gb=0.02, tag="-evr")
+    lrows, _, _ = compute_rows(statsL, list(dimsL), nL, 6,
+                               ["hold_stale", "naive_linear"], [2], [1, 4], (2, 4), [])
+    nai_evr = [r["pred_evr_pooled"] for r in lrows
+               if r["method"] == "naive_linear" and not r["tied"]]
+    hold_evr = [r["pred_evr_pooled"] for r in lrows
+                if r["method"] == "hold_stale" and not r["tied"]]
+    YL = np.stack([np.concatenate([ticksL[t][k] for k in dimsL])
+                   for t in range(nL)])
+    twL = np.arange(2, nL - 4)
+    r2L, cmL = M.per_scalar_pred_r2(YL[twL] + 2.0 * (YL[twL] - YL[twL - 2]),
+                                    YL[twL + 4])
+    evr_ok = (all(abs(v - 1.0) <= 1e-9 for v in nai_evr)
+              and all(v == 0.0 for v in hold_evr))
+    ps_ok = (not np.any(cmL)) and float(np.min(r2L)) >= 1.0 - 1e-9
+    inv["pred_evr_identities"] = (
+        evr_ok and ps_ok,
+        f"exact-linear: naive pred_evr_pooled==1 within "
+        f"{max(abs(v - 1.0) for v in nai_evr):.1e}, hold_stale ==0 exactly; "
+        f"per-scalar pred R² min={float(np.min(r2L)):.12f} (tol 1e-9)")
+
+    # -- per-scalar prediction R²: vectorized == plain per-coordinate loop ----------
+    rng6 = np.random.default_rng(66)
+    W6, k6 = 12, 40
+    yh6 = rng6.normal(size=(W6, k6))
+    yt6 = rng6.normal(size=(W6, k6))
+    yt6[:, 0] = 3.14                       # constant column: excluded + counted
+    r2v, cmv = M.per_scalar_pred_r2(yh6, yt6)
+    worst6, const6 = 0.0, bool(cmv[0]) and int(cmv.sum()) == 1
+    for i in range(1, k6):
+        col = yt6[:, i]
+        r2_loop = 1.0 - float(((yh6[:, i] - col) ** 2).sum()) / \
+            float(((col - col.mean()) ** 2).sum())
+        worst6 = max(worst6, abs(r2_loop - r2v[i])
+                     / max(abs(r2_loop), abs(r2v[i]), 1e-12))
+    inv["pred_scalar_offpath_parity"] = (
+        worst6 <= 1e-9 and const6,
+        f"{k6 - 1} coords worst rel diff {worst6:.2e} (tol 1e-9); constant coord "
+        f"excluded+counted={const6}")
+
+    # -- paper trajectory filters: planted const / quantized / moving coords --------
+    T7, k7 = 12, 10
+    Y7 = np.zeros((T7, k7))
+    Y7[:, 0:3] = 0.5                                    # constant -> range fail
+    Y7[:, 3] = 0.5 + np.linspace(0.0, 5e-5, T7)         # range 5e-5 <= 1e-4 -> fail
+    Y7[:, 4:6] = np.array([0.0, 0.5, 1.0])[np.arange(T7) % 3, None]  # 3-level -> fail
+    Y7[:, 6:] = 1.0 + 0.01 * np.arange(T7)[:, None] * np.arange(1, 5)[None, :]
+    keep7, nr7, nu7 = SP.trajectory_filters(Y7, 1e-4, 4)
+    want_keep = np.array([False] * 6 + [True] * 4)
+    inv["paper_filter_counts"] = (
+        np.array_equal(keep7, want_keep) and nr7 == 4 and nu7 == 2
+        and int(keep7.sum()) + nr7 + nu7 == k7,
+        f"keep mask exact={np.array_equal(keep7, want_keep)}; "
+        f"n_range={nr7} (want 4), n_unique={nu7} (want 2); counts close")
+
+    # -- paper arm scored from a panel == naive_linear at matched anchors -----------
+    plp = SP.build_sample_plan(r2nd, 1.0, 50, 1024, 8192, 262144, seed=42)
+    panelp = gather_panel(r2reader, plp, r2names, r2n)
+    prp = InMemoryReader({t: {n: panelp[n][t] for n in r2names}
+                          for t in range(r2n)})
+    ppstats_f = stream_stats(prp, [(n, plp[n].k_actual) for n in r2names], r2n,
+                             pp_band, ram_gb=0.05, tag="-ppfast")
+    Ppf = prefix_from_banded(ppstats_f[nm]["D"], pp_band)
+    ppf_worst = 0.0
+    for (h, t, t0w, dres) in windows:
+        if dres + h > pp_band:
+            continue
+        a = prp.load_matrix_f64(t0w, nm)
+        tt = prp.load_matrix_f64(t, nm)
+        s = prp.load_matrix_f64(t + h, nm)
+        k = h / dres
+        e = (tt + k * (tt - a)) - s
+        b = tt - s
+        saa, sab, sbb = cell_window_sums(Ppf, dres, h, r2n)
+        jj = t - dres
+        be2, bb2, beb = nai.window_stats(saa[jj], sab[jj], sbb[jj], dres, h)
+        for dv, sv in ((float(e @ e), be2), (float(b @ b), bb2), (float(e @ b), beb)):
+            ppf_worst = max(ppf_worst, abs(dv - sv) / max(abs(dv), abs(sv), 1e-12))
+    # tol: spec asked 4e-14, but the IDENTICAL pre-existing full-path parity
+    # (paper_anchor_and_parity above) measures 4.37e-14 of float-association
+    # noise on this synthetic — 4e-14 fails spuriously; 2e-13 is the tightest
+    # tolerance with margin (~4.6x measured) that stays robust across BLAS builds.
+    inv["fast_paper_parity"] = (
+        ppf_worst <= 2e-13,
+        f"panel-path direct (e2,b2,eb) == naive(delta_resolved) worst rel "
+        f"{ppf_worst:.2e} (tol 2e-13; spec 4e-14 sits below the measured "
+        f"4.37e-14 float-association noise of the full-path twin)")
+
+    # -- bf16 gather upcast is bit-exact (guards the relaxed dtype assert) ----------
+    import torch
+    bt_root = os.path.join(out_dir, "bf16_cast_check")
+    os.makedirs(os.path.join(bt_root, "full", "tick_0"), exist_ok=True)
+    rng9 = np.random.default_rng(99)
+    raw = rng9.integers(0, 2 ** 16, size=4096, dtype=np.uint16)
+    raw[(raw & 0x7F80) == 0x7F80] = 0x3F80          # drop NaN/Inf bit patterns
+    ten = torch.from_numpy(raw.view(np.int16).copy()).view(torch.bfloat16)
+    torch.save({"bf.m": ten}, os.path.join(bt_root, "full", "tick_0", "tick_0.pt"))
+    rd9 = MmapTraceReader(bt_root)
+    sd9 = rd9.load_raw(0)
+    exp = ((raw.astype(np.uint32) << 16).view(np.float32)).astype(np.float64)
+    bf_ok = True
+    for frac9, strip9 in ((1.0, 1024), (0.05, 8), (0.05, 1)):   # all/strips/scatter
+        p9 = SP.build_sample_plan([("bf.m", 4096)], frac9, 16, strip9, 128, 1024,
+                                  seed=5)["bf.m"]
+        got = rd9.gather_f64(sd9, "bf.m", p9)
+        bf_ok = bf_ok and np.array_equal(got.view(np.uint64),
+                                         exp[p9.idx].view(np.uint64))
+    inv["bf16_cast_exact"] = (
+        bf_ok, "gather_f64 bf16->f64 upcast bit-exact vs manual <<16 expansion "
+               "(all/strips/scatter plans)")
+
+    # -- real-trace fast end-to-end: full fast emit + schema round-trip -------------
+    if args.trace_root and part is not None and inv.get("trace_ready", (False, ""))[0]:
+        import copy
+        a2 = copy.copy(args)
+        a2.fidelity = "fast"
+        a2.out = os.path.join(out_dir, "fast_e2e")
+        a2.force_recompute = True
+        rc_emit = run_emit(a2)
+        rc_ver = run_verify_schema(a2.out)
+        inv["fast_end_to_end_real"] = (
+            rc_emit == 0 and rc_ver == 0,
+            f"fast emit rc={rc_emit}, verify-schema rc={rc_ver} ({a2.out})")
+
     hard = {k: v for k, v in inv.items() if k != "determinism_soft"}
     go = all(ok for ok, _ in hard.values())
     for k, (ok, detail) in inv.items():
@@ -1691,6 +2346,10 @@ def _manifest_nticks(path: str) -> int:
     return sum(1 for l in open(path) if l.strip())
 
 
+def _manifest_dtype(path: str) -> str:
+    return str(json.loads(open(path).readline()).get("dump_dtype", ""))
+
+
 def _clean(x):
     """NaN/Inf -> null so the emitted JSON is strictly parseable (round-trip gate)."""
     if isinstance(x, dict):
@@ -1709,8 +2368,28 @@ def _clean(x):
 def run_emit(args) -> int:
     assert M.METRIC_CONTRACT == METRIC_CONTRACT_EXPECTED, (
         f"metric-contract drift: {M.METRIC_CONTRACT!r} != {METRIC_CONTRACT_EXPECTED!r}")
-    out_dir = args.out or DEFAULT_OUT
+    assert M.REGRESSION_CONTRACT == REGRESSION_CONTRACT_EXPECTED
+    assert SP.SAMPLING_CONTRACT == SAMPLING_CONTRACT_EXPECTED
+    fidelity = args.fidelity
+    # fidelity-suffixed default out dir so fast and full artifacts never overwrite
+    out_dir = args.out or (DEFAULT_OUT + ("-fast" if fidelity == "fast" else ""))
+    meta_path = os.path.join(out_dir, "meta.json")
+    if os.path.exists(meta_path) and not args.force_recompute:
+        try:
+            old_fid = json.load(open(meta_path)).get("fidelity", "full")
+        except Exception:
+            old_fid = None
+        if old_fid is not None and old_fid != fidelity:
+            print(f"FIDELITY-MISMATCH: {out_dir} holds a fidelity={old_fid!r} "
+                  f"scorecard; refusing to overwrite with fidelity={fidelity!r} "
+                  f"(pass --force-recompute or a different --out)", flush=True)
+            print("EMIT: NO-GO", flush=True)
+            return 1
     os.makedirs(out_dir, exist_ok=True)
+    if fidelity == "fast":
+        log(f"fidelity=fast (sampled ~{args.sample_frac:.4g} frac/matrix, "
+            f"seed={args.sample_seed}) — screening mode; use --fidelity full "
+            f"for verdict-grade numbers")
     names = _manifest_names(args.manifest)
     dims = _manifest_dims(args.manifest)
     part = ST.partition(names)
@@ -1737,41 +2416,149 @@ def run_emit(args) -> int:
     log(f"cadence={args.cadence} unit={unit} n_ticks={n_ticks} band={band} "
         f"tickset[0:4]={tickset[:4]}..{tickset[-1]}")
     name_dims = [(n, dims[n]) for n in names]
-    fp = _fingerprint(name_dims, n_ticks, band, args.trace_root,
-                      cadence=args.cadence, tickset=tickset)
-    cache_path = os.path.join(out_dir, "stats_cache.npz")
-    stats = None if args.force_recompute else load_stats_cache(cache_path, fp)
-    if stats is None:
+    dump_dtype = _manifest_dtype(args.manifest)
+    # range-filter threshold: 'auto' (default) scales the paper's bf16-calibrated
+    # 1e-4 by the trace dtype's quantization floor (fp32 => 1e-4 * 2^-16); an
+    # explicit float reproduces the paper protocol verbatim.
+    mac, mac_mode = SP.resolve_min_abs_change(args.min_abs_change, dump_dtype)
+    if fidelity == "fast":
+        log(f"linearity filters: min_abs_change={mac:.3g} ({mac_mode}; paper bf16 "
+            f"value {SP.PAPER_MIN_ABS_CHANGE:g}), min_unique={args.min_unique}")
+    sampling_knobs = {"frac": args.sample_frac, "min_k": args.sample_min_k,
+                      "strip_elems": args.sample_strip_elems,
+                      "small_full": args.sample_small_full,
+                      "scatter_cutoff": args.sample_scatter_cutoff,
+                      "seed": args.sample_seed}
+    plans = panel = panel_fp = None
+    need_panel = fidelity == "fast" or args.scalar_pred_r2 == "panel"
+    if need_panel:
+        plans = SP.build_sample_plan(name_dims, args.sample_frac, args.sample_min_k,
+                                     args.sample_strip_elems, args.sample_small_full,
+                                     args.sample_scatter_cutoff, args.sample_seed)
+        panel_fp = _fast_fingerprint(name_dims, n_ticks, band, args.trace_root,
+                                     args.cadence, tickset, sampling_knobs, dump_dtype)
+        panel_bytes = n_ticks * sum(p.k_actual for p in plans.values()) * 8
+        assert panel_bytes <= 0.5 * args.ram_gb * 1e9, (
+            f"panel needs {panel_bytes / 1e9:.1f} GB f64 > half of --ram-gb "
+            f"{args.ram_gb} — lower --sample-frac or raise --ram-gb")
+        panel_cache = os.path.join(out_dir, "panel_cache.npz")
+        # --force-recompute bypasses the panel cache LOAD (same semantics as the
+        # stats cache on the same flag) but still writes a fresh cache below.
+        if not args.no_panel_cache and not args.force_recompute:
+            panel = load_panel_cache(panel_cache, panel_fp, plans)
+        if panel is None:
+            panel = gather_panel(reader, plans, names, n_ticks)
+            if not args.no_panel_cache:
+                save_panel_cache(panel_cache, panel, plans, panel_fp)
+                log(f"panel cache saved: {panel_cache}")
+        else:
+            log(f"panel cache reused: {panel_cache}")
+    fp = None
+    if fidelity == "fast":
+        # reader-level substitution: the UNCHANGED engine replays the in-RAM panel
+        pr = InMemoryReader({t: {n: panel[n][t] for n in names}
+                             for t in range(n_ticks)})  # panel is already reindexed
+        eff_name_dims = [(n, plans[n].k_actual) for n in names]
+        eff_dims = {n: plans[n].k_actual for n in names}
         t0 = time.time()
-        stats = stream_stats(reader, name_dims, n_ticks, band, ram_gb=args.ram_gb)
-        log(f"full streaming pass done in {(time.time() - t0) / 60:.1f} min")
-        save_stats_cache(cache_path, stats, fp)
-        log(f"stats cache saved: {cache_path}")
+        stats = stream_stats(pr, eff_name_dims, n_ticks, band,
+                             ram_gb=args.ram_gb, tag="-fast")
+        log(f"fast panel stream done in {time.time() - t0:.1f}s")
+        apply_linearity_filters(stats, panel, plans, mac, args.min_unique, n_ticks)
+        # population-gutting disclosure: how much of the sampled panel survives
+        # the paper filters into the linearity-R² population (meta.filters +
+        # report banner carry the same numbers)
+        tot_k = sum(p.k_actual for p in plans.values())
+        tot_valid = sum(int(s["r2_n_valid"]) for s in stats.values())
+        kept = tot_valid / max(tot_k, 1)
+        log(f"linearity-R² population after paper filters: {tot_valid:,}/{tot_k:,} "
+            f"sampled coords kept ({kept:.1%})")
+        if kept < 0.5:
+            log(f"WARNING: paper filters removed {1.0 - kept:.1%} of the sampled "
+                f"population — r2_median describes only the moving tail, not "
+                f"'sampled weights'; check --min-abs-change ({mac:.3g}, {mac_mode})")
+        score_reader, score_dims = pr, eff_dims   # paper arm scores off the panel too
     else:
-        log(f"stats cache reused: {cache_path}")
+        fp = _fingerprint(name_dims, n_ticks, band, args.trace_root,
+                          cadence=args.cadence, tickset=tickset)
+        cache_path = os.path.join(out_dir, "stats_cache.npz")
+        stats = None if args.force_recompute else load_stats_cache(cache_path, fp)
+        if stats is None:
+            t0 = time.time()
+            stats = stream_stats(reader, name_dims, n_ticks, band, ram_gb=args.ram_gb)
+            log(f"full streaming pass done in {(time.time() - t0) / 60:.1f} min")
+            save_stats_cache(cache_path, stats, fp)
+            log(f"stats cache saved: {cache_path}")
+        else:
+            log(f"stats cache reused: {cache_path}")
+        score_reader, score_dims = reader, dims
+    r2_population = ("sampled_paper_filtered" if fidelity == "fast"
+                     else "all_const_excluded")
+    # per-matrix sampled-cluster counts (None = exact whole-tensor coverage);
+    # rows carry the group min as sample_min_runs. In fast mode only — a FULL
+    # row's ratio fields are exact, so its sample_min_runs stays None (the
+    # panel-only pred_r2_scalar_* fields are marked via pred_r2_scalar_source).
+    plan_runs = ({n: (len(p.runs) if p.mode != "all" else None)
+                  for n, p in plans.items()}
+                 if (plans is not None and fidelity == "fast") else None)
     methods = args.methods
     cached_methods = [m for m in methods if m != "paper_linear"]
+    gstore: dict = {}
     rows, ratio_store, lam_select = compute_rows(
         stats, names, n_ticks, band, cached_methods, deltas, hs,
         args.op_point, args.also_points,
-        cadence=args.cadence, unit=unit, lam_grid=args.lam_gridv)
+        cadence=args.cadence, unit=unit, lam_grid=args.lam_gridv,
+        fidelity=fidelity, r2_population=r2_population, total_dims=dims,
+        global_damped_store=gstore, plan_runs=plan_runs)
     log(f"{len(rows)} banded-cache atomic rows computed")
     paper_panel = None
     if "paper_linear" in methods:
         groups = build_groups(names)
         t0 = time.time()
         paper_rows, paper_panel = compute_paper_rows(
-            reader, names, dims, n_ticks, hs, groups,
+            score_reader, names, score_dims, n_ticks, hs, groups,
             args.paper_anchor_frac, args.paper_stride, stats,
-            args.cadence, unit, ram_gb=args.ram_gb)
+            args.cadence, unit, ram_gb=args.ram_gb,
+            fidelity=fidelity, r2_population=r2_population, total_dims=dims,
+            plan_runs=plan_runs)
         paper_panel["operating_h"] = args.op_point[1]
         rows.extend(paper_rows)
         log(f"paper_linear direct pass done in {(time.time() - t0) / 60:.1f} min "
             f"({len(paper_rows)} rows)")
+    pred_hists = None
+    if panel is not None and args.scalar_pred_r2 == "panel":
+        grid = [(d, h) for d in deltas for h in hs]
+        cells = [c for c in dict.fromkeys([args.op_point] + args.also_points)
+                 if c in grid]
+        paper_ctx = ({"h": args.op_point[1], "anchor_frac": args.paper_anchor_frac,
+                      "stride": args.paper_stride}
+                     if "paper_linear" in methods else None)
+        pred_hists = attach_scalar_pred_r2(rows, panel, methods, names, n_ticks,
+                                           cells, args.op_point,
+                                           lam_star_by_cell=gstore,
+                                           paper_ctx=paper_ctx)
     vis = build_visuals(rows, methods, deltas, hs, args.op_point,
-                        lam_select=lam_select, stats=stats, paper_panel=paper_panel)
+                        lam_select=lam_select, stats=stats, paper_panel=paper_panel,
+                        pred_hists=pred_hists)
+    sampling_meta = None
+    if plans is not None:
+        sampling_meta = dict(sampling_knobs)
+        sampling_meta.update({
+            "n_elems_sampled_total": int(sum(p.k_actual for p in plans.values())),
+            "n_elems_total": int(sum(d for _, d in name_dims)),
+            "n_matrices_all_mode": int(sum(1 for p in plans.values()
+                                           if p.mode == "all")),
+            # all-mode (exact small-tensor) scalar count — lets the report
+            # quantify norm/bias over-representation in the sampled histograms
+            "n_elems_all_mode": int(sum(p.k_actual for p in plans.values()
+                                        if p.mode == "all")),
+            "min_strips_per_matrix": SP.MIN_STRIPS_PER_MATRIX,
+            "min_sample_runs": (min((len(p.runs) for p in plans.values()
+                                     if p.mode != "all"), default=None))})
     gates = run_gates(rows, part, n_ticks, methods, deltas, hs,
-                      args.op_point, args.also_points)
+                      args.op_point, args.also_points,
+                      fidelity=fidelity, scalar_pred_r2=args.scalar_pred_r2,
+                      sampling_meta=sampling_meta, stats=stats, plans=plans)
     gall = next((r for r in rows if r["method"] == cached_methods[0]
                  and r["group_kind"] == "global"), {})
     linearity_r2 = {"r2_median": gall.get("r2_median"),
@@ -1801,8 +2588,38 @@ def run_emit(args) -> int:
         "visual_keys": visual_keys,
         "linearity_r2": linearity_r2,
         "gates": gates,
-        "stats_cache_fingerprint": fp,
+        "stats_cache_fingerprint": fp,          # None in fast mode (no stats cache)
         "n_rows": len(rows),
+        # ---- rows-v48.0 fast/regression provenance ----
+        "fidelity": fidelity,
+        "row_schema_version": ROW_SCHEMA_VERSION,
+        "regression_contract": M.REGRESSION_CONTRACT,
+        "sampling_contract": SP.SAMPLING_CONTRACT,
+        "sampling": sampling_meta,              # None when no panel was gathered
+        "filters": {
+            "min_abs_change": mac,                       # RESOLVED threshold
+            "min_abs_change_mode": mac_mode,             # explicit | auto:*
+            "min_abs_change_requested": str(args.min_abs_change),
+            "min_unique": args.min_unique,
+            "n_excluded_range_total": int(sum(s.get("n_excluded_range", 0)
+                                              for s in stats.values())),
+            "n_excluded_unique_total": int(sum(s.get("n_excluded_unique", 0)
+                                               for s in stats.values())),
+            # linearity-R² population survival (gutting disclosure): valid
+            # scalars after range/unique/const exclusions over the population
+            # the filters saw (fast: the panel; full: all scalars)
+            "n_kept_total": int(sum(int(s.get("r2_n_valid", 0))
+                                    for s in stats.values())),
+            "kept_frac": (float(sum(int(s.get("r2_n_valid", 0))
+                                    for s in stats.values()))
+                          / max(sum(int(s["d"]) for s in stats.values()), 1))},
+        "scalar_pred_r2": args.scalar_pred_r2,
+        # spec 6.2: null unless fidelity=fast (automation may key 'null => full');
+        # the FULL-mode --scalar-pred-r2 panel provenance moves to its own key
+        "panel_cache_fingerprint": (panel_fp if fidelity == "fast" else None),
+        "scalar_pred_r2_panel_fingerprint": (
+            panel_fp if (fidelity != "fast" and panel is not None) else None),
+        "dump_dtype": dump_dtype,
     }
     with open(os.path.join(out_dir, "scorecard.jsonl"), "w") as f:
         for r in rows:
@@ -1836,8 +2653,16 @@ def run_verify_schema(scorecard_dir: str) -> int:
         except Exception as e:
             problems.append(f"round-trip parse failure: {e}")
     if rows and not problems:
+        # rows-v48.0 version gate: dirs emitted by pre-change code get ONE clear
+        # problem string instead of a flood of missing-key noise — the row-key
+        # check below is version-gated down to the legacy key set for them.
+        old_schema = "row_schema_version" not in meta
+        if old_schema:
+            problems.append(f"old-schema dir (no meta.row_schema_version; expected "
+                            f"{ROW_SCHEMA_VERSION}) — re-emit with current code")
+        req_keys = REQUIRED_ROW_KEYS_LEGACY if old_schema else REQUIRED_ROW_KEYS
         for i, r in enumerate(rows):
-            missing = [k for k in REQUIRED_ROW_KEYS if k not in r]
+            missing = [k for k in req_keys if k not in r]
             if missing:
                 problems.append(f"row {i} missing keys {missing}")
                 break
@@ -1915,6 +2740,41 @@ def run_verify_schema(scorecard_dir: str) -> int:
                                     f"({r['method']},{r['delta_ticks']},{r['h_ticks']},"
                                     f"{r['group_kind']},{r['group_key']})")
                     break
+        # ---- rows-v48.0 fast/regression checks (only on new-schema dirs) ----
+        if "row_schema_version" in meta:
+            fid = meta.get("fidelity")
+            if fid not in ("fast", "full"):
+                problems.append(f"meta.fidelity {fid!r} not in ('fast','full')")
+            want_pop = ("sampled_paper_filtered" if fid == "fast"
+                        else "all_const_excluded")
+            bad_pop = [r for r in rows if r.get("r2_population") != want_pop
+                       or r.get("fidelity") != fid]
+            if bad_pop:
+                problems.append(f"{len(bad_pop)} rows with fidelity/r2_population "
+                                f"inconsistent with meta.fidelity={fid!r}")
+            for r in rows:
+                v = r.get("pred_evr_pooled")
+                if v is not None and v > 1.0 + 1e-9:
+                    problems.append(f"pred_evr_pooled {v} > 1+1e-9 on "
+                                    f"({r['method']},{r['delta_ticks']},{r['h_ticks']},"
+                                    f"{r['group_kind']},{r['group_key']})")
+                    break
+            for r in rows:
+                if (r.get("method") == "hold_stale"
+                        and r.get("pred_evr_pooled") is not None
+                        and abs(r["pred_evr_pooled"]) > 1e-6):
+                    problems.append("hold_stale row with |pred_evr_pooled| > 1e-6")
+                    break
+            if meta.get("scalar_pred_r2") == "panel":
+                op = meta.get("operating_point", [None, None])
+                need_ps = [(m, op[0], op[1]) for m in grid_methods]
+                if "paper_linear" in methods:
+                    need_ps.append(("paper_linear", paper_delta, op[1]))
+                for (m, d, h) in need_ps:
+                    r = index.get((m, d, h, "global", "all"), {})
+                    if r.get("pred_r2_scalar_median") is None:
+                        problems.append(f"pred_r2_scalar_median null on global "
+                                        f"operating-point row ({m},{d},{h})")
         # visuals: check the ACTUAL emitted set (meta.visual_keys), so a regime-T table
         # (no paper panel) verifies without demanding the regime-S-only m_paper visual.
         for key in meta.get("visual_keys", VISUAL_KEYS):
@@ -1976,6 +2836,37 @@ def main() -> int:
                     help="paper_linear t0 = floor(frac*t) (Wang et al. App. E.1, 0.20-0.30)")
     ap.add_argument("--paper-stride", type=int, default=2,
                     help="paper_linear anchor stride over t (regime S only)")
+    # ---- fast-mode / regression flags (rows-v48.0) ----
+    ap.add_argument("--fidelity", default="fast", choices=["fast", "full"],
+                    help="fast (DEFAULT): sampled-panel screening mode; "
+                         "full: the exact STRONG path (verdict-grade, unchanged)")
+    ap.add_argument("--sample-frac", type=float, default=0.001,
+                    help="paper SAMPLE_PERCENTAGE (per-matrix coordinate fraction)")
+    ap.add_argument("--sample-min-k", type=int, default=50,
+                    help="paper MIN_SAMPLES_THRESHOLD (per-matrix floor)")
+    ap.add_argument("--sample-strip-elems", type=int, default=1024,
+                    help="contiguous run length for IO-efficient gathers; "
+                         "1 = pure scatter (paper-faithful)")
+    ap.add_argument("--sample-small-full", type=int, default=8192,
+                    help="numel <= this => take ALL elements (norms/biases exact)")
+    ap.add_argument("--sample-scatter-cutoff", type=int, default=262144,
+                    help="numel <= this => scattered randperm sample (no strips)")
+    ap.add_argument("--sample-seed", type=int, default=42,
+                    help="paper SEED; folded into per-matrix derived seeds")
+    ap.add_argument("--min-abs-change", default="auto",
+                    help="paper MIN_ABS_CHANGE range filter (linearity-R2 "
+                         "population only). 'auto' (default) calibrates the "
+                         "paper's bf16 value 1e-4 to the trace dtype (fp32 => "
+                         "1e-4 * 2^-16 ~ 1.5e-9 — the paper value transplanted "
+                         "onto an fp32 per-step trace guts the population); pass "
+                         "an explicit float (e.g. 1e-4) for paper-verbatim")
+    ap.add_argument("--min-unique", type=int, default=4,
+                    help="paper MIN_UNIQUE_VALUES (linearity-R2 population only)")
+    ap.add_argument("--scalar-pred-r2", default="panel", choices=["panel", "off"],
+                    help="per-scalar prediction-R2 source; 'panel' also gathers a "
+                         "panel in FULL mode")
+    ap.add_argument("--no-panel-cache", action="store_true",
+                    help="skip panel_cache.npz read/write")
     args = ap.parse_args()
 
     if args.verify_schema:
@@ -1983,6 +2874,12 @@ def main() -> int:
 
     assert M.METRIC_CONTRACT == METRIC_CONTRACT_EXPECTED, (
         f"metric-contract drift: {M.METRIC_CONTRACT!r} != {METRIC_CONTRACT_EXPECTED!r}")
+    assert M.REGRESSION_CONTRACT == REGRESSION_CONTRACT_EXPECTED, (
+        f"regression-contract drift: {M.REGRESSION_CONTRACT!r} != "
+        f"{REGRESSION_CONTRACT_EXPECTED!r}")
+    assert SP.SAMPLING_CONTRACT == SAMPLING_CONTRACT_EXPECTED, (
+        f"sampling-contract drift: {SP.SAMPLING_CONTRACT!r} != "
+        f"{SAMPLING_CONTRACT_EXPECTED!r}")
     args.methods = [m.strip() for m in args.method.split(",") if m.strip()]
     for m in args.methods:
         # paper_linear is a direct-scored arm (not a fixed-kappa registry method)

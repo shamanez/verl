@@ -237,3 +237,77 @@ def full_metric_row(theta_hat, theta_now, theta_stale, noise_floor: float | None
         "snr": snr_v,
         "bf16_unreliable": is_bf16_unreliable(snr_v),
     }
+
+
+# =============================================================================
+# Regression view (v1 REGRESSION contract — ADDITIVE; every function above and
+# METRIC_CONTRACT itself are byte-identical to weight-proj-metrics-v1)
+# =============================================================================
+# machine-checkable string tag of the regression-metric contract version
+REGRESSION_CONTRACT = "weight-proj-regression-v1"
+PRED_HIST_BINS = 200            # per-scalar prediction-R² histogram bins
+PRED_HIST_RANGE = (-1.0, 1.0)   # values clipped into this range for the histogram
+PRED_R2_STRONG = 0.7            # paper's strong-linearity line reused for prediction
+
+
+def pooled_evr(sum_e2: float, sum_b2: float) -> float:
+    """Pooled explained-variance ratio vs the stale baseline over SCORED windows.
+
+    pred_evr_pooled = 1 - sum_w ||e_w||^2 / sum_w ||b_w||^2.
+    NaN iff sum_b2 <= DENOM_EPS**2 (the only permitted NaN). A predictor that
+    holds the stale weights (e == b per window) scores EXACTLY 0.
+    """
+    if sum_b2 <= DENOM_EPS ** 2:
+        return float("nan")
+    return 1.0 - float(sum_e2) / float(sum_b2)
+
+
+def per_scalar_pred_r2(Yhat: np.ndarray, Ytrue: np.ndarray,
+                       const_eps: float = 1e-300):
+    """Classical per-coordinate R² of predicted vs ACTUAL FUTURE weights.
+
+    Yhat, Ytrue: f64 [W, k] (W scored windows). For coordinate i:
+      ybar_i   = mean_w Ytrue[w, i]
+      SS_res_i = sum_w (Yhat[w,i] - Ytrue[w,i])^2
+      SS_tot_i = sum_w (Ytrue[w,i] - ybar_i)^2
+      R2_i     = 1 - SS_res_i / SS_tot_i    # NOT clamped; can be negative
+    const_mask_i = SS_tot_i <= const_eps (excluded + counted; mirrors the
+    linearity-R² R2_CONST_EPS semantics). Returns (r2[k], const_mask[k]).
+    """
+    Yhat = np.asarray(Yhat, dtype=np.float64)
+    Ytrue = np.asarray(Ytrue, dtype=np.float64)
+    ybar = Ytrue.mean(axis=0)
+    ss_res = ((Yhat - Ytrue) ** 2).sum(axis=0)
+    ss_tot = ((Ytrue - ybar) ** 2).sum(axis=0)
+    const_mask = ss_tot <= const_eps
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(const_mask, np.nan, 1.0 - ss_res / ss_tot)
+    return r2, const_mask
+
+
+def pred_r2_summary(r2: np.ndarray, const_mask: np.ndarray):
+    """(hist[PRED_HIST_BINS] over PRED_HIST_RANGE with values clipped into [-1,1],
+    n_excluded_const, n_valid, frac_lt_0). Mergeable by summation across matrices."""
+    valid = r2[~const_mask]
+    valid = valid[np.isfinite(valid)]
+    clipped = np.clip(valid, PRED_HIST_RANGE[0], PRED_HIST_RANGE[1])
+    hist, _ = np.histogram(clipped, bins=PRED_HIST_BINS, range=PRED_HIST_RANGE)
+    frac_lt_0 = float(np.mean(valid < 0.0)) if valid.size else float("nan")
+    return hist.astype(np.int64), int(np.sum(const_mask)), int(valid.size), frac_lt_0
+
+
+def pred_r2_from_hist(hist: np.ndarray):
+    """(median, frac_gt_0.7, frac_lt_0) read off a merged prediction-R² histogram
+    (cumsum median; bins with center > PRED_R2_STRONG; bins with center < 0)."""
+    hist = np.asarray(hist, dtype=np.float64)
+    n = float(hist.sum())
+    if n <= 0:
+        return float("nan"), float("nan"), float("nan")
+    lo, hi = PRED_HIST_RANGE
+    centers = lo + (np.arange(PRED_HIST_BINS) + 0.5) * (hi - lo) / PRED_HIST_BINS
+    cum = np.cumsum(hist)
+    mi = int(np.searchsorted(cum, (n + 1.0) / 2.0))
+    med = float(centers[min(mi, PRED_HIST_BINS - 1)])
+    frac_gt = float(hist[centers > PRED_R2_STRONG].sum()) / n
+    frac_lt0 = float(hist[centers < 0.0].sum()) / n
+    return med, frac_gt, frac_lt0
