@@ -10,10 +10,16 @@ one offline HTML report:
       --out     runs/MOAT-47-ANALYSIS/report.html
 
 The page is STRICTLY self-contained: inline <svg> only, ZERO <script>/<img>/external
-refs (re-openable offline). It LEADS with the per-scalar linearity R² readout vs the
-Wang et al. 2026 anchors, THEN the ratio/projection findings (PRIMARY per-step, then
-the per-tick extended-Δ sweep), the paper-protocol equivalence panel, and the lane
-verdict. Copies the inline-SVG pattern from weight_proj/report.py (does NOT edit it).
+refs/fonts/url()/gradients (re-openable offline). It LEADS with the per-scalar
+linearity R² readout vs the Wang et al. 2026 anchors, THEN the ratio/projection
+findings (PRIMARY per-step, then the per-tick extended-Δ sweep), the paper-protocol
+equivalence panel, and the lane verdict.
+
+Prose is embedded from a sibling `report_explainer.md` (a RENDER INPUT): the "how to
+read", "what was verified", per-figure captions, glossary and one-paragraph findings
+are converted from that markdown at render time. If the explainer is absent the report
+still renders (those sections are skipped and a warning is printed) — graceful
+degradation, single source of truth for the prose.
 
 Direction-agnostic: a decisive NEGATIVE result (damped never beats hold-stale, wider Δ
 never helps, low R²) is a VALID finding and is reported as such, not as a failure.
@@ -25,6 +31,7 @@ import html
 import json
 import math
 import os
+import re
 
 # Wang et al. 2026 (arXiv:2601.04537) per-scalar linearity R² anchors (median / Pr>0.7)
 WANG_RL = (0.845, 0.794)     # nearest RL analog: R1-Distill-Qwen-1.5B GRPO / DeepScaleR
@@ -33,6 +40,38 @@ ESC = html.escape
 
 PALETTE = {"hold_stale": "#7f7f7f", "naive_linear": "#1f77b4",
            "damped_linear": "#d62728", "paper_linear": "#2ca02c"}
+
+CSS = (
+    "body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:24px;color:#222;"
+    "max-width:1180px;line-height:1.5}"
+    "h1{font-size:23px}"
+    "h2{font-size:17px;margin-top:34px;border-bottom:2px solid #333;padding-bottom:4px}"
+    "h3{font-size:14px;margin-top:18px;color:#444}"
+    "p{margin:8px 0}"
+    "table{border-collapse:collapse;font-size:12px;margin:8px 0}"
+    "td,th{border:1px solid #ccc;padding:4px 8px;text-align:right}"
+    "th{background:#f5f5f5}td.l,th.l{text-align:left}"
+    ".mono{font-family:ui-monospace,Menlo,monospace}"
+    ".small{color:#777;font-size:11px}.ok{color:#127a12;font-weight:bold}.bad{color:#c00;font-weight:bold}"
+    ".lead{background:#f0f6ff;border:1px solid #cfe0ff;border-radius:6px;padding:12px 18px;margin:14px 0}"
+    ".explain{background:#f7f9fc;border:1px solid #dbe4f0;border-radius:6px;padding:4px 20px;margin:14px 0}"
+    ".side{display:flex;flex-wrap:wrap;gap:14px}.col{flex:1;min-width:420px}"
+    ".verdict{background:#fffbe6;border:1px solid #f0e0a0;border-radius:6px;padding:10px 18px}"
+    ".figtitle{font-size:13px;font-weight:bold;margin:16px 0 4px;color:#333}"
+    ".cap{color:#555;font-size:11.5px;line-height:1.5;margin:5px 0 2px;max-width:900px}"
+    ".cbcap{color:#555;font-size:10.5px;margin:2px 0 8px;max-width:640px}"
+    ".figscroll{overflow-x:auto;max-width:100%}"
+    ".tblwrap{overflow-x:auto;max-width:100%}"
+    ".gloss{font-size:12px}.gloss td{vertical-align:top}"
+    ".gloss td.t{white-space:nowrap;font-weight:600;color:#1a1a1a}"
+    ".gloss td.d{text-align:left;max-width:860px}"
+    "pre{background:#f6f8fa;border:1px solid #e0e0e0;border-radius:5px;padding:10px 12px;"
+    "font-size:11.5px;line-height:1.4;overflow-x:auto}"
+    "code{background:#eef0f3;border-radius:3px;padding:0 3px;"
+    "font-family:ui-monospace,Menlo,monospace;font-size:12px}"
+    "ol,ul{margin:6px 0;padding-left:24px}li{margin:4px 0}"
+    ".foot{color:#888;font-size:11px;margin-top:30px;border-top:1px solid #ddd;padding-top:8px}"
+)
 
 
 def _load(d: str) -> dict:
@@ -59,11 +98,156 @@ def _fmt(v, nd=3):
 
 
 # =============================================================================
-# Inline-SVG primitives (self-contained; copied idiom from weight_proj/report.py)
+# Explainer (report_explainer.md) → HTML. Single source of truth for the prose;
+# a RENDER INPUT that degrades gracefully (absent ⇒ warn + skip those sections).
+# =============================================================================
+def load_explainer(path):
+    """Parse report_explainer.md into {h2_title: [body_lines]}. Returns {} if absent."""
+    if not path or not os.path.exists(path):
+        print(f"WARNING: explainer not found ({path!r}); rendering without embedded prose.",
+              flush=True)
+        return {}
+    secs, cur = {}, None
+    for line in open(path):
+        line = line.rstrip("\n")
+        m = re.match(r"^## (.+)$", line)
+        if m:
+            cur = m.group(1).strip()
+            secs[cur] = []
+        elif cur is not None:
+            secs[cur].append(line)
+    return secs
+
+
+def _md_inline(s):
+    """Inline markdown → HTML on a raw string. Handles `code`, **bold**, *italic*,
+    and backslash-escaped * / _. Everything is HTML-escaped first."""
+    s = ESC(s)
+    s = s.replace(r"\*", "\x00").replace(r"\_", "\x01")   # protect escaped punctuation
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"\*([^*]+?)\*", r"<em>\1</em>", s)
+    return s.replace("\x00", "*").replace("\x01", "_")
+
+
+def _md_block(lines):
+    """Convert a list of markdown lines → HTML: headers, bold/italic/code, ordered &
+    unordered lists (with indented continuations), fenced ``` code → <pre>, tables,
+    and paragraphs."""
+    out, para, ul, ol, tbl = [], [], [], [], []
+    pre = None
+
+    def flush_para():
+        if para:
+            out.append("<p>" + _md_inline(" ".join(para)) + "</p>")
+            para.clear()
+
+    def flush_ul():
+        if ul:
+            out.append("<ul>" + "".join(f"<li>{_md_inline(x)}</li>" for x in ul) + "</ul>")
+            ul.clear()
+
+    def flush_ol():
+        if ol:
+            out.append("<ol>" + "".join(f"<li>{_md_inline(x)}</li>" for x in ol) + "</ol>")
+            ol.clear()
+
+    def flush_tbl():
+        if tbl:
+            body = []
+            for r, cells in enumerate(tbl):
+                tag = "th" if r == 0 else "td"
+                body.append("<tr>" + "".join(f'<{tag} class="l">{_md_inline(c)}</{tag}>'
+                                              for c in cells) + "</tr>")
+            out.append('<div class="tblwrap"><table>' + "".join(body) + "</table></div>")
+            tbl.clear()
+
+    def flush_all():
+        flush_para(); flush_ul(); flush_ol(); flush_tbl()
+
+    for raw in lines:
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            if pre is None:
+                flush_all(); pre = []
+            else:
+                out.append("<pre>" + ESC("\n".join(pre)) + "</pre>"); pre = None
+            continue
+        if pre is not None:
+            pre.append(raw); continue
+        if not line.strip():
+            flush_all(); continue
+        m_h3 = re.match(r"^###\s+(.*)$", line)
+        m_ul = re.match(r"^\s*-\s+(.*)$", line)
+        m_ol = re.match(r"^\s*\d+\.\s+(.*)$", line)
+        is_tbl = line.lstrip().startswith("|") and line.rstrip().endswith("|")
+        if m_h3:
+            flush_all(); out.append(f"<h3>{_md_inline(m_h3.group(1))}</h3>"); continue
+        if is_tbl:
+            flush_para(); flush_ul(); flush_ol()
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if all(set(c) <= set("-: ") for c in cells):   # separator row
+                continue
+            tbl.append(cells); continue
+        if m_ul:
+            flush_para(); flush_ol(); flush_tbl(); ul.append(m_ul.group(1)); continue
+        if m_ol:
+            flush_para(); flush_ul(); flush_tbl(); ol.append(m_ol.group(1)); continue
+        if (ul or ol) and (raw.startswith("  ") or raw.startswith("\t")):
+            (ul if ul else ol)[-1] += " " + line.strip(); continue
+        flush_ul(); flush_ol(); flush_tbl(); para.append(line.strip())
+
+    if pre is not None:
+        out.append("<pre>" + ESC("\n".join(pre)) + "</pre>")
+    flush_all()
+    return "".join(out)
+
+
+def parse_glossary(lines):
+    """`- **term** — definition` bullets (with indented continuations) → [(term, def)]."""
+    items, cur = [], None
+    for raw in lines:
+        line = raw.rstrip()
+        m = re.match(r"^\s*-\s+\*\*(.+?)\*\*\s*—\s*(.*)$", line)
+        if m:
+            if cur:
+                items.append(cur)
+            cur = [m.group(1), m.group(2)]
+        elif cur is not None and line.strip():
+            cur[1] += " " + line.strip()
+    if cur:
+        items.append(cur)
+    return [(_md_inline(t), _md_inline(d)) for t, d in items]
+
+
+def parse_figure_caps(lines):
+    """`- **Figure name** — text` bullets → {figure_name: rendered_caption_html}."""
+    caps, key, buf = {}, None, []
+
+    def commit():
+        if key is not None:
+            caps[key] = _md_inline(" ".join(buf).strip())
+
+    for raw in lines:
+        line = raw.rstrip()
+        m = re.match(r"^\s*-\s+\*\*(.+?)\*\*(.*)$", line)
+        if m:
+            commit()
+            key = m.group(1).strip()
+            buf = ["**" + m.group(1) + "**" + m.group(2)]
+        elif key is not None and line.strip():
+            buf.append(line.strip())
+    commit()
+    return caps
+
+
+# =============================================================================
+# Inline-SVG primitives (self-contained; no <img>/url()/gradient/<script>)
 # =============================================================================
 def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1.6,
              yref=1.0, xvals=None) -> str:
-    """series: name -> [(x, y)]. Dashed y=yref reference line."""
+    """series: name -> [(x, y)]. Dashed y=yref reference line. Legend sits on a white
+    card (drawn last) so it never disappears behind a curve."""
     pad = 46
     pts_all = [p for s in series.values() for p in s if p[1] is not None and p[1] == p[1]]
     if not pts_all:
@@ -89,8 +273,9 @@ def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1
     P.append(f'<line x1="{pad}" y1="{h-pad}" x2="{w-pad}" y2="{h-pad}" stroke="#333"/>')
     P.append(f'<text x="{pad-6}" y="{sy(0):.1f}" font-size="10" text-anchor="end">0</text>')
     P.append(f'<text x="{pad-6}" y="{sy(ymax)+8:.1f}" font-size="10" text-anchor="end">{ymax:.2g}</text>')
-    P.append(f'<text x="{w/2}" y="{h-8}" font-size="11" text-anchor="middle">{ESC(xlabel)}</text>')
-    P.append(f'<text x="{w/2}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
+    P.append(f'<text x="{w/2:.1f}" y="{h-8}" font-size="11" text-anchor="middle">{ESC(xlabel)}</text>')
+    P.append(f'<text x="{w/2:.1f}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
+    legend = []
     for i, (name, pts) in enumerate(series.items()):
         col = PALETTE.get(name, ["#9467bd", "#ff7f0e", "#17becf", "#8c564b"][i % 4])
         pts = sorted((x, y) for x, y in pts if y is not None and y == y)
@@ -101,9 +286,18 @@ def svg_line(series: dict, title: str, xlabel="horizon h", w=520, h=300, y_max=1
         P.append(f'<path d="{d}" fill="none" stroke="{col}" stroke-width="2"/>')
         for x, y in pts:
             P.append(f'<circle cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="2.5" fill="{col}"/>')
-        ly = 30 + i * 14
-        P.append(f'<rect x="{w-pad-150}" y="{ly-8}" width="10" height="10" fill="{col}"/>')
-        P.append(f'<text x="{w-pad-136}" y="{ly}" font-size="10">{ESC(name)}</text>')
+        legend.append((name, col))
+    # legend card (top-right), drawn last so it stays readable over the curves
+    if legend:
+        lx = w - pad - 152
+        ly0 = pad + 6
+        box_h = len(legend) * 15 + 8
+        P.append(f'<rect x="{lx-6:.1f}" y="{ly0-4:.1f}" width="152" height="{box_h}" '
+                 f'rx="4" fill="#fff" opacity="0.9" stroke="#ddd"/>')
+        for i, (name, col) in enumerate(legend):
+            ly = ly0 + 6 + i * 15
+            P.append(f'<rect x="{lx:.1f}" y="{ly-8:.1f}" width="10" height="10" fill="{col}"/>')
+            P.append(f'<text x="{lx+15:.1f}" y="{ly:.1f}" font-size="10">{ESC(name)}</text>')
     P.append("</svg>")
     return "".join(P)
 
@@ -117,7 +311,7 @@ def svg_bars(counts: list, title: str, x0=0.0, x1=1.0, w=520, h=240, vmark=None)
     cmax = max(counts)
     bw = (w - 2 * pad) / n
     P = [f'<svg width="{w}" height="{h}" style="background:#fff;border:1px solid #ddd">']
-    P.append(f'<text x="{w/2}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
+    P.append(f'<text x="{w/2:.1f}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
     P.append(f'<line x1="{pad}" y1="{h-pad}" x2="{w-pad}" y2="{h-pad}" stroke="#333"/>')
     for i, c in enumerate(counts):
         bh = 0 if cmax == 0 else (c / cmax) * (h - 2 * pad)
@@ -155,32 +349,88 @@ def _heat_color(v, vmin, vmax, reverse=False):
     return f"rgb({r},{g},{b})"
 
 
-def svg_heatmap(matrix, rowlabels, collabels, title, vmin, vmax, reverse=False,
-                cell=15) -> str:
+def centered_vlim(matrix, cap=0.5):
+    """Symmetric-about-1.0 color limits from the actual finite data (bug-fix for the
+    washed-out 0.5..1.5 scale). Returns (vmin, vmax, m) with vmin=1-m, vmax=1+m."""
+    vals = [v for row in matrix for v in row
+            if isinstance(v, (int, float)) and math.isfinite(v)]
+    if not vals:
+        return 0.5, 1.5, 0.5
+    m = min(cap, max(abs(v - 1.0) for v in vals))
+    m = max(m, 0.02)
+    return 1.0 - m, 1.0 + m, m
+
+
+def svg_heatmap(matrix, rowlabels, collabels, vmin, vmax, reverse=False, cell=17,
+                minw=200) -> str:
+    """Bare heatmap SVG (NO title/caption inside — those are HTML, drawn by the caller
+    so they cannot be clipped by a narrow canvas). Column labels tilt up-and-right at
+    9px with top/right padding sized to hold them; rows labelled every 4."""
     if not matrix or not matrix[0]:
-        return f"<p><em>no data for {ESC(title)}</em></p>"
+        return "<p><em>no data</em></p>"
     nr, nc = len(matrix), len(matrix[0])
-    lpad, tpad = 40, 34
-    w = lpad + nc * cell + 8
-    hgt = tpad + nr * cell + 30
+    lpad, fs, charw = 44, 9, 0.62
+    lmax = max((len(str(c)) for c in collabels), default=1) * charw * fs
+    tpad = int(math.ceil(0.866 * lmax)) + 10
+    rpad = int(math.ceil(0.5 * lmax)) + 8
+    w = max(minw, lpad + nc * cell + rpad)
+    hgt = tpad + nr * cell + 10
     P = [f'<svg width="{w}" height="{hgt}" style="background:#fff;border:1px solid #ddd">']
-    P.append(f'<text x="{w/2}" y="14" font-size="12" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
     for j, cl in enumerate(collabels):
-        x = lpad + j * cell + cell / 2
-        P.append(f'<text x="{x:.1f}" y="{tpad-3}" font-size="7" text-anchor="end" '
-                 f'transform="rotate(-60 {x:.1f} {tpad-3})">{ESC(str(cl))}</text>')
+        cx = lpad + j * cell + cell / 2
+        cy = tpad - 4
+        P.append(f'<text x="{cx:.1f}" y="{cy:.1f}" font-size="{fs}" text-anchor="start" '
+                 f'transform="rotate(-60 {cx:.1f} {cy:.1f})">{ESC(str(cl))}</text>')
     for i, row in enumerate(matrix):
         y = tpad + i * cell
         if i % 4 == 0:
-            P.append(f'<text x="{lpad-3}" y="{y+cell-3:.1f}" font-size="8" text-anchor="end">{ESC(str(rowlabels[i]))}</text>')
+            P.append(f'<text x="{lpad-4}" y="{y+cell-4:.1f}" font-size="{fs}" '
+                     f'text-anchor="end">{ESC(str(rowlabels[i]))}</text>')
         for j, v in enumerate(row):
             x = lpad + j * cell
             P.append(f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" '
-                     f'fill="{_heat_color(v, vmin, vmax, reverse)}" stroke="#fff" stroke-width="0.3"/>')
-    P.append(f'<text x="{lpad}" y="{hgt-8}" font-size="9" fill="#888">'
-             f'{ESC(title.split("—")[0])}: {vmin:g}…{vmax:g}</text>')
+                     f'fill="{_heat_color(v, vmin, vmax, reverse)}" stroke="#fff" stroke-width="0.4"/>')
     P.append("</svg>")
     return "".join(P)
+
+
+def svg_colorbar(vmin, vmax, ticks, reverse=False, w=300, h=48) -> str:
+    """Horizontal gradient legend built from solid <rect> stripes (no url()/gradient).
+    Short numeric ticks only; the wordy caption is a sibling HTML element."""
+    pad_l, pad_r, bar_y, bar_h, nst = 8, 8, 10, 16, 120
+    bw = w - pad_l - pad_r
+    P = [f'<svg width="{w}" height="{h}" style="background:#fff">']
+    for i in range(nst):
+        t = i / (nst - 1)
+        v = vmin + t * (vmax - vmin)
+        x = pad_l + t * bw
+        P.append(f'<rect x="{x:.2f}" y="{bar_y}" width="{bw/nst+1.0:.2f}" height="{bar_h}" '
+                 f'fill="{_heat_color(v, vmin, vmax, reverse)}"/>')
+    P.append(f'<rect x="{pad_l}" y="{bar_y}" width="{bw:.1f}" height="{bar_h}" '
+             f'fill="none" stroke="#999" stroke-width="0.6"/>')
+    for k, tv in enumerate(ticks):
+        t = 0.0 if vmax == vmin else (tv - vmin) / (vmax - vmin)
+        t = max(0.0, min(1.0, t))
+        x = pad_l + t * bw
+        P.append(f'<line x1="{x:.1f}" y1="{bar_y+bar_h}" x2="{x:.1f}" y2="{bar_y+bar_h+3}" stroke="#333"/>')
+        anc = "start" if k == 0 else "end" if k == len(ticks) - 1 else "middle"
+        P.append(f'<text x="{x:.1f}" y="{bar_y+bar_h+15}" font-size="9" '
+                 f'text-anchor="{anc}">{tv:g}</text>')
+    P.append("</svg>")
+    return "".join(P)
+
+
+def heatmap_figure(title, matrix, rowlabels, collabels, vmin, vmax, cb_ticks, cb_caption,
+                   reverse=False, caption_html=""):
+    """HTML title + scrollable heatmap SVG + colorbar SVG + colorbar caption + optional
+    how-to-read caption. Title/caption live OUTSIDE the SVG so they never clip."""
+    parts = [f'<div class="figtitle">{ESC(title)}</div>',
+             f'<div class="figscroll">{svg_heatmap(matrix, rowlabels, collabels, vmin, vmax, reverse)}</div>',
+             f'<div class="figscroll">{svg_colorbar(vmin, vmax, cb_ticks, reverse)}</div>',
+             f'<div class="cbcap">{ESC(cb_caption)}</div>']
+    if caption_html:
+        parts.append(caption_html)
+    return "".join(parts)
 
 
 def svg_scatter(points, xlab, ylab, title, w=460, h=320, spearman=None) -> str:
@@ -201,14 +451,14 @@ def svg_scatter(points, xlab, ylab, title, w=460, h=320, spearman=None) -> str:
         return (h - pad) - (0 if y1 == y0 else (y - y0) / (y1 - y0)) * (h - 2 * pad)
 
     P = [f'<svg width="{w}" height="{h}" style="background:#fff;border:1px solid #ddd">']
-    P.append(f'<text x="{w/2}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
+    P.append(f'<text x="{w/2:.1f}" y="15" font-size="13" text-anchor="middle" font-weight="bold">{ESC(title)}</text>')
     P.append(f'<line x1="{pad}" y1="{sy(1.0):.1f}" x2="{w-pad}" y2="{sy(1.0):.1f}" stroke="#bbb" stroke-dasharray="4 3"/>')
     P.append(f'<line x1="{pad}" y1="{pad}" x2="{pad}" y2="{h-pad}" stroke="#333"/>')
     P.append(f'<line x1="{pad}" y1="{h-pad}" x2="{w-pad}" y2="{h-pad}" stroke="#333"/>')
     for x, y, k in pts:
         P.append(f'<circle cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="3" fill="#d62728" opacity="0.7"/>')
-    P.append(f'<text x="{w/2}" y="{h-6}" font-size="11" text-anchor="middle">{ESC(xlab)}</text>')
-    P.append(f'<text x="14" y="{h/2}" font-size="11" text-anchor="middle" transform="rotate(-90 14 {h/2})">{ESC(ylab)}</text>')
+    P.append(f'<text x="{w/2:.1f}" y="{h-6}" font-size="11" text-anchor="middle">{ESC(xlab)}</text>')
+    P.append(f'<text x="14" y="{h/2:.1f}" font-size="11" text-anchor="middle" transform="rotate(-90 14 {h/2:.1f})">{ESC(ylab)}</text>')
     if spearman is not None and math.isfinite(spearman):
         P.append(f'<text x="{w-pad}" y="{pad}" font-size="11" text-anchor="end" fill="#333">Spearman ρ = {spearman:.3f}</text>')
     P.append("</svg>")
@@ -350,17 +600,34 @@ def _table(headers, rows_html):
             + "</tr>" + "".join(rows_html) + "</table>")
 
 
-def render(S, T, out_path):
+def render(S, T, out_path, explainer_path=None):
+    secs = load_explainer(explainer_path)
+    figcaps = parse_figure_caps(secs.get("Reading each figure", []))
+
+    def cap(needle):
+        for k, v in figcaps.items():
+            if needle.lower() in k.lower():
+                return f'<p class="cap">{v}</p>'
+        return ""
+
+    def prose(*titles):
+        return "".join(_md_block(secs[t]) for t in titles if secs.get(t))
+
+    def prose_titled(*titles):
+        out = []
+        for t in titles:
+            if secs.get(t):
+                out.append(f"<h3>{ESC(t)}</h3>" + _md_block(secs[t]))
+        return "".join(out)
+
+    n = [0]
+
+    def H2(title):
+        n[0] += 1
+        return f"<h2>{n[0]} — {ESC(title)}</h2>"
+
     P = ['<meta charset="utf-8"><title>EXP-47 — ANCHOR linear/damped projection lane</title>',
-         '<style>body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:24px;color:#222;max-width:1180px}',
-         'h1{font-size:23px}h2{font-size:17px;margin-top:30px;border-bottom:2px solid #333;padding-bottom:4px}',
-         'h3{font-size:14px;margin-top:18px;color:#444}',
-         'table{border-collapse:collapse;font-size:12px;margin:8px 0}td,th{border:1px solid #ccc;padding:4px 8px;text-align:right}',
-         'th{background:#f5f5f5}td.l,th.l{text-align:left}.mono{font-family:ui-monospace,Menlo,monospace}',
-         '.small{color:#777;font-size:11px}.ok{color:#127a12;font-weight:bold}.bad{color:#c00;font-weight:bold}',
-         '.lead{background:#f0f6ff;border:1px solid #cfe0ff;border-radius:6px;padding:12px 18px;margin:14px 0}',
-         '.side{display:flex;flex-wrap:wrap;gap:14px}.col{flex:1;min-width:420px}',
-         '.verdict{background:#fffbe6;border:1px solid #f0e0a0;border-radius:6px;padding:10px 18px}</style>']
+         '<style>' + CSS + '</style>']
     ref = S or T
     op_s = S["meta"]["operating_point"] if S else None
     op_t = T["meta"]["operating_point"] if T else None
@@ -371,8 +638,16 @@ def render(S, T, out_path):
              f'Metric contract: {ESC(str((ref or {}).get("meta", {}).get("metric_contract", "")))}. '
              f'Ratio &lt; 1 ⇒ projection beats holding the stale weights.</p>')
 
-    # ---- LEAD: per-scalar linearity R² -----------------------------------------
-    P.append("<h2>1 — Per-scalar linearity R² (the MUST metric; Wang et al. 2026)</h2>")
+    # ---- How to read this report (embedded prose) ------------------------------
+    intro = prose_titled("What this analysis is",
+                         "Where Δ comes from: the sliding-window protocol",
+                         "Which parameters were used")
+    if intro:
+        P.append(H2("How to read this report"))
+        P.append('<div class="explain">' + intro + '</div>')
+
+    # ---- LEAD SCIENCE: per-scalar linearity R² ---------------------------------
+    P.append(H2("Per-scalar linearity R² (the MUST metric; Wang et al. 2026)"))
     P.append('<div class="lead">')
     P.append(f'<p>Per-individual-scalar OLS R² of the weight value vs the training-step index '
              f'(constant scalars excluded &amp; counted). Anchors: nearest RL analog '
@@ -389,7 +664,8 @@ def render(S, T, out_path):
                      f'<td class="mono">{_fmt(lr.get("r2_frac_gt_0.7"))}</td>'
                      f'<td class="mono">{_fmt(lr.get("n_excluded_const"),0)}</td></tr>')
     P.append(_table(["regime", "R² median", "Pr(R²>0.7)", "n_excluded_const"], rowsh))
-    # R² histogram + depth×block heatmap + coupling (prefer regime S)
+    P.append('</div>')
+    # R² histogram + coupling scatter
     P.append('<div class="side">')
     if S and S["vis"].get("i_r2_histogram", {}).get("global"):
         g = S["vis"]["i_r2_histogram"]["global"]
@@ -397,22 +673,27 @@ def render(S, T, out_path):
         P.append('<div class="col">' + svg_bars(
             g["counts"], "Per-scalar R² histogram (per-step, global)", 0.0, 1.0,
             vmark=[(lr.get("r2_median"), "median", "#d62728"),
-                   (WANG_RL[0], "RL", "#2ca02c"), (WANG_SFT[0], "SFT", "#ff7f0e")]) + '</div>')
+                   (WANG_RL[0], "RL", "#2ca02c"), (WANG_SFT[0], "SFT", "#ff7f0e")])
+            + cap("histogram") + '</div>')
     if S and S["vis"].get("k_r2_ratio_coupling"):
         cp = S["vis"]["k_r2_ratio_coupling"]
         P.append('<div class="col">' + svg_scatter(
             cp.get("points", []), "group median R²", "OOS-damped ratio @op",
-            "R²-vs-ratio coupling (per-step)", spearman=cp.get("spearman")) + '</div>')
+            "R²-vs-ratio coupling (per-step)", spearman=cp.get("spearman"))
+            + cap("coupling") + '</div>')
     P.append('</div>')
+    # depth×block R² heatmap (colorbar + caption)
     if S and S["vis"].get("j_r2_depth_block_heatmap"):
         hm = S["vis"]["j_r2_depth_block_heatmap"]
-        P.append(svg_heatmap(hm["r2_median"], hm["layers"], hm["block_types"],
-                             "Depth × block per-scalar R² (per-step) — distinct from traj_r2",
-                             0.0, 1.0))
-    P.append('</div>')
+        P.append(heatmap_figure(
+            "Depth × block per-scalar R² (per-step) — distinct from traj_r2",
+            hm["r2_median"], hm["layers"], hm["block_types"], 0.0, 1.0,
+            cb_ticks=[0.0, 0.25, 0.5, 0.75, 1.0],
+            cb_caption="per-scalar R² median · blue = low (less linear) → red = high (more linear)",
+            reverse=False, caption_html=cap("depth")))
 
     # ---- ratio/projection findings, both regimes -------------------------------
-    P.append("<h2>2 — Projection accuracy vs horizon (both regimes)</h2>")
+    P.append(H2("Projection accuracy vs horizon (both regimes)"))
     P.append('<div class="side">')
     if S:
         methods = [m for m in S["meta"]["methods"] if m != "paper_linear"]
@@ -425,16 +706,17 @@ def render(S, T, out_path):
                  % (op_t[0], svg_line(_accuracy_series(T, methods),
                                       "median ratio vs h (ticks)", "horizon h (ticks)")))
     P.append('</div>')
+    P.append(cap("accuracy"))
 
-    P.append("<h2>3 — Δ-sensitivity (extended to Δ=40, per-tick) &amp; λ-selection</h2>")
+    P.append(H2("Δ-sensitivity (extended to Δ=40, per-tick) & λ-selection"))
     P.append('<div class="side">')
     if T:
         methods = [m for m in T["meta"]["methods"] if m != "paper_linear"]
         P.append('<div class="col"><h3>Δ-sensitivity at operating h=%d (per-tick)</h3>%s'
-                 '<p class="small">Δ∈%s — does a wider anchor help past Δ=20?</p></div>'
+                 '<p class="small">Δ∈%s — does a wider anchor help past Δ=20?</p>%s</div>'
                  % (op_t[1], svg_line(_delta_series(T, methods),
                                       "median ratio vs Δ", "Δ (ticks)", xvals=T["meta"]["delta_ticks"]),
-                    T["meta"]["delta_ticks"]))
+                    T["meta"]["delta_ticks"], cap("sensitivity")))
     if S:
         lam = S["vis"].get("h_lambda_selection", {}).get("cells", {})
         key = f"{op_s[0]},{op_s[1]}"
@@ -443,17 +725,22 @@ def render(S, T, out_path):
             ser = {"in-sample ratio": list(zip(cell["lambda"], cell["ratio_median"]))}
             P.append('<div class="col"><h3>λ-selection at (Δ=%d,h=%d), per-step</h3>%s'
                      '<p class="small">in-sample median ratio vs λ (OOS picks per-window on '
-                     'strictly-earlier data). λ=0 ⇒ hold-stale, λ=1 ⇒ naive.</p></div>'
+                     'strictly-earlier data). λ=0 ⇒ hold-stale, λ=1 ⇒ naive.</p>%s</div>'
                      % (op_s[0], op_s[1], svg_line(ser, "ratio vs λ", "λ",
-                                                   xvals=cell["lambda"])))
+                                                   xvals=cell["lambda"]), cap("λ-selection")))
     P.append('</div>')
 
-    # ratio heatmap by layer×block (regime S, damped)
+    # ratio heatmap by layer×block (regime S, damped) — colorbar + caption
     if S and S["vis"].get("e_ratio_heatmap", {}).get("damped_linear"):
         e = S["vis"]["e_ratio_heatmap"]["damped_linear"]
-        P.append("<h3>OOS-damped ratio by layer × block (per-step, at operating point)</h3>")
-        P.append(svg_heatmap(e["ratio_median"], e["layers"], e["block_types"],
-                             "damped ratio (blue<1 good, red>1 harmful)", 0.5, 1.5))
+        vmin, vmax, m = centered_vlim(e["ratio_median"])
+        P.append(heatmap_figure(
+            "OOS-damped ratio by layer × block (per-step, at operating point)",
+            e["ratio_median"], e["layers"], e["block_types"], vmin, vmax,
+            cb_ticks=[round(vmin, 3), round(1.0 - m / 2, 3), 1.0,
+                      round(1.0 + m / 2, 3), round(vmax, 3)],
+            cb_caption="ratio: blue < 1 = projection beats stale · red > 1 = worse than stale",
+            reverse=False, caption_html=cap("h_star")))
 
     # special groups table (regime S)
     if S and S["vis"].get("g_special_groups", {}).get("damped_linear"):
@@ -465,9 +752,10 @@ def render(S, T, out_path):
                          f'<td class="mono">{_fmt(grp.get("r2_median"))}</td>'
                          f'<td class="mono">{_fmt(grp.get("lam_star"))}</td></tr>')
         P.append(_table(["special group", "damped ratio", "R² median", "λ* (med)"], rowsh))
+        P.append(cap("special-groups"))
 
     # ---- paper-protocol equivalence panel (regime S) ---------------------------
-    P.append("<h2>4 — Paper-protocol equivalence panel (Wang et al. §6.2, regime S)</h2>")
+    P.append(H2("Paper-protocol equivalence panel (Wang et al. §6.2, regime S)"))
     if S and "paper_linear" in S["meta"].get("methods", []):
         pd = S["meta"].get("paper_sentinel_delta", 0)
         P.append('<div class="lead"><p><b>The algebra.</b> The paper\'s weight-space extrapolation '
@@ -480,8 +768,6 @@ def render(S, T, out_path):
                  'Baseline differs too: our ratio denominator is hold-stale (comm-substitution — can a '
                  'worker\'s stale copy be beaten by local prediction), NOT more RL training '
                  '(the paper\'s compute-substitution comparator).</p></div>')
-        # matched-(t,h) comparison + beta distribution
-        oh = S["vis"].get("m_paper_equivalence", {}).get("operating_h")
         hs = S["meta"]["h_ticks"]
         rowsh = []
         for h in hs:
@@ -495,16 +781,27 @@ def render(S, T, out_path):
                          f'<td class="mono">{_fmt(prow.get("beta"),2)} '
                          f'[{_fmt(prow.get("beta_min"),2)},{_fmt(prow.get("beta_max"),2)}]</td>'
                          f'<td class="mono">{_fmt(prow.get("n_windows"),0)}</td></tr>')
-        P.append(_table(["h (steps)", "paper ratio", "naive(fixed Δ)", "OOS-damped",
-                         "Δ_resolved", "β [min,max]", "n_win"], rowsh))
+        P.append('<div class="tblwrap">' + _table(
+            ["h (steps)", "paper ratio", "naive(fixed Δ)", "OOS-damped",
+             "Δ_resolved", "β [min,max]", "n_win"], rowsh) + '</div>')
+        P.append(cap("paper-equivalence"))
         P.append('<p class="small">paper_linear is regime-S ONLY (the protocol is checkpoint/per-step-like; '
                  'per-tick is the catastrophic-cancellation regime). Map β onto the paper\'s Fig. 5 '
                  'inverted-U: moderate β helps, excessive β amplifies slope-estimation error.</p>')
     else:
         P.append('<p class="small">paper_linear not present in the per-step table.</p>')
 
+    # ---- what was verified (embedded prose, BEFORE the verdict) -----------------
+    verified = prose("What was verified before trusting these numbers")
+    if verified:
+        P.append(H2("What was verified before trusting these numbers"))
+        P.append('<div class="explain">' + verified + '</div>')
+
     # ---- verdict ---------------------------------------------------------------
-    P.append("<h2>5 — Lane verdict (direction-agnostic)</h2>")
+    P.append(H2("Lane verdict (direction-agnostic)"))
+    findings = prose("The findings in one paragraph")
+    if findings:
+        P.append('<div class="lead">' + findings + '</div>')
     P.append('<div class="verdict"><ul>')
     for line in build_verdict(S, T):
         P.append(f"<li>{line}</li>")
@@ -512,8 +809,17 @@ def render(S, T, out_path):
              'wider Δ never helps; ratio &gt; 1 at long h; low R²) is a VALID finding — the lane '
              'PASSES by producing a correct, schema-verified, machine-readable answer either way.</p></div>')
 
-    # ---- provenance ------------------------------------------------------------
-    P.append("<h2>Provenance</h2>")
+    # ---- glossary (embedded prose) ---------------------------------------------
+    gl = parse_glossary(secs.get("Glossary", []))
+    if gl:
+        P.append(H2("Glossary"))
+        rows = "".join(f'<tr><td class="l t">{t}</td><td class="l d">{d}</td></tr>' for t, d in gl)
+        P.append('<div class="tblwrap"><table class="gloss">'
+                 '<tr><th class="l">term</th><th class="l">definition</th></tr>'
+                 + rows + '</table></div>')
+
+    # ---- provenance (technical footer) -----------------------------------------
+    P.append('<div class="foot"><b>Provenance</b>')
     for reg, tag in ((S, "per-step"), (T, "per-tick")):
         if not reg:
             continue
@@ -522,6 +828,8 @@ def render(S, T, out_path):
                  f'n_ticks={m.get("n_ticks")} band={m.get("band")} n_rows={m.get("n_rows")} '
                  f'lam_grid={len(m.get("lam_grid", []))}pts fingerprint={m.get("stats_cache_fingerprint")} '
                  f'gates={ {k: v.get("pass") for k, v in m.get("gates", {}).items()} }</p>')
+    P.append('</div>')
+
     with open(out_path, "w") as f:
         f.write("".join(P))
     print(f"report written: {out_path} ({os.path.getsize(out_path)} bytes)", flush=True)
@@ -532,12 +840,16 @@ def main():
     ap.add_argument("--perstep", default="", help="regime S scorecard dir")
     ap.add_argument("--pertick", default="", help="regime T scorecard dir")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--explainer", default="",
+                    help="report_explainer.md (default: sibling of --out); prose degrades if absent")
     args = ap.parse_args()
     S = _load(args.perstep)
     T = _load(args.pertick)
     if not S and not T:
         raise SystemExit("need at least one of --perstep / --pertick")
-    render(S, T, args.out)
+    explainer = args.explainer or os.path.join(os.path.dirname(os.path.abspath(args.out)),
+                                               "report_explainer.md")
+    render(S, T, args.out, explainer)
 
 
 if __name__ == "__main__":
