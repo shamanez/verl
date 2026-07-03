@@ -271,6 +271,27 @@ def hold_stale_pred(anchor_pos: int) -> dict[int, float]:
     return {anchor_pos: 1.0}
 
 
+def rank_anchored_pred(fit: RankRFit, target_tick: int) -> dict[int, float]:
+    """Anchor-pinned rank-r slope replay: θ̂ = θ_anchor + Σ_j a_j·(T − t_a)·v_j.
+
+    The staleness-fair member of the family: POSITION comes from the anchor
+    exactly (h→0 ⇒ θ̂ → θ_anchor, like the raw-space arms), while DIRECTION and
+    VELOCITY come from the denoised rank-r trajectory fit (v_j from the window
+    SVD, a_j from the least-squares coefficient slope). Unlike rank{r}_traj it
+    never pays the off-subspace residual of the accumulated base delta, so it
+    isolates the value of the SVD direction/speed estimate for short-horizon
+    staleness compensation — the regime the comm-eff anchor design lives in.
+    """
+    dt = float(target_tick - fit.anchor_tick)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.where(fit.valid & (fit.sigma > 0.0),
+                         fit.slope * dt / fit.sigma, 0.0)
+    gamma = fit.U @ scale
+    d = {p: float(g) for p, g in zip(fit.window_pos, gamma)}
+    d[fit.anchor_pos] = d.get(fit.anchor_pos, 0.0) + 1.0
+    return d
+
+
 def two_anchor_pred(anchor_pos: int, anchor_tick: int, prev_pos: int,
                     prev_tick: int, target_tick: int) -> dict[int, float]:
     """Raw-space two-point linear extrapolation (Paper A's Weight Extrapolation):

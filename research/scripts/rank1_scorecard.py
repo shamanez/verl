@@ -226,24 +226,35 @@ def matrix_cells(D: np.ndarray, plan: R1.TickPlan, base_tick: int,
                        "e2": e2, "b2": b2, "eb": eb}
                 for r in rank_grid:
                     fit = fits[r]
-                    pred = R1.rank1_pred(fit, target)
-                    e2, b2, eb = R1.family_moments(B, pred, a_pos, t_pos)
                     used = int(fit.valid.sum())
-                    yield {"method": f"rank{r}_traj", "rank": r,
-                           "window_spec": wspec, "window": w, "window_span": span,
-                           "anchor_tick": anchor, "h_ticks": h,
-                           "target_tick": target,
-                           "e2": e2, "b2": b2, "eb": eb,
-                           "sigma1": float(fit.sigma[0]),
-                           "evr1": float(fit.evr[0]),
-                           "evr_sum_r": float(np.nansum(fit.evr[:used])) if used
-                           else float("nan"),
-                           "coef_r2_1": float(fit.coef_r2[0]),
-                           "coef_r2_min": (float(np.nanmin(fit.coef_r2[:used]))
-                                           if used else float("nan")),
-                           "slope1": float(fit.slope[0]),
-                           "intercept1": float(fit.intercept[0]),
-                           "n_comp_valid": used}
+                    # off-subspace share of the ACCUMULATED base delta at the
+                    # anchor: the constant absolute residual rank{r}_traj pays
+                    # at every horizon (and rank{r}_anchored never does)
+                    baa = float(B[a_pos, a_pos])
+                    con = float((fit.coef[-1, :][fit.valid] ** 2).sum())
+                    off_frac = (math.sqrt(max(baa - con, 0.0) / baa)
+                                if baa > 0 else float("nan"))
+                    diag = {"sigma1": float(fit.sigma[0]),
+                            "evr1": float(fit.evr[0]),
+                            "evr_sum_r": float(np.nansum(fit.evr[:used])) if used
+                            else float("nan"),
+                            "coef_r2_1": float(fit.coef_r2[0]),
+                            "coef_r2_min": (float(np.nanmin(fit.coef_r2[:used]))
+                                            if used else float("nan")),
+                            "slope1": float(fit.slope[0]),
+                            "intercept1": float(fit.intercept[0]),
+                            "n_comp_valid": used,
+                            "anchor_offline_frac": off_frac}
+                    for method, pred in (
+                            (f"rank{r}_traj", R1.rank1_pred(fit, target)),
+                            (f"rank{r}_anchored",
+                             R1.rank_anchored_pred(fit, target))):
+                        e2, b2, eb = R1.family_moments(B, pred, a_pos, t_pos)
+                        yield {"method": method, "rank": r,
+                               "window_spec": wspec, "window": w,
+                               "window_span": span, "anchor_tick": anchor,
+                               "h_ticks": h, "target_tick": target,
+                               "e2": e2, "b2": b2, "eb": eb, **diag}
 
 
 def cell_metrics(cell: dict) -> dict:
@@ -597,6 +608,39 @@ def run_selftest() -> int:
           r1["weight_proj_ratio"] < 0.5, f"ratio={r1['weight_proj_ratio']:.4f}")
     check("T2 noisy: coef R2 still high", r1["coef_r2_1"] > 0.9,
           f"r2={r1['coef_r2_1']:.4f}")
+
+    # ---- T7: anchor-pinned variant (rank1_anchored) ---------------------------
+    # Two noise regimes with OPPOSITE winners (this is the key design fact):
+    #   iid positional noise (T2's thetas2)  -> base-form denoises the anchor
+    #     position too, so rank1_traj can win at small h;
+    #   INTEGRATED random-walk noise (real optimizer traces look like this) ->
+    #     off-line displacement is persistent state carried by the future
+    #     truth as well, so discarding it makes rank1_traj pay a constant
+    #     absolute residual at every h while rank1_anchored never does.
+    _, cells1a = _cells_for(thetas, n_ticks, 0, [40], ["8"], [5, 19], 1, [1])
+    ca = _get(cells1a, "rank1_anchored", 19)
+    check("T7 exact-linear: rank1_anchored ratio ~ 0",
+          ca["weight_proj_ratio"] <= 1e-6, f"ratio={ca['weight_proj_ratio']:.2e}")
+    walk7 = np.cumsum(0.003 * rng.standard_normal((n_ticks, d)), axis=0)
+    thetas7 = {t: theta0 + (0.02 * t) * v1 + walk7[t] for t in range(n_ticks)}
+    _, cells7 = _cells_for(thetas7, n_ticks, 0, [40], ["24"], [1, 19], 1, [1])
+    a1 = _get(cells7, "rank1_anchored", 1)
+    t1 = _get(cells7, "rank1_traj", 1)
+    a19 = _get(cells7, "rank1_anchored", 19)
+    t19 = _get(cells7, "rank1_traj", 19)
+    n19 = _get(cells7, "naive_last2", 19)
+    check("T7 walk-noise: base-form blows up at h=1 (the real-trace mechanism)",
+          t1["weight_proj_ratio"] > 1.0, f"traj={t1['weight_proj_ratio']:.3f}")
+    check("T7 walk-noise: anchoring fixes it (h=1)",
+          a1["weight_proj_ratio"] < 1.0 and
+          a1["weight_proj_ratio"] < t1["weight_proj_ratio"],
+          f"anchored={a1['weight_proj_ratio']:.3f} traj={t1['weight_proj_ratio']:.3f}")
+    check("T7 walk-noise: anchored beats base-form at h=19",
+          a19["weight_proj_ratio"] < t19["weight_proj_ratio"],
+          f"anchored={a19['weight_proj_ratio']:.3f} traj={t19['weight_proj_ratio']:.3f}")
+    check("T7 walk-noise: anchored beats naive_last2 at h=19",
+          a19["weight_proj_ratio"] < n19["weight_proj_ratio"],
+          f"anchored={a19['weight_proj_ratio']:.3f} naive={n19['weight_proj_ratio']:.3f}")
 
     # ---- T3: curved (rotating-direction) trajectory -> graceful degradation --
     thetas3 = {t: theta0 + (0.02 * t) * (math.cos(0.03 * t) * v1
