@@ -22,8 +22,9 @@ DEFAULT_HANDLE_DIR="${VERL_VAST_HANDLE_DIR:-$PROJECT_DIR/.claude/state/vast-hand
 # ---- defaults --------------------------------------------------------------
 # Tuned for agent-self-sufficient invocation (Claude /vast-provision with no
 # explicit budget): safe per-instance cost, modest disk, generous wait for the
-# verlai image pull + onstart script. Production plans (8×H100, etc.) pass
-# explicit overrides — see the per-experiment plan in .claude/plans/<N>.md.
+# verlai image pull + onstart script. Larger multi-GPU plans (legacy 4×H200 /
+# 8×H100 shapes, explicit operator request only) pass explicit overrides — see
+# the per-experiment plan in .claude/plans/<N>.md.
 COUNT=1
 QUERY=""
 IMAGE=""

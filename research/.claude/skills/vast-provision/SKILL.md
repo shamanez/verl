@@ -449,7 +449,7 @@ vastai update template <old-hash> \
   --env '--shm-size=10g --cap-add=SYS_ADMIN -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false -e RAY_DISABLE_USAGE_STATS=1' \
   --onstart-cmd "$(cat onstart.verl-vllm020.sh)" \
   --ssh --direct --disk_space 200 \
-  --search_params 'verified=true rentable=true external=false num_gpus>=1 cuda_max_good>=13.0 reliability>=0.97' \
+  --search_params 'verified=true rentable=true external=false num_gpus>=1 cuda_max_good>=13.0 reliability>0.99' \
   --desc 'shamanez/verl@vast-ai-workload on verlai/verl:vllm020.dev1 ...'
 
 # safer: create a new template and delete the old one
