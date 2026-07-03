@@ -411,6 +411,12 @@ class CommEffState:
         # exactly one of the two, so fires+fallbacks == anchor fires.
         self.lookahead_fires = 0
         self.lookahead_warmup_fallbacks = 0
+        # E2 (warmup_mode=no_correct): fires SKIPPED before the projector is
+        # ready — the anchor pass (clone fwd/bwd + M update) is not run, so M
+        # stays cold and the merger passes fast grads through unchanged. Stays 0
+        # in the default stale_correct mode. On the earliest-legal (min_snaps=2)
+        # arm this increments exactly once (fire 1), then the projector engages.
+        self.warmup_no_correct_skips = 0
         # Geometry probe. All None / 0 unless probe.geometry_enabled
         # (off-path parity: the OFF path builds no ring, no buffer, no stash).
         #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
@@ -998,6 +1004,8 @@ class CommEffState:
             # (both 0 unless anchor.lookahead_anchor is active).
             "comm_eff/lookahead_fires": self.lookahead_fires,
             "comm_eff/lookahead_warmup_fallbacks": self.lookahead_warmup_fallbacks,
+            # E2 warmup skips (0 unless warmup_mode=no_correct).
+            "comm_eff/warmup_no_correct_skips": self.warmup_no_correct_skips,
             # Cumulative geometry-probe fires with a complete
             # m1–m7 record written (0 unless probe.geometry_enabled).
             "comm_eff/geometry_probe_fires": self.geometry_probe_fires,

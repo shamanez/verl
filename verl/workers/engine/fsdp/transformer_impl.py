@@ -1337,6 +1337,7 @@ class FSDPEngine(BaseEngine):
             cross_rank_max_rel_dev,
             lookahead_enabled,
             lookahead_learns,
+            lookahead_min_points,
             lookahead_num_source_points,
             resolve_lookahead_rollout_source,
         )
@@ -1592,6 +1593,7 @@ class FSDPEngine(BaseEngine):
                 la_ring = LookaheadSnapshotRing(
                     n_points=lookahead_num_source_points(anchor_cfg),
                     keep_theta_hat=lookahead_learns(anchor_cfg),
+                    min_points=lookahead_min_points(anchor_cfg),
                 )
                 state._lookahead_ring = la_ring
                 state._lookahead_projector = LookaheadProjector(anchor_cfg, target_substrs)
@@ -1654,6 +1656,23 @@ class FSDPEngine(BaseEngine):
                     f"ring_peak={la_ring.peak_retained}",
                     flush=True,
                 )
+            elif str(getattr(anchor_cfg, "warmup_mode", "stale_correct")) == "no_correct":
+                # E2: the projector is not ready yet. In no_correct mode do NOT
+                # compute a stale-theta correction — all pushes/bookkeeping above
+                # (replay ring, la_ring, canary) already ran, so just SKIP the
+                # clone load / fwd / bwd / M update entirely and RETURN. M stays
+                # cold, so the merger's cold-M guard passes the fast gradient
+                # through UNCHANGED (no correction) until the first projected fire.
+                # Returning here is clean: mask_active / path_tag are only touched
+                # BELOW this block, so nothing needs restoring.
+                state.warmup_no_correct_skips = int(getattr(state, "warmup_no_correct_skips", 0)) + 1
+                print(
+                    f"[comm_eff][lookahead] step={step} WARMUP no_correct -> anchor pass SKIPPED "
+                    f"(M untouched) (ring has {len(la_ring.ticks)}/{la_ring.min_points} sources "
+                    f"required, n_points={la_ring.n_points})",
+                    flush=True,
+                )
+                return
             else:
                 state.lookahead_warmup_fallbacks = int(getattr(state, "lookahead_warmup_fallbacks", 0)) + 1
                 print(

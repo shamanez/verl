@@ -92,6 +92,7 @@ __all__ = [
     "FIXED_LINEAR_COEFFS",
     "lookahead_enabled",
     "lookahead_num_source_points",
+    "lookahead_min_points",
     "lookahead_learns",
     "resolve_lookahead_rollout_source",
     "is_lookahead_target",
@@ -187,6 +188,27 @@ def lookahead_num_source_points(anchor_cfg) -> int:
     if not lookahead_enabled(anchor_cfg):
         return 0
     return 3 if lookahead_learns(anchor_cfg) else 2
+
+
+def lookahead_min_points(anchor_cfg) -> int:
+    """Ring snapshots required before the projector engages (E3).
+
+    Reads ``anchor.lookahead_min_snapshots``: ``-1`` (default) ⇒ the mode's full
+    source count :func:`lookahead_num_source_points` (2 fixed / 3 learned) —
+    today's behavior. A concrete value (config-validated to ``[2, n_points]``)
+    lets the projector engage at the earliest mathematically-legal fire (2 = fire
+    2). This is the SINGLE readiness threshold the ring keys :meth:`ready` on, so
+    the no_correct skip gate and the projected-vs-fallback decision share it (a
+    second hardcoded ``n_points`` check would silently extend the skip window).
+    Returns 0 when look-ahead is disabled.
+    """
+    n = lookahead_num_source_points(anchor_cfg)
+    if n == 0:
+        return 0
+    raw = int(getattr(anchor_cfg, "lookahead_min_snapshots", -1))
+    if raw == -1:
+        return n
+    return raw
 
 
 def lookahead_strength(anchor_cfg) -> float:
@@ -335,9 +357,17 @@ class LookaheadSnapshotRing:
     Pure container: no collectives, no RNG, CPU-testable.
     """
 
-    def __init__(self, n_points: int, keep_theta_hat: bool = False):
+    def __init__(self, n_points: int, keep_theta_hat: bool = False, min_points: Optional[int] = None):
         assert n_points >= 2, f"look-ahead ring needs >= 2 source points, got {n_points}"
         self.n_points = int(n_points)
+        # Readiness threshold (E3). Defaults to n_points (today's behavior);
+        # a smaller min_points lets :meth:`ready` engage the projector at the
+        # earliest legal fire while retention still keeps n_points (the learned
+        # residual's 3rd point arrives later). Must be in [2, n_points].
+        self.min_points = int(min_points) if min_points is not None else self.n_points
+        assert 2 <= self.min_points <= self.n_points, (
+            f"look-ahead ring min_points must be in [2, n_points={self.n_points}]; got {self.min_points}"
+        )
         self.keep_theta_hat = bool(keep_theta_hat)
         # OrderedDict[true_tick -> snapshot dict]; insertion order == tick order.
         self._snaps: OrderedDict[int, dict] = OrderedDict()
@@ -369,8 +399,14 @@ class LookaheadSnapshotRing:
         )
 
     def ready(self) -> bool:
-        """True iff enough source snapshots are retained to extrapolate."""
-        return len(self._snaps) >= self.n_points
+        """True iff enough source snapshots are retained to extrapolate.
+
+        Keys on ``min_points`` (not ``n_points``) so the projector can engage at
+        the earliest legal fire when ``lookahead_min_snapshots`` relaxes it. This
+        is the SINGLE readiness gate — the engine's no_correct skip and the
+        projected-vs-fallback branch both derive from it.
+        """
+        return len(self._snaps) >= self.min_points
 
     def sources(self):
         """Return ``[S0, S1, (S2)]`` NEWEST-first with their TRUE ticks.
@@ -379,12 +415,16 @@ class LookaheadSnapshotRing:
         (``theta[t-K]``), ``snaps[1]`` the next (``theta[t-K-cadence]``), etc.,
         and ``ticks`` the matching TRUE snapshot ticks (newest-first) — exactly
         the inputs :meth:`LookaheadProjector.project` needs to compute the real
-        horizon. Returns ``(None, None)`` until :meth:`ready`.
+        horizon. Returns ``(None, None)`` until :meth:`ready`. Returns the
+        ``min(len, n_points)`` newest — when readiness is relaxed to
+        ``min_points`` the ring may hold only 2 of a learned mode's 3 points at
+        the first projected fire; ``compute_theta_hat`` handles ``s2=None`` (the
+        seed's ``a3=0``), so a 2-source projection is legal.
         """
         if not self.ready():
             return None, None
         items = list(self._snaps.items())  # oldest-first
-        items = items[-self.n_points :]  # the n_points newest
+        items = items[-self.n_points :]  # the n_points newest (clamps to len)
         items.reverse()  # newest-first
         ticks = [int(t) for t, _s in items]
         snaps = [s for _t, s in items]

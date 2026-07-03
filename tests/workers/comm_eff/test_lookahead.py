@@ -182,6 +182,60 @@ def test_ring_true_tick_keying_bound_and_sources():
     assert ring.ticks == [20, 30] and float(ring.get(30)["w"]) == 31.0
 
 
+def test_lookahead_min_points_helper():
+    """lookahead_min_snapshots resolution: -1 -> mode n_points; concrete pass-through; disabled -> 0."""
+    # Learned mode: n_points=3; default (-1) -> 3; explicit 2 -> 2.
+    learned = _cfg(mode="learned_linear_with_fixed_linear_cold_start")
+    assert _la.lookahead_num_source_points(learned) == 3
+    assert _la.lookahead_min_points(learned) == 3  # min_snapshots defaults to -1
+    learned.lookahead_min_snapshots = 2
+    assert _la.lookahead_min_points(learned) == 2
+    # Fixed mode: n_points=2; default -> 2.
+    fixed = _cfg(mode="fixed_linear")
+    assert _la.lookahead_min_points(fixed) == 2
+    # Disabled -> 0 regardless of the knob.
+    off = _cfg(enabled=False)
+    off.lookahead_min_snapshots = 2
+    assert _la.lookahead_min_points(off) == 0
+
+
+def test_ring_min_points_ready_early_but_retains_full():
+    """min_points relaxes readiness (project at fire 2) while retention stays n_points.
+
+    Learned mode: n_points=3, min_points=2. ready() at 2 snapshots; sources()
+    then returns the 2 newest (compute_theta_hat handles s2=None); once a 3rd
+    arrives, retention is still bounded at 3 and sources() returns all 3.
+    """
+    ring = _la.LookaheadSnapshotRing(n_points=3, keep_theta_hat=True, min_points=2)
+    assert not ring.ready()  # 0 of 2
+    ring.push(0, {"w": torch.tensor(0.0)})
+    assert not ring.ready()  # 1 of 2
+    ring.push(20, {"w": torch.tensor(20.0)})
+    assert ring.ready()  # 2 of 2 -> the earliest legal (fire 2) projection
+    snaps, ticks = ring.sources()
+    assert ticks == [20, 0] and len(snaps) == 2  # 2 sources legal (s2=None)
+    ring.push(40, {"w": torch.tensor(40.0)})  # 3rd point; retention bound = n_points=3
+    assert ring.ticks == [0, 20, 40]
+    snaps, ticks = ring.sources()
+    assert ticks == [40, 20, 0] and len(snaps) == 3
+    ring.push(60, {"w": torch.tensor(60.0)})  # evicts oldest -> still bounded at 3
+    assert ring.ticks == [20, 40, 60]
+
+
+def test_ring_min_points_bounds_asserted():
+    """min_points must be in [2, n_points]."""
+    with pytest.raises(AssertionError):
+        _la.LookaheadSnapshotRing(n_points=3, min_points=1)
+    with pytest.raises(AssertionError):
+        _la.LookaheadSnapshotRing(n_points=2, min_points=3)
+    # Default (min_points=None) reproduces n_points readiness exactly.
+    ring = _la.LookaheadSnapshotRing(n_points=3)
+    assert ring.min_points == 3
+    ring.push(0, {"w": torch.tensor(0.0)})
+    ring.push(20, {"w": torch.tensor(20.0)})
+    assert not ring.ready()  # 2 of 3 -> NOT ready under the default threshold
+
+
 def test_ring_keeps_prev_theta_hat_only_when_asked():
     ring = _la.LookaheadSnapshotRing(n_points=2, keep_theta_hat=False)
     ring.set_prev_theta_hat(40, {"w": torch.tensor(0.0)})
