@@ -403,6 +403,14 @@ class CommEffState:
         # 0 unless anchor.replay_paired_batch=true; post-warmup it advances once
         # per anchor fire, so the probe can prove every fire went through replay.
         self.anchor_replay_fires = 0
+        # Look-ahead (weight-projection) anchor counters. Both stay 0 unless
+        # anchor.lookahead_anchor is active: `lookahead_fires` counts fires that
+        # loaded a projected theta_hat into the clone; `lookahead_warmup_fallbacks`
+        # counts fires that fell back to the raw stale snapshot because the
+        # source ring was not yet warm. Post-warmup every fire increments
+        # exactly one of the two, so fires+fallbacks == anchor fires.
+        self.lookahead_fires = 0
+        self.lookahead_warmup_fallbacks = 0
         # Geometry probe. All None / 0 unless probe.geometry_enabled
         # (off-path parity: the OFF path builds no ring, no buffer, no stash).
         #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
@@ -986,6 +994,10 @@ class CommEffState:
             # Cumulative paired-replay anchor fires (0 unless
             # anchor.replay_paired_batch=true).
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
+            # Look-ahead (weight-projection) anchor fires vs warmup fallbacks
+            # (both 0 unless anchor.lookahead_anchor is active).
+            "comm_eff/lookahead_fires": self.lookahead_fires,
+            "comm_eff/lookahead_warmup_fallbacks": self.lookahead_warmup_fallbacks,
             # Cumulative geometry-probe fires with a complete
             # m1–m7 record written (0 unless probe.geometry_enabled).
             "comm_eff/geometry_probe_fires": self.geometry_probe_fires,

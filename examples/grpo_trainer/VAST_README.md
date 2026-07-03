@@ -6,6 +6,34 @@ for vast.ai-specific GRPO smoke + research launchers. Upstream
 mainline mergeable with upstream by isolating fork-specific scripts to
 this branch and to the `vast_*` naming convention.
 
+## Two ways to make a box runnable
+
+**Method 1 — locked template (clean, the default).** Provision with the
+`verl-research-vllm020` template (registry:
+`research/.claude/skills/vast-provision/templates.json`): its docker image
+ships torch+vLLM and the onstart script installs verl + HF/WandB auth. Then
+just run the launcher.
+
+**Method 2 — bare box (operator-provided instance, no verl image).** Proven
+2026-07-03 on a 1×H200 (Ubuntu 24.04, CUDA 12.6 driver). System python3.12 is
+fine. Steps: (1) rsync the **laptop checkout** to `/root/verl` (private repo —
+no git creds on the box): exclude `.git`, `research/`, `__pycache__`,
+`.claude`. (2) Install the FSDP+vLLM subset of
+`scripts/install_vllm_sglang_mcore.sh` (`USE_MEGATRON=0`, skip sglang/apex):
+`vllm==0.11.0` (supported range `>=0.8.5,<=0.12.0`; pulls torch 2.8 **cu126**,
+required on CUDA-12.6-driver boxes where the template's cu130 stack cannot
+run), the script's basic-packages list, the prebuilt flash-attn 2.8.1
+`cu12torch2.8…cp312` wheel, then `pip install --no-deps -e /root/verl`.
+(3) Create `~/.config/verl-research/secrets.env` (ONLY the HF_TOKEN +
+WANDB_API_KEY lines, `chmod 600`). (4) Run the same launchers.
+Gotchas: Vast WAN is often ~100 KB/s to pypi/github → pip hangs on
+"Downloading…" with no error; download wheels on the laptop
+(`pip download --platform manylinux2014_x86_64 --python-version 312
+--only-binary=:all:`) and rsync them over, then install
+`--no-index --find-links`. Run installs inside tmux with a logfile and poll by
+ssh. `pkill -f "pip install"` over ssh kills your own shell — use
+`pkill -f "pip [i]nstall"`.
+
 ## Convention
 
 Filename: `vast_<scenario>_<model>_<algo>_<dataset>.sh`. Examples:

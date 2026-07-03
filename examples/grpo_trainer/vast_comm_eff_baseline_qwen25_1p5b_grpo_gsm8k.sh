@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
 #
-# COMMUNICATION-EFFICIENT GRPO — Qwen2.5-1.5B-Instruct on GSM8K, multi-GPU
-# (4..8), FSDP + vLLM rollout. Mirrors the dense baseline launcher
+# COMMUNICATION-EFFICIENT GRPO — Qwen2.5-1.5B-Instruct on GSM8K, 1..8 GPUs
+# (default box: 1×H200 per project.yaml `default_compute`; legacy 4..8 shapes
+# on explicit operator request), FSDP + vLLM rollout. Mirrors the dense baseline launcher
 # (vast_baseline_qwen25_1p5b_grpo_gsm8k.sh) one-for-one in training shape so
 # the two compare apples-to-apples; the ONLY differences are the
 # communication-efficient method's hydra knobs and the no-KL / no-entropy
@@ -48,9 +49,11 @@
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: multi-GPU only (4..8). The anchor allocates a ~3 GB
+# Hardware: 1..8 GPUs; default box 1×H200 (project ladder — project.yaml
+# `default_compute`). The anchor allocates a ~3 GB
 # no-hook clone/rank for its stale forward-backward, so the default actor token
-# budget is already halved (PPO_MAX_TOKEN_LEN_PER_GPU=18432) to fit 4×H200; this
+# budget is already halved (PPO_MAX_TOKEN_LEN_PER_GPU=18432, sized to fit the
+# legacy 4×H200 shape and comfortable on 1×H200 at resp=1024); this
 # is the default memory posture. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
 # a reference-only ablation) frees the clone and you can raise it back to 36864.
 #
@@ -99,20 +102,19 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — 1..8.
-#    The default research mandate is multi-GPU (4..8). The weight-trajectory
-#    collection study is an operator-AUTHORIZED single-GPU exception
-#    (2026-06-29): the weight-trajectory
-#    geometry is invariant to GPU count when the global batch is held fixed (DP
-#    degree changes only the reduction order, not the trajectory), and the
-#    16K-context rationale behind the multi-GPU rule is defused by resp=1024. Set
-#    ALLOW_SINGLE_GPU=1 to permit 1..3 GPUs (single-GPU collection); otherwise the
-#    4..8 mandate stands.
+# 2. GPU count — 1..8 (default 1, matching the 1×H200 default box).
+#    Since 2026-07-03 single-GPU is the DEFAULT (proven on 1×H200 for both the
+#    GSM8K fast surface and Big-Math @ resp 4096; DP degree changes only the
+#    reduction order at fixed global batch, and the 16K-context rationale
+#    behind the old 4..8 mandate is defused by resp<=4096 surfaces). The legacy
+#    4×H200 / 8×H100 shapes remain supported for explicit operator request.
+#    ALLOW_SINGLE_GPU is accepted for back-compat but no longer required;
+#    REQUIRE_MULTI_GPU=1 restores the legacy 4..8 hard gate.
 # ---------------------------------------------------------------------------
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
-GPU_MIN=4
-if [[ "${ALLOW_SINGLE_GPU:-0}" == "1" ]]; then
-  GPU_MIN=1
+GPU_MIN=1
+if [[ "${REQUIRE_MULTI_GPU:-0}" == "1" ]]; then
+  GPU_MIN=4
 fi
 if (( DETECTED_GPUS < GPU_MIN || DETECTED_GPUS > 8 )); then
   echo "FATAL: this recipe requires ${GPU_MIN}..8 GPUs; detected $DETECTED_GPUS" >&2

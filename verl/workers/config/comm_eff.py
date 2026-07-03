@@ -130,6 +130,36 @@ class CommEffAnchorConfig(BaseConfig):
             casts back via ``.to(p.device, p.dtype)``, a byte-preserving round
             trip — numerics-neutral). Applies to BOTH the staleness
             queue and the paired replay ring. Validated against {gpu, cpu}.
+        lookahead_anchor (bool): Master flag for the look-ahead (weight-
+            projection) anchor — M4. When active (this flag AND a
+            non-``disabled`` ``lookahead_mode``), the anchor backward runs from
+            a linearly extrapolated weight point ``theta_hat[t]`` instead of the
+            raw ``delay_K``-stale snapshot. ``false`` (default) is a strict
+            no-op: no snapshot ring, no projector, no extra logs — byte-
+            identical to today. See ``verl/workers/comm_eff/lookahead.py``.
+        lookahead_mode (str): ``"disabled"`` (default) | ``"fixed_linear"``
+            (frozen AsyncPP seed: pure linear extrapolation over the recorded
+            snapshot ticks) | ``"learned_linear_with_fixed_linear_cold_start"``
+            (same seed plus a small per-block residual trained ONLY from
+            retrospective prediction errors — the no-peek invariant). A stray
+            ``lookahead_anchor=true`` with ``lookahead_mode=disabled`` (or
+            vice-versa) is inert by design.
+        lookahead_strength (float): Projection horizon multiplier ``alpha``.
+            ``1.0`` (default) projects the full realized horizon (catch-up to
+            the current tick); ``<1`` projects a shorter horizon; ``0`` degrades
+            to the raw stale weights. Must be ``>= 0``.
+        lookahead_rollout_source (str): Which rollouts the anchor consumes when
+            the look-ahead projector is on. ``"auto"`` (default) resolves to
+            ``"current_step"`` when the projector is active and to
+            ``"stale_paired"`` otherwise — so matching rollouts are THE DEFAULT
+            whenever weight projection is ON and the knob has zero effect when
+            it is OFF. ``"stale_paired"`` = today's exact behavior (the replayed
+            ``t-delay_K`` batch in replay mode). ``"current_step"`` = the anchor
+            consumes the CURRENT tick's batch — the step-``t`` rollouts that the
+            projected ``theta_hat[t]`` corresponds to; requires the projector ON
+            (stale-weights + fresh-rollouts is an unsupported ablation).
+            ``"self_generate"`` is a RESERVED seam (the anchor generating its
+            own rollouts) and is rejected as not implemented.
     """
 
     enabled: bool = False
@@ -138,6 +168,10 @@ class CommEffAnchorConfig(BaseConfig):
     owns_q: bool = False
     replay_paired_batch: bool = False
     snapshot_device: str = "gpu"
+    lookahead_anchor: bool = False
+    lookahead_mode: str = "disabled"
+    lookahead_strength: float = 1.0
+    lookahead_rollout_source: str = "auto"
 
 
 @dataclass
@@ -856,6 +890,49 @@ class CommEffConfig(BaseConfig):
         if self.anchor.snapshot_device not in ("gpu", "cpu"):
             raise ValueError(
                 f"comm_eff.anchor.snapshot_device must be one of (gpu, cpu); got {self.anchor.snapshot_device!r}"
+            )
+        # Look-ahead (weight-projection) anchor knobs. The mode / rollout-source
+        # whitelists live in verl.workers.comm_eff.lookahead (single source of
+        # truth); imported lazily here — validation only, no allocation, no RNG,
+        # so the enabled=false path keeps zero numerical side effects.
+        from verl.workers.comm_eff.lookahead import (
+            LOOKAHEAD_MODES,
+            LOOKAHEAD_ROLLOUT_SOURCES,
+            lookahead_enabled,
+        )
+
+        if not isinstance(self.anchor.lookahead_anchor, bool):
+            raise ValueError(
+                f"comm_eff.anchor.lookahead_anchor must be a bool; got "
+                f"{type(self.anchor.lookahead_anchor).__name__} ({self.anchor.lookahead_anchor!r})"
+            )
+        if self.anchor.lookahead_mode not in LOOKAHEAD_MODES:
+            raise ValueError(
+                f"comm_eff.anchor.lookahead_mode must be one of {LOOKAHEAD_MODES}; "
+                f"got {self.anchor.lookahead_mode!r}"
+            )
+        if not float(self.anchor.lookahead_strength) >= 0.0:
+            raise ValueError(
+                f"comm_eff.anchor.lookahead_strength must be >= 0 (0 = raw stale weights, "
+                f"1 = full catch-up to the current tick); got {self.anchor.lookahead_strength}"
+            )
+        if self.anchor.lookahead_rollout_source not in LOOKAHEAD_ROLLOUT_SOURCES:
+            raise ValueError(
+                f"comm_eff.anchor.lookahead_rollout_source must be one of "
+                f"{LOOKAHEAD_ROLLOUT_SOURCES}; got {self.anchor.lookahead_rollout_source!r}"
+            )
+        if self.anchor.lookahead_rollout_source == "self_generate":
+            raise ValueError(
+                "comm_eff.anchor.lookahead_rollout_source='self_generate' is a RESERVED "
+                "seam (the anchor generating its own rollouts) and is NOT implemented. "
+                "Use 'auto', 'stale_paired', or 'current_step'."
+            )
+        if self.anchor.lookahead_rollout_source == "current_step" and not lookahead_enabled(self.anchor):
+            raise ValueError(
+                "comm_eff.anchor.lookahead_rollout_source='current_step' requires the "
+                "look-ahead projector ON (lookahead_anchor=true AND lookahead_mode != "
+                "'disabled'): stale weights + fresh rollouts is an unsupported ablation. "
+                "Leave it 'auto' to get current_step automatically whenever the projector is on."
             )
         # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):

@@ -83,6 +83,7 @@ clone_batch_for_replay = _anchor.clone_batch_for_replay
 maybe_build_replay_ring = _anchor.maybe_build_replay_ring
 snapshot_canary = _anchor.snapshot_canary
 verify_canary_on_module = _anchor.verify_canary_on_module
+verify_canary_on_snapshot = _anchor.verify_canary_on_snapshot
 snapshot_named_params = _anchor.snapshot_named_params
 
 
@@ -377,6 +378,34 @@ def test_canary_target_choice_is_deterministic():
     c2 = snapshot_canary(snap, target_substrs=("q_proj", "o_proj"))
     assert list(c1.keys()) == list(c2.keys()) == sorted(c1.keys())
     assert c1 == c2
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_canary_verifies_on_snapshot_dict(dtype):
+    """The look-ahead path verifies the SOURCE snapshot (the clone holds the
+    PROJECTED theta_hat) — verify_canary_on_snapshot must match bitwise on the
+    untouched dict."""
+    src = _Tiny(dtype=dtype)
+    snap = snapshot_named_params(src.named_parameters(), device=torch.device("cpu"))
+    canary = snapshot_canary(snap, target_substrs=("q_proj", "o_proj"))
+    ok, results = verify_canary_on_snapshot(snap, canary)
+    assert ok, results
+
+
+def test_canary_on_snapshot_catches_perturbation_and_missing_key():
+    src = _Tiny(dtype=torch.bfloat16)
+    snap = snapshot_named_params(src.named_parameters(), device=torch.device("cpu"))
+    canary = snapshot_canary(snap, target_substrs=("q_proj", "o_proj"))
+    # Single-element perturbation in ONE canary target.
+    perturbed = {k: v.clone() for k, v in snap.items()}
+    name = sorted(canary.keys())[0]
+    perturbed[name][0, 0] += 1.0
+    ok, _results = verify_canary_on_snapshot(perturbed, canary)
+    assert not ok
+    # A missing canary key is a loud mismatch, not a silent pass.
+    dropped = {k: v for k, v in snap.items() if k != name}
+    ok, results = verify_canary_on_snapshot(dropped, canary)
+    assert not ok and results[name] == (None, None)
 
 
 # =========================================================================== #

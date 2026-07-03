@@ -22,9 +22,15 @@ project's goal is captured in
 **Fixed control variables — do not change without a separate justification:**
 - **Model**: Qwen2.5-1.5B-Instruct (the dense control is anchored to it).
 - **RL loss**: vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
-- **Hardware**: multi-GPU only, **4 ≤ num_gpus ≤ 8**, on Vast.ai H100/H200 via
-  the fixed `verl-research-vllm020` template. Single-GPU runs are forbidden in
-  the research loop (16K response context + n=8 rollouts needs the headroom).
+- **Hardware**: default **1×H200** on Vast.ai via the fixed
+  `verl-research-vllm020` template; provisioning ladder 1×H200 → 1×B200 →
+  2×H200, machine reliability strictly >0.99 on every rung (see
+  `research/.claude/project.yaml` `default_compute`). 1–8 GPUs supported;
+  the legacy 4×H200 / 8×H100 shapes are retained for explicit operator
+  request only.
+- **Datasets**: EASY = GSM8K (the default); HARD = Big-Math
+  (`gshasiri/Big-Math-RL-Verified-filtered`) at `MAX_RESPONSE_LENGTH=4096`.
+  Registry: `research/.claude/project.yaml` `datasets:`.
 
 ## 2. Where to look
 

@@ -388,6 +388,33 @@ def verify_canary_on_module(module: torch.nn.Module, canary: dict, canon: Option
     return ok, results
 
 
+def verify_canary_on_snapshot(snapshot: dict, canary: dict):
+    """Bitwise-verify ``canary`` against a raw snapshot DICT (pre-clone-load).
+
+    Same fp32-on-CPU ``(norm, sum)`` reduction as
+    :func:`verify_canary_on_module`, but off the snapshot mapping itself. Used
+    by the look-ahead (weight-projection) path: the clone there is loaded with
+    the PROJECTED ``theta_hat`` — the clone no longer holds the recorded stale
+    weights verbatim, so the value-level staleness guard must run against the
+    SOURCE snapshot instead. Returns ``(ok, results)``; the caller hard-asserts
+    ``ok``.
+    """
+    results = {}
+    ok = True
+    for name, (ref_norm, ref_sum) in canary.items():
+        t = snapshot.get(name)
+        if t is None:
+            results[name] = (None, None)
+            ok = False
+            continue
+        tt = t.detach().to("cpu", torch.float32)
+        got = (float(torch.linalg.norm(tt).item()), float(tt.sum().item()))
+        results[name] = got
+        if got != (float(ref_norm), float(ref_sum)):
+            ok = False
+    return ok, results
+
+
 class AnchorReplayRing:
     """Paired ``(batch, generator-weights)`` replay ring for the anchor refresh.
 
@@ -438,6 +465,19 @@ class AnchorReplayRing:
 
     def has_snapshot(self, gs: int) -> bool:
         return int(gs) in self._snapshots
+
+    def snapshot_tick(self, gs: int) -> int:
+        """Tick at which global step ``gs``'s generator snapshot was taken.
+
+        That is the FIRST train_batch tick of ``gs`` — the exact weight point
+        vLLM sampled this step's rollouts from. The look-ahead projector uses it
+        as the projection TARGET for the current step (projecting to the fire
+        tick instead would overshoot the generator by the fire's within-step
+        tick offset and de-pair the ratio-1 anchor loss from its batch).
+        Returns ``-1`` when ``gs`` has no retained snapshot.
+        """
+        entry = self._snapshots.get(int(gs))
+        return int(entry[2]) if entry is not None else -1
 
     def push_snapshot(self, gs: int, snapshot: dict, canary: Optional[dict] = None, tick: int = -1) -> bool:
         """Record the generator snapshot for global step ``gs`` (first-tick wins).

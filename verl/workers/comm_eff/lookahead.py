@@ -31,6 +31,22 @@ training trajectory. The RLVR-linearity paper (arXiv:2601.04537) licenses this:
 RLVR weights move ~linearly (R^2 ~ 0.9, linear extrapolation holds ~600 steps;
 our staleness K ~ 10-20 ticks).
 
+**Generalized horizon (the seed alone is NOT enough).** The source snapshots
+are spaced by the anchor FIRE cadence (a real recorded gap of ``g`` ticks:
+``g = tick(S0) - tick(S1)``), while the projection target is the CURRENT fire
+tick ``t``, which sits ``h = t - tick(S0)`` ticks ahead of ``S0`` (``h >=
+delay_K``). The seed coefficients ``(1+alpha, -alpha)`` extrapolate exactly ONE
+inter-snapshot gap forward, so they land on ``t`` only when ``h == g`` (i.e.
+cadence == delay_K — true at the 20/20 and 5/5 operating points, false
+otherwise). :meth:`LookaheadProjector.project` therefore consumes the ring's
+REAL recorded ticks and uses::
+
+    theta_hat = S0 + alpha * (h/g) * (S0 - S1)
+              = (1 + alpha*h/g) * S0 - (alpha*h/g) * S1
+
+which reduces EXACTLY to the frozen seed at ``h == g`` (behavior at the
+operating points unchanged) and projects to the true fire tick otherwise.
+
 **One code path for fixed and learned.** The projector always evaluates the
 SAME per-block affine combination of the retained snapshots. ``fixed_linear``
 holds the coefficients FROZEN at the seed ``[2, -1, 0]`` (so it is exactly the
@@ -72,10 +88,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "LOOKAHEAD_MODES",
+    "LOOKAHEAD_ROLLOUT_SOURCES",
     "FIXED_LINEAR_COEFFS",
     "lookahead_enabled",
     "lookahead_num_source_points",
     "lookahead_learns",
+    "resolve_lookahead_rollout_source",
     "is_lookahead_target",
     "compute_theta_hat",
     "LookaheadSnapshotRing",
@@ -108,7 +126,28 @@ LOOKAHEAD_MODES = ("disabled", "fixed_linear", "learned_linear_with_fixed_linear
 # The fixed-linear (AsyncPP) coefficients for [theta[t-K], theta[t-2K], theta[t-3K]]:
 # theta_hat = 2*theta[t-K] - theta[t-2K] + 0*theta[t-3K]. a3=0 means the third
 # snapshot is unused in fixed-linear (so fixed-linear needs only 2 source points).
+# This is the documented SEED — the exact coefficients at alpha=1 AND horizon
+# h == gap g (cadence == delay_K). The live projection generalizes to
+# (1 + alpha*h/g, -alpha*h/g, 0) from the ring's REAL recorded ticks; see
+# LookaheadProjector.project.
 FIXED_LINEAR_COEFFS = (2.0, -1.0, 0.0)
+
+# Which rollouts the anchor consumes when the look-ahead projector is on.
+#   "auto"          -> resolves to "current_step" when look-ahead is enabled,
+#                      else "stale_paired" (matching rollouts are THE DEFAULT
+#                      whenever weight projection is ON; zero effect when OFF).
+#   "stale_paired"  -> today's exact behavior: the replayed t-delay_K batch in
+#                      replay mode. (Legacy non-replay mode ALREADY consumes the
+#                      current tick's batch, so this option only changes
+#                      behavior in replay mode.)
+#   "current_step"  -> replay mode consumes a copy of the CURRENT tick's batch
+#                      (the step-t rollouts that the projected theta_hat[t]
+#                      weights correspond to). Config-validated to require the
+#                      projector ON (stale-weights + fresh-rollouts is an
+#                      unsupported ablation).
+#   "self_generate" -> RESERVED seam for a future "anchor generates its own
+#                      rollouts" option; REJECTED at config validation.
+LOOKAHEAD_ROLLOUT_SOURCES = ("auto", "stale_paired", "current_step", "self_generate")
 
 
 def lookahead_enabled(anchor_cfg) -> bool:
@@ -166,6 +205,24 @@ def lookahead_strength(anchor_cfg) -> float:
         return float(getattr(anchor_cfg, "lookahead_strength", 1.0))
     except (TypeError, ValueError):
         return 1.0
+
+
+def resolve_lookahead_rollout_source(anchor_cfg) -> str:
+    """Resolve ``anchor.lookahead_rollout_source`` to a concrete source.
+
+    Pure function (unit-testable, no side effects). ``"auto"`` (the default)
+    resolves to ``"current_step"`` iff the look-ahead projector is enabled
+    (:func:`lookahead_enabled`) and to ``"stale_paired"`` otherwise — so the
+    matching-rollouts behavior is THE DEFAULT whenever weight projection is ON
+    and has ZERO effect when it is OFF. Explicit values pass through unchanged;
+    the invalid combinations (``current_step`` without the projector,
+    ``self_generate``) are rejected up front by the config ``__post_init__``,
+    not here.
+    """
+    src = str(getattr(anchor_cfg, "lookahead_rollout_source", "auto")) if anchor_cfg is not None else "auto"
+    if src == "auto":
+        return "current_step" if lookahead_enabled(anchor_cfg) else "stale_paired"
+    return src
 
 
 def is_lookahead_target(name: str, target_substrs) -> bool:
@@ -264,7 +321,13 @@ class LookaheadSnapshotRing:
     before the next fire. The legacy :class:`anchor.AnchorStalenessQueue` holds
     ``theta[t-K]..theta[t]`` but not ``theta[t-2K]``, and is not even built in
     replay mode. So the look-ahead history is its OWN ring, pushed at every
-    anchor FIRE (not every tick) and keyed by the fire tick.
+    anchor FIRE (not every tick) and keyed by the snapshot's TRUE tick — the
+    tick whose weights the snapshot actually holds (a fire at tick ``t``
+    replays ``theta[t-K]``, so the key is ``t-K``, NOT ``t``). True-tick keying
+    is what lets :meth:`LookaheadProjector.project` compute the REAL horizon
+    ``h`` and gap ``g`` instead of assuming ``cadence == delay_K``. Pushes store
+    REFERENCES (no tensor copies) — retention here keeps replay-ring-evicted
+    snapshot generations alive by refcount.
 
     Holds the last ``n_points`` fire-aligned snapshots (2 fixed / 3 learned),
     NEWEST-first via :meth:`sources`. Optionally keeps ONE prior ``theta_hat``
@@ -276,7 +339,7 @@ class LookaheadSnapshotRing:
         assert n_points >= 2, f"look-ahead ring needs >= 2 source points, got {n_points}"
         self.n_points = int(n_points)
         self.keep_theta_hat = bool(keep_theta_hat)
-        # OrderedDict[fire_tick -> snapshot dict]; insertion order == tick order.
+        # OrderedDict[true_tick -> snapshot dict]; insertion order == tick order.
         self._snaps: OrderedDict[int, dict] = OrderedDict()
         # One prior theta_hat for the retrospective residual (learned mode).
         self._prev_theta_hat: Optional[dict] = None
@@ -286,14 +349,17 @@ class LookaheadSnapshotRing:
         self._maxlen = self.n_points
         self.peak_retained = 0
 
-    def push(self, fire_tick: int, snapshot: dict) -> None:
-        """Record the full-param ``snapshot`` taken at anchor fire ``fire_tick``.
+    def push(self, tick: int, snapshot: dict) -> None:
+        """Record the full-param ``snapshot`` whose weights belong to ``tick``.
 
-        Evicts the oldest beyond ``n_points``. Asserts the bound on every push
-        (mirrors ``AnchorReplayRing.push_snapshot`` :457-461) so a regressed
-        eviction is a loud failure, not a silent leak.
+        ``tick`` is the snapshot's TRUE tick (``t - delay_K`` at a fire tick
+        ``t``), not the fire tick — see the class docstring. Re-pushing the
+        same tick (a warmup fallback replaying one snapshot twice) overwrites
+        in place. Evicts the oldest beyond ``n_points``. Asserts the bound on
+        every push (mirrors ``AnchorReplayRing.push_snapshot`` :457-461) so a
+        regressed eviction is a loud failure, not a silent leak.
         """
-        self._snaps[int(fire_tick)] = snapshot
+        self._snaps[int(tick)] = snapshot
         while len(self._snaps) > self._maxlen:
             self._snaps.popitem(last=False)
         self.peak_retained = max(self.peak_retained, self.total_retained())
@@ -307,12 +373,13 @@ class LookaheadSnapshotRing:
         return len(self._snaps) >= self.n_points
 
     def sources(self):
-        """Return ``[S0, S1, (S2)]`` NEWEST-first with their fire ticks.
+        """Return ``[S0, S1, (S2)]`` NEWEST-first with their TRUE ticks.
 
         Returns ``(snaps, ticks)`` where ``snaps[0]`` is the newest retained
-        (``theta[t-K]``), ``snaps[1]`` the next (``theta[t-2K]``), etc., and
-        ``ticks`` the matching fire-tick indices (newest-first). Returns
-        ``(None, None)`` until :meth:`ready`.
+        (``theta[t-K]``), ``snaps[1]`` the next (``theta[t-K-cadence]``), etc.,
+        and ``ticks`` the matching TRUE snapshot ticks (newest-first) — exactly
+        the inputs :meth:`LookaheadProjector.project` needs to compute the real
+        horizon. Returns ``(None, None)`` until :meth:`ready`.
         """
         if not self.ready():
             return None, None
@@ -326,13 +393,30 @@ class LookaheadSnapshotRing:
     def set_prev_theta_hat(self, fire_tick: int, theta_hat: dict) -> None:
         """Stash the PRIOR fire's ``theta_hat`` (learned-mode residual target).
 
-        Only one is retained (the most recent). Counted in the memory report.
+        ``fire_tick`` is the PROJECTION-TARGET tick — the tick the
+        extrapolation was projected TO (in replay mode the current step's
+        generator tick, not the literal fire tick), so its ground truth is
+        ``theta[fire_tick]`` and, at cadence == delay_K, a LATER fire's source
+        snapshot carries exactly that true tick (:meth:`get` then serves the
+        retrospective update). Only one is retained (the most recent). Counted
+        in the memory report.
         """
         if not self.keep_theta_hat:
             return
         self._prev_theta_hat = theta_hat
         self._prev_theta_hat_tick = int(fire_tick)
         self.peak_retained = max(self.peak_retained, self.total_retained())
+
+    def get(self, tick: int):
+        """Return the retained snapshot whose TRUE tick is ``tick`` (or None).
+
+        Used by the learned mode's retrospective update: the prior fire's
+        ``theta_hat`` predicted ``theta[t_prev_fire]``, whose exact ground
+        truth is retained here iff some source snapshot's true tick equals
+        ``t_prev_fire`` (at cadence == delay_K that is precisely this fire's
+        freshly-pushed S0). Exact-match only — never an approximation.
+        """
+        return self._snaps.get(int(tick))
 
     def prev_theta_hat(self):
         """Return ``(theta_hat, tick)`` of the prior fire, or ``(None, -1)``."""
@@ -366,10 +450,14 @@ class LookaheadProjector:
         self.target_substrs = tuple(target_substrs or ())
         self.learns = lookahead_learns(anchor_cfg)
         self.n_points = lookahead_num_source_points(anchor_cfg)
-        # Projection horizon: coeffs = (1+alpha, -alpha, 0). alpha=1.0 reproduces
-        # the frozen AsyncPP seed (2,-1,0) = full catch-up; alpha<1 = a shorter
-        # look-ahead horizon (M4 horizon sweep). The learned mode cold-
-        # starts here and then adapts the per-block residual on top of these coeffs.
+        # SEED coefficients: (1+alpha, -alpha, 0). alpha=1.0 reproduces the
+        # frozen AsyncPP seed (2,-1,0) = full catch-up; alpha<1 = a shorter
+        # look-ahead horizon (M4 horizon sweep). These are exact ONLY when the
+        # realized horizon h equals the inter-source gap g (cadence == delay_K);
+        # :meth:`project` generalizes to (1 + alpha*h/g, -alpha*h/g, 0) from the
+        # ring's REAL ticks and falls back to this seed when ticks are omitted.
+        # The learned mode cold-starts here and then adapts the per-block
+        # residual on top of the effective coefficients.
         self.strength = lookahead_strength(anchor_cfg)
         self.coeffs = [1.0 + self.strength, -self.strength, 0.0]
         # Per-block scalar residual (learned mode only); zero ⇒ fixed-linear.
@@ -382,19 +470,54 @@ class LookaheadProjector:
         # blow the extrapolation; keeps the learned mode a CORRECTION to fixed-linear.
         self._residual_clip = 1.0e-3
 
-    def project(self, sources: list):
+    def project(self, sources: list, ticks: Optional[list] = None, fire_tick: Optional[int] = None):
         """Compute ``theta_hat`` from the source snapshots.
 
-        Returns ``(theta_hat, excluded_names)``. ``residual`` is folded in only
-        in the learned mode (it is ``{}`` until the first retrospective update).
+        ``ticks`` (TRUE snapshot ticks, newest-first, aligned with ``sources``)
+        and ``fire_tick`` (the tick being projected TO) generalize the seed to
+        the REAL horizon. With ``g = ticks[0] - ticks[1]`` (inter-source gap,
+        = cadence) and ``h = fire_tick - ticks[0]`` (realized staleness of S0,
+        >= delay_K), the effective coefficients are::
+
+            (1 + alpha*h/g, -alpha*h/g, 0)
+
+        — the linear extrapolation that lands ON ``fire_tick``. At ``h == g``
+        (cadence == delay_K, the 20/20 and 5/5 operating points) this reduces
+        EXACTLY to the frozen seed, so prior behavior is unchanged there. The
+        seed alone lands short/long whenever ``h != g`` — that was the original
+        naive-linear bug this signature fixes. Omitting ``ticks``/``fire_tick``
+        (unit tests, seed-only callers) falls back to the seed coefficients.
+
+        Returns ``(theta_hat, excluded_names, proj_info)`` where ``proj_info``
+        carries the realized ``{"h", "g", "coeffs"}`` for fire logging (``h``/
+        ``g`` are ``None`` on the seed fallback). ``residual`` is folded in
+        only in the learned mode (it is ``{}`` until the first retrospective
+        update).
         """
+        coeffs = list(self.coeffs)
+        h = g = None
+        if ticks is not None and fire_tick is not None and len(ticks) >= 2:
+            g = int(ticks[0]) - int(ticks[1])
+            h = int(fire_tick) - int(ticks[0])
+            assert g > 0, (
+                f"look-ahead source ticks must be strictly decreasing newest-first; "
+                f"got gap g={g} from ticks={ticks} — the ring's true-tick keying regressed."
+            )
+            assert h >= 0, (
+                f"look-ahead fire_tick={fire_tick} precedes the newest source tick "
+                f"{ticks[0]} (h={h}) — the projection would run BACKWARD; the caller "
+                f"passed a stale fire tick or the ring keying regressed."
+            )
+            scale = self.strength * (float(h) / float(g))
+            coeffs = [1.0 + scale, -scale, 0.0]
         residual = self._residual if self.learns else None
-        return compute_theta_hat(
+        theta_hat, excluded = compute_theta_hat(
             sources,
-            self.coeffs,
+            coeffs,
             target_substrs=self.target_substrs,
             residual=residual,
         )
+        return theta_hat, excluded, {"h": h, "g": g, "coeffs": tuple(coeffs)}
 
     def update_from_retrospective(self, theta_true_prev: dict, theta_hat_prev: dict) -> dict:
         """Update the learned residual from the PRIOR fire's true-vs-predicted error.

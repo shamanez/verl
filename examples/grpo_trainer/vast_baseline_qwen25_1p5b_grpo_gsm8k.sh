@@ -26,8 +26,11 @@
 #      and WANDB_API_KEY (push a stripped copy from the laptop after
 #      provisioning; VAST_API_KEY MUST NOT live on the box).
 #
-# Hardware: multi-GPU only. This script HARD-FAILS if it detects <4 or >8
-# GPUs. The compression-research GRPO recipe is sized for 4..8 H100/H200.
+# Hardware: 1..8 GPUs (HARD-FAILS outside that range). Default box: 1×H200
+# (project ladder 1×H200 → 1×B200 → 2×H200, reliability >0.99 — see
+# research/.claude/project.yaml `default_compute`). On 1 GPU the launcher
+# auto-selects the proven resp=1024 analysis surface; the full 16K-context
+# control still wants the legacy 4..8 shapes (explicit operator request only).
 #
 # Iteration loop (e.g. tuning batch sizes when fitting GPUs):
 #   laptop: edit this file

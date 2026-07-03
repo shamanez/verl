@@ -379,6 +379,29 @@ comm_eff:
     # Where anchor weight snapshots live between ticks: "gpu" or "cpu".
     snapshot_device: gpu
 
+    # Look-ahead (weight-projection) anchor — M4. When active (this flag AND a
+    # non-"disabled" lookahead_mode), the anchor backward runs from a linearly
+    # extrapolated weight point theta_hat[t] instead of the raw delay_K-stale
+    # snapshot. false (default) is a strict no-op, byte-identical to today.
+    lookahead_anchor: false
+
+    # "disabled" | "fixed_linear" (frozen AsyncPP seed over the recorded
+    # snapshot ticks) | "learned_linear_with_fixed_linear_cold_start" (seed +
+    # small per-block residual trained only from retrospective errors).
+    lookahead_mode: disabled
+
+    # Projection horizon multiplier alpha: 1.0 = full catch-up to the current
+    # tick; <1 = shorter horizon; 0 = raw stale weights. Must be >= 0.
+    lookahead_strength: 1.0
+
+    # Which rollouts the anchor consumes when the projector is on.
+    # "auto" (default) -> "current_step" when the projector is active, else
+    # "stale_paired" (today's exact replay behavior). "current_step" = the
+    # anchor consumes the CURRENT tick's batch (the step-t rollouts matching
+    # theta_hat[t]); requires the projector ON. "self_generate" is a reserved
+    # not-implemented seam and is rejected at validation.
+    lookahead_rollout_source: auto
+
   # Spectral-correction sub-config (inert while enabled=false). Applies an
   # anchor-guided correction to the fast-path gradient after actor backward /
   # FSDP grad reduction and before optimizer.step() / grad clipping. Live

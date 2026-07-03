@@ -579,5 +579,81 @@ class TestCommEffStateInert(unittest.TestCase):
         self.assertEqual(comm_eff_metrics(None), {})
 
 
+class TestCommEffLookaheadConfig(unittest.TestCase):
+    """Look-ahead (weight-projection) anchor knobs: inert defaults + strict
+    validation of the mode / rollout-source enums and their coupling."""
+
+    def test_defaults_are_inert(self):
+        """A bare config leaves the projector fully off and 'auto' resolves to
+        today's stale-paired behavior — zero effect while projection is OFF."""
+        from verl.workers.comm_eff.lookahead import lookahead_enabled, resolve_lookahead_rollout_source
+
+        cfg = CommEffConfig()
+        self.assertFalse(cfg.anchor.lookahead_anchor)
+        self.assertEqual(cfg.anchor.lookahead_mode, "disabled")
+        self.assertEqual(cfg.anchor.lookahead_strength, 1.0)
+        self.assertEqual(cfg.anchor.lookahead_rollout_source, "auto")
+        self.assertFalse(lookahead_enabled(cfg.anchor))
+        self.assertEqual(resolve_lookahead_rollout_source(cfg.anchor), "stale_paired")
+
+    def test_auto_resolves_to_current_step_when_projector_on(self):
+        """Matching rollouts are THE DEFAULT whenever weight projection is ON."""
+        from verl.workers.comm_eff.lookahead import resolve_lookahead_rollout_source
+
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(lookahead_anchor=True, lookahead_mode="fixed_linear")
+        )
+        self.assertEqual(resolve_lookahead_rollout_source(cfg.anchor), "current_step")
+
+    def test_stray_flag_combinations_are_inert_not_errors(self):
+        """lookahead_anchor=true with mode=disabled (and vice versa) constructs
+        fine and stays OFF — matching the module's lookahead_enabled contract."""
+        from verl.workers.comm_eff.lookahead import lookahead_enabled
+
+        c1 = CommEffConfig(anchor=CommEffAnchorConfig(lookahead_anchor=True))
+        c2 = CommEffConfig(anchor=CommEffAnchorConfig(lookahead_mode="fixed_linear"))
+        self.assertFalse(lookahead_enabled(c1.anchor))
+        self.assertFalse(lookahead_enabled(c2.anchor))
+
+    def test_invalid_mode_rejected(self):
+        with self.assertRaisesRegex(ValueError, "lookahead_mode"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_mode="paper_linear"))
+
+    def test_negative_strength_rejected(self):
+        with self.assertRaisesRegex(ValueError, "lookahead_strength"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_strength=-0.5))
+
+    def test_self_generate_is_a_rejected_seam(self):
+        """The future 'anchor generates its own rollouts' option must fail
+        loudly as not-implemented, never silently no-op."""
+        with self.assertRaisesRegex(ValueError, "RESERVED"):
+            CommEffConfig(
+                anchor=CommEffAnchorConfig(
+                    lookahead_anchor=True,
+                    lookahead_mode="fixed_linear",
+                    lookahead_rollout_source="self_generate",
+                )
+            )
+
+    def test_current_step_requires_projector_on(self):
+        """Explicit current_step without the projector is the unsupported
+        stale-weights + fresh-rollouts ablation — a config error."""
+        with self.assertRaisesRegex(ValueError, "requires the"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_rollout_source="current_step"))
+        # With the projector ON it constructs fine.
+        cfg = CommEffConfig(
+            anchor=CommEffAnchorConfig(
+                lookahead_anchor=True,
+                lookahead_mode="fixed_linear",
+                lookahead_rollout_source="current_step",
+            )
+        )
+        self.assertEqual(cfg.anchor.lookahead_rollout_source, "current_step")
+
+    def test_unknown_rollout_source_rejected(self):
+        with self.assertRaisesRegex(ValueError, "lookahead_rollout_source"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_rollout_source="fresh"))
+
+
 if __name__ == "__main__":
     unittest.main()
