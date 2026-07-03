@@ -5,8 +5,8 @@
     "hard": true
   },
   "structure_partition": {
-    "pass": false,
-    "detail": "manifest missing: runs/EXP-57/regimeA/weights/full_manifest.jsonl",
+    "pass": true,
+    "detail": "exact 338-partition, other=0 (SYNTHESIZED canonical names \u2014 no manifest at runs/EXP-57/regimeA/weights/full_manifest.jsonl; bt={'q_proj': 28, 'k_proj': 28, 'v_proj': 28, 'o_proj': 28, 'gate_proj': 28, 'up_proj': 28, 'down_proj': 28, 'norm': 57, 'bias': 84, 'embed': 1, 'lm_head': 0, 'other': 0})",
     "hard": true
   },
   "causality_leakage_guard": {

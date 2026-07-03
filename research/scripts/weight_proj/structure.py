@@ -121,6 +121,31 @@ def classify(name: str) -> dict:
             "block_type": bt, "super_block": sb, "special": special}
 
 
+def canonical_matrix_names(n_layers: int = N_LAYERS) -> list[str]:
+    """The 338 canonical Qwen2.5-1.5B-Instruct state-dict matrix names, in dump order.
+
+    These are FULLY determined by the architecture (they are the real HF state-dict
+    keys, not a fixture): embed + final norm + per-layer {q,k,v}_proj .weight/.bias,
+    o_proj .weight, {gate,up,down}_proj .weight, and the two layernorms. lm_head is
+    TIED (no standalone key). Used by the offline harness's self-test to exercise the
+    partition gate WITHOUT the ~1 TB trace/manifest on disk (lightweight-testing path);
+    the on-box run still validates against the REAL manifest names. partition() on this
+    list returns ok=True with exactly expected_counts()."""
+    names = ["model.embed_tokens.weight"]
+    for i in range(n_layers):
+        p = f"model.layers.{i}."
+        for x in ("q_proj", "k_proj", "v_proj"):     # Qwen2.5 attn has .weight AND .bias
+            names.append(f"{p}self_attn.{x}.weight")
+            names.append(f"{p}self_attn.{x}.bias")
+        names.append(f"{p}self_attn.o_proj.weight")
+        for x in ("gate_proj", "up_proj", "down_proj"):
+            names.append(f"{p}mlp.{x}.weight")
+        names.append(f"{p}input_layernorm.weight")
+        names.append(f"{p}post_attention_layernorm.weight")
+    names.append("model.norm.weight")
+    return names
+
+
 def expected_counts(n_layers: int = N_LAYERS) -> tuple[dict, dict]:
     """EXACT expected per-group counts for a tied-embedding Qwen2-style decoder."""
     bt = {t: n_layers for t in DECODER_WEIGHT_TYPES}

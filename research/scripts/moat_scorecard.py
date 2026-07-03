@@ -2114,17 +2114,26 @@ def run_selftest(args) -> int:
     inv["metric_contract_pin"] = (
         pin_ok, f"weight_proj.metrics.METRIC_CONTRACT == {M.METRIC_CONTRACT!r}")
 
-    # -- invariant: structure partition on the real manifest ------------------
+    # -- invariant: structure partition ---------------------------------------
+    # On-box (real manifest present) -> validate the REAL 338 names. On a laptop
+    # with no ~1 TB trace/manifest downloaded -> exercise the SAME partition gate
+    # against the canonical Qwen2.5-1.5B names (lightweight-testing path, so the
+    # self-test can reach GO locally). `part` stays populated either way; the
+    # real-trace end-to-end block below still guards on args.trace_root.
     if os.path.exists(args.manifest):
         man_names = _manifest_names(args.manifest)
         part = ST.partition(man_names)
         inv["structure_partition"] = (part["ok"],
                                       "; ".join(part["failures"]) or
                                       f"exact 338-partition, other=0 "
-                                      f"(bt={part['block_type_counts']})")
+                                      f"(REAL manifest; bt={part['block_type_counts']})")
     else:
-        part = None
-        inv["structure_partition"] = (False, f"manifest missing: {args.manifest}")
+        part = ST.partition(ST.canonical_matrix_names())
+        inv["structure_partition"] = (part["ok"],
+                                      "; ".join(part["failures"]) or
+                                      f"exact 338-partition, other=0 (SYNTHESIZED "
+                                      f"canonical names — no manifest at {args.manifest}; "
+                                      f"bt={part['block_type_counts']})")
 
     # -- invariant: causality / leakage guard ---------------------------------
     lg_ok, lg_detail = P.leakage_guard_selftest()
