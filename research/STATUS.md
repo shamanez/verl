@@ -1,14 +1,8 @@
 # Research Status
 
-Two priorities (detail: `PROGRESS.md`, `reports/`, `.claude/GOAL.md`):
+Priorities (detail: `.claude/GOAL.md`, `LOG.md`):
 
-1. **M4 — beat the anchor k-collapse by projecting the WEIGHTS** (not the gradient). The dense
-   GRPO weight trajectory is collected to R2 in both precisions; **#45–#56 use the fp32 master
-   weights (EXP-57)**. **#44 PASS** — offline sweep engine accepted. Analysis is GPU-free and
-   **downloads the whole trace first** to a cheap big-disk box (`weight_proj_sweep.py --trace-root`;
-   streaming kept for few-snapshot passes). Access: `reports/r2-access-pattern-for-analysis.md`;
-   scope: `reports/m4-weight-proj-status-and-architecture.md`.
-2. **M6 — shrink the ~0.04 compression train–inference mismatch.**
-   `reports/priority-2-compression-train-inference-mismatch.html`.
+1. **M4 — beat anchor k-collapse by projecting WEIGHTS.** fp32 trace (EXP-57) + scorecard contract (#45) done. **#47 PASS:** OOS damped-linear beats hold-stale (0.940 at Δ=10,h=10; λ*=0.3; h_safe=30 steps; best_delta=5); linearity R² 0.535/0.335; R²-vs-ratio ρ=−0.75 — steer projection by per-group R². Remaining lanes #48/#49 → #56 MOAT verdict.
+2. **M6 — shrink ~0.04 compression train–inference mismatch.**
 
-Base: `signed_ema` (α=0.25, β_anc=0.50) at 20/20 anchor latency (k-collapse), PowerSGD r=77. No live boxes.
+Base: `signed_ema` α=0.25, 20/20 anchor latency, PowerSGD r=77. Live: EXTERNAL analysis box 43511290 only (keep; never register RUNNING).
