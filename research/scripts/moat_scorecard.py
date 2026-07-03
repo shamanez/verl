@@ -86,7 +86,8 @@ SCHEMA_VERSION = "moat-scorecard-v47.1"
 # so v1 panels (1-strip small-k matrices) regather instead of loading stale.
 FAST_SCHEMA_VERSION = "moat-scorecard-fast-v2"
 # row-schema evolution is versioned SEPARATELY from the stats cache
-ROW_SCHEMA_VERSION = "moat-scorecard-rows-v48.0"
+ROW_SCHEMA_VERSION = "moat-scorecard-rows-v49.0"
+ROW_SCHEMA_V48 = "moat-scorecard-rows-v48.0"
 DEFAULT_MANIFEST = "runs/EXP-57/regimeA/weights/full_manifest.jsonl"
 DEFAULT_OUT = "runs/MOAT-45-ANALYSIS/scorecard"
 PARITY_RTOL = 1e-6          # off-path parity: surrogate-path vs direct-tensor-path
@@ -94,7 +95,6 @@ IDENTITY_TOL = 1e-6         # hold-stale gate: |ratio-1| and |skill| per plan
 R2_STRONG = 0.7             # per-scalar linearity R² "strong" threshold (Wang et al.)
 R2_HIST_BINS = 100          # 100 bins over [0,1] for histogram-merged group R²
 R2_CONST_EPS = 1e-300       # SS_tot <= this ⇒ constant scalar (excluded + counted)
-PAPER_SENTINEL_DELTA = 0    # paper_linear rows key delta_ticks=0 (delta is derived)
 
 # pre-rows-v48 required keys — the set a pre-change (#47) emit satisfies; verify-
 # schema checks ONLY these on old-schema dirs so they get the single clear
@@ -118,7 +118,7 @@ REQUIRED_ROW_KEYS_LEGACY = [
     "tied",
     # ---- #47 REQUIRED superset (existing 29 keys above unchanged) ----
     "cadence", "unit",                             # regime tag
-    "anchor_mode", "delta_resolved", "beta",       # two-anchor descriptor (paper-equiv)
+    "anchor_mode", "delta_resolved", "beta",       # anchor descriptor
     "r2_median", "r2_frac_gt_0.7", "n_excluded_const",  # per-scalar linearity R²
     "lam_star",                                    # OOS-selected lambda (None off damped)
 ]
@@ -137,16 +137,16 @@ ROW_KEYS_V48 = [
     "sample_min_runs",              # min per-matrix sampled-cluster count feeding this
                                     # group row (None when every member is exact/full)
 ]
-REQUIRED_ROW_KEYS = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48
+# rows-v49.0 core-ladder superset (nullable where N/A)
+ROW_KEYS_V49 = ["lookback_ticks", "lam2_star"]
+REQUIRED_ROW_KEYS = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48 + ROW_KEYS_V49
 
-# base visuals (#45) present in every regime; #47 adds the lambda / R² / paper visuals.
+# base visuals (#45) present in every regime; #47 adds the lambda / R² visuals.
 VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
                "c_target_horizon_sweep", "d_traj_r2",
                "e_ratio_heatmap", "f_hstar_heatmap", "g_special_groups",
                "h_lambda_selection", "i_r2_histogram", "j_r2_depth_block_heatmap",
                "k_r2_ratio_coupling"]
-# regime-S-only visual (paper_linear present) — declared per-emit in meta.visual_keys
-VISUAL_KEY_PAPER = "m_paper_equivalence"
 # regression visuals — n_* only when the per-scalar panel path ran (declared per-emit)
 VISUAL_KEY_PRED_HIST = "n_pred_r2_scalar_hist"
 VISUAL_KEY_PRED_EVR = "o_pred_evr_vs_h"
@@ -170,10 +170,14 @@ class MoatMethod:
     """
     name = "base"
     needs_fit = False
+    n_anchors = 2
 
     def anchor_offsets(self, delta: int) -> list[int]:
         """Anchor tick offsets relative to t (e.g. [-delta, 0]) this method loads."""
         raise NotImplementedError
+
+    def lookback(self, delta: int) -> int:
+        return -min(self.anchor_offsets(delta))
 
     def predict(self, history, delta: int, h: int):
         raise NotImplementedError
@@ -247,9 +251,89 @@ class DampedLinear(TwoAnchorLinear):
         return self.lam * float(h) / float(delta)
 
 
+class AdaptiveLinear(TwoAnchorLinear):
+    needs_fit = True
+
+    def __init__(self, lam: float = 1.0):
+        super().__init__("adaptive_linear")
+        self.lam = float(lam)
+
+    def kappa(self, delta: int, h: int) -> float:
+        return self.lam * float(h) / float(delta)
+
+
+class ThreeAnchorQuad(MoatMethod):
+    n_anchors = 3
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def coeffs(self, delta: int, h: int) -> tuple[float, float]:
+        raise NotImplementedError
+
+    def anchor_offsets(self, delta: int) -> list[int]:
+        return [-2 * delta, -delta, 0]
+
+    def predict(self, history, delta: int, h: int):
+        assert len(history) == 3, \
+            "three-anchor method needs exactly [theta_{t-2D}, theta_{t-D}, theta_t]"
+        k1, k2 = self.coeffs(delta, h)
+        th_2, th_1, th_t = history[0][1], history[1][1], history[2][1]
+        return th_t + k1 * (th_t - th_1) + k2 * (th_1 - th_2)
+
+    def window_stats(self, s11, s12, s22, s1b, s2b, sbb, delta: int, h: int):
+        k1, k2 = self.coeffs(delta, h)
+        e2 = _second_e2(k1, k2, s11, s12, s22, s1b, s2b, sbb)
+        b2 = sbb
+        eb = sbb - k1 * s1b - k2 * s2b
+        return e2, b2, eb
+
+
+def _quad_sq(delta: int, h: int) -> tuple[float, float]:
+    s = float(h) / float(delta)
+    return s, s * (s + 1.0) / 2.0
+
+
+class NaiveSecondOrder(ThreeAnchorQuad):
+    def __init__(self):
+        super().__init__("naive_second_order")
+
+    def coeffs(self, delta: int, h: int) -> tuple[float, float]:
+        s, q = _quad_sq(delta, h)
+        return s + q, -q
+
+
+class DampedSecondOrder(ThreeAnchorQuad):
+    def __init__(self, mu: float = 1.0):
+        super().__init__("damped_second_order")
+        self.mu = float(mu)
+
+    def coeffs(self, delta: int, h: int) -> tuple[float, float]:
+        s, q = _quad_sq(delta, h)
+        return s + self.mu * q, -self.mu * q
+
+
+class AdaptiveSecondOrder(ThreeAnchorQuad):
+    needs_fit = True
+
+    def __init__(self, lam_v: float = 1.0, lam_c: float = 1.0):
+        super().__init__("adaptive_second_order")
+        self.lam_v = float(lam_v)
+        self.lam_c = float(lam_c)
+
+    def coeffs(self, delta: int, h: int) -> tuple[float, float]:
+        s, q = _quad_sq(delta, h)
+        return self.lam_v * s + self.lam_c * q, -self.lam_c * q
+
+
 def _damped_e2(k: float, s_aa, s_ab, s_bb):
     """||e||^2 for kappa=k over the delta-Gram block sums (vectorized over windows)."""
     return k * k * s_aa + s_bb - 2.0 * k * s_ab
+
+
+def _second_e2(k1, k2, s11, s12, s22, s1b, s2b, sbb):
+    return (sbb + k1 * k1 * s11 + k2 * k2 * s22 + 2.0 * k1 * k2 * s12
+            - 2.0 * k1 * s1b - 2.0 * k2 * s2b)
 
 
 _REGISTRY: dict[str, MoatMethod] = {}
@@ -262,6 +346,13 @@ def register_method(m: MoatMethod) -> None:
 register_method(HoldStale())
 register_method(NaiveLinear())
 register_method(DampedLinear())
+register_method(NaiveSecondOrder())
+register_method(DampedSecondOrder())
+register_method(AdaptiveLinear())
+register_method(AdaptiveSecondOrder())
+
+COEF_METHODS = ("damped_linear", "damped_second_order",
+                "adaptive_linear", "adaptive_second_order")
 
 
 def fit_window_positions(n_ticks: int, t: int, fit_len: int) -> list[int]:
@@ -745,6 +836,22 @@ def cell_window_sums(Ppre: np.ndarray, delta: int, h: int, n_ticks: int):
     S = lambda r0, r1, c0, c1: (Ppre[r1, c1] - Ppre[r0, c1]
                                 - Ppre[r1, c0] + Ppre[r0, c0])
     return S(a0, a1, a0, a1), S(a0, a1, b0, b1), S(b0, b1, b0, b1)
+
+
+def cell_window_sums6(Ppre: np.ndarray, delta: int, h: int, n_ticks: int):
+    t = np.arange(2 * delta, n_ticks - h)
+    if t.size == 0:
+        z = np.zeros(0)
+        return z, z, z, z, z, z
+    S = lambda r0, r1, c0, c1: (Ppre[r1, c1] - Ppre[r0, c1]
+                                - Ppre[r1, c0] + Ppre[r0, c0])
+    s11 = S(t - delta, t, t - delta, t)
+    s22 = S(t - 2 * delta, t - delta, t - 2 * delta, t - delta)
+    s12 = S(t - delta, t, t - 2 * delta, t - delta)
+    s1b = S(t - delta, t, t, t + h)
+    s2b = S(t - 2 * delta, t - delta, t, t + h)
+    sbb = S(t, t + h, t, t + h)
+    return s11, s12, s22, s1b, s2b, sbb
 
 
 def surrogate_metric_row(e2: float, b2: float, eb: float) -> dict:
