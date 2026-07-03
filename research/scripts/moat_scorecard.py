@@ -150,6 +150,8 @@ VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
 # regression visuals — n_* only when the per-scalar panel path ran (declared per-emit)
 VISUAL_KEY_PRED_HIST = "n_pred_r2_scalar_hist"
 VISUAL_KEY_PRED_EVR = "o_pred_evr_vs_h"
+# adaptive-arm coefficient trajectories — declared per-emit only when an adaptive arm ran
+VISUAL_KEY_COEF_TRAJ = "l_adaptive_coef_traj"
 
 
 def log(msg: str) -> None:
@@ -1050,44 +1052,281 @@ def damped_cell(saa, sab, sbb, delta: int, h: int, lam_grid) -> dict:
                                          for v in insample_med])}
 
 
+def damped2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mu_grid) -> dict:
+    nw = int(s11.size)
+    mus = np.asarray(mu_grid, dtype=np.float64)
+    Mn = mus.size
+    s, q = _quad_sq(delta, h)
+    k1 = s + mus * q
+    k2 = -mus * q
+    e2 = _second_e2(k1[:, None], k2[:, None], s11[None, :], s12[None, :],
+                    s22[None, :], s1b[None, :], s2b[None, :], sbb[None, :])
+    e2 = np.maximum(e2, 0.0)
+    nb = np.sqrt(np.maximum(sbb, 0.0))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio_mw = np.where(nb[None, :] > M.DENOM_EPS, np.sqrt(e2) / nb[None, :], np.nan)
+    insample_med = np.full(Mn, np.nan)
+    for l in range(Mn):
+        fin = ratio_mw[l][np.isfinite(ratio_mw[l])]
+        if fin.size:
+            insample_med[l] = float(np.median(fin))
+    if np.all(np.isnan(insample_med)):
+        mu_oracle, oracle_med = float("nan"), float("nan")
+    else:
+        oi = int(np.nanargmin(insample_med))
+        mu_oracle, oracle_med = float(mus[oi]), float(insample_med[oi])
+    cumE = np.cumsum(e2, axis=1)
+    ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
+    dcoss = np.full(nw, np.nan); stales = np.full(nw, np.nan); projs = np.full(nw, np.nan)
+    mu_star = np.full(nw, np.nan); n_warmup = 0
+    sum_e2 = sum_b2 = 0.0
+    for j in range(nw):
+        fit_end = _oos_fit_end(j, h)
+        if fit_end < 0:
+            n_warmup += 1
+            continue
+        mi = int(np.argmin(cumE[:, fit_end]))
+        mu_star[j] = mus[mi]
+        r = surrogate_metric_row(e2[mi, j], sbb[j],
+                                 sbb[j] - k1[mi] * s1b[j] - k2[mi] * s2b[j])
+        ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
+        dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+        sum_e2 += float(e2[mi, j])
+        sum_b2 += float(max(sbb[j], 0.0))
+    mu_star_med = float(np.nanmedian(mu_star)) if np.any(np.isfinite(mu_star)) else float("nan")
+    return {"ratios": ratios, "skills": skills, "dcoss": dcoss, "stales": stales,
+            "projs": projs, "lam_star": mu_star, "lam_star_med": mu_star_med,
+            "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
+            "lam_oracle": mu_oracle, "oracle_med": oracle_med,
+            "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
+            "insample": (mus.tolist(), [None if not np.isfinite(v) else float(v)
+                                        for v in insample_med]),
+            "lam2_star": None, "lam2_star_med": None}
+
+
+def adaptive_cell(saa, sab, sbb, delta: int, h: int, mode: str,
+                  ewma_decay: float, coef_clip: float) -> dict:
+    nw = int(saa.size)
+    kappa0 = float(h) / float(delta)
+    inv_k = float(delta) / float(h)
+    lam = np.full(nw, np.nan)
+    if mode == "rolling_ls":
+        csaa = np.cumsum(saa)
+        csab = np.cumsum(sab)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            if fe < 0 or csaa[fe] <= 0.0:
+                continue
+            lam[j] = float(np.clip(inv_k * csab[fe] / csaa[fe], -coef_clip, coef_clip))
+    else:
+        Ah = Bh = None
+        w_next = 0
+        rho = float(ewma_decay)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            while w_next <= fe:
+                if Ah is None:
+                    Ah, Bh = float(saa[w_next]), float(sab[w_next])
+                else:
+                    Ah = rho * Ah + (1.0 - rho) * float(saa[w_next])
+                    Bh = rho * Bh + (1.0 - rho) * float(sab[w_next])
+                w_next += 1
+            if Ah is None or Ah <= 0.0:
+                continue
+            lam[j] = float(np.clip(inv_k * Bh / Ah, -coef_clip, coef_clip))
+    scored = np.isfinite(lam)
+    n_warmup = int(nw - scored.sum())
+    ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
+    dcoss = np.full(nw, np.nan); stales = np.full(nw, np.nan); projs = np.full(nw, np.nan)
+    sum_e2 = sum_b2 = 0.0
+    for j in range(nw):
+        if not scored[j]:
+            continue
+        k = lam[j] * kappa0
+        e2 = max(float(_damped_e2(k, saa[j], sab[j], sbb[j])), 0.0)
+        r = surrogate_metric_row(e2, sbb[j], sbb[j] - k * sab[j])
+        ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
+        dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+        sum_e2 += e2
+        sum_b2 += float(max(sbb[j], 0.0))
+    tot_aa = float(np.sum(saa))
+    if tot_aa > 0.0:
+        lam_oracle = float(np.clip(inv_k * float(np.sum(sab)) / tot_aa,
+                                   -coef_clip, coef_clip))
+        k_o = lam_oracle * kappa0
+        e2o = np.maximum(_damped_e2(k_o, saa, sab, sbb), 0.0)
+        nb = np.sqrt(np.maximum(sbb, 0.0))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ro = np.where(nb > M.DENOM_EPS, np.sqrt(e2o) / nb, np.nan)
+        fin = ro[np.isfinite(ro)]
+        oracle_med = float(np.median(fin)) if fin.size else float("nan")
+    else:
+        lam_oracle, oracle_med = float("nan"), float("nan")
+    lam_star_med = float(np.nanmedian(lam)) if np.any(scored) else float("nan")
+    return {"ratios": ratios, "skills": skills, "dcoss": dcoss, "stales": stales,
+            "projs": projs, "lam_star": lam, "lam_star_med": lam_star_med,
+            "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
+            "lam_oracle": lam_oracle, "oracle_med": oracle_med,
+            "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
+            "insample": None, "lam2_star": None, "lam2_star_med": None}
+
+
+def adaptive2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mode: str,
+                   ewma_decay: float, coef_clip: float) -> dict:
+    nw = int(s11.size)
+    s, q = _quad_sq(delta, h)
+    guu = s11
+    guw = s11 - s12
+    gww = s11 - 2.0 * s12 + s22
+    r1 = s1b
+    r2 = s1b - s2b
+    lam_v = np.full(nw, np.nan)
+    lam_c = np.full(nw, np.nan)
+    n_fallback = [0]
+
+    def _solve(a_uu, a_uw, a_ww, b1, b2):
+        m11 = s * s * a_uu
+        m12 = s * q * a_uw
+        m22 = q * q * a_ww
+        det = m11 * m22 - m12 * m12
+        if det > 1e-12 * m11 * m22 and det > 0.0:
+            rv1 = s * b1
+            rv2 = q * b2
+            return (m22 * rv1 - m12 * rv2) / det, (m11 * rv2 - m12 * rv1) / det
+        if a_uu <= 0.0:
+            return None, None
+        n_fallback[0] += 1
+        return b1 / (s * a_uu), 0.0
+
+    if mode == "rolling_ls":
+        cguu, cguw, cgww = np.cumsum(guu), np.cumsum(guw), np.cumsum(gww)
+        cr1, cr2 = np.cumsum(r1), np.cumsum(r2)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            if fe < 1:
+                continue
+            lv, lc = _solve(cguu[fe], cguw[fe], cgww[fe], cr1[fe], cr2[fe])
+            if lv is None:
+                continue
+            lam_v[j] = float(np.clip(lv, -coef_clip, coef_clip))
+            lam_c[j] = float(np.clip(lc, -coef_clip, coef_clip))
+    else:
+        st = None
+        w_next = 0
+        rho = float(ewma_decay)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            while w_next <= fe:
+                cur = np.array([guu[w_next], guw[w_next], gww[w_next],
+                                r1[w_next], r2[w_next]], dtype=np.float64)
+                st = cur if st is None else rho * st + (1.0 - rho) * cur
+                w_next += 1
+            if st is None or w_next < 2:
+                continue
+            lv, lc = _solve(st[0], st[1], st[2], st[3], st[4])
+            if lv is None:
+                continue
+            lam_v[j] = float(np.clip(lv, -coef_clip, coef_clip))
+            lam_c[j] = float(np.clip(lc, -coef_clip, coef_clip))
+    scored = np.isfinite(lam_v)
+    n_warmup = int(nw - scored.sum())
+    n_fb = n_fallback[0]
+    lvo, lco = _solve(float(np.sum(guu)), float(np.sum(guw)), float(np.sum(gww)),
+                      float(np.sum(r1)), float(np.sum(r2)))
+    if lvo is not None:
+        lam_oracle = float(np.clip(lvo, -coef_clip, coef_clip))
+        lco = float(np.clip(lco, -coef_clip, coef_clip))
+        k1o = lam_oracle * s + lco * q
+        k2o = -lco * q
+        e2o = np.maximum(_second_e2(k1o, k2o, s11, s12, s22, s1b, s2b, sbb), 0.0)
+        nb = np.sqrt(np.maximum(sbb, 0.0))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ro = np.where(nb > M.DENOM_EPS, np.sqrt(e2o) / nb, np.nan)
+        fin = ro[np.isfinite(ro)]
+        oracle_med = float(np.median(fin)) if fin.size else float("nan")
+    else:
+        lam_oracle, oracle_med = float("nan"), float("nan")
+    ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
+    dcoss = np.full(nw, np.nan); stales = np.full(nw, np.nan); projs = np.full(nw, np.nan)
+    sum_e2 = sum_b2 = 0.0
+    for j in range(nw):
+        if not scored[j]:
+            continue
+        k1 = lam_v[j] * s + lam_c[j] * q
+        k2 = -lam_c[j] * q
+        e2 = max(float(_second_e2(k1, k2, s11[j], s12[j], s22[j],
+                                  s1b[j], s2b[j], sbb[j])), 0.0)
+        r = surrogate_metric_row(e2, sbb[j], sbb[j] - k1 * s1b[j] - k2 * s2b[j])
+        ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
+        dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
+        sum_e2 += e2
+        sum_b2 += float(max(sbb[j], 0.0))
+    lam_v_med = float(np.nanmedian(lam_v)) if np.any(scored) else float("nan")
+    lam_c_med = float(np.nanmedian(lam_c)) if np.any(np.isfinite(lam_c)) else float("nan")
+    return {"ratios": ratios, "skills": skills, "dcoss": dcoss, "stales": stales,
+            "projs": projs, "lam_star": lam_v, "lam_star_med": lam_v_med,
+            "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
+            "lam_oracle": lam_oracle, "oracle_med": oracle_med,
+            "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
+            "insample": None, "lam2_star": lam_c, "lam2_star_med": lam_c_med,
+            "n_det_fallback": n_fb}
+
+
 def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                  methods: list[str], deltas: list[int], hs: list[int],
                  op_point: tuple[int, int], also_points: list[tuple[int, int]],
-                 cadence: str = "per-tick", unit: str = "tick", lam_grid=None,
+                 cadence: str = "per-tick", unit: str = "tick", method_ctx=None,
                  fidelity: str = "full", r2_population: str = "all_const_excluded",
-                 total_dims: dict | None = None, global_damped_store: dict | None = None,
+                 total_dims: dict | None = None, global_coef_store: dict | None = None,
                  plan_runs: dict | None = None):
     """The full scorecard: atomic rows + per-window ratio store (for h*/visuals).
 
-    #47 additions: `damped_linear` rows use the OOS walk-forward selector (damped_cell);
+    #47 additions: coefficient-selected methods use OOS walk-forward per-cell scorers
+    (damped_cell / damped2_cell / adaptive_cell / adaptive2_cell);
     every group carries its per-scalar linearity R² (r2_median / r2_frac_gt_0.7 /
     n_excluded_const, method-independent); every row is tagged with cadence/unit and the
-    two-anchor descriptor {anchor_mode='fixed', delta_resolved=delta, beta=1+h/delta}.
-    Returns (rows, ratio_store, lam_select) where lam_select[(delta,h)] = (lams, med)
-    is the GLOBAL-group in-sample lambda-selection curve for the visual.
+    anchor descriptor {anchor_mode='fixed', delta_resolved=delta, beta=1+h/delta}.
+    Returns (rows, ratio_store, lam_select, mu_select) where lam_select[(delta,h)] =
+    (lams, med) is the GLOBAL-group in-sample lambda-selection curve for the visual
+    (mu_select is damped_second_order's mu-curve twin).
 
     rows-v48.0 additions (all fidelity-agnostic): pred_evr_pooled (exact from the
     SAME block sums — zero extra trace access), fidelity/r2_population tags,
     n_elems_used vs n_elems_total (`total_dims` = true numels; fast mode passes the
-    manifest dims while stats hold k_actual), paper-filter counts, and nullable
+    manifest dims while stats hold k_actual), sampling-filter counts, and nullable
     per-scalar prediction-R² fields (filled later by attach_scalar_pred_r2).
-    `global_damped_store` (if given) captures the GLOBAL group's per-window OOS
-    lam_star array per (delta,h) for the per-scalar damped prediction path.
+    `method_ctx` = {lam_grid, mu_grid, adaptive_mode, ewma_decay, coef_clip}.
+    `global_coef_store` (if given) captures the GLOBAL group's per-window OOS
+    coefficient array(s) per (method, delta, h) for the per-scalar prediction path.
     `plan_runs` = {matrix: sampled-cluster count or None (exact)} — the group min
     lands on every row as `sample_min_runs` (the strip-clustering variance proxy)."""
+    ctx = method_ctx or {}
     if "damped_linear" in methods:
+        lam_grid = ctx.get("lam_grid")
         assert lam_grid is not None and len(lam_grid) > 0, "damped_linear needs --lam-grid"
+    if "damped_second_order" in methods:
+        mu_grid = ctx.get("mu_grid")
+        assert mu_grid is not None and len(mu_grid) > 0, "damped_second_order needs --mu-grid"
+    amode = ctx.get("adaptive_mode", "rolling_ls")
+    adecay = float(ctx.get("ewma_decay", 0.9))
+    aclip = float(ctx.get("coef_clip", 2.0))
     groups = build_groups(names)
     # per-matrix prefix sums once; per-matrix per-cell block sums once
     cells = [(d, h) for d in deltas for h in hs]
+    need6 = any(_REGISTRY[m].n_anchors == 3 for m in methods)
     per_matrix: dict = {}
+    per_matrix6: dict = {}
     for n in names:
         Ppre = prefix_from_banded(stats[n]["D"], band)
         per_matrix[n] = {c: cell_window_sums(Ppre, c[0], c[1], n_ticks) for c in cells}
+        if need6:
+            per_matrix6[n] = {c: cell_window_sums6(Ppre, c[0], c[1], n_ticks)
+                              for c in cells}
         del Ppre
     rows: list[dict] = []
     ratio_store: dict = {}                       # (method, delta, h, kind, key) -> ratios
     lam_select: dict = {}                        # (delta,h) -> (lams, insample_med) [GLOBAL]
+    mu_select: dict = {}                         # (delta,h) -> (mus, insample_med) [GLOBAL]
     for g in groups:
         diag = group_diagnostics(g["members"], stats, n_ticks)
         gr2_med, gr2_frac, gr2_nexcl, _, gr2_nrange, gr2_nunique = \
@@ -1101,6 +1340,7 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
             g_min_runs = min(rr) if rr else None
         is_global = (g["kind"] == "global")
         gsums = {}
+        gsums6 = {}
         for c in cells:
             saa = sab = sbb = None
             for m in g["members"]:
@@ -1112,27 +1352,58 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     sab += x
                     sbb += b
             gsums[c] = (saa, sab, sbb)
+            if need6:
+                acc6 = None
+                for m in g["members"]:
+                    vals = per_matrix6[m][c]
+                    if acc6 is None:
+                        acc6 = [v.copy() for v in vals]
+                    else:
+                        for i, v in enumerate(vals):
+                            acc6[i] += v
+                gsums6[c] = tuple(acc6)
         for mname in methods:
             meth = _REGISTRY[mname]
+            three = meth.n_anchors == 3
             med_by_dh: dict = {}
             cell_row_map: dict = {}
             for (delta, h) in cells:
                 saa, sab, sbb = gsums[(delta, h)]
-                nw_expected = n_ticks - h - delta
+                if three:
+                    s11, s12, s22, s1b, s2b, sb6 = gsums6[(delta, h)]
+                nw_expected = n_ticks - h - meth.lookback(delta)
                 in_bounds = nw_expected > 0
-                nw = int(saa.size)
+                nw = int(s11.size) if three else int(saa.size)
                 assert nw == max(nw_expected, 0), \
-                    f"n_windows {nw} != {nw_expected} for cell ({delta},{h})"
+                    f"n_windows {nw} != {nw_expected} for {mname} cell ({delta},{h})"
                 dmp = None
                 if mname == "damped_linear":
-                    dmp = damped_cell(saa, sab, sbb, delta, h, lam_grid)
+                    dmp = damped_cell(saa, sab, sbb, delta, h, ctx["lam_grid"])
+                elif mname == "damped_second_order":
+                    dmp = damped2_cell(s11, s12, s22, s1b, s2b, sb6, delta, h,
+                                       ctx["mu_grid"])
+                elif mname == "adaptive_linear":
+                    dmp = adaptive_cell(saa, sab, sbb, delta, h, amode, adecay, aclip)
+                elif mname == "adaptive_second_order":
+                    dmp = adaptive2_cell(s11, s12, s22, s1b, s2b, sb6, delta, h,
+                                         amode, adecay, aclip)
+                if dmp is not None:
                     ratios, skills = dmp["ratios"], dmp["skills"]
                     dcoss, stales, projs = dmp["dcoss"], dmp["stales"], dmp["projs"]
                     pev = dmp["pred_evr_pooled"]
                     if is_global:
-                        lam_select[(delta, h)] = dmp["insample"]
-                        if global_damped_store is not None:
-                            global_damped_store[(delta, h)] = dmp["lam_star"]
+                        if dmp.get("insample") is not None:
+                            sel = lam_select if mname == "damped_linear" else mu_select
+                            sel[(delta, h)] = dmp["insample"]
+                        if global_coef_store is not None:
+                            l2 = dmp.get("lam2_star")
+                            global_coef_store[(mname, delta, h)] = (
+                                (dmp["lam_star"], l2) if l2 is not None
+                                else dmp["lam_star"])
+                        if dmp.get("n_det_fallback"):
+                            log(f"adaptive2 cell ({delta},{h}): det-guard scalar "
+                                f"fallback on {dmp['n_det_fallback']}/{nw} windows "
+                                f"(global group)")
                 else:
                     ratios = np.full(nw, np.nan)
                     skills = np.full(nw, np.nan)
@@ -1141,7 +1412,13 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     projs = np.full(nw, np.nan)
                     sum_e2 = sum_b2 = 0.0
                     for j in range(nw):
-                        e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j], delta, h)
+                        if three:
+                            e2, b2, eb = meth.window_stats(s11[j], s12[j], s22[j],
+                                                           s1b[j], s2b[j], sb6[j],
+                                                           delta, h)
+                        else:
+                            e2, b2, eb = meth.window_stats(saa[j], sab[j], sbb[j],
+                                                           delta, h)
                         r = surrogate_metric_row(e2, b2, eb)
                         ratios[j] = r["weight_proj_ratio"]
                         skills[j] = r["skill"]
@@ -1179,10 +1456,12 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     "r2_median": gr2_med, "r2_frac_gt_0.7": gr2_frac,
                     "n_excluded_const": gr2_nexcl,
                     "lam_star": (dmp["lam_star_med"] if dmp else None),
+                    "lam2_star": (dmp.get("lam2_star_med") if dmp else None),
                     "lam_oracle": (dmp["lam_oracle"] if dmp else None),
                     "ratio_oracle_median": (dmp["oracle_med"] if dmp else None),
                     "n_warmup": (dmp["n_warmup"] if dmp else 0),
                     "n_oos_scored": (dmp["n_oos_scored"] if dmp else nw),
+                    "lookback_ticks": meth.lookback(delta),
                     # ---- rows-v48.0 fast/regression superset ----
                     "fidelity": fidelity,
                     "n_elems_used": g_used, "n_elems_total": g_total,
@@ -1221,7 +1500,7 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
     for (mname, delta, h, kind, key), ratios in list(ratio_store.items()):
         if kind == "special" and key == "embed":
             ratio_store[(mname, delta, h, "special", "lm_head")] = ratios
-    return rows, ratio_store, lam_select
+    return rows, ratio_store, lam_select, mu_select
 
 
 def _spearman(x: list, y: list) -> float:
@@ -1241,15 +1520,13 @@ def _spearman(x: list, y: list) -> float:
 def build_visuals(rows: list[dict], methods: list[str],
                   deltas: list[int], hs: list[int], op: tuple[int, int],
                   lam_select: dict | None = None, stats: dict | None = None,
-                  paper_panel: dict | None = None,
+                  mu_select: dict | None = None, coef_traj: dict | None = None,
                   pred_hists: dict | None = None) -> dict:
     idx = {(r["method"], r["delta_ticks"], r["h_ticks"],
             r["group_kind"], r["group_key"]): r for r in rows}
     op_d, op_h = op
     gget = lambda m, d, h: idx.get((m, d, h, "global", "all"), {})
-    # paper_linear is off the (delta x h) grid (delta derived per window) -> excluded
-    # from the grid visuals a-g; it gets its own m_paper_equivalence panel instead.
-    gm = [m for m in methods if m != "paper_linear"]
+    gm = list(methods)
     vis = {
         "a_accuracy_vs_horizon": {
             m: {"delta": op_d, "h": hs,
@@ -1301,11 +1578,15 @@ def build_visuals(rows: list[dict], methods: list[str],
 
     # ---- #47 h: lambda-selection (in-sample median ratio vs lambda per (delta,h)) ----
     lam_select = lam_select or {}
+    mu_select = mu_select or {}
     vis["h_lambda_selection"] = {
         "operating_point": [op_d, op_h],
         "cells": {f"{d},{h}": {"lambda": lam_select[(d, h)][0],
                                "ratio_median": lam_select[(d, h)][1]}
-                  for (d, h) in sorted(lam_select)}}
+                  for (d, h) in sorted(lam_select)},
+        "mu_cells": {f"{d},{h}": {"mu": mu_select[(d, h)][0],
+                                  "ratio_median": mu_select[(d, h)][1]}
+                     for (d, h) in sorted(mu_select)}}
 
     # ---- #47 i: per-scalar R² histogram (global + per super_block) ----
     r2_hist_data = {}
@@ -1346,170 +1627,19 @@ def build_visuals(rows: list[dict], methods: list[str],
                               [p["ratio_median"] for p in pts])}
 
     # ---- rows-v48 o: per-method pooled EVR vs h at the operating Δ (global) ----
-    evr = {m: {"delta": op_d, "h": hs,
-               "pred_evr_pooled": [gget(m, op_d, h).get("pred_evr_pooled") for h in hs]}
-           for m in gm}
-    if "paper_linear" in methods:
-        evr["paper_linear"] = {
-            "delta": PAPER_SENTINEL_DELTA, "h": hs,
-            "pred_evr_pooled": [idx.get(("paper_linear", PAPER_SENTINEL_DELTA, h,
-                                         "global", "all"), {}).get("pred_evr_pooled")
-                                for h in hs]}
-    vis[VISUAL_KEY_PRED_EVR] = evr
+    vis[VISUAL_KEY_PRED_EVR] = {
+        m: {"delta": op_d, "h": hs,
+            "pred_evr_pooled": [gget(m, op_d, h).get("pred_evr_pooled") for h in hs]}
+        for m in gm}
 
     # ---- rows-v48 n: per-scalar prediction-R² histograms (panel path only) ----
     if pred_hists is not None:
         vis[VISUAL_KEY_PRED_HIST] = pred_hists
 
-    # ---- #47 m: paper-equivalence panel (regime S only; passed in by run_emit) ----
-    if paper_panel is not None:
-        vis[VISUAL_KEY_PAPER] = paper_panel
+    # ---- rows-v49 l: GLOBAL adaptive per-window coefficient trajectories ----
+    if coef_traj:
+        vis[VISUAL_KEY_COEF_TRAJ] = coef_traj
     return vis
-
-
-# =============================================================================
-# paper_linear — the Wang et al. 2026 weight-space extrapolation protocol arm
-# (regime S ONLY; direct-scored OUTSIDE the banded cache; delta grows with t)
-# =============================================================================
-def _paper_windows(n_ticks: int, hs: list[int], anchor_frac: float, stride: int):
-    """(h, t, t0, delta_resolved) windows: t0=floor(frac*t), t>=20, strided anchors,
-    t+h<=n_ticks-1. Asserts the App. E.1 anchor rule 0.20 <= t0/t <= 0.30."""
-    windows = []
-    needed: set[int] = set()
-    for h in hs:
-        for t in range(20, n_ticks - h, stride):
-            t0 = int(math.floor(anchor_frac * t))
-            if t0 < 1:
-                continue
-            frac_res = t0 / t
-            assert 0.20 <= frac_res <= 0.30, (
-                f"paper anchor t0/t={frac_res:.3f} outside [0.20,0.30] at t={t} "
-                f"(t>=20 required; frac={anchor_frac})")
-            windows.append((h, t, t0, t - t0))
-            needed.update((t0, t, t + h))
-    return windows, sorted(needed)
-
-
-def compute_paper_rows(reader, names, dims, n_ticks, hs, groups, anchor_frac,
-                       stride, stats, cadence, unit, ram_gb=40.0,
-                       fidelity: str = "full",
-                       r2_population: str = "all_const_excluded",
-                       total_dims: dict | None = None,
-                       plan_runs: dict | None = None):
-    """Direct-score paper_linear over mmap slice reads. theta_hat = theta_t +
-    (h/delta_resolved)*(theta_t - theta_{t0}) — the SAME Order1 secant as naive_linear
-    with delta=delta_resolved (t0=floor(frac*t)). Its cells NEVER enter the banded
-    stats_cache and MUST NOT change `band`. Returns (paper_rows, paper_panel).
-    In fast mode the reader is the in-RAM panel (dims = k_actual, total_dims = true
-    numels) — the scoring math, anchor rule and asserts are IDENTICAL."""
-    windows, needed = _paper_windows(n_ticks, hs, anchor_frac, stride)
-    log(f"paper_linear: {len(windows)} windows over h={hs}, {len(needed)} unique steps, "
-        f"frac={anchor_frac}, stride={stride}")
-    name_dims = [(n, dims[n]) for n in names]
-    cap = max(int(ram_gb * 1e9 / (max(len(needed), 1) * 8)), 1_000_000)
-    chunks = plan_chunks(name_dims, cap)
-    acc: dict = {}                       # (matrix, h, t) -> np.array([e2, b2, eb])
-    for ci, chunk in enumerate(chunks):
-        tc = time.time()
-        buf: dict = {}
-        for step in needed:
-            sd = reader.load_raw(step)
-            buf[step] = {i: reader.slice_f64(sd, u.name, u.a, u.b)
-                         for i, u in enumerate(chunk)}
-            del sd
-        for i, u in enumerate(chunk):
-            for (h, t, t0, dres) in windows:
-                a = buf[t0][i]; tt = buf[t][i]; s = buf[t + h][i]
-                k = float(h) / float(dres)
-                e = (tt + k * (tt - a)) - s        # Order1 secant residual
-                b = tt - s                          # stale baseline displacement
-                trip = np.array([float(e @ e), float(b @ b), float(e @ b)])
-                key = (u.name, h, t)
-                acc[key] = acc[key] + trip if key in acc else trip
-        buf = None
-        log(f"paper_linear: chunk {ci + 1}/{len(chunks)} done in {time.time() - tc:.1f}s")
-    win_by_h: dict = {}
-    for (h, t, t0, dres) in windows:
-        win_by_h.setdefault(h, []).append((t, t0, dres))
-    paper_rows: list[dict] = []
-    panel = {"operating_h": None, "h": list(hs), "betas_by_h": {}, "ratio_by_h": {}}
-    for g in groups:
-        diag = group_diagnostics(g["members"], stats, n_ticks)
-        gr2_med, gr2_frac, gr2_nexcl, _, gr2_nrange, gr2_nunique = \
-            group_r2(g["members"], stats)
-        g_used = sum(int(stats[m]["d"]) for m in g["members"])
-        g_total = (sum(int(total_dims[m]) for m in g["members"])
-                   if total_dims is not None else g_used)
-        g_min_runs = None
-        if plan_runs is not None:
-            rr = [plan_runs[m] for m in g["members"] if plan_runs.get(m) is not None]
-            g_min_runs = min(rr) if rr else None
-        for h in hs:
-            wl = win_by_h.get(h, [])
-            ratios = np.full(len(wl), np.nan); skills = np.full(len(wl), np.nan)
-            dcoss = np.full(len(wl), np.nan); stales = np.full(len(wl), np.nan)
-            projs = np.full(len(wl), np.nan)
-            betas = []; dress = []
-            sum_e2 = sum_b2 = 0.0
-            for j, (t, t0, dres) in enumerate(wl):
-                e2 = b2 = eb = 0.0
-                for m in g["members"]:
-                    v = acc.get((m, h, t))
-                    if v is not None:
-                        e2 += v[0]; b2 += v[1]; eb += v[2]
-                r = surrogate_metric_row(e2, b2, eb)
-                ratios[j] = r["weight_proj_ratio"]; skills[j] = r["skill"]
-                dcoss[j] = r["dir_cos"]; stales[j] = r["base_norm"]; projs[j] = r["err_norm"]
-                betas.append(1.0 + float(h) / float(dres)); dress.append(dres)
-                sum_e2 += float(max(e2, 0.0))
-                sum_b2 += float(max(b2, 0.0))
-            rm, r10, r90 = _pcts(ratios)
-            sm, s10, s90 = _pcts(skills)
-            row = {
-                "method": "paper_linear", "delta_ticks": PAPER_SENTINEL_DELTA,
-                "h_ticks": h, "group_kind": g["kind"], "group_key": str(g["key"]),
-                "matrix_name": g["matrix_name"], "layer_idx": g["layer_idx"],
-                "special": g["special"], "block_type": g["block_type"],
-                "super_block": g["super_block"],
-                "stale_error_median": _pcts(stales)[0], "proj_error_median": _pcts(projs)[0],
-                "weight_proj_ratio_median": rm,
-                "weight_proj_ratio_p10": r10, "weight_proj_ratio_p90": r90,
-                "skill_median": sm, "skill_p10": s10, "skill_p90": s90,
-                "dir_cos_median": _pcts(dcoss)[0],
-                "traj_r2": diag["traj_r2"], "consec_delta_cos": diag["consec_delta_cos"],
-                "delta_norm": diag["delta_norm"], "coverage": diag["coverage"],
-                "n_windows": len(wl), "in_bounds": bool(len(wl) > 0),
-                "n_nan_windows": int(np.sum(~np.isfinite(ratios))),
-                "h_star": None, "best_delta": None, "tied": False,
-                "cadence": cadence, "unit": unit,
-                "anchor_mode": "frac25",
-                "delta_resolved": (float(np.median(dress)) if dress else None),
-                "delta_resolved_min": (int(np.min(dress)) if dress else None),
-                "delta_resolved_max": (int(np.max(dress)) if dress else None),
-                "beta": (float(np.median(betas)) if betas else None),
-                "beta_min": (float(np.min(betas)) if betas else None),
-                "beta_max": (float(np.max(betas)) if betas else None),
-                "r2_median": gr2_med, "r2_frac_gt_0.7": gr2_frac,
-                "n_excluded_const": gr2_nexcl, "lam_star": None,
-                "lam_oracle": None, "ratio_oracle_median": None,
-                "n_warmup": 0, "n_oos_scored": len(wl),
-                # ---- rows-v48.0 fast/regression superset ----
-                "fidelity": fidelity,
-                "n_elems_used": g_used, "n_elems_total": g_total,
-                "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
-                "pred_r2_scalar_median": None, "pred_r2_scalar_frac_gt_0.7": None,
-                "pred_r2_scalar_frac_lt_0": None, "pred_r2_scalar_n": None,
-                "pred_r2_scalar_n_excluded": None,
-                "pred_r2_scalar_source": None,
-                "r2_population": r2_population,
-                "n_excluded_range": gr2_nrange, "n_excluded_unique": gr2_nunique,
-                "sample_min_runs": g_min_runs,
-            }
-            paper_rows.append(row)
-            if g["kind"] == "global":
-                panel["betas_by_h"][str(h)] = [float(x) for x in betas]
-                panel["ratio_by_h"][str(h)] = rm
-    return paper_rows, panel
 
 
 # =============================================================================
