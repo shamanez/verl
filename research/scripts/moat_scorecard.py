@@ -2863,7 +2863,7 @@ def run_verify_schema(scorecard_dir: str) -> int:
         hs = meta.get("h_ticks", [])
         n_ticks = meta.get("n_ticks", 0)
         grid_methods = (methods if v49_schema
-                        else [m for m in methods if m != "paper_linear"])
+                        else [m for m in methods if m in _REGISTRY])
         for m in grid_methods:
             for d in deltas:
                 for h in hs:
@@ -2909,7 +2909,7 @@ def run_verify_schema(scorecard_dir: str) -> int:
             if r["in_bounds"] and not r.get("tied") and n_ticks:
                 if v49_schema:
                     expected_nw = n_ticks - r["h_ticks"] - r["lookback_ticks"]
-                elif r["method"] == "paper_linear":
+                elif r["method"] not in _REGISTRY:
                     continue
                 else:
                     expected_nw = n_ticks - r["h_ticks"] - r["delta_ticks"]

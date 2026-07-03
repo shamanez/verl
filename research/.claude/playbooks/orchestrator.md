@@ -43,10 +43,11 @@ These hold every tick, regardless of how you were invoked:
    - **Env-failure** (docker bring-up fail, CUDA/driver mismatch, vLLM init OOM,
      NCCL init crash, SSH unreachable >2 min): the box is unusable. On the
      monitor's `teardown_and_fallback` recommendation, dispatch `vast-teardown`
-     immediately, then re-provision by walking to the next tier in the plan's
-     `gpu_filter_chain`. The only two sanctioned tiers are 4×H200 (preferred)
-     and 8×H100 — there is no consumer-card or 4×H100 fallback in the research
-     loop.
+     immediately, then re-provision by walking to the next rung in the plan's
+     `gpu_filter_chain`. The default ladder is 1×H200 → 1×B200 → 2×H200 at
+     reliability >0.99 (source of truth: project.yaml `default_compute`;
+     legacy 4×H200/8×H100 only on explicit operator request) — there is no
+     consumer-card fallback in the research loop.
      - **External-box exception (env-failure only):** if the unusable box is
        `external:true` (operator-attached via `vast-attach`), **tear it down** via
        `vast-teardown` (teardown is a must) but do **NOT** auto-re-provision a
@@ -246,7 +247,7 @@ agent needs but cannot derive.
 ```
 You are experiment-runner for EXP-<N>.
 Plan: .claude/plans/<N>.md (read $PARENT/.claude/plans/<N>.md from your worktree).
-The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (4×H200 → 8×H100) is what the planner emits unless this plan overrides.
+The plan's `## Compute budget` block defines `gpu_filter_chain`, `max_dph`, `max_gpu_hr`; walk the chain. The default chain (1×H200 → 1×B200 → 2×H200, reliability >0.99 — project.yaml `default_compute`) is what the planner emits unless this plan overrides.
 code_change=<true|false>. If true: FIRST check whether the implementation is already done (the MacBook implement step — researcher_steps §2). If `exp/<N>-<slug>` already exists on origin AND the plan's `## Progress` marks the implementation complete, do NOT re-patch — the runner just fetches that branch, bundles it for the box, and provisions + launches it. Otherwise branch `exp/<N>-<slug>` from `vast-ai-workload` (NOT main), apply target_modules patches, commit + `git push -u origin exp/<N>-<slug>` BEFORE provisioning so the branch survives if the laptop dies.
 vast_account=<team|private>. Default private. `export VAST_ACCOUNT=<this>` before provisioning so the box bills the right account, and record `vast_account` on the PROVISIONED ledger row (teardown reads it back).
 attach_box: if the plan's `## Compute budget` names `attach_box:`, OR this dispatch passes `attach_box=instance_id=…,ssh_host=…,ssh_port=…,num_gpus=…,account=…` (the session's pre-attached box), SKIP provisioning — take the runner's attach path (vast-attach skill, step 3b), pointing the skill at $PARENT. The box is EXTERNAL (provenance only) and IS torn down after its run like any box; if a RUNNING/PROVISIONED row already references its instance_id, it is BUSY — do not launch a second experiment onto it.
