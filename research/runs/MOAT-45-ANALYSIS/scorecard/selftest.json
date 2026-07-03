@@ -1,0 +1,142 @@
+{
+  "metric_contract_pin": {
+    "pass": true,
+    "detail": "weight_proj.metrics.METRIC_CONTRACT == 'weight-proj-metrics-v1'",
+    "hard": true
+  },
+  "structure_partition": {
+    "pass": false,
+    "detail": "manifest missing: runs/EXP-57/regimeA/weights/full_manifest.jsonl",
+    "hard": true
+  },
+  "causality_leakage_guard": {
+    "pass": true,
+    "detail": "valid split fit_idx=[4, 5, 6]<score=7; overlap-guard-fires=True; fit_window_positions wired (max fit idx 99 < anchor 100)",
+    "hard": true
+  },
+  "hold_stale_identity_synthetic": {
+    "pass": true,
+    "detail": "54 rows: worst |ratio-1|=0.00e+00, worst |skill|=0.00e+00",
+    "hard": true
+  },
+  "naive_linear_exact_trajectory": {
+    "pass": true,
+    "detail": "exactly-linear matrix: worst naive_linear ratio 8.31e-06 (expect ~fp32-rounding floor << 1)",
+    "hard": true
+  },
+  "offpath_parity_synthetic": {
+    "pass": true,
+    "detail": "24 samples, worst rel diff 0.00e+00 (tol 1e-06) \u2014 surrogate path == direct predictors.Order1+metrics.full_metric_row",
+    "hard": true
+  },
+  "damped_lambda_identities": {
+    "pass": true,
+    "detail": "per-tick: |lam1-naive|=0.0e+00 |lam0-hold|=0.0e+00; per-step: |lam1-naive|=0.0e+00 |lam0-hold|=0.0e+00",
+    "hard": true
+  },
+  "cadence_reindex": {
+    "pass": true,
+    "detail": "per-step step->tick 2s=True; present-set validated=True; per-step delta==2x per-tick=True; fingerprint distinct=True",
+    "hard": true
+  },
+  "oos_leakage_guard": {
+    "pass": true,
+    "detail": "_oos_fit_end causal on 2<=j<30 x h in (1,3,5)=True; intentional-leak trips assert=True; fit_score_split guard=True",
+    "hard": true
+  },
+  "damped_offpath_parity": {
+    "pass": true,
+    "detail": "lam=0.4: 12 samples, worst rel diff 0.00e+00 (tol 1e-06) \u2014 block-sum window_stats == Order1(kappa)+metrics",
+    "hard": true
+  },
+  "r2_offpath_parity": {
+    "pass": true,
+    "detail": "r2.const: |dmed|=0.0e+00 |dfr|=0.0e+00 nexcl=50; r2.linear: |dmed|=4.4e-16 |dfr|=0.0e+00 nexcl=0; r2.noisy: |dmed|=3.3e-16 |dfr|=0.0e+00 nexcl=0; r2.mixed: |dmed|=2.2e-16 |dfr|=0.0e+00 nexcl=0",
+    "hard": true
+  },
+  "r2_bounds_and_exclusion": {
+    "pass": true,
+    "detail": "all valid R\u00b2 in [0,1]=True; r2.const fully excluded (n_excluded_const=50/50)=True",
+    "hard": true
+  },
+  "determinism_soft": {
+    "pass": true,
+    "detail": "not run (no trace)",
+    "hard": false
+  },
+  "sampling_determinism": {
+    "pass": true,
+    "detail": "replan under reversed insertion order identical=True; seed 43 differs=True; modes={'s.a': 'scatter', 's.b': 'all', 's.c': 'strips'}",
+    "hard": true
+  },
+  "panel_gather_parity": {
+    "pass": true,
+    "detail": "panel == direct slice at sampled idx (exact) over 6 matrices x 3 ticks; modes=['all', 'scatter', 'strips']",
+    "hard": true
+  },
+  "fast_full_equivalence_frac1": {
+    "pass": true,
+    "detail": "6048 shared fields over 108 rows, worst rel diff 0.00e+00 (tol 1e-9; frac=1.0 panel == full stream)",
+    "hard": true
+  },
+  "fast_hold_stale_identity": {
+    "pass": true,
+    "detail": "54 sampled rows: worst |ratio-1|=0.00e+00 (tol 1e-06), worst |pred_evr|=0.00e+00 (tol 1e-12); filter bookkeeping closes=True",
+    "hard": true
+  },
+  "pred_evr_identities": {
+    "pass": true,
+    "detail": "exact-linear: naive pred_evr_pooled==1 within 3.7e-15, hold_stale ==0 exactly; per-scalar pred R\u00b2 min=1.000000000000 (tol 1e-9)",
+    "hard": true
+  },
+  "pred_scalar_offpath_parity": {
+    "pass": true,
+    "detail": "39 coords worst rel diff 3.35e-15 (tol 1e-9); constant coord excluded+counted=True",
+    "hard": true
+  },
+  "paper_filter_counts": {
+    "pass": true,
+    "detail": "keep mask exact=True; n_range=4 (want 4), n_unique=2 (want 2); counts close",
+    "hard": true
+  },
+  "bf16_cast_exact": {
+    "pass": true,
+    "detail": "gather_f64 bf16->f64 upcast bit-exact vs manual <<16 expansion (all/strips/scatter plans)",
+    "hard": true
+  },
+  "second_order_exact_quadratic": {
+    "pass": true,
+    "detail": "exact-quadratic: naive_second_order worst ratio 4.79e-08 (tol 1e-6, block-sum f64 cancellation floor; spec 1e-9 unreachable in sqrt space), worst |1-EVR|=1.0e-14 (tol 1e-9); naive_linear global min ratio 1.08e-01 (discrimination >= 1e-2); hold_stale EVR==0 exactly=True",
+    "hard": true
+  },
+  "second_order_nesting": {
+    "pass": true,
+    "detail": "|e2(mu=1)-e2(naive2)|=0.0e+00; |e2(mu=0)-e2(naive1)| at aligned windows (j2=j3+delta)=0.0e+00; exact-linear naive2==naive1 e2 diff=4.3e-17 (all tol 1e-9)",
+    "hard": true
+  },
+  "second_order_offpath_parity": {
+    "pass": true,
+    "detail": "48 samples over 4 arms (frozen mu=0.5 / lam=0.4 / (0.7,0.3)), worst rel diff 0.00e+00 (tol 1e-06); NaiveSecondOrder.predict == P.Order2(damp=1).predict(h/delta) within 0.0e+00 (tol 1e-12)",
+    "hard": true
+  },
+  "adaptive_convergence_known_lambda": {
+    "pass": true,
+    "detail": "exponential r=0.9: lam*=0.852632; rolling_ls worst |lam-lam*|=1.2e-15 (tol 1e-9), worst scored ratio 6.89e-07 (tol 1e-5, prefix-cancellation floor; spec 1e-9 unreachable); ewma |lam_last-lam*|=1.4e-15 (tol 1e-6); n_warmup=2 (want h+1=2)",
+    "hard": true
+  },
+  "adaptive_leakage_prefix": {
+    "pass": true,
+    "detail": "corrupting windows w>=13 (x10) leaves lam_j bit-identical for all j with fit_end<13 (True); later lam differ=True; intentional-leak predicate trips=True",
+    "hard": true
+  },
+  "adaptive_second_order_recovery": {
+    "pass": true,
+    "detail": "exact-quadratic: worst |lv-1|=2.7e-14, |lc-1|=2.1e-13 (tol 1e-6), worst ratio 1.31e-07 (tol 1e-6, cancellation floor), det-fallbacks=0 (want 0); exponential: adaptive2 med 1.06e-13 <= adaptive1 med 1.29e-13 + 1e-9 (collinear u/w -> det-guard fallback path, 18 fallbacks)",
+    "hard": true
+  },
+  "ladder_regression_handcheck": {
+    "pass": true,
+    "detail": "explicit two-step yhat on exact-quadratic: min pred R2=1.000000000000 (tol 1e-9), const-mask=0; naive_second_order global |1-EVR|=7.1e-15 (tol 1e-9); hold_stale EVR==0 exactly",
+    "hard": true
+  }
+}
