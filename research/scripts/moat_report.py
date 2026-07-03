@@ -663,6 +663,24 @@ def _delta_series(reg, methods):
     return out
 
 
+def _accuracy_series_with_arms(reg, methods, arms):
+    """Base-method accuracy-vs-horizon + each #49 arm whose cadence matches `reg`
+    (arm dirs are single-cadence; per-step arms overlay the per-step chart only)."""
+    out = _accuracy_series(reg, methods)
+    cad = reg["meta"].get("cadence")
+    for arm in arms:
+        areg = arm["reg"]
+        if areg["meta"].get("cadence") != cad:
+            continue
+        a = areg["vis"].get("a_accuracy_vs_horizon", {})
+        for m in areg["meta"].get("methods", []):
+            s = a.get(m)
+            if s and s.get("h") and s.get("ratio_median"):
+                out[arm["label"]] = list(zip(s["h"], s["ratio_median"]))
+                break
+    return out
+
+
 def _table(headers, rows_html):
     return ("<table><tr>" + "".join(f'<th class="l">{ESC(h)}</th>' for h in headers)
             + "</tr>" + "".join(rows_html) + "</table>")
@@ -944,12 +962,12 @@ def render(S, T, out_path, explainer_path=None, arms=None):
     if S:
         methods = S["meta"]["methods"]
         P.append('<div class="col"><h3>Regime S — per-step (global steps), Δ=%d</h3>%s</div>'
-                 % (op_s[0], svg_line(_accuracy_series(S, methods),
+                 % (op_s[0], svg_line(_accuracy_series_with_arms(S, methods, arms),
                                       "median ratio vs h (global steps)", "horizon h (global steps)")))
     if T:
         methods = T["meta"]["methods"]
         P.append('<div class="col"><h3>Regime T — per-tick, Δ=%d</h3>%s</div>'
-                 % (op_t[0], svg_line(_accuracy_series(T, methods),
+                 % (op_t[0], svg_line(_accuracy_series_with_arms(T, methods, arms),
                                       "median ratio vs h (ticks)", "horizon h (ticks)")))
     P.append('</div>')
     P.append(cap("accuracy"))
