@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """weight_proj/structure.py — #45 structure-axes layer (matrix_name -> layer_idx / block_type / super_block).
 
-ADDITIVE module (plan 45 `## Code change`). Wraps weight_proj.sweep's name parsing
-(`block_family` / `layer_index` — REUSED, never edited) and remaps to the sharpened
-MOAT taxonomy:
+ADDITIVE module (plan 45 `## Code change`). The name parsers (`_LAYER_RE`,
+`block_family` / `layer_index`) are defined locally below (vendored verbatim from
+the retired sweep engine) and remapped to the sharpened MOAT taxonomy:
 
   1. any name ending `.bias`                 -> block_type=bias,  super_block=bias
      (this MOVES the 84 q/k/v biases OUT of q/k/v_proj — sweep.block_family folds
@@ -25,11 +25,51 @@ MOAT taxonomy:
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 
-from . import sweep as SW
-
 N_LAYERS = 28  # Qwen2.5-1.5B-Instruct decoder depth (the fixed control model)
+
+# =============================================================================
+# Name parsers (vendored verbatim from the retired weight_proj.sweep engine).
+# =============================================================================
+_LAYER_RE = re.compile(r"model\.layers\.(\d+)\.(.+)")
+
+
+def block_family(name: str) -> str:
+    """11-family block label. q/k/v/o proj, gate/up/down proj, 2 layernorms, embed, norm."""
+    if name == "model.embed_tokens.weight":
+        return "embed"
+    if name == "model.norm.weight":
+        return "norm"
+    m = _LAYER_RE.match(name)
+    assert m, f"ungrouped matrix name: {name}"
+    tail = m.group(2)  # e.g. self_attn.q_proj.weight / mlp.down_proj.weight / input_layernorm.weight
+    if tail.startswith("self_attn.q_proj"):
+        return "q_proj"
+    if tail.startswith("self_attn.k_proj"):
+        return "k_proj"
+    if tail.startswith("self_attn.v_proj"):
+        return "v_proj"
+    if tail.startswith("self_attn.o_proj"):
+        return "o_proj"
+    if tail.startswith("mlp.gate_proj"):
+        return "gate_proj"
+    if tail.startswith("mlp.up_proj"):
+        return "up_proj"
+    if tail.startswith("mlp.down_proj"):
+        return "down_proj"
+    if tail.startswith("input_layernorm"):
+        return "input_layernorm"
+    if tail.startswith("post_attention_layernorm"):
+        return "post_attention_layernorm"
+    raise AssertionError(f"unrecognized block tail: {tail} (from {name})")
+
+
+def layer_index(name: str):
+    """Decoder layer index 0..27, or None for embed/norm (layer-agnostic groups)."""
+    m = _LAYER_RE.match(name)
+    return int(m.group(1)) if m else None
 
 DECODER_WEIGHT_TYPES = ("q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj")
@@ -52,19 +92,19 @@ TIED_LM_HEAD = {"block_type": "lm_head", "super_block": "lm_head",
 def classify(name: str) -> dict:
     """matrix_name -> {matrix_name, layer_idx, block_type, super_block, special}.
 
-    layer_idx comes from sweep.layer_index (REUSED); block routing applies the
-    sharpened taxonomy above ON TOP of sweep.block_family (bias split FIRST, since
-    block_family folds q/k/v biases into q/k/v_proj). `special` is the special-group
-    label (embed/norm/bias) for layer-agnostic reporting, else None.
+    layer_idx comes from layer_index (local); block routing applies the sharpened
+    taxonomy above ON TOP of block_family (bias split FIRST, since block_family folds
+    q/k/v biases into q/k/v_proj). `special` is the special-group label
+    (embed/norm/bias) for layer-agnostic reporting, else None.
     """
-    layer_idx = SW.layer_index(name)
+    layer_idx = layer_index(name)
     if name.endswith(".bias"):
         bt = "bias"
     elif name == "model.embed_tokens.weight":
         bt = "embed"
     else:
         try:
-            fam = SW.block_family(name)
+            fam = block_family(name)
         except AssertionError:
             fam = None
         if fam in ("input_layernorm", "post_attention_layernorm", "norm"):

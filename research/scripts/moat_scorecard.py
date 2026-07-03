@@ -7,8 +7,11 @@ box over a pre-downloaded trace (--trace-root), or on any machine for --verify-s
 
 CLI contract (plan 45 `## Verification commands`):
     python scripts/moat_scorecard.py --trace-root $TRACE --self-test
+    # DEFAULT --method = hold_stale + the CORE 4 arms
+    # (naive_linear, naive_second_order, adaptive_linear, adaptive_second_order);
+    # damped_linear/damped_second_order are optional non-default arms (need --lam-grid/--mu-grid)
     python scripts/moat_scorecard.py --trace-root $TRACE \
-        --method hold_stale,naive_linear --delta 5,10,20 --h 1,2,5,10,20,30,40 \
+        --delta 5,10,20 --h 1,2,5,10,20,30,40 \
         --operating-point 20,20 --also 10,10 --out runs/MOAT-45-ANALYSIS/scorecard/
     python scripts/moat_scorecard.py --verify-schema runs/MOAT-45-ANALYSIS/scorecard/
 
@@ -254,6 +257,10 @@ class DampedLinear(TwoAnchorLinear):
 
 
 class AdaptiveLinear(TwoAnchorLinear):
+    """Online/adaptive linear arm. The extrapolation coefficient is refit from all
+    causally-available past checkpoints (rolling-LS) or a running EWMA estimate
+    (error-feedback) and improves as training advances; the prediction then projects
+    h steps ahead from the most recent checkpoint."""
     needs_fit = True
 
     def __init__(self, lam: float = 1.0):
@@ -316,6 +323,10 @@ class DampedSecondOrder(ThreeAnchorQuad):
 
 
 class AdaptiveSecondOrder(ThreeAnchorQuad):
+    """Online/adaptive second-order arm. Its velocity+curvature coefficients are refit
+    from all causally-available past checkpoints (rolling-LS) or a running EWMA estimate
+    (error-feedback) and improve as training advances; the prediction then projects h
+    steps ahead from the most recent checkpoint."""
     needs_fit = True
 
     def __init__(self, lam_v: float = 1.0, lam_c: float = 1.0):
@@ -1659,6 +1670,9 @@ def _write_pred_scalar(idx: dict, groups: list[dict], key3, per_matrix: dict) ->
             n_excl += ne
             n_val += nv
         med, fgt, flt0 = M.pred_r2_from_hist(hist)
+        # Per-scalar prediction-R² is ALWAYS a fast panel-sampled estimate
+        # (paper-style subsample, arXiv:2601.04537); --fidelity full only widens
+        # the ratio/linearity population, not this metric.
         fields = {"pred_r2_scalar_median": med, "pred_r2_scalar_frac_gt_0.7": fgt,
                   "pred_r2_scalar_frac_lt_0": flt0, "pred_r2_scalar_n": n_val,
                   "pred_r2_scalar_n_excluded": n_excl,
@@ -3188,7 +3202,15 @@ def main() -> int:
                     help="local trace root (full/tick_<N>/tick_<N>.pt)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST)
     ap.add_argument("--self-test", action="store_true")
-    ap.add_argument("--method", default="hold_stale,naive_linear")
+    ap.add_argument("--method",
+                    default="hold_stale,naive_linear,naive_second_order,"
+                            "adaptive_linear,adaptive_second_order",
+                    help="comma list of registered predictors. DEFAULT = the "
+                         "do-nothing baseline hold_stale + the CORE 4 arms "
+                         "(naive_linear, naive_second_order, adaptive_linear, "
+                         "adaptive_second_order). damped_linear/damped_second_order "
+                         "are registered but NON-default — request them explicitly "
+                         "and pass --lam-grid/--mu-grid")
     ap.add_argument("--delta", default="5,10,20")
     ap.add_argument("--h", dest="h_grid", default="1,2,5,10,20,30,40")
     ap.add_argument("--operating-point", default="20,20",

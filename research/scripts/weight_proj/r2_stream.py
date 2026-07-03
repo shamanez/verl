@@ -10,7 +10,7 @@ TWO readers behind ONE `load(tick, names) -> {name: fp32 tensor}` contract:
                           "download everything first, then analyse on a big-disk box"
                           mode (tasks 1 & 3) — the bounded-footprint constraint is
                           RELEASED for analysis here.
-Callers pick by presence of a local trace root (weight_proj_sweep.py --trace-root).
+Callers pick by presence of a local trace root (moat_scorecard.py --trace-root).
 
 HARD streaming contract for R2SnapshotStream ONLY (bounded-footprint single-streaming-pass R2 access discipline):
   * Drive downloads from the in-repo manifests, NOT a bucket-list.

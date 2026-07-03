@@ -138,8 +138,9 @@ def main() -> int:
             print(f"  - tick {t}: {s}", flush=True)
         return 1
     print(f"[fetch] trace ready at {args.dest} — analyse with: "
-          f"python scripts/weight_proj_sweep.py runs/{args.experiment}/{args.regime}/weights/"
-          f"full_manifest.jsonl --trace-root {args.dest} ...", flush=True)
+          f"python scripts/moat_scorecard.py --manifest "
+          f"runs/{args.experiment}/{args.regime}/weights/full_manifest.jsonl "
+          f"--trace-root {args.dest} ...", flush=True)
     return 0
 
 

@@ -7,8 +7,8 @@ manifests the sweep engine hard-requires:
   * full_manifest.jsonl  — per-tick matrix names/shapes/d + per-matrix fp32 fro_norm
   * r2_manifest.jsonl    — per-tick verified R2 key/bucket/size
 
-This script builds both, so `weight_proj_sweep.py runs/EXP-57/regimeA/weights/
-full_manifest.jsonl ...` just works.
+This script builds both, so `moat_scorecard.py --manifest runs/EXP-57/regimeA/weights/
+full_manifest.jsonl --trace-root <local> ...` just works.
 
 STRUCTURE (names/shapes/d) is reused from the EXP-43 manifest — the model is identical
 (Qwen2.5-1.5B-Instruct, 338 matrices, same layout). NORMS are NOT copied: EXP-57 is a
@@ -159,8 +159,8 @@ def main() -> int:
             f.write(json.dumps(row) + "\n")
     print(f"[synth] wrote {r2_path} ({args.n_ticks} rows"
           + (", sizes head-fetched" if args.head_sizes else ", remote_bytes=null") + ")", flush=True)
-    print(f"[synth] DONE. Run: python scripts/weight_proj_sweep.py {full_path} "
-          f"--trace-root <local> --selftest --check-invariants", flush=True)
+    print(f"[synth] DONE. Run: python scripts/moat_scorecard.py "
+          f"--manifest {full_path} --trace-root <local> --self-test", flush=True)
     return 0
 
 
