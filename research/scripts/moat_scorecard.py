@@ -3075,7 +3075,20 @@ def run_emit(args) -> int:
     deltas, hs = args.deltas, args.hs
     band = max(_REGISTRY[m].lookback(max(deltas)) for m in args.methods) + max(hs)
     # #47 cadence: resolve the SELECTED tick set; step index s -> real tick tickset[s].
-    tickset = TS.select_ticks(args.cadence, n_ticks)
+    # #61 ADDITIVE tick-range: a contiguous non-zero-based slice [START,END] becomes an
+    # OFFSET tickset (the reader.path()/fingerprint machinery already carries an arbitrary
+    # tickset). Empty tick_range => the original full-trajectory path (byte-identical).
+    tr = getattr(args, "tick_range", "") or ""
+    if tr:
+        assert args.cadence == "per-tick", (
+            "--tick-range is per-tick only (offset composes with stride 1); "
+            f"got --cadence {args.cadence}")
+        _a, _b = (int(x) for x in tr.split(","))
+        assert 0 <= _a <= _b, f"--tick-range START,END needs 0<=START<=END; got {tr!r}"
+        tickset = list(range(_a, _b + 1))
+        n_ticks = len(tickset)
+    else:
+        tickset = TS.select_ticks(args.cadence, n_ticks)
     unit = "global_step" if args.cadence == "per-step" else "tick"
     assert len(tickset) == n_ticks, (
         f"cadence {args.cadence} yields {len(tickset)} ticks != n_ticks {n_ticks} "
@@ -3521,6 +3534,13 @@ def main() -> int:
                     help="scorecard dir to round-trip verify (no trace needed)")
     ap.add_argument("--n-ticks", type=int, default=0,
                     help="default: rows in --manifest")
+    ap.add_argument("--tick-range", default="",
+                    help="#61 ADDITIVE: score a CONTIGUOUS non-zero-based tick slice "
+                         "START,END (inclusive) via an offset tickset "
+                         "list(range(START,END+1)); overrides --n-ticks to the slice "
+                         "length. Empty (default) == full trajectory from tick_0 "
+                         "(unchanged). Per-tick only (offset composes with per-tick "
+                         "stride 1); mutually exclusive with --cadence per-step.")
     ap.add_argument("--ram-gb", type=float, default=40.0)
     ap.add_argument("--force-recompute", action="store_true")
     # ---- #47 flags ----
