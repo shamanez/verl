@@ -14,3 +14,5 @@ MILESTONE_PASS: M4
 [2026-07-04T04:32:47+10:00] [analyst #49] verdict=PASS carry_forward=F best=armA_rolling_ls_k_K5 op_ratio=0.9351 Δratio_vs_bar=-0.0045
 [2026-07-04T04:39:32+10:00] [log-writer #49] logged verdict=PASS carry_forward=FALSE best=armA_rolling_ls_k_K5 milestone=M4
 [2026-07-04T10:52:13+10:00] [research-planner #60] plan written
+[2026-07-04T17:57:29+10:00] [analyst #60] verdict=PASS carry_forward=F best=hold_stale(do-nothing) op_ratio=1.0000 d_vs_bar=-0.0001 generalizes=dataset-specific (consec_delta_cos=0.15)
+[2026-07-04T18:00:54+10:00] [log-writer #60] logged verdict=PASS carry_forward=FALSE generalizes=dataset-specific milestone=M4
