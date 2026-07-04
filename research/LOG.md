@@ -4,6 +4,15 @@ Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, `runs/<ID
 (published to the cloud-fare site), W&B, and git history. Use method names + settings, not old run labels. Current operating
 base + the two active priorities are in `PROGRESS.md`.
 
+## EXP-61 · 2026-07-04T17:10Z · M4 · PASS
+MOAT: Math-only projector ablation — best Δ/order/adaptivity/granularity on the Big-Math (EXP-58) fp32 trajectory (GPU-free offline replay). NAMED best Math projector = `adaptive_linear` (adaptive-mode `rolling_ls_k`, K=3) at Δ*=1, h=1 (= 20 global steps anchor spacing / 20 global steps horizon) — op-cell weight_proj_ratio_median ≈ **0.9888** (CI [0.98763, 0.99043], does NOT straddle 1.0), pred_evr_pooled **+0.0220**, h_safe **5 ticks = 100 global steps** / h_star **10 ticks = 200 global steps**.
+- prefer-simplicity outcome: 2nd-order beats linear by only ~0.0002 and adaptive beats fixed by only ~0.0012 (both < 0.01 rule) → **DEPLOY the fixed `damped_linear` (λ*=0.2) at the freshest anchor**.
+- scientific finding: **PROJECTABLE ONLY at the freshest anchor (Δ=1, h=1); do-nothing OPTIMAL at the operational op (Δ=5, h=10 = 200 global steps — all methods collapse).** Confirms #60 "dataset-specific": `consec_delta_cos ≈ 0.15` uniform across Δ/family/phase (vs ≈ 0.86 GSM8K). Per-family: **bias → EXCLUDE** (op ratio 1.0078, matches #60); other families copy-latest/tie. Early training marginally more projectable than late.
+- code: `code_change` flipped false→true on-box ONLY for the sanctioned contingency — a tiny additive `--tick-range START,END` phase-axis flag on `research/scripts/moat_scorecard.py` (parity ~1e-16). NOT a verl/ method change, NO launcher; `promote_launcher_as: none` → NO PR.
+- run dir: runs/MOAT-MATH-ABLATION/
+- report: reports/moat-math-ablation.html
+- verdict: runs/MOAT-MATH-ABLATION/verdict.md
+
 ## EXP-56 · 2026-07-04T18:30Z · M4 · PASS
 MOAT: Projector verdict for ANCHOR/FAST from EXP-57 weights (integration/rollup) — the TERMINAL MOAT integration of the five feeder lanes (#45 substrate / #47 fixed-linear / #48 fixed-2nd-order / #49 adaptive — all GSM8K — + #60 Big-Math cross-dataset). Consumes ONLY the terminal feeder artifacts; produces the single go/no-go answering #56's eight verdict questions + the tensor-family verdict + decision rules, and the combined offline crown report.
 - deliverable: one MOAT projector recommendation + the combined self-contained report telling the GSM8K verdict AND the #60 cross-dataset generalization. No new hypothesis — INTEGRATES the falsified/confirmed feeder hypotheses.
