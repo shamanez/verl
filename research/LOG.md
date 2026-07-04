@@ -4,6 +4,18 @@ Terse per-experiment verdicts only. Detail lives in `runs/SUMMARY.md`, `runs/<ID
 (published to the cloud-fare site), W&B, and git history. Use method names + settings, not old run labels. Current operating
 base + the two active priorities are in `PROGRESS.md`.
 
+## EXP-56 · 2026-07-04T18:30Z · M4 · PASS
+MOAT: Projector verdict for ANCHOR/FAST from EXP-57 weights (integration/rollup) — the TERMINAL MOAT integration of the five feeder lanes (#45 substrate / #47 fixed-linear / #48 fixed-2nd-order / #49 adaptive — all GSM8K — + #60 Big-Math cross-dataset). Consumes ONLY the terminal feeder artifacts; produces the single go/no-go answering #56's eight verdict questions + the tensor-family verdict + decision rules, and the combined offline crown report.
+- deliverable: one MOAT projector recommendation + the combined self-contained report telling the GSM8K verdict AND the #60 cross-dataset generalization. No new hypothesis — INTEGRATES the falsified/confirmed feeder hypotheses.
+- result: **PASS — RECOMMENDATION is CONDITIONAL (this IS the completed verdict, not a failure).** Best CURRENT ANCHOR projector = the **FIXED #47 damped-linear rule** (global scalar λ≈0.3, Δ=5, tiny state=1 scalar) — WINS on GSM8K, selected by prefer-simplicity. **BUT it is DATASET-SPECIFIC** (collapses to do-nothing on Big-Math) → **NOT adopted as a universal ANCHOR default**; the comm-eff ANCHOR must GATE projection on trajectory coherence.
+- key numbers (GSM8K per-step Δ=10,h=10 GLOBAL median): fixed #47 damped_linear op ratio **0.9396 < 1**, pred_evr **+0.1171**, h_safe ≈ **30 global steps**, no family breakers · prefer-simplicity vs #48 fixed-2nd-order **+0.2086 WORSE** (1.1482) · vs #49 best adaptive (armA rolling_ls_k K=5) only **−0.0045** better (0.9351, sub-0.01 margin). Cross-dataset (#60 Big-Math): same fixed projector λ*=**0.0**, ratio **1.0000**, pred_evr **−0.0012**, no arm beats hold_stale; mechanism consec_delta_cos ≈ **0.15** (Big-Math near-orthogonal) vs ≈ **0.86** (GSM8K aligned).
+- gates: all 8 verdict questions answered with source-attributed numbers; tensor-family verdict + decision rules applied; **16/16 adversarial spotchecks passed**; every number grep-attributable to a feeder scorecard/verdict (nothing re-scored or invented); combined report offline-safe (0 script/img/src/external `<link`, 9 inline SVG, 5 tables).
+- compute: GPU-free INTEGRATION on the laptop from local feeder artifacts (MOAT-45/47/48/49 + MOAT-58 dirs) — no Vast, no scoring run, 0 GPU-hours.
+- code: `code_change=false` — no scoring code, no verl/ edits, no exp/* branch, NO PR; `promote_launcher_as: none`. Combined report is a new file under research/reports/ (writable on vast-ai-workload).
+- run dir: runs/MOAT-56-ANALYSIS/
+- report: reports/moat-projector-verdict.html
+- verdict: runs/MOAT-56-ANALYSIS/verdict.md
+
 ## EXP-60 · 2026-07-04T07:50Z · M4 · PASS
 MOAT: Big-Math (EXP-58) cross-dataset projector validation + longer-horizon — GPU-free offline replay/scoring over the EXP-58 Big-Math fp32 trace, testing whether the GSM8K-winning fixed #47 damped-linear projector + the #49 self-correcting arms reproduce on a second dataset. Feeds #56's "Cross-dataset generalization" section.
 - hypothesis: the GSM8K ANCHOR projector winner (fixed #47 damped-linear) generalizes to a second dataset (Big-Math); carried forward only if it clears on Big-Math OR some arm beats the EXP-58-live fixed bar by ≥0.01 abs ratio, without regressing above hold_stale. Symmetric falsification — dataset-specific is a valid COMPLETED PASS.

@@ -16,3 +16,4 @@ MILESTONE_PASS: M4
 [2026-07-04T10:52:13+10:00] [research-planner #60] plan written
 [2026-07-04T17:57:29+10:00] [analyst #60] verdict=PASS carry_forward=F best=hold_stale(do-nothing) op_ratio=1.0000 d_vs_bar=-0.0001 generalizes=dataset-specific (consec_delta_cos=0.15)
 [2026-07-04T18:00:54+10:00] [log-writer #60] logged verdict=PASS carry_forward=FALSE generalizes=dataset-specific milestone=M4
+[2026-07-04T18:15:14+10:00] [analyst #56] verdict=PASS (integration: GSM8K winner=fixed damped-linear 0.9396; cross-dataset=dataset-specific, Big-Math bar 1.0000/lam0.0/consec0.15)
