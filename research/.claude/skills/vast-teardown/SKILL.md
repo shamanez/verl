@@ -50,3 +50,8 @@ bash .claude/hooks/install-reaper-cron.sh --remove   # uninstall
 
 The hook is idempotent, lock-aware, timeout-bounded, and exits 0 — safe to run
 alongside live sessions. Its log: `/tmp/teardown.cron.log`.
+
+**macOS gotcha:** ~/Documents is TCC-protected — the cron line is inert
+("Operation not permitted" in the log) until the operator grants Full Disk
+Access to `/usr/sbin/cron` (System Settings → Privacy & Security). Until then
+the Stop-hook reaper is the only backstop.

@@ -35,8 +35,8 @@ workspace:
 github:
   research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.
   research_repo_visibility: private
-  code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=vast-ai-workload
-  code_pr_base_branch: vast-ai-workload                       # NEVER `main` — main tracks upstream
+  code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=code_pr_base_branch below
+  code_pr_base_branch: autonomous-harness-v1                  # THE harness base branch (self-hosting: this harness line forks exp/* from and PRs back to ITSELF). NEVER `main` (tracks upstream); vast-ai-workload is the LEGACY old-harness line — kept frozen, never a PR target from this line.
   labels:                                                     # labels are the DURABLE state machine; ONLY stage commands write them (the human never hand-flips)
     research_claim: research:claim                            # applied by /new-issue
     status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
@@ -80,14 +80,14 @@ source_tree:                                                  # the upstream cod
   path: /Users/shamane/Documents/verl/
   remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
   upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
-  base_branch: vast-ai-workload                               # primary working branch on the fork — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here
+  base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here. (vast-ai-workload = legacy old-harness line, kept but not written by this harness.)
   protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
     - /Users/shamane/Documents/verl/                          # everything UNDER verl/
   allowed_paths:                                              # except these subtrees
     - /Users/shamane/Documents/verl/research/                 # always writable
   exception_branches:                                         # plus any path is writable when on these branches
     - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
-    - vast-ai-workload                                        # the base working branch — research/ + examples/grpo_trainer/vast_*.sh edits live here
+    - vast-ai-workload                                        # LEGACY old-harness line — still writable so the old harness keeps working; this harness line never commits here
     - autonomous-harness-*                                    # harness-engineering branches
 
 vast_template:                                                # the locked Vast.ai docker template the runner provisions
@@ -146,7 +146,7 @@ fixed_control_surface:                                        # LOCKED training 
   measurement_knobs: [test_freq]                              # NOT control variables (validation is read-only) — canonical test_freq=25
 
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
-  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, branch vast-ai-workload)
+  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones vast-ai-workload (fixed template hash) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone with the exp bundle instead.
   naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
   override_model: canonical-launcher + CLI/env overrides      # a run calls the canonical launcher and overrides only the knobs it varies (${VAR:-default} env vars + Hydra "$@" passthrough) — never re-types the baseline
   sandbox: research/runs/<N>-<slug>/                          # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth

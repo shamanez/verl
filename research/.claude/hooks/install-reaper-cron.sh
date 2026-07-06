@@ -9,6 +9,13 @@
 #   bash .claude/hooks/install-reaper-cron.sh            # install (idempotent)
 #   bash .claude/hooks/install-reaper-cron.sh --remove   # uninstall
 #   bash .claude/hooks/install-reaper-cron.sh --status   # show the current line
+#
+# macOS CAVEAT (observed 2026-07-07): the repo lives under ~/Documents, which is
+# TCC-protected — cron gets "Operation not permitted" until the OPERATOR grants
+# Full Disk Access to /usr/sbin/cron (System Settings → Privacy & Security →
+# Full Disk Access → add /usr/sbin/cron). Until then the cron line is installed
+# but inert, and the Stop-hook reaper (session-scoped) is the only backstop.
+# Verify after granting:  tail /tmp/teardown.cron.log  (should stop erroring).
 set -euo pipefail
 
 RESEARCH_DIR="$(cd "$(dirname "$0")/../.." && pwd)"

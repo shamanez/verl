@@ -29,6 +29,9 @@ fi
 LEDGER=".claude/state/runs.jsonl"
 SUMMARY="runs/SUMMARY.md"
 PLAN_CACHE_DIR=".claude/state/plan-cache"
+# PR base branch for the SUMMARY "merged" column — from project.yaml, never hardcoded
+BASE_BRANCH="$(awk -F': ' '/^  code_pr_base_branch:/{sub(/#.*/,"",$2);gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml 2>/dev/null || true)"
+BASE_BRANCH="${BASE_BRANCH:-base}"
 DRY=0
 ALL_TERMINAL=0
 IDS=()
@@ -128,7 +131,7 @@ for RAW in "${IDS[@]}"; do
   [[ -z "$MILE" && -f "$RUNDIR/run.json" ]] && MILE=$(jq -r '.milestone // empty' "$RUNDIR/run.json" 2>/dev/null)
   [[ -z "$MILE" ]] && MILE="?"
   PR="$(grep -hE "$(bounded "$ID")" LOG.md PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
-  MERGED="—"; [[ -n "$PR" ]] && MERGED="PR #$PR → \`vast-ai-workload\`"
+  MERGED="—"; [[ -n "$PR" ]] && MERGED="PR #$PR → \`$BASE_BRANCH\`"
   ROW="| $ID | $MILE | $TITLE | $VERDICT | $MERGED |"
 
   echo "$PROG: folding $ID → $SUMMARY"

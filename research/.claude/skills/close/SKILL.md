@@ -40,17 +40,19 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
    the one-line LOG.md entry, the `runs/SUMMARY.md` row, REPRODUCIBILITY +
    launcher promotion from `resolved_params.txt` (PASS only), and the
    branch/PR/merge below.
-3. **Branch + PR + merge — every issue with something to land:**
-   - Ensure `exp/<id>` exists (create from `origin/vast-ai-workload` if
-     /launch never ran — e.g. analysis kinds).
+3. **Branch + PR + merge — every issue with something to land** (BASE = the
+   project.yaml `code_pr_base_branch`, resolved the way log-writer does —
+   never a hardcoded branch name):
+   - Ensure `exp/<id>` exists (create from `origin/$BASE` if /launch never
+     ran — e.g. analysis kinds).
    - Commit deliverables to it: `runs/<id>/verdict.md` + `report.html` +
      `run.json` + `resolved_params.txt`, LOG/SUMMARY deltas, any code/launcher
      changes. The plan is NOT a file deliverable — it lives in the issue body.
      Bulk artifacts stay gitignored.
-   - `git diff origin/vast-ai-workload..exp/<id>` empty → skip PR, log
+   - `git diff origin/$BASE..exp/<id>` empty → skip PR, log
      `PR_SKIPPED: #<N> nothing to land`, continue.
    - Else: push; `gh pr create --repo <project.yaml github.code_repo>
-     --base vast-ai-workload --head exp/<id>` with a body carrying: verdict,
+     --base $BASE --head exp/<id>` with a body carrying: verdict,
      the results table (metric | value | target | source), box/cost line from
      the ledger, WandB group link. Then `gh pr merge --squash --delete-branch`.
      Merge conflict/failure → leave the PR open, `flag_human <N> "PR merge
@@ -65,7 +67,8 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 
 ## Hard rules
 
-- code PRs go to `shamanez/verl` base `vast-ai-workload` — NEVER upstream,
-  NEVER base main.
+- code PRs go to `shamanez/verl` base = project.yaml `code_pr_base_branch`
+  (this harness line's own branch) — NEVER upstream, NEVER base main, NEVER
+  the legacy `vast-ai-workload` line.
 - Idempotent: re-running must not duplicate LOG entries, PRs, or comments.
 - This stage never re-opens analysis or re-litigates the verdict.

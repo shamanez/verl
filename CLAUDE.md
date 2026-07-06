@@ -46,7 +46,7 @@ under `research/`. The project's north-star — what "done" means — is
 | **The stage commands** (one per lifecycle stage, `/<cmd> <issue>`) | `research/researcher_steps.md` (index) → `research/.claude/skills/*/SKILL.md` |
 | Harness operator manual (human-only, hosted HTML; design rationale lives there) | link at the top of `research/researcher_steps.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
-| **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
+| **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (on the project.yaml base branch) |
 | **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
@@ -90,16 +90,20 @@ and `setup_flow` entries in your memory index.
 
 ### Branch + PR policy (read this carefully — it's the load-bearing contract)
 
-Three branches on the fork (`shamanez/verl`) matter:
+Four branches on the fork (`shamanez/verl`) matter. **This harness line is
+self-hosting**: on `autonomous-harness-v1`, every operative branch reference
+resolves from `research/.claude/project.yaml` (`source_tree.base_branch` /
+`github.code_pr_base_branch`) — never a hardcoded name.
 
 | Branch | Role | Write policy |
 |---|---|---|
 | `main` | tracks upstream `verl-project/verl` | **READ-ONLY.** Never commit. Never PR to it. Never branch off of it for work. |
-| `vast-ai-workload` | primary working branch on the fork | All harness work + research/ + vast-ai launchers commit here. **All experiment PRs target this branch as the base.** |
-| `exp/<N>-<slug>` | per-experiment branches | Created by `experiment-runner` from `vast-ai-workload`, pushed to origin BEFORE training launches so the branch survives a laptop crash. PRs land back on `vast-ai-workload`. |
+| `autonomous-harness-v1` | **THE base branch of this harness line** | All harness work + research/ + launcher promotions commit here. **All experiment PRs target this branch as the base.** |
+| `vast-ai-workload` | LEGACY line carrying the old harness | Kept working, untouched by this line. If v1 proves out, it gets retired — until then never commit v1 harness work or target PRs here. |
+| `exp/<N>-<slug>` | per-experiment branches | Created by `experiment-runner` from the project.yaml base branch, pushed to origin BEFORE training launches so the branch survives a laptop crash. PRs land back on the base branch. |
 
 **Two repos, two purposes, no overlap:**
-- **`shamanez/verl` (origin)** receives code PRs. Head=`exp/<N>-<slug>`, base=`vast-ai-workload`. Set in `research/.claude/project.yaml.github.code_repo` + `.code_pr_base_branch`.
+- **`shamanez/verl` (origin)** receives code PRs. Head=`exp/<N>-<slug>`, base=`project.yaml github.code_pr_base_branch` (= `autonomous-harness-v1` on this line).
 - **`shamanez/verl-compression-research` (research remote, `gh repo set-default`)** is the issue queue ONLY. Triage polls it; analyst/log-writer post verdict comments. **No PRs go here.**
 
 The `log-writer` agent reads these from `project.yaml` rather than hardcoding them, so porting to a new project is one-file.

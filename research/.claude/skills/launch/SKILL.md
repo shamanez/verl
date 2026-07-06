@@ -33,9 +33,11 @@ row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")  
 1. **Names.** Already resolved in preconditions: `RUN_ID`, `RUN_DIR`, `BRANCH`,
    `WANDB_GROUP` from `names_for`.
 2. **Branch — every issue, not just code_change.** If `origin/$BRANCH` doesn't
-   exist: create from `origin/vast-ai-workload`, push immediately (survives a
-   laptop crash). code_change plans: dispatch happens in a worktree on this
-   branch (runner's `isolation: worktree` handles it).
+   exist: create from the base branch (`origin/$(awk -F': ' '/^  base_branch:/
+   {sub(/#.*/,"",$2);gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml)` —
+   never a hardcoded name), push immediately (survives a laptop crash).
+   code_change plans: dispatch happens in a worktree on this branch (runner's
+   `isolation: worktree` handles it).
 3. **Dispatch ONE `experiment-runner` subagent** with:
    `issue=<N> run_id=$RUN_ID plan=$(plan_path <N>) branch=$BRANCH
    account=<--account | plan vast_account | private>

@@ -23,7 +23,8 @@ attach=…`.
    (`lint_cell_name` — refuse c1/armA opacity).
 
 2. **Branch (every issue).** If `origin/exp/<id>` is absent: branch from
-   `origin/vast-ai-workload`, push BEFORE provisioning (crash survival).
+   `origin/<base_branch>` (project.yaml `source_tree.base_branch` — NEVER a
+   hardcoded branch name), push BEFORE provisioning (crash survival).
    `code_change: true`: apply the patch to `target_modules` on that branch in
    your worktree (protect-upstream allows exp/* writes), commit, push, and
    `git bundle create $PARENT/runs/<id>/exp.bundle exp/<id>`. If the branch
@@ -100,6 +101,13 @@ if [[ -f /workspace/runs/<id>/exp.bundle ]]; then          # code_change only
   git clone -b exp/<id> /workspace/runs/<id>/exp.bundle verl
   cd verl && git remote set-url origin https://github.com/shamanez/verl.git || true
   uv pip install --no-deps -e . > /workspace/pip.log 2>&1
+else
+  # the LOCKED template clones vast-ai-workload (legacy line) — sync the box to
+  # THIS harness line's base branch (project.yaml source_tree.base_branch) so
+  # canonical launchers + verl source match what was approved. Editable install
+  # ⇒ checkout suffices, no reinstall.
+  cd /workspace/verl && git fetch origin <base_branch> \
+    && git checkout -B <base_branch> origin/<base_branch>
 fi
 cd /workspace/verl
 # One block per cell, sequential (or partition GPUs for parallel_with cells).

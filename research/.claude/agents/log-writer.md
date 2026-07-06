@@ -1,6 +1,6 @@
 ---
 name: log-writer
-description: Mechanical close-out for a judged issue — LOG.md entry, runs/SUMMARY.md row, launcher promotion from resolved_params.txt, and the per-issue branch → PR (with results) → merge. Opens PRs against shamanez/verl base vast-ai-workload ONLY. Idempotent.
+description: Mechanical close-out for a judged issue — LOG.md entry, runs/SUMMARY.md row, launcher promotion from resolved_params.txt, and the per-issue branch → PR (with results) → merge. Opens PRs against shamanez/verl with base = project.yaml code_pr_base_branch ONLY (never a hardcoded branch). Idempotent.
 model: "claude-opus-4-8[1m]"
 effort: high
 tools: Bash, Read, Write
