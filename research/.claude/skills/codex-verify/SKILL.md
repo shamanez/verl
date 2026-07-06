@@ -60,13 +60,14 @@ The first content line of the output file is always one of these markers:
 ### `verify` — review a plan before approving it
 
 ```bash
-# After triage's research-planner writes .claude/plans/<N>.md, BEFORE flipping
-# status:planned → status:approved, optionally run this:
+# After research-planner publishes the plan into issue #<N>'s body, BEFORE
+# flipping status:planned → status:approved, optionally run this
+# (source _lib.sh && plan_fetch <N> first so the cache is fresh):
 mkdir -p runs/<N>-<slug>/verify
 bash .claude/skills/codex-verify/run.sh \
     --mode verify \
     --out  runs/<N>-<slug>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
-    --plan .claude/plans/<N>.md \
+    --plan .claude/state/plan-cache/<N>.md \
     --cd   /Users/shamane/Documents/verl
 cat runs/<N>-<slug>/verify/*.md
 ```

@@ -1,10 +1,12 @@
 # Plan <N> — <title>
 
 <!-- DEEP tier: multi-stage / days-long research. Target ≤ 15 KB. Same flat
-     yaml contract as the fast tier; deep adds staged execution with gates,
-     correctness invariants, and a session hand-off. All heavy deliberation
-     (judge panels, adversarial review, open questions) happens HERE, before
-     approval — never during execution. -->
+     yaml contract as the fast tier — and the same home: the plan LIVES IN THE
+     GITHUB ISSUE BODY between the plan:start/plan:end markers (plan_publish /
+     plan_fetch). Deep adds staged execution with gates, correctness
+     invariants, and a session hand-off. All heavy deliberation (judge panels,
+     adversarial review, open questions) happens HERE, before approval —
+     never during execution. -->
 
 ```yaml
 issue: <N>

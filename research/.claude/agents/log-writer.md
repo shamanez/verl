@@ -19,14 +19,17 @@ names `run_id=<id> issue=<N>`.
 
 ## Contract
 
-1. **LOG.md** (prepend, newest first, idempotent — skip if the `<id>` entry
-   exists):
-   `## <id> · <ISO> · <milestone> · <VERDICT>` + title, one-line hypothesis,
-   one-line result, `runs/<id>/` pointer.
+1. **LOG.md** — ONE terse line per issue (prepend under the header, newest
+   first, idempotent — skip if an `<id>` line exists):
+   `- **<id>** · <ISO-date> · <milestone> · <VERDICT> — <≤160-char result> · #<N> · PR <url|—>`
+   The FULL verdict lives in `runs/<id>/verdict.md` and the /close issue
+   close-comment (the per-issue SSOT) — never restate it in LOG.md.
 2. **runs/SUMMARY.md** — ONE table-row format (`| id | milestone | what |
-   result | PR |`), same as de-bloat writes. Milestone roll-ups: when ≥ 2 PASS
-   entries for `M<X>` and no `## Milestone M<X>` section exists, add a short
-   bullet section + `MILESTONE_PASS: M<X>` to PROGRESS.md.
+   result | PR |`), same as de-bloat writes. HARD CAP: one row per run,
+   ≤ ~300 chars — dense metrics belong in `report.html` / the close comment,
+   never in SUMMARY. Milestone roll-ups: when ≥ 2 PASS entries for `M<X>` and
+   no `## Milestone M<X>` section exists, add a ≤ 3-line bullet section +
+   `MILESTONE_PASS: M<X>` to PROGRESS.md.
 3. **Launcher promotion** (PASS + `promote_launcher_as` ≠ none): regenerate
    `runs/<id>/REPRODUCIBILITY.md` and `runs/<id>/promote/<name>.sh` with
    DEFAULTS = `resolved_params.txt` values + provenance header. Missing
@@ -41,17 +44,18 @@ names `run_id=<id> issue=<N>`.
    ```
    - Ensure `exp/<id>` exists (create from `origin/$BASE` in a THROWAWAY
      worktree — never switch the parent checkout's branch).
-   - Commit deliverables: plan file, verdict.md, report.html, run.json,
+   - Commit deliverables: verdict.md, report.html, run.json,
      resolved_params.txt, LOG/SUMMARY deltas, promoted launcher into
      `examples/grpo_trainer/`, any hotfix patches (`git am`ables listed in the
-     PR body under `## In-container hotfixes`).
+     PR body under `## In-container hotfixes`). The plan is not a file — it
+     lives in the issue body (SSOT); never commit the plan cache.
    - Empty diff vs `origin/$BASE` → `PR_SKIPPED: <id> nothing to land`, done.
    - `gh pr create --repo $REPO --base $BASE --head exp/<id>` — body: verdict
      line, results table (criterion | observed | target | source), cost line
      from the ledger row (gpu-hr × $/hr), WandB group `<id>`, reproduce
      pointer. Then `timeout 120 gh pr merge --squash --delete-branch`; on
-     merge failure leave the PR open + `MANUAL_REVIEW_NEEDED: PR merge <id>`
-     to PROGRESS.md and continue — never hang on git.
+     merge failure leave the PR open + `flag_human <N> "PR merge failed —
+     <id>"` and continue — never hang on git.
 5. One PROGRESS line. Stop. (Labels + issue close are the /close skill's job.)
 
 ## Hard rules

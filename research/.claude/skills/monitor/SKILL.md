@@ -24,8 +24,8 @@ esac
 ```
 - **PROVISIONED row:** the runner is (or was) mid-launch. Wait ONE bounded cycle
   (≤ 15 min, checking the row each minute): promoted to RUNNING → proceed;
-  still PROVISIONED after 15 min → the Stop-hook reaper will flip it; report
-  `MANUAL_REVIEW_NEEDED: #<N> stuck PROVISIONED` and stop. Never bounce the
+  still PROVISIONED after 15 min → the reaper will flip it; run
+  `flag_human <N> "stuck PROVISIONED"` and stop. Never bounce the
   operator back to /launch (its live-box guard would bounce them here again).
 
 ## Watch loop (bounded, background, act-on-report)
@@ -48,14 +48,14 @@ under `/bg /goal … /go <N>`):
    - **probe/env fix needed** (code_change probe crashed on backend
      integration) → `bump_attempt "$id" fix_attempts 3 || {teardown; stop}` —
      ONE focused fix per attempt via the on-box commit-hotfix loop, relaunch
-     the cell, next cycle. Exhausted → teardown + `MANUAL_REVIEW_NEEDED`.
+     the cell, next cycle. Exhausted → teardown + `flag_human <N> …`.
    - **env-failure** (docker/CUDA/NCCL/vLLM-init/SSH-dead) → teardown, then
      `bump_attempt "$id" launch_attempts 3 || stop` and re-dispatch the runner
      on the NEXT ladder rung. Attached (`external:true`) box: teardown but
-     NEVER auto-provision a replacement — `MANUAL_REVIEW_NEEDED`, stop.
+     NEVER auto-provision a replacement — `flag_human <N> …`, stop.
    - **stall** (all GPUs ≤5% for 4 polls, tmux alive) → one `nvidia-smi` +
-     log-tail confirmation, then teardown + `MANUAL_REVIEW_NEEDED`. A stalled
-     GPU is burning money for nothing.
+     log-tail confirmation, then teardown + `flag_human <N> "stall"`. A
+     stalled GPU is burning money for nothing.
    - **timeout** (40-min cap, training healthy) → next cycle immediately.
 3. Between reports there is nothing to do — do NOT fill the gap with analysis,
    verification, or "deep dives" on the live box.
@@ -63,9 +63,9 @@ under `/bg /goal … /go <N>`):
 ## Hard rules
 
 - NO adversarial verification, judge panels, or exploratory workflows during a
-  run. If something genuinely warrants heavy verification mid-run, append
-  `MANUAL_REVIEW_NEEDED: <what/why> — #<N>` to PROGRESS.md and STOP for a
-  human go/no-go.
+  run. If something genuinely warrants heavy verification mid-run, run
+  `flag_human <N> "<what/why>"` (durable `needs:human` label + issue comment +
+  PROGRESS echo) and STOP for a human go/no-go.
 - Teardown always via the `vast-teardown` skill (ledger flip included), the
   instant science is captured. Never `vastai destroy` bare.
 - Every loop here is bounded by ledger counters (`fix_attempts`,

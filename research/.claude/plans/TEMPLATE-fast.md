@@ -1,6 +1,9 @@
 # Plan <N> — <title>
 
 <!-- FAST tier: single hypothesis, one launch round, ≤ ~6 cells. Target ≤ 4 KB.
+     The plan LIVES IN THE GITHUB ISSUE BODY between the plan:start/plan:end
+     markers (_lib.sh plan_publish installs it; plan_fetch caches it locally
+     under .claude/state/plan-cache/ — gitignored).
      The yaml block below is the ONLY machine-read part (flat keys — parsed by
      skills/_lib.sh plan_field). Everything else is for humans: plain prose,
      no boilerplate, no (n/a) sections — delete what you don't need. -->

@@ -22,11 +22,24 @@ lib_research_dir() {
 RESEARCH_DIR="${RESEARCH_DIR:-$(lib_research_dir)}"
 STATE_DIR="$RESEARCH_DIR/.claude/state"
 LEDGER="$STATE_DIR/runs.jsonl"
-PLANS_DIR="$RESEARCH_DIR/.claude/plans"
+PLANS_DIR="$RESEARCH_DIR/.claude/plans"          # templates + legacy pre-P2 plan files only
+PLAN_CACHE_DIR="$STATE_DIR/plan-cache"           # gitignored cache of the GitHub-resident plans
 RUNS_DIR="$RESEARCH_DIR/runs"
 PROGRESS="$RESEARCH_DIR/PROGRESS.md"
 
-progress() { echo "[$(date -Iseconds)] $*" >> "$PROGRESS"; }
+# PROGRESS.md is a CAPPED local audit echo (durable signals live in labels +
+# issue comments; full tick history is in git via the autosave hook).
+PROGRESS_CAP_LINES=400
+progress() {
+  echo "[$(date -Iseconds)] $*" >> "$PROGRESS"
+  local n; n=$(wc -l < "$PROGRESS" 2>/dev/null | tr -d '[:space:]') || return 0
+  if [[ -n "$n" && "$n" -gt $((PROGRESS_CAP_LINES + 40)) ]]; then
+    { head -3 "$PROGRESS"; echo "…(older ticks pruned — full history in git)…"
+      tail -n "$PROGRESS_CAP_LINES" "$PROGRESS"; } > "$PROGRESS.tmp" \
+      && mv "$PROGRESS.tmp" "$PROGRESS"
+  fi
+  return 0
+}
 die() { echo "REFUSED: $*" >&2; exit 3; }   # named refusal — never a retry loop
 
 # ---------- ledger (flock'd; the ONLY sanctioned way to touch runs.jsonl) ----------
@@ -92,15 +105,60 @@ lint_cell_name() {
   return 0
 }
 
-# ---------- plans: flat-frontmatter parsing + graceful absence ----------
-plan_path() { echo "$PLANS_DIR/$1.md"; }
-plan_exists() { [[ -f "$PLANS_DIR/$1.md" ]]; }
+# ---------- plans: SSOT is the GITHUB ISSUE BODY ----------
+# The plan lives INSIDE the issue body between the two marker lines below; its
+# machine fields are the first ```yaml fence in that block. Local copies under
+# $PLAN_CACHE_DIR are a derived, gitignored cache (offline reads + worktrees);
+# legacy .claude/plans/<N>.md files remain a read-only fallback for pre-P2
+# issues. Freshness rule: stages that SPEND or GATE (/plan /approve /launch)
+# call plan_fetch first; everything else may read the cache.
+PLAN_MARK_START='<!-- plan:start -->'
+PLAN_MARK_END='<!-- plan:end -->'
+plan_path() { echo "$PLAN_CACHE_DIR/$1.md"; }
+plan_fetch() {  # plan_fetch <N> — refresh cache from GitHub; stale cache/legacy file survive a network failure
+  local n="$1" body rc=0 f    # NB: $n referenced on its own line — same-line local n="$1" f="…$n…" is unbound under set -u
+  f="$PLAN_CACHE_DIR/$n.md"
+  mkdir -p "$PLAN_CACHE_DIR"
+  body=$(timeout 60 gh issue view "$n" --json body -q .body 2>/dev/null) || rc=$?
+  if (( rc == 0 )); then
+    if grep -qF "$PLAN_MARK_START" <<<"$body"; then
+      awk -v s="$PLAN_MARK_START" -v e="$PLAN_MARK_END" \
+          'index($0,e){f=0} f{print} index($0,s){f=1}' <<<"$body" > "$f"
+    else
+      rm -f "$f"   # GitHub is SSOT: plan block gone ⇒ a stale cache must not resurrect it
+    fi
+  fi
+  [[ -s "$f" ]] && return 0
+  [[ -f "$PLANS_DIR/$n.md" ]] && { cp "$PLANS_DIR/$n.md" "$f"; return 0; }
+  return 1
+}
+plan_exists() {  # cheap: cache/legacy first; one bounded fetch only when neither is present
+  [[ -s "$PLAN_CACHE_DIR/$1.md" || -f "$PLANS_DIR/$1.md" ]] || plan_fetch "$1"
+}
 plan_field() {  # plan_field <N> <key> [default] — reads the first ```yaml fence, flat keys only
-  local f="$PLANS_DIR/$1.md" key="$2" dflt="${3:-}" v
+  local n="$1" key="$2" dflt="${3:-}" f v
+  f="$PLAN_CACHE_DIR/$n.md"
+  [[ -s "$f" ]] || plan_fetch "$n" >/dev/null 2>&1 || true
+  [[ -s "$f" ]] || f="$PLANS_DIR/$n.md"
   [[ -f "$f" ]] || { echo "$dflt"; return 0; }
   v=$(awk '/^```yaml/{f=1;next} /^```/{if(f)exit} f' "$f" \
       | grep -m1 -E "^${key}:" | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*(#.*)?$//")
   echo "${v:-$dflt}"
+}
+plan_publish() {  # plan_publish <N> <plan-file> — install/replace the plan block in the issue body.
+  # Text OUTSIDE the markers (the claim + any human notes) is preserved verbatim;
+  # re-publishing replaces ONLY the marked block. Also refreshes the local cache.
+  local n="$1" src="$2" body tmp
+  [[ -s "$src" ]] || { echo "plan_publish: $src missing/empty" >&2; return 1; }
+  body=$(timeout 60 gh issue view "$n" --json body -q .body 2>/dev/null) || return 1
+  tmp=$(mktemp)
+  { awk -v s="$PLAN_MARK_START" -v e="$PLAN_MARK_END" \
+        'index($0,s){f=1} !f{print} index($0,e){f=0}' <<<"$body"
+    echo ""; echo "$PLAN_MARK_START"; cat "$src"; echo "$PLAN_MARK_END"
+  } > "$tmp"
+  if ! timeout 60 gh issue edit "$n" --body-file "$tmp" >/dev/null; then rm -f "$tmp"; return 1; fi
+  rm -f "$tmp"
+  mkdir -p "$PLAN_CACHE_DIR" && cp "$src" "$PLAN_CACHE_DIR/$n.md"
 }
 
 # ---------- run snapshot: downstream stages read THIS, never the plan ----------
@@ -113,9 +171,10 @@ snapshot_get() {  # snapshot_get <id> <jq path> [default] — default applies fo
 
 # ---------- github: labels are the durable state machine; ALWAYS set by commands ----------
 ALL_STATUS_LABELS="status:planned status:approved status:running status:pass status:revise status:stop status:done"
+PAUSE_LABELS="needs:human awaiting:approval"   # the durable pause signals (P4: labels, not PROGRESS prose)
 ensure_labels() {  # idempotent; run by /new-issue on first use
   local l
-  for l in research:claim $ALL_STATUS_LABELS \
+  for l in research:claim $ALL_STATUS_LABELS $PAUSE_LABELS \
            kind:experiment kind:ablation kind:implementation kind:brainstorm kind:literature kind:analysis; do
     timeout 30 gh label create "$l" --force >/dev/null 2>&1 || true
   done
@@ -130,6 +189,25 @@ set_status_label() {  # set_status_label <N> <planned|approved|running|pass|revi
   echo "label: #$n -> $new"
 }
 issue_status() { issue_labels "$1" | grep -m1 '^status:' | sed 's/^status://'; }
+
+# ---------- human-pause signals: a LABEL is the durable flag; PROGRESS is the local echo ----------
+# flag_human replaces bare "MANUAL_REVIEW_NEEDED → PROGRESS.md" prose: the label
+# survives laptop loss and is visible from any window/gh query; the reason lands
+# as an issue comment; the PROGRESS line remains as a local, capped echo.
+flag_human() {  # flag_human <N> <reason…>
+  local n="$1"; shift
+  timeout 60 gh issue edit "$n" --add-label needs:human >/dev/null 2>&1 || true
+  timeout 60 gh issue comment "$n" --body "**needs:human** — $*" >/dev/null 2>&1 || true
+  progress "MANUAL_REVIEW_NEEDED: #$n $*"
+}
+flag_awaiting_approval() {  # unattended /approve parks the issue here
+  timeout 60 gh issue edit "$1" --add-label awaiting:approval >/dev/null 2>&1 || true
+  progress "AWAITING_APPROVAL: #$1"
+}
+clear_human_flags() {  # the operator decided — the resuming stage clears both pause labels
+  timeout 60 gh issue edit "$1" --remove-label needs:human --remove-label awaiting:approval >/dev/null 2>&1 || true
+}
+has_human_flag() { issue_labels "$1" | grep -qE '^(needs:human|awaiting:approval)$'; }
 
 # ---------- bounded external calls ----------
 vast() { timeout "${VAST_TIMEOUT:-90}" vastai "$@"; }   # NEVER call vastai bare in a skill

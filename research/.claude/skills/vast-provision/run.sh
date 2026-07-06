@@ -33,7 +33,7 @@ DEFAULT_HANDLE_DIR="${VERL_VAST_HANDLE_DIR:-$PROJECT_DIR/.claude/state/vast-hand
 # explicit budget): safe per-instance cost, modest disk, generous wait for the
 # verlai image pull + onstart script. Larger multi-GPU plans (legacy 4×H200 /
 # 8×H100 shapes, explicit operator request only) pass explicit overrides — see
-# the per-experiment plan in .claude/plans/<N>.md.
+# the per-experiment plan (GitHub issue body; local cache .claude/state/plan-cache/<N>.md).
 COUNT=1
 QUERY=""
 IMAGE=""

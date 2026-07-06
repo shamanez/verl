@@ -28,17 +28,31 @@ fi
 
 LEDGER=".claude/state/runs.jsonl"
 SUMMARY="runs/SUMMARY.md"
+PLAN_CACHE_DIR=".claude/state/plan-cache"
 DRY=0
+ALL_TERMINAL=0
 IDS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '1,60p' "$(dirname "$0")/SKILL.md"; exit 0 ;;
+    -a|--all-terminal) ALL_TERMINAL=1; shift ;;
+    -h|--help) sed -n '1,70p' "$(dirname "$0")/SKILL.md"; exit 0 ;;
     *) IDS+=("$1"); shift ;;
   esac
 done
-[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one run id (e.g. 61-math-ablation, EXP-44)"; exit 2; }
+
+# --all-terminal: enumerate every run dir and let the per-id guards below do
+# the deciding — live rows, pending work, and the baseline are refused with a
+# printed reason, so the batch folds EXACTLY the terminal runs. Still behind
+# the same DEBLOAT_OPERATOR_ACK human gate as single-id invocations.
+if [[ "$ALL_TERMINAL" == 1 ]]; then
+  for d in runs/*/; do
+    [[ -d "$d" ]] || continue
+    IDS+=("$(basename "$d")")
+  done
+fi
+[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one run id (e.g. 61-math-ablation, EXP-44) or --all-terminal"; exit 2; }
 
 if [[ ! -f "$SUMMARY" ]]; then
   mkdir -p runs
@@ -138,6 +152,11 @@ for RAW in "${IDS[@]}"; do
   if [[ -n "$PLAN" && -f "$PLAN" ]]; then
     if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm $PLAN"
     else git rm -q --ignore-unmatch "$PLAN" 2>/dev/null || true; rm -f "$PLAN"; fi
+  fi
+  # plan CACHE is derived (SSOT = the issue body) — always safe to drop
+  if [[ -n "$ISSUE_NUM" && -f "$PLAN_CACHE_DIR/$ISSUE_NUM.md" ]]; then
+    if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm $PLAN_CACHE_DIR/$ISSUE_NUM.md"
+    else rm -f "$PLAN_CACHE_DIR/$ISSUE_NUM.md"; fi
   fi
   folded=$((folded+1))
 done

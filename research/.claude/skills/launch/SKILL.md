@@ -12,7 +12,7 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
 ```bash
 source .claude/skills/_lib.sh
 st=$(issue_status <N>)
-plan_exists <N> || die "plan for #<N> was deleted — /plan <N> again, then /approve"
+plan_fetch <N> || die "no plan block in issue #<N> — /plan <N> again, then the gate"
 slug=$(plan_field <N> slug); names_for <N> "$slug"
 row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")   # attach rows may predate the issue stamp
 [[ -n "$row" ]] && jq -e '.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL"' <<<"$row" >/dev/null \
@@ -37,16 +37,19 @@ row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")  
    laptop crash). code_change plans: dispatch happens in a worktree on this
    branch (runner's `isolation: worktree` handles it).
 3. **Dispatch ONE `experiment-runner` subagent** with:
-   `issue=<N> run_id=$RUN_ID plan=.claude/plans/<N>.md branch=$BRANCH
+   `issue=<N> run_id=$RUN_ID plan=$(plan_path <N>) branch=$BRANCH
    account=<--account | plan vast_account | private>
    attach=<--attach id | plan attach_box | none>`.
+   (`plan_path` is the fetched cache of the issue-body plan — `plan_fetch`
+   above already refreshed it; the runner never talks to GitHub for the plan.)
    The runner owns: provision-or-attach (bounded ladder walk, ≤ 3 rungs, ≤ 1
    retry per rung), PROVISIONED row BEFORE any rsync, payload sync, tmux
    launch, `runs/$RUN_ID/run.json` snapshot, promote to RUNNING.
 4. On runner success: `set_status_label <N> running`; print box + WandB names
    (`<N>-<cell>` per cell, group `$RUN_ID`) + `Next: /monitor <N>`.
-5. On runner failure: it already logged `MANUAL_REVIEW_NEEDED`/`NO_OFFERS` to
-   PROGRESS.md — surface that verbatim and stop. Do NOT re-dispatch in a loop.
+5. On runner failure: it already flagged `needs:human` (`flag_human`) or
+   logged `NO_OFFERS` — surface that verbatim and stop. Do NOT re-dispatch in
+   a loop.
 
 ## Rules
 

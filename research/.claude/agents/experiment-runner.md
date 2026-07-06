@@ -50,10 +50,9 @@ attach=…`.
      ```
      Poll (background bash, `until handle-appears || process-died || 26 min`).
      Classify from the log: handle → done; `NO_OFFERS` → next rung;
-     `MANUAL_REVIEW` / missing team hash → append to PROGRESS.md, STOP the
-     walk (every rung would fail identically). All rungs dry → append
-     `MANUAL_REVIEW_NEEDED: no offers in any rung — <id>`, stop, register
-     nothing.
+     `MANUAL_REVIEW` / missing team hash → `flag_human <N> "<reason> — <id>"`,
+     STOP the walk (every rung would fail identically). All rungs dry →
+     `flag_human <N> "no offers in any rung — <id>"`, stop, register nothing.
 
 4. **Register PROVISIONED IMMEDIATELY after handle capture** — before any
    rsync/launch (closes the money-leak window; the reaper covers everything

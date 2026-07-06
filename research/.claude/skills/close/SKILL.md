@@ -33,29 +33,33 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 1. **Teardown check first (money before paperwork).** If the ledger row is
    `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
    harness box may outlive its issue. **`EXTERNAL` rows are operator-managed:**
-   do NOT auto-destroy — ask (interactive) or append
-   `MANUAL_REVIEW_NEEDED: external box <id> still up after /close #<N> — tear
-   down when done` and continue (the box may serve other work).
+   do NOT auto-destroy — ask (interactive) or run `flag_human <N> "external
+   box <id> still up after /close — tear down when done"` and continue (the
+   box may serve other work).
 2. Dispatch ONE `log-writer` subagent with `run_id=<id> issue=<N>`. It owns:
-   LOG.md prepend, `runs/SUMMARY.md` row, REPRODUCIBILITY + launcher promotion
-   from `resolved_params.txt` (PASS only), and the branch/PR/merge below.
+   the one-line LOG.md entry, the `runs/SUMMARY.md` row, REPRODUCIBILITY +
+   launcher promotion from `resolved_params.txt` (PASS only), and the
+   branch/PR/merge below.
 3. **Branch + PR + merge — every issue with something to land:**
    - Ensure `exp/<id>` exists (create from `origin/vast-ai-workload` if
      /launch never ran — e.g. analysis kinds).
-   - Commit deliverables to it: plan file, `runs/<id>/verdict.md` +
-     `report.html` + `run.json` + `resolved_params.txt`, LOG/SUMMARY deltas,
-     any code/launcher changes. Bulk artifacts stay gitignored.
+   - Commit deliverables to it: `runs/<id>/verdict.md` + `report.html` +
+     `run.json` + `resolved_params.txt`, LOG/SUMMARY deltas, any code/launcher
+     changes. The plan is NOT a file deliverable — it lives in the issue body.
+     Bulk artifacts stay gitignored.
    - `git diff origin/vast-ai-workload..exp/<id>` empty → skip PR, log
      `PR_SKIPPED: #<N> nothing to land`, continue.
    - Else: push; `gh pr create --repo <project.yaml github.code_repo>
      --base vast-ai-workload --head exp/<id>` with a body carrying: verdict,
      the results table (metric | value | target | source), box/cost line from
      the ledger, WandB group link. Then `gh pr merge --squash --delete-branch`.
-     Merge conflict/failure → leave the PR open, log
-     `MANUAL_REVIEW_NEEDED: PR merge #<N>`, continue to labels (never hang on
-     git).
-4. `set_status_label <N> done` and `gh issue close <N> --comment "<verdict
-   one-liner + PR link + runs/<id>/>"`.
+     Merge conflict/failure → leave the PR open, `flag_human <N> "PR merge
+     failed"`, continue to labels (never hang on git).
+4. `set_status_label <N> done` and close with THE verdict record — the close
+   comment is the per-issue verdict SSOT (LOG.md keeps only an index line):
+   `gh issue close <N> --comment` body = `VERDICT:` line, headline results
+   (criterion | observed | target), cost line from the ledger (gpu-hr × $/hr),
+   PR link, `runs/<id>/` pointer, WandB group.
 5. Print: what landed, PR URL, teardown confirmation, cost total.
    Optionally suggest (never run) `/de-bloat <id>` — that skill is human-only.
 

@@ -13,10 +13,11 @@ You are the analyst. Output: `runs/<id>/verdict.md` + one PROGRESS line +
 
 1. `runs/<id>/run.json` — cells, step target, success-criteria snapshot,
    baseline_run, iterations. This is authoritative for what ran.
-2. `.claude/plans/<N>.md` — success criteria + verification commands, IF it
-   still exists. Missing plan + present run.json → use the snapshot's
-   criteria; note `plan deleted — judged against run.json snapshot` in the
-   verdict.
+2. The plan — `$(plan_path <N>)` after `plan_fetch <N>` (the plan lives in
+   the GitHub issue body; the cache/legacy fallback is automatic) — success
+   criteria + verification commands, IF it still resolves. No plan anywhere +
+   present run.json → use the snapshot's criteria; note `plan unavailable —
+   judged against run.json snapshot` in the verdict.
 3. `runs/<id>/metrics/` — the numbers. Run dir entirely missing → do NOT
    guess: write nothing, print `RESULTS_MISSING: <id>`, stop.
 

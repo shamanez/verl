@@ -54,9 +54,9 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 
 - ONE analyst pass. No adversarial re-verification of the verdict, no
   multi-analyst fan-out, no "let me double-check with another agent". If the
-  verdict looks untrustworthy, append `MANUAL_REVIEW_NEEDED: verdict #<N>
-  <doubt>` to PROGRESS.md and stop — the human decides whether to
-  re-run analysis or invoke `codex-verify`.
+  verdict looks untrustworthy, run `flag_human <N> "verdict doubt: <doubt>"`
+  and stop — the human decides whether to re-run analysis or invoke
+  `codex-verify`.
 - Never invent numbers; every verdict value must be greppable from
   `runs/<id>/metrics/` or `analysis.log`.
 - Divergence (NaN/exploding grad-norm) in metrics ⇒ STOP with the step number.
