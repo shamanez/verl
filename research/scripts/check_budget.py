@@ -45,12 +45,35 @@ def _load_ledger(p: Path) -> list[dict]:
 
 
 def _load_budget(p: Path) -> dict:
+    """Caps live in project.yaml's `budget:` block (budget.json was retired).
+
+    Parsed with a dumb line scanner so we don't need a yaml dependency; falls
+    back to a legacy budget.json path if one is explicitly passed and exists.
+    """
+    if p.suffix == ".json" and p.exists():
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            return {"monthly_cap_usd": None}
     if not p.exists():
         return {"monthly_cap_usd": None}
-    try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
-        return {"monthly_cap_usd": None}
+    caps, in_budget = {}, False
+    for line in p.read_text().splitlines():
+        if line.startswith("budget:"):
+            in_budget = True
+            continue
+        if in_budget:
+            if line and not line.startswith((" ", "\t", "#")):
+                break
+            stripped = line.strip()
+            for key in ("monthly_cap_usd", "weekly_cap_usd"):
+                if stripped.startswith(f"{key}:"):
+                    val = stripped.split(":", 1)[1].split("#")[0].strip()
+                    try:
+                        caps[key] = float(val)
+                    except ValueError:
+                        pass
+    return caps or {"monthly_cap_usd": None}
 
 
 def _row_spent_usd(row: dict, now_epoch: float) -> float:
@@ -69,7 +92,7 @@ def _row_spent_usd(row: dict, now_epoch: float) -> float:
 def main() -> int:
     here = Path(__file__).resolve().parent.parent
     default_ledger = here / ".claude" / "state" / "runs.jsonl"
-    default_budget = here / "budget.json"
+    default_budget = here / ".claude" / "project.yaml"
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scope", nargs="?", default=None,

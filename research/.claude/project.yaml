@@ -1,6 +1,6 @@
 # Project config — single source of truth for the values that agents need to operate.
 # Update this file when porting the harness to a different research project; the
-# operating-context blocks in agents/playbooks mirror these values inline as a
+# operating-context blocks in agents/skills mirror these values inline as a
 # token-cost optimization (so fresh-context agents don't need an extra read), but
 # project.yaml is authoritative. If the two diverge, this file wins.
 #
@@ -37,11 +37,40 @@ github:
   research_repo_visibility: private
   code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=vast-ai-workload
   code_pr_base_branch: vast-ai-workload                       # NEVER `main` — main tracks upstream
-  labels:
-    research_claim: research:claim                            # triage picks these up
-    status_prefix: "status:"                                  # planned, approved, running, pass, revise, stop, done
+  labels:                                                     # labels are the DURABLE state machine; ONLY stage commands write them (the human never hand-flips)
+    research_claim: research:claim                            # applied by /new-issue
+    status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
     milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
-    kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature
+    kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature, analysis
+
+commands:                                                     # the per-issue stage commands (skills in .claude/skills/) — each invokable as /<name> <issue>
+  lifecycle: [new-issue, plan, approve, launch, monitor, analyze, close]
+  driver: go                                                  # /go <N> — resume from labels+ledger and run remaining stages; the unattended entry point
+  overview: status                                            # /status — read-only fleet view
+  human_only: [de-bloat, codex-verify]                        # disable-model-invocation; deleting science / external review are operator acts
+  degradation_rule: "every command derives state labels+ledger FIRST, files second; a deleted plan or runs/<id>/ yields a named refusal or terminal derivation — never a retry loop"
+
+naming:                                                       # ONE readable name everywhere — derived by skills/_lib.sh names_for(), never by convention
+  run_id: "<issue>-<slug>"                                    # e.g. 63-anchor-ema-sweep = runs/ dir name = ledger id = Vast label = WandB group; branch exp/<run_id>
+  wandb_run: "<issue>-<cell>"                                 # e.g. 63-adaptive-ls-k10; WANDB_RUN_GROUP = run_id
+  cells: "self-describing kebab slugs naming method+knob (adaptive-ls-k10, dense-control); BANNED: c1/c2/armA-* opacity (lint_cell_name enforces)"
+  tmux: "run-<issue>"
+
+wandb:                                                        # single source of truth (was hardcoded in the monitor agent)
+  project: verl_compression_research
+  entity: shamanework-pl
+  tail_rule: "the async uploader drops the last 1-2 steps — /analyze backfills them from train.log (scripts/backfill_wandb.py)"
+
+budget:                                                       # money caps (absorbed budget.json; scripts/check_budget.py reads THIS block)
+  monthly_cap_usd: 1500
+  weekly_cap_usd: 500
+  notes: "per-run caps live in each plan's max_gpu_hr/max_dph; the ladder is default_compute.gpu_filter_chain (1×H200 → 1×B200 → 2×H200)"
+
+verification:                                                 # WHERE heavy verification is allowed — the anti-hang doctrine (operator directive 2026-07-03 + harness-v1)
+  planning: "unbounded: /plan deep may run judge-panel workflows, brainstorming, operator Q&A; /approve may invoke codex-verify. All uncertainty is spent BEFORE approval."
+  execution: "NONE autonomous. /launch → /close run without adversarial review, verdict re-verification, or exploratory workflows. If a stage believes heavy verification is warranted mid-run, it appends 'MANUAL_REVIEW_NEEDED: <why> — #<N>' to PROGRESS.md and STOPS for an explicit human go/no-go."
+  cpu_vs_gpu: "CPU checks (import/shape/off-path-parity) run ONCE per gate with ONE bounded fix attempt — never a loop. Numerics-under-training are validated by the on-box probe cell (1-2 steps); on-box fixes are bounded by ledger fix_attempts<=3, then MANUAL_REVIEW_NEEDED."
+  bounded_retry_rule: "every retry is counted in the ledger (launch_attempts<=3, fix_attempts<=3, revise_depth<=plan iterations, monitor cycles<=12); exhaustion stops with a named flag, never spins"
 
 source_tree:                                                  # the upstream code the experiments operate on
   path: /Users/shamane/Documents/verl/
@@ -53,8 +82,9 @@ source_tree:                                                  # the upstream cod
   allowed_paths:                                              # except these subtrees
     - /Users/shamane/Documents/verl/research/                 # always writable
   exception_branches:                                         # plus any path is writable when on these branches
-    - exp/*                                                   # experiment-runner worktrees for code_change=true plans
+    - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
     - vast-ai-workload                                        # the base working branch — research/ + examples/grpo_trainer/vast_*.sh edits live here
+    - autonomous-harness-*                                    # harness-engineering branches
 
 vast_template:                                                # the locked Vast.ai docker template the runner provisions
   name: verl-research-vllm020
@@ -177,40 +207,30 @@ agent_models:
       why: mechanical append/copy/rewrite + draft PR (genuinely not reasoning-heavy). Opus 4.8 per the strict best-model policy; effort held at `high` (the floor). Never launches a workflow — its durable git/GitHub mutations stay single-shot.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# New-feature policy (operator directive 2026-06-29). Full design + rollout:
-# .claude/HARNESS_FEATURE_INTEGRATION.md. These three blocks are the single
-# source of truth for HOW /goal, dynamic workflows (ultracode), and agent teams
-# are used in this harness; playbooks/runbook/CLAUDE.md mirror one-line pointers.
+# Feature policy (/goal, workflows, teams) — harness-v1. Design + rationale:
+# .claude/HARNESS_DESIGN.md. The `verification:` block above is the gating rule
+# these features live under.
 # ─────────────────────────────────────────────────────────────────────────────
 
-goal_command:                                                 # Claude Code /goal — DRIVES the autonomous loop to completion
+goal_command:                                                 # Claude Code /goal — the unattended wrapper around /go <N>
   status: enabled
-  role: "the autonomous loop launch commands START with /goal so a session does not stop until the plan's success-criteria are met (or it escalates). See researcher_steps.md §2/§3."
+  role: "days-long unattended execution = `/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN, LOG entry) or PROGRESS.md has AWAITING_APPROVAL/MANUAL_REVIEW_NEEDED/STUCK for #<N>. Each turn run /go <N> once and print status+evidence. Stop after 120 turns.`"
   evaluator_model: claude-opus-4-8                            # the /goal done-judge runs on Opus 4.8. NO Haiku model runs anywhere in this harness.
-  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # HOW: this is Claude Code's small-fast-model slot (its DEFAULT is Haiku); settings.json OVERRIDES it to claude-opus-4-8 so NO Haiku ever runs. The var NAME says 'HAIKU' but its EFFECT is to ELIMINATE Haiku. Do NOT delete the override (that lets the slot fall back to Haiku). Operator note (non-directive): this also routes other small-fast/background calls to Opus — an accepted cost trade-off under the strict best-model policy; do NOT change without an operator directive.
-  transcript_evidence_rule: "the /goal evaluator is transcript-only (no tools; cannot read runs.jsonl/WandB/verdict.md/labels). The orchestrator MUST print a plan-completion ledger each tick (every success-criterion + its evidence, DONE/PENDING) so the judge can see 'done'. Without surfaced evidence the goal never confirms (spins) or false-confirms on a mere claim."
-  escape_hatch: "every /goal condition MUST include an escape — '… OR log STUCK/MANUAL_REVIEW_NEEDED' + a turn bound (e.g. 'stop after 200 turns') — so an impossible criterion cannot burn money forever."
-  stop_hook_interaction: "/goal blocks the Stop event, so budget safety must NOT depend on the Stop hook firing: the orchestrator runs teardown-finished-runs.sh IN-FOREGROUND every tick — keep it; this is the mandatory, trusted budget backstop."
-  must_not_replace: [human status:approved gate, teardown-finished-runs.sh foreground sweep, GOAL.md north-star]
+  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # Claude Code's small-fast-model slot (default Haiku); settings.json OVERRIDES it to claude-opus-4-8 so NO Haiku ever runs. Do NOT delete the override.
+  transcript_evidence_rule: "the /goal evaluator is transcript-only — /go prints the issue's stage + evidence (labels, ledger status, verdict line) each turn so the judge can see 'done'."
+  escape_hatch: "every /goal condition MUST include an escape ('… or PROGRESS.md has MANUAL_REVIEW_NEEDED/STUCK') + a turn bound, so an impossible criterion cannot burn money forever."
+  stop_hook_interaction: "/goal blocks the Stop event, so /monitor runs the teardown sweep in-foreground when acting on reports; the Stop hook remains the backstop for plain sessions."
+  must_not_replace: [human /approve gate, teardown backstop, GOAL.md north-star]
 
-workflows:                                                    # Claude Code dynamic workflows / `ultracode` — ENABLED in the harness
-  status: enabled
-  driver_policy: "the unattended /loop|/goal driver runs at effort=max (NOT session-wide `/effort ultracode`); it launches workflows EXPLICITLY per lane. Session-wide ultracode auto-escalates every tick and pushes orchestration state into ephemeral script variables — the driver's value is crash-durable file/ledger state."
-  interactive_policy: "an operator interactive session MAY use `/effort ultracode` freely (big analysis, design, hard coding)."
-  workflow_lanes:                                             # where the SESSION launches a workflow instead of dispatching a single subagent
-    - "analysis (moment of truth): fan out N analysts (reward·length·entropy·grad-cosine·train-infer gap) -> adversarial verify -> one verdict"
-    - "live in-training diagnostics: deep probe fan-out on the live box; the 30s SSH poll stays the always-on heartbeat"
-    - "hard planning: judge-panel — draft N approaches -> score -> synthesize"
-    - "parallel/sequential runs: pipeline/fan-out across multiple approved plans & boxes"
-    - "hard code_change patches: implement -> adversarial review -> test (worktree); experiment-runner executes the result"
-  read_only_auto_approve_rule: "workflow worker agents auto-approve edits (acceptEdits; no prompt when headless). SAFE only for the read-only lanes (analysis/planning/diagnostics — they touch only runs/ + reports). Anything that SPENDS MONEY or mutates durable state (vast-provision, git branches, PRs, runs.jsonl) STAYS a gated single-shot subagent — NEVER a worker inside an auto-approving workflow. This preserves the status:approved gate + budget caps."
-  not_disabled: "CLAUDE_CODE_DISABLE_WORKFLOWS is intentionally NOT set; the `ultracode` keyword/effort tier stays available."
-  saved_workflows_dir: .claude/workflows/                     # e.g. parallel-runs.md — read input via the `args` global
+workflows:                                                    # dynamic workflows / `ultracode` — PLANNING-TIME ONLY (see verification: above)
+  status: enabled-planning-only
+  sanctioned_lanes:
+    - "hard planning (/plan deep): judge-panel — draft N approaches -> score -> synthesize -> research-planner writes the winner"
+    - "operator interactive analysis of ALREADY-CLOSED results (post-teardown, GPU-free)"
+  forbidden_lanes: "mid-run adversarial verify, live in-training diagnostics fan-out, autonomous verdict re-verification — these were the harness's main hang cause; execution stages use single-shot subagents only"
+  read_only_auto_approve_rule: "workflow workers stay READ-ONLY (runs/ only). Anything that spends money or mutates durable state (vast-provision, git, PRs, runs.jsonl, labels) is a gated single-shot dispatch — never a workflow worker."
+  saved_workflows_dir: .claude/workflows/
 
-agent_teams:                                                  # Claude Code agent teams — CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 is set in the environment
+agent_teams:                                                  # CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 is set
   status: enabled-opt-in
-  unattended_substrate: "the two background sessions + single-shot subagents remain the crash-durable spine (issues + runs.jsonl + files). Do NOT replace them with an Agent team: in-process teammates do NOT survive /resume, background bash has no network egress, one-team-per-session, no nesting."
-  sanctioned_uses:
-    - "parallel runs: one teammate per concurrent box (typed from experiment-runner) — provisioning still via the gated single-shot runner path, never an auto-approving teammate"
-    - "operator-run adversarial verdict review: spawn analyst-typed teammates that defend vs. challenge a verdict, reconcile into one verdict.md (GPU-free, post-teardown, NEVER flips status:approved)"
-  caveat: "a teammate spawned from a subagent definition does NOT inherit that def's `skills`/`mcpServers` frontmatter — keep team uses GPU-free and skill-free (no vast-* dependency)."
+  rule: "never part of the unattended loop (in-process teammates don't survive /resume). Opt-in, GPU-free, planning-time or post-close only — e.g. an operator-run plan-design panel. Parallel ISSUES use parallel sessions in worktrees, not teams."

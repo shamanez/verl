@@ -43,8 +43,8 @@ under `research/`. The project's north-star — what "done" means — is
 |---|---|
 | **Single source of truth for all project-level config** | `research/.claude/project.yaml` |
 | **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list |
-| The autonomous research loop (human operator manual) | `research/researcher_steps.md` |
-| Top-level playbooks (triage, orchestrator) | `research/.claude/playbooks/*.md` |
+| **The stage commands** (one per lifecycle stage, `/<cmd> <issue>`) | `research/researcher_steps.md` (index) → `research/.claude/skills/*/SKILL.md` |
+| Harness architecture + audit rationale | `research/.claude/HARNESS_DESIGN.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
 | **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
 | **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
@@ -120,45 +120,37 @@ ls -l ~/.config/verl-research/secrets.env   # expect -rw-------
 gh repo set-default --view                   # expect shamanez/verl-compression-research
 ```
 
-### Start the autonomous loop
+### Run an experiment (per-issue stage commands — harness-v1)
 
 ```bash
 cd /Users/shamane/Documents/verl/research
 claude
 ```
 
-Both loops are **`/goal`-driven** (they run until the plan's success-criteria are met,
-then auto-stop) — full commands + rationale in `research/researcher_steps.md` §3/§3a.
-
-Session A (planning watcher):
-
-```
-/bg /goal All open research:claim issues planned (triage ledger unplanned=0) … or log a triage error. Read .claude/playbooks/triage.md, one tick, pace ~60m. Stop after 100 turns.
-```
-
-Session B (executor):
+One issue = one lifecycle = one command per stage, each `/<command> <issue>`;
+labels are applied automatically (you never hand-flip). Full index:
+`research/researcher_steps.md`.
 
 ```
-/bg /goal All status:approved plans terminal (PASS/STOP, box TORN_DOWN, LOG.md written) per my plan-completion ledger … or log STUCK/MANUAL_REVIEW_NEEDED. Read .claude/playbooks/orchestrator.md, one tick, pace ~30m. Stop after 200 turns.
+/new-issue "does signed_ema α=0.4 hold parity at cadence 10/10?"   → files #N
+/go <N>          # plan → YOUR /approve → launch → monitor → analyze → close
 ```
 
-Triage polls GitHub for `research:claim` issues, the planner writes a
-plan, you read it and flip the issue label to `status:approved`, then the
-orchestrator drives provisioning → training → verdict → log entry
-autonomously.
+`/go <N>` is resumable (detects the stage from labels + ledger) and is the
+unattended entry point — for a days-long run, wrap it:
+`/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN, LOG entry) or
+PROGRESS.md flags it … run /go <N> each turn. Stop after 120 turns.`
+Parallel issues run in parallel sessions, each in its own worktree
+(`claude --worktree <N>-<slug>`).
 
-**Model & feature policy (2026-06-29).** Every agent — and the `/goal` done-judge — runs on
+**Model & feature policy.** Every agent — and the `/goal` done-judge — runs on
 **Opus 4.8** (no Sonnet, no Haiku anywhere); the only knob is reasoning **effort** with a
-floor of `high`. The per-agent effort tiers (max / xhigh / high) live in
-`research/.claude/project.yaml` (`reasoning_effort_rule` + per-agent `effort:`) — do not
-restate them here. Dynamic **workflows** (`ultracode`) are
-enabled and launched EXPLICITLY at the session level for the hard lanes (moment-of-truth
-analysis, hard `code_change`, hard planning, parallel runs) — never as session-wide
-`/effort ultracode` on the unattended loops, and a workflow's auto-approving workers stay
-READ-ONLY (provisioning / PR / `runs.jsonl` writes remain gated single-shot). **Agent
-teams** are opt-in and GPU-free (adversarial verdict review, parallel-run fan-out). Single
-source of truth: `research/.claude/project.yaml` (`goal_command:` / `workflows:` /
-`agent_teams:`); full design in `research/.claude/HARNESS_FEATURE_INTEGRATION.md`.
+floor of `high`; per-agent tiers live in `research/.claude/project.yaml`. Heavy
+deliberation (judge-panel workflows, adversarial review, agent teams) is
+**planning-time only** (`/plan deep`, `/approve`); during execution the stages run
+single-shot subagents with bounded retries and pause for a human go/no-go instead of
+looping (project.yaml `verification:` is the single source of truth; design in
+`research/.claude/HARNESS_DESIGN.md`).
 
 Kill switch (instant pause of all agent tool calls):
 

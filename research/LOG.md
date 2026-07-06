@@ -10,7 +10,7 @@ MOAT: Math-only projector ablation — best Δ/order/adaptivity/granularity on t
 - scientific finding: **PROJECTABLE ONLY at the freshest anchor (Δ=1, h=1); do-nothing OPTIMAL at the operational op (Δ=5, h=10 = 200 global steps — all methods collapse).** Confirms #60 "dataset-specific": `consec_delta_cos ≈ 0.15` uniform across Δ/family/phase (vs ≈ 0.86 GSM8K). Per-family: **bias → EXCLUDE** (op ratio 1.0078, matches #60); other families copy-latest/tie. Early training marginally more projectable than late.
 - code: `code_change` flipped false→true on-box ONLY for the sanctioned contingency — a tiny additive `--tick-range START,END` phase-axis flag on `research/scripts/moat_scorecard.py` (parity ~1e-16). NOT a verl/ method change, NO launcher; `promote_launcher_as: none` → NO PR.
 - run dir: runs/MOAT-MATH-ABLATION/
-- report: reports/moat-math-ablation.html
+- report: runs/MOAT-MATH-ABLATION/report.html
 - verdict: runs/MOAT-MATH-ABLATION/verdict.md
 
 ## EXP-56 · 2026-07-04T18:30Z · M4 · PASS
@@ -20,9 +20,9 @@ MOAT: Projector verdict for ANCHOR/FAST from EXP-57 weights (integration/rollup)
 - key numbers (GSM8K per-step Δ=10,h=10 GLOBAL median): fixed #47 damped_linear op ratio **0.9396 < 1**, pred_evr **+0.1171**, h_safe ≈ **30 global steps**, no family breakers · prefer-simplicity vs #48 fixed-2nd-order **+0.2086 WORSE** (1.1482) · vs #49 best adaptive (armA rolling_ls_k K=5) only **−0.0045** better (0.9351, sub-0.01 margin). Cross-dataset (#60 Big-Math): same fixed projector λ*=**0.0**, ratio **1.0000**, pred_evr **−0.0012**, no arm beats hold_stale; mechanism consec_delta_cos ≈ **0.15** (Big-Math near-orthogonal) vs ≈ **0.86** (GSM8K aligned).
 - gates: all 8 verdict questions answered with source-attributed numbers; tensor-family verdict + decision rules applied; **16/16 adversarial spotchecks passed**; every number grep-attributable to a feeder scorecard/verdict (nothing re-scored or invented); combined report offline-safe (0 script/img/src/external `<link`, 9 inline SVG, 5 tables).
 - compute: GPU-free INTEGRATION on the laptop from local feeder artifacts (MOAT-45/47/48/49 + MOAT-58 dirs) — no Vast, no scoring run, 0 GPU-hours.
-- code: `code_change=false` — no scoring code, no verl/ edits, no exp/* branch, NO PR; `promote_launcher_as: none`. Combined report is a new file under research/reports/ (writable on vast-ai-workload).
+- code: `code_change=false` — no scoring code, no verl/ edits, no exp/* branch, NO PR; `promote_launcher_as: none`. Combined report lives in the run dir (runs/ is the sole artifact home).
 - run dir: runs/MOAT-56-ANALYSIS/
-- report: reports/moat-projector-verdict.html
+- report: runs/MOAT-56-ANALYSIS/report.html
 - verdict: runs/MOAT-56-ANALYSIS/verdict.md
 
 ## EXP-60 · 2026-07-04T07:50Z · M4 · PASS

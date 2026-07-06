@@ -17,7 +17,7 @@ MILESTONE_PASS: M4
 [2026-07-04T17:57:29+10:00] [analyst #60] verdict=PASS carry_forward=F best=hold_stale(do-nothing) op_ratio=1.0000 d_vs_bar=-0.0001 generalizes=dataset-specific (consec_delta_cos=0.15)
 [2026-07-04T18:00:54+10:00] [log-writer #60] logged verdict=PASS carry_forward=FALSE generalizes=dataset-specific milestone=M4
 [2026-07-04T18:15:14+10:00] [analyst #56] verdict=PASS (integration: GSM8K winner=fixed damped-linear 0.9396; cross-dataset=dataset-specific, Big-Math bar 1.0000/lam0.0/consec0.15)
-[2026-07-04T18:32:34+10:00] [log-writer #56] logged verdict=PASS MOAT-rollup conditional-winner=fixed-damped-linear cross-dataset=dataset-specific milestone=M4; report reports/moat-projector-verdict.html
+[2026-07-04T18:32:34+10:00] [log-writer #56] logged verdict=PASS MOAT-rollup conditional-winner=fixed-damped-linear cross-dataset=dataset-specific milestone=M4; report runs/MOAT-56-ANALYSIS/report.html
 [2026-07-04T22:26:58+10:00] [research-planner #61] plan written
 [2026-07-05T03:15:18+10:00] [analyst #61] verdict=PASS — best Math projector = adaptive_linear rolling_ls_k K=3 @ Delta*=1,h=1 (ratio 0.98879 CI[0.98763,0.99043], evr +0.02203; deploy fixed damped_linear by prefer-simplicity); PROJECTABLE only at freshest anchor (20 global steps), do-nothing optimal at op Delta=5,h=10 — confirms #60 dataset-specific, consec_delta_cos~0.15
 [2026-07-05T03:25:15+10:00] [log-writer #61] LOG.md + runs/SUMMARY.md (M4) updated — EXP-61 PASS: best Math projector adaptive_linear rolling_ls_k K=3 @ Δ*=1,h=1; deploy fixed damped_linear; do-nothing optimal at op, confirms #60 dataset-specific

@@ -1,9 +1,0 @@
-{
-  "monthly_cap_usd": 1500,
-  "weekly_cap_usd": 500,
-  "default_max_dph": 24.0,
-  "default_max_gpu_hr": 96,
-  "default_per_node_gpus": 4,
-  "default_gpu_filter": "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true",
-  "notes": "Spend caps + a single fallback gpu filter. AUTHORITATIVE provisioning preference is project.yaml.default_compute.gpu_filter_chain (4xH200 preferred -> 8xH100). The planner refuses plans whose budget_gpu_hr would push month spend past monthly_cap_usd; the teardown hook enforces per-experiment max_gpu_hr at runtime."
-}
