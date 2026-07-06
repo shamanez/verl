@@ -44,7 +44,7 @@ under `research/`. The project's north-star — what "done" means — is
 | **Single source of truth for all project-level config** | `research/.claude/project.yaml` |
 | **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list |
 | **The stage commands** (one per lifecycle stage, `/<cmd> <issue>`) | `research/researcher_steps.md` (index) → `research/.claude/skills/*/SKILL.md` |
-| Harness architecture + audit rationale | `research/.claude/HARNESS_DESIGN.md` |
+| Harness operator manual (human-only, hosted HTML; design rationale lives there) | link at the top of `research/researcher_steps.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
 | **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (branch `vast-ai-workload`) |
 | **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
@@ -55,8 +55,9 @@ under `research/`. The project's north-star — what "done" means — is
 
 The GitHub repo the harness watches is
 **`shamanez/verl-compression-research`** (private) — the issue queue only:
-`/new-issue` files there, the stage commands set its labels, `/plan` posts the
-stub comment, `/close` posts the closing verdict comment. No PRs. It is set as
+`/new-issue` files there, the stage commands set its labels, `/plan` writes
+the plan INTO the issue body (between plan markers — the plan's single source
+of truth), `/close` posts the closing verdict comment. No PRs. It is set as
 the local `gh` default via the `research` git remote on this checkout. Confirm
 with `gh repo set-default --view`.
 
@@ -129,21 +130,20 @@ cd /Users/shamane/Documents/verl/research
 claude
 ```
 
-One issue = one lifecycle = one command per stage, each `/<command> <issue>`;
+One issue = one lifecycle, driven as **three phases, one fresh window each**;
 labels are applied automatically (you never hand-flip). Full index:
 `research/researcher_steps.md`.
 
 ```
-/new-issue "does signed_ema α=0.4 hold parity at cadence 10/10?"   → files #N
-/go <N>          # plan → YOUR /approve → launch → monitor → analyze → close
+/build "does signed_ema α=0.4 hold parity at cadence 10/10?"   → files #N
+/plan <N>        # fresh window: plan → written into the issue body → YOUR approve
+/execute <N>     # fresh window: launch → monitor → analyze → close
 ```
 
-`/go <N>` is resumable (detects the stage from labels + ledger) and is the
-unattended entry point — for a days-long run, wrap it:
-`/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN, LOG entry) or
-PROGRESS.md flags it … run /go <N> each turn. Stop after 120 turns.`
-Parallel issues run in parallel sessions, each in its own worktree
-(`claude --worktree <N>-<slug>`).
+`/go <N>` is the resume-from-anywhere fallback (detects the stage from labels +
+ledger); the optional unattended `/bg /goal … /go <N>` wrapper is an appendix in
+the operator manual, not the default path. Parallel issues run in parallel
+windows, each in its own worktree (`claude --worktree <N>-<slug>`).
 
 **Model & feature policy.** Every agent — and the `/goal` done-judge — runs on
 **Opus 4.8** (no Sonnet, no Haiku anywhere); the only knob is reasoning **effort** with a
@@ -151,8 +151,8 @@ floor of `high`; per-agent tiers live in `research/.claude/project.yaml`. Heavy
 deliberation (judge-panel workflows, adversarial review, agent teams) is
 **planning-time only** (`/plan deep`, `/approve`); during execution the stages run
 single-shot subagents with bounded retries and pause for a human go/no-go instead of
-looping (project.yaml `verification:` is the single source of truth; design in
-`research/.claude/HARNESS_DESIGN.md`).
+looping (project.yaml `verification:` is the single source of truth; design rationale
+lives in the hosted operator manual linked from `research/researcher_steps.md`).
 
 Kill switch (instant pause of all agent tool calls):
 
@@ -168,7 +168,7 @@ Provision directly with `research/.claude/skills/vast-provision/run.sh` (locked
 template `verl-research-vllm020`, hash `3b0f8b726ac3036d6c007bfa13b6d75f` — its
 onstart script handles docker + verl install + HF/WandB auth), then ssh in and run
 `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`. Full procedure:
-`research/researcher_steps.md`.
+operator-manual appendix (link at the top of `research/researcher_steps.md`).
 
 ## 5. Commits
 

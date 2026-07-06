@@ -42,13 +42,17 @@ github:
     status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
     milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
     kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature, analysis
+    pause: [needs:human, awaiting:approval]                   # the DURABLE pause signals (set via _lib.sh flag_human / flag_awaiting_approval; cleared by the resuming stage). PROGRESS.md lines are only a local capped echo.
+  plan_home: issue-body                                       # the plan's SSOT is the ISSUE BODY between <!-- plan:start --> / <!-- plan:end --> markers (_lib.sh plan_publish/plan_fetch). Local .claude/state/plan-cache/<N>.md is a gitignored derived cache; .claude/plans/ holds templates + read-only legacy files. Human edits to the plan block ON GitHub are authoritative — every gating stage re-fetches.
 
 commands:                                                     # the per-issue stage commands (skills in .claude/skills/) — each invokable as /<name> <issue>
+  phases: [build, plan, execute]                              # the three ENTRY POINTS, one FRESH WINDOW each (context control): /build files → /plan plans + ends at the human gate → /execute runs launch→close. A UX layer over the stages below — never a replacement for them.
   lifecycle: [new-issue, plan, approve, launch, monitor, analyze, close]
-  driver: go                                                  # /go <N> — resume from labels+ledger and run remaining stages; the unattended entry point
-  overview: status                                            # /status — read-only fleet view
+  driver: go                                                  # /go <N> — resume from labels+ledger and run remaining stages; the fallback/resume path (and the optional unattended entry point)
+  overview: status                                            # /status — read-only fleet view printed to stdout (no STATUS.md file exists)
   human_only: [de-bloat, codex-verify]                        # disable-model-invocation; deleting science / external review are operator acts
   degradation_rule: "every command derives state labels+ledger FIRST, files second; a deleted plan or runs/<id>/ yields a named refusal or terminal derivation — never a retry loop"
+  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable via the human-only de-bloat (incl. --all-terminal batch). Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh or de-bloat."
 
 naming:                                                       # ONE readable name everywhere — derived by skills/_lib.sh names_for(), never by convention
   run_id: "<issue>-<slug>"                                    # e.g. 63-anchor-ema-sweep = runs/ dir name = ledger id = Vast label = WandB group; branch exp/<run_id>
@@ -207,17 +211,17 @@ agent_models:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature policy (/goal, workflows, teams) — harness-v1. Design + rationale:
-# .claude/HARNESS_DESIGN.md. The `verification:` block above is the gating rule
-# these features live under.
+# the hosted operator manual (link in researcher_steps.md). The `verification:`
+# block above is the gating rule these features live under.
 # ─────────────────────────────────────────────────────────────────────────────
 
-goal_command:                                                 # Claude Code /goal — the unattended wrapper around /go <N>
-  status: enabled
-  role: "days-long unattended execution = `/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN, LOG entry) or PROGRESS.md has AWAITING_APPROVAL/MANUAL_REVIEW_NEEDED/STUCK for #<N>. Each turn run /go <N> once and print status+evidence. Stop after 120 turns.`"
+goal_command:                                                 # Claude Code /goal — the OPTIONAL unattended wrapper around /go <N>
+  status: optional-appendix                                   # NOT the default path (P6): default = one-issue-per-window with a human nearby (/plan window, /execute window). Reach for /bg /goal only for a genuinely unattended multi-day run.
+  role: "days-long unattended execution = `/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN) or the issue gained a needs:human/awaiting:approval label. Each turn run /go <N> once and print status+evidence. Stop after 120 turns.`"
   evaluator_model: claude-opus-4-8                            # the /goal done-judge runs on Opus 4.8. NO Haiku model runs anywhere in this harness.
   evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # Claude Code's small-fast-model slot (default Haiku); settings.json OVERRIDES it to claude-opus-4-8 so NO Haiku ever runs. Do NOT delete the override.
   transcript_evidence_rule: "the /goal evaluator is transcript-only — /go prints the issue's stage + evidence (labels, ledger status, verdict line) each turn so the judge can see 'done'."
-  escape_hatch: "every /goal condition MUST include an escape ('… or PROGRESS.md has MANUAL_REVIEW_NEEDED/STUCK') + a turn bound, so an impossible criterion cannot burn money forever."
+  escape_hatch: "every /goal condition MUST include an escape ('… or the issue gained a needs:human/awaiting:approval label') + a turn bound, so an impossible criterion cannot burn money forever."
   stop_hook_interaction: "/goal blocks the Stop event, so /monitor runs the teardown sweep in-foreground when acting on reports; the Stop hook remains the backstop for plain sessions."
   must_not_replace: [human /approve gate, teardown backstop, GOAL.md north-star]
 

@@ -36,15 +36,17 @@ This tears down **any** instance id you give it — including operator-attached
 
 The `teardown-finished-runs.sh` Stop hook handles **automatic** teardown — verdict written, heartbeat stale, budget exceeded, orphaned handles. This skill is for **explicit** teardown the operator or an agent wants to force, independent of those triggers (e.g., aborting an experiment that's heading nowhere, or cleaning up after a launch retry that left orphans).
 
-## Session-independent backstop (optional, recommended)
+## Session-independent backstop (INSTALLED — the default)
 
-The Stop-hook reaper only fires while a Claude session is open. To keep the
-money backstop alive with zero sessions, install an hourly cron on the laptop:
+The Stop-hook reaper only fires while a Claude session is open. An hourly
+crontab line (installed 2026-07-06) runs the same hook headless so the money
+backstop survives zero-session gaps. Manage it with:
 
 ```bash
-crontab -e   # add:
-17 * * * * CLAUDE_PROJECT_DIR=/Users/shamane/Documents/verl/research bash /Users/shamane/Documents/verl/research/.claude/hooks/teardown-finished-runs.sh >> /tmp/teardown.cron.log 2>&1
+bash .claude/hooks/install-reaper-cron.sh            # install / refresh (idempotent)
+bash .claude/hooks/install-reaper-cron.sh --status   # show the line
+bash .claude/hooks/install-reaper-cron.sh --remove   # uninstall
 ```
 
-The hook is idempotent, lock-aware, and exits 0 — safe to run alongside live
-sessions.
+The hook is idempotent, lock-aware, timeout-bounded, and exits 0 — safe to run
+alongside live sessions. Its log: `/tmp/teardown.cron.log`.

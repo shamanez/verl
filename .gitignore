@@ -159,10 +159,13 @@ research/runs/*/*/weights/**/*.pt
 # ── harness-v1 (autonomous-harness-v1) ───────────────────────────────────────
 # machine state — ONE live copy shared by all worktrees; never versioned
 research/.claude/state/runs.jsonl
-research/.claude/state/STATUS.md
 research/.claude/state/.last-*
 research/.claude/state/.runs.jsonl.lock/
 research/.claude/state/vast-handles/
+# derived cache of the GitHub-resident plans (SSOT = the issue body)
+research/.claude/state/plan-cache/
+# the /build phase skill — upstream's `build/` python ignore above would swallow it
+!research/.claude/skills/build/
 # bulk analysis caches — regenerable; folded by the human-only de-bloat skill
 research/runs/**/*.npz
 research/runs/**/panel_cache*
