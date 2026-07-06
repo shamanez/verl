@@ -168,6 +168,8 @@ done
 if [[ -s "$RESULTS" ]]; then
   LOCKDIR="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0; LOCKED=1
   until mkdir "$LOCKDIR" 2>/dev/null; do
+    AGE=$(( NOW - $(stat -f %m "$LOCKDIR" 2>/dev/null || stat -c %Y "$LOCKDIR" 2>/dev/null || echo "$NOW") ))
+    (( AGE > 300 )) && { rmdir "$LOCKDIR" 2>/dev/null || true; continue; }   # stale lock from a crashed holder
     n=$((n+1)); (( n > 300 )) && { LOCKED=0; break; }; sleep 0.1
   done
   if [[ "$LOCKED" == 1 ]]; then

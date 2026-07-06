@@ -31,9 +31,13 @@ die() { echo "REFUSED: $*" >&2; exit 3; }   # named refusal — never a retry lo
 
 # ---------- ledger (flock'd; the ONLY sanctioned way to touch runs.jsonl) ----------
 # macOS has no flock(1); use a mkdir spinlock with a hard 30s bound.
+# A lockdir older than 5 min is STALE (its holder crashed) — steal it, else one
+# crashed process would wedge every future writer.
 _ledger_lock() {
-  local d="$STATE_DIR/.runs.jsonl.lock" n=0
+  local d="$STATE_DIR/.runs.jsonl.lock" n=0 age
   until mkdir "$d" 2>/dev/null; do
+    age=$(( $(date +%s) - $(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || date +%s) ))
+    (( age > 300 )) && { rmdir "$d" 2>/dev/null || true; continue; }
     n=$((n+1)); (( n > 300 )) && { echo "ledger lock timeout" >&2; return 1; }
     sleep 0.1
   done
