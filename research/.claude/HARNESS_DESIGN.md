@@ -189,7 +189,25 @@ reason instead of stalling.
 - 21.5 GB of terminal `runs/` dirs are foldable via the fixed, now
   **human-only** de-bloat — not auto-deleted (deleting science is a human act).
 
-## 9. Primitive choices (Claude Code, mid-2026)
+## 9. Verification round (2026-07-06)
+
+A 4-lens adversarial workflow (contracts / shell / lifecycle / docs) ran over
+the finished rewrite; its findings were fixed before landing. The criticals it
+caught: (1) macOS ships no `timeout(1)` and this laptop has no coreutils —
+every bounded call would have failed rc=127; fixed with a perl-alarm shim in
+`_lib.sh` and every standalone hook/skill; (2) both destroy paths classified
+"command not found" as "instance already gone", which would have flipped live
+billing boxes to TORN_DOWN — fixed with rc-124/126/127 guards ahead of any
+pattern match, plus Vast-specific patterns; (3) a runner dying mid-detached-
+provision left a billing box with a handle but no ledger row — fixed with the
+reaper's orphan-handle sweep (45-min grace, external handles exempt).
+Cross-row attempt counters, the /go↔/launch↔/monitor refusal cycles,
+EXTERNAL-row semantics at /close, and the attach rows' missing `issue` field
+were fixed in the same pass. The reap→ledger-flip cycle, orphan sweep,
+external-skip, and `_lib.sh` helpers were then smoke-tested on the laptop with
+a stubbed `vastai`.
+
+## 10. Primitive choices (Claude Code, mid-2026)
 
 Verified against current docs: skills are the unified command primitive
 (frontmatter: `disable-model-invocation`, `allowed-tools`, arguments);
