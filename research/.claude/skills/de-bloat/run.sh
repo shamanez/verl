@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 # de-bloat — fold a COMPLETED experiment into runs/SUMMARY.md and remove its bulky
-# artifacts (run dir incl. *.bundle, its plan file, its stale handle). See SKILL.md.
+# artifacts (run dir, plan file, stale handles). HUMAN-ONLY — see the gate below.
 #
 # Hard guards:
-#   - NEVER touches the baseline (ids baseline / 3 / EXP-3, refused by name); the baseline is
-#     comm-eff OFF and keeps no standalone run dir or plan file.
-#   - Refuses an experiment that still has a live (RUNNING/PROVISIONED) ledger row.
-#   - Refuses an undone experiment (run dir present but no verdict.md / LOG entry).
-#   - Idempotent: re-running on an already-folded id is a no-op.
+#   - OPERATOR GATE: refuses unless DEBLOAT_OPERATOR_ACK=1 is set. The autonomous
+#     loop must NEVER set it; only /de-bloat typed by the human does (SKILL.md is
+#     disable-model-invocation, so the model cannot auto-fire this skill).
+#   - NEVER the baseline (ids baseline / 3 / EXP-3).
+#   - Refuses a live (RUNNING/PROVISIONED/EXTERNAL) ledger row.
+#   - Refuses an undone experiment (no verdict.md AND no LOG entry).
+#   - Idempotent.
 set -euo pipefail
 
 PROG=de-bloat
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 cd "$PROJECT_DIR"
+
+if [[ "${DEBLOAT_OPERATOR_ACK:-0}" != "1" ]]; then
+  cat >&2 <<'EOF'
+de-bloat: REFUSED — this skill deletes run dirs and plan files, so it is a
+deliberate HUMAN action. If you are the operator and typed /de-bloat yourself:
+    DEBLOAT_OPERATOR_ACK=1 bash .claude/skills/de-bloat/run.sh <id> [--dry-run]
+Autonomous sessions: never set that variable; suggest the command instead.
+EOF
+  exit 5
+fi
 
 LEDGER=".claude/state/runs.jsonl"
 SUMMARY="runs/SUMMARY.md"
@@ -26,9 +38,8 @@ while [[ $# -gt 0 ]]; do
     *) IDS+=("$1"); shift ;;
   esac
 done
-[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one experiment id (e.g. EXP-44)"; exit 2; }
+[[ ${#IDS[@]} -gt 0 ]] || { echo "$PROG: need at least one run id (e.g. 61-math-ablation, EXP-44)"; exit 2; }
 
-# Ensure SUMMARY exists with the canonical table header.
 if [[ ! -f "$SUMMARY" ]]; then
   mkdir -p runs
   cat > "$SUMMARY" <<'HDR'
@@ -43,60 +54,73 @@ pruned (folded here by the `de-bloat` skill); the durable record is here + git h
 HDR
 fi
 
-run() { if [[ "$DRY" == 1 ]]; then echo "  [dry-run] $*"; else eval "$*"; fi; }
+# grep pattern with word boundaries so EXP-4 never matches EXP-44 / 4-foo never 44-foo.
+bounded() { printf '(^|[^0-9A-Za-z-])%s([^0-9A-Za-z-]|$)' "$(sed 's/[][\.*^$(){}?+|/]/\\&/g' <<<"$1")"; }
 
-field() { grep -m1 -E "^- *$1:" "$2" 2>/dev/null | sed -E "s/^- *$1: *//" | sed 's/[[:space:]]*$//'; }
+field() { grep -m1 -E "^-? *$1:" "$2" 2>/dev/null | sed -E "s/^-? *$1:[[:space:]]*//" | sed 's/[[:space:]]*(#.*)?$//'; }
 
 folded=0
 for RAW in "${IDS[@]}"; do
-  # --- baseline guard, by NAME, before any parsing (covers `baseline`, `EXP-3`, `3`) ---
+  # --- baseline guard, by NAME, before any parsing ---
   if [[ "$RAW" == "baseline" || "$RAW" == "EXP-3" || "$RAW" == "3" ]]; then
     echo "$PROG: refusing to de-bloat the baseline ($RAW) — it is the permanent control."; continue
   fi
-  NUM="$(echo "$RAW" | grep -oE '[0-9]+' | head -1 || true)"
-  if [[ -z "$NUM" ]]; then
-    echo "$PROG: can't parse an experiment number from '$RAW' — skipping."; continue
+
+  # --- resolve the id VERBATIM first (new <N>-<slug> and legacy slug dirs), then legacy EXP-<N> ---
+  ID=""; ISSUE_NUM=""
+  if [[ -d "runs/$RAW" ]]; then
+    ID="$RAW"
+  elif [[ "$RAW" =~ ^EXP-([0-9]+)$ || "$RAW" =~ ^([0-9]+)$ ]]; then
+    ISSUE_NUM="${BASH_REMATCH[1]}"; ID="EXP-$ISSUE_NUM"
+  else
+    ID="$RAW"   # ledger-only id (dir may already be gone)
   fi
-  if [[ "$NUM" == "3" ]]; then
-    echo "$PROG: refusing to de-bloat the baseline (EXP-3) — it is the permanent control."; continue
+  [[ "$ID" =~ ^([0-9]+)- ]] && ISSUE_NUM="${BASH_REMATCH[1]}"
+  # run.json knows its issue even when the id has no number prefix
+  [[ -z "$ISSUE_NUM" && -f "runs/$ID/run.json" ]] \
+    && ISSUE_NUM=$(jq -r '.issue // empty' "runs/$ID/run.json" 2>/dev/null)
+  if [[ "$ISSUE_NUM" == "3" ]]; then
+    echo "$PROG: refusing to de-bloat the baseline (issue 3)."; continue
   fi
-  ID="EXP-$NUM"
 
   RUNDIR="runs/$ID"
-  PLAN=".claude/plans/$NUM.md"
+  PLAN=""; [[ -n "$ISSUE_NUM" ]] && PLAN=".claude/plans/$ISSUE_NUM.md"
 
-  # --- idempotency: already folded? ---
-  if [[ ! -d "$RUNDIR" && ! -f "$PLAN" ]] && grep -q "| *$ID " "$SUMMARY"; then
+  # --- idempotency ---
+  if [[ ! -d "$RUNDIR" && ( -z "$PLAN" || ! -f "$PLAN" ) ]] && grep -qE "$(bounded "$ID")" "$SUMMARY"; then
     echo "$PROG: $ID already folded — skipping."; continue
   fi
 
-  # --- live-instance guard ---
-  if jq -e --arg id "$ID" 'select(.id==$id and (.status=="RUNNING" or .status=="PROVISIONED"))' "$LEDGER" >/dev/null 2>&1; then
-    echo "$PROG: $ID still has a live (RUNNING/PROVISIONED) ledger row — tear it down first. Refusing."; continue
+  # --- live-instance guard (EXTERNAL counts as live: operator-managed box) ---
+  if [[ -f "$LEDGER" ]] && jq -e --arg id "$ID" \
+      'select(.id==$id and (.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL"))' \
+      "$LEDGER" >/dev/null 2>&1; then
+    echo "$PROG: $ID still has a live ledger row — tear it down first. Refusing."; continue
   fi
 
-  # --- done-check: refuse unless the issue is terminal (verdict written OR a LOG entry).
-  #     This protects PLANNED-but-not-run backlog issues (plan file present, no run yet) —
-  #     de-bloating one of those would delete pending work. ---
+  # --- done-check: verdict.md OR a word-bounded LOG entry ---
   VERDICT="$(grep -m1 -oE 'VERDICT:[[:space:]]*(PASS|REVISE|STOP)' "$RUNDIR/verdict.md" 2>/dev/null | grep -oE 'PASS|REVISE|STOP' || true)"
-  if [[ -z "$VERDICT" ]] && ! grep -q "$ID" LOG.md 2>/dev/null; then
-    echo "$PROG: $ID is not done (no verdict.md, no LOG.md entry) — refusing to fold/delete a pending issue."; continue
+  if [[ -z "$VERDICT" ]] && ! grep -qE "$(bounded "$ID")" LOG.md 2>/dev/null; then
+    echo "$PROG: $ID is not done (no verdict.md, no LOG.md entry) — refusing to delete pending work."; continue
   fi
-  [[ -z "$VERDICT" ]] && VERDICT="$(grep -m1 -oE "$ID .*(PASS|STOP|REVISE)" LOG.md 2>/dev/null | grep -oE 'PASS|STOP|REVISE' || echo 'done')"
+  [[ -z "$VERDICT" ]] && VERDICT="$(grep -E "$(bounded "$ID")" LOG.md 2>/dev/null | grep -m1 -oE 'PASS|STOP|REVISE' || echo 'done')"
 
-  # --- extract a concise row (best-effort; falls back to placeholders) ---
-  TITLE="$(field title "$PLAN")"; [[ -z "$TITLE" ]] && TITLE="$(grep -m1 "$ID" LOG.md 2>/dev/null | sed -E 's/^#+ *//' || echo "$ID")"
-  MILE="$(field milestone "$PLAN")"; [[ -z "$MILE" ]] && MILE="?"
-  # PR number scoped to lines that mention THIS id (avoids grabbing another issue's PR).
-  PR="$(grep -hE "$ID" LOG.md PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+  # --- concise SUMMARY row (plan → run.json → LOG fallbacks) ---
+  TITLE=""; MILE=""
+  [[ -n "$PLAN" && -f "$PLAN" ]] && { TITLE="$(field title "$PLAN")"; MILE="$(field milestone "$PLAN")"; }
+  [[ -z "$TITLE" && -f "$RUNDIR/run.json" ]] && TITLE=$(jq -r '.title // empty' "$RUNDIR/run.json" 2>/dev/null)
+  [[ -z "$TITLE" ]] && TITLE="$(grep -E "$(bounded "$ID")" LOG.md 2>/dev/null | head -1 | sed -E 's/^#+ *//' || true)"
+  [[ -z "$TITLE" ]] && TITLE="$ID"
+  [[ -z "$MILE" && -f "$RUNDIR/run.json" ]] && MILE=$(jq -r '.milestone // empty' "$RUNDIR/run.json" 2>/dev/null)
+  [[ -z "$MILE" ]] && MILE="?"
+  PR="$(grep -hE "$(bounded "$ID")" LOG.md PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
   MERGED="—"; [[ -n "$PR" ]] && MERGED="PR #$PR → \`vast-ai-workload\`"
-  ROW="| $ID | $MILE | ${TITLE:-$ID} | $VERDICT | $MERGED |"
+  ROW="| $ID | $MILE | $TITLE | $VERDICT | $MERGED |"
 
   echo "$PROG: folding $ID → $SUMMARY"
   echo "    $ROW"
 
-  # --- insert row after the table separator (newest first), unless already present ---
-  if ! grep -q "| *$ID " "$SUMMARY"; then
+  if ! grep -qE "$(bounded "$ID")" "$SUMMARY"; then
     if [[ "$DRY" == 1 ]]; then echo "  [dry-run] insert row into $SUMMARY";
     else
       TMP="$(mktemp)"; awk -v row="$ROW" '
@@ -106,19 +130,25 @@ for RAW in "${IDS[@]}"; do
     fi
   fi
 
-  # --- remove the bulky artifacts (git rm if tracked, else plain rm) ---
-  if [[ -d "$RUNDIR" ]]; then run "git rm -r -q --ignore-unmatch '$RUNDIR' 2>/dev/null || rm -rf '$RUNDIR'"; fi
-  if [[ -f "$PLAN"  ]]; then run "git rm -q --ignore-unmatch '$PLAN' 2>/dev/null || rm -f '$PLAN'"; fi
+  # --- remove bulky artifacts (no eval; git rm if tracked, else rm) ---
+  if [[ -d "$RUNDIR" ]]; then
+    if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm -rf $RUNDIR"
+    else git rm -r -q --ignore-unmatch "$RUNDIR" 2>/dev/null || true; rm -rf "$RUNDIR"; fi
+  fi
+  if [[ -n "$PLAN" && -f "$PLAN" ]]; then
+    if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm $PLAN"
+    else git rm -q --ignore-unmatch "$PLAN" 2>/dev/null || true; rm -f "$PLAN"; fi
+  fi
   folded=$((folded+1))
 done
 
-# --- light tidy: drop handle files for instances already TORN_DOWN (never touches live ones) ---
-if [[ -d .claude/state/vast-handles && "$DRY" == 0 ]]; then
+# --- light tidy: drop handle files for instances already TORN_DOWN ---
+if [[ -d .claude/state/vast-handles && "$DRY" == 0 && -f "$LEDGER" ]]; then
   for h in .claude/state/vast-handles/*.json; do
     [[ -e "$h" ]] || continue
     iid="$(basename "$h" .json)"
     if jq -e --arg i "$iid" 'select((.handles[]?.instance_id==$i or .instance_id==$i) and .status=="TORN_DOWN")' "$LEDGER" >/dev/null 2>&1; then
-      git rm -q --ignore-unmatch "$h" 2>/dev/null || rm -f "$h"
+      git rm -q --ignore-unmatch "$h" 2>/dev/null || true; rm -f "$h"
     fi
   done
 fi

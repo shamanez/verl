@@ -60,7 +60,7 @@ case "$ABS" in
     #                       Edits flow git-tracked (laptop → push → box `git pull`).
     BRANCH="$(git -C "$(dirname "$ABS")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
     case "$BRANCH" in
-      exp/*|vast-ai-workload) exit 0 ;;
+      exp/*|vast-ai-workload|autonomous-harness-*) exit 0 ;;
     esac
     cat >&2 <<EOF
 protect-upstream: refused write to upstream verl path.

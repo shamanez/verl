@@ -36,6 +36,22 @@ NOW=$(date +%s)
 TEMP=$(mktemp)
 TORN_ANY=0
 
+# Hard bound on every vastai CLI call — a hung API call must never hang session
+# Stop or the foreground sweep (never-hang guarantee).
+VAST_CLI_TIMEOUT=90
+
+# Ledger spinlock (shared with skills/_lib.sh writers) so a concurrent session's
+# append is never lost by this whole-file rewrite. Bounded 30s; on timeout we
+# proceed WITHOUT the rewrite (skip ledger mutation, still attempt destroys next
+# Stop) rather than hang.
+LOCKDIR="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"
+LOCKED=0; n=0
+until mkdir "$LOCKDIR" 2>/dev/null; do
+  n=$((n+1)); (( n > 300 )) && break; sleep 0.1
+done
+(( n <= 300 )) && LOCKED=1
+trap '[[ $LOCKED -eq 1 ]] && rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+
 # Process each ledger row.
 # Triggers teardown for RUNNING and PROVISIONED rows. PROVISIONED rows came from
 # experiment-runner's "register early" step — they have paid instances but no
@@ -145,7 +161,7 @@ while IFS= read -r row || [[ -n "$row" ]]; do
       fi
       # MUST pass -y (without it a non-TTY prompt collapses to "Aborted" yet the
       # CLI still exits 0 — a silent no-op; observed 2026-06-03 on 39132674).
-      DOUT=$(VAST_API_KEY="$ROW_KEY" vastai destroy instance "$iid" -y 2>&1); DRC=$?
+      DOUT=$(timeout "$VAST_CLI_TIMEOUT" env VAST_API_KEY="$ROW_KEY" vastai destroy instance "$iid" -y 2>&1); DRC=$?
       echo "[$(date -Iseconds)] destroy $iid account=$ROW_ACCT rc=$DRC: $DOUT" >> /tmp/teardown.err
       if (( DRC == 0 )) && ! echo "$DOUT" | grep -qiE 'aborted|traceback|status_code|permission denied|^error'; then
         DESTROYED=$((DESTROYED + 1))                       # clean destroy
@@ -155,7 +171,7 @@ while IFS= read -r row || [[ -n "$row" ]]; do
         # Ambiguous — verify authoritatively. Only a POSITIVE not-found counts as
         # gone; still-listed OR an auth/network error is a conservative FAILED so
         # we never abandon a live, billing box.
-        CHECK=$(VAST_API_KEY="$ROW_KEY" vastai show instance "$iid" --raw 2>&1 || true)
+        CHECK=$(timeout "$VAST_CLI_TIMEOUT" env VAST_API_KEY="$ROW_KEY" vastai show instance "$iid" --raw 2>&1 || true)
         if echo "$CHECK" | grep -qiE 'not found|no such|does not exist|404'; then
           DESTROYED=$((DESTROYED + 1))
         else
@@ -199,7 +215,12 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   fi
 done < "$LEDGER"
 
-mv "$TEMP" "$LEDGER"
+if [[ $LOCKED -eq 1 ]]; then
+  mv "$TEMP" "$LEDGER"
+else
+  rm -f "$TEMP"
+  echo "[$(date -Iseconds)] teardown: ledger lock timeout — destroys attempted, ledger rewrite skipped" >> /tmp/teardown.err
+fi
 
 if [[ $TORN_ANY -eq 1 ]]; then
   echo "teardown-finished-runs: tore down at least one stale Vast.ai handle. See PROGRESS.md." >&2

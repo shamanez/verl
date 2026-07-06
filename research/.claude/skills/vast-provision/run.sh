@@ -77,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --poll-interval)       POLL_INTERVAL="$2"; shift 2 ;;
     --handle-dir)          HANDLE_DIR="$2"; shift 2 ;;
     --session-id)          SESSION_ID="$2"; shift 2 ;;
+    --label)               LABEL_OVERRIDE="$2"; shift 2 ;;   # exact instance label (run id) — beats --label-prefix
     --label-prefix)        LABEL_PREFIX="$2"; shift 2 ;;
     --template-hash)       TEMPLATE_HASH="$2"; shift 2 ;;
     --no-default-filters)  NO_DEFAULT_FILTERS=true; shift ;;
@@ -107,9 +108,11 @@ if [[ -z "$IMAGE" && -z "$TEMPLATE_HASH" && -r "$TEMPLATES_JSON" ]]; then
       if [[ -n "$TEMPLATE_HASH" ]]; then
         echo "$PROG: auto-selected TEAM template '$TEMPLATE_NAME' hash=$TEMPLATE_HASH image=$TEMPLATE_IMAGE (VAST_ACCOUNT=team)" >&2
       else
-        echo "$PROG: WARNING VAST_ACCOUNT=team but templates.json has no team_hash_id for '$TEMPLATE_NAME' —" >&2
-        echo "$PROG: falling back to the PRIVATE hash, which will 400 on the team account. Record a team-owned copy (SKILL.md 'Team-account templates')." >&2
-        TEMPLATE_HASH=$(jq -r '.[keys[0]].hash_id' "$TEMPLATES_JSON")
+        # FAIL FAST: the private hash is guaranteed to 400 on the team account —
+        # submitting a doomed create just wastes a round-trip and muddies the log.
+        echo "$PROG: WARNING VAST_ACCOUNT=team but templates.json has no team_hash_id for '$TEMPLATE_NAME'." >&2
+        echo "$PROG: MANUAL_REVIEW unrecoverable create error: record a team-owned template copy (SKILL.md 'Team-account templates') before provisioning on the team account." >&2
+        exit 4
       fi
     else
       TEMPLATE_HASH=$(jq -r '.[keys[0]].hash_id' "$TEMPLATES_JSON")
@@ -194,8 +197,13 @@ if [[ -z "$SESSION_ID" ]]; then
     SESSION_ID="$(date +%s)-$$"
   fi
 fi
-LABEL="${LABEL_PREFIX}:${SESSION_ID}"
+LABEL="${LABEL_OVERRIDE:-${LABEL_PREFIX}:${SESSION_ID}}"
 mkdir -p "$HANDLE_DIR"
+
+# Every vastai CLI call is hard-bounded — a hung API call must never hang the
+# skill (never-hang guarantee). `command timeout` bypasses this function for
+# timeout(1); the exec'd vastai binary never re-enters it.
+vastai() { command timeout "${VAST_CLI_TIMEOUT:-120}" vastai "$@"; }
 
 # ---- search offers --------------------------------------------------------
 SEARCH_CMD=(vastai search offers "$QUERY" -o dph_total --raw)
@@ -634,6 +642,19 @@ except Exception:
     _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
   fi
   echo "$PROG: SSH verified to $INSTANCE_ID ($SSH_HOST:$SSH_PORT)" >&2
+
+  # ---- pids.max host-lottery gate (promoted from SKILL.md prose) ----
+  # Hosts capping the container at <= 2048 pids deterministically SIGABRT at the
+  # FSDP->vLLM boundary (the verl stack needs ~1700+ threads). Catch it NOW,
+  # while advancing to the next candidate is cheap.
+  PIDS_MAX=$(timeout 30 ssh -i "$SSH_IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" \
+      'cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids/pids.max 2>/dev/null | head -1' 2>/dev/null || echo "")
+  if [[ "$PIDS_MAX" =~ ^[0-9]+$ ]] && (( PIDS_MAX <= 2048 )); then
+    echo "$PROG: $INSTANCE_ID pids.max=$PIDS_MAX (<=2048) — host would SIGABRT under FSDP+vLLM; destroying + next candidate" >&2
+    _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
+  fi
+  [[ -n "$PIDS_MAX" ]] && echo "$PROG: pids.max=$PIDS_MAX ok" >&2
 
   PUB_IP=$(echo "$INSTANCE_JSON"  | jq -r '.public_ipaddr // ""')
   INST_GPU_NAME=$(echo "$INSTANCE_JSON" | jq -r '.gpu_name // ""')

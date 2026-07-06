@@ -14,7 +14,7 @@ set -uo pipefail
 
 PROG="vast-cost"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../.." && pwd)}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 command -v vastai >/dev/null || { echo "$PROG: 'vastai' not on PATH (pip install vastai)" >&2; exit 1; }
@@ -26,7 +26,8 @@ source "$SKILL_DIR/../_vast_account.sh"; vast_load_secrets
 # Instance ids the ledger considers live (RUNNING|PROVISIONED) — the leak baseline.
 LEDGER_IDS=""
 if [[ -f "$LEDGER" ]]; then
-  LEDGER_IDS="$(jq -r 'select(.status=="RUNNING" or .status=="PROVISIONED") | .handles[]?.instance_id // empty' "$LEDGER" 2>/dev/null | sort -u)"
+  # EXTERNAL rows are tracked too (operator-managed boxes are NOT leaks).
+  LEDGER_IDS="$(jq -r 'select(.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL") | .handles[]?.instance_id // empty' "$LEDGER" 2>/dev/null | sort -u)"
 fi
 
 TOTAL_DPH=0
@@ -36,7 +37,7 @@ LEAK=0
 for acct in private team; do
   KEY="$(vast_key_for "$acct")"
   [[ -z "$KEY" ]] && continue
-  RAW="$(VAST_API_KEY="$KEY" vastai show instances --raw 2>/dev/null || true)"
+  RAW="$(timeout 90 env VAST_API_KEY="$KEY" vastai show instances --raw 2>/dev/null || true)"
   echo "$RAW" | jq -e 'type=="array"' >/dev/null 2>&1 || continue
   N=$(echo "$RAW" | jq 'length')
   if [[ "${N:-0}" -eq 0 ]]; then

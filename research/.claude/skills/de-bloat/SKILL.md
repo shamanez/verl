@@ -1,54 +1,48 @@
 ---
 name: de-bloat
-description: Fold a COMPLETED experiment into runs/SUMMARY.md and delete its bulky artifacts (run dir incl. *.bundle, plan file, stale handle). Run only after an entire issue is done. Never touches the baseline.
+description: "HUMAN-ONLY: fold a COMPLETED experiment into runs/SUMMARY.md and delete its bulky artifacts (run dir, plan file, stale handles). Never invoked by the autonomous loop — deleting science is a deliberate operator act."
+disable-model-invocation: true
 allowed-tools: Bash
 ---
 
-# de-bloat
+# /de-bloat <id> [id …] [--dry-run] — operator-only artifact pruning
 
-Keeps the harness repo lean. After an experiment's issue is **fully done** (verdict
-written, PR merged if any, instance torn down), this skill collapses that experiment's
-heavyweight footprint into a single concise row in `runs/SUMMARY.md` and removes the rest
-— made repeatable and safe.
+Collapses a finished experiment's footprint into one `runs/SUMMARY.md` row and
+deletes the rest. **Two independent human-only gates:**
+1. `disable-model-invocation: true` — the model can never auto-fire this skill;
+   only the operator typing `/de-bloat` triggers it.
+2. `run.sh` refuses without `DEBLOAT_OPERATOR_ACK=1`. When (and only when) the
+   operator invoked this skill themselves, run:
+   ```bash
+   DEBLOAT_OPERATOR_ACK=1 bash .claude/skills/de-bloat/run.sh <id> [--dry-run]
+   ```
+   An autonomous session must NEVER set that variable — it may only *suggest*
+   the command in its close-out summary.
 
-## Usage
+## Ids
 
-```
-$CLAUDE_PROJECT_DIR/.claude/skills/de-bloat/run.sh EXP-<N> [EXP-<M> ...]
-$CLAUDE_PROJECT_DIR/.claude/skills/de-bloat/run.sh --dry-run EXP-<N>     # preview, no writes/deletes
-```
-
-Accepts `EXP-44`, `44`, or `EXP-44`-style ids.
+Accepts the canonical `<N>-<slug>` (e.g. `61-math-ablation`), legacy `EXP-44`
+/ `44`, and legacy slug dirs (`MOAT-45-ANALYSIS`) — matched verbatim against
+`runs/`, word-bounded against LOG/SUMMARY (EXP-4 never matches EXP-44).
 
 ## What it does (per id)
 
-1. **Appends a one-line row** to the `runs/SUMMARY.md` table (newest first), derived from
-   the plan (`title`, `milestone`), the verdict (`VERDICT: PASS|REVISE|STOP`), and any PR
-   number found in `LOG.md`/`PROGRESS.md`. Skipped if a row for that id already exists.
-2. **Deletes** `runs/EXP-<N>/` (including the multi-MB `exp.bundle`) and `.claude/plans/<N>.md`
-   — `git rm` when tracked, plain `rm` otherwise.
-3. **Light tidy:** removes `.claude/state/vast-handles/*.json` for instances already
-   `TORN_DOWN` in the ledger (never live ones).
+1. Appends one `| id | milestone | what | result | merged |` row to
+   `runs/SUMMARY.md` (from plan → run.json → LOG fallbacks; idempotent).
+2. Deletes `runs/<id>/` and the plan file `.claude/plans/<N>.md`.
+3. Tidies `.claude/state/vast-handles/*.json` for TORN_DOWN instances.
 
-It does **not** commit or push — review `git status` and `runs/SUMMARY.md`, then commit.
+Does NOT commit — review `git status`, then commit.
 
-## Hard guards (it refuses rather than risk the baseline or live work)
+## Refusals (guards, not errors)
 
-- **Never the baseline.** ids `baseline` / `3` / `EXP-3` are a legacy dense-control guard,
-  always refused by name. (The current baseline is the launcher
-  `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh`, not a run dir;
-  the dense control is just **comm-eff OFF**. de-bloat only touches `runs/EXP-*`, so no
-  baseline artifact is at risk regardless.)
-- **Never a live experiment.** Refuses if the id has a `RUNNING` or `PROVISIONED` ledger row
-  (tear it down first — that's `vast-teardown`'s job).
-- **Never an undone experiment.** Refuses if the run dir exists but there is no
-  `verdict.md` and no `LOG.md` entry for the id.
-- **Idempotent.** Re-running on an id whose artifacts are already gone and whose row is
-  already in `SUMMARY.md` is a no-op.
+- The baseline (`baseline`/`3`/`EXP-3`) — permanent control.
+- Any id with a live ledger row (RUNNING / PROVISIONED / EXTERNAL).
+- Any id with no verdict.md AND no LOG entry (pending work).
 
-## When to run
+## When
 
-After the orchestrator has driven an issue to its terminal state (LOG entry written, PR
-merged, instance torn down). Typically the last manual step before moving to the next issue.
-The ledger rows in `runs.jsonl` are left as historical record; only handle files and bulky
-artifacts are removed.
+After `/close <N>` is fully done (status:done, PR merged, box TORN_DOWN) and
+you no longer need the raw artifacts. The harness stays fully functional after
+deletion: every stage command degrades gracefully via labels + ledger +
+SUMMARY (that is a tested design property, not luck).

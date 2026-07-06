@@ -112,7 +112,7 @@ for iid in "${IDS[@]}"; do
     FAILED+=("$iid")
     continue
   fi
-  OUT=$(VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
+  OUT=$(timeout 90 env VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
   echo "[$iid] account=$ACCT $OUT" >>"$ERR_LOG"
   # Already-gone = goal achieved (idempotent). `destroy` errors on a missing
   # instance, so check this BEFORE the generic error->FAILED guard (mirrors the
@@ -131,7 +131,7 @@ for iid in "${IDS[@]}"; do
   # `vastai show instance <id>` returns an object while it exists; once
   # destroyed it returns either an HTTP error or no payload.
   sleep 2
-  CHECK=$(VAST_API_KEY="$KEY" vastai show instance "$iid" --raw 2>&1 || true)
+  CHECK=$(timeout 90 env VAST_API_KEY="$KEY" vastai show instance "$iid" --raw 2>&1 || true)
   if echo "$CHECK" | grep -qiE 'error|not found|404' \
      || ! echo "$CHECK" | jq -e 'type=="object" and has("id")' >/dev/null 2>&1; then
     DESTROYED+=("$iid")
@@ -143,26 +143,36 @@ for iid in "${IDS[@]}"; do
 done
 
 # Patch the ledger: any row whose handles contain a destroyed id flips to TORN_DOWN.
+# Locked (shared spinlock with _lib.sh / the Stop hook) so a concurrent append is
+# never lost by this whole-file rewrite; bounded 30s, then skip rather than hang.
 if [[ -f "$LEDGER" && ${#DESTROYED[@]} -gt 0 ]]; then
-  TS=$(date -Iseconds)
-  TEMP=$(mktemp)
-  IDS_JSON=$(printf '%s\n' "${DESTROYED[@]}" | jq -R . | jq -s .)
-  while IFS= read -r row; do
-    [[ -z "$row" ]] && continue
-    NEW=$(jq -c --argjson ids "$IDS_JSON" --arg t "$TS" --arg r "$REASON" '
-      # Patch RUNNING *and* PROVISIONED rows (an abandoned PROVISIONED box —
-      # e.g. one that failed SSH-key injection before launch — must also flip
-      # to TORN_DOWN once its instance is destroyed, else the Stop hook keeps
-      # reaping it; observed 2026-06-04 with an abandoned PROVISIONED box).
-      if (.status == "RUNNING" or .status == "PROVISIONED")
-         and (any(.handles[]?.instance_id // empty; . as $i | $ids | index($i)))
-      then . + {status: "TORN_DOWN", torn_down_at: $t, teardown_reason: $r}
-      else .
-      end
-    ' <<<"$row")
-    echo "$NEW" >> "$TEMP"
-  done < "$LEDGER"
-  mv "$TEMP" "$LEDGER"
+  LOCKDIR="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0; LOCKED=1
+  until mkdir "$LOCKDIR" 2>/dev/null; do
+    n=$((n+1)); (( n > 300 )) && { LOCKED=0; break; }; sleep 0.1
+  done
+  if [[ "$LOCKED" == 1 ]]; then
+    TS=$(date -Iseconds)
+    TEMP=$(mktemp)
+    IDS_JSON=$(printf '%s\n' "${DESTROYED[@]}" | jq -R . | jq -s .)
+    while IFS= read -r row; do
+      [[ -z "$row" ]] && continue
+      NEW=$(jq -c --argjson ids "$IDS_JSON" --arg t "$TS" --arg r "$REASON" '
+        # RUNNING, PROVISIONED *and* EXTERNAL rows all flip once their instance is
+        # destroyed (EXTERNAL = operator-managed lifecycle, but a destroyed box must
+        # never linger as a live-looking row).
+        if (.status == "RUNNING" or .status == "PROVISIONED" or .status == "EXTERNAL")
+           and (any(.handles[]?.instance_id // empty; . as $i | $ids | index($i)))
+        then . + {status: "TORN_DOWN", torn_down_at: $t, teardown_reason: $r}
+        else .
+        end
+      ' <<<"$row")
+      echo "$NEW" >> "$TEMP"
+    done < "$LEDGER"
+    mv "$TEMP" "$LEDGER"
+    rmdir "$LOCKDIR" 2>/dev/null || true
+  else
+    echo "vast-teardown: ledger lock timeout — instances destroyed but rows not flipped (next sweep will reconcile)" >&2
+  fi
 fi
 
 echo "VAST_TORN_DOWN: destroyed=${#DESTROYED[@]} failed=${#FAILED[@]} reason=$REASON"

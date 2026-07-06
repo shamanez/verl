@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# vast-attach — register an ALREADY-RUNNING, operator-provided box as an EXTERNAL
-# handle the harness can use WITHOUT provisioning (skip the provision+warmup tax).
-# Companion to vast-provision. See SKILL.md.
+# vast-attach — register an ALREADY-RUNNING, operator-provided box so the harness
+# can use it WITHOUT provisioning. Companion to vast-provision. See SKILL.md.
 #
-# external:true is PROVENANCE (the harness didn't provision it), NOT teardown
-# protection: the box is STILL torn down after its run, or on request, like any box.
-# Output mirrors vast-provision (a VAST_HANDLE: {...} line) so the experiment-runner's
-# rsync+launch path is unchanged.
+# Two lifecycles, chosen explicitly:
+#   default        -> ledger status:"RUNNING", external:true, max_gpu_hr backstop.
+#                     Reaped by the teardown hook like any provisioned box.
+#   --manual       -> ledger status:"EXTERNAL". Tracked (vast-cost sees it) but
+#                     NEVER auto-reaped: for operator-managed analysis/download
+#                     boxes (the box-43495538 incident class). Teardown is the
+#                     operator's explicit act (vast-teardown handles EXTERNAL).
 set -euo pipefail
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 EXP_ID=""; INSTANCE_ID=""; SSH_HOST=""; SSH_PORT=""; NUM_GPUS=""
 GPU_NAME=""; GPU_RAM="0"; DPH="0"; ACCOUNT="private"; REGISTER=1
+MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,21 +30,24 @@ while [[ $# -gt 0 ]]; do
     --gpu-ram)     GPU_RAM="$2"; shift 2 ;;
     --dph)         DPH="$2"; shift 2 ;;
     --account)     ACCOUNT="$2"; shift 2 ;;
-    --no-register) REGISTER=0; shift ;;     # write the handle only, do NOT add a ledger row
-    -h|--help)     sed -n '1,80p' "$(dirname "$0")/SKILL.md"; exit 0 ;;
+    --max-gpu-hr)  MAX_GPU_HR="$2"; shift 2 ;;
+    --manual)      MANUAL=1; shift ;;        # status EXTERNAL: tracked, never auto-reaped
+    --no-probe)    NO_PROBE=1; shift ;;      # skip the ssh reachability probe (non-standard boxes)
+    --no-register) REGISTER=0; shift ;;      # handle only, no ledger row at all
+    -h|--help)     sed -n '1,80p' "$SKILL_DIR/SKILL.md"; exit 0 ;;
     *) echo "vast-attach: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 
-[[ -n "$INSTANCE_ID" ]] || { echo "vast-attach: --instance-id required (use a label for a non-Vast box)" >&2; exit 2; }
+[[ -n "$INSTANCE_ID" ]] || { echo "vast-attach: --instance-id required" >&2; exit 2; }
 
-# If ssh params are missing AND this is a real Vast box, resolve them from the API.
+# Resolve missing ssh params from the Vast API (bounded).
 if [[ -z "$SSH_HOST" || -z "$SSH_PORT" || -z "$NUM_GPUS" ]]; then
-  if command -v vastai >/dev/null 2>&1 && [[ -f "$(dirname "$0")/../_vast_account.sh" ]]; then
+  if command -v vastai >/dev/null 2>&1 && [[ -f "$SKILL_DIR/../_vast_account.sh" ]]; then
     # shellcheck disable=SC1090
-    source "$(dirname "$0")/../_vast_account.sh"; vast_load_secrets
+    source "$SKILL_DIR/../_vast_account.sh"; vast_load_secrets
     KEY=$(vast_key_for "$(vast_account_norm "$ACCOUNT")")
-    RAW=$(VAST_API_KEY="$KEY" vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
+    RAW=$(timeout 60 env VAST_API_KEY="$KEY" vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
     if echo "$RAW" | jq -e 'type=="object"' >/dev/null 2>&1; then
       [[ -z "$SSH_HOST" ]] && SSH_HOST=$(echo "$RAW" | jq -r '.ssh_host // .public_ipaddr // empty')
       [[ -z "$SSH_PORT" ]] && SSH_PORT=$(echo "$RAW" | jq -r '.ssh_port // empty')
@@ -56,22 +63,35 @@ fi
 
 EXP_ID="${EXP_ID:-ATTACH-$INSTANCE_ID}"
 GPU_NAME="${GPU_NAME:-unknown}"
-# Offer the team key for a team box, the personal key otherwise (display convenience;
-# the operator can pass any -i when they actually connect to their BYO box).
-if [[ "$ACCOUNT" == "team" ]]; then SSH_ID="~/.ssh/Vast-Team"; else SSH_ID="~/.ssh/vast_ai_name"; fi
-SSH_LOGIN="ssh -i $SSH_ID -o StrictHostKeyChecking=accept-new -p $SSH_PORT root@$SSH_HOST"
+IDENTITY="${VAST_SSH_IDENTITY:-$HOME/.ssh/vast_ai_name}"
+[[ "$ACCOUNT" == "team" && -f "$HOME/.ssh/Vast-Team" ]] && IDENTITY="$HOME/.ssh/Vast-Team"
+SSH_LOGIN="ssh -i $IDENTITY -o StrictHostKeyChecking=accept-new -p $SSH_PORT root@$SSH_HOST"
+
+# REACHABILITY PROBE — never hand the harness an unreachable box (bounded 30s).
+if [[ "$NO_PROBE" != "1" ]]; then
+  if ! timeout 30 ssh -i "$IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
+       -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" 'true' 2>/dev/null; then
+    echo "vast-attach: ssh probe FAILED for root@$SSH_HOST:$SSH_PORT (identity $IDENTITY)." >&2
+    echo "vast-attach: fix connectivity or pass --no-probe to force. NOT registering." >&2
+    exit 4
+  fi
+fi
 
 HANDLE=$(jq -nc \
   --arg iid "$INSTANCE_ID" --arg host "$SSH_HOST" --argjson port "$SSH_PORT" \
   --argjson ng "$NUM_GPUS" --arg gn "$GPU_NAME" --argjson gr "$GPU_RAM" \
-  --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" --arg label "$EXP_ID" \
+  --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" \
+  --arg label "$EXP_ID" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{schema_version:"1", instance_id:$iid, ssh_host:$host, ssh_port:$port,
     num_gpus:$ng, gpu_name:$gn, gpu_ram:$gr, dph_total:$dph, ssh_login:$login,
-    label:$label, vast_account:$acct, external:true}')
+    label:$label, vast_account:$acct, created_at:$t, external:true}')
 
+# Handle lands in BOTH homes: the run dir (runner contract) and the shared
+# state dir (vast-teardown's account-resolution fallback scans it).
 HANDLE_DIR="$PROJECT_DIR/runs/$EXP_ID/handles"
-mkdir -p "$HANDLE_DIR"
+mkdir -p "$HANDLE_DIR" "$PROJECT_DIR/.claude/state/vast-handles"
 echo "$HANDLE" | jq . > "$HANDLE_DIR/$INSTANCE_ID.json"
+echo "$HANDLE" | jq . > "$PROJECT_DIR/.claude/state/vast-handles/$INSTANCE_ID.json"
 
 echo "VAST_HANDLE: $HANDLE"
 
@@ -79,17 +99,24 @@ if [[ "$REGISTER" == "1" ]]; then
   if [[ -f "$LEDGER" ]] && jq -e --arg id "$EXP_ID" 'select(.id==$id)' "$LEDGER" >/dev/null 2>&1; then
     echo "vast-attach: ledger already has a row for $EXP_ID — not duplicating." >&2
   else
-    HANDLES_ARR=$(echo "$HANDLE" | jq -s .)
+    STATUS="RUNNING"; (( MANUAL )) && STATUS="EXTERNAL"
     ROW=$(jq -nc --arg id "$EXP_ID" --arg t "$(date -Iseconds)" --argjson ts "$(date +%s)" \
-      --argjson ng "$NUM_GPUS" --argjson dph "$DPH" --arg acct "$ACCOUNT" --argjson h "$HANDLES_ARR" \
+      --argjson ng "$NUM_GPUS" --argjson dph "$DPH" --arg acct "$ACCOUNT" \
+      --argjson mgh "$MAX_GPU_HR" --arg st "$STATUS" \
+      --argjson h "$(echo "$HANDLE" | jq -s .)" \
       '{id:$id, handles:$h, started_at:$t, started_at_epoch:$ts,
-        per_node_gpus:$ng, total_gpus:$ng, dph:$dph, vast_account:$acct,
-        external:true, status:"RUNNING"}')
+        per_node_gpus:$ng, total_gpus:$ng, dph:$dph, max_gpu_hr:$mgh,
+        vast_account:$acct, external:true, status:$st}')
+    # Locked append (shared spinlock with _lib.sh writers).
+    LOCK="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0
+    until mkdir "$LOCK" 2>/dev/null; do n=$((n+1)); (( n > 300 )) && break; sleep 0.1; done
     mkdir -p "$(dirname "$LEDGER")"; echo "$ROW" >> "$LEDGER"
-    echo "vast-attach: registered RUNNING+external ledger row for $EXP_ID." >&2
+    rmdir "$LOCK" 2>/dev/null || true
+    echo "vast-attach: registered $STATUS ledger row for $EXP_ID (max_gpu_hr=$MAX_GPU_HR)." >&2
+    (( MANUAL )) && echo "vast-attach: EXTERNAL = operator-managed — the reaper will NOT touch it; tear down explicitly." >&2
   fi
 fi
 
-echo "vast-attach: attached EXTERNAL box $INSTANCE_ID ($NUM_GPUS×$GPU_NAME, account=$ACCOUNT) as $EXP_ID — torn down after its run, or on request, like any box." >&2
-echo "vast-attach: ssh  -> $SSH_LOGIN" >&2
+echo "vast-attach: attached box $INSTANCE_ID (${NUM_GPUS}×$GPU_NAME, account=$ACCOUNT) as $EXP_ID." >&2
+echo "vast-attach: ssh    -> $SSH_LOGIN" >&2
 echo "vast-attach: handle -> runs/$EXP_ID/handles/$INSTANCE_ID.json" >&2
