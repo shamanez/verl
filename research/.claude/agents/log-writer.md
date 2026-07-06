@@ -34,8 +34,10 @@ names `run_id=<id> issue=<N>`.
    (never fabricate values).
 4. **Branch → PR → merge (every issue with something to land):**
    ```bash
-   REPO=$(awk -F': ' '/^  code_repo:/{gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml)
-   BASE=$(awk -F': ' '/^  code_pr_base_branch:/{gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml)
+   # sub() strips the inline comment BEFORE the space-gsub, else the value
+   # concatenates with the comment text (e.g. "shamanez/verl#PRsfrom…").
+   REPO=$(awk -F': ' '/^  code_repo:/{sub(/#.*/,"",$2);gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml)
+   BASE=$(awk -F': ' '/^  code_pr_base_branch:/{sub(/#.*/,"",$2);gsub(/[ "]/,"",$2);print $2}' .claude/project.yaml)
    ```
    - Ensure `exp/<id>` exists (create from `origin/$BASE` in a THROWAWAY
      worktree — never switch the parent checkout's branch).

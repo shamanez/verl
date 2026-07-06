@@ -11,11 +11,22 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
 
 ```bash
 source .claude/skills/_lib.sh
-row=$(ledger_row_by_issue <N>) ; [[ -n "$row" ]] || die "no ledger row for #<N> — /launch <N> first"
-id=$(jq -r .id <<<"$row")
-jq -e '.status=="RUNNING"' <<<"$row" >/dev/null || die "#<N> box is $(jq -r .status <<<"$row") — /analyze <N> if results synced, /launch <N> to relaunch"
+row=$(ledger_row_by_issue <N>)
+[[ -z "$row" ]] && { slug=$(plan_field <N> slug); [[ -n "$slug" ]] && row=$(ledger_row "<N>-$slug"); }
+[[ -n "$row" ]] || die "no ledger row for #<N> — /launch <N> first"
+id=$(jq -r .id <<<"$row"); st=$(jq -r .status <<<"$row")
+case "$st" in
+  RUNNING|EXTERNAL) ;;                       # EXTERNAL = operator-managed box running this issue's work — watch it the same way
+  PROVISIONED) ;;                            # runner mid-launch — see below, do NOT bounce to /launch
+  *) die "#<N> box is $st — /analyze <N> if results synced, /launch <N> to relaunch" ;;
+esac
 [[ -f "$(run_json_path "$id")" ]] || echo "warn: run.json missing — monitor from ledger handles only"
 ```
+- **PROVISIONED row:** the runner is (or was) mid-launch. Wait ONE bounded cycle
+  (≤ 15 min, checking the row each minute): promoted to RUNNING → proceed;
+  still PROVISIONED after 15 min → the Stop-hook reaper will flip it; report
+  `MANUAL_REVIEW_NEEDED: #<N> stuck PROVISIONED` and stop. Never bounce the
+  operator back to /launch (its live-box guard would bounce them here again).
 
 ## Watch loop (bounded, background, act-on-report)
 

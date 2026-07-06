@@ -12,6 +12,9 @@
 #   VAST_COST: burn_rate_dph=<X.XXXX> projected_24h_usd=<Y.YY> untracked=<0|1>
 set -uo pipefail
 
+# macOS has no timeout(1); perl alarm survives execve (same shim as _lib.sh).
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 PROG="vast-cost"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"

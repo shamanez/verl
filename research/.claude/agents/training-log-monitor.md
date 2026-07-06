@@ -16,8 +16,10 @@ report — the caller never foreground-polls you.
   remote_log, wandb project/entity.
 - `runs/<id>/handles/*.json` — ssh_host, ssh_port, instance_id.
 - Missing run.json → degrade: watch tmux liveness + train.log + GPU util only
-  (say so in the report). Missing handles → report `env-failure:
-  handles missing` immediately.
+  (say so in the report). Missing `runs/<id>/handles/` → fall back to the
+  ledger row's embedded `.handles[]` (`ledger_row "<id>"` via `_lib.sh`) — a
+  deleted local dir must NOT be misread as a dead box. Report `env-failure:
+  handles missing` only when the ledger row lacks handles too.
 
 ## Loop (hard bounds: 30 s cadence, ≤ 40 min, then report)
 

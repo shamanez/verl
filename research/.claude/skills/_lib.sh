@@ -4,6 +4,12 @@
 # Everything here must be: bounded (no unbounded waits), locked (ledger),
 # and main-checkout-anchored (worktree sessions share ONE state dir).
 
+# macOS ships NO timeout(1) (and this laptop has no coreutils). Shim it with
+# the perl alarm+exec idiom — alarm(2) survives execve, so the target dies on
+# SIGALRM after N seconds. Every hook/skill that can't source _lib.sh carries
+# the same 2-line shim.
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 # ---------- paths (always the PRIMARY checkout, even from a worktree) ----------
 lib_main_checkout() {
   # First line of `git worktree list` is the main working tree.
@@ -40,12 +46,16 @@ ledger_append() {  # ledger_append '<one-line json row>'
   _ledger_unlock
 }
 ledger_update() {  # ledger_update <id> '<jq row filter, e.g. .status="RUNNING">'
-  local id="$1" filter="$2" tmp
+  local id="$1" filter="$2" tmp rc=0
   _ledger_lock || return 1
   tmp=$(mktemp)
-  jq -c --arg id "$id" "if .id == \$id then ${filter} else . end" "$LEDGER" > "$tmp" \
-    && mv "$tmp" "$LEDGER"
+  if jq -c --arg id "$id" "if .id == \$id then ${filter} else . end" "$LEDGER" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$LEDGER"
+  else
+    rc=1; rm -f "$tmp"   # bad filter / jq error — caller MUST see the failure
+  fi
   _ledger_unlock
+  return $rc
 }
 ledger_row() {  # ledger_row <id>  -> last row for id (or empty)
   [[ -f "$LEDGER" ]] || return 0
@@ -91,9 +101,10 @@ plan_field() {  # plan_field <N> <key> [default] — reads the first ```yaml fen
 
 # ---------- run snapshot: downstream stages read THIS, never the plan ----------
 run_json_path() { echo "$RUNS_DIR/$1/run.json"; }   # <id>
-snapshot_get() {  # snapshot_get <id> <jq path> [default]
-  local f="$RUNS_DIR/$1/run.json"
-  [[ -f "$f" ]] && jq -r "$2 // empty" "$f" || echo "${3:-}"
+snapshot_get() {  # snapshot_get <id> <jq path> [default] — default applies for missing FILE or missing KEY
+  local f="$RUNS_DIR/$1/run.json" v=""
+  [[ -f "$f" ]] && v=$(jq -r "$2 // empty" "$f" 2>/dev/null)
+  echo "${v:-${3:-}}"
 }
 
 # ---------- github: labels are the durable state machine; ALWAYS set by commands ----------
@@ -102,10 +113,10 @@ ensure_labels() {  # idempotent; run by /new-issue on first use
   local l
   for l in research:claim $ALL_STATUS_LABELS \
            kind:experiment kind:ablation kind:implementation kind:brainstorm kind:literature kind:analysis; do
-    gh label create "$l" --force >/dev/null 2>&1 || true
+    timeout 30 gh label create "$l" --force >/dev/null 2>&1 || true
   done
 }
-issue_labels() { gh issue view "$1" --json labels -q '.labels[].name' 2>/dev/null; }
+issue_labels() { timeout 60 gh issue view "$1" --json labels -q '.labels[].name' 2>/dev/null; }
 set_status_label() {  # set_status_label <N> <planned|approved|running|pass|revise|stop|done>
   local n="$1" new="status:$2" cur rm=""
   cur=$(issue_labels "$n" | grep '^status:' || true)
@@ -125,12 +136,16 @@ sshb() {  # bounded ssh: sshb <port> <host> <cmd...>
 }
 
 # ---------- attempt counters (bounded retries live in the ledger, not in prose) ----------
-bump_attempt() {  # bump_attempt <id> <field> <max> -> exits nonzero (and logs) when exhausted
+bump_attempt() {  # bump_attempt <id> <field> <max> -> nonzero (and logs) when exhausted
+  # Read the MAX across ALL rows for this id — relaunches append fresh rows, so
+  # tail-1 alone would reset the counter and defeat the bound. The update writes
+  # the new value onto every row with the id, keeping future reads consistent.
   local id="$1" field="$2" max="$3" cur
-  cur=$(ledger_row "$id" | jq -r ".${field} // 0")
+  cur=$( [[ -f "$LEDGER" ]] && jq -r --arg id "$id" "select(.id == \$id) | .${field} // 0" "$LEDGER" 2>/dev/null | sort -n | tail -1 )
+  cur="${cur:-0}"
   if (( cur >= max )); then
     progress "MANUAL_REVIEW_NEEDED: $id exhausted ${field} (${cur}/${max})"
     return 1
   fi
-  ledger_update "$id" ".${field} = ((.${field} // 0) + 1)"
+  ledger_update "$id" ".${field} = $((cur + 1))"
 }

@@ -12,6 +12,9 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
 ```bash
 source .claude/skills/_lib.sh
 row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
+# GPU-free kinds (and deleted ledgers) have no row — derive the id from the plan:
+[[ -z "$id" ]] && { slug=$(plan_field <N> slug); [[ -n "$slug" ]] && id="<N>-$slug"; }
+[[ -z "$id" ]] && die "cannot resolve a run id for #<N> (no ledger row, no plan slug) — nothing to analyze"
 ```
 - `kind: analysis` plan (GPU-free): no ledger row is expected — run the plan's
   `## Verification commands` locally, verdict GO=PASS / NO-GO=STOP. Skip all
@@ -41,7 +44,9 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 4. Label from the verdict: `set_status_label <N> <pass|revise|stop>`.
 5. REVISE → file the child issue NOW (`/new-issue` semantics: title
    `REVISE of #<N>: <knob change>`, body = next_actions, `depends_on: [<N>]`),
-   bump `revise_depth` on the ledger row, and print `Next: /plan <child>`.
+   bump `revise_depth` on the ledger row, append the durable flag
+   `progress "REVISE_CHILD: #<child> from #<N> — needs /plan"` (so /status and
+   unattended goal-judges can see it), and print `Next: /plan <child>`.
 6. Print verdict + evidence lines (metric=value vs target, source file) +
    `Next: /close <N>`.
 

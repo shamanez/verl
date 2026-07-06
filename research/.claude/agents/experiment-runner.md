@@ -32,10 +32,12 @@ attach=…`.
 
 3. **Compute — attach OR provision (never both, never re-invented):**
    - `attach != none` → `CLAUDE_PROJECT_DIR=$PARENT bash
-     $PARENT/.claude/skills/vast-attach/run.sh --exp-id <id> --instance-id
-     <iid> --account <acct>` (it ssh-probes, writes the handle, registers the
-     ledger row). If a live row already references that instance: append
-     `BOX_BUSY: <iid> — <id> waiting` to PROGRESS.md and stop.
+     $PARENT/.claude/skills/vast-attach/run.sh --exp-id <id> --issue <N>
+     --instance-id <iid> --account <acct> --max-gpu-hr <max_gpu_hr>` (it
+     ssh-probes, writes the handle, registers the ledger row; `--issue` is
+     REQUIRED — every downstream stage locates the row by issue number). If a
+     live row already references that instance: append `BOX_BUSY: <iid> — <id>
+     waiting` to PROGRESS.md and stop.
    - else walk `gpu_filter_chain` in order, ≤ 1 retry per rung on transient
      errors. Per rung, launch the skill DETACHED and poll a local file —
      never block one Bash call on the ~7–25 min image pull:
@@ -67,7 +69,8 @@ attach=…`.
    ```
 
 5. **Snapshot `runs/<id>/run.json`** — everything downstream stages need so
-   the plan file can be deleted mid-flight: issue, run_id, branch, cells
+   the plan file can be deleted mid-flight: issue, run_id, title (the plan's
+   H1 / issue title — de-bloat's SUMMARY row reads it), branch, cells
    (`[{name, wandb_name: "<N>-<cell>", overrides}]`), step_target, milestone,
    promote_launcher_as, code_change, success-criteria checklist (verbatim),
    baseline_run, iterations, wandb {project, entity} from

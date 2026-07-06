@@ -54,9 +54,11 @@ under `research/`. The project's north-star — what "done" means — is
 | **Project north-star (what "done" means)** | `research/.claude/GOAL.md` |
 
 The GitHub repo the harness watches is
-**`shamanez/verl-compression-research`** (private). It is set as the local
-`gh` default via the `research` git remote on this checkout. Confirm with
-`gh repo set-default --view`.
+**`shamanez/verl-compression-research`** (private) — the issue queue only:
+`/new-issue` files there, the stage commands set its labels, `/plan` posts the
+stub comment, `/close` posts the closing verdict comment. No PRs. It is set as
+the local `gh` default via the `research` git remote on this checkout. Confirm
+with `gh repo set-default --view`.
 
 ## 3. Hard rules
 

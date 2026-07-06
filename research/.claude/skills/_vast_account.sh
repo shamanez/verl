@@ -27,11 +27,13 @@ vast_load_secrets() {
 }
 
 # Echo the API key for an account name ("team"|"private"; default private).
-# Falls back to the private key if the team key is unset, so default behaviour
-# is unchanged when VAST_API_KEY_TEAM is absent.
+# NO team→private fallback: destroying a team box with the private key 404s,
+# the verify-authoritative classifier would count it "already gone", and the
+# still-billing box would vanish from the ledger. An EMPTY key makes every
+# caller's empty-key guard fire (skip + log) — the safe failure.
 vast_key_for() {
   case "${1:-private}" in
-    team) printf '%s' "${VAST_API_KEY_TEAM:-${VAST_API_KEY:-}}" ;;
+    team) printf '%s' "${VAST_API_KEY_TEAM:-}" ;;
     *)    printf '%s' "${VAST_API_KEY:-}" ;;
   esac
 }

@@ -58,7 +58,7 @@ through stages, each stage a self-contained skill invoked as `/<cmd> <N>`:
 | file | `/new-issue "…"` | — | `research:claim`, `kind:*` |
 | plan | `/plan <N> [deep]` | research-planner | `status:planned` |
 | gate | `/approve <N>` | — (human digest + confirm) | `status:approved` |
-| launch | `/run <N> [--attach <id>]` | experiment-runner | `status:running` |
+| launch | `/launch <N> [--attach <id>]` | experiment-runner | `status:running` |
 | watch | `/monitor <N>` | training-log-monitor (bg, bounded) | — |
 | judge | `/analyze <N>` | analyst | `status:pass\|revise\|stop` |
 | finish | `/close <N>` | log-writer | `status:done` + issue closed |
@@ -83,7 +83,7 @@ Rules that make this never-hang:
 
 **Where humans belong.** All questions, brainstorming, judge-panels, and
 adversarial review live in `/plan` (deep tier) and `/approve`. During
-`/run → /close` the harness is maximally autonomous: no adversarial loops, no
+`/launch → /close` the harness is maximally autonomous: no adversarial loops, no
 self-review workflows. If something mid-run genuinely warrants heavy
 verification, the stage appends `MANUAL_REVIEW_NEEDED: <why> — <N>` to
 PROGRESS.md and stops for an explicit human go/no-go. This is enforced by
@@ -138,7 +138,7 @@ Cells are self-describing kebab slugs (`adaptive-ls-k10`, `dense-control`) —
 (`63-adaptive-ls-k10`), group = the canonical id. Names derive from one
 helper (`skills/_lib.sh: names_for`), not convention.
 
-**Snapshot (`runs/<id>/run.json`)**: `/run` materializes everything
+**Snapshot (`runs/<id>/run.json`)**: `/launch` materializes everything
 downstream stages need (cells, wandb names, step target, milestone,
 promote_launcher_as, branch, account) so monitor/analyst/log-writer never
 depend on the plan file — deleting any plan or run dir mid-flight degrades
@@ -147,7 +147,7 @@ reason instead of stalling.
 
 ## 6. Branch + PR discipline (every issue)
 
-- `/run` creates `exp/<id>` from `vast-ai-workload` (worktree for
+- `/launch` creates `exp/<id>` from `vast-ai-workload` (worktree for
   code_change; branch-only otherwise) and pushes before launch.
 - `/close` commits the issue's durable deliverables (plan, verdict,
   LOG/SUMMARY delta, code, promoted launcher) to `exp/<id>`, opens a PR

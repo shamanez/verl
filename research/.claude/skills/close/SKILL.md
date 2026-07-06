@@ -11,21 +11,31 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
 
 ```bash
 source .claude/skills/_lib.sh
-st=$(issue_status <N>)
-case "$st" in pass|stop|revise) ;; done) echo "#<N> already done"; exit 0 ;;
-  *) die "#<N> is status:$st — /analyze <N> first (close needs a verdict)";; esac
+st=$(issue_status <N>); kind=$(plan_field <N> kind experiment)
+case "$st" in
+  pass|stop|revise) ;;
+  done) echo "#<N> already done"; exit 0 ;;
+  approved) case "$kind" in brainstorm|literature|implementation) ;;   # plan/PR IS the deliverable — no verdict stage
+            *) die "#<N> is status:approved — /launch or /analyze first";; esac ;;
+  *) die "#<N> is status:$st — /analyze <N> first (close needs a verdict)";;
+esac
 row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
+[[ -z "$id" ]] && { slug=$(plan_field <N> slug); [[ -n "$slug" ]] && id="<N>-$slug"; }
+[[ -z "$id" ]] && id="issue-<N>"   # last resort: plan deleted too — close from labels/LOG only
 ```
 - Verdict file missing but label is terminal → proceed using the label + LOG
   as the source (deleted-run degradation); note it in the PR body.
-- `kind: brainstorm|literature` → plan IS the deliverable: commit + PR the
-  plan file, label done, close. No box ever existed.
+- `kind: brainstorm|literature|implementation` → plan (+ any PR) IS the
+  deliverable: commit + PR it, label done, close. No box ever existed.
 
 ## Steps
 
 1. **Teardown check first (money before paperwork).** If the ledger row is
-   `RUNNING|PROVISIONED|EXTERNAL` → run `vast-teardown` now; verify
-   `TORN_DOWN`. No box may outlive its issue.
+   `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
+   harness box may outlive its issue. **`EXTERNAL` rows are operator-managed:**
+   do NOT auto-destroy — ask (interactive) or append
+   `MANUAL_REVIEW_NEEDED: external box <id> still up after /close #<N> — tear
+   down when done` and continue (the box may serve other work).
 2. Dispatch ONE `log-writer` subagent with `run_id=<id> issue=<N>`. It owns:
    LOG.md prepend, `runs/SUMMARY.md` row, REPRODUCIBILITY + launcher promotion
    from `resolved_params.txt` (PASS only), and the branch/PR/merge below.

@@ -1,73 +1,57 @@
 ---
 name: vast-attach
-description: Register an ALREADY-RUNNING, operator-provided Vast.ai box as an EXTERNAL handle the harness can use without provisioning (skip the provision+warmup tax). external is PROVENANCE only — the box is still torn down after its run or on request, like any box. Companion to vast-provision for the "bring-your-own-box" fast path.
+description: Register an ALREADY-RUNNING, operator-provided box so the harness can use it without provisioning ("bring-your-own-box"). Probes SSH before registering. Default lifecycle = reaped like any box; --manual = operator-managed EXTERNAL (never auto-reaped). Companion to vast-provision.
 allowed-tools: Bash
 ---
 
 # vast-attach
 
-Skip the ~1–3 min provision + ~5–8 min warm-up: hand the harness a box you already
-have running and start immediately. The box is marked **`external: true`** (provenance:
-the harness didn't provision it) — but it is **still torn down** after its run completes
-or on request. Teardown is a must; external is not an exemption.
+Skip the ~1–3 min provision + ~5–8 min warm-up: hand the harness a box you
+already have. The skill **ssh-probes the box first** (refuses to register an
+unreachable one), writes a provision-schema handle, and registers a ledger row.
 
 ## Usage
 
 ```bash
-# Real Vast box — the API resolves ssh/gpu details from just the instance id:
-bash .claude/skills/vast-attach/run.sh --instance-id 41680420 --account team
+# Training run on your own box (reaped like any provisioned box; 24 gpu-hr backstop):
+bash .claude/skills/vast-attach/run.sh --exp-id 63-anchor-ema-sweep \
+  --instance-id 41680420 --account team
 
-# Or give them explicitly (any box, Vast or not):
-bash .claude/skills/vast-attach/run.sh \
-  --instance-id 41680420 --ssh-host 84.8.106.109 --ssh-port 40206 --num-gpus 4 --account team
+# Operator-managed analysis/download box (NEVER auto-reaped — you own teardown):
+bash .claude/skills/vast-attach/run.sh --instance-id 41680420 --manual
 
-# Just write the handle, do NOT add a ledger row (purest manual path — harness
-# stays completely unaware of the box, so nothing can ever touch it):
+# Handle only, no ledger row (harness completely unaware):
 bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-port P --num-gpus N --no-register
 ```
 
 | flag | meaning |
 |---|---|
-| `--instance-id` | **required.** The Vast instance id, or any label for a non-Vast box. |
-| `--ssh-host` / `--ssh-port` / `--num-gpus` | the box's SSH endpoint + GPU count. Auto-resolved from the Vast API if omitted and the id is a real Vast box. |
-| `--gpu-name` / `--gpu-ram` / `--dph` | optional metadata (display only; external boxes are never budget-torn-down). |
-| `--account` | `team` \| `private` (default `private`) — recorded on the handle/row. |
-| `--exp-id` | the run id to file under (default `ATTACH-<instance-id>`). |
-| `--no-register` | write the handle JSON only; do **not** add a `runs.jsonl` row. |
+| `--instance-id` | **required.** Vast id (ssh/gpu auto-resolved from the API) or any label for a non-Vast box |
+| `--exp-id` | run id to file under — use the canonical `<N>-<slug>` (default `ATTACH-<id>`) |
+| `--ssh-host/--ssh-port/--num-gpus` | explicit endpoint (auto-resolved for real Vast ids) |
+| `--account` | `team` \| `private` (default private) — stamped on handle+row; teardown reads it back |
+| `--manual` | ledger `status:EXTERNAL`: tracked by vast-cost, **never auto-reaped**; teardown is YOUR explicit act |
+| `--max-gpu-hr` | budget backstop for the default (RUNNING) lifecycle; default 24 |
+| `--no-probe` | skip the ssh reachability probe (non-standard boxes) |
+| `--no-register` | handle JSON only, no ledger row |
 
-## What it does
+## Lifecycle semantics (the box-43495538 lesson, mechanized)
 
-1. Writes `runs/<EXP_ID>/handles/<instance_id>.json` in the **same schema as
-   vast-provision** (`schema_version "1"`, `ssh_login`, `num_gpus`, …) **plus
-   `external: true`**, and prints a `VAST_HANDLE: {...}` line (so the
-   experiment-runner's rsync+launch path consumes it unchanged).
-2. Unless `--no-register`, appends a ledger row `status:"RUNNING", external:true`
-   so the orchestrator/monitor/analyst can see it — and the teardown machinery tears it
-   down on the same triggers as any provisioned box (external is provenance, NOT exemption;
-   see the next section). Use `--no-register` for a box you do NOT want auto-torn-down.
+- **default** → `status:"RUNNING", external:true, max_gpu_hr:<cap>`: the reaper
+  applies ALL normal triggers (verdict / heartbeat / budget). Use for training
+  runs the harness drives end-to-end (`/launch <N> --attach <id>`).
+- **`--manual`** → `status:"EXTERNAL"`: the reaper never touches it and
+  vast-cost counts it as tracked (not a leak). Use for operator-managed
+  analysis/download boxes where a heartbeat-reap mid-work would destroy data.
+  `vast-teardown <id>` still destroys it and flips the row when you're done.
+- On env-failure of any attached box the harness tears it down but never
+  auto-provisions a replacement (you hand-picked it) — `MANUAL_REVIEW_NEEDED`.
 
-## The external flag (provenance, NOT teardown protection)
+## What it writes
 
-`external: true` only records that the operator ATTACHED this box (the harness did
-not provision it). **It does not exempt the box from teardown** — teardown is a must:
+1. `runs/<exp-id>/handles/<instance_id>.json` **and**
+   `.claude/state/vast-handles/<instance_id>.json` (provision schema +
+   `external:true`) + a `VAST_HANDLE: {...}` stdout line.
+2. Unless `--no-register`: one locked ledger append (schema above).
 
-- The **teardown Stop hook** tears an external box down on the same triggers as a
-  provisioned one (verdict written / heartbeat stale / budget exceeded).
-- The **vast-teardown skill** destroys an external box like any other (no `--force`).
-- The one external-specific behaviour: on an **env-failure**, the harness does NOT
-  auto-provision a replacement (you hand-picked a box; there's no SKU chain to walk) —
-  it tears the box down and surfaces `MANUAL_REVIEW_NEEDED` instead.
-
-Want a box the harness will NOT track or tear down? Use `--no-register` (or skip the
-skill and just SSH in): with no ledger row the harness never sees it, and **you** own
-its teardown entirely.
-
-## When to use
-
-- You already have a warm box (manual provision, or held from a prior run) and want
-  to start training/analysis NOW without paying the provision+warmup tax. The box is
-  torn down after its run completes (or on request); to keep it across runs, use
-  `--no-register` and manage (and tear down) it yourself.
-
-For a brand-new box the harness should own and auto-tear-down, use `vast-provision`
-instead — not this.
+For a brand-new box the harness should own end-to-end, use `vast-provision`.

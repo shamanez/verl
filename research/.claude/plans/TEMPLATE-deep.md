@@ -9,6 +9,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>
+title: <issue title>          # one line — SUMMARY.md rows and LOG entries read it
 kind: experiment
 tier: deep
 code_change: false
@@ -78,8 +79,9 @@ invariants:
 - [ ] <controlled variables held equal across compared arms>
 
 ## Verification commands
+<!-- CWD is research/ — paths are scripts/… and runs/…, never research/… -->
 ```bash
-python research/scripts/analyze.py runs/<N>-<slug> --emit verdict.md
+python scripts/analyze.py runs/<N>-<slug> --emit verdict.md
 ```
 
 ## Open questions (must be empty at approval)

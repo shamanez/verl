@@ -3,6 +3,9 @@
 # See SKILL.md for usage. Safe to call repeatedly; idempotent on already-TORN_DOWN rows.
 set -euo pipefail
 
+# macOS has no timeout(1); perl alarm survives execve (same shim as _lib.sh).
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 REASON="manual"
@@ -112,12 +115,19 @@ for iid in "${IDS[@]}"; do
     FAILED+=("$iid")
     continue
   fi
-  OUT=$(timeout 90 env VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1) || true
-  echo "[$iid] account=$ACCT $OUT" >>"$ERR_LOG"
-  # Already-gone = goal achieved (idempotent). `destroy` errors on a missing
-  # instance, so check this BEFORE the generic error->FAILED guard (mirrors the
-  # Stop hook's verify-authoritative classification).
-  if grep -qiE 'not found|no such|does not exist|no longer (exists|gone)|already (destroyed|gone)|"?404"?' <<<"$OUT"; then
+  OUT=$(timeout 90 env VAST_API_KEY="$KEY" vastai destroy instance "$iid" -y 2>&1); ORC=$?
+  echo "[$iid] account=$ACCT rc=$ORC $OUT" >>"$ERR_LOG"
+  # rc 124/126/127 = the destroy NEVER RAN (timeout / not executable / command
+  # not found) — a hard FAILURE. Must precede any pattern matching: a shell
+  # "command not found" message would otherwise match 'not found' below and
+  # flip a LIVE billing box to TORN_DOWN.
+  if (( ORC == 124 || ORC == 126 || ORC == 127 )); then
+    FAILED+=("$iid")
+    continue
+  fi
+  # Already-gone = goal achieved (idempotent). Vast-specific phrasing only —
+  # never bare 'not found'.
+  if grep -qiE 'instance not found|no such instance|does not exist|no longer (exists|gone)|already (destroyed|gone)' <<<"$OUT"; then
     DESTROYED+=("$iid")
     continue
   fi
@@ -131,8 +141,14 @@ for iid in "${IDS[@]}"; do
   # `vastai show instance <id>` returns an object while it exists; once
   # destroyed it returns either an HTTP error or no payload.
   sleep 2
-  CHECK=$(timeout 90 env VAST_API_KEY="$KEY" vastai show instance "$iid" --raw 2>&1 || true)
-  if echo "$CHECK" | grep -qiE 'error|not found|404' \
+  CHECK=$(timeout 90 env VAST_API_KEY="$KEY" vastai show instance "$iid" --raw 2>&1); CRC=$?
+  if (( CRC == 124 || CRC == 126 || CRC == 127 )); then
+    # verify never ran — conservative FAILED, retry next invocation
+    echo "[$iid] post-destroy verify rc=$CRC (wrapper/CLI failure)" >>"$ERR_LOG"
+    FAILED+=("$iid")
+    continue
+  fi
+  if echo "$CHECK" | grep -qiE 'instance not found|no such instance|does not exist|404' \
      || ! echo "$CHECK" | jq -e 'type=="object" and has("id")' >/dev/null 2>&1; then
     DESTROYED+=("$iid")
   else

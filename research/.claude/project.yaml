@@ -30,7 +30,7 @@ workspace:
   # private -> VAST_API_KEY. Resolved by .claude/skills/_vast_account.sh; provision stamps the chosen
   # account on the handle/ledger as `vast_account`, and both teardown paths (vast-teardown skill +
   # teardown-finished-runs Stop hook) read it back so a box is always destroyed with the account that
-  # created it. Operator picks it via the loop instruction ("use the team account") — see researcher_steps.md.
+  # created it. Operator picks it per issue via `/launch <N> --account team|private` or the plan's `vast_account:` key (default private).
 
 github:
   research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.
@@ -145,8 +145,8 @@ launchers:                                                    # launch-script st
   dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, branch vast-ai-workload)
   naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
   override_model: canonical-launcher + CLI/env overrides      # a run calls the canonical launcher and overrides only the knobs it varies (${VAR:-default} env vars + Hydra "$@" passthrough) — never re-types the baseline
-  sandbox: research/runs/EXP-<ID>/                            # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth
-  promotion: auto-propose-on-PASS                             # log-writer opens a DRAFT PR (base vast-ai-workload) baking the proven values into a canonical launcher; human merges
+  sandbox: research/runs/<N>-<slug>/                          # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth
+  promotion: auto-land-on-close                               # /close's log-writer bakes the proven values (from resolved_params.txt) into the canonical launcher on the issue branch and merges its PR; the human gate for this spend already happened at /approve
   provenance:                                                 # "what settings actually ran" must never be lost to drift
     capture_script: research/scripts/capture_resolved_config.py
     artifact: resolved_params.txt                             # Hydra last-wins key=value, extracted from train.log set -x trace; ground truth, NOT the plan or a manifest
@@ -173,10 +173,9 @@ agent_models:
   #            cost-vs-quality model choice — both are now Opus 4.8) because the monitor is
   #            a high-frequency ~80-poll/run loop and log-writer is mechanical.
   # "ultracode" (xhigh + dynamic-workflow orchestration) is a MECHANISM, not a per-agent
-  # effort: it is launched at the SESSION level (orchestrator/triage/interactive) for the
-  # hard lanes — moment-of-truth analysis, hard code_change patches, hard planning, parallel
-  # runs — because workflows spawn their own workers and a leaf subagent cannot host one.
-  # See the `workflows:` block below. The /goal evaluator runs on Opus 4.8: Claude Code's
+  # effort: it is launched at the SESSION level, PLANNING-TIME ONLY (/plan deep judge
+  # panels, operator analysis of closed results) — see `verification:` + `workflows:`.
+  # The /goal evaluator runs on Opus 4.8: Claude Code's
   # small-fast-model slot (env ANTHROPIC_DEFAULT_HAIKU_MODEL, default Haiku) is OVERRIDDEN to
   # claude-opus-4-8 in settings.json, so NO Haiku model ever runs (see `goal_command:`).
   #

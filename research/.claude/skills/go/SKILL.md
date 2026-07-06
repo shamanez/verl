@@ -21,11 +21,13 @@ row=$(ledger_row_by_issue <N>)  # "" | PROVISIONED | RUNNING | EXTERNAL | TORN_D
 | no `status:*` label | `/plan <N>` |
 | `planned` | `/approve <N>` (interactive) — unattended: print digest, append `AWAITING_APPROVAL: #<N>`, STOP |
 | `approved`, no live row | `/launch <N>` (analysis kind → `/analyze <N>`; implementation/brainstorm/literature → `/close <N>`) |
-| `approved`/`running`, row RUNNING or PROVISIONED | `/monitor <N>` |
+| `approved`/`running`, row RUNNING / PROVISIONED / EXTERNAL | `/monitor <N>` (it handles PROVISIONED-wait and EXTERNAL itself) |
 | `running`, row TORN_DOWN, results in `runs/<id>/` | `/analyze <N>` |
-| `running`, row TORN_DOWN, NO results | relaunch via `/launch <N>` (its `launch_attempts` bound applies) |
-| `pass` / `stop` / `revise` | `/close <N>` |
+| `running`, row TORN_DOWN, NO results, no verdict | `/launch <N>` — its relaunch exception accepts exactly this state, bounded by `launch_attempts ≤ 3` |
+| `pass` / `stop` / `revise` | `/close <N>` (a REVISE child was already filed by /analyze — check PROGRESS for `REVISE_CHILD:`) |
 | `done` | print the LOG entry; nothing to do |
+
+`depends_on` gates read `pass|stop|done` as terminal (a closed parent shows `done`).
 
 Run stages in order until one of: `status:done`, `AWAITING_APPROVAL`,
 `MANUAL_REVIEW_NEEDED`/`STUCK` appended, or a stage refuses. Surface the

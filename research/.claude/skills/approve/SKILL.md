@@ -24,7 +24,7 @@ around it is the harness's.
    machine-checkable? budget sane? cell names readable? `target_modules`
    confined to allowed paths? Numeric hypothesis?
 4. Ask the operator (AskUserQuestion): **approve / edit first / reject**.
-   - **approve** → `set_status_label <N> approved` → print `Next: /run <N>  (or /go <N> to drive to completion)`.
+   - **approve** → `set_status_label <N> approved` → print `Next: /launch <N>  (or /go <N> to drive to completion)`.
    - **edit first** → apply the operator's requested plan edits, re-show digest, ask again.
    - **reject** → ask close-or-keep: close → `gh issue close <N>` +
      `rm .claude/plans/<N>.md`; keep → leave at `status:planned`.

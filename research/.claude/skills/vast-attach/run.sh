@@ -11,17 +11,21 @@
 #                     operator's explicit act (vast-teardown handles EXTERNAL).
 set -euo pipefail
 
+# macOS has no timeout(1); perl alarm survives execve (same shim as _lib.sh).
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 EXP_ID=""; INSTANCE_ID=""; SSH_HOST=""; SSH_PORT=""; NUM_GPUS=""
 GPU_NAME=""; GPU_RAM="0"; DPH="0"; ACCOUNT="private"; REGISTER=1
-MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0
+MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0; ISSUE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --exp-id)      EXP_ID="$2"; shift 2 ;;
+    --issue)       ISSUE="$2"; shift 2 ;;   # issue number — REQUIRED for /launch-driven attaches (ledger_row_by_issue keys on it)
     --instance-id) INSTANCE_ID="$2"; shift 2 ;;
     --ssh-host)    SSH_HOST="$2"; shift 2 ;;
     --ssh-port)    SSH_PORT="$2"; shift 2 ;;
@@ -96,15 +100,20 @@ echo "$HANDLE" | jq . > "$PROJECT_DIR/.claude/state/vast-handles/$INSTANCE_ID.js
 echo "VAST_HANDLE: $HANDLE"
 
 if [[ "$REGISTER" == "1" ]]; then
-  if [[ -f "$LEDGER" ]] && jq -e --arg id "$EXP_ID" 'select(.id==$id)' "$LEDGER" >/dev/null 2>&1; then
-    echo "vast-attach: ledger already has a row for $EXP_ID — not duplicating." >&2
+  # Dedup against LIVE rows only — a TORN_DOWN row under the same id is history,
+  # not a duplicate; re-attaching after teardown must register a fresh row or the
+  # new box has no budget backstop and vast-cost flags it as a leak.
+  if [[ -f "$LEDGER" ]] && jq -e --arg id "$EXP_ID" \
+      'select(.id==$id and (.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL"))' \
+      "$LEDGER" >/dev/null 2>&1; then
+    echo "vast-attach: ledger already has a LIVE row for $EXP_ID — not duplicating." >&2
   else
     STATUS="RUNNING"; (( MANUAL )) && STATUS="EXTERNAL"
     ROW=$(jq -nc --arg id "$EXP_ID" --arg t "$(date -Iseconds)" --argjson ts "$(date +%s)" \
       --argjson ng "$NUM_GPUS" --argjson dph "$DPH" --arg acct "$ACCOUNT" \
-      --argjson mgh "$MAX_GPU_HR" --arg st "$STATUS" \
+      --argjson mgh "$MAX_GPU_HR" --arg st "$STATUS" --argjson iss "${ISSUE:-null}" \
       --argjson h "$(echo "$HANDLE" | jq -s .)" \
-      '{id:$id, handles:$h, started_at:$t, started_at_epoch:$ts,
+      '{id:$id, issue:$iss, handles:$h, started_at:$t, started_at_epoch:$ts,
         per_node_gpus:$ng, total_gpus:$ng, dph:$dph, max_gpu_hr:$mgh,
         vast_account:$acct, external:true, status:$st}')
     # Locked append (shared spinlock with _lib.sh writers).

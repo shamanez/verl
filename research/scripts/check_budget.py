@@ -102,7 +102,7 @@ def main() -> int:
     ap.add_argument("--month", action="store_true",
                     help="restrict accounting to the current calendar month")
     ap.add_argument("--cap-check", action="store_true",
-                    help="exit 2 if monthly_cap_usd in budget.json is exceeded")
+                    help="exit 2 if monthly_cap_usd in project.yaml budget: is exceeded")
     args = ap.parse_args()
 
     rows = _load_ledger(args.ledger)

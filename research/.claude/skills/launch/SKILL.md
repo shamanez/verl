@@ -11,23 +11,27 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
 
 ```bash
 source .claude/skills/_lib.sh
-[[ "$(issue_status <N>)" == "approved" ]] || die "#<N> is status:$(issue_status <N>), not approved — the human gate is sacred"
+st=$(issue_status <N>)
 plan_exists <N> || die "plan for #<N> was deleted — /plan <N> again, then /approve"
-row=$(ledger_row_by_issue <N>)
-[[ -n "$row" ]] && jq -e '.status=="RUNNING" or .status=="PROVISIONED"' <<<"$row" >/dev/null \
+slug=$(plan_field <N> slug); names_for <N> "$slug"
+row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")   # attach rows may predate the issue stamp
+[[ -n "$row" ]] && jq -e '.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL"' <<<"$row" >/dev/null \
   && die "#<N> already has a live box ($(jq -r .id <<<"$row")) — /monitor <N> instead"
 ```
+- Gate: `st == approved` is the normal entry. ONE exception — **relaunch**:
+  `st == running` AND the last row is `TORN_DOWN` AND no `runs/$RUN_ID/verdict.md`
+  (env-failure history) is allowed, guarded by
+  `bump_attempt "$RUN_ID" launch_attempts 3 || exit 1`. Anything else → refuse:
+  the human gate is sacred.
 - `kind: analysis|implementation|brainstorm|literature` → no GPU. Refuse with
   the right next step (`/analyze <N>` for analysis; `/close <N>` for the rest).
-- Every `depends_on` issue must be `status:pass|stop` — else refuse, naming
-  the blocker.
-- Prior `TORN_DOWN` row without a verdict (env-failure history): allowed to
-  relaunch, but `bump_attempt "$RUN_ID" launch_attempts 3 || exit 1`.
+- Every `depends_on` issue must be terminal — `status:pass|stop|done` (a closed
+  PASSed parent reads `done`) — else refuse, naming the blocker.
 
 ## Steps
 
-1. **Names.** `slug` from the plan (`plan_field <N> slug`);
-   `names_for <N> "$slug"` → `RUN_ID`, `RUN_DIR`, `BRANCH`, `WANDB_GROUP`.
+1. **Names.** Already resolved in preconditions: `RUN_ID`, `RUN_DIR`, `BRANCH`,
+   `WANDB_GROUP` from `names_for`.
 2. **Branch — every issue, not just code_change.** If `origin/$BRANCH` doesn't
    exist: create from `origin/vast-ai-workload`, push immediately (survives a
    laptop crash). code_change plans: dispatch happens in a worktree on this

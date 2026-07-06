@@ -9,6 +9,9 @@
 # (this closes the "monitors keep mtime fresh" defeat, memory 2026-06).
 set -euo pipefail
 
+# macOS has no timeout(1); perl alarm survives execve (same shim as _lib.sh).
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 DEBOUNCE="$PROJECT_DIR/.claude/state/.last-sync"
@@ -54,14 +57,18 @@ jq -c 'select(.status == "RUNNING")' "$LEDGER" 2>/dev/null | while IFS= read -r 
 
     TMP_TAIL=$(mktemp -t sync-metrics.XXXXXX)
     SSH_RC=0
-    timeout "$HARD_TIMEOUT" ssh "${SSH_OPTS[@]}" -p "$PORT" "root@$HOST" \
+    # -n: never let ssh drain the while-loop's stdin (it would eat the
+    # remaining handle rows and silently skip every node after the first).
+    timeout "$HARD_TIMEOUT" ssh -n "${SSH_OPTS[@]}" -p "$PORT" "root@$HOST" \
         "tail -n 200 '$REMOTE_LOG' 2>/dev/null" \
         > "$TMP_TAIL" 2>>"$OUT_DIR/sync-errors.log" || SSH_RC=$?
 
     if (( SSH_RC == 0 )) && [[ -s "$TMP_TAIL" ]]; then
       # PROGRESS CHECK: append (= refresh heartbeat) only if the tail moved.
+      # Sig is PER HOST — with multi-node handles a shared sig would alternate
+      # every cycle and mask a single frozen node.
       SIG=$(tail -n 3 "$TMP_TAIL" | cksum | awk '{print $1}')
-      SIG_FILE="$OUT_DIR/.last-tail-sig"
+      SIG_FILE="$OUT_DIR/.last-tail-sig.$HOST.$PORT"
       PREV=$(cat "$SIG_FILE" 2>/dev/null || echo "")
       if [[ "$SIG" != "$PREV" ]]; then
         echo "$SIG" > "$SIG_FILE"

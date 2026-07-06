@@ -16,7 +16,7 @@ From an agent or directly:
 $CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh <instance_id> [<instance_id> ...]
 ```
 
-Or pass a path to a handle JSON file (the runner emits these under `research/runs/EXP-<ID>/handles/`):
+Or pass a path to a handle JSON file (the runner emits these under `research/runs/<N>-<slug>/handles/`):
 
 ```
 $CLAUDE_PROJECT_DIR/.claude/skills/vast-teardown/run.sh --handles research/runs/<run>/handles/
@@ -34,4 +34,17 @@ This tears down **any** instance id you give it — including operator-attached
 
 ## Why this exists separately from the Stop-hook teardown
 
-The `teardown-finished-runs.sh` Stop hook handles **automatic** teardown — verdict written, heartbeat stale, or budget exceeded. This skill is for **explicit** teardown the operator or an agent wants to force, independent of those triggers (e.g., aborting an experiment that's heading nowhere, or cleaning up after a launch retry that left orphans).
+The `teardown-finished-runs.sh` Stop hook handles **automatic** teardown — verdict written, heartbeat stale, budget exceeded, orphaned handles. This skill is for **explicit** teardown the operator or an agent wants to force, independent of those triggers (e.g., aborting an experiment that's heading nowhere, or cleaning up after a launch retry that left orphans).
+
+## Session-independent backstop (optional, recommended)
+
+The Stop-hook reaper only fires while a Claude session is open. To keep the
+money backstop alive with zero sessions, install an hourly cron on the laptop:
+
+```bash
+crontab -e   # add:
+17 * * * * CLAUDE_PROJECT_DIR=/Users/shamane/Documents/verl/research bash /Users/shamane/Documents/verl/research/.claude/hooks/teardown-finished-runs.sh >> /tmp/teardown.cron.log 2>&1
+```
+
+The hook is idempotent, lock-aware, and exits 0 — safe to run alongside live
+sessions.

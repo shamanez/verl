@@ -1,6 +1,7 @@
 ---
 name: codex-verify
-description: Hang-protected wrapper around `codex exec` (hard wall-clock timeout + stall watchdog) for OPERATOR-INVOKED plan review, code-rescue diagnosis, math-rescue derivation walks, and milestone adversarial review. NOT auto-dispatched by the orchestrator — the human operator runs it manually.
+description: "HUMAN-ONLY: hang-protected wrapper around `codex exec` (hard wall-clock timeout + stall watchdog) for operator-invoked plan review, code-rescue diagnosis, math-rescue derivation walks, and milestone adversarial review. Never dispatched by the stage commands."
+disable-model-invocation: true
 allowed-tools: Bash
 ---
 
@@ -14,8 +15,8 @@ hung Codex call can never block the operator's terminal.
 
 ## Why this is operator-invoked (not auto-dispatched)
 
-The autonomous orchestrator used to dispatch this skill before launching
-Vast.ai runs. In practice the autonomous flow produced:
+An earlier harness auto-dispatched this skill before launching Vast.ai
+runs. In practice the autonomous flow produced:
 
 - broker hangs (codex CLI bug) → harness blocked
 - false-positive `VERIFY: FAIL` verdicts → operator override → relaunch
@@ -23,8 +24,8 @@ Vast.ai runs. In practice the autonomous flow produced:
 - pre-skipped `VERIFY: PASS` files → operator decided anyway
 
 The operator was always the final authority. So the skill is now what it
-should have been: a tool the operator runs **between `status:planned` and
-`status:approved`** if they want a second opinion on a plan, OR after a
+should have been: a tool the operator runs **at `/approve` time** (between `status:planned`
+and `status:approved`) if they want a second opinion on a plan, OR after a
 runtime failure if they want a diagnosis, OR before promoting a milestone
 if they want an adversarial review of the summary.
 
@@ -61,13 +62,13 @@ The first content line of the output file is always one of these markers:
 ```bash
 # After triage's research-planner writes .claude/plans/<N>.md, BEFORE flipping
 # status:planned → status:approved, optionally run this:
-mkdir -p runs/EXP-<N>/verify
+mkdir -p runs/<N>-<slug>/verify
 bash .claude/skills/codex-verify/run.sh \
     --mode verify \
-    --out  runs/EXP-<N>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
+    --out  runs/<N>-<slug>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
     --plan .claude/plans/<N>.md \
     --cd   /Users/shamane/Documents/verl
-cat runs/EXP-<N>/verify/*.md
+cat runs/<N>-<slug>/verify/*.md
 ```
 
 Read the verdict. If `VERIFY: PASS` or `VERIFY: CONCERNS` (and the concerns
@@ -81,8 +82,8 @@ override with intent (the harness does not check this file).
 bash .claude/skills/codex-verify/run.sh \
     --mode code-rescue \
     --out  /tmp/rescue.md \
-    --ctx  "STUCK: EXP-<N> grad_norm exploded at step 17; train.log attached" \
-    --diff runs/EXP-<N>/train.log \
+    --ctx  "STUCK: <N>-<slug> grad_norm exploded at step 17; train.log attached" \
+    --diff runs/<N>-<slug>/train.log \
     --cd   /Users/shamane/Documents/verl
 cat /tmp/rescue.md
 ```
@@ -92,7 +93,7 @@ cat /tmp/rescue.md
 ```bash
 bash .claude/skills/codex-verify/run.sh \
     --mode math-rescue \
-    --out  findings/derivations/<topic>.md \
+    --out  runs/<N>-<slug>/derivations/<topic>.md \
     --ctx  "<question or hypothesis to check>" \
     --plan <optional path to the issue body or paper section> \
     --cd   /Users/shamane/Documents/verl
@@ -101,11 +102,11 @@ bash .claude/skills/codex-verify/run.sh \
 ### `adversarial` — milestone summary review
 
 ```bash
-# After log-writer writes findings/M<X>/SUMMARY.md, optionally:
+# After log-writer writes the ## Milestone M<X> section in runs/SUMMARY.md, optionally:
 bash .claude/skills/codex-verify/run.sh \
     --mode adversarial \
-    --out  findings/M<X>/codex-review.md \
-    --plan findings/M<X>/SUMMARY.md \
+    --out  runs/milestone-reviews/M<X>-codex-review.md \
+    --plan runs/SUMMARY.md \
     --ctx  "Verdicts: runs/EXP-<a>/verdict.md, runs/EXP-<b>/verdict.md, ..." \
     --cd   /Users/shamane/Documents/verl
 ```

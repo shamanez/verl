@@ -10,7 +10,7 @@ all config: [`.claude/project.yaml`](.claude/project.yaml).
 | file | `/new-issue "<one-liner>"` | issue + `research:claim` + `kind:*` labels | describe the experiment |
 | plan | `/plan <N>` (add `deep` for multi-stage) | plan file + `status:planned` + stub comment | answer questions if asked — planning is where deliberation belongs |
 | gate | `/approve <N>` | digest → your yes/no → `status:approved` | **the one decision that is yours** |
-| launch | `/launch <N>` (`--attach <id>` for your own box) | branch `exp/<N>-<slug>`, provision-or-attach, launch, `status:running` | none |
+| launch | `/launch <N>` (`--attach <id>` for your own box; `--account team\|private`) | branch `exp/<N>-<slug>`, provision-or-attach, launch, `status:running` | none |
 | watch | `/monitor <N>` | bounded watch cycles → teardown the moment results sync | none (pauses + flags if a human call is needed) |
 | judge | `/analyze <N>` | verdict.md, WandB backfill, `status:pass\|revise\|stop` | none |
 | finish | `/close <N>` | teardown check, LOG+SUMMARY, PR with results → merge, `status:done`, issue closed | none |

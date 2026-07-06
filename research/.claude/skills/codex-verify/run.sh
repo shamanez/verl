@@ -4,7 +4,7 @@
 # Invoke this skill MANUALLY between status:planned and status:approved when you
 # want a second opinion on a plan, OR after a STUCK runtime failure for diagnosis,
 # OR before a milestone promotion for an adversarial summary review. The
-# autonomous harness (orchestrator playbook) does NOT call this skill — it stays
+# autonomous harness (the stage commands) does NOT call this skill — it stays
 # operator-driven because the codex CLI's broker is occasionally flaky and the
 # autonomous-loop "verify before launch" gate was empirically more friction than
 # value (see SKILL.md "Why this is operator-invoked").

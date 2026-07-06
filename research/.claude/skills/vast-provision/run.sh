@@ -12,6 +12,15 @@ set -euo pipefail
 PROG="vast-provision"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# macOS has no timeout(1); perl alarm survives execve (same shim as _lib.sh).
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+# Every vastai CLI call in this script is hard-bounded — a hung API call must
+# never hang the skill. Defined BEFORE any call site (incl. the ssh-keys
+# preflight). Inside the function, `timeout` resolves to the binary or the shim
+# above; the exec'd vastai binary can never re-enter this shell function.
+vastai() { timeout "${VAST_CLI_TIMEOUT:-120}" "$(command -v vastai)" "$@"; }
+
 # CLAUDE_PROJECT_DIR resolves to the research/ directory the harness was
 # launched from; fall back to walking three levels up from this script.
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"
@@ -200,11 +209,6 @@ fi
 LABEL="${LABEL_OVERRIDE:-${LABEL_PREFIX}:${SESSION_ID}}"
 mkdir -p "$HANDLE_DIR"
 
-# Every vastai CLI call is hard-bounded — a hung API call must never hang the
-# skill (never-hang guarantee). `command timeout` bypasses this function for
-# timeout(1); the exec'd vastai binary never re-enters it.
-vastai() { command timeout "${VAST_CLI_TIMEOUT:-120}" vastai "$@"; }
-
 # ---- search offers --------------------------------------------------------
 SEARCH_CMD=(vastai search offers "$QUERY" -o dph_total --raw)
 $NO_DEFAULT_FILTERS && SEARCH_CMD+=(-n)
@@ -388,7 +392,9 @@ trap '_on_exit' EXIT
 _ssh_probe() {         # host port -> 0 iff a REAL ssh command succeeds with the offered key
   local host="$1" port="$2" i
   for i in 1 2 3 4 5; do
-    if ssh -i "$SSH_IDENTITY_PATH" \
+    # timeout 30 bounds a connect-then-wedge sshd; ConnectTimeout alone only
+    # bounds the TCP handshake, not a hung remote command.
+    if timeout 30 ssh -n -i "$SSH_IDENTITY_PATH" \
            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
            -o BatchMode=yes -o ConnectTimeout=10 \
            -p "$port" "root@$host" true >/dev/null 2>&1; then

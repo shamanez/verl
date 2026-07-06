@@ -8,6 +8,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>            # becomes runs/<N>-<slug>/, branch exp/<N>-<slug>, WandB group
+title: <issue title>          # one line — SUMMARY.md rows and LOG entries read it
 kind: experiment              # experiment|ablation|implementation|brainstorm|literature|analysis
 tier: fast
 code_change: false
@@ -53,8 +54,9 @@ e.g. "signed_ema(α=0.25) at cadence 10/10 reaches val/score ≥ 0.72 at step 50
 - [ ] <comparison vs baseline_run within tolerance>
 
 ## Verification commands
+<!-- CWD is research/ — paths are scripts/… and runs/…, never research/… -->
 ```bash
-python research/scripts/analyze.py runs/<N>-<slug> --emit verdict.md
+python scripts/analyze.py runs/<N>-<slug> --emit verdict.md
 ```
 
 ## Notes (optional)
