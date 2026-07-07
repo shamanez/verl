@@ -140,8 +140,15 @@ class CommEffAnchorConfig(BaseConfig):
         lookahead_mode (str): ``"disabled"`` (default) | ``"fixed_linear"``
             (frozen AsyncPP seed: pure linear extrapolation over the recorded
             snapshot ticks) | ``"learned_linear_with_fixed_linear_cold_start"``
-            (same seed plus a small per-block residual trained ONLY from
-            retrospective prediction errors — the no-peek invariant). A stray
+            (same seed plus a small per-block additive DC residual trained ONLY
+            from retrospective prediction errors — the no-peek invariant) |
+            ``"learned_step_scale_with_fixed_linear_cold_start"`` (the adaptive
+            projector: same seed plus a per-block multiplicative SCALE ``beta`` on
+            the extrapolation step, learned retrospectively from the fractional
+            over/under-shoot ``<e, step>/||step||^2`` — a better-conditioned signal
+            than the ~zero-mean DC residual, with a ``[0, 2]`` trust region that
+            degrades to raw-stale where the trajectory is not locally linear). All
+            three cold-start byte-identical to ``fixed_linear``. A stray
             ``lookahead_anchor=true`` with ``lookahead_mode=disabled`` (or
             vice-versa) is inert by design.
         lookahead_strength (float): Projection horizon multiplier ``alpha``.
@@ -160,6 +167,29 @@ class CommEffAnchorConfig(BaseConfig):
             (stale-weights + fresh-rollouts is an unsupported ablation).
             ``"self_generate"`` is a RESERVED seam (the anchor generating its
             own rollouts) and is rejected as not implemented.
+        warmup_mode (str): What the anchor does at fires BEFORE the look-ahead
+            projector is ready (fewer than the required source snapshots
+            retained). ``"stale_correct"`` (DEFAULT, today's exact behavior):
+            the anchor computes ``M`` from the raw stale ``theta[t-K]`` + paired
+            stale rollouts and the merger folds it every ``spectral.cadence``
+            ticks — the k-collapse warmup that A0 suffered. ``"no_correct"``:
+            do ALL ring/snapshot bookkeeping but SKIP the anchor clone fwd/bwd
+            and the ``M`` update entirely, so ``M`` stays cold and the merger's
+            cold-M guard passes the fast gradient through UNCHANGED (no
+            correction) until the FIRST projected fire. Only meaningful with the
+            look-ahead projector on; requires ``owns_q=false`` (a skipped anchor
+            pass must not be the sole Q updater). Validated against
+            {stale_correct, no_correct}.
+        lookahead_min_snapshots (int): Minimum ring snapshots required before the
+            projector engages. ``-1`` (DEFAULT): the mode's full source count
+            (2 for fixed_linear and the step-scale learned mode, 3 for the offset
+            learned mode) — today's behavior. A
+            concrete value in ``[2, mode_n_points]`` lets the projector engage at
+            the earliest mathematically-legal fire: ``2`` projects from fire 2
+            (the first fire at which two ``>=K``-stale snapshots exist — fire 1
+            can NEVER project, a line needs 2 points). Retention is unchanged
+            (the ring still holds ``mode_n_points`` for the learned residual);
+            only readiness is relaxed. Requires the projector enabled.
     """
 
     enabled: bool = False
@@ -172,6 +202,8 @@ class CommEffAnchorConfig(BaseConfig):
     lookahead_mode: str = "disabled"
     lookahead_strength: float = 1.0
     lookahead_rollout_source: str = "auto"
+    warmup_mode: str = "stale_correct"
+    lookahead_min_snapshots: int = -1
 
 
 @dataclass
@@ -899,6 +931,7 @@ class CommEffConfig(BaseConfig):
             LOOKAHEAD_MODES,
             LOOKAHEAD_ROLLOUT_SOURCES,
             lookahead_enabled,
+            lookahead_num_source_points,
         )
 
         if not isinstance(self.anchor.lookahead_anchor, bool):
@@ -934,6 +967,56 @@ class CommEffConfig(BaseConfig):
                 "'disabled'): stale weights + fresh rollouts is an unsupported ablation. "
                 "Leave it 'auto' to get current_step automatically whenever the projector is on."
             )
+        # --- warmup behavior knobs (E2/E3): what the anchor does at fires
+        # BEFORE the look-ahead projector is ready, and how early it engages.
+        # All additive — the defaults (stale_correct, -1) reproduce today's
+        # behavior byte-identically.
+        if self.anchor.warmup_mode not in ("stale_correct", "no_correct"):
+            raise ValueError(
+                f"comm_eff.anchor.warmup_mode must be one of (stale_correct, no_correct); "
+                f"got {self.anchor.warmup_mode!r}"
+            )
+        if self.anchor.warmup_mode == "no_correct":
+            # no_correct SKIPS the anchor pass while warming, so M is never set
+            # during the wait. That is only coherent when there IS a projector to
+            # later set M (else M would never exist — a different ablation:
+            # "anchor disabled").
+            if not lookahead_enabled(self.anchor):
+                raise ValueError(
+                    "comm_eff.anchor.warmup_mode='no_correct' requires the look-ahead projector ON "
+                    "(lookahead_anchor=true AND lookahead_mode != 'disabled'): the skipped warmup "
+                    "leaves M cold, so M is only ever set by the FIRST projected fire. With the "
+                    "projector off, M would never exist — that is 'anchor disabled', a different "
+                    "ablation. Enable the projector or use warmup_mode='stale_correct'."
+                )
+            # Skipping the anchor pass means it cannot be the Q updater during the
+            # warmup window; owns_q=true would then leave Q at its cold random
+            # bootstrap for the whole wait (the step-1..9 blowup A0 suffered).
+            if self.anchor.owns_q:
+                raise ValueError(
+                    "comm_eff.anchor.warmup_mode='no_correct' requires anchor.owns_q=false. With "
+                    "owns_q=true the anchor is the ONLY Q updater, but no_correct SKIPS the anchor "
+                    "pass during warmup, so Q would stay frozen at its random bootstrap basis for "
+                    "the entire wait (the cold-Q blowup). Set anchor.owns_q=false so the FAST net "
+                    "owns and refreshes Q (E1)."
+                )
+        # lookahead_min_snapshots: -1 (mode default) or a concrete count in
+        # [2, mode_n_points]. Any non-(-1) value requires the projector on.
+        if self.anchor.lookahead_min_snapshots != -1:
+            if not lookahead_enabled(self.anchor):
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_min_snapshots is only meaningful with the look-ahead "
+                    "projector ON (lookahead_anchor=true AND lookahead_mode != 'disabled'); got "
+                    f"{self.anchor.lookahead_min_snapshots} with the projector off. Leave it -1."
+                )
+            _n_points = lookahead_num_source_points(self.anchor)
+            if not (2 <= self.anchor.lookahead_min_snapshots <= _n_points):
+                raise ValueError(
+                    f"comm_eff.anchor.lookahead_min_snapshots must be -1 (mode default) or in "
+                    f"[2, {_n_points}] for lookahead_mode={self.anchor.lookahead_mode!r}; got "
+                    f"{self.anchor.lookahead_min_snapshots}. (Fire 1 can NEVER project — a line "
+                    f"needs 2 points — so 2 is the earliest legal value.)"
+                )
         # Storage-layer enum.
         if self.spectral.ema_device not in ("gpu", "cpu"):
             raise ValueError(

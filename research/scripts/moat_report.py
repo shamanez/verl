@@ -663,12 +663,162 @@ def _delta_series(reg, methods):
     return out
 
 
+def _accuracy_series_with_arms(reg, methods, arms):
+    """Base-method accuracy-vs-horizon + each #49 arm whose cadence matches `reg`
+    (arm dirs are single-cadence; per-step arms overlay the per-step chart only)."""
+    out = _accuracy_series(reg, methods)
+    cad = reg["meta"].get("cadence")
+    for arm in arms:
+        areg = arm["reg"]
+        if areg["meta"].get("cadence") != cad:
+            continue
+        a = areg["vis"].get("a_accuracy_vs_horizon", {})
+        for m in areg["meta"].get("methods", []):
+            s = a.get(m)
+            if s and s.get("h") and s.get("ratio_median"):
+                out[arm["label"]] = list(zip(s["h"], s["ratio_median"]))
+                break
+    return out
+
+
 def _table(headers, rows_html):
     return ("<table><tr>" + "".join(f'<th class="l">{ESC(h)}</th>' for h in headers)
             + "</tr>" + "".join(rows_html) + "</table>")
 
 
-def render(S, T, out_path, explainer_path=None):
+# ---- #49 self-correcting-arm rendering (ranked accuracy + state-cost tables) -------
+def load_arms(arm_specs: list) -> list:
+    """Parse repeatable `--arm-dir LABEL=PATH` into [{label, reg}]. A #49 arm dir is a
+    normal scorecard whose adaptive method carries the new adaptive_mode/knobs in its
+    rows + meta (see moat_scorecard rows-v49.1)."""
+    arms = []
+    for spec in arm_specs or []:
+        if "=" in spec:
+            label, path = spec.split("=", 1)
+        else:
+            label, path = os.path.basename(spec.rstrip("/")), spec
+        reg = _load(path)
+        if reg:
+            arms.append({"label": label.strip(), "reg": reg})
+    return arms
+
+
+def _arm_row(arm, d, h):
+    """The representative GLOBAL op-point row for an arm dir = its adaptive method
+    (the one carrying adaptive_mode) at (d,h)."""
+    reg = arm["reg"]
+    for m in reg["meta"].get("methods", []):
+        r = _g(reg, m, d, h)
+        if r and r.get("adaptive_mode") is not None:
+            return m, r
+    # fall back to the first needs_fit-looking method present
+    for m in reg["meta"].get("methods", []):
+        r = _g(reg, m, d, h)
+        if r:
+            return m, r
+    return None, {}
+
+
+def _arm_knob_str(r) -> str:
+    """Compact knob descriptor for an arm's op-point row."""
+    mode = r.get("adaptive_mode")
+    if not mode:
+        return "fixed"
+    bits = [mode]
+    if r.get("adaptive_lookback_k") is not None:
+        bits.append(f"K={r['adaptive_lookback_k']}")
+    if r.get("coef_momentum") is not None:
+        bits.append(f"β={r['coef_momentum']}")
+    if r.get("adaptive_warmup"):
+        bits.append(f"W={r['adaptive_warmup']}")
+    if r.get("adaptive_gain_schedule") not in (None, "none"):
+        bits.append(f"gain={r['adaptive_gain_schedule']}")
+    return " ".join(bits)
+
+
+def ranked_accuracy_table(ref, arms):
+    """DELIVERABLE A: rank ALL base methods + #49 arms by OOS accuracy (pred_evr_pooled)
+    at the primary op-point GLOBAL row. Names the single best-fitting method."""
+    if not ref:
+        return "", None
+    d, h = ref["meta"]["operating_point"]
+    entries = []          # (pred_evr, name, ratio, h_safe, state_cost, knob, is_arm)
+    for m in ref["meta"].get("methods", []):
+        r = _g(ref, m, d, h)
+        if not r:
+            continue
+        entries.append((r.get("pred_evr_pooled"), m, r.get("weight_proj_ratio_median"),
+                        _h_safe(ref, m), r.get("state_cost"), _arm_knob_str(r), False))
+    for arm in arms:
+        m, r = _arm_row(arm, d, h)
+        if not r:
+            continue
+        entries.append((r.get("pred_evr_pooled"), arm["label"],
+                        r.get("weight_proj_ratio_median"), _h_safe(arm["reg"], m),
+                        r.get("state_cost"), _arm_knob_str(r), True))
+
+    def _key(e):
+        v = e[0]
+        return v if (v is not None and math.isfinite(v)) else -1e18
+    entries.sort(key=_key, reverse=True)
+    best = entries[0][1] if entries else None
+    body = []
+    for rank, (pev, name, ratio, hsafe, sc, knob, is_arm) in enumerate(entries, 1):
+        cls = ' class="hit"' if rank == 1 else ""
+        star = " ★" if rank == 1 else ""
+        body.append(
+            f"<tr{cls}><td class='l'>{rank}</td>"
+            f"<td class='l'>{ESC(name)}{'  (arm)' if is_arm else ''}{star}</td>"
+            f"<td class='l'>{ESC(knob)}</td>"
+            f"<td>{_fmt(pev, 4)}</td><td>{_fmt(ratio, 4)}</td>"
+            f"<td>{_fmt(hsafe, 0)}</td><td>{_fmt(sc, 0)}</td></tr>")
+    tbl = _table(["rank", "method / arm", "knobs", "pred_evr_pooled ↑",
+                  "op ratio ↓", "h_safe", "state"], body)
+    return f'<div class="tblwrap">{tbl}</div>', best
+
+
+def state_cost_table(ref, arms):
+    """State-cost-vs-gain: each arm vs the fixed #47 damped-linear bar at the op-point
+    (Δratio<0 and Δpred_evr>0 = a gain that must justify the arm's ANCHOR state)."""
+    if not ref:
+        return ""
+    d, h = ref["meta"]["operating_point"]
+    bar = _g(ref, "damped_linear", d, h)
+    bar_ratio = bar.get("weight_proj_ratio_median")
+    bar_evr = bar.get("pred_evr_pooled")
+    inc = _g(ref, "adaptive_linear", d, h)   # expanding-window incumbent
+
+    def _d(a, b):
+        if a is None or b is None or not (math.isfinite(a) and math.isfinite(b)):
+            return None
+        return a - b
+    rows = []
+    refs = [("damped_linear (#47 fixed bar)", bar, "fixed"),
+            ("adaptive_linear (expanding incumbent)", inc, _arm_knob_str(inc))]
+    seen = []
+    for lbl, r, knob in refs:
+        if r:
+            seen.append((lbl, r, knob))
+    for arm in arms:
+        m, r = _arm_row(arm, d, h)
+        if r:
+            seen.append((arm["label"], r, _arm_knob_str(r)))
+    for lbl, r, knob in seen:
+        ratio = r.get("weight_proj_ratio_median")
+        evr = r.get("pred_evr_pooled")
+        rows.append(
+            f"<tr><td class='l'>{ESC(lbl)}</td><td class='l'>{ESC(knob)}</td>"
+            f"<td>{_fmt(r.get('state_cost'), 0)}</td>"
+            f"<td>{_fmt(evr, 4)}</td><td>{_fmt(ratio, 4)}</td>"
+            f"<td>{_fmt(_d(ratio, bar_ratio), 4)}</td>"
+            f"<td>{_fmt(_d(evr, bar_evr), 4)}</td></tr>")
+    tbl = _table(["method / arm", "knobs", "state (#scalars)", "pred_evr_pooled",
+                  "op ratio", "Δratio vs bar", "Δpred_evr vs bar"], rows)
+    return f'<div class="tblwrap">{tbl}</div>'
+
+
+def render(S, T, out_path, explainer_path=None, arms=None):
+    arms = arms or []
     secs = load_explainer(explainer_path)
     figcaps = parse_figure_caps(secs.get("Reading each figure", []))
 
@@ -707,6 +857,28 @@ def render(S, T, out_path, explainer_path=None):
              f'Ratio &lt; 1 ⇒ projection beats holding the stale weights.</p>')
     for reg, tag in ((S, "regime S / per-step"), (T, "regime T / per-tick")):
         P.append(fidelity_banner(reg, tag))
+
+    # ---- DELIVERABLE A: ranked OOS accuracy (front-and-centre) + state-cost -----
+    ref_rank = S or T
+    if ref_rank:
+        tbl_html, best = ranked_accuracy_table(ref_rank, arms)
+        if tbl_html:
+            P.append(H2("Ranked OOS projection accuracy (DELIVERABLE A)"))
+            regime = "per-step (primary)" if S else "per-tick"
+            opd, oph = ref_rank["meta"]["operating_point"]
+            P.append(f'<p class="small">All base methods'
+                     f'{" + #49 self-correcting arms" if arms else ""} ranked by out-of-sample '
+                     f'projection accuracy (<code>pred_evr_pooled</code>, higher is better) at the '
+                     f'{regime} operating point Δ={opd}, h={oph} (GLOBAL median row). '
+                     f'<b>Best-fitting method: {ESC(str(best))}</b>. Ratio &lt; 1 ⇒ beats holding '
+                     f'the stale weights; state = # scalars ANCHOR carries.</p>')
+            P.append(tbl_html)
+            sc_html = state_cost_table(ref_rank, arms)
+            if sc_html:
+                P.append("<p class='small'><b>State-cost vs gain</b> — each arm vs the fixed "
+                         "#47 damped-linear bar (Δratio &lt; 0 AND Δpred_evr &gt; 0 = a real gain "
+                         "that must justify the arm's extra ANCHOR state).</p>")
+                P.append(sc_html)
 
     # ---- How to read this report (embedded prose) ------------------------------
     intro = prose_titled("What this analysis is",
@@ -790,12 +962,12 @@ def render(S, T, out_path, explainer_path=None):
     if S:
         methods = S["meta"]["methods"]
         P.append('<div class="col"><h3>Regime S — per-step (global steps), Δ=%d</h3>%s</div>'
-                 % (op_s[0], svg_line(_accuracy_series(S, methods),
+                 % (op_s[0], svg_line(_accuracy_series_with_arms(S, methods, arms),
                                       "median ratio vs h (global steps)", "horizon h (global steps)")))
     if T:
         methods = T["meta"]["methods"]
         P.append('<div class="col"><h3>Regime T — per-tick, Δ=%d</h3>%s</div>'
-                 % (op_t[0], svg_line(_accuracy_series(T, methods),
+                 % (op_t[0], svg_line(_accuracy_series_with_arms(T, methods, arms),
                                       "median ratio vs h (ticks)", "horizon h (ticks)")))
     P.append('</div>')
     P.append(cap("accuracy"))
@@ -1023,14 +1195,19 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--explainer", default="",
                     help="report_explainer.md (default: sibling of --out); prose degrades if absent")
+    ap.add_argument("--arm-dir", action="append", default=[], metavar="LABEL=PATH",
+                    help="#49 self-correcting-arm scorecard dir to fold into the ranked "
+                         "accuracy + state-cost tables (repeatable). Op-point must match "
+                         "--perstep. Omit for the base-only report (unchanged output).")
     args = ap.parse_args()
     S = _load(args.perstep)
     T = _load(args.pertick)
     if not S and not T:
         raise SystemExit("need at least one of --perstep / --pertick")
+    arms = load_arms(args.arm_dir)
     explainer = args.explainer or os.path.join(os.path.dirname(os.path.abspath(args.out)),
                                                "report_explainer.md")
-    render(S, T, args.out, explainer)
+    render(S, T, args.out, explainer, arms=arms)
 
 
 if __name__ == "__main__":

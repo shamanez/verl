@@ -89,8 +89,9 @@ SCHEMA_VERSION = "moat-scorecard-v47.1"
 # so v1 panels (1-strip small-k matrices) regather instead of loading stale.
 FAST_SCHEMA_VERSION = "moat-scorecard-fast-v2"
 # row-schema evolution is versioned SEPARATELY from the stats cache
-ROW_SCHEMA_VERSION = "moat-scorecard-rows-v49.0"
+ROW_SCHEMA_VERSION = "moat-scorecard-rows-v49.1"
 ROW_SCHEMA_V48 = "moat-scorecard-rows-v48.0"
+ROW_SCHEMA_V49 = "moat-scorecard-rows-v49.0"   # CORE-4 ladder (pre self-correcting arms)
 DEFAULT_MANIFEST = "runs/EXP-57/regimeA/weights/full_manifest.jsonl"
 DEFAULT_OUT = "runs/MOAT-45-ANALYSIS/scorecard"
 PARITY_RTOL = 1e-6          # off-path parity: surrogate-path vs direct-tensor-path
@@ -142,7 +143,16 @@ ROW_KEYS_V48 = [
 ]
 # rows-v49.0 core-ladder superset (nullable where N/A)
 ROW_KEYS_V49 = ["lookback_ticks", "lam2_star"]
-REQUIRED_ROW_KEYS = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48 + ROW_KEYS_V49
+# rows-v49.1 self-correcting-arm superset (#49; nullable — populated only on the
+# needs_fit adaptive arms). adaptive_mode = the online-fit mode; adaptive_lookback_k
+# = bounded-last-K fit window (rolling_ls_k only); coef_momentum = heavy-ball beta
+# (ewma_momentum only); adaptive_warmup / adaptive_gain_schedule = trust schedule;
+# state_cost = # scalars ANCHOR carries for that arm (1 global scalar / 2 vel+curv or
+# coef+momentum). All null for the fixed/naive/hold_stale rows.
+ROW_KEYS_V49_1 = ["adaptive_mode", "adaptive_lookback_k", "coef_momentum",
+                  "adaptive_warmup", "adaptive_gain_schedule", "state_cost"]
+REQUIRED_ROW_KEYS = (REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48
+                     + ROW_KEYS_V49 + ROW_KEYS_V49_1)
 
 # base visuals (#45) present in every regime; #47 adds the lambda / R² visuals.
 VISUAL_KEYS = ["a_accuracy_vs_horizon", "b_delta_sensitivity",
@@ -1115,8 +1125,53 @@ def damped2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mu_grid) -> d
             "lam2_star": None, "lam2_star_med": None}
 
 
+def _gain_factor(schedule: str, gi: int, warmup: int) -> float:
+    """Multiplicative trust gain g(gi) on the online coefficient, gi = 0-based index
+    among the windows that SURVIVE warmup. `none` => 1 (identity → nests the base mode).
+    `linear_ramp` ramps 0→1 over R=max(warmup,1) trusted windows then holds 1.
+    `one_over_t` = 1 - 1/(gi+2): a warmup-independent ramp that asymptotes to 1."""
+    if schedule == "linear_ramp":
+        R = max(int(warmup), 1)
+        return min(1.0, float(gi + 1) / float(R))
+    if schedule == "one_over_t":
+        return 1.0 - 1.0 / float(gi + 2)
+    return 1.0
+
+
+def _apply_warmup_gain(arrs: list, warmup: int, gain_schedule: str) -> list:
+    """#49 arm-D post-processing on per-window coefficient array(s) (any mode).
+    Drops the first `warmup` SCORED windows (NaN → counted as warm-up) and scales the
+    rest by `_gain_factor`. Scored ordering is taken from arrs[0] (the primary coef);
+    a 2-param arm passes [lam_v, lam_c] so both are gated/scaled on the SAME windows.
+    NO extra ANCHOR state: the schedule is deterministic in the fire index. A no-op at
+    (warmup=0, gain_schedule='none') — the caller guards on that so plain modes stay
+    byte-identical."""
+    primary = arrs[0]
+    scored_idx = [j for j in range(primary.size) if np.isfinite(primary[j])]
+    out = [a.copy() for a in arrs]
+    for i, j in enumerate(scored_idx):
+        if i < warmup:
+            for a in out:
+                a[j] = np.nan
+        elif gain_schedule != "none":
+            g = _gain_factor(gain_schedule, i - warmup, warmup)
+            for a in out:
+                a[j] *= g
+    return out
+
+
 def adaptive_cell(saa, sab, sbb, delta: int, h: int, mode: str,
-                  ewma_decay: float, coef_clip: float) -> dict:
+                  ewma_decay: float, coef_clip: float,
+                  lookback: int = 0, momentum: float = 0.0,
+                  warmup: int = 0, gain_schedule: str = "none") -> dict:
+    """Online/adaptive LINEAR arm. modes:
+      rolling_ls     — EXPANDING all-causal least squares (incumbent, np.cumsum)
+      rolling_ls_k   — bounded-last-K windowed LS (#49 arm A; K<=0 or K>=nw == expanding)
+      ewma           — EWMA of the delta-Gram stats then solve (low-state incumbent)
+      ewma_momentum  — ewma target + heavy-ball momentum on the coefficient (#49 arm C;
+                       beta=0 == ewma). `lookback`/`momentum` select the K / beta; the
+                       optional `warmup`/`gain_schedule` (#49 arm D) post-process ANY
+                       mode's coefficient sequence with no extra ANCHOR state."""
     nw = int(saa.size)
     kappa0 = float(h) / float(delta)
     inv_k = float(delta) / float(h)
@@ -1129,7 +1184,24 @@ def adaptive_cell(saa, sab, sbb, delta: int, h: int, mode: str,
             if fe < 0 or csaa[fe] <= 0.0:
                 continue
             lam[j] = float(np.clip(inv_k * csab[fe] / csaa[fe], -coef_clip, coef_clip))
-    else:
+    elif mode == "rolling_ls_k":
+        # bounded-last-K expanding LS: windowed cumsum over the last K completed
+        # causal fires [start..fe]. K<=0 or K>fe => start=0 == the expanding arm
+        # (the nesting invariant). Clip identically to rolling_ls.
+        csaa = np.cumsum(saa)
+        csab = np.cumsum(sab)
+        K = int(lookback)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            if fe < 0:
+                continue
+            start = 0 if (K <= 0 or fe - K + 1 < 0) else fe - K + 1
+            waa = csaa[fe] - (csaa[start - 1] if start > 0 else 0.0)
+            wab = csab[fe] - (csab[start - 1] if start > 0 else 0.0)
+            if waa <= 0.0:
+                continue
+            lam[j] = float(np.clip(inv_k * wab / waa, -coef_clip, coef_clip))
+    elif mode == "ewma":
         Ah = Bh = None
         w_next = 0
         rho = float(ewma_decay)
@@ -1145,6 +1217,43 @@ def adaptive_cell(saa, sab, sbb, delta: int, h: int, mode: str,
             if Ah is None or Ah <= 0.0:
                 continue
             lam[j] = float(np.clip(inv_k * Bh / Ah, -coef_clip, coef_clip))
+    elif mode == "ewma_momentum":
+        # ewma target coefficient + heavy-ball momentum on the coefficient sequence.
+        # velocity[j] = beta*velocity[j-1] + (target - lam_prev); lam = lam_prev + velocity.
+        # beta=0 => lam == clip(target) == plain ewma (the nesting invariant). Clip is
+        # applied AFTER the momentum update (per plan Notes).
+        Ah = Bh = None
+        w_next = 0
+        rho = float(ewma_decay)
+        beta = float(momentum)
+        lam_prev = None
+        vel = 0.0
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            while w_next <= fe:
+                if Ah is None:
+                    Ah, Bh = float(saa[w_next]), float(sab[w_next])
+                else:
+                    Ah = rho * Ah + (1.0 - rho) * float(saa[w_next])
+                    Bh = rho * Bh + (1.0 - rho) * float(sab[w_next])
+                w_next += 1
+            if Ah is None or Ah <= 0.0:
+                continue
+            target = inv_k * Bh / Ah
+            if lam_prev is None:
+                lam_out = target
+                vel = 0.0
+            else:
+                vel = beta * vel + (target - lam_prev)
+                lam_out = lam_prev + vel
+            lam_out = float(np.clip(lam_out, -coef_clip, coef_clip))
+            lam[j] = lam_out
+            lam_prev = lam_out
+    else:
+        raise ValueError(f"adaptive_cell: unknown mode {mode!r}")
+    if warmup > 0 or gain_schedule != "none":
+        lam = _apply_warmup_gain([lam], warmup, gain_schedule)[0]
+    state_cost = 2 if (mode == "ewma_momentum" and float(momentum) != 0.0) else 1
     scored = np.isfinite(lam)
     n_warmup = int(nw - scored.sum())
     ratios = np.full(nw, np.nan); skills = np.full(nw, np.nan)
@@ -1179,11 +1288,14 @@ def adaptive_cell(saa, sab, sbb, delta: int, h: int, mode: str,
             "n_warmup": n_warmup, "n_oos_scored": nw - n_warmup,
             "lam_oracle": lam_oracle, "oracle_med": oracle_med,
             "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
-            "insample": None, "lam2_star": None, "lam2_star_med": None}
+            "insample": None, "lam2_star": None, "lam2_star_med": None,
+            "state_cost": state_cost}
 
 
 def adaptive2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mode: str,
-                   ewma_decay: float, coef_clip: float) -> dict:
+                   ewma_decay: float, coef_clip: float,
+                   lookback: int = 0, momentum: float = 0.0,
+                   warmup: int = 0, gain_schedule: str = "none") -> dict:
     nw = int(s11.size)
     s, q = _quad_sq(delta, h)
     guu = s11
@@ -1221,7 +1333,27 @@ def adaptive2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mode: str,
                 continue
             lam_v[j] = float(np.clip(lv, -coef_clip, coef_clip))
             lam_c[j] = float(np.clip(lc, -coef_clip, coef_clip))
-    else:
+    elif mode == "rolling_ls_k":
+        # #49 arm B: JOINT velocity+curvature 2-param LS over the last K completed
+        # causal fires (bounded-last-K windowed cumsum). K<=0 or K>fe => start=0 ==
+        # the expanding 2-param arm (the nesting invariant). Same fe>=1 + det-guard.
+        cguu, cguw, cgww = np.cumsum(guu), np.cumsum(guw), np.cumsum(gww)
+        cr1, cr2 = np.cumsum(r1), np.cumsum(r2)
+        K = int(lookback)
+        for j in range(nw):
+            fe = _oos_fit_end(j, h)
+            if fe < 1:
+                continue
+            start = 0 if (K <= 0 or fe - K + 1 < 0) else fe - K + 1
+
+            def _w(c):
+                return c[fe] - (c[start - 1] if start > 0 else 0.0)
+            lv, lc = _solve(_w(cguu), _w(cguw), _w(cgww), _w(cr1), _w(cr2))
+            if lv is None:
+                continue
+            lam_v[j] = float(np.clip(lv, -coef_clip, coef_clip))
+            lam_c[j] = float(np.clip(lc, -coef_clip, coef_clip))
+    elif mode == "ewma":
         st = None
         w_next = 0
         rho = float(ewma_decay)
@@ -1239,6 +1371,14 @@ def adaptive2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mode: str,
                 continue
             lam_v[j] = float(np.clip(lv, -coef_clip, coef_clip))
             lam_c[j] = float(np.clip(lc, -coef_clip, coef_clip))
+    else:
+        # ewma_momentum is LINEAR-only (arm C); the 2-param cell supports the
+        # expanding / bounded-K / ewma fits. A clear error beats silent wrong numbers.
+        raise ValueError(
+            f"adaptive2_cell: unsupported mode {mode!r} "
+            f"(use rolling_ls | rolling_ls_k | ewma)")
+    if warmup > 0 or gain_schedule != "none":
+        lam_v, lam_c = _apply_warmup_gain([lam_v, lam_c], warmup, gain_schedule)
     scored = np.isfinite(lam_v)
     n_warmup = int(nw - scored.sum())
     n_fb = n_fallback[0]
@@ -1280,7 +1420,7 @@ def adaptive2_cell(s11, s12, s22, s1b, s2b, sbb, delta: int, h: int, mode: str,
             "lam_oracle": lam_oracle, "oracle_med": oracle_med,
             "pred_evr_pooled": M.pooled_evr(sum_e2, sum_b2),
             "insample": None, "lam2_star": lam_c, "lam2_star_med": lam_c_med,
-            "n_det_fallback": n_fb}
+            "n_det_fallback": n_fb, "state_cost": 2}
 
 
 def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
@@ -1321,6 +1461,11 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
     amode = ctx.get("adaptive_mode", "rolling_ls")
     adecay = float(ctx.get("ewma_decay", 0.9))
     aclip = float(ctx.get("coef_clip", 2.0))
+    # #49 self-correcting-arm knobs (defaults keep rolling_ls/ewma byte-identical)
+    alook = int(ctx.get("lookback", 0))
+    amom = float(ctx.get("momentum", 0.0))
+    awarm = int(ctx.get("warmup", 0))
+    again = ctx.get("gain_schedule", "none")
     groups = build_groups(names)
     # per-matrix prefix sums once; per-matrix per-cell block sums once
     cells = [(d, h) for d in deltas for h in hs]
@@ -1394,10 +1539,12 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     dmp = damped2_cell(s11, s12, s22, s1b, s2b, sb6, delta, h,
                                        ctx["mu_grid"])
                 elif mname == "adaptive_linear":
-                    dmp = adaptive_cell(saa, sab, sbb, delta, h, amode, adecay, aclip)
+                    dmp = adaptive_cell(saa, sab, sbb, delta, h, amode, adecay, aclip,
+                                        alook, amom, awarm, again)
                 elif mname == "adaptive_second_order":
                     dmp = adaptive2_cell(s11, s12, s22, s1b, s2b, sb6, delta, h,
-                                         amode, adecay, aclip)
+                                         amode, adecay, aclip,
+                                         alook, amom, awarm, again)
                 if dmp is not None:
                     ratios, skills = dmp["ratios"], dmp["skills"]
                     dcoss, stales, projs = dmp["dcoss"], dmp["stales"], dmp["projs"]
@@ -1484,6 +1631,15 @@ def compute_rows(stats: dict, names: list[str], n_ticks: int, band: int,
                     "r2_population": r2_population,
                     "n_excluded_range": gr2_nrange, "n_excluded_unique": gr2_nunique,
                     "sample_min_runs": g_min_runs,
+                    # ---- rows-v49.1 self-correcting-arm superset (adaptive only) ----
+                    "adaptive_mode": (amode if meth.needs_fit else None),
+                    "adaptive_lookback_k": (alook if (meth.needs_fit
+                                            and amode == "rolling_ls_k") else None),
+                    "coef_momentum": (amom if (meth.needs_fit
+                                      and amode == "ewma_momentum") else None),
+                    "adaptive_warmup": (awarm if meth.needs_fit else None),
+                    "adaptive_gain_schedule": (again if meth.needs_fit else None),
+                    "state_cost": (dmp.get("state_cost") if dmp else None),
                 }
                 rows.append(row)
                 cell_row_map[(delta, h)] = row
@@ -2688,6 +2844,122 @@ def run_selftest(args) -> int:
         f"med {medE2:.2e} <= adaptive1 med {medE1:.2e} + 1e-9 (collinear u/w -> "
         f"det-guard fallback path, {cellE2['n_det_fallback']} fallbacks)")
 
+    # ============ #49 self-correcting-arm invariants (one targeted per new arm) ====
+    # Each bundles the plan's hard facets for that arm: limiting-case NESTING (the
+    # bounded/momentum/schedule knob reduces to a known incumbent at its degenerate
+    # setting), known-coefficient REGRESSION RECOVERY, NO-PEEK prefix-stability, and
+    # STATE-COST accounting. Reuses the exponential fixture (sumsE @ dE=2,hE=1;
+    # lam_true; cellR = expanding rolling_ls incumbent), the exact-quadratic fixture
+    # (s6Q; cellQ = expanding 2-param incumbent), and the syn (2,2) block sums
+    # (saaP/sabP/sbbP; jK0=size//2) for the future-corruption probe (h=2 -> fe=j-3).
+
+    # -- arm A: bounded-last-K rolling-LS (linear) -----------------------------------
+    cellAk_big = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                               "rolling_ls_k", 0.9, 2.0, lookback=10_000)
+    nestA = np.array_equal(cellAk_big["lam_star"], cellR["lam_star"], equal_nan=True)
+    cellAk = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                           "rolling_ls_k", 0.9, 2.0, lookback=3)
+    scAk = np.isfinite(cellAk["lam_star"])
+    worst_lamAk = (float(np.max(np.abs(cellAk["lam_star"][scAk] - lam_true)))
+                   if scAk.any() else float("inf"))
+    worst_ratAk = float(np.nanmax(cellAk["ratios"])) if scAk.any() else float("inf")
+    saaKc, sabKc = saaP.copy(), sabP.copy()
+    jK0 = int(saaP.size // 2)
+    saaKc[jK0:] *= 10.0
+    sabKc[jK0:] *= 10.0
+    lamK_base = adaptive_cell(saaP, sabP, sbbP, 2, 2, "rolling_ls_k",
+                              0.9, 2.0, lookback=4)["lam_star"]
+    lamK_cor = adaptive_cell(saaKc, sabKc, sbbP, 2, 2, "rolling_ls_k",
+                             0.9, 2.0, lookback=4)["lam_star"]
+    pastK = np.array([j for j in range(saaP.size) if j - 2 - 1 < jK0])
+    peekA_ok = np.array_equal(lamK_base[pastK], lamK_cor[pastK], equal_nan=True)
+    inv["armA_rolling_ls_k"] = (
+        nestA and worst_lamAk <= 1e-9 and worst_ratAk <= 1e-5 and peekA_ok
+        and cellAk["state_cost"] == 1,
+        f"nesting K>=nw==expanding lam bit-identical={nestA}; bounded-K=3 recovers "
+        f"lam*: worst |lam-lam*|={worst_lamAk:.1e} (tol 1e-9), worst ratio "
+        f"{worst_ratAk:.2e} (tol 1e-5, prefix floor); no-peek prefix stable "
+        f"(future x10)={peekA_ok}; state_cost={cellAk['state_cost']} (want 1)")
+
+    # -- arm B: JOINT velocity+curvature bounded-K 2-param LS ------------------------
+    cellBk_big = adaptive2_cell(*s6Q, 2, 2, "rolling_ls_k", 0.9, 2.0, lookback=10_000)
+    nestB = (np.array_equal(cellBk_big["lam_star"], cellQ["lam_star"], equal_nan=True)
+             and np.array_equal(cellBk_big["lam2_star"], cellQ["lam2_star"],
+                                equal_nan=True))
+    cellBk = adaptive2_cell(*s6Q, 2, 2, "rolling_ls_k", 0.9, 2.0, lookback=8)
+    scBk = np.isfinite(cellBk["lam_star"])
+    worst_lvBk = (float(np.max(np.abs(cellBk["lam_star"][scBk] - 1.0)))
+                  if scBk.any() else float("inf"))
+    worst_lcBk = (float(np.max(np.abs(cellBk["lam2_star"][scBk] - 1.0)))
+                  if scBk.any() else float("inf"))
+    worst_ratBk = float(np.nanmax(cellBk["ratios"])) if scBk.any() else float("inf")
+    inv["armB_joint_vc_regression_k"] = (
+        nestB and worst_lvBk <= 1e-6 and worst_lcBk <= 1e-6 and worst_ratBk <= 1e-6
+        and cellBk["state_cost"] == 2 and cellBk["n_det_fallback"] == 0,
+        f"nesting K>=nw==expanding (lv,lc) bit-identical={nestB}; bounded-K=8 recovers "
+        f"(1,1): worst |lv-1|={worst_lvBk:.1e} |lc-1|={worst_lcBk:.1e} (tol 1e-6), "
+        f"worst ratio {worst_ratBk:.2e} (tol 1e-6); state_cost={cellBk['state_cost']} "
+        f"(want 2), det-fallbacks={cellBk['n_det_fallback']} (want 0)")
+
+    # -- arm C: EWMA + heavy-ball momentum on the coefficient ------------------------
+    cellCm0 = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                            "ewma_momentum", 0.9, 2.0, momentum=0.0)
+    cellW_ref = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE, "ewma", 0.9, 2.0)
+    nestC = np.array_equal(cellCm0["lam_star"], cellW_ref["lam_star"], equal_nan=True)
+    cellCm = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                           "ewma_momentum", 0.9, 2.0, momentum=0.5)
+    scCm = np.isfinite(cellCm["lam_star"])
+    worst_lamCm = (float(np.max(np.abs(cellCm["lam_star"][scCm] - lam_true)))
+                   if scCm.any() else float("inf"))
+    saaCc, sabCc = saaP.copy(), sabP.copy()
+    jC0 = int(saaP.size // 2)
+    saaCc[jC0:] *= 10.0
+    sabCc[jC0:] *= 10.0
+    lamC_base = adaptive_cell(saaP, sabP, sbbP, 2, 2, "ewma_momentum",
+                              0.9, 2.0, momentum=0.5)["lam_star"]
+    lamC_cor = adaptive_cell(saaCc, sabCc, sbbP, 2, 2, "ewma_momentum",
+                             0.9, 2.0, momentum=0.5)["lam_star"]
+    pastC = np.array([j for j in range(saaP.size) if j - 2 - 1 < jC0])
+    peekC_ok = np.array_equal(lamC_base[pastC], lamC_cor[pastC], equal_nan=True)
+    inv["armC_ewma_momentum"] = (
+        nestC and worst_lamCm <= 1e-6 and peekC_ok
+        and cellCm0["state_cost"] == 1 and cellCm["state_cost"] == 2,
+        f"nesting beta=0==plain ewma bit-identical={nestC}; beta=0.5 converges to "
+        f"lam*: worst |lam-lam*|={worst_lamCm:.1e} (tol 1e-6); no-peek prefix stable="
+        f"{peekC_ok}; state_cost beta0={cellCm0['state_cost']}(want 1) "
+        f"beta.5={cellCm['state_cost']}(want 2)")
+
+    # -- arm D: warmup + gain schedule (layered on any base mode) --------------------
+    cellD0 = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                           "rolling_ls", 0.9, 2.0, warmup=0, gain_schedule="none")
+    nestD = np.array_equal(cellD0["lam_star"], cellR["lam_star"], equal_nan=True)
+    Wd = 2
+    cellDw = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE,
+                           "rolling_ls", 0.9, 2.0, warmup=Wd, gain_schedule="none")
+    base_scored = int(np.isfinite(cellR["lam_star"]).sum())
+    warm_scored = int(np.isfinite(cellDw["lam_star"]).sum())
+    warmup_ok = (base_scored - warm_scored) == min(Wd, base_scored)
+    cellDg = adaptive_cell(sumsE[0], sumsE[1], sumsE[2], dE, hE, "rolling_ls",
+                           0.9, 2.0, warmup=Wd, gain_schedule="linear_ramp")
+    exp_lam = cellR["lam_star"].copy()
+    scR_idx = [j for j in range(exp_lam.size) if np.isfinite(exp_lam[j])]
+    for i, j in enumerate(scR_idx):
+        if i < Wd:
+            exp_lam[j] = np.nan
+        else:
+            exp_lam[j] *= min(1.0, float(i - Wd + 1) / float(max(Wd, 1)))
+    gain_mask_ok = np.array_equal(np.isfinite(cellDg["lam_star"]),
+                                  np.isfinite(exp_lam))
+    gain_val_ok = np.allclose(cellDg["lam_star"][np.isfinite(cellDg["lam_star"])],
+                              exp_lam[np.isfinite(exp_lam)], atol=1e-12, rtol=0.0)
+    inv["armD_warmup_gain_schedule"] = (
+        nestD and warmup_ok and gain_mask_ok and gain_val_ok
+        and cellD0["state_cost"] == 1,
+        f"nesting (W0,none)==base bit-identical={nestD}; warmup W=2 drops "
+        f"{base_scored - warm_scored} scored (want {min(Wd, base_scored)}); "
+        f"linear_ramp gain matches hand-computed mask={gain_mask_ok} vals={gain_val_ok}; "
+        f"state_cost={cellD0['state_cost']} (schedule adds 0)")
+
     YQ = np.stack([np.concatenate([ticksQ[t][k] for k in dimsQ])
                    for t in range(nQ)])
     dQ7, hQ7 = 2, 2
@@ -2803,7 +3075,20 @@ def run_emit(args) -> int:
     deltas, hs = args.deltas, args.hs
     band = max(_REGISTRY[m].lookback(max(deltas)) for m in args.methods) + max(hs)
     # #47 cadence: resolve the SELECTED tick set; step index s -> real tick tickset[s].
-    tickset = TS.select_ticks(args.cadence, n_ticks)
+    # #61 ADDITIVE tick-range: a contiguous non-zero-based slice [START,END] becomes an
+    # OFFSET tickset (the reader.path()/fingerprint machinery already carries an arbitrary
+    # tickset). Empty tick_range => the original full-trajectory path (byte-identical).
+    tr = getattr(args, "tick_range", "") or ""
+    if tr:
+        assert args.cadence == "per-tick", (
+            "--tick-range is per-tick only (offset composes with stride 1); "
+            f"got --cadence {args.cadence}")
+        _a, _b = (int(x) for x in tr.split(","))
+        assert 0 <= _a <= _b, f"--tick-range START,END needs 0<=START<=END; got {tr!r}"
+        tickset = list(range(_a, _b + 1))
+        n_ticks = len(tickset)
+    else:
+        tickset = TS.select_ticks(args.cadence, n_ticks)
     unit = "global_step" if args.cadence == "per-step" else "tick"
     assert len(tickset) == n_ticks, (
         f"cadence {args.cadence} yields {len(tickset)} ticks != n_ticks {n_ticks} "
@@ -2904,7 +3189,11 @@ def run_emit(args) -> int:
     method_ctx = {"lam_grid": args.lam_gridv, "mu_grid": args.mu_gridv,
                   "adaptive_mode": args.adaptive_mode,
                   "ewma_decay": args.ewma_decay,
-                  "coef_clip": args.adaptive_coef_clip}
+                  "coef_clip": args.adaptive_coef_clip,
+                  "lookback": args.adaptive_lookback,
+                  "momentum": args.coef_momentum,
+                  "warmup": args.adaptive_warmup,
+                  "gain_schedule": args.adaptive_gain_schedule}
     gstore: dict = {}
     rows, ratio_store, lam_select, mu_select = compute_rows(
         stats, names, n_ticks, band, methods, deltas, hs,
@@ -2981,6 +3270,11 @@ def run_emit(args) -> int:
         "adaptive_mode": args.adaptive_mode,
         "ewma_decay": args.ewma_decay,
         "adaptive_coef_clip": args.adaptive_coef_clip,
+        # ---- #49 self-correcting-arm knobs (provenance for the arm dirs) ----
+        "adaptive_lookback": args.adaptive_lookback,
+        "coef_momentum": args.coef_momentum,
+        "adaptive_warmup": args.adaptive_warmup,
+        "adaptive_gain_schedule": args.adaptive_gain_schedule,
         "operating_point": list(args.op_point),
         "also_points": [list(p) for p in args.also_points],
         "n_matrices": len(names),
@@ -3061,13 +3355,22 @@ def run_verify_schema(scorecard_dir: str) -> int:
         rsv = meta.get("row_schema_version")
         old_schema = rsv is None
         v48_schema = rsv == ROW_SCHEMA_V48
+        v49_0_schema = rsv == ROW_SCHEMA_V49                 # CORE-4 ladder dirs (e.g. #48)
+        # v49_schema drives the n_windows-uses-lookback_ticks branch — true for BOTH
+        # v49.0 and v49.1 (both carry lookback_ticks). The v49.1 self-correcting-arm
+        # keys are required ONLY on v49.1+ dirs, so reused v49.0 dirs still verify.
         v49_schema = not old_schema and not v48_schema
         if old_schema:
             problems.append(f"old-schema dir (no meta.row_schema_version; expected "
                             f"{ROW_SCHEMA_VERSION}) — re-emit with current code")
-        req_keys = (REQUIRED_ROW_KEYS_LEGACY if old_schema
-                    else REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48 if v48_schema
-                    else REQUIRED_ROW_KEYS)
+        if old_schema:
+            req_keys = REQUIRED_ROW_KEYS_LEGACY
+        elif v48_schema:
+            req_keys = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48
+        elif v49_0_schema:
+            req_keys = REQUIRED_ROW_KEYS_LEGACY + ROW_KEYS_V48 + ROW_KEYS_V49
+        else:
+            req_keys = REQUIRED_ROW_KEYS
         for i, r in enumerate(rows):
             missing = [k for k in req_keys if k not in r]
             if missing:
@@ -3231,6 +3534,13 @@ def main() -> int:
                     help="scorecard dir to round-trip verify (no trace needed)")
     ap.add_argument("--n-ticks", type=int, default=0,
                     help="default: rows in --manifest")
+    ap.add_argument("--tick-range", default="",
+                    help="#61 ADDITIVE: score a CONTIGUOUS non-zero-based tick slice "
+                         "START,END (inclusive) via an offset tickset "
+                         "list(range(START,END+1)); overrides --n-ticks to the slice "
+                         "length. Empty (default) == full trajectory from tick_0 "
+                         "(unchanged). Per-tick only (offset composes with per-tick "
+                         "stride 1); mutually exclusive with --cadence per-step.")
     ap.add_argument("--ram-gb", type=float, default=40.0)
     ap.add_argument("--force-recompute", action="store_true")
     # ---- #47 flags ----
@@ -3243,13 +3553,30 @@ def main() -> int:
                     help="damped_second_order curvature grid (mu=0 nests "
                          "naive_linear, mu=1 nests naive_second_order)")
     ap.add_argument("--adaptive-mode", default="rolling_ls",
-                    choices=["rolling_ls", "ewma"],
-                    help="adaptive-arm online fit: expanding-window least squares "
-                         "or EWMA residual correction (low-state fallback)")
+                    choices=["rolling_ls", "rolling_ls_k", "ewma", "ewma_momentum"],
+                    help="adaptive-arm online fit: rolling_ls (EXPANDING all-causal LS, "
+                         "incumbent); rolling_ls_k (#49 arm A/B: bounded-last-K windowed "
+                         "LS, needs --adaptive-lookback); ewma (EWMA-of-stats, low-state "
+                         "incumbent); ewma_momentum (#49 arm C: ewma target + heavy-ball "
+                         "momentum on the coefficient, needs --coef-momentum; LINEAR only)")
     ap.add_argument("--ewma-decay", type=float, default=0.9,
-                    help="EWMA decay rho for --adaptive-mode ewma")
+                    help="EWMA decay rho for --adaptive-mode ewma / ewma_momentum")
     ap.add_argument("--adaptive-coef-clip", type=float, default=2.0,
                     help="symmetric clip on every online-fit coefficient")
+    # ---- #49 self-correcting-arm knobs (SCALAR per run; sweep = one --out per value) ----
+    ap.add_argument("--adaptive-lookback", type=int, default=0,
+                    help="#49 arm A/B bounded-last-K fit window (rolling_ls_k). "
+                         "0 or >=n_windows == the expanding arm (nesting)")
+    ap.add_argument("--coef-momentum", type=float, default=0.0,
+                    help="#49 arm C heavy-ball momentum beta on the coefficient update "
+                         "(ewma_momentum). 0.0 == plain ewma (nesting)")
+    ap.add_argument("--adaptive-warmup", type=int, default=0,
+                    help="#49 arm D: drop the first W SCORED windows (any mode). "
+                         "0 == no extra warm-up (nesting)")
+    ap.add_argument("--adaptive-gain-schedule", default="none",
+                    choices=["none", "linear_ramp", "one_over_t"],
+                    help="#49 arm D: multiplicative trust gain on the online coefficient. "
+                         "none == identity (nesting); adds NO persistent ANCHOR state")
     # ---- fast-mode / regression flags (rows-v48.0) ----
     ap.add_argument("--fidelity", default="fast", choices=["fast", "full"],
                     help="fast (DEFAULT): sampled-panel screening mode; "
@@ -3298,6 +3625,10 @@ def main() -> int:
     for m in args.methods:
         assert m in _REGISTRY, \
             f"unknown method {m!r}; registered: {sorted(_REGISTRY)}"
+    # #49 arm C is LINEAR-only: a clean pre-flight error beats a mid-stream traceback.
+    if args.adaptive_mode == "ewma_momentum" and "adaptive_second_order" in args.methods:
+        raise SystemExit("--adaptive-mode ewma_momentum is LINEAR-only (arm C); drop "
+                         "adaptive_second_order from --method (or use rolling_ls_k)")
     args.deltas = [int(x) for x in args.delta.split(",")]
     args.hs = [int(x) for x in args.h_grid.split(",")]
     args.op_point = _parse_pair(args.operating_point)

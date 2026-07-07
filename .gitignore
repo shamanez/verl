@@ -155,3 +155,12 @@ research/runs/*/*/metrics/incoming.log
 # the .jsonl manifests + analysis outputs are committed)
 research/runs/*/weights/**/*.pt
 research/runs/*/*/weights/**/*.pt
+
+# Oversized moat/scorecard analysis blobs — panel caches + per-tick scorecards run
+# 100-400 MB and blow GitHub's 100 MB push limit. Keep the lightweight .md/.tsv
+# analysis write-ups; never commit these binaries. (The autosave hook committing
+# them is what wedged the vast-ai-workload push.)
+research/runs/**/*.npz
+research/runs/**/scorecard.jsonl
+# Ephemeral run scaffold at the repo root (never committed)
+/runs/

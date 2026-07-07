@@ -402,6 +402,20 @@ comm_eff:
     # not-implemented seam and is rejected at validation.
     lookahead_rollout_source: auto
 
+    # What the anchor does at fires BEFORE the look-ahead projector is ready.
+    # "stale_correct" (default) = today's behavior: M from raw stale theta[t-K]
+    # + paired stale rollouts, folded every spectral.cadence ticks. "no_correct"
+    # = do all ring bookkeeping but SKIP the anchor clone fwd/bwd + M update, so
+    # M stays cold and the merger's cold-M guard passes fast grads through
+    # unchanged until the first projected fire. no_correct requires the projector
+    # on AND owns_q=false.
+    warmup_mode: stale_correct
+
+    # Minimum ring snapshots before the projector engages. -1 (default) = the
+    # mode's source count (2 fixed / 3 learned). 2 = project from the earliest
+    # legal fire (fire 2). Requires the projector on; validated to [2, n_points].
+    lookahead_min_snapshots: -1
+
   # Spectral-correction sub-config (inert while enabled=false). Applies an
   # anchor-guided correction to the fast-path gradient after actor backward /
   # FSDP grad reduction and before optimizer.step() / grad clipping. Live

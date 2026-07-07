@@ -57,6 +57,34 @@ PRIOR fire (never the current weights — the no-peek invariant). With the
 residual frozen at zero the learned mode is byte-identical to fixed-linear, so
 the first learned fire equals the fixed-linear prediction.
 
+**Third mode — ``learned_step_scale_with_fixed_linear_cold_start`` (the adaptive
+projector).** The DC-offset residual above corrects only the MEAN of the
+per-block extrapolation error, but a linear-extrapolation error is ~zero-mean
+across a weight matrix (``mean(theta_true - theta_hat) ~ 0``), so that signal is
+nearly vacuous — the residual is learning the coefficient on the all-ones basis
+vector ``1`` when the error actually lives along the trajectory direction
+``d = S0 - S1``. This mode fixes the BASIS: it learns a per-block SCALE
+``beta[name]`` (init ``1.0``) on the extrapolation STEP —
+
+    theta_hat = S0 + beta * base_scale * (S0 - S1)
+              = (1 + beta*base_scale) * S0 - (beta*base_scale) * S1
+
+with ``base_scale = alpha * h/g`` the same realized-horizon step the other modes
+use. ``beta`` is updated retrospectively by projecting the prior fire's error
+onto the STEP it actually took (:meth:`LookaheadProjector._update_step_scale`):
+``rho = <e, step> / (||step||^2)`` is the fractional over/under-shoot
+(``rho > 0`` ⇒ the truth lay FURTHER along the step ⇒ we under-projected ⇒ grow
+``beta``; ``rho < 0`` ⇒ over-projected ⇒ shrink), and ``beta <- clip(beta +
+lr*rho, beta_min, beta_max)``. The ``[beta_min, beta_max] = [0, 2]`` clip is a
+per-block trust region: ``beta -> 0`` degrades gracefully to the raw stale
+weight (the safe fallback in blocks where the trajectory is NOT locally linear —
+important for the harder Big-Math dynamics), ``beta`` caps over-projection at
+``2x`` the linear step. Every reduction is an INNER PRODUCT of DP-identical
+stale tensors (no mean-collapse of the signal, no RNG), so ``beta`` is
+cross-rank-identical by construction just like the offset residual. At
+``beta == 1`` (the cold start) the step equals the fixed-linear step EXACTLY, so
+the first fire is byte-identical to ``fixed_linear``.
+
 **LayerNorm / embedding / lm_head excluded.** Per the linearity paper (Fig 8 /
 App A.2) norm + embedding layers have LOW linearity; extrapolating them injects
 error. Excluded params take the raw ``theta[t-K]`` (no projection). The decoder
@@ -88,10 +116,15 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "LOOKAHEAD_MODES",
+    "MODE_DISABLED",
+    "MODE_FIXED_LINEAR",
+    "MODE_LEARNED_OFFSET",
+    "MODE_LEARNED_STEP_SCALE",
     "LOOKAHEAD_ROLLOUT_SOURCES",
     "FIXED_LINEAR_COEFFS",
     "lookahead_enabled",
     "lookahead_num_source_points",
+    "lookahead_min_points",
     "lookahead_learns",
     "resolve_lookahead_rollout_source",
     "is_lookahead_target",
@@ -117,11 +150,22 @@ def _canon(name: str) -> str:
     return name
 
 
-# The three look-ahead modes. ``disabled`` (default) is a strict no-op — the
-# anchor forwards from the raw stale ``theta[t-K]`` exactly as today.
-# ``fixed_linear`` uses the FROZEN AsyncPP seed. The learned mode unfreezes a
-# per-block residual but cold-starts at the fixed-linear seed.
-LOOKAHEAD_MODES = ("disabled", "fixed_linear", "learned_linear_with_fixed_linear_cold_start")
+# The look-ahead modes. ``disabled`` (default) is a strict no-op — the anchor
+# forwards from the raw stale ``theta[t-K]`` exactly as today. ``fixed_linear``
+# uses the FROZEN AsyncPP seed. The two learned modes cold-start at the
+# fixed-linear seed and unfreeze a per-block state trained ONLY from
+# retrospective (no-peek) errors: the OFFSET mode learns an additive DC residual,
+# the STEP_SCALE mode learns a multiplicative scale on the extrapolation step
+# (the better-conditioned basis — see the module docstring). Named constants are
+# used for internal dispatch; the whitelist tuple is the config single-source.
+MODE_DISABLED = "disabled"
+MODE_FIXED_LINEAR = "fixed_linear"
+MODE_LEARNED_OFFSET = "learned_linear_with_fixed_linear_cold_start"
+MODE_LEARNED_STEP_SCALE = "learned_step_scale_with_fixed_linear_cold_start"
+LOOKAHEAD_MODES = (MODE_DISABLED, MODE_FIXED_LINEAR, MODE_LEARNED_OFFSET, MODE_LEARNED_STEP_SCALE)
+# The modes that train per-block state (need a retained prior theta_hat + a
+# retrospective update). Both learned modes; fixed_linear/disabled do not.
+_LEARNED_MODES = (MODE_LEARNED_OFFSET, MODE_LEARNED_STEP_SCALE)
 
 # The fixed-linear (AsyncPP) coefficients for [theta[t-K], theta[t-2K], theta[t-3K]]:
 # theta_hat = 2*theta[t-K] - theta[t-2K] + 0*theta[t-3K]. a3=0 means the third
@@ -162,31 +206,63 @@ def lookahead_enabled(anchor_cfg) -> bool:
         return False
     if not bool(getattr(anchor_cfg, "lookahead_anchor", False)):
         return False
-    mode = str(getattr(anchor_cfg, "lookahead_mode", "disabled"))
-    return mode in ("fixed_linear", "learned_linear_with_fixed_linear_cold_start")
+    mode = str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED))
+    return mode in (MODE_FIXED_LINEAR, MODE_LEARNED_OFFSET, MODE_LEARNED_STEP_SCALE)
 
 
 def lookahead_learns(anchor_cfg) -> bool:
-    """True iff the projector trains a per-block residual (learned mode)."""
+    """True iff the projector trains per-block state (either learned mode).
+
+    Gates the engine's three learned-mode-only actions — retaining a prior
+    ``theta_hat`` (``keep_theta_hat``), running the retrospective update, and
+    stashing this fire's ``theta_hat`` for the next update — so it must be True
+    for BOTH the offset (:data:`MODE_LEARNED_OFFSET`) and step-scale
+    (:data:`MODE_LEARNED_STEP_SCALE`) modes. The *specific* per-block quantity
+    each mode trains (additive residual vs. multiplicative ``beta``) is dispatched
+    inside :class:`LookaheadProjector`, not here.
+    """
     if not lookahead_enabled(anchor_cfg):
         return False
-    return str(getattr(anchor_cfg, "lookahead_mode", "disabled")) == (
-        "learned_linear_with_fixed_linear_cold_start"
-    )
+    return str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED)) in _LEARNED_MODES
 
 
 def lookahead_num_source_points(anchor_cfg) -> int:
     """Number of fire-aligned source snapshots the projector consumes.
 
-    ``fixed_linear`` uses 2 (``theta[t-K]``, ``theta[t-2K]``); the learned mode
-    uses 3 (``+ theta[t-3K]``) so the residual has a third basis point. The
-    NEW look-ahead ring is sized from this (plus the retrospective-residual
-    ``theta_hat_prev`` slot the learned mode keeps separately). Returns 0 when
+    ``fixed_linear`` and ``learned_step_scale_with_fixed_linear_cold_start`` are
+    FIRST-ORDER (``S0 = theta[t-K]``, ``S1 = theta[t-2K]``) so they use 2; the
+    offset ``learned_linear_with_fixed_linear_cold_start`` uses 3 (``+
+    theta[t-3K]``) so its residual has a third basis point. The look-ahead ring
+    is sized from this (plus the retrospective ``theta_hat_prev`` slot both
+    learned modes keep separately — the step-scale mode reconstructs its prior
+    STEP from ``S1``, which the 2-point ring already retains). Returns 0 when
     look-ahead is disabled.
     """
     if not lookahead_enabled(anchor_cfg):
         return 0
-    return 3 if lookahead_learns(anchor_cfg) else 2
+    return 3 if str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED)) == MODE_LEARNED_OFFSET else 2
+
+
+def lookahead_min_points(anchor_cfg) -> int:
+    """Ring snapshots required before the projector engages (E3).
+
+    Reads ``anchor.lookahead_min_snapshots``: ``-1`` (default) ⇒ the mode's full
+    source count :func:`lookahead_num_source_points` (2 for fixed_linear /
+    step-scale, 3 for the offset learned mode) — today's behavior. A concrete
+    value (config-validated to ``[2, n_points]``) lets the projector engage at
+    the earliest mathematically-legal fire (2 = fire 2). This is the SINGLE
+    readiness threshold the ring keys :meth:`ready` on, so the no_correct skip
+    gate and the projected-vs-fallback decision share it (a second hardcoded
+    ``n_points`` check would silently extend the skip window).
+    Returns 0 when look-ahead is disabled.
+    """
+    n = lookahead_num_source_points(anchor_cfg)
+    if n == 0:
+        return 0
+    raw = int(getattr(anchor_cfg, "lookahead_min_snapshots", -1))
+    if raw == -1:
+        return n
+    return raw
 
 
 def lookahead_strength(anchor_cfg) -> float:
@@ -246,6 +322,8 @@ def compute_theta_hat(
     *,
     target_substrs,
     residual: Optional[dict] = None,
+    per_block_scale: Optional[dict] = None,
+    base_scale: Optional[float] = None,
 ) -> tuple:
     """Materialize the per-target extrapolated weights ``theta_hat`` (CPU/full).
 
@@ -257,14 +335,24 @@ def compute_theta_hat(
             snapshots).
         coeffs: the affine combination ``(a1, a2, a3)`` applied to
             ``(S0, S1, S2)``. ``a3`` is ignored when only 2 sources are given.
+            Ignored entirely when ``per_block_scale`` is given.
         target_substrs: the decoder-matrix selector. A param is extrapolated iff
             it is a target AND 2D; every OTHER param takes ``S0`` (the raw stale
             weight) unchanged — the LayerNorm/embedding exclusion.
         residual: optional ``{canon_name -> per-block scalar residual delta}``
-            ADDED to the targeted ``theta_hat`` in the learned mode. ``None`` (or
-            an all-zero residual) ⇒ pure fixed-linear. The residual is a
-            cross-rank-identical per-target scalar (broadcast over the matrix),
-            so it cannot diverge ranks.
+            ADDED to the targeted ``theta_hat`` in the OFFSET learned mode.
+            ``None`` (or an all-zero residual) ⇒ pure fixed-linear. The residual
+            is a cross-rank-identical per-target scalar (broadcast over the
+            matrix), so it cannot diverge ranks. Mutually exclusive with
+            ``per_block_scale``.
+        per_block_scale: optional ``{canon_name -> per-block scale ``beta``}`` for
+            the STEP-SCALE learned mode. When given, the coefficients are IGNORED
+            and each target uses ``(1 + beta*base_scale, -beta*base_scale)`` with
+            ``beta`` defaulting to ``1.0`` for any un-updated block — so an
+            all-default ``beta`` reproduces the fixed-linear step EXACTLY. Requires
+            ``base_scale``. Cross-rank-identical (a scalar per target).
+        base_scale: the realized linear step ``alpha*h/g`` (a scalar), used only
+            with ``per_block_scale``. ``beta*base_scale`` is the effective step.
 
     Returns:
         ``(theta_hat, excluded_names)`` — ``theta_hat`` is ``{canon_name ->
@@ -276,10 +364,18 @@ def compute_theta_hat(
     dtype, so it composes with bf16 snapshots with no cross-shard ambiguity.
     """
     assert len(sources) >= 2, f"compute_theta_hat needs >= 2 source snapshots, got {len(sources)}"
+    assert not (per_block_scale is not None and residual is not None), (
+        "compute_theta_hat: per_block_scale (step-scale mode) and residual (offset mode) are "
+        "mutually exclusive — a mode should pass exactly one."
+    )
+    assert per_block_scale is None or base_scale is not None, (
+        "compute_theta_hat: per_block_scale requires base_scale (the realized alpha*h/g step)."
+    )
     s0 = sources[0]
     s1 = sources[1]
     s2 = sources[2] if len(sources) >= 3 else None
     a1, a2, a3 = float(coeffs[0]), float(coeffs[1]), float(coeffs[2] if len(coeffs) >= 3 else 0.0)
+    _base = float(base_scale) if base_scale is not None else 0.0
 
     theta_hat: dict = {}
     excluded: list = []
@@ -298,15 +394,24 @@ def compute_theta_hat(
             excluded.append(name)
             continue
         dtype = p0.dtype
-        acc = a1 * p0.to(torch.float32) + a2 * p1.to(torch.float32)
-        if s2 is not None and a3 != 0.0:
-            p2 = s2.get(name)
-            if p2 is not None and p2.shape == p0.shape:
-                acc = acc + a3 * p2.to(torch.float32)
-        if residual is not None:
-            r = residual.get(name)
-            if r is not None:
-                acc = acc + float(r)
+        if per_block_scale is not None:
+            # STEP-SCALE mode: eff coeffs (1 + beta*base_scale, -beta*base_scale).
+            # beta defaults to 1.0 for an un-updated block, so eff == base_scale
+            # and this is the fixed-linear step EXACTLY (byte-identical cold
+            # start). The additive residual / third snapshot are unused here.
+            beta = float(per_block_scale.get(name, 1.0))
+            eff = beta * _base
+            acc = (1.0 + eff) * p0.to(torch.float32) + (-eff) * p1.to(torch.float32)
+        else:
+            acc = a1 * p0.to(torch.float32) + a2 * p1.to(torch.float32)
+            if s2 is not None and a3 != 0.0:
+                p2 = s2.get(name)
+                if p2 is not None and p2.shape == p0.shape:
+                    acc = acc + a3 * p2.to(torch.float32)
+            if residual is not None:
+                r = residual.get(name)
+                if r is not None:
+                    acc = acc + float(r)
         theta_hat[name] = acc.to(dtype)
     return theta_hat, sorted(excluded)
 
@@ -335,9 +440,17 @@ class LookaheadSnapshotRing:
     Pure container: no collectives, no RNG, CPU-testable.
     """
 
-    def __init__(self, n_points: int, keep_theta_hat: bool = False):
+    def __init__(self, n_points: int, keep_theta_hat: bool = False, min_points: Optional[int] = None):
         assert n_points >= 2, f"look-ahead ring needs >= 2 source points, got {n_points}"
         self.n_points = int(n_points)
+        # Readiness threshold (E3). Defaults to n_points (today's behavior);
+        # a smaller min_points lets :meth:`ready` engage the projector at the
+        # earliest legal fire while retention still keeps n_points (the learned
+        # residual's 3rd point arrives later). Must be in [2, n_points].
+        self.min_points = int(min_points) if min_points is not None else self.n_points
+        assert 2 <= self.min_points <= self.n_points, (
+            f"look-ahead ring min_points must be in [2, n_points={self.n_points}]; got {self.min_points}"
+        )
         self.keep_theta_hat = bool(keep_theta_hat)
         # OrderedDict[true_tick -> snapshot dict]; insertion order == tick order.
         self._snaps: OrderedDict[int, dict] = OrderedDict()
@@ -369,8 +482,14 @@ class LookaheadSnapshotRing:
         )
 
     def ready(self) -> bool:
-        """True iff enough source snapshots are retained to extrapolate."""
-        return len(self._snaps) >= self.n_points
+        """True iff enough source snapshots are retained to extrapolate.
+
+        Keys on ``min_points`` (not ``n_points``) so the projector can engage at
+        the earliest legal fire when ``lookahead_min_snapshots`` relaxes it. This
+        is the SINGLE readiness gate — the engine's no_correct skip and the
+        projected-vs-fallback branch both derive from it.
+        """
+        return len(self._snaps) >= self.min_points
 
     def sources(self):
         """Return ``[S0, S1, (S2)]`` NEWEST-first with their TRUE ticks.
@@ -379,12 +498,16 @@ class LookaheadSnapshotRing:
         (``theta[t-K]``), ``snaps[1]`` the next (``theta[t-K-cadence]``), etc.,
         and ``ticks`` the matching TRUE snapshot ticks (newest-first) — exactly
         the inputs :meth:`LookaheadProjector.project` needs to compute the real
-        horizon. Returns ``(None, None)`` until :meth:`ready`.
+        horizon. Returns ``(None, None)`` until :meth:`ready`. Returns the
+        ``min(len, n_points)`` newest — when readiness is relaxed to
+        ``min_points`` the ring may hold only 2 of a learned mode's 3 points at
+        the first projected fire; ``compute_theta_hat`` handles ``s2=None`` (the
+        seed's ``a3=0``), so a 2-source projection is legal.
         """
         if not self.ready():
             return None, None
         items = list(self._snaps.items())  # oldest-first
-        items = items[-self.n_points :]  # the n_points newest
+        items = items[-self.n_points :]  # the n_points newest (clamps to len)
         items.reverse()  # newest-first
         ticks = [int(t) for t, _s in items]
         snaps = [s for _t, s in items]
@@ -448,7 +571,14 @@ class LookaheadProjector:
 
     def __init__(self, anchor_cfg, target_substrs):
         self.target_substrs = tuple(target_substrs or ())
+        self.mode = str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED))
+        # learns == "trains per-block state" (both learned modes; gates the ring's
+        # keep_theta_hat + the engine's retrospective block). The SPECIFIC learned
+        # quantity is dispatched by the two mode flags below — exactly one is True
+        # in a learned mode, both False for fixed_linear.
         self.learns = lookahead_learns(anchor_cfg)
+        self.learns_offset = self.mode == MODE_LEARNED_OFFSET
+        self.learns_scale = self.mode == MODE_LEARNED_STEP_SCALE
         self.n_points = lookahead_num_source_points(anchor_cfg)
         # SEED coefficients: (1+alpha, -alpha, 0). alpha=1.0 reproduces the
         # frozen AsyncPP seed (2,-1,0) = full catch-up; alpha<1 = a shorter
@@ -456,11 +586,12 @@ class LookaheadProjector:
         # realized horizon h equals the inter-source gap g (cadence == delay_K);
         # :meth:`project` generalizes to (1 + alpha*h/g, -alpha*h/g, 0) from the
         # ring's REAL ticks and falls back to this seed when ticks are omitted.
-        # The learned mode cold-starts here and then adapts the per-block
-        # residual on top of the effective coefficients.
+        # Both learned modes cold-start here and then adapt their per-block state
+        # on top of the effective step.
         self.strength = lookahead_strength(anchor_cfg)
         self.coeffs = [1.0 + self.strength, -self.strength, 0.0]
-        # Per-block scalar residual (learned mode only); zero ⇒ fixed-linear.
+        # --- OFFSET mode state ---
+        # Per-block scalar residual (offset mode only); zero ⇒ fixed-linear.
         self._residual: dict = {}
         # Learning rate for the residual update from the retrospective error.
         # Small + bounded; the residual is a magnitude nudge on the extrapolation,
@@ -469,6 +600,25 @@ class LookaheadProjector:
         # Bound the absolute residual so a pathological retrospective error cannot
         # blow the extrapolation; keeps the learned mode a CORRECTION to fixed-linear.
         self._residual_clip = 1.0e-3
+        # --- STEP-SCALE mode state ---
+        # Per-block multiplicative scale beta on the extrapolation STEP; default
+        # 1.0 for an un-updated block (via .get(name, 1.0)) ⇒ fixed-linear. Keyed
+        # by canonical target name; updated by :meth:`_update_step_scale`.
+        self._beta: dict = {}
+        # Learning rate for the beta update from the fractional over/under-shoot
+        # rho (a per-block integral controller, mirroring the offset residual's
+        # small-gain design). rho is dimensionless, so lr is a direct fraction.
+        self._beta_lr = 0.2
+        # Per-block trust region: beta_min=0 degrades a block gracefully to the
+        # raw stale weight (safe where the trajectory is NOT locally linear);
+        # beta_max=2 caps over-projection at 2x the linear step.
+        self._beta_min = 0.0
+        self._beta_max = 2.0
+        # Clip a SINGLE fire's over/under-shoot signal so one pathological
+        # retrospective error cannot swing beta by more than beta_lr*rho_clip.
+        self._rho_clip = 1.0
+        # Guard the division by ||step||^2 (a block that took no step this fire).
+        self._beta_eps = 1.0e-12
 
     def project(self, sources: list, ticks: Optional[list] = None, fire_tick: Optional[int] = None):
         """Compute ``theta_hat`` from the source snapshots.
@@ -490,11 +640,13 @@ class LookaheadProjector:
 
         Returns ``(theta_hat, excluded_names, proj_info)`` where ``proj_info``
         carries the realized ``{"h", "g", "coeffs"}`` for fire logging (``h``/
-        ``g`` are ``None`` on the seed fallback). ``residual`` is folded in
-        only in the learned mode (it is ``{}`` until the first retrospective
-        update).
+        ``g`` are ``None`` on the seed fallback; ``coeffs`` is the beta==1
+        baseline step in step-scale mode). The offset ``residual`` (offset mode)
+        or the per-block ``beta`` (step-scale mode) is folded in — each is empty
+        until the first retrospective update, so the first fire equals fixed-linear.
         """
         coeffs = list(self.coeffs)
+        base_scale = self.strength  # tick-less fallback: effective step == alpha
         h = g = None
         if ticks is not None and fire_tick is not None and len(ticks) >= 2:
             g = int(ticks[0]) - int(ticks[1])
@@ -508,29 +660,53 @@ class LookaheadProjector:
                 f"{ticks[0]} (h={h}) — the projection would run BACKWARD; the caller "
                 f"passed a stale fire tick or the ring keying regressed."
             )
-            scale = self.strength * (float(h) / float(g))
-            coeffs = [1.0 + scale, -scale, 0.0]
-        residual = self._residual if self.learns else None
-        theta_hat, excluded = compute_theta_hat(
-            sources,
-            coeffs,
-            target_substrs=self.target_substrs,
-            residual=residual,
-        )
+            base_scale = self.strength * (float(h) / float(g))
+            coeffs = [1.0 + base_scale, -base_scale, 0.0]
+        if self.learns_scale:
+            # STEP-SCALE mode: per-block beta multiplies base_scale; coeffs are
+            # ignored downstream (kept in proj_info as the beta==1 baseline).
+            theta_hat, excluded = compute_theta_hat(
+                sources,
+                coeffs,
+                target_substrs=self.target_substrs,
+                per_block_scale=self._beta,
+                base_scale=base_scale,
+            )
+        else:
+            residual = self._residual if self.learns_offset else None
+            theta_hat, excluded = compute_theta_hat(
+                sources,
+                coeffs,
+                target_substrs=self.target_substrs,
+                residual=residual,
+            )
         return theta_hat, excluded, {"h": h, "g": g, "coeffs": tuple(coeffs)}
 
-    def update_from_retrospective(self, theta_true_prev: dict, theta_hat_prev: dict) -> dict:
-        """Update the learned residual from the PRIOR fire's true-vs-predicted error.
+    def update_from_retrospective(
+        self, theta_true_prev: dict, theta_hat_prev: dict, s0_prev: Optional[dict] = None
+    ) -> dict:
+        """Update the learned per-block state from the PRIOR fire's error.
 
-        ``theta_true_prev`` is the FSDP live weights summoned at THIS fire (the
-        true weights that the prior fire's ``theta_hat`` was predicting); read
-        DP-identical. ``theta_hat_prev`` is the prior fire's extrapolation. The
-        per-block residual moves a small step toward closing the mean error
-        ``mean(theta_true_prev - theta_hat_prev)`` per target — a scalar nudge,
-        cross-rank-identical (both inputs are DP-mean / DP-identical). No-op for
-        ``fixed_linear``. Returns the updated residual dict (for telemetry).
+        ``theta_true_prev`` is the now-aged-in stale snapshot whose true tick
+        equals the tick the prior fire projected TO (retrieved from the ring at
+        THIS fire — NOT the live weights, preserving the no-peek invariant).
+        ``theta_hat_prev`` is the prior fire's extrapolation. Dispatches on the
+        learned mode:
+
+        * OFFSET (:data:`MODE_LEARNED_OFFSET`): the per-block residual moves a
+          small step toward closing the MEAN error ``mean(theta_true - theta_hat)``
+          per target — a scalar nudge on the DC component.
+        * STEP-SCALE (:data:`MODE_LEARNED_STEP_SCALE`): see
+          :meth:`_update_step_scale` — needs ``s0_prev`` (the prior fire's ``S0``,
+          = THIS fire's ``S1`` at cadence == delay_K) to reconstruct the step.
+
+        Both reductions are over DP-identical stale tensors (no RNG), so the
+        learned state is cross-rank-identical. No-op for ``fixed_linear``. Returns
+        the updated learned-state dict (for telemetry).
         """
-        if not self.learns or theta_true_prev is None or theta_hat_prev is None:
+        if self.learns_scale:
+            return self._update_step_scale(theta_true_prev, theta_hat_prev, s0_prev)
+        if not self.learns_offset or theta_true_prev is None or theta_hat_prev is None:
             return dict(self._residual)
         for name, t_true in theta_true_prev.items():
             cname = _canon(name)
@@ -547,17 +723,66 @@ class LookaheadProjector:
             self._residual[cname] = new
         return dict(self._residual)
 
-    def residual_vector(self):
-        """Return the per-block residual as a sorted-by-name fp32 1-D tensor.
+    def _update_step_scale(
+        self, theta_true_prev: dict, theta_hat_prev: dict, s0_prev: Optional[dict]
+    ) -> dict:
+        """Update per-block ``beta`` from the prior fire's over/under-shoot.
 
-        Used by the engine to emit a cross-rank max-rel-dev (proving the learned
-        residual is DP-identical). Empty tensor when fixed-linear / not yet
+        Reconstructs the STEP the prior fire actually took, ``step = theta_hat_prev
+        - S0_prev`` (parallel to the trajectory ``S0-S1``), and the residual error
+        ``e = theta_true_prev - theta_hat_prev``. The fractional over/under-shoot
+        projected onto the step is::
+
+            rho = <e, step> / (||step||^2)
+
+        ``rho > 0`` ⇒ the truth lay FURTHER along the step than we went
+        (under-projected) ⇒ grow ``beta``; ``rho < 0`` ⇒ over-projected ⇒ shrink.
+        ``beta <- clip(beta + beta_lr * clip(rho, +-rho_clip), beta_min, beta_max)``.
+        Unlike the offset mode's ``mean(e)`` (≈0 on zero-mean weight-update
+        matrices), ``<e, step>`` is a genuine inner product — an informative,
+        cross-rank-identical scalar (both ``e`` and ``step`` are differences of
+        DP-identical stale snapshots). No-op unless ``s0_prev`` is provided.
+        """
+        if theta_true_prev is None or theta_hat_prev is None or s0_prev is None:
+            return dict(self._beta)
+        for name, t_true in theta_true_prev.items():
+            cname = _canon(name)
+            if not is_lookahead_target(cname, self.target_substrs):
+                continue
+            t_hat = theta_hat_prev.get(cname) if cname in theta_hat_prev else theta_hat_prev.get(name)
+            s0p = s0_prev.get(cname) if cname in s0_prev else s0_prev.get(name)
+            if t_hat is None or s0p is None:
+                continue
+            if t_hat.shape != t_true.shape or s0p.shape != t_true.shape:
+                continue
+            e = t_true.to(torch.float32) - t_hat.to(torch.float32)
+            step = t_hat.to(torch.float32) - s0p.to(torch.float32)
+            step_sq = float((step * step).sum().item())
+            if step_sq <= self._beta_eps:
+                # No step taken this fire (h=0, or beta already collapsed to 0):
+                # the over/under-shoot is undefined — leave beta unchanged.
+                continue
+            rho = float((e * step).sum().item()) / (step_sq + self._beta_eps)
+            rho = max(-self._rho_clip, min(self._rho_clip, rho))
+            prev = float(self._beta.get(cname, 1.0))
+            new = prev + self._beta_lr * rho
+            new = max(self._beta_min, min(self._beta_max, new))
+            self._beta[cname] = new
+        return dict(self._beta)
+
+    def residual_vector(self):
+        """Return the learned per-block state as a sorted-by-name fp32 1-D tensor.
+
+        Offset mode → the residual deltas; step-scale mode → the per-block
+        ``beta``. Used by the engine to emit a cross-rank max-rel-dev (proving the
+        learned state is DP-identical). Empty tensor when fixed-linear / not yet
         updated.
         """
-        if not self._residual:
+        state = self._beta if self.learns_scale else self._residual
+        if not state:
             return torch.zeros(0, dtype=torch.float32)
-        names = sorted(self._residual.keys())
-        return torch.tensor([float(self._residual[n]) for n in names], dtype=torch.float32)
+        names = sorted(state.keys())
+        return torch.tensor([float(state[n]) for n in names], dtype=torch.float32)
 
 
 def cross_rank_max_rel_dev(local_vec: torch.Tensor, dp_group=None) -> Optional[float]:

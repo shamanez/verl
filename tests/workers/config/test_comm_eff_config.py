@@ -655,5 +655,79 @@ class TestCommEffLookaheadConfig(unittest.TestCase):
             CommEffConfig(anchor=CommEffAnchorConfig(lookahead_rollout_source="fresh"))
 
 
+class TestWarmupModeKnobs(unittest.TestCase):
+    """E2/E3 warmup knobs: warmup_mode + lookahead_min_snapshots.
+
+    Defaults (stale_correct, -1) are byte-identical to today; no_correct and a
+    concrete min_snapshots engage the redesigned warmup, guarded by the four
+    validation rules.
+    """
+
+    def _projector(self, **kw):
+        """A learned-mode projector-on anchor (n_points=3) with overrides."""
+        base = dict(
+            enabled=True,
+            lookahead_anchor=True,
+            lookahead_mode="learned_linear_with_fixed_linear_cold_start",
+            owns_q=False,
+        )
+        base.update(kw)
+        return CommEffAnchorConfig(**base)
+
+    def test_defaults_are_byte_identical(self):
+        cfg = CommEffConfig()
+        self.assertEqual(cfg.anchor.warmup_mode, "stale_correct")
+        self.assertEqual(cfg.anchor.lookahead_min_snapshots, -1)
+
+    def test_warmup_mode_enum_rejected(self):
+        with self.assertRaisesRegex(ValueError, "warmup_mode"):
+            CommEffConfig(anchor=CommEffAnchorConfig(warmup_mode="skip"))
+
+    def test_no_correct_requires_projector(self):
+        # Projector off => M would never exist => rejected.
+        with self.assertRaisesRegex(ValueError, "no_correct.*requires the look-ahead projector"):
+            CommEffConfig(anchor=CommEffAnchorConfig(warmup_mode="no_correct"))
+
+    def test_no_correct_requires_owns_q_false(self):
+        with self.assertRaisesRegex(ValueError, "no_correct.*requires anchor.owns_q=false"):
+            CommEffConfig(anchor=self._projector(warmup_mode="no_correct", owns_q=True))
+
+    def test_no_correct_valid_roundtrips(self):
+        cfg = CommEffConfig(anchor=self._projector(warmup_mode="no_correct", lookahead_min_snapshots=2))
+        self.assertEqual(cfg.anchor.warmup_mode, "no_correct")
+        self.assertEqual(cfg.anchor.lookahead_min_snapshots, 2)
+
+    def test_min_snapshots_requires_projector(self):
+        with self.assertRaisesRegex(ValueError, "lookahead_min_snapshots is only meaningful"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=2))
+
+    def test_min_snapshots_range_validated(self):
+        # Learned mode n_points=3: 2 and 3 legal, 1 and 4 rejected.
+        for good in (2, 3):
+            cfg = CommEffConfig(anchor=self._projector(lookahead_min_snapshots=good))
+            self.assertEqual(cfg.anchor.lookahead_min_snapshots, good)
+        for bad in (1, 4):
+            with self.assertRaisesRegex(ValueError, "lookahead_min_snapshots must be"):
+                CommEffConfig(anchor=self._projector(lookahead_min_snapshots=bad))
+        # Fixed mode n_points=2: only 2 legal, 3 rejected.
+        fixed = dict(enabled=True, lookahead_anchor=True, lookahead_mode="fixed_linear", owns_q=False)
+        self.assertEqual(
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=2, **fixed)).anchor.lookahead_min_snapshots,
+            2,
+        )
+        with self.assertRaisesRegex(ValueError, "lookahead_min_snapshots must be"):
+            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=3, **fixed))
+
+    def test_c1_arm_config_constructs(self):
+        """The exact C1 arm shape (no_correct + min_snaps=2 + owns_q=false)."""
+        cfg = CommEffConfig(
+            enabled=True,
+            anchor=self._projector(warmup_mode="no_correct", lookahead_min_snapshots=2),
+        )
+        self.assertEqual(cfg.anchor.warmup_mode, "no_correct")
+        self.assertEqual(cfg.anchor.lookahead_min_snapshots, 2)
+        self.assertFalse(cfg.anchor.owns_q)
+
+
 if __name__ == "__main__":
     unittest.main()
