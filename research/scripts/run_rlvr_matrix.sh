@@ -48,11 +48,16 @@ prep_one() { # slug
 prep_all() { for d in "${DATASETS[@]}"; do prep_one "$d" || echo "[prep] FAILED $d"; done; }
 
 judge_cell() { # cell
-  local cell="$1" log="$RUNROOT/$cell/train.log" rc="$2"
-  local v; v="$(python research/scripts/assert_cell_reward.py "$log" 2>/dev/null)"
-  local es=""; [[ -f "$RUNROOT/$cell/EARLY_STOP_SIGNAL" ]] && es="EARLY_STOP_SIGNAL"
-  printf '%s\t%s\t%s\t%s\n' "$cell" "$rc" "${es:-ok}" "$v" >> "$STATUS"
-  echo "[judge] $cell rc=$rc ${es:-} -> $v"
+  # The launcher may exit non-zero on a benign wandb-teardown error AFTER training
+  # succeeds, so judge on the training exit code (train_rc from setup.log) + the log,
+  # NOT on the launcher's shell exit code.
+  local cell="$1" S="$RUNROOT/$cell"
+  local trc; trc="$(grep -oE 'train_rc=[0-9]+' "$S/setup.log" 2>/dev/null | tail -1 | grep -oE '[0-9]+')"
+  [[ -z "$trc" ]] && trc="?"
+  local v; v="$(python research/scripts/assert_cell_reward.py "$S/train.log" 2>/dev/null)"
+  local es="ok"; [[ -f "$S/EARLY_STOP_SIGNAL" ]] && es="EARLY_STOP_SIGNAL"
+  printf '%s\ttrain_rc=%s\t%s\t%s\n' "$cell" "$trc" "$es" "$v" >> "$STATUS"
+  echo "[judge] $cell train_rc=$trc $es -> $v"
 }
 
 run_cell() { # cell model_hf ds_slug|"" extra_hydra...
@@ -63,9 +68,8 @@ run_cell() { # cell model_hf ds_slug|"" extra_hydra...
   local env_common=( MODEL_PATH="$mp" EXPERIMENT_NAME="62-rlvr-models-datasets/$cell"
                      TOTAL_TRAINING_STEPS=5 TEST_FREQ=1 VAL_BEFORE_TRAIN=True )
   if [[ -n "$ds" ]]; then env_common+=( DATA_DIR="$HOME/data/${DSDIR[$ds]}" ); fi
-  env "${env_common[@]}" bash "$LAUNCHER" "${extra[@]}" > "$RUNROOT/$cell/setup.log" 2>&1
-  local rc=$?
-  judge_cell "$cell" "$rc"
+  env "${env_common[@]}" bash "$LAUNCHER" "${extra[@]}" > "$RUNROOT/$cell/setup.log" 2>&1 || true
+  judge_cell "$cell"
 }
 
 smoke_cell() { # ds model

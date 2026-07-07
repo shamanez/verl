@@ -24,7 +24,8 @@ from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 PREFIX = re.compile(r"^.*?(?=\bstep:\d)")
-PAIR = re.compile(r"([A-Za-z0-9_./]+):(-?[0-9][0-9.eE+\-]*|nan|inf|-inf)")
+# keys carry '-' and '@' (e.g. val-aux/DigitalLearningGmbH/MATH-lighteval/reward/mean@1)
+PAIR = re.compile(r"([A-Za-z0-9_./@-]+):(-?[0-9][0-9.eE+\-]*|nan|inf|-inf)")
 
 TRAIN_REWARD_KEYS = ("critic/score/mean", "critic/rewards/mean")
 
