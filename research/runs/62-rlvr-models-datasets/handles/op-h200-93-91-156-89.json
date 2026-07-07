@@ -1,0 +1,15 @@
+{
+  "schema_version": "1",
+  "instance_id": "op-h200-93-91-156-89",
+  "ssh_host": "93.91.156.89",
+  "ssh_port": 44446,
+  "num_gpus": 1,
+  "gpu_name": "unknown",
+  "gpu_ram": 0,
+  "dph_total": 0,
+  "ssh_login": "ssh -i /Users/shamane/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 44446 root@93.91.156.89",
+  "label": "62-rlvr-models-datasets",
+  "vast_account": "private",
+  "created_at": "2026-07-07T12:27:49Z",
+  "external": true
+}
