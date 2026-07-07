@@ -65,11 +65,16 @@ run_cell() { # cell model_hf ds_slug|"" extra_hydra...
   local dir_arg=() ; local extra=("$@")
   mkdir -p "$RUNROOT/$cell"
   echo "======== [cell] $cell  model=$mp  ds=${ds:-gsm8k-auto}  extra=${extra[*]:-none} ========"
+  # SAVE_FREQ=-1 disables checkpoint writes (smoke needs no weights); we also
+  # rm -rf checkpoints/ after every cell as a hard disk-safety backstop — an
+  # unattended 26-cell matrix filled a 200G disk with FSDP checkpoints once.
   local env_common=( MODEL_PATH="$mp" EXPERIMENT_NAME="62-rlvr-models-datasets/$cell"
-                     TOTAL_TRAINING_STEPS=5 TEST_FREQ=1 VAL_BEFORE_TRAIN=True )
+                     TOTAL_TRAINING_STEPS=5 TEST_FREQ=1 VAL_BEFORE_TRAIN=True SAVE_FREQ=-1 )
   if [[ -n "$ds" ]]; then env_common+=( DATA_DIR="$HOME/data/${DSDIR[$ds]}" ); fi
   env "${env_common[@]}" bash "$LAUNCHER" "${extra[@]}" > "$RUNROOT/$cell/setup.log" 2>&1 || true
   judge_cell "$cell"
+  rm -rf checkpoints 2>/dev/null || true
+  echo "[disk] after $cell: $(df -h / | awk 'NR==2{print $4" free"}')"
 }
 
 smoke_cell() { # ds model
@@ -80,18 +85,24 @@ smoke_cell() { # ds model
   run_cell "$cell" "${MODEL[$m]}" "$ds" "${extra[@]}"
 }
 
-run_all_smoke() { # optional: skip_canary
+already_passed() { # cell -> 0 if a pass:true row exists for it
+  grep -F "$1"$'\t' "$STATUS" 2>/dev/null | grep -q '"pass": true'
+}
+
+run_all_smoke() { # optional: skip_canary | resume
   local skip="${1:-}"
   for ds in "${DATASETS[@]}"; do
     for m in "${MODELS_ORDER[@]}"; do
       local cell="smoke-$ds-$m"
       [[ "$skip" == "skip_canary" && "$cell" == "$CANARY" ]] && continue
+      [[ "$skip" == "resume" ]] && already_passed "$cell" && { echo "[skip] $cell already passed"; continue; }
       smoke_cell "$ds" "$m"
     done
   done
 }
 
-run_parity() {
+run_parity() { # optional: resume
+  [[ "${1:-}" == "resume" ]] && already_passed "dense-control-parity" && { echo "[skip] parity already passed"; return 0; }
   # dense control = comm-eff OFF on the gsm8k path (launcher auto-preps gsm8k when DATA_DIR unset)
   run_cell "dense-control-parity" "Qwen/Qwen2.5-1.5B-Instruct" "" \
     actor_rollout_ref.actor.comm_eff.enabled=false
@@ -102,6 +113,7 @@ case "$MODE" in
   canary) prep_one math; smoke_cell math qwen25-math-1p5b ;;
   rest)   prep_all; run_all_smoke skip_canary ;;
   parity) run_parity ;;
+  resume) prep_all; run_all_smoke resume; run_parity resume ;;   # run only cells not already pass:true
   all)    prep_all; run_all_smoke; run_parity ;;
   *) echo "unknown mode: $MODE"; exit 2 ;;
 esac
