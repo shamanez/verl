@@ -40,7 +40,7 @@ row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")  
    `isolation: worktree` handles it).
 3. **Dispatch ONE `experiment-runner` subagent** with:
    `issue=<N> run_id=$RUN_ID plan=$(plan_path <N>) branch=$BRANCH
-   account=<--account | plan vast_account | private>
+   account=<--account | plan vast_account | team>
    attach=<--attach id | plan attach_box | none>`.
    (`plan_path` is the fetched cache of the issue-body plan — `plan_fetch`
    above already refreshed it; the runner never talks to GitHub for the plan.)

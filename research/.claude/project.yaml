@@ -26,11 +26,11 @@ workspace:
   secrets_optional:
     - VAST_API_KEY_TEAM           # shared "Pluralis Research" team Vast.ai account; used when VAST_ACCOUNT=team
   secrets_file_perms: "600"
-  # Vast.ai account selector: VAST_ACCOUNT=team|private (default private). team -> VAST_API_KEY_TEAM,
+  # Vast.ai account selector: VAST_ACCOUNT=team|private (default TEAM — the private account is out of credits). team -> VAST_API_KEY_TEAM,
   # private -> VAST_API_KEY. Resolved by .claude/skills/_vast_account.sh; provision stamps the chosen
   # account on the handle/ledger as `vast_account`, and both teardown paths (vast-teardown skill +
   # teardown-finished-runs Stop hook) read it back so a box is always destroyed with the account that
-  # created it. Operator picks it per issue via `/launch <N> --account team|private` or the plan's `vast_account:` key (default private).
+  # created it. Operator picks it per issue via `/launch <N> --account team|private` or the plan's `vast_account:` key (default team; pass --account private / set vast_account: private to use the personal account).
 
 github:
   research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.

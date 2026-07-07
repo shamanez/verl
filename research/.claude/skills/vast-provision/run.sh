@@ -109,7 +109,7 @@ if [[ -z "$IMAGE" && -z "$TEMPLATE_HASH" && -r "$TEMPLATES_JSON" ]]; then
   if [[ "$NUM_TEMPLATES" == "1" ]]; then
     TEMPLATE_NAME=$(jq -r 'keys[0]' "$TEMPLATES_JSON")
     TEMPLATE_IMAGE=$(jq -r '.[keys[0]].image // "?"' "$TEMPLATES_JSON")
-    if [[ "${VAST_ACCOUNT:-private}" == "team" ]]; then
+    if [[ "${VAST_ACCOUNT:-team}" == "team" ]]; then
       # A Vast Template is owned by ONE account; the private-owned template is NOT
       # accessible to the team account (create 400s). Use the recorded team-owned
       # copy (team_hash_id) when provisioning on the team account.
@@ -161,7 +161,7 @@ SECRETS_FILE="${VERL_SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
 # shellcheck disable=SC1090
 source "$SKILL_DIR/../_vast_account.sh"
 vast_load_secrets
-VAST_ACCOUNT="$(vast_account_norm "${VAST_ACCOUNT:-private}")"
+VAST_ACCOUNT="$(vast_account_norm "${VAST_ACCOUNT:-team}")"
 VAST_API_KEY="$(vast_key_for "$VAST_ACCOUNT")"; export VAST_API_KEY
 if [[ -z "${VAST_API_KEY:-}" ]]; then
   echo "$PROG: no Vast API key for account=$VAST_ACCOUNT (set VAST_API_KEY / VAST_API_KEY_TEAM in $SECRETS_FILE)" >&2

@@ -95,7 +95,7 @@ acct_for_iid() {
       select(any(.handles[]?.instance_id // empty; (.|tostring) == $i)) | .vast_account // empty' \
       "$LEDGER" 2>/dev/null | tail -1)
   fi
-  vast_account_norm "${a:-private}"
+  vast_account_norm "${a:-team}"
 }
 
 ERR_LOG="/tmp/teardown.err"
