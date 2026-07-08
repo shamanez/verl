@@ -48,6 +48,7 @@ under `research/`. The project's north-star — what "done" means — is
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
 | **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (on the project.yaml base branch) |
 | **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
+| **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 `autonomous-harness-rlvr-compression/<run_id>/`; config: `project.yaml` `reports:` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |

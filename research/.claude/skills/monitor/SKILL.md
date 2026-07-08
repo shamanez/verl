@@ -1,6 +1,6 @@
 ---
 name: monitor
-description: "Babysit a running experiment until terminal: bounded background watch cycles, env-failure ladder walk, bounded on-box fix loop for code_change probes, teardown the moment results sync. Stage 5. No adversarial loops — ever."
+description: "Babysit a running experiment until terminal: bounded background watch cycles (cheap machine-monitor health poller; Opus training-log-monitor dispatched ONCE per anomaly to classify), env-failure ladder walk, bounded on-box fix loop for code_change probes, teardown the moment results sync. Stage 5. No adversarial loops — ever."
 argument-hint: "<issue-number>"
 allowed-tools: Bash, Read, Glob, Grep, Agent
 ---
@@ -28,17 +28,29 @@ esac
   `flag_human <N> "stuck PROVISIONED"` and stop. Never bounce the
   operator back to /launch (its live-box guard would bounce them here again).
 
-## Watch loop (bounded, background, act-on-report)
+## Watch loop (bounded, background, act-on-report — two tiers)
+
+The default watcher is the CHEAP **`machine-monitor`** (Sonnet — mechanical
+health polls only). The Opus **`training-log-monitor`** costs real money per
+poll and is dispatched **on demand**: ONCE per anomaly, in classify mode —
+never as the every-cycle watcher (project.yaml `verification.monitoring`).
 
 Repeat up to **12 cycles** (~8 h; for longer runs re-invoke /monitor or run
 under `/bg /goal … /go <N>`):
 
-1. Dispatch `training-log-monitor` with `run_in_background: true`, passing
+1. Dispatch `machine-monitor` with `run_in_background: true`, passing
    `run_id=$id` (it reads handles + cells + step target from
    `runs/$id/run.json` / `runs/$id/handles/*.json` — never the plan). It polls
-   30 s / ≤ 40 min and returns a terminal report. Never foreground-poll a
-   background task with sleep loops.
-2. Act on the report — this is a dispatch table, not a judgment call:
+   30 s / ≤ 40 min and returns ONE terminal report:
+   `done | healthy-timeout | anomaly` (+ evidence: log tail, GPU util
+   history, step trace). Never foreground-poll a background task with sleep
+   loops.
+2. `anomaly` → dispatch `training-log-monitor` ONCE (foreground,
+   `mode=classify`, passing the anomaly evidence). It classifies into the
+   dispatch table below and returns. Do NOT redispatch it for a second
+   opinion.
+3. Act on the (classified) report — this is a dispatch table, not a judgment
+   call:
    - **done** (flags + steps reached) → confirm metrics rsynced to
      `runs/$id/metrics/`, then teardown NOW (`vast-teardown` skill), then
      `/analyze <N>`. The box never outlives its science.
@@ -56,8 +68,14 @@ under `/bg /goal … /go <N>`):
    - **stall** (all GPUs ≤5% for 4 polls, tmux alive) → one `nvidia-smi` +
      log-tail confirmation, then teardown + `flag_human <N> "stall"`. A
      stalled GPU is burning money for nothing.
-   - **timeout** (40-min cap, training healthy) → next cycle immediately.
-3. Between reports there is nothing to do — do NOT fill the gap with analysis,
+   - **unclear** (the classifier genuinely could not classify) → sync
+     whatever evidence exists into `runs/$id/`, then teardown +
+     `flag_human <N> "unclassifiable anomaly: <what's missing>"`, stop. An
+     unexplained box must never keep billing unwatched — money-safe beats
+     diagnosis.
+   - **healthy-timeout** (40-min cap, training progressing) → next cycle
+     immediately (back to step 1 — the cheap watcher again).
+4. Between reports there is nothing to do — do NOT fill the gap with analysis,
    verification, or "deep dives" on the live box.
 
 ## Hard rules
@@ -66,6 +84,9 @@ under `/bg /goal … /go <N>`):
   run. If something genuinely warrants heavy verification mid-run, run
   `flag_human <N> "<what/why>"` (durable `needs:human` label + issue comment +
   PROGRESS echo) and STOP for a human go/no-go.
+- ONE classification per anomaly: machine-monitor detects, training-log-monitor
+  classifies once, this skill acts. Classification doubt → the classifier says
+  so in its report and the action is `flag_human`, not a re-run.
 - Teardown always via the `vast-teardown` skill (ledger flip included), the
   instant science is captured. Never `vastai destroy` bare.
 - Every loop here is bounded by ledger counters (`fix_attempts`,

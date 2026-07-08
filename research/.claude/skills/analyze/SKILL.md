@@ -24,7 +24,7 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 - `runs/<id>/verdict.md` already exists → show it, `Next: /close <N>`, stop
   (idempotent).
 - `runs/<id>/` DELETED but issue is `status:pass|stop` → terminal already;
-  point at `/close <N>` or the LOG entry. If not terminal and the run dir is
+  point at `/close <N>` or the runs/SUMMARY.md row. If not terminal and the run dir is
   gone → `die "results for #<N> were deleted — relaunch or close"`.
 
 ## Steps

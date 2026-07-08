@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # de-bloat — fold a COMPLETED experiment into runs/SUMMARY.md and remove its bulky
 # artifacts (run dir, plan file, stale handles). HUMAN-ONLY — see the gate below.
+# Since 2026-07-08 this is the manual BATCH FALLBACK for legacy/leftover dirs:
+# the normal path is /close's own cleanup sweep (scripts/close_cleanup.sh),
+# which cleans each issue automatically once its record is durably published.
 #
 # Hard guards:
 #   - OPERATOR GATE: refuses unless DEBLOAT_OPERATOR_ACK=1 is set. The autonomous
@@ -8,7 +11,7 @@
 #     disable-model-invocation, so the model cannot auto-fire this skill).
 #   - NEVER the baseline (ids baseline / 3 / EXP-3).
 #   - Refuses a live (RUNNING/PROVISIONED/EXTERNAL) ledger row.
-#   - Refuses an undone experiment (no verdict.md AND no LOG entry).
+#   - Refuses an undone experiment (no verdict.md AND no SUMMARY row).
 #   - Idempotent.
 set -euo pipefail
 
@@ -60,14 +63,14 @@ fi
 if [[ ! -f "$SUMMARY" ]]; then
   mkdir -p runs
   cat > "$SUMMARY" <<'HDR'
-# Research runs — summary
+# Runs summary — one row per issue
 
-Concise record of what has run on this harness. Full per-experiment artifacts are
-pruned (folded here by the `de-bloat` skill); the durable record is here + git history + merged code.
+Concise durable index (the OFFLINE fallback). The verdict SSOT is each issue's
+close comment + the published report page (project.yaml `reports:`).
 
-| id | milestone | what | result | merged |
-|---|---|---|---|---|
-| **baseline** | M1 | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the control) | reference curve | — |
+| id | date | verdict | headline | issue | PR |
+|---|---|---|---|---|---|
+| baseline | — | reference | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the permanent control) | — | — |
 HDR
 fi
 
@@ -115,24 +118,24 @@ for RAW in "${IDS[@]}"; do
     echo "$PROG: $ID still has a live ledger row — tear it down first. Refusing."; continue
   fi
 
-  # --- done-check: verdict.md OR a word-bounded LOG entry ---
+  # --- done-check: verdict.md OR a word-bounded SUMMARY row (LOG.md is retired) ---
   VERDICT="$(grep -m1 -oE 'VERDICT:[[:space:]]*(PASS|REVISE|STOP)' "$RUNDIR/verdict.md" 2>/dev/null | grep -oE 'PASS|REVISE|STOP' || true)"
-  if [[ -z "$VERDICT" ]] && ! grep -qE "$(bounded "$ID")" LOG.md 2>/dev/null; then
-    echo "$PROG: $ID is not done (no verdict.md, no LOG.md entry) — refusing to delete pending work."; continue
+  if [[ -z "$VERDICT" ]] && ! grep -qE "$(bounded "$ID")" "$SUMMARY" 2>/dev/null; then
+    echo "$PROG: $ID is not done (no verdict.md, no SUMMARY row) — refusing to delete pending work."; continue
   fi
-  [[ -z "$VERDICT" ]] && VERDICT="$(grep -E "$(bounded "$ID")" LOG.md 2>/dev/null | grep -m1 -oE 'PASS|STOP|REVISE' || echo 'done')"
+  [[ -z "$VERDICT" ]] && VERDICT="$(grep -E "$(bounded "$ID")" "$SUMMARY" 2>/dev/null | grep -m1 -oE 'PASS|STOP|REVISE' || echo 'done')"
 
-  # --- concise SUMMARY row (plan → run.json → LOG fallbacks) ---
+  # --- concise SUMMARY row (plan → run.json fallbacks) ---
   TITLE=""; MILE=""
   [[ -n "$PLAN" && -f "$PLAN" ]] && { TITLE="$(field title "$PLAN")"; MILE="$(field milestone "$PLAN")"; }
   [[ -z "$TITLE" && -f "$RUNDIR/run.json" ]] && TITLE=$(jq -r '.title // empty' "$RUNDIR/run.json" 2>/dev/null)
-  [[ -z "$TITLE" ]] && TITLE="$(grep -E "$(bounded "$ID")" LOG.md 2>/dev/null | head -1 | sed -E 's/^#+ *//' || true)"
   [[ -z "$TITLE" ]] && TITLE="$ID"
   [[ -z "$MILE" && -f "$RUNDIR/run.json" ]] && MILE=$(jq -r '.milestone // empty' "$RUNDIR/run.json" 2>/dev/null)
-  [[ -z "$MILE" ]] && MILE="?"
-  PR="$(grep -hE "$(bounded "$ID")" LOG.md PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+  [[ -n "$MILE" && "$MILE" != "none" && "$MILE" != "?" ]] && TITLE="[$MILE] $TITLE"
+  PR="$(grep -hE "$(bounded "$ID")" "$SUMMARY" PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
   MERGED="—"; [[ -n "$PR" ]] && MERGED="PR #$PR → \`$BASE_BRANCH\`"
-  ROW="| $ID | $MILE | $TITLE | $VERDICT | $MERGED |"
+  ISSUE_COL="—"; [[ -n "$ISSUE_NUM" ]] && ISSUE_COL="#$ISSUE_NUM"
+  ROW="| $ID | $(date +%F) | $VERDICT | $TITLE | $ISSUE_COL | $MERGED |"
 
   echo "$PROG: folding $ID → $SUMMARY"
   echo "    $ROW"

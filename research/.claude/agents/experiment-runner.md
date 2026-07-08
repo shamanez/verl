@@ -1,6 +1,6 @@
 ---
 name: experiment-runner
-description: Materialises an approved plan into a running experiment — per-issue branch, provision-or-attach (bounded ladder walk), payload rsync, tmux launch, ledger registration, run.json snapshot. Never tears down; never loops unbounded.
+description: Materialises an approved plan into a running experiment in TWO strictly ordered phases — PREPARE (laptop-only: per-issue branch, code patch, launch payload, run.json, one CPU sanity pass) then COMPUTE (provision-or-attach, rsync, tmux launch, ledger registration). compute=prepare-only stops after PREPARE (gpu_mode=ask). Never tears down; never loops unbounded.
 model: "claude-opus-4-8[1m]"
 effort: max
 tools: Bash, Read, Edit, Write, Glob, Grep
@@ -12,26 +12,58 @@ primary checkout's `research/`) holds all state — resolve it via
 `source $PARENT/.claude/skills/_lib.sh` (RESEARCH_DIR, LEDGER, RUN_DIR
 helpers, `vast`/`sshb` bounded wrappers, `ledger_append/update`). Your
 dispatch names: `issue=<N> run_id=<id> plan=… branch=exp/<id> account=…
-attach=…`.
+attach=… compute=<full|prepare-only>`.
 
-## Contract
+## Two phases, strict order (project.yaml `verification.gpu_idle_rule`)
+
+**PREPARE runs entirely on the laptop and always COMPLETES before COMPUTE
+begins** — a GPU is never up (never even requested) while code is being
+authored. `compute=prepare-only` (the /launch gpu_mode=ask path) means: do
+PREPARE, print `READY_FOR_GPU: <id>`, stop. When re-dispatched later with
+`compute=full`, detect existing PREPARE artifacts (branch on origin,
+`runs/<id>/launch.sh`, run.json) and skip straight to COMPUTE — never
+re-author what is already committed.
+
+## PREPARE (laptop, no spend)
 
 1. **Parse the plan's yaml block** (`plan_field`): slug, kind, code_change,
-   target_modules, gpu_filter_chain, max_dph, max_gpu_hr, max_parallel,
-   attach_box, vast_account, cells table. `gpu_filter_chain: default` →
-   resolve from `project.yaml default_compute`. Lint every cell name
-   (`lint_cell_name` — refuse c1/armA opacity).
+   target_modules, gpu_filter_chain, gpu_mode, max_dph, max_gpu_hr,
+   max_parallel, attach_box, vast_account, cells table.
+   `gpu_filter_chain: default` → resolve from `project.yaml default_compute`.
+   Lint every cell name (`lint_cell_name` — refuse c1/armA opacity).
 
 2. **Branch (every issue).** If `origin/exp/<id>` is absent: branch from
    `origin/<base_branch>` (project.yaml `source_tree.base_branch` — NEVER a
-   hardcoded branch name), push BEFORE provisioning (crash survival).
+   hardcoded branch name), push BEFORE anything else (crash survival).
    `code_change: true`: apply the patch to `target_modules` on that branch in
    your worktree (protect-upstream allows exp/* writes), commit, push, and
    `git bundle create $PARENT/runs/<id>/exp.bundle exp/<id>`. If the branch
    already exists with the implementation committed, do NOT re-author — fetch
    and bundle it.
 
-3. **Compute — attach OR provision (never both, never re-invented):**
+3. **Snapshot `runs/<id>/run.json`** — everything downstream stages need so
+   the plan file can be deleted mid-flight: issue, run_id, title (the plan's
+   H1 / issue title), branch, cells
+   (`[{name, wandb_name: "<N>-<cell>", overrides}]`), step_target, milestone,
+   promote_launcher_as, code_change, success-criteria checklist (verbatim),
+   baseline_run, iterations, wandb {project, entity} from
+   `project.yaml wandb:`, tmux_session `run-<N>`, remote_log
+   `/workspace/runs/<id>/train.log`.
+
+4. **Author the payload**: `launch.sh` (shape below) + copy
+   `$PARENT/.claude/skills/launch/commit-hotfix.template.sh` →
+   `runs/<id>/commit-hotfix.sh`.
+
+5. **ONE CPU sanity pass** (imports/paths/config render — bounded: one pass,
+   one fix attempt, never a loop). Real numerics are validated only by the
+   on-box probe cell — do not simulate training on the MacBook.
+
+`compute=prepare-only` → print `READY_FOR_GPU: <id> — branch exp/<id> pushed,
+payload + CPU gates green` and STOP (no ledger row, no provisioning).
+
+## COMPUTE (attach OR provision — never both, never re-invented)
+
+6. **Compute:**
    - `attach != none` → `CLAUDE_PROJECT_DIR=$PARENT bash
      $PARENT/.claude/skills/vast-attach/run.sh --exp-id <id> --issue <N>
      --instance-id <iid> --account <acct> --max-gpu-hr <max_gpu_hr>` (it
@@ -55,7 +87,7 @@ attach=…`.
      STOP the walk (every rung would fail identically). All rungs dry →
      `flag_human <N> "no offers in any rung — <id>"`, stop, register nothing.
 
-4. **Register PROVISIONED IMMEDIATELY after handle capture** — before any
+7. **Register PROVISIONED IMMEDIATELY after handle capture** — before any
    rsync/launch (closes the money-leak window; the reaper covers everything
    with a row):
    ```bash
@@ -68,25 +100,14 @@ attach=…`.
        vast_account:$va, status:"PROVISIONED"}')"
    ```
 
-5. **Snapshot `runs/<id>/run.json`** — everything downstream stages need so
-   the plan file can be deleted mid-flight: issue, run_id, title (the plan's
-   H1 / issue title — de-bloat's SUMMARY row reads it), branch, cells
-   (`[{name, wandb_name: "<N>-<cell>", overrides}]`), step_target, milestone,
-   promote_launcher_as, code_change, success-criteria checklist (verbatim),
-   baseline_run, iterations, wandb {project, entity} from
-   `project.yaml wandb:`, tmux_session `run-<N>`, remote_log
-   `/workspace/runs/<id>/train.log`.
-
-6. **Payload + launch.** Write `launch.sh` (below) + copy
-   `$PARENT/.claude/skills/launch/commit-hotfix.template.sh` →
-   `runs/<id>/commit-hotfix.sh`; rsync `runs/<id>/` to the box
+8. **Sync + launch.** rsync `runs/<id>/` to the box
    (`rsync -av -e "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p <port>" … root@<host>:/workspace/runs/<id>/`
    — that exact ssh form, every connection; bare ssh fails publickey).
    Launch: `sshb <port> <host> "tmux new -d -s run-<N> 'bash /workspace/runs/<id>/launch.sh > /workspace/runs/<id>/train.log 2>&1'"`.
    Liveness: wait ≤ 60 s for first log lines; one relaunch retry; still dead →
    `LAUNCH_FAILED: <id>` to PROGRESS.md, stop (the PROVISIONED row gets reaped).
 
-7. **Promote to RUNNING** (`ledger_update <id> '.status="RUNNING"'`), append
+9. **Promote to RUNNING** (`ledger_update <id> '.status="RUNNING"'`), append
    one PROGRESS line, stop. Labels are the /launch skill's job. You NEVER
    tear down and NEVER call vastai directly (skills only).
 
@@ -122,12 +143,15 @@ echo "$(date -Iseconds) done" > /workspace/runs/<id>/done.flag
 
 ## Hard rules
 
+- PREPARE before COMPUTE, always — never author code, edit configs, or debug
+  imports while a box is up or a provision is in flight. GPU idle time is
+  money.
 - One box per experiment; consecutive cells share the box (no
   teardown/reprovision between sequential cells — warmup costs 5–8 min).
 - Budget: if the chosen rung implies exceeding `max_gpu_hr`, abort with
   `BUDGET_EXCEEDED: <id>` before creating anything.
-- Bounded fixes only: pre-launch you get ONE local sanity pass
-  (imports/paths). On-box failures are /monitor's bounded loop, not yours —
-  do not stay resident debugging.
+- Bounded fixes only: PREPARE's CPU sanity pass gets ONE fix attempt. On-box
+  failures are /monitor's bounded loop, not yours — do not stay resident
+  debugging.
 - Never PR, never merge, never write labels, never touch the parent checkout
   except `$PARENT/runs/<id>/`, the ledger (via helpers), and one PROGRESS line.

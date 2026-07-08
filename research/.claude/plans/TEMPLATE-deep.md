@@ -11,7 +11,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>
-title: <issue title>          # one line — SUMMARY.md rows and LOG entries read it
+title: <issue title>          # one line — SUMMARY.md rows and the run-report page read it
 kind: experiment
 tier: deep
 code_change: false
@@ -19,6 +19,7 @@ target_modules: []
 baseline_run: baseline
 depends_on: []
 milestone: none
+gpu_mode: default             # 'default' = project.yaml default_compute.gpu_mode (auto|ask); CLI --gpu beats this
 gpu_filter_chain: default
 max_dph: 24.0
 max_gpu_hr: 72
@@ -31,7 +32,7 @@ iterations: 3
 
 ## What & why
 <A paragraph a colleague could read cold: the question, why now, what changes
-depending on the answer. Link prior LOG.md / runs/SUMMARY.md entries instead
+depending on the answer. Link prior runs/SUMMARY.md rows / report pages instead
 of restating them.>
 
 ## Hypothesis

@@ -28,14 +28,28 @@ What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
   `status`) + compute skills (`vast-*`) + human-only `de-bloat`/`codex-verify` +
   the shared `_lib.sh`.
 - `.claude/agents/` — leaf subagents the commands dispatch: research-planner,
-  experiment-runner, training-log-monitor, analyst, log-writer.
+  experiment-runner (PREPARE laptop-phase → COMPUTE box-phase), machine-monitor
+  (cheap Sonnet health poller — the default watcher), training-log-monitor
+  (Opus classifier, dispatched on anomaly), analyst, log-writer.
 - `.claude/plans/` — `TEMPLATE-fast.md` / `TEMPLATE-deep.md` (+ read-only legacy
   files). The plan itself lives in the GITHUB ISSUE BODY; the local copy is a
   gitignored cache under `.claude/state/plan-cache/`.
-- `runs/<N>-<slug>/` — ALL run artifacts (metrics, verdict.md, report.html, run.json);
-  `runs/SUMMARY.md` is the durable fold-in record. Nothing run-related lives anywhere else.
-- `.claude/state/` — `runs.jsonl` ledger + plan cache (machine state; not versioned).
-- `scripts/` — `analyze.py`, `check_budget.py`, `capture_resolved_config.py`, ….
+- `runs/<N>-<slug>/` — run artifacts (metrics, verdict.md, run.json) — VOLATILE:
+  /close publishes the record to the reports site + R2, then its cleanup sweep
+  (`scripts/close_cleanup.sh`) deletes the dir. `runs/SUMMARY.md` (one row per
+  issue) is the only durable local index; `PROGRESS.md` is THE one session file.
+- `.claude/state/` — `runs.jsonl` ledger + plan cache (machine state; not versioned;
+  swept per-issue by /close's cleanup).
+- `scripts/` — `analyze.py`, `check_budget.py`, `capture_resolved_config.py`,
+  `publish_run_report.py` (report page + artifacts + R2), `close_cleanup.sh`, ….
+
+## Where finished-run results live
+
+Issue close comment (verdict SSOT) → report page on
+**https://com-eff-rlvr.pages.dev/runs/** (auto-published by /close; push =
+Cloudflare Pages deploy) → big artifacts in R2
+(`autonomous-harness-rlvr-compression/<run_id>/`) → small artifacts in the
+report repo's gitignored `artifacts/<run_id>/`. Config: `project.yaml reports:`.
 
 ## Quick start
 

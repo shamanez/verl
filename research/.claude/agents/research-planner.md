@@ -25,7 +25,7 @@ plan_publish <N> "$DRAFT"         # installs it between <!-- plan:start/end --> 
    from the body. Defaults: kind=experiment, baseline_run=baseline, compute =
    `project.yaml default_compute` (write `gpu_filter_chain: default`, never
    paste the ladder — the runner resolves it).
-2. Read any `runs/<id>/verdict.md` or LOG.md entries the issue references —
+2. Read any `runs/<id>/verdict.md` or `runs/SUMMARY.md` rows the issue references —
    ground the plan in known results. Nothing else is required reading.
 3. Pick the template: `tier=fast` → `.claude/plans/TEMPLATE-fast.md`;
    `tier=deep` → `.claude/plans/TEMPLATE-deep.md`. Fill it. Rules:

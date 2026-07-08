@@ -8,7 +8,10 @@ allowed-tools: Bash
 # /de-bloat <id> [id …] | --all-terminal [--dry-run] — operator-only artifact pruning
 
 Collapses a finished experiment's footprint into one `runs/SUMMARY.md` row and
-deletes the rest. **Two independent human-only gates:**
+deletes the rest. **Since 2026-07-08 this is the manual batch FALLBACK for
+legacy/leftover dirs** — the normal path is /close's own cleanup sweep
+(`scripts/close_cleanup.sh`), which does this per-issue automatically once the
+record is durably published. **Two independent human-only gates:**
 1. `disable-model-invocation: true` — the model can never auto-fire this skill;
    only the operator typing `/de-bloat` triggers it.
 2. `run.sh` refuses without `DEBLOAT_OPERATOR_ACK=1`. When (and only when) the
@@ -30,15 +33,17 @@ list, then run it for real.
 
 Accepts the canonical `<N>-<slug>` (e.g. `61-math-ablation`), legacy `EXP-44`
 / `44`, and legacy slug dirs (`MOAT-45-ANALYSIS`) — matched verbatim against
-`runs/`, word-bounded against LOG/SUMMARY (EXP-4 never matches EXP-44).
+`runs/`, word-bounded against SUMMARY (EXP-4 never matches EXP-44).
 
 ## What it does (per id)
 
-1. Appends one `| id | milestone | what | result | merged |` row to
-   `runs/SUMMARY.md` (from plan → run.json → LOG fallbacks; idempotent).
+1. Appends one `| id | date | verdict | headline | issue | PR |` row to
+   `runs/SUMMARY.md` (from plan → run.json fallbacks; idempotent — same
+   format the log-writer uses at /close).
 2. Deletes `runs/<id>/`, any legacy plan file `.claude/plans/<N>.md`, and the
    derived plan cache `.claude/state/plan-cache/<N>.md` (the plan's SSOT is
-   the GitHub issue body — nothing is lost).
+   the GitHub issue body — nothing is lost; rich detail lives on the report
+   page, project.yaml `reports:`).
 3. Tidies `.claude/state/vast-handles/*.json` for TORN_DOWN instances.
 
 Does NOT commit — review `git status`, then commit.
@@ -56,7 +61,7 @@ and re-running de-bloat is a no-op.
 
 - The baseline (`baseline`/`3`/`EXP-3`) — permanent control.
 - Any id with a live ledger row (RUNNING / PROVISIONED / EXTERNAL).
-- Any id with no verdict.md AND no LOG entry (pending work).
+- Any id with no verdict.md AND no SUMMARY row (pending work).
 
 ## When
 

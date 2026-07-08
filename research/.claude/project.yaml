@@ -52,7 +52,13 @@ commands:                                                     # the per-issue st
   overview: status                                            # /status — read-only fleet view printed to stdout (no STATUS.md file exists)
   human_only: [de-bloat, codex-verify]                        # disable-model-invocation; deleting science / external review are operator acts
   degradation_rule: "every command derives state labels+ledger FIRST, files second; a deleted plan or runs/<id>/ yields a named refusal or terminal derivation — never a retry loop"
-  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable via the human-only de-bloat (incl. --all-terminal batch). Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh or de-bloat."
+  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable: /close's final cleanup sweep (scripts/close_cleanup.sh) deletes them AUTOMATICALLY once the verdict is durably published (close comment + report page), and the human-only de-bloat (incl. --all-terminal batch) remains the manual fallback for legacy dirs. Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh, close_cleanup.sh, or de-bloat."
+
+local_state:                                                  # the ONE-FILE policy (operator directive 2026-07-08): nothing about a FINISHED run lives in the harness checkout
+  session_file: PROGRESS.md                                   # THE single local mutable file — capped tick echo + the end-of-session checklist an agent reads to double-check everything is done before ending its window. Standing operator notes live in its header. LOG.md is RETIRED (its index rows were folded into runs/SUMMARY.md).
+  durable_index: runs/SUMMARY.md                              # one append-only row per issue — the offline fallback when GitHub is unreachable; everything richer lives in the close comment + the published report page
+  durable_record: "issue close comment (verdict SSOT) + reports.site runs page + WandB + git history — NEVER local files"
+  cleanup_rule: "/close's LAST step runs scripts/close_cleanup.sh <N> <id>: verifies status:done + ledger TORN_DOWN/absent + report published, then deletes runs/<id>/, plan-cache/<N>.md, torn-down vast-handles, compacts the issue's ledger rows to one terminal row, and sweeps the issue's PROGRESS.md ticks. After /close, the checkout carries NOTHING about the finished run except its SUMMARY row."
 
 naming:                                                       # ONE readable name everywhere — derived by skills/_lib.sh names_for(), never by convention
   run_id: "<issue>-<slug>"                                    # e.g. 63-anchor-ema-sweep = runs/ dir name = ledger id = Vast label = WandB group; branch exp/<run_id>
@@ -65,6 +71,19 @@ wandb:                                                        # single source of
   entity: shamanework-pl
   tail_rule: "the async uploader drops the last 1-2 steps — /analyze backfills them from train.log (scripts/backfill_wandb.py)"
 
+reports:                                                      # publishing surface for finished runs (operator directive 2026-07-08) — verdicts live OUTSIDE the harness
+  repo_dir: /Users/shamane/Documents/com-eff-RLVR             # local checkout of the Cloudflare Pages repo (auto-deploys on push)
+  site_url: https://com-eff-rlvr.pages.dev
+  runs_dir: runs                                              # one self-contained HTML page per closed issue: runs/<N>-<slug>.html, linked to the GitHub issue; runs/index.html is the machine-maintained list (marker: <!-- runs:insert -->). The curated reports/ + weekly/ tabs stay HUMAN-curated — the pipeline NEVER writes there.
+  artifacts_dir: artifacts                                    # gitignored in the report repo — small per-run downloads the operator wants locally (artifacts/<run_id>/); NEVER committed to Pages
+  publish_script: research/scripts/publish_run_report.py      # /close runs it at step 5c, AFTER the close comment exists (the page renders it): generates the run page, updates runs/index.html, copies small artifacts, uploads big ones to R2, commits (and pushes unless --no-push) the report repo. Nonzero exit = REPORT_PUBLISH_PARTIAL → /close flags a human and SKIPS the cleanup sweep.
+  push_on_publish: true                                       # a push IS the deploy (Cloudflare Pages auto-builds) — that is the point
+  r2:                                                         # big artifacts (checkpoints, weight dumps, full metrics) — NEVER into git
+    bucket_env: R2_BUCKET                                     # from secrets.env (aws CLI with --endpoint-url $R2_ENDPOINT; keys R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)
+    endpoint_env: R2_ENDPOINT
+    prefix: autonomous-harness-rlvr-compression               # per-run layout: <prefix>/<run_id>/…
+    console: https://dash.cloudflare.com/c0b687e3982c3fbcee1fc04607cd2683/r2/default/buckets/shamane-pluralis
+
 budget:                                                       # money caps (absorbed budget.json; scripts/check_budget.py reads THIS block)
   monthly_cap_usd: 1500
   weekly_cap_usd: 500
@@ -74,6 +93,8 @@ verification:                                                 # WHERE heavy veri
   planning: "unbounded: /plan deep may run judge-panel workflows, brainstorming, operator Q&A; /approve may invoke codex-verify. All uncertainty is spent BEFORE approval."
   execution: "NONE autonomous. /launch → /close run without adversarial review, verdict re-verification, or exploratory workflows. If a stage believes heavy verification is warranted mid-run, it appends 'MANUAL_REVIEW_NEEDED: <why> — #<N>' to PROGRESS.md and STOPS for an explicit human go/no-go."
   cpu_vs_gpu: "CPU checks (import/shape/off-path-parity) run ONCE per gate with ONE bounded fix attempt — never a loop. Numerics-under-training are validated by the on-box probe cell (1-2 steps); on-box fixes are bounded by ledger fix_attempts<=3, then MANUAL_REVIEW_NEEDED."
+  gpu_idle_rule: "implementation FINISHES on the laptop before any box exists (operator directive 2026-07-08): the runner's PREPARE phase (branch/patch/launch payload/one CPU sanity pass) always completes BEFORE provision/attach, in both gpu_mode=auto and ask — a GPU is never up while code is being authored. On-box work is launch + the bounded probe-fix loop only. CPU tests are ONE bounded pass, never a loop — real on-policy numerics are only ever tested on the GPU."
+  monitoring: "the default watch loop is the CHEAP machine-monitor (Sonnet health poller: ssh/tmux/GPU-util/step-advance/disk/wandb-liveness). The Opus training-log-monitor is dispatched ONCE per ANOMALY report, mode=classify (env vs experiment vs probe failure vs stall vs unclear) — never every cycle; a clean done/healthy-timeout report needs no classification. See agent_models."
   bounded_retry_rule: "every retry is counted in the ledger (launch_attempts<=3, fix_attempts<=3, revise_depth<=plan iterations, monitor cycles<=12); exhaustion stops with a named flag, never spins"
 
 source_tree:                                                  # the upstream code the experiments operate on
@@ -107,6 +128,9 @@ vast_ssh:                                                     # SSH identity the
   # sync-metrics.sh, experiment-runner SSH/rsync calls, and any future on-box helpers MUST pass `-i $(eval echo "$identity_file")` so the right key is offered. Bare `ssh root@host` will silently fall back to id_rsa/id_ed25519 and fail with publickey.
 
 default_compute:                                              # planner emits these defaults unless the issue overrides
+  gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
+                                                              #   auto = hands-off: once the runner's PREPARE phase (implementation + CPU gates, laptop-only) is green it walks gpu_filter_chain and provisions by itself.
+                                                              #   ask  = prepare everything, then PAUSE: needs:human "READY FOR GPU" comment on the issue; the operator hands over a box (`--attach <id>` → vast-attach registers it) or authorizes auto-provision (re-run with `--gpu auto`).
   gpu_count: 1
   gpu_filter_chain:                                           # DEFAULT ladder (2026-07-03): 1×H200 → 1×B200 → 2×H200 — runner tries each rung in order; first rung with ≥1 offer ≤ max_dph wins. Machine reliability strictly >0.99 on EVERY rung.
     - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default — proven for both datasets (GSM8K fast surface; Big-Math @ resp 4096, EXP-58)
@@ -163,8 +187,8 @@ default_baseline:                                             # the reference a 
   dense_control: baseline                                     # the verl-unmodified dense reference; name it explicitly with `baseline_run: baseline`
 
 fixed_control_surface:                                        # LOCKED training hyperparameters — operator directive 2026-06-04; comm-eff substrate locked 2026-06-09; accelerated base 2026-06-18. Extends CLAUDE.md §1 model/loss/hardware controls.
-  doc: research/runs/FIXED_CONTROL_SURFACE.md                 # authoritative human-readable sheet (batch/lr/substrate/steps/contexts pinned)
-  rule: "every GSM8K comm-eff experiment runs the accelerated comm-eff base (launcher vast_comm_eff_accel_base_*.sh): accel surface (use_dynamic_bsz=True, resp 2048, rollout TP=1, gpu_mem_util 0.55, ppo_max_token 24576, 50 steps, test_freq 25, val_before_train=False) + signed_ema(α=0.25, β_anc=0.50) core + diagnostics=false speed knob, on the locked PowerSGD r=77 anchor substrate (anchor owns Q, cadence/delay_K=5, clean=0, replay_paired_batch, disable_custom_all_reduce). The ONLY axis that may vary is the merger (how the stale anchor gradient is USED). Dense (enabled=false on the same accel surface) is the reference (≈0.7657; comm-eff signed_ema(0.25,0.50) ≈0.7362). Values live in the launcher, NOT duplicated here."
+  doc: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh   # the launcher IS the authoritative value sheet (the old runs/FIXED_CONTROL_SURFACE.md sheet was pruned; values live in the launcher, per the rule below)
+  rule: "every GSM8K comm-eff experiment runs the accelerated comm-eff base (launcher vast_comm_eff_accel_base_*.sh): accel surface (use_dynamic_bsz=True, resp 1024, rollout TP=1, gpu_mem_util 0.55, ppo_max_token 24576, 50 steps, test_freq 25, val_before_train=False) + signed_ema(α=0.25, β_anc=0.50) core + diagnostics=false speed knob, on the locked PowerSGD r=77 anchor substrate (anchor owns Q, cadence/delay_K=5, clean=0, replay_paired_batch, disable_custom_all_reduce). The ONLY axis that may vary is the merger (how the stale anchor gradient is USED). Dense (enabled=false on the same accel surface) is the reference (≈0.7657; comm-eff signed_ema(0.25,0.50) ≈0.7362). Values live in the launcher, NOT duplicated here."
   variable_axis: merger                                       # how M/δ is folded into the fast update; accel base default = signed_ema(α=0.25, β_anc=0.50). Substrate (powersgd r77, anchor owns_q) + accel surface are LOCKED.
   measurement_knobs: [test_freq]                              # NOT control variables (validation is read-only) — canonical test_freq=25
 
@@ -188,17 +212,22 @@ agent_models:
   # the whole spread is reviewable in one place; if you change an agent's frontmatter,
   # update the matching row here by hand (and vice versa).
   #
-  # Policy (operator directive 2026-06-29): STRICT best model — every agent runs on
-  # Opus 4.8 (claude-opus-4-8). Model is NOT a tunable; the ONLY knob is reasoning
-  # effort, with a FLOOR of `high` (no agent at low/medium, and none on Sonnet/Haiku).
-  # Effort is tiered by role within {high, xhigh, max}:
+  # Policy (operator directive 2026-06-29, AMENDED 2026-07-08): STRICT best model for
+  # every REASONING agent — Opus 4.8 (claude-opus-4-8), effort floor `high`, tiered
+  # within {high, xhigh, max}. The 2026-07-08 amendment carves out ONE exception:
+  # machine-monitor, the mechanical box-health poller, runs on SONNET — its checks are
+  # numeric threshold reads (ssh alive? tmux alive? GPU util? step advanced?) with an
+  # escalation path to the Opus classifier, and it is the highest-frequency agent in the
+  # harness, so per-poll cost/latency compounds hardest there. Anything that requires
+  # JUDGMENT (classification, verdicts, plans, patches) stays Opus 4.8.
   #   • max  — the two agents that AUTHOR load-bearing artifacts: research-planner
   #            (designs the plan) and experiment-runner (writes/patches verl code +
   #            launch payload). A wrong plan/patch burns GPU money, so they get the ceiling.
   #   • xhigh — analyst: deep verdict reasoning, one notch below max.
-  #   • high  — training-log-monitor + log-writer (the floor). Held at the floor (NOT a
-  #            cost-vs-quality model choice — both are now Opus 4.8) because the monitor is
-  #            a high-frequency ~80-poll/run loop and log-writer is mechanical.
+  #   • high  — training-log-monitor + log-writer (the floor for Opus agents).
+  #   • sonnet/high — machine-monitor (the 2026-07-08 exception above): dispatched
+  #            EVERY watch cycle; escalates anomalies to training-log-monitor, which is
+  #            now dispatched ON DEMAND (once per anomaly/terminal), not every cycle.
   # "ultracode" (xhigh + dynamic-workflow orchestration) is a MECHANISM, not a per-agent
   # effort: it is launched at the SESSION level, PLANNING-TIME ONLY (/plan deep judge
   # panels, operator analysis of closed results) — see `verification:` + `workflows:`.
@@ -207,8 +236,9 @@ agent_models:
   # claude-opus-4-8 in settings.json, so NO Haiku model ever runs (see `goal_command:`).
   #
   # Reasoning-effort rule: research-planner + experiment-runner @ max; analyst @ xhigh;
-  # training-log-monitor + log-writer @ high (the floor). Model = Opus 4.8 for all.
-  reasoning_effort_rule: "Opus 4.8 for ALL agents (strict best-model policy); effort floor=high; research-planner+experiment-runner @ max, analyst @ xhigh, training-log-monitor+log-writer @ high; ultracode/workflows = session-level mechanism for the hard lanes"
+  # training-log-monitor + log-writer @ high (the floor). Model = Opus 4.8 for all
+  # reasoning agents; machine-monitor = Sonnet @ high (mechanical exception, 2026-07-08).
+  reasoning_effort_rule: "Opus 4.8 for ALL reasoning agents (strict best-model policy); effort floor=high; research-planner+experiment-runner @ max, analyst @ xhigh, training-log-monitor+log-writer @ high; machine-monitor = Sonnet @ high (mechanical health poller — the ONE sanctioned non-Opus agent, operator directive 2026-07-08); ultracode/workflows = session-level mechanism for the hard lanes"
   context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]); keep the suffix on every agent. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent reasoning-effort tiers below (all agents are Opus 4.8; only effort varies)."
   agents:
     analyst:
@@ -223,10 +253,14 @@ agent_models:
       model: "claude-opus-4-8[1m]"
       effort: max
       why: writes/patches verl code on exp/* branches + authors launch.sh/config/provisioning payload — the code author, one of the two max agents. Operator directive — max (not Anthropic's xhigh coding-default) because a wrong patch or mis-provision burns real GPU money and corrupts the run.
+    machine-monitor:
+      model: "claude-sonnet-5[1m]"
+      effort: high
+      why: the DEFAULT per-cycle watcher — mechanical numeric health checks only (ssh/tmux liveness, per-GPU util, global_step advance, disk, done flags, wandb heartbeat). Zero judgment calls by design: anything anomalous is returned as evidence and escalated. Sonnet because it is the highest-frequency agent (30s cadence, ~80 polls/run) and speed/cost compound; the 2026-07-08 operator exception to the strict-Opus policy.
     training-log-monitor:
       model: "claude-opus-4-8[1m]"
       effort: high
-      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains). Opus 4.8 per the strict best-model policy; effort held at `high` (the floor) because it is a high-frequency ~80-poll/run loop where per-poll cost compounds. May be a worker inside a session-launched deep-diagnostics workflow.
+      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains). Since 2026-07-08 dispatched ON DEMAND — once per machine-monitor ANOMALY report, in classify mode — not as the every-cycle watcher, so the Opus cost is paid only when judgment is actually needed. May be a worker inside a session-launched deep-diagnostics workflow.
     log-writer:
       model: "claude-opus-4-8[1m]"
       effort: high

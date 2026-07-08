@@ -27,8 +27,11 @@ PLAN_CACHE_DIR="$STATE_DIR/plan-cache"           # gitignored cache of the GitHu
 RUNS_DIR="$RESEARCH_DIR/runs"
 PROGRESS="$RESEARCH_DIR/PROGRESS.md"
 
-# PROGRESS.md is a CAPPED local audit echo (durable signals live in labels +
-# issue comments; full tick history is in git via the autosave hook).
+# PROGRESS.md is THE one local mutable file (operator directive 2026-07-08):
+# a CAPPED tick echo + the end-of-session checklist an agent reads before
+# ending its window. Durable signals live in labels + issue comments + the
+# published report page; a closed issue's ticks are swept by progress_sweep
+# (called from /close's cleanup) — full history survives in git anyway.
 PROGRESS_CAP_LINES=400
 progress() {
   echo "[$(date -Iseconds)] $*" >> "$PROGRESS"
@@ -39,6 +42,17 @@ progress() {
       && mv "$PROGRESS.tmp" "$PROGRESS"
   fi
   return 0
+}
+progress_sweep() {  # progress_sweep <N> <id> — drop a CLOSED issue's ticks from PROGRESS.md.
+  # Word-bounded so #4 never sweeps #44 and 4-foo never sweeps 44-foo. Standing
+  # operator notes (no issue reference) survive; the durable record is the close
+  # comment + report page, and git keeps the full tick history regardless.
+  local n="$1" id="$2" tmp
+  [[ -f "$PROGRESS" ]] || return 0
+  tmp=$(mktemp)
+  grep -Ev "(^|[^0-9A-Za-z])#${n}([^0-9]|$)|(^|[^0-9A-Za-z-])${id}([^0-9A-Za-z-]|$)" \
+    "$PROGRESS" > "$tmp" || true
+  mv "$tmp" "$PROGRESS"
 }
 die() { echo "REFUSED: $*" >&2; exit 3; }   # named refusal — never a retry loop
 
@@ -81,6 +95,28 @@ ledger_row() {  # ledger_row <id>  -> last row for id (or empty)
 ledger_row_by_issue() {  # ledger_row_by_issue <N>
   [[ -f "$LEDGER" ]] || return 0
   jq -c --argjson n "$1" 'select(.issue == $n)' "$LEDGER" 2>/dev/null | tail -1
+}
+ledger_compact() {  # ledger_compact <id> — collapse a TERMINAL id's history to its last row.
+  # Relaunch attempts append rows; once the issue is done only the final row
+  # matters. Refuses (rc 1) while ANY row for the id is live (not just the
+  # last — a failed destroy can leave an earlier RUNNING row hidden behind a
+  # later TORN_DOWN one, and compacting it away would blind the reaper to a
+  # live billing box). Refuses on a corrupt ledger — never rewrite from a bad
+  # parse (a mid-file bad line would silently drop every row after it).
+  local id="$1" tmp last
+  [[ -f "$LEDGER" ]] || return 0
+  last=$(ledger_row "$id"); [[ -n "$last" ]] || return 0
+  jq -e --arg id "$id" \
+    'select(.id==$id and (.status=="RUNNING" or .status=="PROVISIONED" or .status=="EXTERNAL"))' \
+    "$LEDGER" >/dev/null 2>&1 && return 1
+  _ledger_lock || return 1
+  tmp=$(mktemp)
+  if ! jq -c --arg id "$id" 'select(.id != $id)' "$LEDGER" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; _ledger_unlock; return 1
+  fi
+  printf '%s\n' "$last" >> "$tmp"
+  mv "$tmp" "$LEDGER"
+  _ledger_unlock
 }
 
 # ---------- naming: ONE derivation for every surface (goal: readable at a glance) ----------
@@ -159,6 +195,29 @@ plan_publish() {  # plan_publish <N> <plan-file> — install/replace the plan bl
   if ! timeout 60 gh issue edit "$n" --body-file "$tmp" >/dev/null; then rm -f "$tmp"; return 1; fi
   rm -f "$tmp"
   mkdir -p "$PLAN_CACHE_DIR" && cp "$src" "$PLAN_CACHE_DIR/$n.md"
+}
+plan_tick() {  # plan_tick <N> [<literal substring>] — flip '- [ ]' → '- [x]' on matching lines
+  # INSIDE the plan block of the issue body (all unticked boxes when no pattern).
+  # The pattern is a LITERAL substring, matched with index() — never a regex
+  # (callers pass raw checkbox text; an unbalanced bracket must not break awk)
+  # — and it travels via the environment so backslashes survive (-v mangles
+  # them). The rewritten body is pushed ONLY if awk succeeded AND the plan:end
+  # marker survived — a truncated body must never reach the plan SSOT.
+  local n="$1" pat="${2:-}" body tmp
+  body=$(timeout 60 gh issue view "$n" --json body -q .body 2>/dev/null) || return 1
+  grep -qF "$PLAN_MARK_START" <<<"$body" || return 1
+  tmp=$(mktemp)
+  if ! PLAN_TICK_PAT="$pat" awk -v s="$PLAN_MARK_START" -v e="$PLAN_MARK_END" '
+      BEGIN{pat=ENVIRON["PLAN_TICK_PAT"]}
+      index($0,s){f=1} index($0,e){f=0}
+      f && /^[[:space:]]*- \[ \]/ && (pat=="" || index($0,pat)) { sub(/\[ \]/,"[x]") }
+      { print }' <<<"$body" > "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  grep -qF "$PLAN_MARK_END" "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! timeout 60 gh issue edit "$n" --body-file "$tmp" >/dev/null; then rm -f "$tmp"; return 1; fi
+  rm -f "$tmp"
+  plan_fetch "$n" >/dev/null 2>&1 || true
 }
 
 # ---------- run snapshot: downstream stages read THIS, never the plan ----------

@@ -11,7 +11,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>            # becomes runs/<N>-<slug>/, branch exp/<N>-<slug>, WandB group
-title: <issue title>          # one line — SUMMARY.md rows and LOG entries read it
+title: <issue title>          # one line — SUMMARY.md rows and the run-report page read it
 kind: experiment              # experiment|ablation|implementation|brainstorm|literature|analysis
 tier: fast
 code_change: false
@@ -19,6 +19,7 @@ target_modules: []            # verl paths, only when code_change: true
 baseline_run: baseline        # the dense control (comm-eff OFF) unless stated
 depends_on: []                # issue numbers that must be status:pass|stop first
 milestone: none
+gpu_mode: default             # 'default' = project.yaml default_compute.gpu_mode (auto = hands-off provision; ask = pause READY-FOR-GPU for an operator box). CLI --gpu beats this.
 gpu_filter_chain: default     # 'default' = project.yaml ladder (1×H200 → 1×B200 → 2×H200)
 max_dph: 24.0
 max_gpu_hr: 24                # HARD cap — reaper enforces via the ledger row

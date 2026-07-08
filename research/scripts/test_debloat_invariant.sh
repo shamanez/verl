@@ -30,10 +30,6 @@ export PATH="$SANDBOX/stub-bin:$PATH"
 echo "# Progress" > "$SANDBOX/PROGRESS.md"
 echo "line2" >> "$SANDBOX/PROGRESS.md"
 echo "line3" >> "$SANDBOX/PROGRESS.md"
-cat > "$SANDBOX/LOG.md" <<'EOF'
-# log
-- **90-terminal-run** · 2026-07-06 · M9 · PASS — synthetic terminal run · #90 · PR —
-EOF
 
 # 90-terminal-run: verdict + TORN_DOWN row  → must fold + delete
 mkdir -p "$SANDBOX/runs/90-terminal-run"
@@ -71,7 +67,7 @@ check "plan cache deleted"             test ! -f "$SANDBOX/.claude/state/plan-ca
 check "live run dir intact"            test -d "$SANDBOX/runs/91-live-run"
 check "pending run dir intact"         test -d "$SANDBOX/runs/92-pending-run"
 check "baseline dir intact"            test -d "$SANDBOX/runs/baseline"
-check "SUMMARY row written"            grep -q "| 90-terminal-run | M9 | synthetic terminal run | PASS |" "$SANDBOX/runs/SUMMARY.md"
+check "SUMMARY row written"            grep -qE "\| 90-terminal-run \| [0-9-]+ \| PASS \| \[M9\] synthetic terminal run \| #90 \|" "$SANDBOX/runs/SUMMARY.md"
 
 echo "== idempotency =="
 out=$(run_debloat 90-terminal-run)
@@ -89,6 +85,37 @@ echo "== the invariant: terminal issue needs NO run dir (lib degradation) =="
   exit 0
 ) && pass "ledger resolves; snapshot_get/plan_field/plan_exists degrade cleanly" \
   || fail "lib degradation after run-dir deletion"
+
+echo "== close_cleanup guards (gh dead ⇒ status:done unprovable ⇒ refuse) =="
+mkdir -p "$SANDBOX/runs/93-closed-run"
+out=$(CLAUDE_PROJECT_DIR="$SANDBOX" RESEARCH_DIR="$SANDBOX" bash "$HERE/scripts/close_cleanup.sh" 93 93-closed-run 2>&1) && rc=0 || rc=$?
+check "close_cleanup refuses without provable status:done (rc=3)" test "$rc" -eq 3
+check "close_cleanup left the run dir alone"                      test -d "$SANDBOX/runs/93-closed-run"
+
+echo "== progress_sweep + ledger_compact =="
+( RESEARCH_DIR="$SANDBOX" CLAUDE_PROJECT_DIR="$SANDBOX" source "$LIB"
+  progress "[analyst #94] verdict=PASS"
+  progress "teardown 94-sweep-me reason=verdict"
+  progress "STANDING note that must survive"
+  progress_sweep 94 94-sweep-me
+  grep -q 'STANDING note that must survive' "$PROGRESS" || exit 1   # unrelated lines survive
+  grep -qE '#94|94-sweep-me' "$PROGRESS" && exit 1                  # the issue's ticks are gone
+  ledger_append '{"id":"95-compact-me","issue":95,"status":"TORN_DOWN","launch_attempts":1}'
+  ledger_append '{"id":"95-compact-me","issue":95,"status":"TORN_DOWN","launch_attempts":2}'
+  ledger_compact 95-compact-me
+  [[ "$(jq -c 'select(.id=="95-compact-me")' "$LEDGER" | wc -l | tr -d ' ')" == "1" ]] || exit 1
+  [[ "$(ledger_row 95-compact-me | jq -r .launch_attempts)" == "2" ]] || exit 1   # the LAST row survives
+  ledger_compact 91-live-run && exit 1                              # refuses a live id
+  # the review-confirmed blind spot: an EARLIER live row hidden behind a later
+  # TORN_DOWN row (failed destroy of box A, successful relaunch on box B) must
+  # ALSO block compaction — tail-1 liveness alone would delete the RUNNING row.
+  ledger_append '{"id":"96-hidden-live","issue":96,"status":"RUNNING","handles":[{"instance_id":"111"}]}'
+  ledger_append '{"id":"96-hidden-live","issue":96,"status":"TORN_DOWN","handles":[{"instance_id":"222"}]}'
+  ledger_compact 96-hidden-live && exit 1                           # must refuse
+  [[ "$(jq -c 'select(.id=="96-hidden-live")' "$LEDGER" | wc -l | tr -d ' ')" == "2" ]] || exit 1  # both rows intact
+  exit 0
+) && pass "progress_sweep keeps standing notes; ledger_compact keeps last row, refuses live ids (incl. hidden earlier live row)" \
+  || fail "progress_sweep / ledger_compact"
 
 echo "== progress cap =="
 ( RESEARCH_DIR="$SANDBOX" CLAUDE_PROJECT_DIR="$SANDBOX" source "$LIB"
