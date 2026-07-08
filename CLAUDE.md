@@ -46,7 +46,7 @@ under `research/`. The project's north-star — what "done" means — is
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
 | **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (on the project.yaml base branch) |
 | **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
-| **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 `autonomous-harness-rlvr-compression/<run_id>/`; config: `project.yaml` `reports:` |
+| **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 bucket `autonomous-harness-rlvr-compression`, key `runs/<run_id>/…` (reports) and `verl-research/<run_id>/<cell>/checkpoints/…` (training checkpoints); config: `project.yaml` `reports.r2` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
@@ -64,8 +64,9 @@ with `gh repo set-default --view`.
 
 ### Do not edit upstream verl code outside `exp/*` branches
 
-Everything under `/Users/shamane/Documents/verl/` **except** `research/`,
-this `CLAUDE.md`, and `.gitignore` is considered
+Everything under the checkout root (wherever this clone lives — the hook
+self-locates from its own path; never assume a fixed location) **except**
+`research/`, this `CLAUDE.md`, and `.gitignore` is considered
 upstream-owned. Writes are blocked by
 `research/.claude/hooks/protect-upstream.sh` (a PreToolUse hook) for any
 session opened in `research/`. The only legitimate way to patch verl code
@@ -128,8 +129,9 @@ gh repo set-default --view                   # expect shamanez/verl-compression-
 ### Run an experiment (per-issue stage commands — harness-v1)
 
 ```bash
-cd /Users/shamane/Documents/verl/research
-claude
+cd <your-checkout>/research   # ALWAYS research/ of the CURRENT checkout — custom
+claude                        # agents, protect-upstream, and the Stop-hook reaper
+                              # register from here (verify: bash .claude/hooks/check-workspace.sh)
 ```
 
 One issue = one lifecycle, driven as **three phases, one fresh window each**;

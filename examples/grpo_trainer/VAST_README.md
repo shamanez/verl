@@ -63,6 +63,25 @@ Two zones, one direction of flow:
 | **Experiment sandbox** — `research/runs/run-id/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
 | **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `vast-ai-workload`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
 
+**On-box bootstrap: the restricted-refspec trap (#63 B7).** The locked Vast
+template's onstart clones the fork with a fetch refspec restricted to its
+PINNED branch — so on the box, `git fetch origin <base-branch>` populates only
+`FETCH_HEAD`, NOT the `origin/<base-branch>` tracking ref, and a subsequent
+`git checkout <base-branch>` silently stays on the pinned (wrong) branch.
+Every launch.sh bootstrap MUST use the refspec-independent pattern and VERIFY:
+
+```bash
+git fetch origin "$BASE_BRANCH" \
+  || { echo "FATAL: fetch origin $BASE_BRANCH failed" >&2; exit 1; }   # else FETCH_HEAD is stale
+git checkout -B "$BASE_BRANCH" FETCH_HEAD
+# Verify the COMMIT, not the branch NAME: `checkout -B` always makes HEAD's name
+# == $BASE_BRANCH, so a name check is vacuous — it would pass even if a failed
+# fetch left FETCH_HEAD on the template's pinned branch (the exact B7 bug).
+want=$(git ls-remote origin "refs/heads/$BASE_BRANCH" | cut -f1)
+[[ -n "$want" && "$(git rev-parse HEAD)" == "$want" ]] \
+  || { echo "FATAL: HEAD is not origin/$BASE_BRANCH tip after bootstrap" >&2; exit 1; }
+```
+
 **Canonical launcher + CLI overrides.** A run never re-types the baseline. It
 calls the canonical `vast_*.sh` and overrides only the knob(s) it's testing —
 either via the launcher's `${VAR:-default}` env vars or via Hydra args

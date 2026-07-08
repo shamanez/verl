@@ -38,7 +38,9 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 
 1. **Teardown check first (money before paperwork).** If the ledger row is
    `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
-   harness box may outlive its issue. **`EXTERNAL` rows are operator-managed:**
+   harness box may outlive its issue. (Semantics key on the ledger STATUS, not
+   the `external` flag: `RUNNING`+`external:true` = harness-managed attach —
+   teardown normally.) **`EXTERNAL` rows are operator-managed:**
    do NOT auto-destroy — ask (interactive) or run `flag_human <N> "external
    box <id> still up after /close — tear down when done"` and continue (the
    box may serve other work).

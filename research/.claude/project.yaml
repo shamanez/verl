@@ -4,12 +4,18 @@
 # token-cost optimization (so fresh-context agents don't need an extra read), but
 # project.yaml is authoritative. If the two diverge, this file wins.
 #
-# Porting checklist (5 fields) — change these, the harness machinery comes along for free:
+# Porting checklist — change these, the harness machinery comes along for free:
 #   1. project.name + research_repo
 #   2. source_tree.path + protect/exception paths (if you fork a different upstream)
 #   3. vast_template.* (only if you maintain a different Vast.ai template)
 #   4. default_compute.gpu_filter_chain (only if the new project needs a different shape)
 #   5. .claude/GOAL.md (the project north-star — what "done" means)
+#   6. REINSTALL the reaper cron from the new checkout (bash .claude/hooks/install-reaper-cron.sh)
+#      and verify: crontab -l | grep verl-research-reaper points AT the new checkout (#63 B3)
+#   7. verify the Vast template's onstart branch pin (templates.json) matches source_tree.base_branch —
+#      a restricted fetch refspec on the box silently keeps the pinned branch (#63 B7)
+#   8. sweep CLAUDE.md + this file for stale absolute paths; run .claude/hooks/check-workspace.sh
+#      from the new checkout's research/ dir (#63 B4/B6)
 
 project:
   name: verl-compression-research
@@ -17,7 +23,11 @@ project:
   north_star_doc: .claude/GOAL.md       # the project north-star — what "done" means (agent-readable, operator-approved); THE single source of project intent
 
 workspace:
-  working_dir: /Users/shamane/Documents/verl/research/
+  # PATHS ARE DERIVED AT RUNTIME (#63 B6): every consumer self-locates (hooks from
+  # their own file path; _lib.sh via `git worktree list`). The values here are
+  # DOCUMENTATION of the current checkout — refreshed 2026-07-08 — and fallbacks
+  # only; a moved checkout must keep working without editing this file.
+  working_dir: /Users/shamane/Documents/new-harness/verl/research/
   secrets_file: $HOME/.config/verl-research/secrets.env
   secrets_required:
     - HF_TOKEN
@@ -86,10 +96,15 @@ reports:                                                      # publishing surfa
   publish_script: research/scripts/publish_run_report.py      # /close runs it at step 5c, AFTER the close comment exists (the page renders it): generates the run page, updates runs/index.html, copies small artifacts, uploads big ones to R2, commits (and pushes unless --no-push) the report repo. Nonzero exit = REPORT_PUBLISH_PARTIAL → /close flags a human and SKIPS the cleanup sweep.
   push_on_publish: true                                       # a push IS the deploy (Cloudflare Pages auto-builds) — that is the point
   r2:                                                         # big artifacts (checkpoints, weight dumps, full metrics) — NEVER into git
+    # TWO R2 surfaces, ONE bucket (#63 B12/B13; bucket = R2_BUCKET in secrets.env,
+    # now the DEDICATED `autonomous-harness-rlvr-compression` — never a personal bucket):
+    #   1. finished-run REPORT artifacts (publish_run_report.py at /close): <prefix>/<run_id>/…
+    #   2. TRAINING checkpoints (verl ckpt_r2 sink, during the run):
+    #      verl-research/<R2_EXPERIMENT>/<R2_REGIME>/checkpoints/… (R2_EXPERIMENT=run_id, R2_REGIME=cell)
     bucket_env: R2_BUCKET                                     # from secrets.env (aws CLI with --endpoint-url $R2_ENDPOINT; keys R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)
     endpoint_env: R2_ENDPOINT
-    prefix: autonomous-harness-rlvr-compression               # per-run layout: <prefix>/<run_id>/…
-    console: https://dash.cloudflare.com/c0b687e3982c3fbcee1fc04607cd2683/r2/default/buckets/shamane-pluralis
+    prefix: runs                                              # report-artifact layout: runs/<run_id>/… (the old prefix duplicated the bucket name)
+    console: https://dash.cloudflare.com/c0b687e3982c3fbcee1fc04607cd2683/r2/default/buckets/autonomous-harness-rlvr-compression
 
 budget:                                                       # money caps (absorbed budget.json; scripts/check_budget.py reads THIS block)
   monthly_cap_usd: 1500
@@ -105,14 +120,17 @@ verification:                                                 # WHERE heavy veri
   bounded_retry_rule: "every retry is counted in the ledger (launch_attempts<=3, fix_attempts<=3, revise_depth<=plan iterations, monitor cycles<=12); exhaustion stops with a named flag, never spins"
 
 source_tree:                                                  # the upstream code the experiments operate on
-  path: /Users/shamane/Documents/verl/
+  # path/protect/allowed values are DOCUMENTATION + fallback (#63 B6): the
+  # protect-upstream hook self-locates from its own file; do not rely on these
+  # absolutes surviving a checkout move.
+  path: /Users/shamane/Documents/new-harness/verl/
   remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
   upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
   base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here.
   protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
-    - /Users/shamane/Documents/verl/                          # everything UNDER verl/
+    - /Users/shamane/Documents/new-harness/verl/              # everything UNDER the checkout (hook self-locates; this line is documentation)
   allowed_paths:                                              # except these subtrees
-    - /Users/shamane/Documents/verl/research/                 # always writable
+    - /Users/shamane/Documents/new-harness/verl/research/     # always writable (hook self-locates; documentation)
   exception_branches:                                         # plus any path is writable when on these branches
     - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
     - autonomous-harness-*                                    # harness-engineering branches
@@ -128,6 +146,10 @@ vast_template:                                                # the locked Vast.
   registry_file: .claude/skills/vast-provision/templates.json
 
 vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
+  # PER-HANDLE ssh_login IS AUTHORITATIVE for any given box (#63 I7/B14): operator
+  # boxes arrive on arbitrary keys (e.g. ~/.ssh/vast_ai). This identity is only the
+  # PROVISION-TIME default; vast-attach --ssh-identity / VAST_SSH_IDENTITY override,
+  # and every consumer must use the handle's embedded ssh_login, never re-derive.
   identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Override at runtime with VAST_SSH_IDENTITY.
   pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
   # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.

@@ -54,6 +54,7 @@ e.g. "signed_ema(α=0.25) at cadence 10/10 reaches val/score ≥ 0.72 at step 50
  Default predicate applies: PASS iff all ✓; STOP if falsified/budget/depth;
  REVISE (≤ iterations) with next_actions. A clean symmetric negative is PASS.>
 
+- [ ] resource-feasibility probe (ONLY when model/response-length/rollout-n differ from the locked surface AND no perf_profiles entry matches): 1-2 steps, val off — peak GPU mem + s/step recorded BEFORE the matrix spends
 - [ ] every cell reaches step <S> with no NaN / non-finite grads
 - [ ] <headline metric vs numeric target>
 - [ ] <comparison vs baseline_run within tolerance>

@@ -40,7 +40,7 @@ bash .claude/skills/codex-verify/run.sh \
     --mode  verify|code-rescue|math-rescue|adversarial \
     --out   <output-path> \
     [--plan <plan-path>] [--diff <diff-or-next-actions-path>] [--ctx <free text>] \
-    [--cd /Users/shamane/Documents/verl] \
+    [--cd <checkout-root>] \   # default = THIS checkout; derive, never hardcode: --cd "$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
     [--timeout 600] [--stall 90] [--model gpt-5.5]
 ```
 
@@ -68,7 +68,7 @@ bash .claude/skills/codex-verify/run.sh \
     --mode verify \
     --out  runs/<N>-<slug>/verify/$(date -u +%Y%m%dT%H%M%SZ).md \
     --plan .claude/state/plan-cache/<N>.md \
-    --cd   /Users/shamane/Documents/verl
+    --cd   "$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 cat runs/<N>-<slug>/verify/*.md
 ```
 
@@ -85,7 +85,7 @@ bash .claude/skills/codex-verify/run.sh \
     --out  /tmp/rescue.md \
     --ctx  "STUCK: <N>-<slug> grad_norm exploded at step 17; train.log attached" \
     --diff runs/<N>-<slug>/train.log \
-    --cd   /Users/shamane/Documents/verl
+    --cd   "$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 cat /tmp/rescue.md
 ```
 
@@ -97,7 +97,7 @@ bash .claude/skills/codex-verify/run.sh \
     --out  runs/<N>-<slug>/derivations/<topic>.md \
     --ctx  "<question or hypothesis to check>" \
     --plan <optional path to the issue body or paper section> \
-    --cd   /Users/shamane/Documents/verl
+    --cd   "$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 ```
 
 ### `adversarial` — milestone summary review
@@ -109,7 +109,7 @@ bash .claude/skills/codex-verify/run.sh \
     --out  runs/milestone-reviews/M<X>-codex-review.md \
     --plan runs/SUMMARY.md \
     --ctx  "Verdicts: runs/EXP-<a>/verdict.md, runs/EXP-<b>/verdict.md, ..." \
-    --cd   /Users/shamane/Documents/verl
+    --cd   "$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 ```
 
 ## Hang protection layers

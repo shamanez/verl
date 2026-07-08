@@ -41,16 +41,25 @@ under `/bg /goal … /go <N>`):
 1. Dispatch `machine-monitor` with `run_in_background: true`, passing
    `run_id=$id` (it reads handles + cells + step target from
    `runs/$id/run.json` / `runs/$id/handles/*.json` — never the plan). It polls
-   30 s / ≤ 40 min and returns ONE terminal report:
-   `done | healthy-timeout | anomaly` (+ evidence: log tail, GPU util
-   history, step trace). Never foreground-poll a background task with sleep
-   loops.
-2. `anomaly` → dispatch `training-log-monitor` ONCE (foreground,
-   `mode=classify`, passing the anomaly evidence). It classifies into the
-   dispatch table below and returns. Do NOT redispatch it for a second
-   opinion.
+   30 s / ≤ 40 min IN ITS OWN CONTEXT and returns ONE terminal report **as its
+   final message** (`done | healthy-timeout | anomaly` + evidence: log tail,
+   GPU util history, step trace). It must NOT arm detached background pollers
+   and stop (see the agent def — orphaned-report incident). Never
+   foreground-poll a background task with sleep loops.
+2. `anomaly` → FIRST `operator_stop_check <id>`: if the sentinel
+   `runs/<id>/OPERATOR_STOP` exists (set via `operator_stop_set` before an
+   intentional kill), this is NOT a failure — skip classification entirely and
+   act on the **operator-stopped** row below. Otherwise dispatch
+   `training-log-monitor` ONCE (foreground, `mode=classify`, passing the
+   anomaly evidence); it classifies into the dispatch table and returns. Do
+   NOT redispatch it for a second opinion, and NEVER pay the Opus classifier
+   for an operator stop.
 3. Act on the (classified) report — this is a dispatch table, not a judgment
    call:
+   - **operator-stopped** (sentinel present — gated in step 2) → tmux-death /
+     heartbeat-silence is EXPECTED. No teardown, no relaunch, no
+     classification — report and stop; the operator owns the next move
+     (`operator_stop_clear` on relaunch, done by /launch).
    - **done** (flags + steps reached) → confirm metrics rsynced to
      `runs/$id/metrics/`, then teardown NOW (`vast-teardown` skill), then
      `/analyze <N>`. The box never outlives its science.
@@ -63,8 +72,11 @@ under `/bg /goal … /go <N>`):
      the cell, next cycle. Exhausted → teardown + `flag_human <N> …`.
    - **env-failure** (docker/CUDA/NCCL/vLLM-init/SSH-dead) → teardown, then
      `bump_attempt "$id" launch_attempts 3 || stop` and re-dispatch the runner
-     on the NEXT ladder rung. Attached (`external:true`) box: teardown but
-     NEVER auto-provision a replacement — `flag_human <N> …`, stop.
+     on the NEXT ladder rung. Attached-box semantics key on the LEDGER STATUS
+     (not the external flag): `RUNNING` + `external:true` = harness-managed
+     attach → teardown allowed but NEVER auto-provision a replacement —
+     `flag_human <N> …`, stop. Status `EXTERNAL` = operator-managed → never
+     auto-destroy at all; sync evidence, `flag_human <N> …`, stop.
    - **stall** (all GPUs ≤5% for 4 polls, tmux alive) → one `nvidia-smi` +
      log-tail confirmation, then teardown + `flag_human <N> "stall"`. A
      stalled GPU is burning money for nothing.

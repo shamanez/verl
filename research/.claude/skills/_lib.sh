@@ -71,7 +71,30 @@ _ledger_lock() {
 }
 _ledger_unlock() { rmdir "$STATE_DIR/.runs.jsonl.lock" 2>/dev/null || true; }
 
+ledger_validate() {  # ledger_validate '<row json>' — rc=1 + named reason when malformed for its status
+  # Hand-rolled rows omitting started_at_epoch silently DISABLE the reaper's
+  # heartbeat + budget triggers (jq '.started_at_epoch // 0' -> 0 -> arithmetic
+  # never trips) — #63 B17. Live rows must carry epoch + handles + account.
+  # NB: local is named `st`, NOT `status` — `status` is a READ-ONLY special in
+  # zsh and assigning it aborts the (non-interactive) shell.
+  local row="$1" st
+  jq -e . >/dev/null 2>&1 <<<"$row" || { echo "ledger_validate: not valid JSON" >&2; return 1; }
+  jq -e '.id' >/dev/null 2>&1 <<<"$row" || { echo "ledger_validate: missing .id" >&2; return 1; }
+  st=$(jq -r '.status // empty' <<<"$row")
+  case "$st" in
+    RUNNING|PROVISIONED|EXTERNAL)
+      jq -e '(.started_at_epoch != null) and ((.handles | length) > 0) and (.vast_account != null)' \
+        >/dev/null 2>&1 <<<"$row" \
+        || { echo "ledger_validate: live row needs started_at_epoch + handles[] + vast_account" >&2; return 1; } ;;
+    TORN_DOWN) ;;
+    "") echo "ledger_validate: missing .status" >&2; return 1 ;;
+    *)  echo "ledger_validate: unknown status '$st'" >&2; return 1 ;;
+  esac
+}
 ledger_append() {  # ledger_append '<one-line json row>'
+  # Validation WARNS but never blocks: recording a live box beats schema purity
+  # (money-visibility first); the warning names the writer to fix (#63 B17).
+  ledger_validate "$1" || progress "LEDGER_INVALID_ROW appended anyway — fix the writer: ${1:0:140}"
   _ledger_lock || return 1
   echo "$1" >> "$LEDGER"
   _ledger_unlock
@@ -191,7 +214,13 @@ plan_publish() {  # plan_publish <N> <plan-file> — install/replace the plan bl
   } > "$tmp"
   if ! timeout 60 gh issue edit "$n" --body-file "$tmp" >/dev/null; then rm -f "$tmp"; return 1; fi
   rm -f "$tmp"
-  mkdir -p "$PLAN_CACHE_DIR" && cp "$src" "$PLAN_CACHE_DIR/$n.md"
+  mkdir -p "$PLAN_CACHE_DIR"
+  # cp only when the draft is not ALREADY the cache file: /plan's dispatch tells
+  # planners to draft AT plan_path(N), and `cp x x` exits 1 — the happy path
+  # reported failure after a successful publish (#63 B5). Use `-ef` (same-inode,
+  # works in bash 3.2 + zsh): string compare missed symlink/relative aliases
+  # (macOS /tmp -> /private/tmp), leaving the bug one alias away.
+  [[ "$src" -ef "$PLAN_CACHE_DIR/$n.md" ]] || cp "$src" "$PLAN_CACHE_DIR/$n.md"
 }
 plan_tick() {  # plan_tick <N> [<literal substring>] — flip '- [ ]' → '- [x]' on matching lines
   # INSIDE the plan block of the issue body (all unticked boxes when no pattern).
@@ -237,11 +266,19 @@ ensure_labels() {  # idempotent; run by /new-issue on first use
 }
 issue_labels() { timeout 60 gh issue view "$1" --json labels -q '.labels[].name' 2>/dev/null; }
 set_status_label() {  # set_status_label <N> <planned|approved|running|pass|revise|stop|done>
-  local n="$1" new="status:$2" cur rm=""
+  # Array argv + while-read, NOT unquoted-var word-splitting: zsh does not split
+  # unquoted expansions, so the old `$rm` reached gh as ONE argument and every
+  # transition after the first ABORTED — while still echoing success (#63 B1/B2).
+  # gh's exit code is now checked: a failed edit dies loudly, never lies.
+  local n="$1" new="status:$2" cur l
+  local -a args
+  args=(--add-label "$new")
   cur=$(issue_labels "$n" | grep '^status:' || true)
-  local l; for l in $cur; do [[ "$l" != "$new" ]] && rm="$rm --remove-label $l"; done
-  # shellcheck disable=SC2086
-  timeout 60 gh issue edit "$n" --add-label "$new" $rm >/dev/null
+  while IFS= read -r l; do
+    [[ -n "$l" && "$l" != "$new" ]] && args+=(--remove-label "$l")
+  done <<<"$cur"
+  timeout 60 gh issue edit "$n" "${args[@]}" >/dev/null \
+    || die "label edit FAILED for #$n (wanted $new) — check gh auth/labels"
   echo "label: #$n -> $new"
 }
 issue_status() { issue_labels "$1" | grep -m1 '^status:' | sed 's/^status://'; }
@@ -264,6 +301,16 @@ clear_human_flags() {  # the operator decided — the resuming stage clears both
   timeout 60 gh issue edit "$1" --remove-label needs:human --remove-label awaiting:approval >/dev/null 2>&1 || true
 }
 has_human_flag() { issue_labels "$1" | grep -qE '^(needs:human|awaiting:approval)$'; }
+
+# ---------- operator-stop sentinel: "I stopped this ON PURPOSE" (#63 B10) ----------
+# An operator killing tmux to reconfigure looks IDENTICAL to a crash from outside
+# (tmux dead, GPU freed, no traceback). The sentinel runs/<id>/OPERATOR_STOP tells
+# monitors + the reaper's heartbeat triggers to stand down (BUDGET triggers still
+# apply — a stopped box still bills). Set BEFORE killing; clear on relaunch.
+operator_stop_path()  { echo "$RUNS_DIR/$1/OPERATOR_STOP"; }
+operator_stop_set()   { local id="$1"; shift; mkdir -p "$RUNS_DIR/$id"; echo "[$(date -Iseconds)] ${*:-operator stop}" > "$RUNS_DIR/$id/OPERATOR_STOP"; progress "OPERATOR_STOP: $id ${*:-}"; }
+operator_stop_check() { [[ -f "$RUNS_DIR/$1/OPERATOR_STOP" ]]; }
+operator_stop_clear() { rm -f "$RUNS_DIR/$1/OPERATOR_STOP"; }
 
 # ---------- bounded external calls ----------
 vast() { timeout "${VAST_TIMEOUT:-90}" vastai "$@"; }   # NEVER call vastai bare in a skill

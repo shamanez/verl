@@ -39,7 +39,9 @@ plan_publish <N> "$DRAFT"         # installs it between <!-- plan:start/end --> 
      becomes `clarification_needed: <what>` and you still emit the plan.
    - Config deltas reference the canonical launcher's env vars / Hydra keys —
      never re-type the baseline.
-   - Delete unused prose sections; no `(n/a)` filler. Fast plan ≤ 4 KB,
+   - Delete unused prose sections; no `(n/a)` filler. Fast plan ≤ 8 KB
+     (safety-gate content — money gates, silent-failure contracts — is NEVER
+     elidable to hit a size target),
      deep ≤ 15 KB.
    - Budget: state the SMALLEST cells × steps that can falsify the
      hypothesis; `max_gpu_hr` sized to that, not to a default.
@@ -61,6 +63,25 @@ plan_publish <N> "$DRAFT"         # installs it between <!-- plan:start/end --> 
 
 ## Hard rules
 
+- **Metric labels must name the TRUE dataset — routing aliases are FORBIDDEN
+  (#63 B18).** verl keys every WandB val metric by the row's `data_source`,
+  which is ALSO the reward-routing key. If the honest dataset name routes to
+  the wrong extractor, the fix is a one-line entry in
+  `verl/utils/reward_score/__init__.py` on the harness branch (precedent:
+  math-ai/aime24) — never an alias to another dataset's name: the operator
+  reads the charts, and a mislabeled val curve looks like the wrong eval and
+  triggers emergency stops. Plans state the exact `val-core/<data_source>/…`
+  keys they expect.
+- **`wandb_project` is REQUIRED in the plan yaml and = the run_id**
+  (`<N>-<slug>`, #63 B19): every issue gets its OWN WandB project; the shared
+  legacy project is never used for new issues.
+- **Resource-feasibility probe when the surface changes (#63 I11):** any plan
+  changing model, max response length, or rollout n vs the locked control
+  surface MUST include a bounded probe cell (1–2 steps, val off) measuring
+  peak GPU memory + s/step BEFORE the matrix spends — but check
+  `project.yaml perf_profiles:` first: a matching MEASURED profile replaces
+  the probe and overrides ladder sizing. The reward-health probe does not
+  cover OOM/throughput.
 - Deep-tier `## Open questions` must list every unresolved uncertainty — that
   section is what the human resolves at /approve. Never bury uncertainty in
   prose.
