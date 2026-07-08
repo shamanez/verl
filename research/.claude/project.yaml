@@ -124,7 +124,7 @@ vast_ssh:                                                     # SSH identity the
   pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
   # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.
 
-default_compute:                                              # planner emits these defaults unless the issue overrides
+default_compute:                                              # planner emits these defaults unless the issue overrides. Before sizing compute for a NON-default surface (model/response-length/rollout-n differ from the locked GSM8K surface), CHECK perf_profiles: below — a matching measured profile overrides the ladder pick; the ladder itself stays the default.
   gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
                                                               #   auto = hands-off: once the runner's PREPARE phase (implementation + CPU gates, laptop-only) is green it walks gpu_filter_chain and provisions by itself.
                                                               #   ask  = prepare everything, then PAUSE: needs:human "READY FOR GPU" comment on the issue; the operator hands over a box (`--attach <id>` → vast-attach registers it) or authorizes auto-provision (re-run with `--gpu auto`).
@@ -167,13 +167,24 @@ models:                                                       # RLVR-paper model
   test:
     - {slug: qwen25-math-1p5b,     hf_id: Qwen/Qwen2.5-Math-1.5B,                    chat_template: native, paper: minimal-rlvr}
     - {slug: qwen3-1p7b-base,      hf_id: Qwen/Qwen3-1.7B-Base,                      chat_template: native, paper: one-layer-enough}
-    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "smoke with MAX_RESPONSE_LENGTH=4096 for <think>+boxed room; truncation-only null reward = documented negative, not a hard fail"}
+    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "MEASURED #63: at resp 4096 truncation clip_ratio=0.73 — near-useless for reasoning evals; the real surface is 16K (clip 3%). Before sizing compute for it READ perf_profiles.r1distill-1p5b-16k-n16 below — single-GPU is proven too slow"}
     - {slug: open-nemotron-1p5b,   hf_id: nvidia/OpenReasoning-Nemotron-1.5B,        chat_template: native, paper: minimal-rlvr, note: "id resolved from spec (no explicit id given); loads on laptop. If it OOMs at smoke → recorded negative, dropped."}
     - {slug: qwen3-4b-base,        hf_id: Qwen/Qwen3-4B-Base,                        chat_template: native, paper: one-layer-enough}
   integrate-only:                                             # 7B/8B — registry + CPU load check only; NOT GPU-smoked (too big for 1×H200)
     - {slug: r1-distill-qwen-7b,   hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B,   chat_template: native, paper: rlvr-linearity}
     - {slug: r1-distill-llama-8b,  hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B,  chat_template: native, paper: rlvr-linearity}
     - {slug: qwen3-8b-base,        hf_id: Qwen/Qwen3-8B-Base,                        chat_template: native, paper: one-layer-enough}
+
+perf_profiles:                                                # MEASURED workload profiles (never guess/re-probe a known surface) — planner + experiment-runner MUST consult this before sizing compute for a matching surface. Values are EMPIRICAL (issue #63, 2026-07-08), not theoretical. The default_compute ladder is unchanged; a matching profile OVERRIDES the ladder choice.
+  r1distill-1p5b-16k-n16:                                     # ~1.5B reasoning model on the RLVR-Linearity repro surface
+    surface: {prompt: 2048, response: 16384, rollout_n: 16, train_batch: 128, algo: grpo}
+    single_gpu_h200: "FITS but DO NOT USE — no OOM (rollout gen peaks 138/143GB @ gpu_mem_util 0.85; training phase ~22GB with CPU offload ON), but step-1 = 1677s (~28 min) ⇒ 200 steps ≈ 90+ GPU-hr/arm. param+optimizer CPU offload is REQUIRED to fit 1 GPU and is itself a major slowdown."
+    quad_h200: "USE THIS SHAPE — step-1 = 489s incl. one-time compile (gen 240s of it); steady-state ~400-450s ⇒ ≤27h/arm @ 200 steps. CPU offload MUST be OFF (FSDP shards across ranks; launcher hardcoded False is correct on multi-GPU); NGPUS_PER_NODE auto-detect works; ROLLOUT_TP=1 ⇒ 4 independent vLLM engines (right call for 1.5B — never TP>1 at this size); gpu_memory_utilization=0.85; ppo_max_token_len_per_gpu=30000; max_num_batched_tokens=35840; training-phase mem ~50GB/GPU; free_cache_engine=True absorbs the 130GB↔50GB rollout↔train memory swing."
+    rules:
+      - "CPU offload ON only when single-GPU fit demands it; OFF whenever ≥2 GPUs (FSDP sharding beats CPU offload)"
+      - "generation dominates the step: prefer N independent TP=1 vLLM engines over tensor-parallel for small models"
+      - "checkpoint→R2 (CKPT_R2_ENABLED) needs aws CLI + R2 creds ON THE BOX — preflight at attach/provision time, never discover at the final save"
+      - "resp 4096 on this model: clip_ratio 0.73 (73% truncated) vs 0.03 at 16K — reasoning evals need the 16K surface"
 
 default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
   run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)
