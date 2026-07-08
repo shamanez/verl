@@ -111,9 +111,11 @@ HANDLE=$(jq -nc \
   --argjson ng "$NUM_GPUS" --arg gn "$GPU_NAME" --argjson gr "$GPU_RAM" \
   --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" \
   --arg label "$EXP_ID" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg ident "$IDENTITY" \
   '{schema_version:"1", instance_id:$iid, ssh_host:$host, ssh_port:$port,
     num_gpus:$ng, gpu_name:$gn, gpu_ram:$gr, dph_total:$dph, ssh_login:$login,
-    label:$label, vast_account:$acct, created_at:$t, external:true}')
+    ssh_identity:$ident, label:$label, vast_account:$acct, created_at:$t,
+    external:true}')
 
 # Handle lands in BOTH homes: the run dir (runner contract) and the shared
 # state dir (vast-teardown's account-resolution fallback scans it).

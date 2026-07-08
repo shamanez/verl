@@ -315,8 +315,27 @@ operator_stop_clear() { rm -f "$RUNS_DIR/$1/OPERATOR_STOP"; }
 # ---------- bounded external calls ----------
 vast() { timeout "${VAST_TIMEOUT:-90}" vastai "$@"; }   # NEVER call vastai bare in a skill
 sshb() {  # bounded ssh: sshb <port> <host> <cmd...>
+  # Identity precedence (#63 B3): VAST_SSH_IDENTITY env > the registered
+  # handle's key for THIS host:port (vast-attach resolves --ssh-identity but
+  # env vars don't survive into fresh subagent shells — the handle is the only
+  # durable carrier) > project default. Falls back to parsing ssh_login for
+  # handles written before the ssh_identity field existed.
   local port="$1" host="$2"; shift 2
-  timeout "${SSH_TIMEOUT:-45}" ssh -i "${VAST_SSH_IDENTITY:-$HOME/.ssh/vast_ai_name}" \
+  local ident="${VAST_SSH_IDENTITY:-}" f
+  if [[ -z "$ident" ]]; then
+    for f in "$STATE_DIR"/vast-handles/*.json; do
+      [[ -e "$f" ]] || continue
+      ident=$(jq -r --arg h "$host" --arg p "$port" \
+        'select(.ssh_host==$h and ((.ssh_port|tostring)==$p))
+         | .ssh_identity
+           // (try (.ssh_login | capture("-i +(?<k>[^ ]+)").k) catch null)
+           // empty' "$f" 2>/dev/null)
+      [[ -n "$ident" ]] && break
+    done
+    ident="${ident/#\~/$HOME}"
+  fi
+  [[ -z "$ident" ]] && ident="$HOME/.ssh/vast_ai_name"
+  timeout "${SSH_TIMEOUT:-45}" ssh -i "$ident" \
     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -p "$port" "root@$host" "$@"
 }
 
