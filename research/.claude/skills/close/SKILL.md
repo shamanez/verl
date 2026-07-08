@@ -101,8 +101,7 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 ## Hard rules
 
 - code PRs go to `shamanez/verl` base = project.yaml `code_pr_base_branch`
-  (this harness line's own branch) — NEVER upstream, NEVER base main, NEVER
-  the legacy `vast-ai-workload` line.
+  (this harness line's own branch) — NEVER upstream, NEVER base main.
 - Publish BEFORE cleanup: step 6 only runs after the SUMMARY row, close
   comment, and report page all exist — close_cleanup's guards enforce the
   SUMMARY row and report page mechanically; a failed/partial publish stops

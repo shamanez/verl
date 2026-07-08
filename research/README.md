@@ -31,9 +31,9 @@ What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
   experiment-runner (PREPARE laptop-phase → COMPUTE box-phase), machine-monitor
   (cheap Sonnet health poller — the default watcher), training-log-monitor
   (Opus classifier, dispatched on anomaly), analyst, log-writer.
-- `.claude/plans/` — `TEMPLATE-fast.md` / `TEMPLATE-deep.md` (+ read-only legacy
-  files). The plan itself lives in the GITHUB ISSUE BODY; the local copy is a
-  gitignored cache under `.claude/state/plan-cache/`.
+- `.claude/plans/` — ONLY `TEMPLATE-fast.md` / `TEMPLATE-deep.md`. The plan
+  itself lives in the GITHUB ISSUE BODY; the local copy is a gitignored cache
+  under `.claude/state/plan-cache/`.
 - `runs/<N>-<slug>/` — run artifacts (metrics, verdict.md, run.json) — VOLATILE:
   /close publishes the record to the reports site + R2, then its cleanup sweep
   (`scripts/close_cleanup.sh`) deletes the dir. `runs/SUMMARY.md` (one row per
@@ -71,4 +71,4 @@ rm ~/.claude-kill-switch      # resume
 
 `../verl/`, `../verl/.claude/`, `../AGENTS.md`, `../pyproject.toml`, `../setup.py` —
 upstream-owned; the `protect-upstream.sh` PreToolUse hook enforces it
-(writable only on `exp/*` / `vast-ai-workload` / `autonomous-harness-*` branches).
+(writable only on `exp/*` / `autonomous-harness-*` branches).

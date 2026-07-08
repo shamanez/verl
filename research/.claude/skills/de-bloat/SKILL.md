@@ -1,6 +1,6 @@
 ---
 name: de-bloat
-description: "HUMAN-ONLY: fold a COMPLETED experiment into runs/SUMMARY.md and delete its bulky artifacts (run dir, plan file, stale handles). Never invoked by the autonomous loop — deleting science is a deliberate operator act."
+description: "HUMAN-ONLY: fold a COMPLETED experiment into runs/SUMMARY.md and delete its bulky artifacts (run dir, plan cache, stale handles). Never invoked by the autonomous loop — deleting science is a deliberate operator act."
 disable-model-invocation: true
 allowed-tools: Bash
 ---
@@ -8,8 +8,8 @@ allowed-tools: Bash
 # /de-bloat <id> [id …] | --all-terminal [--dry-run] — operator-only artifact pruning
 
 Collapses a finished experiment's footprint into one `runs/SUMMARY.md` row and
-deletes the rest. **Since 2026-07-08 this is the manual batch FALLBACK for
-legacy/leftover dirs** — the normal path is /close's own cleanup sweep
+deletes the rest. **This is the manual batch FALLBACK for leftover
+dirs** — the normal path is /close's own cleanup sweep
 (`scripts/close_cleanup.sh`), which does this per-issue automatically once the
 record is durably published. **Two independent human-only gates:**
 1. `disable-model-invocation: true` — the model can never auto-fire this skill;
@@ -31,8 +31,8 @@ list, then run it for real.
 
 ## Ids
 
-Accepts the canonical `<N>-<slug>` (e.g. `61-math-ablation`), legacy `EXP-44`
-/ `44`, and legacy slug dirs (`MOAT-45-ANALYSIS`) — matched verbatim against
+Accepts the canonical `<N>-<slug>` (e.g. `61-math-ablation`), older `EXP-44`
+/ `44` ids, and named dirs (`MOAT-45-ANALYSIS`) — matched verbatim against
 `runs/`, word-bounded against SUMMARY (EXP-4 never matches EXP-44).
 
 ## What it does (per id)
@@ -40,10 +40,10 @@ Accepts the canonical `<N>-<slug>` (e.g. `61-math-ablation`), legacy `EXP-44`
 1. Appends one `| id | date | verdict | headline | issue | PR |` row to
    `runs/SUMMARY.md` (from plan → run.json fallbacks; idempotent — same
    format the log-writer uses at /close).
-2. Deletes `runs/<id>/`, any legacy plan file `.claude/plans/<N>.md`, and the
-   derived plan cache `.claude/state/plan-cache/<N>.md` (the plan's SSOT is
-   the GitHub issue body — nothing is lost; rich detail lives on the report
-   page, project.yaml `reports:`).
+2. Deletes `runs/<id>/` and the derived plan cache
+   `.claude/state/plan-cache/<N>.md` (the plan's SSOT is the GitHub issue
+   body — nothing is lost; rich detail lives on the report page,
+   project.yaml `reports:`).
 3. Tidies `.claude/state/vast-handles/*.json` for TORN_DOWN instances.
 
 Does NOT commit — review `git status`, then commit.

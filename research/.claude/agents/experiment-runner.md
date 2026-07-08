@@ -123,7 +123,7 @@ if [[ -f /workspace/runs/<id>/exp.bundle ]]; then          # code_change only
   cd verl && git remote set-url origin https://github.com/shamanez/verl.git || true
   uv pip install --no-deps -e . > /workspace/pip.log 2>&1
 else
-  # the LOCKED template clones vast-ai-workload (legacy line) — sync the box to
+  # the LOCKED template's onstart clones a PINNED branch — sync the box to
   # THIS harness line's base branch (project.yaml source_tree.base_branch) so
   # canonical launchers + verl source match what was approved. Editable install
   # ⇒ checkout suffices, no reinstall.

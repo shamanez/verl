@@ -1,17 +1,22 @@
 # researcher_steps.md — command index
 
-Full operator manual (workflow, compute, data flow, money, design rationale):
-**https://claude.ai/code/artifact/33a69614-404b-42fe-9fea-029f1c73d874**
-(hosted HTML — human-only; agent-facing truth is `.claude/project.yaml` +
-`.claude/skills/*/SKILL.md`, which this index and the manual link to, never restate).
+Full operator manual (workflow, prompting examples, compute, money, design doctrine):
+**https://com-eff-rlvr.pages.dev/harness/** (the site's Autonomous Harness tab;
+mirror: https://claude.ai/code/artifact/33a69614-404b-42fe-9fea-029f1c73d874).
+Human-only — agent-facing truth is `.claude/project.yaml` +
+`.claude/skills/*/SKILL.md`, which this index and the manual link to, never restate.
 
 ## Three phases, one FRESH window each
 
 ```
-/build "does signed_ema α=0.4 hold parity at cadence 10/10?"   → files #N
+/build "does signed_ema α=0.4 hold parity at cadence 10/10?" [kind:…]   → files #N
 /plan <N> [deep]              # plan → written INTO the issue body → ends at YOUR approve
 /execute <N> [--gpu auto|ask] # launch → monitor → analyze → close → status:done
 ```
+
+`kind:` is optional — explicit wins, else inferred (experiment | ablation |
+implementation | analysis | brainstorm | literature); it decides the lifecycle
+shape, so state it whenever inference could guess wrong.
 
 `--gpu auto` (default, project.yaml `default_compute.gpu_mode`) = hands-off:
 implementation + CPU gates finish on the laptop, then the harness provisions
@@ -68,7 +73,7 @@ error.
 
 ## Human-only skills (never run by the loop)
 
-- `/de-bloat <id>|--all-terminal` — manual batch fallback for LEGACY leftover
+- `/de-bloat <id>|--all-terminal` — manual batch fallback for leftover
   dirs (the normal path is /close's automatic cleanup sweep,
   `scripts/close_cleanup.sh`). Requires `DEBLOAT_OPERATOR_ACK=1`; invariant
   test: `scripts/test_debloat_invariant.sh`.

@@ -22,7 +22,7 @@
 # gh unreachable ⇒ refuse (G1 cannot be proven) — re-run when online; this is
 # a cleanup, deferring it costs nothing.
 #
-# Unlike de-bloat (human-only batch fallback for LEGACY dirs), this script is
+# Unlike de-bloat (human-only batch fallback for leftover dirs), this script is
 # sanctioned for the autonomous loop BECAUSE of the guards: it only ever
 # removes what /close has already durably published elsewhere.
 set -euo pipefail

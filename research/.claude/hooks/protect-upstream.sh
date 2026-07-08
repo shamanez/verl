@@ -53,14 +53,13 @@ esac
 case "$ABS" in
   "$VERL_ROOT"|"$VERL_ROOT/"*)
     # Exceptions (branch is read from the canonical path so a symlink can't lie):
-    #   exp/*             — experiment-runner agent patching upstream files inside its
-    #                       worktree on an ephemeral, per-experiment branch.
-    #   vast-ai-workload  — the stable home for vast.ai-specific launchers under
-    #                       examples/grpo_trainer/vast_*.sh on the shamanez/verl fork.
-    #                       Edits flow git-tracked (laptop → push → box `git pull`).
+    #   exp/*                — experiment-runner agent patching upstream files inside
+    #                          its worktree on an ephemeral, per-experiment branch.
+    #   autonomous-harness-* — harness-engineering branches (launcher promotions land
+    #                          here via /close's PR flow).
     BRANCH="$(git -C "$(dirname "$ABS")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
     case "$BRANCH" in
-      exp/*|vast-ai-workload|autonomous-harness-*) exit 0 ;;
+      exp/*|autonomous-harness-*) exit 0 ;;
     esac
     cat >&2 <<EOF
 protect-upstream: refused write to upstream verl path.

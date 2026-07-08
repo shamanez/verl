@@ -14,7 +14,7 @@ You are the analyst. Output: `runs/<id>/verdict.md` + one PROGRESS line +
 1. `runs/<id>/run.json` — cells, step target, success-criteria snapshot,
    baseline_run, iterations. This is authoritative for what ran.
 2. The plan — `$(plan_path <N>)` after `plan_fetch <N>` (the plan lives in
-   the GitHub issue body; the cache/legacy fallback is automatic) — success
+   the GitHub issue body; the cache fallback is automatic) — success
    criteria + verification commands, IF it still resolves. No plan anywhere +
    present run.json → use the snapshot's criteria; note `plan unavailable —
    judged against run.json snapshot` in the verdict.

@@ -26,24 +26,23 @@ workspace:
   secrets_optional:
     - VAST_API_KEY_TEAM           # shared "Pluralis Research" team Vast.ai account; used when VAST_ACCOUNT=team
   secrets_file_perms: "600"
-  # Vast.ai account selector: VAST_ACCOUNT=team|private (default TEAM — the private account is out of credits). team -> VAST_API_KEY_TEAM,
-  # private -> VAST_API_KEY. Resolved by .claude/skills/_vast_account.sh; provision stamps the chosen
-  # account on the handle/ledger as `vast_account`, and both teardown paths (vast-teardown skill +
-  # teardown-finished-runs Stop hook) read it back so a box is always destroyed with the account that
-  # created it. Operator picks it per issue via `/launch <N> --account team|private` or the plan's `vast_account:` key (default team; pass --account private / set vast_account: private to use the personal account).
+  # VAST_ACCOUNT=team|private → VAST_API_KEY_TEAM|VAST_API_KEY (resolved by .claude/skills/_vast_account.sh).
+  # Provision stamps the account on the handle/ledger as `vast_account`; both teardown paths read it back,
+  # so a box is always destroyed with the account that created it. Picked per issue via
+  # `/launch <N> --account team|private` or the plan's `vast_account:` key.
 
 github:
   research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.
   research_repo_visibility: private
   code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=code_pr_base_branch below
-  code_pr_base_branch: autonomous-harness-v1                  # THE harness base branch (self-hosting: this harness line forks exp/* from and PRs back to ITSELF). NEVER `main` (tracks upstream); vast-ai-workload is the LEGACY old-harness line — kept frozen, never a PR target from this line.
+  code_pr_base_branch: autonomous-harness-v1                  # THE harness base branch (self-hosting: this harness line forks exp/* from and PRs back to ITSELF). NEVER `main` (tracks upstream).
   labels:                                                     # labels are the DURABLE state machine; ONLY stage commands write them (the human never hand-flips)
     research_claim: research:claim                            # applied by /new-issue
     status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
     milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
     kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature, analysis
     pause: [needs:human, awaiting:approval]                   # the DURABLE pause signals (set via _lib.sh flag_human / flag_awaiting_approval; cleared by the resuming stage). PROGRESS.md lines are only a local capped echo.
-  plan_home: issue-body                                       # the plan's SSOT is the ISSUE BODY between <!-- plan:start --> / <!-- plan:end --> markers (_lib.sh plan_publish/plan_fetch). Local .claude/state/plan-cache/<N>.md is a gitignored derived cache; .claude/plans/ holds templates + read-only legacy files. Human edits to the plan block ON GitHub are authoritative — every gating stage re-fetches.
+  plan_home: issue-body                                       # the plan's SSOT is the ISSUE BODY between <!-- plan:start --> / <!-- plan:end --> markers (_lib.sh plan_publish/plan_fetch). Local .claude/state/plan-cache/<N>.md is a gitignored derived cache; .claude/plans/ holds ONLY the two plan templates. Human edits to the plan block ON GitHub are authoritative — every gating stage re-fetches.
 
 commands:                                                     # the per-issue stage commands (skills in .claude/skills/) — each invokable as /<name> <issue>
   phases: [build, plan, execute]                              # the three ENTRY POINTS, one FRESH WINDOW each (context control): /build files → /plan plans + ends at the human gate → /execute runs launch→close. A UX layer over the stages below — never a replacement for them.
@@ -52,7 +51,7 @@ commands:                                                     # the per-issue st
   overview: status                                            # /status — read-only fleet view printed to stdout (no STATUS.md file exists)
   human_only: [de-bloat, codex-verify]                        # disable-model-invocation; deleting science / external review are operator acts
   degradation_rule: "every command derives state labels+ledger FIRST, files second; a deleted plan or runs/<id>/ yields a named refusal or terminal derivation — never a retry loop"
-  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable: /close's final cleanup sweep (scripts/close_cleanup.sh) deletes them AUTOMATICALLY once the verdict is durably published (close comment + report page), and the human-only de-bloat (incl. --all-terminal batch) remains the manual fallback for legacy dirs. Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh, close_cleanup.sh, or de-bloat."
+  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable: /close's final cleanup sweep (scripts/close_cleanup.sh) deletes them AUTOMATICALLY once the verdict is durably published (close comment + report page), and the human-only de-bloat (incl. --all-terminal batch) remains the manual fallback for leftover dirs. Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh, close_cleanup.sh, or de-bloat."
 
 local_state:                                                  # the ONE-FILE policy (operator directive 2026-07-08): nothing about a FINISHED run lives in the harness checkout
   session_file: PROGRESS.md                                   # THE single local mutable file — capped tick echo + the end-of-session checklist an agent reads to double-check everything is done before ending its window. Standing operator notes live in its header. LOG.md is RETIRED (its index rows were folded into runs/SUMMARY.md).
@@ -101,14 +100,13 @@ source_tree:                                                  # the upstream cod
   path: /Users/shamane/Documents/verl/
   remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
   upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
-  base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here. (vast-ai-workload = legacy old-harness line, kept but not written by this harness.)
+  base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here.
   protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
     - /Users/shamane/Documents/verl/                          # everything UNDER verl/
   allowed_paths:                                              # except these subtrees
     - /Users/shamane/Documents/verl/research/                 # always writable
   exception_branches:                                         # plus any path is writable when on these branches
     - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
-    - vast-ai-workload                                        # LEGACY old-harness line — still writable so the old harness keeps working; this harness line never commits here
     - autonomous-harness-*                                    # harness-engineering branches
 
 vast_template:                                                # the locked Vast.ai docker template the runner provisions
@@ -122,10 +120,9 @@ vast_template:                                                # the locked Vast.
   registry_file: .claude/skills/vast-provision/templates.json
 
 vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
-  identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Rotated 2026-05-30 from the legacy ~/.ssh/vast_ai (id 835115) after that key failed container SSH-key injection on H200 instance 38444745. Override at runtime with VAST_SSH_IDENTITY.
+  identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Override at runtime with VAST_SSH_IDENTITY.
   pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
-  # NOTE: both keys remain registered on the account, so `vastai create instance --ssh` injects both and a box accepts either; we OFFER vast_ai_name. Legacy ~/.ssh/vast_ai (id 835115) kept as fallback.
-  # sync-metrics.sh, experiment-runner SSH/rsync calls, and any future on-box helpers MUST pass `-i $(eval echo "$identity_file")` so the right key is offered. Bare `ssh root@host` will silently fall back to id_rsa/id_ed25519 and fail with publickey.
+  # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.
 
 default_compute:                                              # planner emits these defaults unless the issue overrides
   gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
@@ -136,9 +133,6 @@ default_compute:                                              # planner emits th
     - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default — proven for both datasets (GSM8K fast surface; Big-Math @ resp 4096, EXP-58)
     - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # more HBM, still single-GPU
     - "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
-  legacy_gpu_filter_chain:                                    # RETIRED default (pre-2026-07-03 4×H200/8×H100 shapes). Used ONLY on explicit operator request — never walked by default.
-    - "num_gpus=4 gpu_name=H200 gpu_ram>=140 reliability>=0.95 rentable=true verified=true"
-    - "num_gpus=8 gpu_name=H100 gpu_ram>=80 reliability>=0.95 rentable=true verified=true"
   max_dph: 24.0
   max_gpu_hr: 96
   max_parallel: 1
@@ -150,7 +144,7 @@ datasets:                                                     # EASY/HARD datase
   easy:
     name: GSM8K
     prep: "launcher-managed — examples/data_preprocess/gsm8k.py runs automatically when DATA_DIR is absent"
-    max_response_length: "per launcher surface (accel base = 1024; full legacy control = 16384)"
+    max_response_length: "per launcher surface (accel base = 1024; full control launcher = 16384)"
   hard:
     name: Big-Math
     hf_id: gshasiri/Big-Math-RL-Verified-filtered             # 123,602 train / 6,506 val
@@ -193,7 +187,7 @@ fixed_control_surface:                                        # LOCKED training 
   measurement_knobs: [test_freq]                              # NOT control variables (validation is read-only) — canonical test_freq=25
 
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
-  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones vast-ai-workload (fixed template hash) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone with the exp bundle instead.
+  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones a PINNED branch (registry: .claude/skills/vast-provision/templates.json) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone with the exp bundle instead.
   naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
   override_model: canonical-launcher + CLI/env overrides      # a run calls the canonical launcher and overrides only the knobs it varies (${VAR:-default} env vars + Hydra "$@" passthrough) — never re-types the baseline
   sandbox: research/runs/<N>-<slug>/                          # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth

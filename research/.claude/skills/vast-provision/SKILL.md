@@ -35,8 +35,8 @@ With neither flag given, the skill reads `templates.json` (this dir) — the sin
 research template `verl-research-vllm020` — and provisions via its Vast Template hash:
 `hash_id` for `VAST_ACCOUNT=private`, `team_hash_id` for `VAST_ACCOUNT=team` (a Vast Template
 is visible only to its owning account). Choice is logged to stderr (`auto-selected template
-...`). The Template record on Vast carries the image, onstart (clones `shamanez/verl @
-vast-ai-workload`, `pip install --no-deps -e .`), docker options, recommended disk, and the
+...`). The Template record on Vast carries the image, onstart (clones `shamanez/verl` at the
+template's pinned branch, `pip install --no-deps -e .`), docker options, recommended disk, and the
 `cuda_max_good>=13.0` driver filter. Maintenance: update `templates.json` and the Vast
 console Template record together — that is the whole runbook.
 

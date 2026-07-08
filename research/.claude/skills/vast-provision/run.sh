@@ -31,7 +31,7 @@ DEFAULT_HANDLE_DIR="${VERL_VAST_HANDLE_DIR:-$PROJECT_DIR/.claude/state/vast-hand
 # ---- defaults --------------------------------------------------------------
 # Tuned for agent-self-sufficient invocation (Claude /vast-provision with no
 # explicit budget): safe per-instance cost, modest disk, generous wait for the
-# verlai image pull + onstart script. Larger multi-GPU plans (legacy 4×H200 /
+# verlai image pull + onstart script. Larger multi-GPU plans (4×H200 /
 # 8×H100 shapes, explicit operator request only) pass explicit overrides — see
 # the per-experiment plan (GitHub issue body; local cache .claude/state/plan-cache/<N>.md).
 COUNT=1
@@ -55,7 +55,7 @@ DRY_RUN=false
 
 # SSH identity offered to the provisioned box (per project.yaml vast_ssh).
 # Override with VAST_SSH_IDENTITY to rotate keys without editing this file.
-# Both ~/.ssh/vast_ai_name (id 890294) and the legacy ~/.ssh/vast_ai (id 835115)
+# Both ~/.ssh/vast_ai_name (id 890294) and the older ~/.ssh/vast_ai (id 835115)
 # are registered on the account, so the box accepts either; we OFFER this one.
 SSH_IDENTITY="${VAST_SSH_IDENTITY:-~/.ssh/vast_ai_name}"
 

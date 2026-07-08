@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # de-bloat — fold a COMPLETED experiment into runs/SUMMARY.md and remove its bulky
-# artifacts (run dir, plan file, stale handles). HUMAN-ONLY — see the gate below.
-# Since 2026-07-08 this is the manual BATCH FALLBACK for legacy/leftover dirs:
-# the normal path is /close's own cleanup sweep (scripts/close_cleanup.sh),
-# which cleans each issue automatically once its record is durably published.
+# artifacts (run dir, plan cache, stale handles). HUMAN-ONLY — see the gate below.
+# This is the manual BATCH FALLBACK for leftover dirs: the normal path is
+# /close's own cleanup sweep (scripts/close_cleanup.sh), which cleans each
+# issue automatically once its record is durably published.
 #
 # Hard guards:
 #   - OPERATOR GATE: refuses unless DEBLOAT_OPERATOR_ACK=1 is set. The autonomous
@@ -77,8 +77,6 @@ fi
 # grep pattern with word boundaries so EXP-4 never matches EXP-44 / 4-foo never 44-foo.
 bounded() { printf '(^|[^0-9A-Za-z-])%s([^0-9A-Za-z-]|$)' "$(sed 's/[][\.*^$(){}?+|/]/\\&/g' <<<"$1")"; }
 
-field() { grep -m1 -E "^-? *$1:" "$2" 2>/dev/null | sed -E "s/^-? *$1:[[:space:]]*//" | sed 's/[[:space:]]*(#.*)?$//'; }
-
 folded=0
 for RAW in "${IDS[@]}"; do
   # --- baseline guard, by NAME, before any parsing ---
@@ -86,7 +84,7 @@ for RAW in "${IDS[@]}"; do
     echo "$PROG: refusing to de-bloat the baseline ($RAW) — it is the permanent control."; continue
   fi
 
-  # --- resolve the id VERBATIM first (new <N>-<slug> and legacy slug dirs), then legacy EXP-<N> ---
+  # --- resolve the id VERBATIM first (<N>-<slug> and named dirs), then older EXP-<N> ids ---
   ID=""; ISSUE_NUM=""
   if [[ -d "runs/$RAW" ]]; then
     ID="$RAW"
@@ -104,10 +102,9 @@ for RAW in "${IDS[@]}"; do
   fi
 
   RUNDIR="runs/$ID"
-  PLAN=""; [[ -n "$ISSUE_NUM" ]] && PLAN=".claude/plans/$ISSUE_NUM.md"
 
   # --- idempotency ---
-  if [[ ! -d "$RUNDIR" && ( -z "$PLAN" || ! -f "$PLAN" ) ]] && grep -qE "$(bounded "$ID")" "$SUMMARY"; then
+  if [[ ! -d "$RUNDIR" ]] && grep -qE "$(bounded "$ID")" "$SUMMARY"; then
     echo "$PROG: $ID already folded — skipping."; continue
   fi
 
@@ -125,12 +122,11 @@ for RAW in "${IDS[@]}"; do
   fi
   [[ -z "$VERDICT" ]] && VERDICT="$(grep -E "$(bounded "$ID")" "$SUMMARY" 2>/dev/null | grep -m1 -oE 'PASS|STOP|REVISE' || echo 'done')"
 
-  # --- concise SUMMARY row (plan → run.json fallbacks) ---
+  # --- concise SUMMARY row (run.json is the only detail source) ---
   TITLE=""; MILE=""
-  [[ -n "$PLAN" && -f "$PLAN" ]] && { TITLE="$(field title "$PLAN")"; MILE="$(field milestone "$PLAN")"; }
-  [[ -z "$TITLE" && -f "$RUNDIR/run.json" ]] && TITLE=$(jq -r '.title // empty' "$RUNDIR/run.json" 2>/dev/null)
+  [[ -f "$RUNDIR/run.json" ]] && TITLE=$(jq -r '.title // empty' "$RUNDIR/run.json" 2>/dev/null)
   [[ -z "$TITLE" ]] && TITLE="$ID"
-  [[ -z "$MILE" && -f "$RUNDIR/run.json" ]] && MILE=$(jq -r '.milestone // empty' "$RUNDIR/run.json" 2>/dev/null)
+  [[ -f "$RUNDIR/run.json" ]] && MILE=$(jq -r '.milestone // empty' "$RUNDIR/run.json" 2>/dev/null)
   [[ -n "$MILE" && "$MILE" != "none" && "$MILE" != "?" ]] && TITLE="[$MILE] $TITLE"
   PR="$(grep -hE "$(bounded "$ID")" "$SUMMARY" PROGRESS.md 2>/dev/null | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
   MERGED="—"; [[ -n "$PR" ]] && MERGED="PR #$PR → \`$BASE_BRANCH\`"
@@ -154,10 +150,6 @@ for RAW in "${IDS[@]}"; do
   if [[ -d "$RUNDIR" ]]; then
     if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm -rf $RUNDIR"
     else git rm -r -q --ignore-unmatch "$RUNDIR" 2>/dev/null || true; rm -rf "$RUNDIR"; fi
-  fi
-  if [[ -n "$PLAN" && -f "$PLAN" ]]; then
-    if [[ "$DRY" == 1 ]]; then echo "  [dry-run] rm $PLAN"
-    else git rm -q --ignore-unmatch "$PLAN" 2>/dev/null || true; rm -f "$PLAN"; fi
   fi
   # plan CACHE is derived (SSOT = the issue body) — always safe to drop
   if [[ -n "$ISSUE_NUM" && -f "$PLAN_CACHE_DIR/$ISSUE_NUM.md" ]]; then

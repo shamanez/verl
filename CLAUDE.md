@@ -25,9 +25,7 @@ project's goal is captured in
 - **Hardware**: default **1×H200** on Vast.ai via the fixed
   `verl-research-vllm020` template; provisioning ladder 1×H200 → 1×B200 →
   2×H200, machine reliability strictly >0.99 on every rung (see
-  `research/.claude/project.yaml` `default_compute`). 1–8 GPUs supported;
-  the legacy 4×H200 / 8×H100 shapes are retained for explicit operator
-  request only.
+  `research/.claude/project.yaml` `default_compute`). 1–8 GPUs supported.
 - **Datasets**: EASY = GSM8K (the default); HARD = Big-Math
   (`gshasiri/Big-Math-RL-Verified-filtered`) at `MAX_RESPONSE_LENGTH=4096`.
   Registry: `research/.claude/project.yaml` `datasets:`.
@@ -91,7 +89,7 @@ and `setup_flow` entries in your memory index.
 
 ### Branch + PR policy (read this carefully — it's the load-bearing contract)
 
-Four branches on the fork (`shamanez/verl`) matter. **This harness line is
+Three branches on the fork (`shamanez/verl`) matter. **This harness line is
 self-hosting**: on `autonomous-harness-v1`, every operative branch reference
 resolves from `research/.claude/project.yaml` (`source_tree.base_branch` /
 `github.code_pr_base_branch`) — never a hardcoded name.
@@ -100,7 +98,6 @@ resolves from `research/.claude/project.yaml` (`source_tree.base_branch` /
 |---|---|---|
 | `main` | tracks upstream `verl-project/verl` | **READ-ONLY.** Never commit. Never PR to it. Never branch off of it for work. |
 | `autonomous-harness-v1` | **THE base branch of this harness line** | All harness work + research/ + launcher promotions commit here. **All experiment PRs target this branch as the base.** |
-| `vast-ai-workload` | LEGACY line carrying the old harness | Kept working, untouched by this line. If v1 proves out, it gets retired — until then never commit v1 harness work or target PRs here. |
 | `exp/<N>-<slug>` | per-experiment branches | Created by `experiment-runner` from the project.yaml base branch, pushed to origin BEFORE training launches so the branch survives a laptop crash. PRs land back on the base branch. |
 
 **Two repos, two purposes, no overlap:**

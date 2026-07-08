@@ -110,8 +110,7 @@ are expected; diagnostic-only issues stay `code_change:false`.
   Registry: `.claude/project.yaml` `datasets:`.
 - **Hardware** — default 1×H200 (ladder 1×H200 → 1×B200 → 2×H200, machine
   reliability >0.99) on Vast.ai via the locked `verl-research-vllm020`
-  template; 1–8 GPUs supported; legacy 4×H200/8×H100 for explicit operator
-  request only. See `.claude/project.yaml` `default_compute`.
+  template; 1–8 GPUs supported. See `.claude/project.yaml` `default_compute`.
 
 ## Pointers
 

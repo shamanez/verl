@@ -22,7 +22,7 @@ lib_research_dir() {
 RESEARCH_DIR="${RESEARCH_DIR:-$(lib_research_dir)}"
 STATE_DIR="$RESEARCH_DIR/.claude/state"
 LEDGER="$STATE_DIR/runs.jsonl"
-PLANS_DIR="$RESEARCH_DIR/.claude/plans"          # templates + legacy pre-P2 plan files only
+PLANS_DIR="$RESEARCH_DIR/.claude/plans"          # ONLY the two plan templates live here — never per-issue plan files (the plan's one home is the GitHub issue body)
 PLAN_CACHE_DIR="$STATE_DIR/plan-cache"           # gitignored cache of the GitHub-resident plans
 RUNS_DIR="$RESEARCH_DIR/runs"
 PROGRESS="$RESEARCH_DIR/PROGRESS.md"
@@ -141,17 +141,17 @@ lint_cell_name() {
   return 0
 }
 
-# ---------- plans: SSOT is the GITHUB ISSUE BODY ----------
+# ---------- plans: the ONE home is the GITHUB ISSUE BODY ----------
 # The plan lives INSIDE the issue body between the two marker lines below; its
 # machine fields are the first ```yaml fence in that block. Local copies under
-# $PLAN_CACHE_DIR are a derived, gitignored cache (offline reads + worktrees);
-# legacy .claude/plans/<N>.md files remain a read-only fallback for pre-P2
-# issues. Freshness rule: stages that SPEND or GATE (/plan /approve /launch)
-# call plan_fetch first; everything else may read the cache.
+# $PLAN_CACHE_DIR are a derived, gitignored cache (offline reads + worktrees)
+# — nothing else on disk ever holds a plan. Freshness rule: stages that SPEND
+# or GATE (/plan /approve /launch) call plan_fetch first; everything else may
+# read the cache.
 PLAN_MARK_START='<!-- plan:start -->'
 PLAN_MARK_END='<!-- plan:end -->'
 plan_path() { echo "$PLAN_CACHE_DIR/$1.md"; }
-plan_fetch() {  # plan_fetch <N> — refresh cache from GitHub; stale cache/legacy file survive a network failure
+plan_fetch() {  # plan_fetch <N> — refresh cache from GitHub; a stale cache survives a network failure
   local n="$1" body rc=0 f    # NB: $n referenced on its own line — same-line local n="$1" f="…$n…" is unbound under set -u
   f="$PLAN_CACHE_DIR/$n.md"
   mkdir -p "$PLAN_CACHE_DIR"
@@ -164,19 +164,16 @@ plan_fetch() {  # plan_fetch <N> — refresh cache from GitHub; stale cache/lega
       rm -f "$f"   # GitHub is SSOT: plan block gone ⇒ a stale cache must not resurrect it
     fi
   fi
-  [[ -s "$f" ]] && return 0
-  [[ -f "$PLANS_DIR/$n.md" ]] && { cp "$PLANS_DIR/$n.md" "$f"; return 0; }
-  return 1
+  [[ -s "$f" ]]
 }
-plan_exists() {  # cheap: cache/legacy first; one bounded fetch only when neither is present
-  [[ -s "$PLAN_CACHE_DIR/$1.md" || -f "$PLANS_DIR/$1.md" ]] || plan_fetch "$1"
+plan_exists() {  # cheap: cache first; one bounded fetch only when it is absent
+  [[ -s "$PLAN_CACHE_DIR/$1.md" ]] || plan_fetch "$1"
 }
 plan_field() {  # plan_field <N> <key> [default] — reads the first ```yaml fence, flat keys only
   local n="$1" key="$2" dflt="${3:-}" f v
   f="$PLAN_CACHE_DIR/$n.md"
   [[ -s "$f" ]] || plan_fetch "$n" >/dev/null 2>&1 || true
-  [[ -s "$f" ]] || f="$PLANS_DIR/$n.md"
-  [[ -f "$f" ]] || { echo "$dflt"; return 0; }
+  [[ -s "$f" ]] || { echo "$dflt"; return 0; }
   v=$(awk '/^```yaml/{f=1;next} /^```/{if(f)exit} f' "$f" \
       | grep -m1 -E "^${key}:" | sed -E "s/^${key}:[[:space:]]*//; s/[[:space:]]*(#.*)?$//")
   echo "${v:-$dflt}"
