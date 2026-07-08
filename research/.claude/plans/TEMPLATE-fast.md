@@ -11,6 +11,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>            # becomes runs/<N>-<slug>/, branch exp/<N>-<slug>, WandB group
+wandb_project: <N>-<kebab-slug>   # REQUIRED = run_id: every issue gets its OWN WandB project (never the shared legacy project) — runner exports PROJECT_NAME from this
 title: <issue title>          # one line — SUMMARY.md rows and the run-report page read it
 kind: experiment              # experiment|ablation|implementation|brainstorm|literature|analysis
 tier: fast

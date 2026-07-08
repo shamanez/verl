@@ -66,7 +66,15 @@ naming:                                                       # ONE readable nam
   tmux: "run-<issue>"
 
 wandb:                                                        # single source of truth (was hardcoded in the monitor agent)
-  project: verl_compression_research
+  # PER-ISSUE PROJECTS (operator directive 2026-07-08): every issue gets its OWN
+  # WandB project named <issue>-<slug> (= run_id, e.g. 63-deepscaler-r1d-signed-ema-k20).
+  # The PLANNER emits `wandb_project: <run_id>` in every plan's yaml block (template
+  # carries the key); the runner exports PROJECT_NAME="$RUN_ID" in launch payloads and
+  # snapshots it into run.json (monitor/analyst read the snapshot, never this file).
+  # The shared name below is ONLY the legacy fallback for pre-#63 runs — never use it
+  # for new issues.
+  project_rule: "<issue>-<slug> (= run_id) — derived automatically at /plan time"
+  project: verl_compression_research                          # LEGACY fallback (pre-#63 runs) — do not use for new issues
   entity: shamanework-pl
   tail_rule: "the async uploader drops the last 1-2 steps — /analyze backfills them from train.log (scripts/backfill_wandb.py)"
 
