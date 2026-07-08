@@ -50,17 +50,24 @@ def build_row(problem: str, answer: str, idx: int, hf_id: str) -> dict:
 
 
 def _rows_bytedtsinghua(limit: int | None):
+    # BytedTsinghua-SIA/AIME-2024 ships the 30 AIME-2024 problems DUPLICATED 32x
+    # (960 rows) for avg@32 eval. We want the 30 UNIQUE problems as a directional
+    # val surface (plan intent + 32x cheaper validation), so dedupe on the problem.
     hf_id = "BytedTsinghua-SIA/AIME-2024"
     ds = datasets.load_dataset(hf_id, split="train")
-    out = []
-    for idx, ex in enumerate(ds):
+    out, seen = [], set()
+    for ex in ds:
         extra = ex.get("extra_info") or {}
         problem = extra.get("raw_problem")
         rm = ex.get("reward_model") or {}
         gt = rm.get("ground_truth")
         if problem is None or gt is None or str(problem).strip() == "" or str(gt).strip() == "":
             continue
-        out.append(build_row(str(problem), str(gt).strip(), idx, hf_id))
+        key = str(problem).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(build_row(str(problem), str(gt).strip(), len(out), hf_id))
         if limit and len(out) >= limit:
             break
     return out
@@ -69,13 +76,17 @@ def _rows_bytedtsinghua(limit: int | None):
 def _rows_maxwell(limit: int | None):
     hf_id = "Maxwell-Jia/AIME_2024"
     ds = datasets.load_dataset(hf_id, split="train")
-    out = []
-    for idx, ex in enumerate(ds):
+    out, seen = [], set()
+    for ex in ds:
         problem = ex.get("Problem")
         gt = ex.get("Answer")
         if problem is None or gt is None or str(problem).strip() == "":
             continue
-        out.append(build_row(str(problem), str(gt).strip(), idx, hf_id))
+        key = str(problem).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(build_row(str(problem), str(gt).strip(), len(out), hf_id))
         if limit and len(out) >= limit:
             break
     return out
