@@ -133,6 +133,29 @@ datasets:                                                     # EASY/HARD datase
     prep: "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42; then launch with DATA_DIR=/root/data/bigmath (skips the launcher's gsm8k prep)"
     data_source: DigitalLearningGmbH/MATH-lighteval           # reward-fn routing key set by bigmath_dapo.py — do NOT use math_bigmath (pred:None crashes val agg) or math_dapo (ignores \boxed{}); see plan 58
     max_response_length: 4096                                 # hard-dataset default — carried from EXP-58 (1000 clean steps on 1×H200)
+  rlvr:                                                       # 5 RLVR-paper math datasets (issue #62). ALL route through data_source=DigitalLearningGmbH/MATH-lighteval (math_reward, \boxed{}+is_equiv). Prep: research/scripts/prepare_rlvr_math.py --dataset <slug> --local_save_dir <DATA_DIR>. Field mappings probed 2026-07-07 and baked into the prep SPECS table (mappings SSOT = the script; this block is the id/route index).
+    data_source: DigitalLearningGmbH/MATH-lighteval           # shared routing key for all 5 (never math_bigmath / math_dapo)
+    prep_script: research/scripts/prepare_rlvr_math.py
+    entries:
+      - {slug: math,        hf_id: EleutherAI/hendrycks_math,        data_dir: math,        splits: "train/test (7 subject configs concatenated)", answer: "boxed span of `solution`"}
+      - {slug: numina-cot,  hf_id: AI-MO/NuminaMath-CoT,             data_dir: numina_cot,  splits: "train/test",                                 answer: "boxed span of `solution`"}
+      - {slug: deepscaler,  hf_id: qingy2024/DeepScaleR-40k,         data_dir: deepscaler,  splits: "train-only -> test carved from train",       answer: "`solution` (bare short answer)"}
+      - {slug: skywork-or1, hf_id: Skywork/Skywork-OR1-RL-Data,      data_dir: skywork_or1, splits: "split=math -> test carved from train",         answer: "json.loads(reward_model.ground_truth)[0]"}
+      - {slug: dapo-math,   hf_id: BytedTsinghua-SIA/DAPO-Math-17k,  data_dir: dapo_math,   splits: "train-only -> test carved from train",       answer: "reward_model.ground_truth (plain str); native Answer-format boilerplate stripped before boxed instruction appended"}
+
+models:                                                       # RLVR-paper model registry (issue #62) — override ONLY MODEL_PATH on the canonical comm-eff launcher; NEVER fork the algorithm path. Qwen2.5-1.5B-Instruct stays the fixed dense control (CLAUDE.md §1) and is NOT listed here.
+  # role=test → GPU-smoked on 1×H200 (fits); role=integrate-only → registry + CPU tokenizer/chat-template load ONLY (too big for 1×H200, never GPU-smoked).
+  # chat_template_ok / boxed_survives verified on the laptop 2026-07-07 (Stage-1 registry-tokenizer-load): all 8 load a chat template that preserves the \boxed{} instruction — no generic fallback needed.
+  test:
+    - {slug: qwen25-math-1p5b,     hf_id: Qwen/Qwen2.5-Math-1.5B,                    chat_template: native, paper: minimal-rlvr}
+    - {slug: qwen3-1p7b-base,      hf_id: Qwen/Qwen3-1.7B-Base,                      chat_template: native, paper: one-layer-enough}
+    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "smoke with MAX_RESPONSE_LENGTH=4096 for <think>+boxed room; truncation-only null reward = documented negative, not a hard fail"}
+    - {slug: open-nemotron-1p5b,   hf_id: nvidia/OpenReasoning-Nemotron-1.5B,        chat_template: native, paper: minimal-rlvr, note: "id resolved from spec (no explicit id given); loads on laptop. If it OOMs at smoke → recorded negative, dropped."}
+    - {slug: qwen3-4b-base,        hf_id: Qwen/Qwen3-4B-Base,                        chat_template: native, paper: one-layer-enough}
+  integrate-only:                                             # 7B/8B — registry + CPU load check only; NOT GPU-smoked (too big for 1×H200)
+    - {slug: r1-distill-qwen-7b,   hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B,   chat_template: native, paper: rlvr-linearity}
+    - {slug: r1-distill-llama-8b,  hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B,  chat_template: native, paper: rlvr-linearity}
+    - {slug: qwen3-8b-base,        hf_id: Qwen/Qwen3-8B-Base,                        chat_template: native, paper: one-layer-enough}
 
 default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
   run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)
