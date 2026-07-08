@@ -4,6 +4,7 @@ The per-issue verdict SSOT is the **issue close comment** (+ `runs/<ID>/verdict.
 the run dir exists). Detail: `runs/SUMMARY.md`, `runs/<ID>/report.html`, W&B, git history.
 Format: `- **<id>** · <date> · <milestone> · <VERDICT> — <one-line result> · #<issue> · PR <url|—>`.
 
+- **#62** · 2026-07-07 · none · PASS — RLVR models+datasets enablement (additive): 8/8 tokenizers + 5/5 dataset schemas + 25/25 CPU reward-preflight pairs; 25/25 GPU smoke cells (5 models × 5 math datasets) 100% non-null rewards, no NaN; dense control byte-identical (0 off-path lines); nemotron near-zero reward recorded as low-capability, not dropped · #62 · PR —
 - **EXP-61** · 2026-07-04 · M4 · PASS — Math-only projector ablation: best = adaptive_linear rolling_ls_k K=3 @ Δ*=1,h=1 (ratio 0.9888); deploy fixed damped_linear at freshest anchor; do-nothing optimal at op — confirms dataset-specific · #61 · PR —
 - **EXP-56** · 2026-07-04 · M4 · PASS — MOAT rollup: conditional winner = fixed #47 damped-linear (GSM8K op 0.9396, pred_evr +0.1171) but DATASET-SPECIFIC (Big-Math collapses to do-nothing) — NOT a universal ANCHOR default; gate on trajectory coherence · #56 · PR —
 - **EXP-60** · 2026-07-04 · M4 · PASS — Big-Math cross-dataset validation: completed negative — NO projector beats do-nothing (GSM8K winner λ*=0.0, ratio 1.0000; consec_delta_cos≈0.15 vs 0.86 GSM8K) · #60 · PR —
