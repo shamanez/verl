@@ -42,7 +42,12 @@ e.g. "signed_ema(α=0.25) at cadence 10/10 reaches val/score ≥ 0.72 at step 50
 
 ## Cells
 <Every cell name says method + key knob. Banned: c1, c2, armA-….
- Config delta = env/Hydra overrides on the canonical launcher only.>
+ Config delta = env/Hydra overrides on the canonical launcher only.
+ VAL_BEFORE_TRAIN policy (#63 2026-07-09): True ONLY for the FIRST cell on a
+ new surface (it smoke-tests the val parquet/reward-route/metric keys before
+ paid training). Every later cell starts from the SAME base checkpoint, so its
+ step-0 val is arm-invariant and already measured — set VAL_BEFORE_TRAIN=False
+ there (saves ~5 min/arm; at 16K/n16 each redundant val ≈ $1.5).>
 
 | cell | config delta vs `vast_comm_eff_accel_base_…sh` | passes when |
 |---|---|---|
