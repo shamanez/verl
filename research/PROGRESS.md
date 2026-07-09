@@ -1,3 +1,4 @@
 # Progress — THE one local session file (capped tick echo + end-of-session checklist)
 STANDING (operator 2026-07-05): team-account boxes labeled `erfan-*` belong to ANOTHER user — NEVER tear down; vast-cost's "possible LEAK" flag on them is a false positive. (Pin by LABEL PATTERN, not instance id — ids rotate.)
 Role (operator 2026-07-08): an agent reads this file ONCE before ending its window — any unresolved MANUAL_REVIEW_NEEDED / TEARDOWN_FAILED / READY_FOR_GPU / STUCK / OPERATOR_STOP line means the session is NOT done. Durable record lives elsewhere (issue close comments · report pages at https://com-eff-rlvr.pages.dev/runs/ · runs/SUMMARY.md · git); /close's cleanup sweeps a finished issue's ticks from here. LOG.md is retired.
+[2026-07-09T12:33:21+10:00] #63 operator re-plan 2026-07-09: all arms -> 102 steps, ckpt @ step 100 (SAVE_FREQ 100). dense finishes to 102 (no ckpt); launch2.sh staged for the 3 comm-eff arms. run.json + plan SSOT updated.

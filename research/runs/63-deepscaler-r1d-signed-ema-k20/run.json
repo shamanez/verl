@@ -8,9 +8,10 @@
  "milestone": "none",
  "promote_launcher_as": "none",
  "iterations": 2,
- "step_target": 200,
+ "step_target": 102,
  "canonical_launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
- "plan_revision_note": "REVISED 2026-07-08 (operator directive, in-flight): control surface re-pointed to the RLVR-Linearity reproduction (prompt 2048 / response 16384 / n=16, 200 steps, AIME-only val via math-ai/aime24 avg@8, offload OFF on 4xH200). run.json regenerated from the issue-body plan + launch.sh on 2026-07-08T14:00Z after the snapshot was found half-stale.",
+ "orchestrator_launch": "launch.sh ran dense-control (to step 102, no ckpt); launch2.sh runs the 3 comm-eff arms at 102 steps / save_freq 100 (operator re-plan 2026-07-09).",
+ "plan_revision_note": "REVISED 2026-07-08 (operator, in-flight): re-pointed to the RLVR-Linearity reproduction (2048/16384/n=16, AIME-only val math-ai/aime24 avg@8, offload OFF on 4xH200). RE-REVISED 2026-07-09 (operator, live): all arms capped at 102 steps (was 200), checkpoint at step 100 (SAVE_FREQ 200->100). dense-control was already ~step 94 with save_freq=200 baked in, so it finishes to 102 WITHOUT a checkpoint (operator choice; curve+val kept on WandB + train_dense-control.log); the 3 comm-eff arms run via launch2.sh with a global_step_100 checkpoint mirrored to R2. Comparison point for all arms = step ~100/102 (AIME avg@8 val fires at step 100; train reward curve to 102).",
  "cells": [
   {
    "name": "dense-control",
@@ -72,10 +73,10 @@
    "ROLLOUT_TP": "1",
    "ROLLOUT_GPU_MEM_UTIL": "0.85",
    "PPO_MAX_TOKEN_LEN_PER_GPU": "30000",
-   "TOTAL_TRAINING_STEPS": "200",
+   "TOTAL_TRAINING_STEPS": "102",
    "TEST_FREQ": "25",
    "VAL_BEFORE_TRAIN": "True",
-   "SAVE_FREQ": "200",
+   "SAVE_FREQ": "100",
    "CKPT_R2_ENABLED": "true",
    "CKPT_R2_DELETE_LOCAL": "true",
    "COMM_EFF_ANCHOR_CADENCE": "20",
@@ -124,17 +125,18 @@
   "note": "val = AIME-2024 ONLY (30 problems, avg@8, every 25 steps). Cross-arm parity corroborated by the deepscaler TRAIN reward curve (low-variance signal); AIME avg@8 is the capability headline."
  },
  "success_criteria": [
-  "all attempted cells reach step 200 with no NaN / non-finite grad_norm",
-  "reward-health gate: dense-control final val-core/math-ai/aime24/acc/mean@8 >= 0.10 (else STOP = documented negative)",
-  "headline: max over {signed-ema-b50, signed-ema-b50-la} of final AIME avg@8 >= (dense final - 0.05), corroborated by the training reward curve",
-  "each arm's step-200 checkpoint (hf_model+optimizer) mirrored to R2 verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_200/ (ONLY the 200th)",
+  "all attempted cells reach step 102 with no NaN / non-finite grad_norm (operator re-plan 2026-07-09: 102 steps, was 200)",
+  "reward-health gate: dense-control step-100 val-core/math-ai/aime24/acc/mean@8 >= 0.10 (else STOP = documented negative). dense step-0..100 already >= 0.19 -> gate cleared.",
+  "headline: max over {signed-ema-b50, signed-ema-b50-la} of step-100 AIME avg@8 >= (dense step-100 - 0.05), corroborated by the training reward curve; all arms compared at step 100 (val fires at 100)",
+  "each comm-eff arm's step-100 checkpoint (hf_model+optimizer) mirrored to R2 verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/ (dense-control has no checkpoint by operator choice)",
   "report (non-gating): signed-ema-b00 + all arms' AIME val-core/math-ai/aime24 (avg@8)"
  ],
  "checkpoints": {
-  "save_freq": 200,
+  "save_freq": 100,
+  "policy": "operator re-plan 2026-07-09: comm-eff arms save global_step_100 (SAVE_FREQ=100, TOTAL=102). dense-control saves NOTHING (was save_freq=200, killed at 102 by operator choice).",
   "r2_bucket_env": "R2_BUCKET",
-  "r2_layout": "s3://<R2_BUCKET>/verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_200/",
-  "verify": "per finished cell check [ckpt_r2] queued / close() OK lines in the cell log; failed upload leaves local files (delete is post-verify) -> hand-mirror with aws s3 cp before the next cell"
+  "r2_layout": "s3://<R2_BUCKET>/verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/",
+  "verify": "per finished comm-eff cell check [ckpt_r2] queued / close() OK lines in the cell log; failed upload leaves local files (delete is post-verify) -> hand-mirror with aws s3 cp before the next cell"
  },
  "compute": {
   "mode": "attach (operator hand-off, ledger status=EXTERNAL, reaper hands-off; teardown at /close via vast-teardown)",
