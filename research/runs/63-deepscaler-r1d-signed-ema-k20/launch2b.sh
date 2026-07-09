@@ -113,7 +113,7 @@ export ROLLOUT_N=16
 export USE_DYNAMIC_BSZ=True
 export ROLLOUT_TP=1
 export ROLLOUT_GPU_MEM_UTIL=0.85
-export PPO_MAX_TOKEN_LEN_PER_GPU=20000   # FALLBACK 2026-07-09: offload-ON alone is marginal at the anchor refresh; lower per-GPU micro-batch token budget (linear on the ~75-80GB un-checkpointed anchor-clone activation surcharge). Pure micro-batching, NO numeric change (train_batch=128, mini_batch=64 unchanged).
+export PPO_MAX_TOKEN_LEN_PER_GPU=16000   # FALLBACK v2 2026-07-09: b50 OOM'd at anchor refresh TWICE (offload-ON alone left only 218MiB free, needed 8.21GiB). 16000 frees ~30GB of the token-linear anchor-clone activation surcharge (~35GB headroom w/ offload). Pure micro-batching, NO numeric change (train_batch=128, mini_batch=64).
 export TOTAL_TRAINING_STEPS=102        # operator re-plan 2026-07-09: cap all arms at 102 steps (was 200)
 export TEST_FREQ=25
 export VAL_BEFORE_TRAIN=True

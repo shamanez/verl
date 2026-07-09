@@ -72,7 +72,7 @@
    "USE_DYNAMIC_BSZ": "True",
    "ROLLOUT_TP": "1",
    "ROLLOUT_GPU_MEM_UTIL": "0.85",
-   "PPO_MAX_TOKEN_LEN_PER_GPU": "30000",
+   "PPO_MAX_TOKEN_LEN_PER_GPU": "16000",
    "TOTAL_TRAINING_STEPS": "102",
    "TEST_FREQ": "25",
    "VAL_BEFORE_TRAIN": "True",
@@ -97,7 +97,7 @@
    "data.filter_overlong_prompts=True",
    "actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra,hf_model]"
   ],
-  "note": "OFFLOAD ASYMMETRY (operator fix 2026-07-09): dense-control ran offload OFF and fit; the 3 comm-eff arms run param_offload=True + optimizer_offload=True (trailing Hydra override in launch2.sh) because they OOM'd at the first anchor refresh (replay_paired_batch extra fwd+bwd) with offload OFF at the 143GB ceiling. Offload = storage location only (CPU 1.5TB RAM), NO numeric change, so the comm-eff-vs-dense comparison stays valid. Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from the vanilla-GRPO control (flagged in the plan)."
+  "note": "COMM-EFF MEMORY FIX (operator 2026-07-09, launch2b.sh): dense-control ran offload OFF / token-len 30000 and fit. The 3 comm-eff arms OOM'd at the first anchor refresh (step 10) because _maybe_comm_eff_anchor_refresh builds an UN-checkpointed full-model clone -> ~75-80GB activation surcharge. Offload ON alone was insufficient (twice; 218MiB free, needed 8.21GiB). Final config for the comm-eff arms: param_offload=True + optimizer_offload=True AND ppo_max_token_len_per_gpu=16000 (was 30000) -> cuts the token-linear anchor surcharge ~30GB. BOTH are engineering knobs (offload=storage location; token-len=micro-batch granularity, train_batch=128/mini_batch=64 unchanged): NO numeric change, comm-eff-vs-dense comparison stays valid; dense's result unaffected. Definitive fix (gradient checkpointing on the anchor clone) filed as a follow-up exp-branch task. Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from vanilla-GRPO control (flagged in plan)."
  },
  "wandb": {
   "project": "63-deepscaler-r1d-signed-ema-k20",
