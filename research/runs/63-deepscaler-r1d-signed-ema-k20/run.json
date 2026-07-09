@@ -72,7 +72,7 @@
    "USE_DYNAMIC_BSZ": "True",
    "ROLLOUT_TP": "1",
    "ROLLOUT_GPU_MEM_UTIL": "0.85",
-   "PPO_MAX_TOKEN_LEN_PER_GPU": "16000",
+   "PPO_MAX_TOKEN_LEN_PER_GPU": "20000",
    "TOTAL_TRAINING_STEPS": "102",
    "TEST_FREQ": "25",
    "VAL_BEFORE_TRAIN": "True",
@@ -97,7 +97,7 @@
    "data.filter_overlong_prompts=True",
    "actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra,hf_model]"
   ],
-  "note": "COMM-EFF MEMORY FIX (operator 2026-07-09, launch2b.sh): dense-control ran offload OFF / token-len 30000 and fit. The 3 comm-eff arms OOM'd at the first anchor refresh (step 10) because _maybe_comm_eff_anchor_refresh builds an UN-checkpointed full-model clone -> ~75-80GB activation surcharge. Offload ON alone was insufficient (twice; 218MiB free, needed 8.21GiB). Final config for the comm-eff arms: param_offload=True + optimizer_offload=True AND ppo_max_token_len_per_gpu=16000 (was 30000) -> cuts the token-linear anchor surcharge ~30GB. BOTH are engineering knobs (offload=storage location; token-len=micro-batch granularity, train_batch=128/mini_batch=64 unchanged): NO numeric change, comm-eff-vs-dense comparison stays valid; dense's result unaffected. Definitive fix (gradient checkpointing on the anchor clone) filed as a follow-up exp-branch task. Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from vanilla-GRPO control (flagged in plan)."
+  "note": "COMM-EFF MEMORY FIX (operator 2026-07-09, launch2b.sh): dense-control ran offload OFF / token-len 30000 and fit. The 3 comm-eff arms OOM'd at the first anchor refresh (step 10) because _maybe_comm_eff_anchor_refresh builds an UN-checkpointed full-model clone -> ~75-80GB activation surcharge. Offload ON alone was insufficient (twice; 218MiB free, needed 8.21GiB). Final config for the comm-eff arms: param_offload=True + optimizer_offload=True AND ppo_max_token_len_per_gpu=20000 (was 30000) -> cuts the token-linear anchor surcharge ~22GB. NOTE token-len has a HARD FLOOR = max_prompt+max_response = 18432 (a single sequence cannot split across micro-batches); 16000 tripped AssertionError max_token_len<max_seq_len, so 20000 is the lowest safe value. BOTH are engineering knobs (offload=storage location; token-len=micro-batch granularity, train_batch=128/mini_batch=64 unchanged): NO numeric change, comm-eff-vs-dense comparison stays valid; dense's result unaffected. Definitive fix (gradient checkpointing on the anchor clone) filed as a follow-up exp-branch task. Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from vanilla-GRPO control (flagged in plan)."
  },
  "wandb": {
   "project": "63-deepscaler-r1d-signed-ema-k20",

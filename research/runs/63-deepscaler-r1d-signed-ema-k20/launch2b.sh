@@ -113,7 +113,7 @@ export ROLLOUT_N=16
 export USE_DYNAMIC_BSZ=True
 export ROLLOUT_TP=1
 export ROLLOUT_GPU_MEM_UTIL=0.85
-export PPO_MAX_TOKEN_LEN_PER_GPU=16000   # FALLBACK v2 2026-07-09: b50 OOM'd at anchor refresh TWICE (offload-ON alone left only 218MiB free, needed 8.21GiB). 16000 frees ~30GB of the token-linear anchor-clone activation surcharge (~35GB headroom w/ offload). Pure micro-batching, NO numeric change (train_batch=128, mini_batch=64).
+export PPO_MAX_TOKEN_LEN_PER_GPU=20000   # 2026-07-09: comm-eff anchor-refresh memory relief. FLOOR = max_prompt+max_response = 18432 (one sequence cannot split across micro-batches; 16000 tripped AssertionError max_token_len<max_seq_len). 20000 is just above the floor -> ~1 seq/micro-batch, max safe relief (~22GB off the 30000 anchor surcharge). Offload ON too. Pure micro-batching, NO numeric change.
 export TOTAL_TRAINING_STEPS=102        # operator re-plan 2026-07-09: cap all arms at 102 steps (was 200)
 export TEST_FREQ=25
 export VAL_BEFORE_TRAIN=True
