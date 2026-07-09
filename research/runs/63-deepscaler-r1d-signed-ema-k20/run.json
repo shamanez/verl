@@ -135,8 +135,10 @@
   "save_freq": 100,
   "policy": "operator re-plan 2026-07-09: comm-eff arms save global_step_100 (SAVE_FREQ=100, TOTAL=102). dense-control saves NOTHING (was save_freq=200, killed at 102 by operator choice).",
   "r2_bucket_env": "R2_BUCKET",
-  "r2_layout": "s3://<R2_BUCKET>/verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/",
-  "verify": "per finished comm-eff cell check [ckpt_r2] queued / close() OK lines in the cell log; failed upload leaves local files (delete is post-verify) -> hand-mirror with aws s3 cp before the next cell"
+  "r2_bucket_used": "shamane-pluralis",
+  "r2_bucket_note": "CONFLICT (#63 B5 2026-07-10): secrets/CLAUDE.md/project.yaml said 'autonomous-harness-rlvr-compression' but verl r2_sink.py hard-guards 'shamane-pluralis' -> the step-100 save CRASHED b50. Fix: pip-installed awscli on the box (was ABSENT despite the 'aws already on box' claim) + set R2_BUCKET=shamane-pluralis in secrets + verified a real test upload. Operator must reconcile the canonical bucket (code guard vs docs).",
+  "r2_layout": "s3://shamane-pluralis/verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/",
+  "verify": "per finished comm-eff cell check [ckpt_r2] queued / close() OK lines in the cell log; failed upload leaves local files (delete is post-verify) -> hand-mirror with aws s3 cp before the next cell. b50's ckpt was hand-mirrored after its save-crash (b50_ckpt_mirror.status)."
  },
  "compute": {
   "mode": "attach (operator hand-off, ledger status=EXTERNAL, reaper hands-off; teardown at /close via vast-teardown)",
