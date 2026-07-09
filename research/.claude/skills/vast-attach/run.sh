@@ -90,16 +90,37 @@ if [[ "$NO_PROBE" != "1" ]]; then
   fi
 fi
 
-# Optional R2-dependency preflight (#63 B11): checkpoint→R2 fails at the FINAL
-# save (after the whole run) when the box lacks the aws CLI or R2 creds —
-# surface it HERE, at attach time. WARN-only (the operator may install later).
+# R2-dependency preflight (#63 B11, hardened B5 2026-07-10): checkpoint→R2 fails
+# at the step-100 SAVE — mid-run, killing the cell — when the box lacks the aws
+# CLI, lacks/has-wrong R2 creds, the bucket is unwritable, OR R2_BUCKET mismatches
+# the verl code guard (r2_sink.py R2_REQUIRED_BUCKET). A `command -v aws` presence
+# check misses ALL of the last three. So do a REAL write test + a guard-match check.
+# Surface HERE, at attach time. WARN-only (the operator may fix later), but LOUD.
 if (( NEED_R2 )) && [[ "$NO_PROBE" != "1" ]]; then
-  R2CHK=$(timeout 30 ssh -i "$IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
-      -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" \
-      'command -v aws >/dev/null && echo AWS_OK || echo AWS_MISSING; grep -qE "^(export )?R2_ACCESS_KEY_ID=" "$HOME/.config/verl-research/secrets.env" 2>/dev/null && echo R2CREDS_OK || echo R2CREDS_MISSING' \
-      2>/dev/null || echo "R2CHK_UNREACHABLE")
-  if echo "$R2CHK" | grep -qE "MISSING|UNREACHABLE"; then
-    echo "vast-attach: WARN --need-r2 preflight: $(echo "$R2CHK" | tr '\n' ' ')— install the aws CLI / push R2 creds BEFORE the final checkpoint save" >&2
+  R2CHK=$(timeout 60 ssh -i "$IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" '
+      command -v aws >/dev/null && echo AWS_OK || echo AWS_MISSING
+      S="$HOME/.config/verl-research/secrets.env"
+      grep -qE "^(export )?R2_ACCESS_KEY_ID=" "$S" 2>/dev/null && echo R2CREDS_OK || echo R2CREDS_MISSING
+      source "$S" 2>/dev/null
+      echo "R2_BUCKET=${R2_BUCKET:-<unset>}"
+      # code guard: the ckpt sink refuses any bucket != R2_REQUIRED_BUCKET
+      G=$(grep -hoE "R2_REQUIRED_BUCKET *= *\"[^\"]+\"" /workspace/verl/verl/workers/comm_eff/r2_sink.py 2>/dev/null | grep -oE "\"[^\"]+\"" | tr -d \")
+      [ -n "$G" ] && { [ "$G" = "${R2_BUCKET:-}" ] && echo "GUARD_MATCH" || echo "GUARD_MISMATCH(code=$G)"; } || echo "GUARD_UNKNOWN(no checkout yet)"
+      # REAL write test to R2_BUCKET via the exact path the sink uses (aws s3 cp)
+      if command -v aws >/dev/null && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCESS_KEY_ID:-}" ]; then
+        EP="${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com}"
+        echo t > /tmp/_r2pf.txt
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+          aws s3 cp /tmp/_r2pf.txt "s3://$R2_BUCKET/verl-research/_attach_writetest.txt" --endpoint-url "$EP" >/dev/null 2>&1 \
+          && echo R2_WRITE_OK || echo R2_WRITE_FAIL
+      else echo R2_WRITE_SKIPPED; fi
+      ' 2>/dev/null || echo "R2CHK_UNREACHABLE")
+  if echo "$R2CHK" | grep -qE "MISSING|UNREACHABLE|GUARD_MISMATCH|R2_WRITE_FAIL"; then
+    echo "vast-attach: WARN --need-r2 preflight FAILED: $(echo "$R2CHK" | tr '\n' ' ')" >&2
+    echo "vast-attach:   -> fix BEFORE the run reaches a checkpoint save (step SAVE_FREQ): install aws (pip install awscli), set R2_BUCKET to the code-guard bucket, verify creds/writability. A save crash kills the cell mid-run." >&2
+  else
+    echo "vast-attach: --need-r2 preflight OK: $(echo "$R2CHK" | tr '\n' ' ')" >&2
   fi
 elif (( NEED_R2 )); then
   # --no-probe silences the preflight; say so — silence must not read as "clean" (#63 B11 review).

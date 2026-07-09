@@ -96,8 +96,24 @@ reports:                                                      # publishing surfa
   publish_script: research/scripts/publish_run_report.py      # /close runs it at step 5c, AFTER the close comment exists (the page renders it): generates the run page, updates runs/index.html, copies small artifacts, uploads big ones to R2, commits (and pushes unless --no-push) the report repo. Nonzero exit = REPORT_PUBLISH_PARTIAL → /close flags a human and SKIPS the cleanup sweep.
   push_on_publish: true                                       # a push IS the deploy (Cloudflare Pages auto-builds) — that is the point
   r2:                                                         # big artifacts (checkpoints, weight dumps, full metrics) — NEVER into git
-    # TWO R2 surfaces, ONE bucket (#63 B12/B13; bucket = R2_BUCKET in secrets.env,
-    # now the DEDICATED `autonomous-harness-rlvr-compression` — never a personal bucket):
+    # !!! UNRESOLVED BUCKET CONFLICT (#63 B5, 2026-07-10) — OPERATOR DECISION NEEDED:
+    #   the docs below + secrets said `autonomous-harness-rlvr-compression`, but the
+    #   verl ckpt-sink code HARD-GUARDS `shamane-pluralis`
+    #   (verl/workers/comm_eff/r2_sink.py:111 R2_REQUIRED_BUCKET). The guard REFUSES
+    #   any other bucket and CRASHES _save_checkpoint at the first save (#63 b50 died
+    #   at step 100). It had never surfaced because no prior run reached a checkpoint
+    #   save with R2 on. STOPGAP: set R2_BUCKET=shamane-pluralis (code-enforced +
+    #   confirmed writable) to unblock #63; checkpoints land there. RECONCILE: either
+    #   update the r2_sink.py guard to the dedicated bucket (exp branch) + confirm it
+    #   is writable, OR change the docs/secrets to shamane-pluralis. Until reconciled,
+    #   TRAINING checkpoints (shamane-pluralis) and REPORT artifacts (bucket_env below)
+    #   may live in DIFFERENT buckets.
+    # REQUIREMENTS (#63 B5): the box MUST have the `aws` CLI (the sink shells out to
+    #   `aws s3 cp`; #63's box had none despite the "aws already on box" claim —
+    #   pip install awscli). vast-attach --need-r2 MUST do a REAL write test to the
+    #   code-required bucket, not just `command -v aws` — presence checks miss both
+    #   the missing-aws and wrong-bucket failures.
+    # TWO R2 surfaces (#63 B12/B13; bucket = R2_BUCKET in secrets.env):
     #   1. finished-run REPORT artifacts (publish_run_report.py at /close): <prefix>/<run_id>/…
     #   2. TRAINING checkpoints (verl ckpt_r2 sink, during the run):
     #      verl-research/<R2_EXPERIMENT>/<R2_REGIME>/checkpoints/… (R2_EXPERIMENT=run_id, R2_REGIME=cell)
