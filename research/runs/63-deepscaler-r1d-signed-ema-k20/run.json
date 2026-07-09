@@ -97,7 +97,7 @@
    "data.filter_overlong_prompts=True",
    "actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra,hf_model]"
   ],
-  "note": "offload OFF (launcher hardcodes param_offload=False/optimizer_offload=False; FSDP shards across the 4 H200s). Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from the vanilla-GRPO control (flagged in the plan)."
+  "note": "OFFLOAD ASYMMETRY (operator fix 2026-07-09): dense-control ran offload OFF and fit; the 3 comm-eff arms run param_offload=True + optimizer_offload=True (trailing Hydra override in launch2.sh) because they OOM'd at the first anchor refresh (replay_paired_batch extra fwd+bwd) with offload OFF at the 143GB ceiling. Offload = storage location only (CPU 1.5TB RAM), NO numeric change, so the comm-eff-vs-dense comparison stays valid. Asymmetric clip 0.2/0.28 + seq-mean-token-mean = reference fidelity, intentional deviation from the vanilla-GRPO control (flagged in the plan)."
  },
  "wandb": {
   "project": "63-deepscaler-r1d-signed-ema-k20",

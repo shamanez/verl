@@ -162,6 +162,15 @@ REF_HYDRA=(
   actor_rollout_ref.rollout.val_kwargs.n=8
   data.filter_overlong_prompts=True
   actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra,hf_model]
+  # OFFLOAD ON (operator directive 2026-07-09 after signed-ema-b50 OOM'd at the first
+  # anchor refresh, tick 20 / step 10). The launcher hardcodes actor param/optimizer
+  # offload=False; these trailing overrides win (Hydra last-wins, "$@" is appended last).
+  # dense-control fit at offload OFF (no compression state); the comm-eff arms add
+  # PowerSGD r77 Q/P + anchor (replay_paired_batch runs an EXTRA fwd+bwd) + spectral EMA,
+  # which overflowed the 143GB ceiling. Offload -> box 1.5TB RAM. Pure storage location:
+  # NO numeric change, comm-eff-vs-dense comparison stays valid. dense's result unaffected.
+  actor_rollout_ref.actor.fsdp_config.param_offload=True
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
 )
 
 # ---------------------------------------------------------------------------
