@@ -148,6 +148,18 @@ EXPERIMENT_NAME=<N>-<cell> WANDB_RUN_GROUP=<id> <VAR=value …> \
 echo "$(date -Iseconds) done" > /workspace/runs/<id>/done.flag
 ```
 
+**Cell-failure policy (payload contract; #63 2026-07-09).** The shape above is
+stop-on-first-failure (`set -e`). A payload MAY instead continue past a failed
+cell (`fail_<cell>.flag` + keep going, so one arm's NaN doesn't strand the
+rest) — but ONLY with a **systematic-failure tripwire**: after any cell fails,
+grep THAT cell's log for config-level signatures
+(`OutOfMemoryError|CUDA out of memory|ModuleNotFoundError|No such file|hydra\.errors`)
+and on a hit write `halt.flag` + `exit 1` instead of advancing — a
+config-level crash recurs in every remaining cell (all cells share the memory
+config), so auto-advance just pre-pays boot+crash per arm. Only science-level
+failures (NaN/divergence in THIS cell's numbers) may auto-advance. #63: an OOM
+at the first comm-eff anchor refresh auto-advanced into a pre-doomed next arm.
+
 ## Hard rules
 
 - PREPARE before COMPUTE, always — never author code, edit configs, or debug

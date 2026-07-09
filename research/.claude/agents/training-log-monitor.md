@@ -35,7 +35,14 @@ Return `{state, evidence, per_cell, recommendation}` with state one of:
 - `done` — the "anomaly" was benign completion (flags + steps ≥ target).
   rec: teardown_then_analyze.
 - `experiment-failure` — training error (NaN/OOM mid-train) but box healthy;
-  name the cell + step. rec: let_cells_finish (the failure is the data).
+  name the cell + step, AND make the **one-off vs systematic** call (#63
+  2026-07-09): `systematic` = config-level, the same crash site recurs in
+  every remaining cell (e.g. OOM at a comm-eff anchor refresh — all arms
+  share the memory config; an OOM whose allocator arithmetic is
+  config-driven, not batch-luck). `one-off` = tied to this cell's unique
+  science (its hyperparams diverged/NaN'd). rec: let_cells_finish (one-off —
+  the failure is the data) | halt_sweep_and_fix (systematic — every further
+  cell is a pre-paid crash; name the engineering knob that would fix it).
 - `probe-fix-needed` — code_change probe crashed on backend integration
   (FSDP/dtype/autograd/vLLM); include the traceback head. rec: bounded_fix.
 - `env-failure` — docker/CUDA mismatch/NCCL-init/vLLM-init-OOM/ssh dead

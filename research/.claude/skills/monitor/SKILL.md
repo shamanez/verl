@@ -63,9 +63,22 @@ under `/bg /goal … /go <N>`):
    - **done** (flags + steps reached) → confirm metrics rsynced to
      `runs/$id/metrics/`, then teardown NOW (`vast-teardown` skill), then
      `/analyze <N>`. The box never outlives its science.
-   - **experiment-failure** (NaN/OOM mid-train, wrong numbers) → the failure
-     IS the data. Let remaining cells finish; when done: sync → teardown →
+   - **experiment-failure / one-off** (NaN/divergence tied to THIS cell's
+     science; remaining cells differ where it matters) → the failure IS the
+     data. Let remaining cells finish; when done: sync → teardown →
      `/analyze <N>`. Do not "investigate" on the paid box.
+   - **experiment-failure / systematic** (the classifier calls the crash
+     CONFIG-LEVEL: same crash site would recur in every remaining cell — e.g.
+     OOM at the first comm-eff anchor refresh with offload OFF, a config that
+     all arms share; a resolve error; a dead dataset path) → do NOT let the
+     sweep roll on: a continue-on-fail payload would burn one boot+crash per
+     remaining cell. Kill the orchestrator tmux NOW, sync evidence, then ONE
+     bounded engineering fix via `bump_attempt "$id" fix_attempts 3`
+     (offload/mem_util/batch knobs ONLY — never a science knob) and relaunch
+     the remaining cells; exhausted, or the fix would touch science →
+     teardown + `flag_human <N> …`. (#63 2026-07-09: b50 OOM'd at anchor
+     refresh tick 20; auto-advance booted a pre-doomed b50-la. This row
+     exists so that never happens unattended again.)
    - **probe/env fix needed** (code_change probe crashed on backend
      integration) → `bump_attempt "$id" fix_attempts 3 || {teardown; stop}` —
      ONE focused fix per attempt via the on-box commit-hotfix loop, relaunch
