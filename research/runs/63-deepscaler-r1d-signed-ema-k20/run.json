@@ -128,7 +128,7 @@
   "all attempted cells reach step 102 with no NaN / non-finite grad_norm (operator re-plan 2026-07-09: 102 steps, was 200)",
   "reward-health gate: dense-control step-100 val-core/math-ai/aime24/acc/mean@8 >= 0.10 (else STOP = documented negative). dense step-0..100 already >= 0.19 -> gate cleared.",
   "headline: max over {signed-ema-b50, signed-ema-b50-la} of step-100 AIME avg@8 >= (dense step-100 - 0.05), corroborated by the training reward curve; all arms compared at step 100 (val fires at 100)",
-  "each comm-eff arm's step-100 checkpoint (hf_model+optimizer) mirrored to R2 verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/ (dense-control has no checkpoint by operator choice)",
+  "each comm-eff arm's step-100 checkpoint (hf_model+optimizer) mirrored to R2 autonomous-harness-rlvr-compression/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/ (dense-control has no checkpoint by operator choice)",
   "report (non-gating): signed-ema-b00 + all arms' AIME val-core/math-ai/aime24 (avg@8)"
  ],
  "checkpoints": {
@@ -137,7 +137,7 @@
   "r2_bucket_env": "R2_BUCKET",
   "r2_bucket_used": "shamane-pluralis",
   "r2_bucket_note": "CONFLICT (#63 B5 2026-07-10): secrets/CLAUDE.md/project.yaml said 'autonomous-harness-rlvr-compression' but verl r2_sink.py hard-guards 'shamane-pluralis' -> the step-100 save CRASHED b50. Fix: pip-installed awscli on the box (was ABSENT despite the 'aws already on box' claim) + set R2_BUCKET=shamane-pluralis in secrets + verified a real test upload. Operator must reconcile the canonical bucket (code guard vs docs).",
-  "r2_layout": "s3://shamane-pluralis/verl-research/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/",
+  "r2_layout": "s3://shamane-pluralis/autonomous-harness-rlvr-compression/63-deepscaler-r1d-signed-ema-k20/<cell>/checkpoints/global_step_100/",
   "verify": "per finished comm-eff cell check [ckpt_r2] queued / close() OK lines in the cell log; failed upload leaves local files (delete is post-verify) -> hand-mirror with aws s3 cp before the next cell. b50's ckpt was hand-mirrored after its save-crash (b50_ckpt_mirror.status)."
  },
  "compute": {

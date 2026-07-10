@@ -112,7 +112,7 @@ if (( NEED_R2 )) && [[ "$NO_PROBE" != "1" ]]; then
         EP="${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com}"
         echo t > /tmp/_r2pf.txt
         AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-          aws s3 cp /tmp/_r2pf.txt "s3://$R2_BUCKET/verl-research/_attach_writetest.txt" --endpoint-url "$EP" >/dev/null 2>&1 \
+          aws s3 cp /tmp/_r2pf.txt "s3://$R2_BUCKET/autonomous-harness-rlvr-compression/_attach_writetest.txt" --endpoint-url "$EP" >/dev/null 2>&1 \
           && echo R2_WRITE_OK || echo R2_WRITE_FAIL
       else echo R2_WRITE_SKIPPED; fi
       ' 2>/dev/null || echo "R2CHK_UNREACHABLE")

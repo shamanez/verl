@@ -44,12 +44,15 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
    cell that reached its save step (`done_<cell>.flag` / a `global_step_<S>`
    locally, or a `[ckpt_r2] ... FAILED` line in the cell log): `aws s3 ls`
    the expected key
-   (`verl-research/<run_id>/<cell>/checkpoints/global_step_<S>/`, bucket
-   `R2_BUCKET`, `--endpoint-url $R2_ENDPOINT`) and confirm object count > 0.
-   Any expected checkpoint MISSING from R2 but present LOCALLY on the box →
-   `aws s3 cp --recursive` it up and re-verify BEFORE teardown. Missing from
-   BOTH → `flag_human <N> "checkpoint <cell> lost — not in R2, not on box"`.
-   Only when every expected checkpoint is verified in R2 do you proceed.
+   (`autonomous-harness-rlvr-compression/<run_id>/<cell>/checkpoints/global_step_<S>/`,
+   bucket `R2_BUCKET`=shamane-pluralis, `--endpoint-url $R2_ENDPOINT`) and
+   confirm object count > 0. Any expected checkpoint MISSING from R2 but present
+   LOCALLY on the box → `aws s3 cp --recursive` it up and re-verify BEFORE
+   teardown. Missing from BOTH → `flag_human <N> "checkpoint <cell> lost — not
+   in R2, not on box"`. Only when every expected checkpoint is verified in R2 do
+   you proceed. (Everything lives under the one per-run home
+   autonomous-harness-rlvr-compression/<run_id>/; the old verl-research/ prefix
+   is retired — if any cell wrote there under old on-box code, MOVE it here.)
 2. **Teardown (money before paperwork).** If the ledger row is
    `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
    harness box may outlive its issue. (Semantics key on the ledger STATUS, not

@@ -97,7 +97,7 @@ def _mk_sink(tmp_path, **kw):
         endpoint="https://acct.r2.cloudflarestorage.com",
         access_key_id="AKIA_test",
         secret_access_key="secret_test",
-        key_prefix="verl-research/EXP-43/regimeA/weights",
+        key_prefix="autonomous-harness-rlvr-compression/EXP-43/regimeA/weights",
         manifest_path=str(tmp_path / "r2_manifest.jsonl"),
     )
     defaults.update(kw)
@@ -137,7 +137,7 @@ def test_upload_verify_delete_success(tmp_path, monkeypatch):
     rows = [json.loads(l) for l in open(sink.manifest_path)]
     assert len(rows) == 1
     assert rows[0]["verified"] is True
-    assert rows[0]["key"] == "verl-research/EXP-43/regimeA/weights/full/step_5/step_5.pt"
+    assert rows[0]["key"] == "autonomous-harness-rlvr-compression/EXP-43/regimeA/weights/full/step_5/step_5.pt"
     assert rows[0]["role"] == "weights" and rows[0]["tick"] == 9
     assert rows[0]["local_bytes"] == rows[0]["remote_bytes"] == 10
     assert sink.n_uploaded == 1
@@ -222,7 +222,7 @@ def test_build_from_env_key_prefix_and_creds(tmp_path, monkeypatch):
     monkeypatch.setenv("R2_EXPERIMENT", "EXP-43")
     monkeypatch.setenv("R2_REGIME", "regimeA")
     sink = build_r2_sink_from_env(artifact_kind="grads", manifest_dir=str(tmp_path))
-    assert sink.key_prefix == "verl-research/EXP-43/regimeA/grads"
+    assert sink.key_prefix == "autonomous-harness-rlvr-compression/EXP-43/regimeA/grads"
     # creds reach the subprocess env (as AWS_*), never logged
     assert sink._env["AWS_ACCESS_KEY_ID"] == "AKIA_env"
     assert sink._env["AWS_SECRET_ACCESS_KEY"] == "secret_env"

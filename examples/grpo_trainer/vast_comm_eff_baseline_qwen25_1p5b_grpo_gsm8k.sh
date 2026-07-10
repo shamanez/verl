@@ -233,7 +233,7 @@ export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 # (trainer.checkpoint_r2_enabled) since that is the gate. R2 creds/prefix come from
 # the SAME env as the weight-traj stream (R2_BUCKET/R2_ENDPOINT|R2_ACCOUNT_ID/
 # R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_EXPERIMENT/R2_REGIME) — the checkpoints
-# land under verl-research/$R2_EXPERIMENT/$R2_REGIME/checkpoints (a DISTINCT prefix
+# land under autonomous-harness-rlvr-compression/$R2_EXPERIMENT/$R2_REGIME/checkpoints (a DISTINCT prefix
 # from .../weights, so no key collision with the weight-traj snapshots).
 export CKPT_R2_ENABLED="${CKPT_R2_ENABLED:-false}"
 export CKPT_R2_ASYNC="${CKPT_R2_ASYNC:-true}"
