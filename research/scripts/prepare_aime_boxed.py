@@ -1,120 +1,91 @@
-"""Convert AIME-2024 to a verl VAL-ONLY parquet with the boxed reward route (issue #63).
+"""Convert AIME-2024 (math-ai/aime24) to a verl VAL-ONLY parquet, boxed reward route (issue #63).
 
-AIME-2024 is a 30-problem validation surface for distilled-reasoning RL runs. The
-native `BytedTsinghua-SIA/AIME-2024` ships `data_source="math_dapo"` + an
-"Answer: $Answer" prompt — that routes to the math_dapo "Answer:"-regex extractor
-(verl/utils/reward_score/__init__.py), which IGNORES \\boxed{} and would score
-every boxed R1-Distill response 0. So this converter REWRITES the row:
+Operator directive 2026-07-08: validation uses EXACTLY math-ai/aime24 (HF), split
+`test`, 30 problems, and the WandB metric keys must honestly read as AIME. The rows
+therefore carry data_source="math-ai/aime24", which routes to math_reward (last
+\\boxed{} span + is_equiv) via the entry added to verl/utils/reward_score/__init__.py
+on the harness branch — NOT the `startswith("aime")` math_dapo branch (that extractor
+ignores \\boxed{} and scores boxed responses 0/-1; verified in the #63 CPU gate).
 
-  * data_source -> "HuggingFaceH4/MATH-500"  (routes to math_reward: last \\boxed{}
-    span + is_equiv, plain 0.0/1.0) — a math_reward alias DISTINCT from deepscaler's
-    "DigitalLearningGmbH/MATH-lighteval" so the two-file val list emits TWO distinct
-    val-core/<data_source>/reward/mean keys (no metric-key collision).
-  * prompt      -> extra_info.raw_problem (the clean problem, no Answer boilerplate)
-    + the \\boxed{} INSTRUCTION (same instruction prepare_rlvr_math.py uses).
-  * ground_truth-> reward_model.ground_truth (plain string int, e.g. "540").
+Schema of math-ai/aime24 split=test (verified via datasets-server 2026-07-08):
+  id: str · problem: str · solution: "\\boxed{<answer>}" · url: str
+ground_truth = the bare answer inside the boxed span (e.g. "204").
 
-Row schema mirrors research/scripts/prepare_rlvr_math.py build_row() exactly.
-Emits VAL ONLY (default <save_dir>/val.parquet) — AIME is a 30-row directional
-eval surface, never a train set.
+Row schema mirrors research/scripts/prepare_rlvr_math.py build_row(). VAL ONLY.
 
-Sources (first that loads wins):
-  BytedTsinghua-SIA/AIME-2024   split=train  (primary; extra_info.raw_problem + reward_model.ground_truth)
-  Maxwell-Jia/AIME_2024         split=train  (fallback; Problem + Answer)
-
-Usage (on the box, PREPARE-authored, runs from the run payload):
+Usage (on the box, from the run payload):
   python3 prepare_aime_boxed.py --local_save_dir /workspace/data/aime2024_boxed
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 
 import datasets
 
 # Same instruction prepare_rlvr_math.py appends: tells the model to emit \boxed{}.
 INSTRUCTION = "Let's think step by step and output the final answer within \\boxed{}."
-# math_reward alias, DISTINCT from deepscaler's DigitalLearningGmbH/MATH-lighteval.
-DATA_SOURCE = "HuggingFaceH4/MATH-500"
+# HONEST name (operator directive): routes to math_reward via the harness-branch
+# router entry; WandB keys become val-core/math-ai/aime24/*.
+DATA_SOURCE = "math-ai/aime24"
+HF_ID = "math-ai/aime24"
+
+_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 
 
-def build_row(problem: str, answer: str, idx: int, hf_id: str) -> dict:
+def _bare_answer(solution: str) -> str | None:
+    """math-ai/aime24 `solution` is the boxed answer string, e.g. '\\boxed{204}'."""
+    s = str(solution).strip()
+    m = _BOXED_RE.search(s)
+    if m:
+        return m.group(1).strip()
+    return s if s else None
+
+
+def build_row(problem: str, answer: str, idx: int) -> dict:
     content = problem.strip() + " " + INSTRUCTION
     return {
         "data_source": DATA_SOURCE,
         "prompt": [{"role": "user", "content": content}],
         "ability": "math",
         "reward_model": {"style": "rule", "ground_truth": answer},
-        "extra_info": {"split": "test", "index": idx, "answer": answer, "hf_id": hf_id},
+        "extra_info": {"split": "test", "index": idx, "answer": answer, "hf_id": HF_ID},
     }
 
 
-def _rows_bytedtsinghua(limit: int | None):
-    # BytedTsinghua-SIA/AIME-2024 ships the 30 AIME-2024 problems DUPLICATED 32x
-    # (960 rows) for avg@32 eval. We want the 30 UNIQUE problems as a directional
-    # val surface (plan intent + 32x cheaper validation), so dedupe on the problem.
-    hf_id = "BytedTsinghua-SIA/AIME-2024"
-    ds = datasets.load_dataset(hf_id, split="train")
-    out, seen = [], set()
-    for ex in ds:
-        extra = ex.get("extra_info") or {}
-        problem = extra.get("raw_problem")
-        rm = ex.get("reward_model") or {}
-        gt = rm.get("ground_truth")
-        if problem is None or gt is None or str(problem).strip() == "" or str(gt).strip() == "":
-            continue
-        key = str(problem).strip()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(build_row(str(problem), str(gt).strip(), len(out), hf_id))
-        if limit and len(out) >= limit:
-            break
-    return out
-
-
-def _rows_maxwell(limit: int | None):
-    hf_id = "Maxwell-Jia/AIME_2024"
-    ds = datasets.load_dataset(hf_id, split="train")
-    out, seen = [], set()
-    for ex in ds:
-        problem = ex.get("Problem")
-        gt = ex.get("Answer")
-        if problem is None or gt is None or str(problem).strip() == "":
-            continue
-        key = str(problem).strip()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(build_row(str(problem), str(gt).strip(), len(out), hf_id))
-        if limit and len(out) >= limit:
-            break
-    return out
-
-
 def load_rows(limit: int | None = None) -> list[dict]:
-    """Return converted AIME rows; primary source first, fallback on any failure."""
-    try:
-        rows = _rows_bytedtsinghua(limit)
-        if rows:
-            return rows
-    except Exception as e:  # noqa: BLE001
-        print(f"prepare_aime_boxed: primary source failed ({type(e).__name__}: {str(e)[:120]}); trying fallback")
-    return _rows_maxwell(limit)
+    ds = datasets.load_dataset(HF_ID, split="test")
+    out, seen = [], set()
+    for ex in ds:
+        problem = ex.get("problem")
+        gt = _bare_answer(ex.get("solution") or "")
+        if not problem or not str(problem).strip() or not gt:
+            continue
+        key = str(problem).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(build_row(str(problem), gt, len(out)))
+        if limit and len(out) >= limit:
+            break
+    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--local_save_dir", required=True)
     ap.add_argument("--out-name", default="val.parquet", help="output parquet filename (val-only)")
-    ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all; AIME-2024 has 30)")
+    ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all; aime24 test has 30)")
     args = ap.parse_args()
 
     out = os.path.expanduser(args.local_save_dir)
     os.makedirs(out, exist_ok=True)
     rows = load_rows(args.limit if args.limit > 0 else None)
+    if len(rows) != 30:
+        print(f"prepare_aime_boxed: WARNING expected 30 problems, got {len(rows)}")
     if not rows:
-        print("prepare_aime_boxed: FATAL no rows converted from any source")
+        print("prepare_aime_boxed: FATAL no rows converted")
         return 1
 
     ds = datasets.Dataset.from_list(rows)
