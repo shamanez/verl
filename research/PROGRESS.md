@@ -8,3 +8,4 @@ Role (operator 2026-07-08): an agent reads this file ONCE before ending its wind
 [2026-07-09T17:05:25+10:00] #63 b50 relaunch #4 at 07:04Z: token-len 16000 tripped AssertionError (below the 18432 max-seq floor). Corrected launch2b.sh to token-len 20000 (offload ON). Watching for step-11 clear = anchor-refresh fit proven.
 [2026-07-09T18:56:22+10:00] #63 FIX PROVEN: signed-ema-b50 cleared the step-10 anchor refresh (anchor_q_updates=1, 339/339 stale params loaded, peak mem 124GB/140, 0 OOM). grad_norm 45->1.4 post-anchor (correction working), reward tracking dense. offload ON + token-len 20000 is the working comm-eff config for all 3 arms. Resuming long-horizon monitoring (each arm ~102 steps; ckpt@100 -> R2).
 [2026-07-10T10:53:34+10:00] [research-planner #64] plan published (tier=fast)
+[2026-07-10T11:10:08+10:00] [approve] #64 approved (edits: vast_account=team, VAL_BEFORE_TRAIN=False both, Big-Math on accel surface @resp4096, S_base operator-supplied)
