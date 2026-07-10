@@ -10,7 +10,8 @@
  "iterations": 2,
  "step_target": 102,
  "canonical_launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
- "orchestrator_launch": "launch.sh ran dense-control (to step 102, no ckpt); launch2.sh runs the 3 comm-eff arms at 102 steps / save_freq 100 (operator re-plan 2026-07-09).",
+ "orchestrator_launch": "launch.sh ran dense-control (to step 102, no ckpt); launch2/2b/2c ran the comm-eff arms (offload ON + token-len 20000 after the anchor OOM).",
+ "cut_directive": "OPERATOR CUT 2026-07-10: 'this is enough'. Terminal state = dense-control full (val@100=0.254); signed-ema-b50 to step ~99 + ckpt@100 (val@100 recovered offline from the ckpt and uploaded to WandB); signed-ema-b50-la stopped at step 50 (train + val@50); signed-ema-b00 NOT RUN (dropped). Then teardown + close + quick report. This is a truncated read, not the full 102x3 sweep — the analysis is a directional early-signal comparison (does signed_ema track dense through the steps we have), not a full step-100 headline across all arms.",
  "plan_revision_note": "REVISED 2026-07-08 (operator, in-flight): re-pointed to the RLVR-Linearity reproduction (2048/16384/n=16, AIME-only val math-ai/aime24 avg@8, offload OFF on 4xH200). RE-REVISED 2026-07-09 (operator, live): all arms capped at 102 steps (was 200), checkpoint at step 100 (SAVE_FREQ 200->100). dense-control was already ~step 94 with save_freq=200 baked in, so it finishes to 102 WITHOUT a checkpoint (operator choice; curve+val kept on WandB + train_dense-control.log); the 3 comm-eff arms run via launch2.sh with a global_step_100 checkpoint mirrored to R2. Comparison point for all arms = step ~100/102 (AIME avg@8 val fires at step 100; train reward curve to 102).",
  "cells": [
   {
