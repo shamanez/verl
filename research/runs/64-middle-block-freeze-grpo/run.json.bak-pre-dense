@@ -16,7 +16,7 @@
   "milestone": "none",
   "promote_launcher_as": "none",
   "baseline_run": "baseline",
-  "iterations": 4,
+  "iterations": 2,
   "tmux_session": "run-64",
   "remote_log": "/workspace/runs/64-middle-block-freeze-grpo/train.log",
   "remote_run_dir": "/workspace/runs/64-middle-block-freeze-grpo",
@@ -93,63 +93,6 @@
       },
       "passes_when": "fallback S_block - S_base > +0.03 (S_full unrecorded for Big-Math; C target >= 0.80 if S_full later supplied)",
       "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N"
-    },
-    {
-      "name": "dense-gsm8k",
-      "wandb_name": "64-dense-gsm8k",
-      "dataset": "gsm8k",
-      "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel (resp=1024, prompt=1024, dyn-bsz) — SAME surface as freeze-block-l11-15-gsm8k",
-      "arm": "dense control (full-parameter; NO TRAIN_LAYERS ⇒ freeze hook no-ops ⇒ all 1.54B params train)",
-      "overrides": {
-        "env": {
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "dense = comm-eff OFF (Hydra last-wins over the accel wrapper's forced COMM_EFF_ENABLED=true) AND no TRAIN_LAYERS. Only delta vs freeze-block-l11-15-gsm8k is the absent TRAIN_LAYERS ⇒ apples-to-apples S_full on the freeze surface.",
-        "launched_by": "launch_dense.sh (cell dense-gsm8k), tmux run-64-dense, on box 44365338 after the freeze cells"
-      },
-      "role": "S_full (GSM8K) — fresh in-run full-param dense; validates/replaces the 0.7657 fixed ref",
-      "val_core_key": "val-core/openai/gsm8k/{acc|reward}/mean@N"
-    },
-    {
-      "name": "dense-bigmath",
-      "wandb_name": "64-dense-bigmath",
-      "dataset": "bigmath (HF gshasiri/Big-Math-RL-Verified-filtered; data_source=DigitalLearningGmbH/MATH-lighteval)",
-      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel speed knobs at resp=4096, prompt=1024 — SAME surface as freeze-block-l11-15-bigmath",
-      "arm": "dense control (full-parameter; NO TRAIN_LAYERS)",
-      "overrides": {
-        "env": {
-          "COMM_EFF_ENABLED": "false",
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False",
-          "USE_DYNAMIC_BSZ": "True",
-          "ROLLOUT_TP": "1",
-          "ROLLOUT_GPU_MEM_UTIL": "0.55",
-          "PPO_MAX_TOKEN_LEN_PER_GPU": "24576",
-          "TRAIN_BATCH_SIZE": "128",
-          "PPO_MINI_BATCH_SIZE": "64",
-          "ROLLOUT_N": "8",
-          "ACTOR_LR": "1e-6",
-          "COMM_EFF_CAPTURE_ENABLED": "false",
-          "MAX_RESPONSE_LENGTH": "4096",
-          "MAX_PROMPT_LENGTH": "1024",
-          "DATA_DIR": "/root/data/bigmath"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "Only delta vs freeze-block-l11-15-bigmath is the absent TRAIN_LAYERS. Supplies the Big-Math S_full that EXP-58 never recorded.",
-        "launched_by": "launch_dense.sh (cell dense-bigmath), tmux run-64-dense"
-      },
-      "role": "S_full (Big-Math) — the previously-missing full-param dense reference; makes C(block) computable for Big-Math (was fallback-only)",
-      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N"
     }
   ],
   "cblock_provenance": {
@@ -174,18 +117,8 @@
     "both cells reach step 75 with no NaN / non-finite grads.",
     "GSM8K: with operator-supplied S_base, C = (S_block − S_base)/(0.7657 − S_base) ≥ 0.80 [PASS] or < 0.80 [clean negative].",
     "clarification_needed (S_base): VAL_BEFORE_TRAIN=False per operator ⇒ S_base not measured. Operator supplies recorded base Qwen2.5-1.5B-Instruct GSM8K + Big-Math val-core scores; analyst plugs in, never guesses.",
-    "RESOLVED (Big-Math S_full): dense-bigmath (this run) supplies the full-param Big-Math S_full ⇒ C(block)_bigmath = (S_block − S_base)/(S_full_bigmath − S_base) is now computable; the +0.03 fallback is the backstop only if dense-bigmath fails.",
-    "APPLES-TO-APPLES dense arm added: dense-gsm8k gives a fresh in-run GSM8K S_full on the freeze surface (cross-checks the 0.7657 ref; use the in-run value for C to remove cross-run confound); dense-bigmath gives the Big-Math S_full. Both = full-param (no TRAIN_LAYERS), comm-eff OFF, same box/code/data.",
-    "Freeze-vs-dense comparison per dataset: report S_freeze, S_dense(=S_full), S_base, and C(block); PASS if C ≥ 0.80 (block carries the RL gain) or a clean symmetric negative."
+    "clarification_needed (Big-Math S_full): EXP-58 recorded no clean full-param Big-Math val (checkpoint-collection run). Until supplied, PASS on fallback S_block − S_base > +0.03."
   ],
   "pass_rule": "PASS iff all ✓; a clean symmetric negative (C < 0.80 with gates green) is PASS.",
-  "verification_command": "python scripts/analyze.py runs/64-middle-block-freeze-grpo --emit verdict.md",
-  "dense_control_added": {
-    "by": "operator directive 2026-07-10 (apples-to-apples full-param dense vs block-freeze)",
-    "launch_script": "runs/64-middle-block-freeze-grpo/launch_dense.sh",
-    "tmux": "run-64-dense",
-    "logs": "train_dense.log + train_dense-<cell>.log",
-    "done_flag": "done_dense.flag",
-    "note": "Runs after the freeze cells on the SAME box 44365338 (warm: verl exp/64 + gsm8k+bigmath data already present). dense cell = freeze cell minus TRAIN_LAYERS."
-  }
+  "verification_command": "python scripts/analyze.py runs/64-middle-block-freeze-grpo --emit verdict.md"
 }
