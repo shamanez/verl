@@ -39,7 +39,7 @@ fi
 # --- ensure /workspace/verl is exp/64 (same code as the freeze cells: dense =
 #     exp/64 with TRAIN_LAYERS unset). Clone from GitHub if the box isn't already
 #     on it (fresh box carries the template's pinned branch). GitHub-first, no bundle. ---
-EXP_BRANCH=exp/64-middle-block-freeze-grpo
+EXP_BRANCH=exp/64-dense-wandbfix   # = exp/64 (same freeze-hook code) + the #65 wandb final-step flush, so dense step-75 vals land in wandb natively
 cd /workspace
 CUR=$(git -C "$VERL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
 if [[ "$CUR" != "$EXP_BRANCH" ]]; then

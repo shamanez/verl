@@ -17,6 +17,8 @@ command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @AR
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$SKILL_DIR/../../.." && pwd)}"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
+# shellcheck disable=SC1090
+source "$SKILL_DIR/../_seed_secrets.sh"   # seed_secrets_to_box: HF+WandB+R2 push, VAST withheld
 
 EXP_ID=""; INSTANCE_ID=""; SSH_HOST=""; SSH_PORT=""; NUM_GPUS=""
 GPU_NAME=""; GPU_RAM="0"; DPH="0"; ACCOUNT="private"; REGISTER=1
@@ -164,6 +166,12 @@ if [[ "$NO_PROBE" != "1" ]]; then
     echo "vast-attach: fix connectivity or pass --no-probe to force. NOT registering." >&2
     exit 4
   fi
+  # Box is reachable — seed HF+WandB+R2 secrets NOW (deterministic; no agent
+  # step), BEFORE the --need-r2 preflight so that preflight validates the creds
+  # we just pushed. Best-effort: a failure WARNs but never blocks the attach.
+  seed_secrets_to_box "$SSH_HOST" "$SSH_PORT" "$IDENTITY" || true
+else
+  echo "vast-attach: NOTE --no-probe set — secrets NOT auto-seeded; ensure /root/.config/verl-research/secrets.env exists on the box by hand." >&2
 fi
 
 # R2-dependency preflight (#63 B11, hardened B5 2026-07-10): checkpoint→R2 fails

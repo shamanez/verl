@@ -160,6 +160,8 @@ SECRETS_FILE="${VERL_SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
 # account is stamped on the handle (vast_account) so teardown auths against it.
 # shellcheck disable=SC1090
 source "$SKILL_DIR/../_vast_account.sh"
+# shellcheck disable=SC1090
+source "$SKILL_DIR/../_seed_secrets.sh"   # seed_secrets_to_box: HF+WandB+R2 push, VAST withheld
 vast_load_secrets
 VAST_ACCOUNT="$(vast_account_norm "${VAST_ACCOUNT:-team}")"
 VAST_API_KEY="$(vast_key_for "$VAST_ACCOUNT")"; export VAST_API_KEY
@@ -648,6 +650,13 @@ except Exception:
     _destroy_instance "$INSTANCE_ID"; _drop_unverified "$INSTANCE_ID"; continue
   fi
   echo "$PROG: SSH verified to $INSTANCE_ID ($SSH_HOST:$SSH_PORT)" >&2
+
+  # ---- seed HF+WandB+R2 secrets onto the box (deterministic; no agent step) --
+  # The on-box launcher FATALs without /root/.config/verl-research/secrets.env;
+  # push it the moment SSH is verified so training "just works". Best-effort:
+  # a failure WARNs but never aborts provisioning (the launcher FATAL is the
+  # backstop). VAST keys are structurally withheld (see _seed_secrets.sh).
+  seed_secrets_to_box "$SSH_HOST" "$SSH_PORT" "$SSH_IDENTITY" || true
 
   # ---- pids.max host-lottery gate (promoted from SKILL.md prose) ----
   # Hosts capping the container at <= 2048 pids deterministically SIGABRT at the
