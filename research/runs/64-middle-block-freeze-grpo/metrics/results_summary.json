@@ -1,0 +1,39 @@
+{
+  "S_base_measured": {
+    "gsm8k": 0.0773313115996967,
+    "bigmath": 0.538
+  },
+  "S_base_note": "measured via val_only on base Qwen2.5-1.5B-Instruct, SAME eval config as the cells. GSM8K base is low (0.077) because the base model does not emit the #### answer format the GSM8K reward extracts; RL learns the format fast (step-25 val ~0.73). Big-Math base 0.538 (base already emits \\boxed). C is internally consistent per dataset.",
+  "cells": {
+    "frozen": {
+      "gsm8k": {
+        "42": 0.7664897649734648,
+        "7": 0.7445034116755117
+      },
+      "bigmath": {
+        "42": 0.58,
+        "7": 0.58
+      }
+    },
+    "dense": {
+      "gsm8k": {
+        "42": 0.77710386656558,
+        "7": 0.7808946171341926
+      },
+      "bigmath": {
+        "42": 0.606,
+        "7": 0.614
+      }
+    }
+  },
+  "C_block": {
+    "gsm8k": {
+      "42": 0.985,
+      "7": 0.948
+    },
+    "bigmath": {
+      "42": 0.618,
+      "7": 0.553
+    }
+  }
+}
