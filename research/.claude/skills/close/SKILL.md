@@ -36,7 +36,21 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 
 ## Steps
 
-1. **Teardown check first (money before paperwork).** If the ledger row is
+1. **Checkpoint-in-R2 verify BEFORE teardown (data before money; #63 B5).**
+   Tearing down destroys the box's LOCAL checkpoints — so if `CKPT_R2_ENABLED`,
+   the R2 mirror must be CONFIRMED before the box dies, or a silently-failed
+   upload is lost forever (the sink is now best-effort/non-fatal: a failed
+   upload only WARNs + keeps the file local, so silence ≠ success). For each
+   cell that reached its save step (`done_<cell>.flag` / a `global_step_<S>`
+   locally, or a `[ckpt_r2] ... FAILED` line in the cell log): `aws s3 ls`
+   the expected key
+   (`verl-research/<run_id>/<cell>/checkpoints/global_step_<S>/`, bucket
+   `R2_BUCKET`, `--endpoint-url $R2_ENDPOINT`) and confirm object count > 0.
+   Any expected checkpoint MISSING from R2 but present LOCALLY on the box →
+   `aws s3 cp --recursive` it up and re-verify BEFORE teardown. Missing from
+   BOTH → `flag_human <N> "checkpoint <cell> lost — not in R2, not on box"`.
+   Only when every expected checkpoint is verified in R2 do you proceed.
+2. **Teardown (money before paperwork).** If the ledger row is
    `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
    harness box may outlive its issue. (Semantics key on the ledger STATUS, not
    the `external` flag: `RUNNING`+`external:true` = harness-managed attach —
