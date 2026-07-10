@@ -96,4 +96,18 @@ fi
 # 5. PROGRESS sweep
 if [[ "$DRY" == 0 ]]; then progress_sweep "$N" "$ID"; else echo "  [dry-run] progress_sweep $N $ID"; fi
 
+# 6. local exp branch + worktree prune (#63 B7). `gh pr merge --delete-branch`
+#    deletes only the REMOTE branch — the LOCAL exp/<id> + any linked worktree
+#    linger (exp/62 lingered locally after its squash-merge+close). Safe here:
+#    G1-G4 already proved the work is merged (PR landed) + published. Squash-merge
+#    leaves the branch "unmerged" by git reachability, so use -D (force).
+BR="exp/$ID"
+if git -C "$RESEARCH_DIR" show-ref --verify --quiet "refs/heads/$BR"; then
+  wt=$(git -C "$RESEARCH_DIR" worktree list --porcelain \
+       | awk -v b="refs/heads/$BR" '/^worktree /{w=$2} /^branch /{if($2==b) print w}')
+  [[ -n "$wt" ]] && { run git -C "$RESEARCH_DIR" worktree remove --force "$wt" && echo "  removed worktree $wt"; }
+  run git -C "$RESEARCH_DIR" branch -D "$BR" >/dev/null 2>&1 && echo "  deleted local branch $BR"
+fi
+run git -C "$RESEARCH_DIR" fetch --prune origin >/dev/null 2>&1 || true
+
 echo "close_cleanup: DONE — durable record: issue #$N close comment · report page · runs/SUMMARY.md row"

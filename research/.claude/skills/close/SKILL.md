@@ -113,7 +113,10 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
    `bash scripts/close_cleanup.sh <N> <id>` — guarded (status:done + no live
    row ACROSS ALL ledger rows + SUMMARY row + report page present), it
    deletes `runs/<id>/`, the plan cache, torn-down handles, compacts the
-   ledger, and sweeps the issue's PROGRESS ticks. A guard refusal is a named
+   ledger, sweeps the issue's PROGRESS ticks, and **prunes the local `exp/<id>`
+   branch + any linked worktree** (`gh pr merge --delete-branch` removed only
+   the REMOTE branch; the local copy would otherwise linger — #63 B7) then
+   `fetch --prune`s stale remote-tracking refs. A guard refusal is a named
    reason to surface, not an error to retry.
 7. Print: what landed, PR URL, report URL, teardown confirmation, cost total.
 
