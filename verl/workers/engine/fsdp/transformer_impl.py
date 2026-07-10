@@ -445,7 +445,22 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        if getattr(self, "_train_layers_active", False):
+            # TRAIN_LAYERS freeze (issue #64): hand the optimizer ONLY the trainable
+            # params (the L11-15 block) so Adam state + DP grad-reduce shrink to the
+            # block and the optimizer never sees frozen params (invariants 1 & 4).
+            params = [p for p in module.parameters() if p.requires_grad]
+            if self.rank == 0:
+                n_all = sum(1 for _ in module.parameters())
+                logger.info(
+                    "[TRAIN_LAYERS] optimizer param tensors: %d/%d (requires_grad=True)",
+                    len(params),
+                    n_all,
+                )
+            optimizer = build_optimizer(params, self.optimizer_config)
+        else:
+            # Dense control path — untouched (byte-identical off-path parity).
+            optimizer = build_optimizer(module.parameters(), self.optimizer_config)
 
         return optimizer
 
@@ -547,6 +562,16 @@ class FSDPEngine(BaseEngine):
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
 
+        # TRAIN_LAYERS blockwise freeze (issue #64) — must run AFTER _build_module()
+        # and BEFORE _build_fsdp_module()/_build_optimizer() so (a) the FSDP flat-params
+        # inherit the right requires_grad at the whole-decoder-layer auto-wrap boundary
+        # (no mixed flat-param), (b) DP grad-reduce is skipped for frozen units, and
+        # (c) the optimizer never sees frozen params. Only training engines freeze
+        # (forward_only ref/rollout are untouched → full-model forward is unchanged).
+        # TRAIN_LAYERS unset/empty ⇒ strict no-op ⇒ byte-identical to the dense control.
+        if not self.engine_config.forward_only:
+            self._maybe_apply_train_layers_freeze(module)
+
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
         if self.rank == 0:
@@ -570,6 +595,217 @@ class FSDPEngine(BaseEngine):
         self.module = module
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+
+    # ------------------------------------------------------------------ #
+    # TRAIN_LAYERS blockwise freeze (issue #64) — money gate.            #
+    # A mis-index or partial freeze silently trains the wrong layers and #
+    # burns the whole spend, so every step here is loud + asserted.      #
+    # ------------------------------------------------------------------ #
+    def _maybe_apply_train_layers_freeze(self, module):
+        """Freeze all params except decoder block ``[lo, hi]`` from env ``TRAIN_LAYERS``.
+
+        No-op (dense parity) when ``TRAIN_LAYERS`` is unset/empty. Runs on the raw
+        (pre-FSDP) module so ``requires_grad`` propagates into the FSDP flat-params
+        and the optimizer. HARD-STOPS if the freeze looks wrong (block empty, or the
+        trainable fraction is nowhere near the expected ~5/28 of decoder params).
+        """
+        from verl.workers.comm_eff.activation_mask import (
+            apply_block_freeze,
+            find_decoder_layers,
+            parse_train_layers,
+        )
+
+        # Off-path default: the dense control leaves everything trainable.
+        self._train_layers_active = False
+        self._train_layers_block = None
+        self._train_layers_grad_checked = False
+        self._train_layers_immut_fp = None
+        self._train_layers_immut_checks = 0
+
+        spec = os.environ.get("TRAIN_LAYERS", "")
+        if spec.strip() == "":
+            # Invariant 5 (off-path parity): nothing frozen ⇒ every param trainable ⇒
+            # byte-identical to the dense control. Assert it, and warn loudly so a
+            # freeze that failed to reach this worker is impossible to miss in the log.
+            assert all(p.requires_grad for p in module.parameters()), (
+                "TRAIN_LAYERS unset but some param has requires_grad=False — off-path parity broken"
+            )
+            if self.rank == 0:
+                logger.warning(
+                    "[TRAIN_LAYERS] unset/empty on a TRAINING engine — every param is trainable "
+                    "(DENSE). If a blockwise freeze was intended, the TRAIN_LAYERS env var did "
+                    "NOT reach this worker; STOP before spending on a mislabeled dense run."
+                )
+            return
+
+        # A freeze WAS requested (non-empty spec). ANY setup failure must HARD-STOP
+        # with the money-gate prefix so launch.sh's tripwire halts the sweep (a bad
+        # freeze recurs in every cell) instead of silently spending on dense.
+        try:
+            layers = find_decoder_layers(module)
+            if layers is None:
+                raise RuntimeError("find_decoder_layers returned None — cannot locate decoder blocks")
+            block = parse_train_layers(spec, len(layers))
+            assert block is not None, "non-empty TRAIN_LAYERS yielded no block"
+            lo, hi = block
+            report = apply_block_freeze(module, lo, hi)
+        except Exception as exc:
+            raise RuntimeError(f"[TRAIN_LAYERS] freeze sanity FAILED: {exc}") from exc
+
+        self._train_layers_active = True
+        self._train_layers_block = (lo, hi)
+
+        # Invariant 3: money-gate STOP. Freezing 23/28 decoder layers should leave
+        # ~5/28 of decoder params (~15% of the 1.54B model) trainable. If the freeze
+        # leaked (near the full model) or emptied (~0), abort before any spend.
+        frac = report["trainable_frac"]
+        if not (0.0 < frac < 0.5):
+            raise RuntimeError(
+                f"[TRAIN_LAYERS] freeze sanity FAILED: trainable_frac={frac:.4f} for block "
+                f"L{lo}-{hi} (expected ~0.15; hard bound 0 < frac < 0.5). report={report}"
+            )
+        if self.rank == 0:
+            logger.info(
+                "[TRAIN_LAYERS] freeze ACTIVE: block L%d-%d (0-indexed inclusive) of %d decoder "
+                "layers | trainable decoder modules=%s | trainable=%d/%d params (%.2f%%)",
+                lo,
+                hi,
+                report["num_decoder_layers"],
+                report["trainable_layer_names"],
+                report["trainable_params"],
+                report["total_params"],
+                100.0 * frac,
+            )
+
+    def _train_layers_l2sq(self, tensor):
+        """Per-rank L2^2 + numel of a (possibly DTensor / sharded) frozen tensor.
+
+        The local shard of a frozen param never changes across steps on a fixed
+        rank, so its L2^2 is a stable immutability fingerprint without summoning
+        full params.
+        """
+        t = tensor.detach()
+        if isinstance(t, DTensor):
+            t = t.to_local()
+        return float(t.float().pow(2).sum().item()), int(t.numel())
+
+    def _train_layers_sampled_frozen(self):
+        """A cheap, representative sample of frozen tensors for the immutability gate.
+
+        Deterministically covers the three tensor groups the money-gate names —
+        tied embed/lm_head, decoder layer 0, and the final norm — with a small per
+        group cap, then falls back to the first few frozen tensors when the FSDP
+        flat-param name scheme hides those names. Strategy-agnostic.
+        """
+        groups = (
+            ("embed/head", ("embed_tokens", "lm_head"), 1),
+            ("layer0", ("layers.0.", "layers.0/", ".h.0.", "blocks.0."), 2),
+            ("final_norm", (".norm.weight", ".norm.bias", ".ln_f."), 1),
+        )
+        named, seen = [], set()
+        for _tag, subs, cap in groups:
+            taken = 0
+            for name, p in self.module.named_parameters():
+                if p.requires_grad or name in seen:
+                    continue
+                low = name.lower()
+                # exclude per-layer *layernorm* from the final-norm bucket
+                if _tag == "final_norm" and "layernorm" in low:
+                    continue
+                if any(s in low for s in subs):
+                    named.append((name, p))
+                    seen.add(name)
+                    taken += 1
+                    if taken >= cap:
+                        break
+        if not named:  # flat-param names hid all three groups — sample the first few
+            for name, p in self.module.named_parameters():
+                if not p.requires_grad:
+                    named.append((name, p))
+                    if len(named) >= 4:
+                        break
+        return named
+
+    def _train_layers_grad_flow_assert(self):
+        """Invariant 6(b): after the first backward, grads flow ONLY to L11-15.
+
+        Strategy-agnostic — keys off ``requires_grad``, so it holds for FSDP1
+        flat-params (frozen unit ⇒ no grad) and FSDP2 / use_orig_params (frozen
+        orig param ⇒ no grad) alike. Any frozen param carrying a nonzero grad, or
+        zero trainable params carrying a grad, aborts before the update.
+        """
+        leaked = []
+        n_trainable_with_grad = 0
+        for name, p in self.module.named_parameters():
+            g = p.grad
+            if p.requires_grad:
+                if g is not None:
+                    n_trainable_with_grad += 1
+                continue
+            if g is None:
+                continue
+            gl = g.to_local() if isinstance(g, DTensor) else g
+            try:
+                nonzero = bool(torch.count_nonzero(gl).item() > 0)
+            except Exception:
+                nonzero = True  # can't prove it's zero ⇒ treat as a leak (fail-safe)
+            if nonzero:
+                leaked.append(name)
+        if leaked:
+            raise RuntimeError(
+                f"[TRAIN_LAYERS] grad-flow FAILED: {len(leaked)} FROZEN params carry nonzero "
+                f"grads (freeze leaked) — e.g. {leaked[:5]}"
+            )
+        if n_trainable_with_grad == 0:
+            raise RuntimeError(
+                "[TRAIN_LAYERS] grad-flow FAILED: NO trainable param received a gradient "
+                "(the block is not training)"
+            )
+        if self.rank == 0:
+            logger.info(
+                "[TRAIN_LAYERS] grad-flow OK (step 1): 0 frozen params with grad, %d trainable "
+                "param tensors with grad",
+                n_trainable_with_grad,
+            )
+
+    def _train_layers_pre_step(self):
+        """Run before ``optimizer.step()``: grad-flow assert (once) + capture the
+        pre-update frozen-weight fingerprint (once)."""
+        if not self._train_layers_grad_checked:
+            self._train_layers_grad_flow_assert()
+            self._train_layers_grad_checked = True
+        if self._train_layers_immut_fp is None:
+            self._train_layers_immut_fp = {
+                name: self._train_layers_l2sq(p.data) for name, p in self._train_layers_sampled_frozen()
+            }
+
+    def _train_layers_post_step(self):
+        """Invariant 6(a): after ``optimizer.step()``, sampled frozen tensors are
+        unchanged. Checked for the first few steps (covers the ≤2-step freeze-smoke);
+        the step-1 grad-flow assert entails immutability for the tail (requires_grad
+        never changes mid-run, so no grad can ever reach a frozen param)."""
+        if self._train_layers_immut_fp is None or self._train_layers_immut_checks >= 3:
+            return
+        self._train_layers_immut_checks += 1
+        drifted = []
+        for name, p in self._train_layers_sampled_frozen():
+            base = self._train_layers_immut_fp.get(name)
+            if base is None:
+                continue
+            cur = self._train_layers_l2sq(p.data)
+            if abs(cur[0] - base[0]) > 1e-3 * (abs(base[0]) + 1.0):
+                drifted.append((name, base[0], cur[0]))
+        if drifted:
+            raise RuntimeError(
+                f"[TRAIN_LAYERS] immutability FAILED after step {self._train_layers_immut_checks}: "
+                f"{len(drifted)} frozen tensors changed — e.g. {drifted[:3]}"
+            )
+        if self.rank == 0:
+            logger.info(
+                "[TRAIN_LAYERS] immutability OK after step %d: %d sampled frozen tensors unchanged",
+                self._train_layers_immut_checks,
+                len(self._train_layers_immut_fp),
+            )
 
     def train_mode(self, **kwargs):
         """
@@ -3308,6 +3544,11 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
+        # TRAIN_LAYERS freeze (issue #64): after the backward, before the update —
+        # assert grads flow ONLY to L11-15 and capture the frozen-weight fingerprint.
+        if getattr(self, "_train_layers_active", False):
+            self._train_layers_pre_step()
+
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
         scaler = getattr(self, "scaler", None)
 
@@ -3344,6 +3585,11 @@ class FSDPEngine(BaseEngine):
             from verl.utils.qat.core import invalidate_all_scales
 
             invalidate_all_scales(self.module)
+
+        # TRAIN_LAYERS freeze (issue #64): after the update — assert sampled frozen
+        # tensors are unchanged (invariant 6a) for the first few steps.
+        if getattr(self, "_train_layers_active", False):
+            self._train_layers_post_step()
 
         return grad_norm.item()
 
