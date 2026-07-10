@@ -12,15 +12,15 @@
 # comm-eff is apples-to-apples. This is THE reference dense run.
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
-# template (which clones shamanez/verl @ vast-ai-workload into /workspace/verl
+# template (which clones shamanez/verl @ autonomous-harness-v1 into /workspace/verl
 # and pip-installs verl editable, preserving the verlai image's bundled
 # torch / vllm / megatron / TE / deepep). No scp'd scripts; this file IS
 # the launcher, lives in the fork at examples/grpo_trainer/, and you iterate
-# on it by editing locally, committing+pushing to vast-ai-workload, then
+# on it by editing locally, committing+pushing to autonomous-harness-v1, then
 # `git pull && bash <thisfile>` on the box.
 #
 # Prereqs on the box (template handles 1-2; you handle 3):
-#   1. /workspace/verl checked out from shamanez/verl @ vast-ai-workload
+#   1. /workspace/verl checked out from shamanez/verl @ autonomous-harness-v1
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present, containing ONLY HF_TOKEN
 #      and WANDB_API_KEY (push a stripped copy from the laptop after
@@ -34,7 +34,7 @@
 #
 # Iteration loop (e.g. tuning batch sizes when fitting GPUs):
 #   laptop: edit this file
-#   laptop: git commit -am "<note>" && git push origin vast-ai-workload
+#   laptop: git commit -am "<note>" && git push origin autonomous-harness-v1
 #   box:    cd /workspace/verl && git pull && bash examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh
 #
 # See examples/grpo_trainer/VAST_README.md for the broader pattern.

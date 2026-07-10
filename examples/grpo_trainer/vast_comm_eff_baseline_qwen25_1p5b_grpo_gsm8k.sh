@@ -39,13 +39,13 @@
 # ===========================================================================
 #
 # Runs on a Vast.ai instance provisioned from the verl-research-vllm020
-# template (clones shamanez/verl @ vast-ai-workload into /workspace/verl and
+# template (clones shamanez/verl @ autonomous-harness-v1 into /workspace/verl and
 # pip-installs verl editable). This file IS the launcher; iterate by editing
-# locally, committing+pushing to vast-ai-workload, then
+# locally, committing+pushing to autonomous-harness-v1, then
 # `git pull && bash <thisfile>` on the box.
 #
 # Prereqs on the box:
-#   1. /workspace/verl checked out from shamanez/verl @ vast-ai-workload
+#   1. /workspace/verl checked out from shamanez/verl @ autonomous-harness-v1
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #

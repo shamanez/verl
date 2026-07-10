@@ -1,6 +1,6 @@
 # Vast.ai launchers (`vast_*.sh`)
 
-Branch: **`vast-ai-workload`** on `shamanez/verl`. This is the stable home
+Branch: **`autonomous-harness-v1`** on `shamanez/verl`. This is the stable home
 for vast.ai-specific GRPO smoke + research launchers. Upstream
 `verl-project/verl` knows nothing about these files; we keep the fork's
 mainline mergeable with upstream by isolating fork-specific scripts to
@@ -61,7 +61,7 @@ Two zones, one direction of flow:
 | Zone | What lives here | Stability |
 |---|---|---|
 | **Experiment sandbox** — `research/runs/run-id/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
-| **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `vast-ai-workload`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
+| **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `autonomous-harness-v1`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
 
 **On-box bootstrap: the restricted-refspec trap (#63 B7).** The locked Vast
 template's onstart clones the fork with a fetch refspec restricted to its
@@ -114,7 +114,7 @@ real settings. So we never rely on prose: we read the launched command back.
 When a run PASSes, `log-writer` **derives the promoted launcher's parameters
 from `resolved_params.txt`** (never from the plan or a manifest), regenerates
 the run's `REPRODUCIBILITY.md` from it, and opens a **draft** PR (base
-`vast-ai-workload`) so a human reviews the exact diff before it becomes
+`autonomous-harness-v1`) so a human reviews the exact diff before it becomes
 canonical. A proven config thus lands in `examples/grpo_trainer/` carrying the
 exact values that worked, plus a provenance header (run-id, commit, verdict,
 headline metric). Draft = nothing becomes canonical without your merge.
@@ -136,7 +136,7 @@ git checkout — no scp, no `/tmp` scripts, no laptop-side file transfers.
 ```text
 laptop:  edit examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
 laptop:  git commit -am "smoke: drop batch to 4 for OOM"
-laptop:  git push origin vast-ai-workload
+laptop:  git push origin autonomous-harness-v1
 box:     cd /workspace/verl && git pull
 box:     bash examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
 ```
@@ -148,7 +148,8 @@ install is editable (`pip install -e .`), so a `git pull` is enough.
 
 The research harness's `research/.claude/hooks/protect-upstream.sh` refuses
 edits under `verl/` unless the current branch matches `exp/*` OR
-`vast-ai-workload` (the named exception added when this branch became
+`autonomous-harness-*` (the named exception — satisfied by the harness
+base branch `autonomous-harness-v1` — added when this branch became
 the home for fork-specific launchers).
 
 ## Secret hygiene checklist on the box
