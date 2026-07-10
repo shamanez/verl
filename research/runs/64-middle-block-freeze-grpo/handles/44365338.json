@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "instance_id": "44365338",
+  "ssh_host": "ssh8.vast.ai",
+  "ssh_port": 15338,
+  "num_gpus": 1,
+  "gpu_name": "H200",
+  "gpu_ram": 0,
+  "dph_total": 2.9678362573099415,
+  "ssh_login": "ssh -i /Users/shamane/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 15338 root@ssh8.vast.ai",
+  "ssh_identity": "/Users/shamane/.ssh/vast_ai",
+  "label": "64-middle-block-freeze-grpo",
+  "vast_account": "team",
+  "created_at": "2026-07-10T02:02:37Z",
+  "external": true
+}
