@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "instance_id": "44376214",
+  "ssh_host": "66.201.7.178",
+  "ssh_port": 20075,
+  "num_gpus": 1,
+  "gpu_name": "unknown",
+  "gpu_ram": 0,
+  "dph_total": 0,
+  "ssh_login": "ssh -i /Users/shamane/.ssh/vast_ai -o StrictHostKeyChecking=accept-new -p 20075 root@66.201.7.178",
+  "ssh_identity": "/Users/shamane/.ssh/vast_ai",
+  "label": "64-middle-block-freeze-grpo",
+  "vast_account": "team",
+  "created_at": "2026-07-10T05:15:57Z",
+  "external": true,
+  "synthetic_instance_id": false
+}
