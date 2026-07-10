@@ -36,8 +36,25 @@ else
   echo "FATAL: $SECRETS missing on box." >&2; exit 1
 fi
 
-# --- reuse the already-bootstrapped verl (exp/64); DO NOT re-clone ---
-cd "$VERL_DIR" 2>/dev/null || { echo "FATAL: $VERL_DIR absent — freeze run should have cloned it." >&2; exit 1; }
+# --- ensure /workspace/verl is exp/64 (same code as the freeze cells: dense =
+#     exp/64 with TRAIN_LAYERS unset). Clone from GitHub if the box isn't already
+#     on it (fresh box carries the template's pinned branch). GitHub-first, no bundle. ---
+EXP_BRANCH=exp/64-middle-block-freeze-grpo
+cd /workspace
+CUR=$(git -C "$VERL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
+if [[ "$CUR" != "$EXP_BRANCH" ]]; then
+  echo "=== verl on '$CUR' — cloning $EXP_BRANCH from GitHub ==="
+  [[ -e "$VERL_DIR" ]] && mv "$VERL_DIR" "${VERL_DIR}.upstream.$(date +%s)"
+  git clone -b "$EXP_BRANCH" https://github.com/shamanez/verl.git "$VERL_DIR" \
+    || { echo "FATAL: clone $EXP_BRANCH failed." >&2; exit 1; }
+  cd "$VERL_DIR" && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
+  if ! python3 -c "import verl" 2>/dev/null; then
+    echo "=== editable install (--no-deps; image provides torch/vLLM) ==="
+    (uv pip install --no-deps -e . || pip install --no-deps -e .) > /workspace/pip.log 2>&1 \
+      || { echo "FATAL: verl editable install failed." >&2; tail -20 /workspace/pip.log >&2; exit 1; }
+  fi
+fi
+cd "$VERL_DIR"
 echo "=== verl @ $(git rev-parse --short HEAD 2>/dev/null) (branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)) ==="
 python3 -c "import verl, torch; print('=== verl OK; torch', torch.__version__, 'cuda', torch.cuda.is_available(), '===')" \
   || { echo "FATAL: verl/torch import failed." >&2; exit 1; }
@@ -56,10 +73,14 @@ run_cell() {
   exp="64-$cell"
   mkdir -p "$VERL_DIR/runs/$exp"
   echo "=== [$(date -Iseconds)] CELL $cell START (wandb run $exp | launcher $(basename "$launcher")) ==="
-  env EXPERIMENT_NAME="$exp" LOG="$RUN_DIR/train_dense.log" ${envs[@]+"${envs[@]}"} \
+  # Write to train.log (NOT train_dense.log): the reaper's heartbeat = mtime of
+  # the synced train.log. On the first dense run the arm wrote to train_dense.log,
+  # so train.log went silent when the freeze cells ended and the box was reaped
+  # (no-heartbeat-30min) mid dense-bigmath. Writing here keeps the heartbeat alive.
+  env EXPERIMENT_NAME="$exp" LOG="$RUN_DIR/train.log" ${envs[@]+"${envs[@]}"} \
     bash "$launcher" ${hydra[@]+"${hydra[@]}"}
   rc=$?
-  cp -f "$RUN_DIR/train_dense.log" "$RUN_DIR/train_${cell}.log" 2>/dev/null || true
+  cp -f "$RUN_DIR/train.log" "$RUN_DIR/train_${cell}.log" 2>/dev/null || true
   if [[ $rc -eq 0 ]]; then
     echo "$(date -Iseconds)" > "$RUN_DIR/done_${cell}.flag"
     echo "=== [$(date -Iseconds)] CELL $cell DONE (rc=0) ==="
