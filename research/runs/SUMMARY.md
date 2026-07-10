@@ -7,7 +7,7 @@ WandB, and git history. LOG.md is retired — its rows were folded in here 2026-
 
 | id | date | verdict | headline | issue | PR |
 |---|---|---|---|---|---|
-| 63-deepscaler-r1d-signed-ema-k20 | 2026-07-10 | PASS (directional/truncated) | signed_ema β_anc=0.50 vs dense: b50 AIME@100 0.2125 vs dense 0.254 (within band+noise); train-reward parity; operator-cut. WandB 63-deepscaler-r1d-signed-ema-k20; box 44208646 TORN_DOWN | #63 | PR_PENDING |
+| 63-deepscaler-r1d-signed-ema-k20 | 2026-07-10 | PASS (directional/truncated) | signed_ema β_anc=0.50 vs dense: b50 AIME@100 0.2125 vs dense 0.254 (within band+noise); train-reward parity; operator-cut. WandB 63-deepscaler-r1d-signed-ema-k20; box 44208646 TORN_DOWN | #63 | shamanez/verl#22 |
 | 62-rlvr-models-datasets | 2026-07-07 | PASS | RLVR models+datasets enablement: 8/8 tokenizers, 5/5 schemas, 25/25 reward-preflight (CPU money gate), 25/25 GPU smoke cells non-null + no NaN, dense parity byte-identical. 5 test models × 5 math datasets; 3 integrate-only 7B/8B (CPU load). | #62 | shamanez/verl#21 |
 | EXP-61 | 2026-07-04 | PASS | [M4] Math-only projector ablation: best = adaptive_linear rolling_ls_k K=3 @ Δ*=1,h=1 (ratio 0.9888); deploy fixed damped_linear at freshest anchor; do-nothing optimal at op — confirms dataset-specific | #61 | — |
 | EXP-56 | 2026-07-04 | PASS | [M4] MOAT rollup: conditional winner = fixed #47 damped-linear (GSM8K op 0.9396, pred_evr +0.1171) but DATASET-SPECIFIC (Big-Math collapses to do-nothing) — NOT a universal ANCHOR default; gate on trajectory coherence | #56 | — |
