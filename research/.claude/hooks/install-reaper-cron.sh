@@ -21,7 +21,17 @@ set -euo pipefail
 RESEARCH_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 HOOK="$RESEARCH_DIR/.claude/hooks/teardown-finished-runs.sh"
 MARK="# verl-research-reaper"   # marker comment — install/remove key off this, never off the schedule
-LINE="17 * * * * CLAUDE_PROJECT_DIR=$RESEARCH_DIR bash $HOOK >> /tmp/teardown.cron.log 2>&1 $MARK"
+
+# PATH is the load-bearing fix (#audit 2026-07-10): macOS cron runs with a bare
+# PATH=/usr/bin:/bin, but `vastai` lives in ~/.local/bin. Without this, the hook
+# scans the ledger fine (jq/perl are in /usr/bin) yet every `vastai destroy`
+# exits 127 -> classified FAILED -> the row never flips TORN_DOWN and the box
+# BILLS FOREVER — silently, since /tmp/teardown.cron.log looks healthy. Resolve
+# vastai's real dir at install time and bake an absolute PATH into the cron line
+# ($HOME/$(...) expand here, at assignment, NOT in crontab which never expands).
+VASTAI_DIR="$(dirname "$(command -v vastai 2>/dev/null || echo "$HOME/.local/bin/vastai")")"
+REAPER_PATH="$VASTAI_DIR:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+LINE="17 * * * * PATH=$REAPER_PATH CLAUDE_PROJECT_DIR=$RESEARCH_DIR bash $HOOK >> /tmp/teardown.cron.log 2>&1 $MARK"
 
 [[ -f "$HOOK" ]] || { echo "install-reaper-cron: $HOOK not found" >&2; exit 1; }
 

@@ -14,6 +14,15 @@
 set -euo pipefail
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+# Re-anchor to the PRIMARY checkout's research dir, exactly like _lib.sh does.
+# Skills (via _lib.sh) register the ledger + create runs/<id>/ in the PRIMARY
+# checkout even from a worktree session; hooks get $CLAUDE_PROJECT_DIR = the
+# worktree root, where .claude/state/runs.jsonl is gitignored/absent. Without
+# this the reaper reads the wrong (empty) ledger and heartbeat dir — leaking
+# boxes on window-close and false-reaping healthy ones. Degrades to a no-op
+# when git is unavailable or this already IS the primary checkout.
+_main=$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+[[ -n "$_main" && -d "$_main/research" ]] && PROJECT_DIR="$_main/research"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 ERRLOG="/tmp/teardown.err"
 VAST_CLI_TIMEOUT=90
@@ -43,19 +52,57 @@ destroy_one() {
   local iid="$1" key="$2" dout drc check crc
   dout=$(timeout "$VAST_CLI_TIMEOUT" env VAST_API_KEY="$key" vastai destroy instance "$iid" -y 2>&1); drc=$?
   echo "[$(date -Iseconds)] destroy $iid rc=$drc: $dout" >> "$ERRLOG"
-  if (( drc == 124 || drc == 126 || drc == 127 )); then echo FAILED; return 0; fi
-  if (( drc == 0 )) && ! grep -qiE 'aborted|traceback|status_code|permission denied|^error' <<<"$dout"; then
-    echo DESTROYED; return 0
-  fi
+  # rc 124/126/127 = GNU timeout / not-executable / not-found; 142 = 128+SIGALRM,
+  # the macOS perl-alarm shim's timeout code (GNU's 124 never appears on this
+  # laptop). All mean the destroy NEVER RAN -> hard FAILED, never "already gone".
+  if (( drc == 124 || drc == 126 || drc == 127 || drc == 142 )); then echo FAILED; return 0; fi
+  # Explicit already-gone phrasing = idempotent success.
   if grep -qiE 'instance not found|no such instance|does not exist|no longer exists|already (destroyed|gone)' <<<"$dout"; then
     echo DESTROYED; return 0
   fi
+  # VERIFY-AUTHORITATIVE (mirror the manual vast-teardown, #63): a clean rc=0 is
+  # NOT trusted on its own — the CLI can exit 0 without destroying. Always
+  # re-query show-instance; DESTROYED only when the box is provably gone.
+  sleep 2
   check=$(timeout "$VAST_CLI_TIMEOUT" env VAST_API_KEY="$key" vastai show instance "$iid" --raw 2>&1); crc=$?
-  if (( crc != 124 && crc != 126 && crc != 127 )) \
-     && grep -qiE 'instance not found|no such instance|does not exist|404' <<<"$check"; then
+  if (( crc == 124 || crc == 126 || crc == 127 || crc == 142 )); then echo FAILED; return 0; fi
+  if grep -qiE 'instance not found|no such instance|does not exist|404' <<<"$check" \
+     || ! jq -e 'type=="object" and has("id")' >/dev/null 2>&1 <<<"$check"; then
     echo DESTROYED; return 0
   fi
   echo FAILED
+}
+
+# heartbeat_alive <row> <id> — 0 if the box is SSH-reachable AND its remote
+# training log advanced since the reaper's last probe. Spares a healthy box
+# whose in-session sync-metrics simply isn't running (all windows closed, or a
+# step slower than the stale threshold). UNREACHABLE or NOT-advancing => 1
+# (let teardown proceed). Bounded; any error => 1 so it never blocks a real reap.
+heartbeat_alive() {
+  local row="$1" id="$2" h host port ident rlog sig prev sigfile
+  h=$(jq -c '.handles[0] // empty' <<<"$row" 2>/dev/null); [[ -n "$h" && "$h" != "null" ]] || return 1
+  host=$(jq -r '.ssh_host // empty' <<<"$h"); port=$(jq -r '.ssh_port // 22' <<<"$h")
+  ident=$(jq -r '.ssh_identity // empty' <<<"$h"); ident="${ident/#\~/$HOME}"
+  [[ -n "$host" && -n "$ident" && -r "$ident" ]] || return 1
+  rlog=$(jq -r '.remote_log // empty' <<<"$row")
+  [[ -z "$rlog" && -r "$PROJECT_DIR/runs/$id/run.json" ]] && \
+    rlog=$(jq -r '.remote_log // empty' "$PROJECT_DIR/runs/$id/run.json" 2>/dev/null)
+  rlog="${rlog:-/workspace/train.log}"
+  sig=$(timeout 25 ssh -n -i "$ident" -o ConnectTimeout=8 -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new -p "$port" "root@$host" \
+        "tail -n 3 '$rlog' 2>/dev/null | cksum" 2>/dev/null) || return 1
+  [[ -n "$sig" ]] || return 1
+  sigfile="$PROJECT_DIR/runs/$id/metrics/.reaper-probe-sig"
+  prev=$(cat "$sigfile" 2>/dev/null || echo "")
+  mkdir -p "$(dirname "$sigfile")" 2>/dev/null || true
+  echo "$sig" > "$sigfile" 2>/dev/null || true
+  # No prior probe, or the tail advanced => alive; refresh the heartbeat mtime so
+  # we don't re-SSH every cycle. Unchanged since last probe => genuinely stalled.
+  if [[ -z "$prev" || "$sig" != "$prev" ]]; then
+    touch "$PROJECT_DIR/runs/$id/metrics/incoming.log" 2>/dev/null || true
+    return 0
+  fi
+  return 1
 }
 
 [[ -f "$LEDGER" ]] || exit 0
@@ -93,13 +140,15 @@ while IFS= read -r row || [[ -n "$row" ]]; do
       (( STARTED > 0 && NOW - STARTED > 3600 )) && REASON="no-heartbeat-ever-60min"
     fi
   fi
-  # 3. budget exceeded
+  # 3. budget exceeded. Gate on max_gpu_hr ONLY — the gpu-hr cap is elapsed×gpus,
+  #    it does not use dph. The old `d > 0` gate meant a row with an unresolved
+  #    dph=0 (e.g. a --instance-id attach whose price didn't resolve) was NEVER
+  #    budget-capped, so only the heartbeat path could ever stop it billing.
   if [[ -z "$REASON" ]]; then
     STARTED=$(jq -r '.started_at_epoch // 0' <<<"$row")
-    DPH=$(jq -r '.dph // 0' <<<"$row")
     MAX_GPU_HR=$(jq -r '.max_gpu_hr // 0' <<<"$row")
     TOTAL_GPUS=$(jq -r '.total_gpus // (.per_node_gpus // 1)' <<<"$row")
-    if (( STARTED > 0 )) && awk -v d="$DPH" -v m="$MAX_GPU_HR" 'BEGIN { exit !(d > 0 && m > 0) }'; then
+    if (( STARTED > 0 )) && awk -v m="$MAX_GPU_HR" 'BEGIN { exit !(m > 0) }'; then
       EXCEEDED=$(awk -v n="$NOW" -v s="$STARTED" -v g="$TOTAL_GPUS" -v mg="$MAX_GPU_HR" \
         'BEGIN { print (((n-s)/3600)*g > mg) ? 1 : 0 }')
       [[ "$EXCEEDED" == "1" ]] && REASON="budget-exceeded"
@@ -110,9 +159,23 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     STARTED=$(jq -r '.started_at_epoch // 0' <<<"$row")
     (( STARTED > 0 && NOW - STARTED > 900 )) && REASON="provisioned-but-never-launched"
   fi
+
+  # Heartbeat reasons only: actively re-probe before reaping. The stale-heartbeat
+  # signal can be a FALSE alarm (no session open to run sync-metrics, or a step
+  # slower than the threshold). budget/verdict/provisioned reasons are NOT spared
+  # — an over-budget box must die even while advancing.
+  if [[ "$REASON" == no-heartbeat-* ]] && heartbeat_alive "$row" "$ID"; then
+    echo "[$(date -Iseconds)] SPARE $ID: $REASON but box reachable + log advancing" >> "$ERRLOG"
+    REASON=""
+  fi
   [[ -z "$REASON" ]] && continue
 
-  ROW_ACCT=$(jq -r '.vast_account // "private"' <<<"$row")
+  ROW_ACCT=$(jq -r '.vast_account // "team"' <<<"$row")
+  # Match provisioning + vast-teardown, which default a missing account to TEAM
+  # (private-default here would destroy a team box with the wrong key -> 404 ->
+  # misread as already-gone -> silent leak). Guard the empty-string case too
+  # (jq's // only fills null/absent, not "").
+  [[ -z "$ROW_ACCT" || "$ROW_ACCT" == "null" ]] && ROW_ACCT="team"
   ROW_KEY=$(vast_key_for "$ROW_ACCT")
   DESTROYED=0; FAILED=0
   while IFS= read -r iid; do

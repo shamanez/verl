@@ -57,13 +57,22 @@ esac
 case "$ABS" in
   "$VERL_ROOT"|"$VERL_ROOT/"*)
     # Exceptions (branch is read from the canonical path so a symlink can't lie):
-    #   exp/*                — experiment-runner agent patching upstream files inside
-    #                          its worktree on an ephemeral, per-experiment branch.
-    #   autonomous-harness-* — harness-engineering branches (launcher promotions land
-    #                          here via /close's PR flow).
+    #   exp/*                — experiment-runner agent patching upstream verl source
+    #                          inside its worktree on an ephemeral per-experiment
+    #                          branch: full write access under the verl tree.
+    #   autonomous-harness-* — the harness base branch. NOT a blanket pass over verl
+    #                          source (that silently defeated the whole rule — an
+    #                          agent on the default branch could edit verl/trainer/…).
+    #                          Only the paths CLAUDE.md declares writable: examples/
+    #                          (launcher promotions) + CLAUDE.md + .gitignore.
     BRANCH="$(git -C "$(dirname "$ABS")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
     case "$BRANCH" in
-      exp/*|autonomous-harness-*) exit 0 ;;
+      exp/*) exit 0 ;;
+      autonomous-harness-*)
+        case "$ABS" in
+          "$VERL_ROOT/examples/"*|"$VERL_ROOT/CLAUDE.md"|"$VERL_ROOT/.gitignore") exit 0 ;;
+        esac
+        ;;
     esac
     cat >&2 <<EOF
 protect-upstream: refused write to upstream verl path.

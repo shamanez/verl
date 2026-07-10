@@ -7,6 +7,12 @@ PAYLOAD="$(cat)"
 SID=$(echo "$PAYLOAD" | jq -r '.session_id // "unknown"')
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+# Anchor to the PRIMARY checkout like _lib.sh: the shared ledger lives there, not
+# in a worktree session's (gitignored/absent) copy. Without this a worktree
+# window always reports running=0 · $0.00/hr — money-blind exactly when parallel
+# boxes burn. No-op when git is absent or this is already the primary checkout.
+_main=$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+[[ -n "$_main" && -d "$_main/research" ]] && PROJECT_DIR="$_main/research"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 BURN_DPH="0.00"

@@ -13,6 +13,14 @@ set -euo pipefail
 command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+# Anchor to the PRIMARY checkout like _lib.sh: /launch registers the ledger row
+# and creates runs/<id>/ in the PRIMARY checkout even from a worktree session.
+# If this hook stayed on the worktree's $CLAUDE_PROJECT_DIR, the ledger is
+# absent (gitignored) so sync no-ops, the primary runs/<id>/metrics/incoming.log
+# heartbeat never advances, and the reaper false-reaps the healthy box at 30-60
+# min. No-op when git is absent or this already is the primary checkout.
+_main=$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+[[ -n "$_main" && -d "$_main/research" ]] && PROJECT_DIR="$_main/research"
 LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 DEBOUNCE="$PROJECT_DIR/.claude/state/.last-sync"
 DEBOUNCE_SEC=300

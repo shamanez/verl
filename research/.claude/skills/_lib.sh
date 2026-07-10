@@ -111,6 +111,29 @@ ledger_update() {  # ledger_update <id> '<jq row filter, e.g. .status="RUNNING">
   _ledger_unlock
   return $rc
 }
+ledger_update_latest() {  # ledger_update_latest <id> '<jq filter>' — apply ONLY to the LAST row with .id==<id>
+  # STATUS TRANSITIONS MUST USE THIS, not ledger_update. Relaunch/migration leave
+  # several rows sharing one id; ledger_update flips EVERY one, so promoting the
+  # new box to RUNNING would resurrect an old box's TORN_DOWN row -> phantom live
+  # row -> vast-cost "leak" + reaper confusion (#63). Counter bumps (bump_attempt)
+  # legitimately want all-rows and keep ledger_update.
+  local id="$1" filter="$2" tmp rc=0
+  [[ -s "$LEDGER" ]] || return 0
+  _ledger_lock || return 1
+  tmp=$(mktemp)
+  if jq -c -s --arg id "$id" "
+       (map(.id == \$id) | rindex(true)) as \$li
+       | to_entries
+       | map(if (.key == \$li) then (.value | ${filter}) else .value end)
+       | .[]
+     " "$LEDGER" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$LEDGER"
+  else
+    rc=1; rm -f "$tmp"   # jq error or empty result — caller MUST see the failure
+  fi
+  _ledger_unlock
+  return $rc
+}
 ledger_row() {  # ledger_row <id>  -> last row for id (or empty)
   [[ -f "$LEDGER" ]] || return 0
   jq -c --arg id "$1" 'select(.id == $id)' "$LEDGER" 2>/dev/null | tail -1

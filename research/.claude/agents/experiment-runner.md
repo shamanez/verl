@@ -152,7 +152,9 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
    Liveness: wait ≤ 60 s for first log lines; one relaunch retry; still dead →
    `LAUNCH_FAILED: <id>` to PROGRESS.md, stop (the PROVISIONED row gets reaped).
 
-9. **Promote to RUNNING** (`ledger_update <id> '.status="RUNNING"'`), append
+9. **Promote to RUNNING** (`ledger_update_latest <id> '.status="RUNNING"'` — the
+   `_latest` variant flips ONLY the newest row for the id; plain `ledger_update`
+   would resurrect an old TORN_DOWN row on a relaunch), append
    one PROGRESS line, stop. Labels are the /launch skill's job. You NEVER
    tear down and NEVER call vastai directly (skills only).
 
