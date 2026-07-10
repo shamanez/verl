@@ -1602,6 +1602,8 @@ class RayPPOTrainer:
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
+                # flush trackers (incl. wandb final step) before teardown — see Tracking.finish
+                logger.finish()
                 return
 
         if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
@@ -1978,6 +1980,8 @@ class RayPPOTrainer:
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    # flush trackers (incl. wandb final step) before teardown — see Tracking.finish
+                    logger.finish()
                     return
 
                 # this is experimental and may be changed/removed in the future
@@ -1997,3 +2001,5 @@ class RayPPOTrainer:
         # loop terminates. Strict no-op without the feature.
         self._close_ckpt_r2_sink()
         self._shutdown_dump_executor()
+        # flush trackers (incl. wandb final step) before teardown — see Tracking.finish
+        logger.finish()

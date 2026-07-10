@@ -185,7 +185,15 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
+    def finish(self):
+        # Idempotent, explicit finalize of all backends. Call this at the end of
+        # training (before Ray/DataLoader teardown) so wandb flushes the FINAL
+        # logged step synchronously — otherwise finalize happens only in __del__
+        # at interpreter shutdown, racing the DataLoader-worker SIGKILL, which
+        # drops the last step from WandB and surfaces as an rc=1 atexit error.
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
         if "wandb" in self.logger:
             self.logger["wandb"].finish(exit_code=0)
         if "swanlab" in self.logger:
@@ -200,6 +208,12 @@ class Tracking:
             self.logger["trackio"].finish()
         if "file" in self.logger:
             self.logger["file"].finish()
+
+    def __del__(self):
+        try:
+            self.finish()
+        except Exception:
+            pass
 
 
 class ClearMLLogger:
