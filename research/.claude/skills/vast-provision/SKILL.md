@@ -29,6 +29,14 @@ POLL_INTERVAL=15s POOL=COUNT+8` candidates; SSH identity `~/.ssh/vast_ai_name` (
 (`VERL_SECRETS_FILE` overrides); handles land in `.claude/state/vast-handles/`
 (`VERL_VAST_HANDLE_DIR` / `--handle-dir`).
 
+**Secret seeding (automatic).** The instant SSH is verified, the skill pushes a
+STRIPPED copy of the laptop secrets to `/root/.config/verl-research/secrets.env`
+on the box (`chmod 600`) via `_seed_secrets.sh` — an allowlist of HF + WandB + R2
+keys only; the Vast API keys are structurally withheld (the on-box launcher
+FATALs if a VAST key leaks). This closes the launcher's
+`FATAL: secrets.env not found` with no manual `scp` and no agent step. Disable
+with `VERL_SEED_SECRETS=0`.
+
 ## Template auto-selection (agents never pass --image / --template-hash)
 
 With neither flag given, the skill reads `templates.json` (this dir) — the single locked

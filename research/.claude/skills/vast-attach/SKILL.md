@@ -43,6 +43,15 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
 | `--no-probe` | skip the ssh reachability probe (non-standard boxes) |
 | `--no-register` | handle JSON only, no ledger row |
 
+**Secret seeding (automatic).** As soon as the reachability probe passes, the
+skill pushes a STRIPPED secrets file to `/root/.config/verl-research/secrets.env`
+(`chmod 600`) via `_seed_secrets.sh` — HF + WandB + R2 keys only; Vast API keys
+withheld. So a bring-your-own box "just works" (the launcher no longer FATALs on
+a missing file), and because seeding runs BEFORE the `--need-r2` preflight, that
+preflight validates the R2 creds this step just pushed. Under `--no-probe` the
+seed is skipped (a NOTE says so — set up the file by hand). Disable with
+`VERL_SEED_SECRETS=0`.
+
 ## Lifecycle semantics (the box-43495538 lesson, mechanized)
 
 - **default** → `status:"RUNNING", external:true, max_gpu_hr:<cap>`: the reaper

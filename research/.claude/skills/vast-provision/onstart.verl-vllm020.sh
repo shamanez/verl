@@ -8,7 +8,7 @@
 #  - PRESERVE the image's bundled torch/vllm/megatron/transformer_engine/deepep
 #    versions. They were CI-validated together by verlai; pip MUST NOT touch
 #    them. The `--no-deps` flag is what enforces that.
-#  - Clone shamanez/verl @ vast-ai-workload so the box ships with the fork's
+#  - Clone shamanez/verl @ autonomous-harness-v1 so the box ships with the fork's
 #    vast.ai-specific launchers (examples/grpo_trainer/vast_*.sh). The "edit
 #    locally, push, git pull on the box" iteration loop is the whole point —
 #    NO scp'd files, NO /tmp scripts. See examples/grpo_trainer/VAST_README.md.
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 VERL_REPO_URL="${VERL_REPO_URL:-https://github.com/shamanez/verl.git}"
-VERL_REPO_BRANCH="${VERL_REPO_BRANCH:-vast-ai-workload}"
+VERL_REPO_BRANCH="${VERL_REPO_BRANCH:-autonomous-harness-v1}"
 
 ONSTART_LOG=/var/log/onstart.log
 exec > >(tee -a "$ONSTART_LOG") 2>&1
@@ -40,7 +40,7 @@ if python3 -c 'import verl, os, sys; sys.exit(0 if "/workspace/verl/" in verl.__
   exit 0
 fi
 
-# 1. Clone shamanez/verl at the vast-ai-workload branch.
+# 1. Clone shamanez/verl at the autonomous-harness-v1 branch.
 mkdir -p /workspace
 cd /workspace
 if [[ ! -d verl/.git ]]; then

@@ -7,7 +7,7 @@
     "team_hash_note": "Team-account (558152) copy of this template — pass --template-hash team_hash_id when VAST_ACCOUNT=team (the private hash above is NOT accessible to the team account).",
     "image": "verlai/verl:vllm020.dev1",
     "verl_repo": "https://github.com/shamanez/verl.git",
-    "verl_branch": "vast-ai-workload",
+    "verl_branch": "autonomous-harness-v1",
     "bundled_torch": "2.11.0+cu130",
     "bundled_vllm": "0.20.2",
     "onstart_file": "onstart.verl-vllm020.sh",
@@ -15,7 +15,7 @@
     "min_cuda_max_good": 13.0,
     "min_driver_version": "580.x",
     "docker_options": "--shm-size=10g --cap-add=SYS_ADMIN -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false -e RAY_DISABLE_USAGE_STATS=1",
-    "desc": "shamanez/verl@vast-ai-workload on verlai/verl:vllm020.dev1 + verl official docker flags (--shm-size=10g --cap-add=SYS_ADMIN). Pip --no-deps preserves vllm 0.20.2 + torch 2.11.0+cu130. ENV: PYTHONUNBUFFERED + TOKENIZERS_PARALLELISM=false + RAY_DISABLE_USAGE_STATS for Vast cgroup-friendly defaults.",
+    "desc": "shamanez/verl@autonomous-harness-v1 on verlai/verl:vllm020.dev1 + verl official docker flags (--shm-size=10g --cap-add=SYS_ADMIN). Pip --no-deps preserves vllm 0.20.2 + torch 2.11.0+cu130. ENV: PYTHONUNBUFFERED + TOKENIZERS_PARALLELISM=false + RAY_DISABLE_USAGE_STATS for Vast cgroup-friendly defaults.",
     "created_by": "shamane@pluralis.ai (account 538739)"
   }
 }

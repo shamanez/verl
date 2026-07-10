@@ -194,11 +194,20 @@ python3 -c "import verl" || { echo "FATAL: verl import failed after bootstrap" >
 **`code_change: false` — sync the box to the base branch.** The LOCKED template's
 onstart clones a PINNED branch, so check out `<base_branch>` (project.yaml
 source_tree.base_branch) so canonical launchers + verl source match what was
-approved. Editable install ⇒ a checkout suffices, no reinstall.
+approved. Editable install ⇒ a checkout suffices, no reinstall. **Never assume
+`/workspace/verl` exists**: if the template's pinned boot-clone branch was
+deleted, the boot clone fails and the dir is absent — so clone the base branch
+fresh when missing. The runner must not depend on any specific template-pinned
+branch surviving.
 
 ```bash
-cd /workspace/verl && git fetch origin <base_branch> \
-  && git checkout -B <base_branch> origin/<base_branch>
+cd /workspace
+if [[ ! -d verl/.git ]]; then
+  git clone -b <base_branch> https://github.com/shamanez/verl.git verl \
+    && (cd verl && uv pip install --no-deps -e . > /workspace/pip.log 2>&1)
+fi
+cd /workspace/verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
+git fetch origin <base_branch> && git checkout -B <base_branch> origin/<base_branch>
 ```
 
 Both forms then run the cells (the runner has pushed ONLY `launch.sh` +
