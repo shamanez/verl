@@ -1,0 +1,124 @@
+{
+  "issue": 64,
+  "run_id": "64-middle-block-freeze-grpo",
+  "slug": "middle-block-freeze-grpo",
+  "title": "Blockwise-freeze GRPO: train only the middle block (L11–15) for 75 steps on GSM8K + Big-Math",
+  "kind": "experiment",
+  "branch": "exp/64-middle-block-freeze-grpo",
+  "base_branch": "autonomous-harness-v1",
+  "code_change": true,
+  "target_modules": [
+    "verl/workers/engine/fsdp/transformer_impl.py",
+    "verl/workers/comm_eff/activation_mask.py"
+  ],
+  "commit": "36cc5fc0a6e373786a660ed36328160451810a70",
+  "step_target": 75,
+  "milestone": "none",
+  "promote_launcher_as": "none",
+  "baseline_run": "baseline",
+  "iterations": 2,
+  "tmux_session": "run-64",
+  "remote_log": "/workspace/runs/64-middle-block-freeze-grpo/train.log",
+  "remote_run_dir": "/workspace/runs/64-middle-block-freeze-grpo",
+  "wandb": {
+    "project": "64-middle-block-freeze-grpo",
+    "entity": "shamanework-pl",
+    "run_group": "64-middle-block-freeze-grpo"
+  },
+  "compute": {
+    "gpu_filter_chain": "default",
+    "gpu_mode": "ask",
+    "max_dph": 24.0,
+    "max_gpu_hr": 10,
+    "max_parallel": 1,
+    "attach_box": "none",
+    "vast_account": "team"
+  },
+  "new_env_knob": {
+    "TRAIN_LAYERS": "inclusive 0-indexed decoder-block range (e.g. '11-15'); unset/empty => dense parity (byte-identical to the dense control)"
+  },
+  "cells": [
+    {
+      "name": "freeze-block-l11-15-gsm8k",
+      "wandb_name": "64-freeze-block-l11-15-gsm8k",
+      "dataset": "gsm8k",
+      "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
+      "surface": "accel (resp=1024, prompt=1024, dyn-bsz); dense ref S_full=0.7657 measured here",
+      "overrides": {
+        "env": {
+          "TRAIN_LAYERS": "11-15",
+          "TOTAL_TRAINING_STEPS": "75",
+          "TEST_FREQ": "25",
+          "VAL_BEFORE_TRAIN": "False"
+        },
+        "hydra": [
+          "actor_rollout_ref.actor.comm_eff.enabled=false"
+        ],
+        "note": "dense = comm-eff OFF. The accel wrapper hard-exports COMM_EFF_ENABLED=true, so the ENV switch is overridden; the trailing Hydra override actor_rollout_ref.actor.comm_eff.enabled=false is the real dense switch (both launchers pass \"$@\" LAST => last-wins)."
+      },
+      "passes_when": "C(block) = (S_block - S_base)/(0.7657 - S_base) >= 0.80 [PASS] or < 0.80 [clean negative]",
+      "val_core_key": "val-core/openai/gsm8k/{acc|reward}/mean@N"
+    },
+    {
+      "name": "freeze-block-l11-15-bigmath",
+      "wandb_name": "64-freeze-block-l11-15-bigmath",
+      "dataset": "bigmath (HF gshasiri/Big-Math-RL-Verified-filtered; data_source=DigitalLearningGmbH/MATH-lighteval)",
+      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
+      "surface": "accel speed knobs at resp=4096, prompt=1024 (the accel WRAPPER hard-pins resp=1024 so cannot host Big-Math)",
+      "data_prep": "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42 (run by launch.sh before the cell)",
+      "overrides": {
+        "env": {
+          "COMM_EFF_ENABLED": "false",
+          "TRAIN_LAYERS": "11-15",
+          "TOTAL_TRAINING_STEPS": "75",
+          "TEST_FREQ": "25",
+          "VAL_BEFORE_TRAIN": "False",
+          "USE_DYNAMIC_BSZ": "True",
+          "ROLLOUT_TP": "1",
+          "ROLLOUT_GPU_MEM_UTIL": "0.55",
+          "PPO_MAX_TOKEN_LEN_PER_GPU": "24576",
+          "TRAIN_BATCH_SIZE": "128",
+          "PPO_MINI_BATCH_SIZE": "64",
+          "ROLLOUT_N": "8",
+          "ACTOR_LR": "1e-6",
+          "COMM_EFF_CAPTURE_ENABLED": "false",
+          "MAX_RESPONSE_LENGTH": "4096",
+          "MAX_PROMPT_LENGTH": "1024",
+          "DATA_DIR": "/root/data/bigmath"
+        },
+        "hydra": [
+          "actor_rollout_ref.actor.comm_eff.enabled=false"
+        ],
+        "note": "PPO_MAX_TOKEN_LEN_PER_GPU=24576 >= max_prompt+max_response = 5120 (one-sequence floor). USE_DYNAMIC_BSZ defaults False in this launcher => set True explicitly."
+      },
+      "passes_when": "fallback S_block - S_base > +0.03 (S_full unrecorded for Big-Math; C target >= 0.80 if S_full later supplied)",
+      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N"
+    }
+  ],
+  "cblock_provenance": {
+    "gsm8k": {
+      "S_full": 0.7657,
+      "S_full_source": "accel-surface dense control (fixed_control_surface / baseline_run: baseline)",
+      "S_base": "OPERATOR-SUPPLIED base Qwen2.5-1.5B-Instruct GSM8K val (VAL_BEFORE_TRAIN=False => not measured at step 0)",
+      "S_block": "GSM8K val @ step 75",
+      "formula": "C(block) = (S_block - S_base) / (0.7657 - S_base); PASS iff >= 0.80, else clean negative"
+    },
+    "bigmath": {
+      "S_full": "UNRECORDED (EXP-58 was a checkpoint-collection run); fallback: S_block - S_base > +0.03",
+      "S_base": "OPERATOR-SUPPLIED base Qwen2.5-1.5B-Instruct Big-Math val",
+      "S_block": "Big-Math val @ step 75"
+    },
+    "note": "C(block) is UNCOMPUTABLE until S_base lands. The analyst blocks on the operator-supplied S_base, never guesses."
+  },
+  "success_criteria": [
+    "resource-feasibility: by-reference-to-EXP-58; ≤2-step freeze-smoke confirms no-OOM/no-NaN under both shapes before the matrix spends (no separate probe cell).",
+    "freeze-correctness: trainable-param count ≈ 5/28 of decoder-layer params; only L11–15 requires_grad; embed/lm_head/final-norm frozen (logged pre-FSDP).",
+    "frozen-weight immutability: sampled frozen tensors unchanged after step 1; grad None/zero on all frozen params, non-None only on L11–15.",
+    "both cells reach step 75 with no NaN / non-finite grads.",
+    "GSM8K: with operator-supplied S_base, C = (S_block − S_base)/(0.7657 − S_base) ≥ 0.80 [PASS] or < 0.80 [clean negative].",
+    "clarification_needed (S_base): VAL_BEFORE_TRAIN=False per operator ⇒ S_base not measured. Operator supplies recorded base Qwen2.5-1.5B-Instruct GSM8K + Big-Math val-core scores; analyst plugs in, never guesses.",
+    "clarification_needed (Big-Math S_full): EXP-58 recorded no clean full-param Big-Math val (checkpoint-collection run). Until supplied, PASS on fallback S_block − S_base > +0.03."
+  ],
+  "pass_rule": "PASS iff all ✓; a clean symmetric negative (C < 0.80 with gates green) is PASS.",
+  "verification_command": "python scripts/analyze.py runs/64-middle-block-freeze-grpo --emit verdict.md"
+}
