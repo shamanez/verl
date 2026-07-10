@@ -31,12 +31,16 @@ plan_fetch <N> && echo "plan already present — digest only unless asked to re-
 ## Tier choice
 
 - **fast** (default): single hypothesis, ≤ ~6 cells, one launch round.
-  Template: `.claude/plans/TEMPLATE-fast.md`. Target ≤ 8 KB (safety-gate
-  content — money gates, silent-failure contracts — is never elidable to hit
-  a size target).
+  Template: `.claude/plans/TEMPLATE-fast.md`.
 - **deep**: operator passed `deep`, or the issue is genuinely multi-stage
   (sequential gated stages / days-long / wide design space).
-  Template: `.claude/plans/TEMPLATE-deep.md`. Target ≤ 15 KB.
+  Template: `.claude/plans/TEMPLATE-deep.md`.
+
+Plan length is **not capped** — the issue body holds ~64 KB and plans use a
+fraction of it (`plan_publish` refuses only if the assembled body nears that
+real GitHub limit, so it never silently truncates). Write what the plan needs:
+keep it scannable and cut filler/duplication, but **never** trim safety-gate
+content (money gates, silent-failure contracts) to make it shorter.
 
 ## Steps
 

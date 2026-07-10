@@ -39,10 +39,9 @@ plan_publish <N> "$DRAFT"         # installs it between <!-- plan:start/end --> 
      becomes `clarification_needed: <what>` and you still emit the plan.
    - Config deltas reference the canonical launcher's env vars / Hydra keys —
      never re-type the baseline.
-   - Delete unused prose sections; no `(n/a)` filler. Fast plan ≤ 8 KB
-     (safety-gate content — money gates, silent-failure contracts — is NEVER
-     elidable to hit a size target),
-     deep ≤ 15 KB.
+   - Delete unused prose sections; no `(n/a)` filler. Plan length is NOT
+     capped — keep it scannable and cut duplication, but NEVER drop safety-gate
+     content (money gates, silent-failure contracts) to make it shorter.
    - Budget: state the SMALLEST cells × steps that can falsify the
      hypothesis; `max_gpu_hr` sized to that, not to a default.
 4. Per-kind adjustments:

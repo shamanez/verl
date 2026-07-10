@@ -1,6 +1,6 @@
 # Plan <N> — <title>
 
-<!-- DEEP tier: multi-stage / days-long research. Target ≤ 15 KB. Same flat
+<!-- DEEP tier: multi-stage / days-long research. No size cap. Same flat
      yaml contract as the fast tier — and the same home: the plan LIVES IN THE
      GITHUB ISSUE BODY between the plan:start/plan:end markers (plan_publish /
      plan_fetch). Deep adds staged execution with gates, correctness

@@ -204,7 +204,7 @@ plan_field() {  # plan_field <N> <key> [default] — reads the first ```yaml fen
 plan_publish() {  # plan_publish <N> <plan-file> — install/replace the plan block in the issue body.
   # Text OUTSIDE the markers (the claim + any human notes) is preserved verbatim;
   # re-publishing replaces ONLY the marked block. Also refreshes the local cache.
-  local n="$1" src="$2" body tmp
+  local n="$1" src="$2" body tmp bytes
   [[ -s "$src" ]] || { echo "plan_publish: $src missing/empty" >&2; return 1; }
   body=$(timeout 60 gh issue view "$n" --json body -q .body 2>/dev/null) || return 1
   tmp=$(mktemp)
@@ -212,6 +212,16 @@ plan_publish() {  # plan_publish <N> <plan-file> — install/replace the plan bl
         'index($0,s){f=1} !f{print} index($0,e){f=0}' <<<"$body"
     echo ""; echo "$PLAN_MARK_START"; cat "$src"; echo "$PLAN_MARK_END"
   } > "$tmp"
+  # Guard the ONE real limit (never silent-truncate): GitHub caps an issue body
+  # at 65,536 chars. Plans use a fraction; refuse if the ASSEMBLED body (claim +
+  # plan + human notes) nears it — the fix is to split the issue, not shrink the
+  # plan. There is NO plan-size budget below this; write what the plan needs.
+  bytes=$(wc -c < "$tmp" | tr -d '[:space:]')
+  if (( bytes > 64000 )); then
+    rm -f "$tmp"
+    echo "plan_publish: assembled issue body is ${bytes}B, over the 64000B guard (GitHub hard limit 65536 chars) — split issue #$n instead of trimming the plan" >&2
+    return 1
+  fi
   if ! timeout 60 gh issue edit "$n" --body-file "$tmp" >/dev/null; then rm -f "$tmp"; return 1; fi
   rm -f "$tmp"
   mkdir -p "$PLAN_CACHE_DIR"
