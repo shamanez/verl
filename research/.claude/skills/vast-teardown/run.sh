@@ -103,6 +103,15 @@ ERR_LOG="/tmp/teardown.err"
 DESTROYED=()
 FAILED=()
 for iid in "${IDS[@]}"; do
+  # Synthetic / non-numeric id (a vast-attach --ssh-login box whose Vast id could
+  # not be reverse-resolved): `vastai destroy instance <non-int>` can't work and
+  # may even echo "no such instance", which would FALSELY read as already-gone.
+  # Skip it — count FAILED so the row never flips TORN_DOWN — and flag for MANUAL.
+  if [[ ! "$iid" =~ ^[0-9]+$ ]]; then
+    echo "[$iid] non-numeric/synthetic id — cannot vastai-destroy; needs MANUAL teardown" >>"$ERR_LOG"
+    FAILED+=("$iid")
+    continue
+  fi
   # MUST pass -y: `vastai destroy instance <id>` prompts interactively for
   # confirmation, and when stdin isn't a TTY the prompt collapses to "Aborted"
   # — but the CLI STILL EXITS 0. Without -y the destroy silently does nothing.

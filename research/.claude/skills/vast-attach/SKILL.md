@@ -17,6 +17,11 @@ unreachable one), writes a provision-schema handle, and registers a ledger row.
 bash .claude/skills/vast-attach/run.sh --exp-id 63-anchor-ema-sweep \
   --instance-id 41680420 --account team
 
+# Attach from the raw SSH login string the operator pasted (host/port/key parsed
+# from it; the Vast id is reverse-resolved from the endpoint for teardown):
+bash .claude/skills/vast-attach/run.sh --exp-id 64-middle-block-freeze-grpo --issue 64 \
+  --ssh-login "ssh -i ~/.ssh/vast_ai -p 15338 root@ssh8.vast.ai -L 8080:localhost:8080"
+
 # Operator-managed analysis/download box (NEVER auto-reaped — you own teardown):
 bash .claude/skills/vast-attach/run.sh --instance-id 41680420 --manual
 
@@ -26,7 +31,8 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
 
 | flag | meaning |
 |---|---|
-| `--instance-id` | **required.** Vast id (ssh/gpu auto-resolved from the API) or any label for a non-Vast box |
+| `--instance-id` | Vast id (ssh/gpu auto-resolved from the API) or any label for a non-Vast box. **Required unless `--ssh-login` is given.** A value that looks like an ssh string is auto-routed to `--ssh-login` |
+| `--ssh-login "<str>"` | a full `ssh -i <key> -p <port> root@<host> …` login string (trailing `-L`/`-D`/`-R` forwards ignored). Endpoint + key are parsed from it and probed ONCE — no reverse-scan of `vastai show instances`. The Vast id is best-effort reverse-resolved from the endpoint for teardown; on a miss the row gets a **synthetic id** (`ATTACH-<host>-<port>`) and auto-teardown is disabled (see below) |
 | `--exp-id` | run id to file under — use the canonical `<N>-<slug>` (default `ATTACH-<id>`) |
 | `--ssh-host/--ssh-port/--num-gpus` | explicit endpoint (auto-resolved for real Vast ids) |
 | `--account` | `team` \| `private` (default private) — API-auth account for teardown; INDEPENDENT of the ssh key (stamped on handle+row) |
@@ -48,6 +54,15 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
   `vast-teardown <id>` still destroys it and flips the row when you're done.
 - On env-failure of any attached box the harness tears it down but never
   auto-provisions a replacement (you hand-picked it) — `MANUAL_REVIEW_NEEDED`.
+- **Synthetic-id limitation (`--ssh-login` only).** When the Vast id can't be
+  reverse-resolved from the endpoint, the row carries `synthetic_instance_id:true`
+  and a non-numeric `instance_id` (`ATTACH-<host>-<port>`). The box is still
+  tracked, probed, and heartbeat/budget-watched — but **auto-teardown is
+  disabled**: the reaper and `vast-teardown` skip a non-numeric id (they can't
+  `vastai destroy` it, and a "no such instance" reply must not be mistaken for
+  already-gone) and surface a throttled `TEARDOWN_FAILED` for MANUAL teardown.
+  To restore auto-teardown, re-attach with the numeric `--instance-id` once you
+  have it (`vastai show instances`), or destroy the box by hand when done.
 
 ## What it writes
 

@@ -1,7 +1,7 @@
 ---
 name: launch
 description: "Launch an approved issue: per-issue branch, PREPARE phase on the laptop (implementation + CPU gates), then provision-or-attach compute per gpu_mode (auto = hands-off, ask = pause READY-FOR-GPU), start training, register the ledger row, snapshot run.json, auto-label status:running. Stage 4. Requires status:approved."
-argument-hint: "<issue-number> [--gpu auto|ask] [--attach <instance-id>] [--account team|private]"
+argument-hint: "<issue-number> [--gpu auto|ask] [--attach <instance-id | \"ssh …\">] [--account team|private]"
 allowed-tools: Bash, Read, Glob, Grep, Agent
 ---
 
@@ -18,7 +18,10 @@ allowed-tools: Bash, Read, Glob, Grep, Agent
   no ledger row, no status change. `--attach <id>` on a later invocation is
   the operator handing over login details — vast-attach registers the box.
 - `--attach <id>` (or plan `attach_box:`) — skip provisioning entirely; the
-  runner attaches the operator's box. Implies the compute phase runs now.
+  runner attaches the operator's box. Implies the compute phase runs now. The
+  value may be a bare Vast instance-id **or** the full SSH login string the
+  operator pasted (`--attach "ssh -i <key> -p <port> root@<host> …"`, quoted);
+  vast-attach parses the endpoint from it and probes once (see its SKILL).
 
 ## Preconditions (labels + ledger first, plan second — degrade, never stall)
 

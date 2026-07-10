@@ -39,7 +39,10 @@ re-author what is already committed.
    your worktree (protect-upstream allows exp/* writes), commit, push, and
    `git bundle create $PARENT/runs/<id>/exp.bundle exp/<id>`. If the branch
    already exists with the implementation committed, do NOT re-author — fetch
-   and bundle it.
+   and bundle it. The bundle is a **LOCAL crash-survival artifact only** (cheap
+   on disk): the box bootstraps by cloning `exp/<id>` straight from origin (see
+   the launch.sh shape + step 8), so the ~1.3 GB bundle is **NOT uploaded** in
+   the common case — `origin/exp/<id>`, pushed just above, IS the durable copy.
 
 3. **Snapshot `runs/<id>/run.json`** — everything downstream stages need so
    the plan file can be deleted mid-flight: issue, run_id, title (the plan's
@@ -68,13 +71,20 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
      $PARENT/.claude/skills/vast-attach/run.sh --exp-id <id> --issue <N>
      --instance-id <iid> --account <acct> --max-gpu-hr <max_gpu_hr>` (it
      ssh-probes, writes the handle, registers the ledger row; `--issue` is
-     REQUIRED — every downstream stage locates the row by issue number). Add
-     `--ssh-identity <key>` when the operator's box uses a non-default key
-     (the dispatch/plan names it; the API account does NOT imply the ssh key),
-     and `--need-r2` when the plan has `CKPT_R2_ENABLED` (attach-time preflight
-     of aws CLI + R2 creds — else the checkpoint upload fails only at the final
-     save). If a live row already references that instance: append `BOX_BUSY:
-     <iid> — <id> waiting` to PROGRESS.md and stop.
+     REQUIRED — every downstream stage locates the row by issue number).
+     `attach` may be **either** a bare Vast instance-id **or** a full SSH login
+     string the operator pasted (`ssh -i <key> -p <port> root@<host> …`, trailing
+     `-L/-D/-R` forwards ignored). When it's an SSH string, pass it QUOTED as
+     `--ssh-login "<string>"` instead of `--instance-id`: vast-attach parses
+     host/port/key straight from it (probes ONCE, no reverse-lookup loop) and
+     best-effort resolves the Vast id from the endpoint for teardown. The parsed
+     `-i` key is honoured, so an explicit `--ssh-identity` is only needed to
+     OVERRIDE it. Add `--ssh-identity <key>` when a bare-id box uses a
+     non-default key (the dispatch/plan names it; the API account does NOT imply
+     the ssh key), and `--need-r2` when the plan has `CKPT_R2_ENABLED`
+     (attach-time preflight of aws CLI + R2 creds — else the checkpoint upload
+     fails only at the final save). If a live row already references that
+     instance: append `BOX_BUSY: <iid> — <id> waiting` to PROGRESS.md and stop.
    - else walk `gpu_filter_chain` in order, ≤ 1 retry per rung on transient
      errors. Per rung, launch the skill DETACHED and poll a local file —
      never block one Bash call on the ~7–25 min image pull:
@@ -83,8 +93,12 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
      nohup bash $PARENT/.claude/skills/vast-provision/run.sh \
        --query "<rung>" --max-price <max_dph> --count 1 --disk-gb 200 \
        --label "<id>" --handle-dir $PARENT/runs/<id>/handles \
-       > $PARENT/runs/<id>/provision.<idx>.log 2>&1 & echo $! > /tmp/prov.pid; disown
+       > $PARENT/runs/<id>/provision.<idx>.log 2>&1 & echo $! > /tmp/prov.<id>.pid; disown
      ```
+     The pidfile is **id-scoped** (`/tmp/prov.<id>.pid`, never a bare
+     `/tmp/prov.pid`): two runners provisioning for different issues in
+     parallel must not race on one global pidfile — the loser would poll the
+     wrong PID and misclassify its own provision as dead/alive.
      Poll (background bash, `until handle-appears || process-died || 26 min`).
      Classify from the log: handle → done; `NO_OFFERS` → next rung;
      `MANUAL_REVIEW` / missing team hash → `flag_human <N> "<reason> — <id>"`,
@@ -104,12 +118,36 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
        vast_account:$va, status:"PROVISIONED"}')"
    ```
 
-8. **Sync + launch.** rsync `runs/<id>/` to the box using the SSH KEY FROM THE
-   HANDLE — never a hardcoded key (an operator/attached box may use any key,
-   e.g. `~/.ssh/vast_ai`; #63 B14). Read it once:
+8. **Sync + launch.**
+   **Idempotency precheck (parallel/resumed safety).** /launch's preconditions
+   already `die` when a LIVE ledger row for this id exists (two windows on the
+   SAME issue → the second is sent to /monitor). Belt-and-suspenders here:
+   before syncing, if `sshb <port> <host> 'tmux has-session -t run-<N>'`
+   succeeds OR a `done*.flag`/`halt.flag` is already present under `runs/<id>/`,
+   THIS experiment is already running (or ran) — do NOT re-sync/re-launch;
+   append `ALREADY_LIVE: <id>` to PROGRESS and hand to /monitor. This stops a
+   second runner from stomping a mid-flight box (the #64 leftover-collision
+   class: a prior abandoned attach left a live row + a half-synced payload).
+
+   **Push ONLY the minimal launch payload — NEVER a blanket `rsync -a
+   runs/<id>/`.** `runs/<id>/` is ephemeral scratch (close_cleanup deletes it):
+   the box executes just `launch.sh` (+ `run.json`, `commit-hotfix.sh`, a few
+   KB); results flow BACK from the box (metrics/, train.log). `exp.bundle`
+   (~1.3 GB), `handles/`, and `metrics/` MUST NOT be pushed outbound. Use the
+   SSH KEY FROM THE HANDLE — never a hardcoded key (an operator/attached box may
+   use any key, e.g. `~/.ssh/vast_ai`; #63 B14):
    `KEY=$(jq -r '.ssh_login' runs/<id>/handles/*.json | grep -oE '\-i [^ ]+' | head -1 | cut -d' ' -f2)`
-   then `rsync -av -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new -p <port>" … root@<host>:/workspace/runs/<id>/`
-   (and `export VAST_SSH_IDENTITY="$KEY"` so `sshb` uses it too; bare ssh fails publickey).
+   ```bash
+   export VAST_SSH_IDENTITY="$KEY"                       # so sshb uses it too; bare ssh fails publickey
+   sshb <port> <host> 'mkdir -p /workspace/runs/<id>'
+   rsync -av -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new -p <port>" \
+     runs/<id>/launch.sh runs/<id>/run.json runs/<id>/commit-hotfix.sh \
+     root@<host>:/workspace/runs/<id>/
+   ```
+   Portable flags ONLY: macOS ships `openrsync` (protocol 29), which REJECTS
+   `--info=…` (prints usage + transfers nothing) — stick to `-a`/`-v`/`--exclude`,
+   or `scp` the 2–3 tiny files. An explicit file list (above) is inherently
+   exclusion-safe: nothing bulk can ride along.
    Launch: `sshb <port> <host> "tmux new -d -s run-<N> 'bash /workspace/runs/<id>/launch.sh > /workspace/runs/<id>/train.log 2>&1'"`.
    Liveness: wait ≤ 60 s for first log lines; one relaunch retry; still dead →
    `LAUNCH_FAILED: <id>` to PROGRESS.md, stop (the PROVISIONED row gets reaped).
@@ -120,23 +158,53 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
 
 ### launch.sh shape (per experiment)
 
+Two author-time forms — pick ONE by `code_change` (bundle-presence no longer
+discriminates: the bundle is not uploaded to the box).
+
+**`code_change: true` — GitHub-first, bundle-fallback** (mirror
+`runs/64-…/launch.sh`). `exp/<id>` is ALWAYS pushed to origin BEFORE COMPUTE and
+the box has a fast datacenter link + repo access (git ls-remote verified) — so
+clone the branch straight from GitHub; NO 1.3 GB bundle upload. `exp.bundle` is a
+crash-survival fallback, present on the box ONLY if the runner uploaded it after
+a GitHub-unreachable probe (rare). Then PROVE the change's hook is importable
+(money gate: never spend on a stale checkout mislabeled as the change).
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 cd /workspace
-if [[ -f /workspace/runs/<id>/exp.bundle ]]; then          # code_change only
-  [[ -d verl ]] && mv verl verl.upstream
+[[ -e verl ]] && mv verl "verl.upstream.$(date +%s)"
+if git clone -b exp/<id> https://github.com/shamanez/verl.git verl; then
+  echo "=== code_change: cloned exp/<id> from GitHub ==="
+elif [[ -f /workspace/runs/<id>/exp.bundle ]]; then
+  echo "=== GitHub unreachable — falling back to exp.bundle ==="
   git clone -b exp/<id> /workspace/runs/<id>/exp.bundle verl
-  cd verl && git remote set-url origin https://github.com/shamanez/verl.git || true
-  uv pip install --no-deps -e . > /workspace/pip.log 2>&1
 else
-  # the LOCKED template's onstart clones a PINNED branch — sync the box to
-  # THIS harness line's base branch (project.yaml source_tree.base_branch) so
-  # canonical launchers + verl source match what was approved. Editable install
-  # ⇒ checkout suffices, no reinstall.
-  cd /workspace/verl && git fetch origin <base_branch> \
-    && git checkout -B <base_branch> origin/<base_branch>
+  echo "FATAL: cannot obtain exp/<id> (GitHub unreachable AND no bundle on box)." >&2
+  echo "  recovery: rsync ONLY runs/<id>/exp.bundle to the box, then relaunch." >&2
+  exit 1
 fi
+cd verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
+uv pip install --no-deps -e . > /workspace/pip.log 2>&1
+python3 -c "import verl" || { echo "FATAL: verl import failed after bootstrap" >&2; exit 1; }
+# + assert THIS change's hook is present, e.g.
+#   python3 -c "from verl.workers.comm_eff.activation_mask import parse_train_layers"
+```
+
+**`code_change: false` — sync the box to the base branch.** The LOCKED template's
+onstart clones a PINNED branch, so check out `<base_branch>` (project.yaml
+source_tree.base_branch) so canonical launchers + verl source match what was
+approved. Editable install ⇒ a checkout suffices, no reinstall.
+
+```bash
+cd /workspace/verl && git fetch origin <base_branch> \
+  && git checkout -B <base_branch> origin/<base_branch>
+```
+
+Both forms then run the cells (the runner has pushed ONLY `launch.sh` +
+`run.json` + `commit-hotfix.sh`; see step 8):
+
+```bash
 cd /workspace/verl
 # One block per cell, sequential (or partition GPUs for parallel_with cells).
 # ALWAYS the canonical launcher + overrides; EXPERIMENT_NAME is the readable

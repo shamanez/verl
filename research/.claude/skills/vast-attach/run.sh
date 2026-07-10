@@ -21,12 +21,14 @@ LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 EXP_ID=""; INSTANCE_ID=""; SSH_HOST=""; SSH_PORT=""; NUM_GPUS=""
 GPU_NAME=""; GPU_RAM="0"; DPH="0"; ACCOUNT="private"; REGISTER=1
 MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0; ISSUE=""; SSH_IDENTITY_FLAG=""; NEED_R2=0
+SSH_LOGIN_STR=""; SYNTHETIC=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --exp-id)      EXP_ID="$2"; shift 2 ;;
     --issue)       ISSUE="$2"; shift 2 ;;   # issue number — REQUIRED for /launch-driven attaches (ledger_row_by_issue keys on it)
     --instance-id) INSTANCE_ID="$2"; shift 2 ;;
+    --ssh-login)   SSH_LOGIN_STR="$2"; shift 2 ;;  # a full "ssh -i <key> -p <port> root@<host> …" string (endpoint parsed from it; id reverse-resolved best-effort)
     --ssh-host)    SSH_HOST="$2"; shift 2 ;;
     --ssh-port)    SSH_PORT="$2"; shift 2 ;;
     --num-gpus)    NUM_GPUS="$2"; shift 2 ;;
@@ -45,15 +47,89 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$INSTANCE_ID" ]] || { echo "vast-attach: --instance-id required" >&2; exit 2; }
+# Accept EITHER a bare instance-id OR a full SSH login string. The operator
+# usually has a working `ssh -i <key> -p <port> root@<host> …` line in hand (the
+# Vast "Direct/Proxy" connect string) — parse the endpoint straight out of it and
+# probe ONCE, instead of reverse-scanning `vastai show instances` for a host:port
+# match before we can do anything. A bare --instance-id that LOOKS like an ssh
+# string is auto-routed here too (so `--attach "ssh …"` works either way).
+if [[ -z "$SSH_LOGIN_STR" && ( "$INSTANCE_ID" == ssh\ * || "$INSTANCE_ID" == *@* ) ]]; then
+  SSH_LOGIN_STR="$INSTANCE_ID"; INSTANCE_ID=""
+fi
 
-# Resolve missing ssh params from the Vast API (bounded).
-if [[ -z "$SSH_HOST" || -z "$SSH_PORT" || -z "$NUM_GPUS" ]]; then
-  if command -v vastai >/dev/null 2>&1 && [[ -f "$SKILL_DIR/../_vast_account.sh" ]]; then
-    # shellcheck disable=SC1090
-    source "$SKILL_DIR/../_vast_account.sh"; vast_load_secrets
-    KEY=$(vast_key_for "$(vast_account_norm "$ACCOUNT")")
-    RAW=$(timeout 60 env VAST_API_KEY="$KEY" vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
+parse_ssh_login() {  # "<ssh … root@host …>" -> sets SSH_HOST SSH_PORT IDENTITY_PARSED (trailing -L/-D/-R forwards ignored)
+  local -a toks; read -ra toks <<<"$1"
+  local i=0 n=${#toks[@]} t
+  SSH_HOST=""; SSH_PORT=""; IDENTITY_PARSED=""
+  while (( i < n )); do
+    t="${toks[$i]}"
+    case "$t" in
+      ssh)                     ;;                                # the command word
+      -i)  IDENTITY_PARSED="${toks[$((i+1))]:-}"; i=$((i+1)) ;;
+      -p)  SSH_PORT="${toks[$((i+1))]:-}";        i=$((i+1)) ;;
+      -L|-R|-D|-o|-J|-W|-b|-c|-l|-m|-F|-E|-Q|-e)  i=$((i+1)) ;;  # option consumes its NEXT token — skip both (incl. -L/-D/-R port-forwards)
+      -*)                      ;;                                # bare flag (-A -T -N -q -v -C -X …) — ignore
+      *@*) SSH_HOST="${t#*@}"  ;;                                # user@host -> host
+      *)   [[ -z "$SSH_HOST" ]] && SSH_HOST="$t" ;;              # bare host fallback
+    esac
+    i=$((i+1))
+  done
+  SSH_PORT="${SSH_PORT:-22}"
+  IDENTITY_PARSED="${IDENTITY_PARSED/#\~/$HOME}"
+}
+
+if [[ -n "$SSH_LOGIN_STR" ]]; then
+  parse_ssh_login "$SSH_LOGIN_STR"
+  [[ -n "$SSH_HOST" ]] || { echo "vast-attach: could not parse a host from --ssh-login '$SSH_LOGIN_STR'" >&2; exit 2; }
+  # The key named IN the login string is the operator's explicit choice for THIS
+  # box — treat it as --ssh-identity (an explicit --ssh-identity flag still wins).
+  [[ -z "$SSH_IDENTITY_FLAG" && -n "$IDENTITY_PARSED" ]] && SSH_IDENTITY_FLAG="$IDENTITY_PARSED"
+fi
+
+[[ -n "$INSTANCE_ID" || -n "$SSH_LOGIN_STR" ]] || {
+  echo "vast-attach: need --instance-id <id> OR --ssh-login \"ssh … root@host …\"" >&2; exit 2; }
+
+# Load the account's Vast key once (used by BOTH the id<-endpoint reverse-resolve
+# and the id->endpoint forward-resolve below).
+if command -v vastai >/dev/null 2>&1 && [[ -f "$SKILL_DIR/../_vast_account.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "$SKILL_DIR/../_vast_account.sh"; vast_load_secrets
+  VAST_KEY=$(vast_key_for "$(vast_account_norm "$ACCOUNT")")
+fi
+
+if [[ -n "$SSH_LOGIN_STR" && -z "$INSTANCE_ID" ]]; then
+  # Best-effort REVERSE-RESOLVE the numeric Vast id from the endpoint (teardown
+  # needs it): match the parsed host:port (or public IP) against the account's
+  # instances. Bounded; a miss is non-fatal (synthetic fallback below).
+  if [[ -n "${VAST_KEY:-}" ]]; then
+    OBJ=$(timeout 60 env VAST_API_KEY="$VAST_KEY" vastai show instances --raw 2>/dev/null \
+      | jq -c --arg h "$SSH_HOST" --arg p "$SSH_PORT" \
+          'if type=="array" then . else [.] end
+           | map(select(((.ssh_host // "")==$h and ((.ssh_port // ""|tostring)==$p))
+                        or ((.public_ipaddr // "")==$h))) | first // empty' 2>/dev/null || true)
+    if [[ -n "${OBJ:-}" ]]; then
+      INSTANCE_ID=$(echo "$OBJ" | jq -r '.id // empty')
+      [[ -z "$NUM_GPUS" ]] && NUM_GPUS=$(echo "$OBJ" | jq -r '.num_gpus // empty')
+      [[ -z "$GPU_NAME" ]] && GPU_NAME=$(echo "$OBJ" | jq -r '.gpu_name // empty')
+      { [[ -z "$DPH" || "$DPH" == "0" ]]; } && DPH=$(echo "$OBJ" | jq -r '.dph_total // 0')
+    fi
+  fi
+  if [[ -z "$INSTANCE_ID" ]]; then
+    # Could not resolve — register with a SYNTHETIC id so the box is still tracked
+    # + probed. Teardown then DEGRADES gracefully: the reaper and vast-teardown
+    # both SKIP a non-numeric id (they cannot `vastai destroy` it) and surface it
+    # for MANUAL teardown, rather than risk a false "already-gone" TORN_DOWN flip.
+    SYNTHETIC=1
+    INSTANCE_ID="ATTACH-${SSH_HOST}-${SSH_PORT}"
+    NUM_GPUS="${NUM_GPUS:-1}"
+    echo "vast-attach: WARN could not reverse-resolve a Vast instance-id for ${SSH_HOST}:${SSH_PORT} (account=$ACCOUNT)." >&2
+    echo "vast-attach:   -> registering synthetic id '$INSTANCE_ID'; AUTO-TEARDOWN IS DISABLED for this row." >&2
+    echo "vast-attach:   -> tear the box down by hand (or re-attach with --instance-id) when done." >&2
+  fi
+elif [[ -z "$SSH_HOST" || -z "$SSH_PORT" || -z "$NUM_GPUS" ]]; then
+  # Bare instance-id path: FORWARD-resolve missing ssh/gpu params from the API.
+  if [[ -n "${VAST_KEY:-}" ]]; then
+    RAW=$(timeout 60 env VAST_API_KEY="$VAST_KEY" vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
     if echo "$RAW" | jq -e 'type=="object"' >/dev/null 2>&1; then
       [[ -z "$SSH_HOST" ]] && SSH_HOST=$(echo "$RAW" | jq -r '.ssh_host // .public_ipaddr // empty')
       [[ -z "$SSH_PORT" ]] && SSH_PORT=$(echo "$RAW" | jq -r '.ssh_port // empty')
@@ -65,7 +141,7 @@ if [[ -z "$SSH_HOST" || -z "$SSH_PORT" || -z "$NUM_GPUS" ]]; then
 fi
 
 [[ -n "$SSH_HOST" && -n "$SSH_PORT" && -n "$NUM_GPUS" ]] || {
-  echo "vast-attach: need --ssh-host, --ssh-port, --num-gpus (could not resolve from the Vast API)" >&2; exit 2; }
+  echo "vast-attach: need host+port+num-gpus — parse them from --ssh-login, or pass --ssh-host/--ssh-port/--num-gpus" >&2; exit 2; }
 
 EXP_ID="${EXP_ID:-ATTACH-$INSTANCE_ID}"
 GPU_NAME="${GPU_NAME:-unknown}"
@@ -132,11 +208,11 @@ HANDLE=$(jq -nc \
   --argjson ng "$NUM_GPUS" --arg gn "$GPU_NAME" --argjson gr "$GPU_RAM" \
   --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" \
   --arg label "$EXP_ID" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg ident "$IDENTITY" \
+  --arg ident "$IDENTITY" --argjson synth "$SYNTHETIC" \
   '{schema_version:"1", instance_id:$iid, ssh_host:$host, ssh_port:$port,
     num_gpus:$ng, gpu_name:$gn, gpu_ram:$gr, dph_total:$dph, ssh_login:$login,
     ssh_identity:$ident, label:$label, vast_account:$acct, created_at:$t,
-    external:true}')
+    external:true, synthetic_instance_id:($synth==1)}')
 
 # Handle lands in BOTH homes: the run dir (runner contract) and the shared
 # state dir (vast-teardown's account-resolution fallback scans it).
@@ -160,10 +236,12 @@ if [[ "$REGISTER" == "1" ]]; then
     ROW=$(jq -nc --arg id "$EXP_ID" --arg t "$(date -Iseconds)" --argjson ts "$(date +%s)" \
       --argjson ng "$NUM_GPUS" --argjson dph "$DPH" --arg acct "$ACCOUNT" \
       --argjson mgh "$MAX_GPU_HR" --arg st "$STATUS" --argjson iss "${ISSUE:-null}" \
+      --argjson synth "$SYNTHETIC" \
       --argjson h "$(echo "$HANDLE" | jq -s .)" \
       '{id:$id, issue:$iss, handles:$h, started_at:$t, started_at_epoch:$ts,
         per_node_gpus:$ng, total_gpus:$ng, dph:$dph, max_gpu_hr:$mgh,
-        vast_account:$acct, external:true, status:$st}')
+        vast_account:$acct, external:true, status:$st,
+        synthetic_instance_id:($synth==1)}')
     # Locked append (shared spinlock with _lib.sh writers).
     LOCK="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0
     until mkdir "$LOCK" 2>/dev/null; do n=$((n+1)); (( n > 300 )) && break; sleep 0.1; done
@@ -177,3 +255,4 @@ fi
 echo "vast-attach: attached box $INSTANCE_ID (${NUM_GPUS}×$GPU_NAME, account=$ACCOUNT) as $EXP_ID." >&2
 echo "vast-attach: ssh    -> $SSH_LOGIN" >&2
 echo "vast-attach: handle -> runs/$EXP_ID/handles/$INSTANCE_ID.json" >&2
+(( SYNTHETIC )) && echo "vast-attach: NOTE synthetic instance-id ('$INSTANCE_ID') — auto-teardown DISABLED; tear this box down by hand when done." >&2

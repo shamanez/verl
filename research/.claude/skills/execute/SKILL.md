@@ -1,7 +1,7 @@
 ---
 name: execute
 description: "Phase-3 entry point — drive an APPROVED issue through launch → monitor → analyze → close in one window. Refuses pre-approval states (those belong to /plan). Resumable: detects the stage from labels + ledger, like /go. `--gpu auto|ask` picks hands-off provisioning vs pause-for-operator-box."
-argument-hint: "<issue-number> [--gpu auto|ask] [--attach <instance-id>] [--account team|private]"
+argument-hint: "<issue-number> [--gpu auto|ask] [--attach <instance-id | \"ssh …\">] [--account team|private]"
 allowed-tools: Bash, Read, Glob, Grep, Agent, Skill, AskUserQuestion
 ---
 
@@ -20,6 +20,9 @@ body; nothing depends on the planning window's context.
   with `/execute <N> --attach <id>` (your own box — login registered via
   vast-attach) or `/execute <N> --gpu auto` to let it provision.
 - `--attach <id>` — use an operator-provided box (implies no provisioning).
+  Accepts a bare Vast instance-id **or** the full SSH login string (quoted:
+  `--attach "ssh -i <key> -p <port> root@<host> …"`) — the endpoint is parsed
+  from it, no reverse-lookup loop.
 - No flag → the plan's `gpu_mode:` key, else `project.yaml
   default_compute.gpu_mode`. Resolution: CLI > plan > project default.
 

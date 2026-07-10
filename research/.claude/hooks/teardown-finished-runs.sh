@@ -117,6 +117,14 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   DESTROYED=0; FAILED=0
   while IFS= read -r iid; do
     [[ -z "$iid" ]] && continue
+    # Synthetic / non-numeric id (vast-attach --ssh-login box with no resolvable
+    # Vast id): un-destroyable via the API, and a "no such instance" reply would
+    # FALSELY flip a live box to TORN_DOWN. Skip (count FAILED so the row stays
+    # live) — the throttled TEARDOWN_FAILED line surfaces it for MANUAL teardown.
+    if [[ ! "$iid" =~ ^[0-9]+$ ]]; then
+      echo "[$(date -Iseconds)] SKIP destroy $iid: non-numeric/synthetic id — needs MANUAL teardown" >> "$ERRLOG"
+      FAILED=$((FAILED + 1)); continue
+    fi
     if [[ -z "$ROW_KEY" ]]; then
       echo "[$(date -Iseconds)] SKIP destroy $iid: no key for account=$ROW_ACCT" >> "$ERRLOG"
       FAILED=$((FAILED + 1)); continue
