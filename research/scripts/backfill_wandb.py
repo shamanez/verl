@@ -1,4 +1,5 @@
-import re, sys, wandb
+import os, re, sys, wandb
+from pathlib import Path
 
 # args: <train_log> <run_id> <target_step>
 # Relog the final training step (WandB's async uploader drops the last 1-2 steps,
@@ -37,8 +38,16 @@ for key in ("training/global_step", "val-core/openai/gsm8k/acc/mean@1",
             "actor/comm_eff/anchor_align_cos", "response_length/mean"):
     print(f"  {key} = {metrics.get(key)}")
 
+# Keep wandb's local staging dir UNDER the run dir so close_cleanup (which
+# removes only runs/<id>/) sweeps it — otherwise wandb.init() drops a ./wandb/
+# in cwd (research/), a shared dir no cleanup step ever removes.
+_wdir = os.environ.get("WANDB_DIR")
+if not _wdir:
+    _p = Path(log_path).resolve()           # runs/<id>/metrics/train.log -> runs/<id>
+    _wdir = str(_p.parents[1]) if len(_p.parents) >= 2 else str(_p.parent)
+os.makedirs(_wdir, exist_ok=True)
 run = wandb.init(project="verl_compression_research", entity="shamanework-pl",
-                 id=run_id, resume="must")
+                 id=run_id, resume="must", dir=_wdir)
 wandb.log(metrics, step=target)
 wandb.finish()
 print("RELOG DONE for", run_id, "step", target)

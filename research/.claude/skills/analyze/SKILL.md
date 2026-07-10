@@ -21,8 +21,12 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
   box checks.
 - Box still `RUNNING`/`PROVISIONED` → refuse: `/monitor <N>` owns it until
   results sync + teardown.
-- `runs/<id>/verdict.md` already exists → show it, `Next: /close <N>`, stop
-  (idempotent).
+- `runs/<id>/verdict.md` already exists → the analyst pass already ran. If the
+  issue is still `status:running` (interrupted before the label write), FIRST
+  re-assert the label from the verdict —
+  `set_status_label <N> $(grep -oiE 'VERDICT:[[:space:]]*(PASS|REVISE|STOP)' runs/<id>/verdict.md | grep -oiE 'pass|revise|stop' | tr '[:upper:]' '[:lower:]')`
+  — otherwise `/close` refuses (it requires a terminal label) and analyze↔close
+  deadlocks. Then show the verdict, `Next: /close <N>`, stop (idempotent).
 - `runs/<id>/` DELETED but issue is `status:pass|stop` → terminal already;
   point at `/close <N>` or the runs/SUMMARY.md row. If not terminal and the run dir is
   gone → `die "results for #<N> were deleted — relaunch or close"`.
@@ -41,14 +45,18 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
      unmeasured (a result that wasn't measured is never PASS).
 3. WandB tail backfill: last 1–2 steps from `runs/<id>/metrics/train.log` if
    the uploader dropped them (`scripts/backfill_wandb.py`).
-4. Label from the verdict: `set_status_label <N> <pass|revise|stop>`.
-5. REVISE → file the child issue NOW (`/new-issue` semantics: title
-   `REVISE of #<N>: <knob change>`, body = next_actions, `depends_on: [<N>]`),
-   bump `revise_depth` on the ledger row, append the durable flag
+4. **REVISE only — file the child BEFORE the label** (mirrors /close's label-last
+   rule: a crash between the label write and the child filing would strand the
+   issue at `status:revise` with no child, and the idempotency guard above would
+   then block a re-file). File the child issue (`/new-issue` semantics: title
+   `REVISE of #<N>: <knob change>`, body = next_actions, `depends_on: [<N>]`) —
+   **idempotent**: skip if an open `REVISE of #<N>:` child already exists. Bump
+   `revise_depth` on the ledger row, append the durable flag
    `progress "REVISE_CHILD: #<child> from #<N> — needs /plan"` (so /status and
-   unattended goal-judges can see it), and print `Next: /plan <child>`.
-6. Print verdict + evidence lines (metric=value vs target, source file) +
-   `Next: /close <N>`.
+   unattended goal-judges can see it).
+5. Label from the verdict (LAST, once the child exists): `set_status_label <N> <pass|revise|stop>`.
+6. Print verdict + evidence lines (metric=value vs target, source file); then
+   `Next: /plan <child>` (REVISE) or `Next: /close <N>` (PASS/STOP).
 
 ## Hard rules
 

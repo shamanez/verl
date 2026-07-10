@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Stop — autosave uncommitted work under research/ (crash durability).
 # NEVER blocks session stop: every failure path exits 0 with a stderr note.
-# Worktree-aware: commits on whatever branch THIS session's checkout is on,
-# which under the per-issue-worktree convention is that issue's own branch —
-# parallel sessions therefore cannot cross-contaminate each other's branches.
+# Worktree-aware: commits on whatever branch THIS session's checkout is on.
+# UNDER THE per-issue-worktree convention (claude --worktree <N>) each session is
+# on its own exp/<id> branch, so they don't cross-contaminate. That guarantee
+# does NOT hold for sessions sharing ONE checkout+branch (e.g. two harness-
+# engineering windows both on autonomous-harness-v1): `git add -- :/research`
+# stages ALL uncommitted research/ changes, so a Stop here can sweep another
+# session's half-done files into this commit. No data is lost (same branch,
+# content preserved) but authorship mingles — keep concurrent harness work in
+# separate worktrees, or expect interleaved autosave commits.
 set -uo pipefail
 
 PAYLOAD="$(cat)"

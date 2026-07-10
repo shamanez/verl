@@ -41,6 +41,10 @@ seed_secrets_to_box() {
   chmod 600 "$tmp"
   # shred is Linux-only; fall back to rm on macOS.
   local _wipe='rm -f'; command -v shred >/dev/null 2>&1 && _wipe='shred -u'
+  # Wipe the plaintext secrets tmpfile on ANY exit from this function — including
+  # a SIGINT/SIGTERM during the up-to-40s ssh/scp (the explicit wipes below only
+  # cover the return paths). RETURN fires when the function unwinds.
+  trap '$_wipe "$tmp" 2>/dev/null || rm -f "$tmp" 2>/dev/null' RETURN INT TERM
 
   # Allowlist strip — box-relevant keys ONLY.
   grep -E "$VERL_SEED_ALLOWLIST_RE" "$src" > "$tmp" 2>/dev/null || true

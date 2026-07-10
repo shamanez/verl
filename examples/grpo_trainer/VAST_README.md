@@ -11,8 +11,10 @@ this branch and to the `vast_*` naming convention.
 **Method 1 — locked template (clean, the default).** Provision with the
 `verl-research-vllm020` template (registry:
 `research/.claude/skills/vast-provision/templates.json`): its docker image
-ships torch+vLLM and the onstart script installs verl + HF/WandB auth. Then
-just run the launcher.
+ships torch+vLLM and the onstart script installs verl (editable, `--no-deps`).
+The HF/WandB/R2 secrets file is pushed onto the box by the provisioning tools
+(`_seed_secrets.sh`, run from vast-provision/vast-attach) — NOT by the onstart —
+so the launcher finds `~/.config/verl-research/secrets.env` and just runs.
 
 **Method 2 — bare box (operator-provided instance, no verl image).** Proven
 2026-07-03 on a 1×H200 (Ubuntu 24.04, CUDA 12.6 driver). System python3.12 is

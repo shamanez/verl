@@ -45,8 +45,8 @@ under `research/`. The project's north-star — what "done" means — is
 | Harness operator manual (human-only, hosted HTML; design rationale lives there) | link at the top of `research/researcher_steps.md` |
 | Leaf subagent definitions | `research/.claude/agents/*.md` |
 | **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (on the project.yaml base branch) |
-| **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh` |
-| **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 bucket `autonomous-harness-rlvr-compression`, key `runs/<run_id>/…` (reports) and `verl-research/<run_id>/<cell>/checkpoints/…` (training checkpoints); config: `project.yaml` `reports.r2` |
+| **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` — the canonical accelerated base (`project.yaml default_baseline.launcher`); the older generic `vast_comm_eff_baseline_*.sh` is superseded |
+| **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 bucket `shamane-pluralis`, everything for a run under prefix `autonomous-harness-rlvr-compression/<run_id>/…` — reports at `…/<run_id>/…` and training checkpoints at `…/<run_id>/<cell>/checkpoints/…` (the old `verl-research/` prefix is retired); config: `project.yaml` `reports.r2` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
@@ -170,7 +170,10 @@ rm ~/.claude-kill-switch
 
 Provision directly with `research/.claude/skills/vast-provision/run.sh` (locked
 template `verl-research-vllm020`, hash `3b0f8b726ac3036d6c007bfa13b6d75f` — its
-onstart script handles docker + verl install + HF/WandB auth), then ssh in and run
+onstart script handles docker + verl install (editable, `--no-deps`); the
+HF/WandB/R2 secrets are seeded onto the box by the provisioning tools
+(`_seed_secrets.sh`, called from vast-provision/vast-attach), NOT the onstart),
+then ssh in and run
 `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`. Full procedure:
 operator-manual appendix (link at the top of `research/researcher_steps.md`).
 

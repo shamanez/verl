@@ -209,7 +209,12 @@ if [[ ! -d verl/.git ]]; then
     && (cd verl && uv pip install --no-deps -e . > /workspace/pip.log 2>&1)
 fi
 cd /workspace/verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-git fetch origin <base_branch> && git checkout -B <base_branch> origin/<base_branch>
+# Use FETCH_HEAD, not origin/<base_branch>: a template clone made with a
+# restricted refspec (e.g. --branch X --depth 1) has no origin/<base_branch>
+# remote-tracking ref, so `checkout -B <base> origin/<base>` fatals. `git fetch
+# origin <base>` always populates FETCH_HEAD regardless of the clone's refspec.
+git fetch origin <base_branch> || { echo "FATAL: fetch <base_branch> failed" >&2; exit 1; }
+git checkout -B <base_branch> FETCH_HEAD
 ```
 
 Both forms then run the cells (the runner has pushed ONLY `launch.sh` +

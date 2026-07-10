@@ -17,7 +17,8 @@
 #
 # Everything is pinned; only run length / name are overridable. signed_ema_alpha
 # has no env mapping in the generic launcher, so it rides as a trailing Hydra arg.
-# See research/runs/FIXED_CONTROL_SURFACE.md for the locked surface + substrate.
+# The locked surface + substrate ARE the pinned exports in THIS file (below) —
+# it is the authoritative value sheet (the old runs/FIXED_CONTROL_SURFACE.md was pruned).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

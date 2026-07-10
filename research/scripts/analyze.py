@@ -56,17 +56,23 @@ def _summarise(rows: list[dict]) -> dict:
 
 
 def _is_m0_smoke(run_dir: Path) -> bool:
+    # A run on real project hardware (H100/H200/B200) is NEVER auto-PASSed as a
+    # smoke test — the analyst must judge it against the plan's criteria. The old
+    # logic keyed on gpu_name == "h100" and returned True (=> auto-PASS) for
+    # anything else, so every real H200/B200 run was silently marked PASS. Invert:
+    # positively recognise the fixed hardware and treat those runs as NON-smoke.
     handles_dir = run_dir / "handles"
     if not handles_dir.is_dir():
         return False
+    known = ("h100", "h200", "b200")
     for hf in handles_dir.glob("*.json"):
         try:
             h = json.loads(hf.read_text())
-            if str(h.get("gpu_name", "")).lower() == "h100":
-                return False
+            if any(g in str(h.get("gpu_name", "")).lower() for g in known):
+                return False  # real GPU -> real run -> analyst judges (PENDING)
         except Exception:
             continue
-    return True
+    return True  # no recognisable GPU handle -> a scaffold/smoke run
 
 
 def main() -> int:

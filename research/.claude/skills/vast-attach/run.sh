@@ -251,10 +251,22 @@ if [[ "$REGISTER" == "1" ]]; then
         vast_account:$acct, external:true, status:$st,
         synthetic_instance_id:($synth==1)}')
     # Locked append (shared spinlock with _lib.sh writers).
-    LOCK="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0
-    until mkdir "$LOCK" 2>/dev/null; do n=$((n+1)); (( n > 300 )) && break; sleep 0.1; done
-    mkdir -p "$(dirname "$LEDGER")"; echo "$ROW" >> "$LEDGER"
-    rmdir "$LOCK" 2>/dev/null || true
+    LOCK="$PROJECT_DIR/.claude/state/.runs.jsonl.lock"; n=0; LOCKED=1
+    mkdir -p "$(dirname "$LEDGER")"
+    # Steal a stale lock (>300s = crashed holder), mirroring _lib.sh, so a dead
+    # session can't wedge us for 30s into the UNLOCKED append below — that path
+    # let a concurrent whole-file rewrite silently drop this live box's row.
+    until mkdir "$LOCK" 2>/dev/null; do
+      AGE=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || date +%s) ))
+      (( AGE > 300 )) && { rmdir "$LOCK" 2>/dev/null || true; continue; }
+      n=$((n+1)); (( n > 300 )) && { LOCKED=0; break; }; sleep 0.1
+    done
+    echo "$ROW" >> "$LEDGER"
+    if (( LOCKED )); then
+      rmdir "$LOCK" 2>/dev/null || true
+    else
+      echo "vast-attach: WARN registered $EXP_ID WITHOUT the ledger lock (30s contention) — a concurrent rewrite may race it; verify with: jq -c 'select(.id==\"$EXP_ID\")' $LEDGER" >&2
+    fi
     echo "vast-attach: registered $STATUS ledger row for $EXP_ID (max_gpu_hr=$MAX_GPU_HR)." >&2
     (( MANUAL )) && echo "vast-attach: EXTERNAL = operator-managed — the reaper will NOT touch it; tear down explicitly." >&2
   fi

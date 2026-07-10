@@ -78,7 +78,7 @@ The base is a working comm-eff trainer at parity; the two open fronts are both a
 **Basic setup / operating base for both:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) —
 on the **fast 1K surface** (resp 1024, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps) at HIGH
 anchor latency (cadence/delay_K = 20/20, the k-collapse regime), on the locked PowerSGD r=77 anchor
-substrate. Exact values: `runs/FIXED_CONTROL_SURFACE.md`.
+substrate. Exact values: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` (the launcher is the authoritative value sheet; the old `runs/FIXED_CONTROL_SURFACE.md` was pruned).
 
 ## Why the anchor (the motivating logic)
 

@@ -38,8 +38,10 @@ row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")  
 - Gate: `st == approved` is the normal entry. ONE exception — **relaunch**:
   `st == running` AND the last row is `TORN_DOWN` AND no `runs/$RUN_ID/verdict.md`
   (env-failure history) is allowed, guarded by
-  `bump_attempt "$RUN_ID" launch_attempts 3 || exit 1`. Anything else → refuse:
-  the human gate is sacred.
+  `bump_attempt "$RUN_ID" launch_attempts 3 || { flag_human <N> "launch relaunch attempts exhausted (3/3): repeated env-failures — needs a human"; exit 1; }`.
+  The `flag_human` is load-bearing: a bare `exit 1` on exhaustion leaves the issue
+  at `status:running` with NO pause label, invisible to /status and the goal-judge.
+  Anything else → refuse: the human gate is sacred.
 - **Clear any operator-stop sentinel before starting training** (#63 B10): a
   relaunched run MUST be heartbeat-reapable again, so
   `operator_stop_check "$RUN_ID" && operator_stop_clear "$RUN_ID"` before the

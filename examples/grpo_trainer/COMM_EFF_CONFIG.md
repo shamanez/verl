@@ -25,7 +25,8 @@ All knobs are env overrides read by the launcher and forwarded to
 The baseline deliberately sits in the **k-collapse regime**: high anchor latency
 (`cadence`/`delay_K` = 20/20), where the stale anchor gradient has rotated
 ~orthogonal to the live gradient. This is the failure Priority 1 targets — see
-`research/runs/FIXED_CONTROL_SURFACE.md` and
+`examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` (the
+authoritative locked-surface value sheet) and
 `research/reports/priority-1-anchor-staleness-k-collapse.html`.
 
 | knob | baseline value |
