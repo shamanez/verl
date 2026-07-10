@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "decoder_boundary_indices",
     "find_decoder_layers",
+    "parse_train_layers",
+    "apply_block_freeze",
     "prf_token_mask",
     "ActivationMasker",
 ]
@@ -115,6 +117,81 @@ def find_decoder_layers(module: nn.Module) -> Optional[nn.ModuleList]:
         return all_lists[0][1]
     candidates.sort(key=lambda kv: len(kv[1]), reverse=True)
     return candidates[0][1]
+
+
+def parse_train_layers(spec: Optional[str], num_layers: int) -> Optional[tuple[int, int]]:
+    """Parse a ``TRAIN_LAYERS`` spec into an inclusive 0-indexed ``(lo, hi)`` block.
+
+    Grammar (blockwise-freeze GRPO, issue #64): ``""`` / ``None`` -> ``None`` (no
+    freeze; dense parity), ``"a"`` -> single layer ``(a, a)``, ``"a-b"`` ->
+    inclusive range ``(a, b)``. Validates ``0 <= lo <= hi < num_layers`` and raises
+    ``ValueError`` on a malformed / out-of-range spec — a mis-parse MUST abort the
+    build, never silently freeze the wrong layers and burn the whole spend.
+    """
+    if spec is None:
+        return None
+    s = str(spec).strip()
+    if s == "":
+        return None
+    try:
+        if "-" in s:
+            lo_str, hi_str = s.split("-", 1)
+            lo, hi = int(lo_str.strip()), int(hi_str.strip())
+        else:
+            lo = hi = int(s)
+    except ValueError as exc:
+        raise ValueError(f"TRAIN_LAYERS={spec!r} is not an int or an 'lo-hi' range") from exc
+    if not (0 <= lo <= hi < num_layers):
+        raise ValueError(
+            f"TRAIN_LAYERS={spec!r} -> block (lo={lo}, hi={hi}) is out of range for "
+            f"num_layers={num_layers}; require 0 <= lo <= hi < num_layers"
+        )
+    return lo, hi
+
+
+def apply_block_freeze(module: nn.Module, lo: int, hi: int) -> dict:
+    """Freeze every parameter of ``module`` except decoder layers ``[lo, hi]``.
+
+    Blockwise-freeze GRPO (issue #64): sets ``requires_grad=False`` on ALL params,
+    then re-enables it on ``find_decoder_layers(module)[lo:hi+1]`` ONLY (inclusive,
+    0-indexed). Embeddings, the (tied) lm_head, the final norm, and every OTHER
+    decoder layer stay frozen. Returns a report dict (resolved indices, trainable
+    decoder-layer module names, trainable/total param counts, trainable fraction).
+
+    Raises ``RuntimeError`` if the decoder ``ModuleList`` can't be located and
+    ``ValueError`` if the block is out of range — a wrong freeze MUST abort the
+    build before any GPU spend rather than silently train the wrong parameters.
+    """
+    layers = find_decoder_layers(module)
+    if layers is None:
+        raise RuntimeError(
+            "apply_block_freeze: could not locate the decoder-layer ModuleList "
+            "(find_decoder_layers returned None) — refusing to freeze blindly"
+        )
+    num_layers = len(layers)
+    if not (0 <= lo <= hi < num_layers):
+        raise ValueError(
+            f"apply_block_freeze: block ({lo}, {hi}) out of range for {num_layers} decoder layers"
+        )
+    # 1) freeze everything, then 2) re-enable the block only.
+    for param in module.parameters():
+        param.requires_grad_(False)
+    trainable_layer_names: list[str] = []
+    for i in range(lo, hi + 1):
+        for param in layers[i].parameters():
+            param.requires_grad_(True)
+        trainable_layer_names.append(f"{type(layers[i]).__name__}[{i}]")
+    total = sum(p.numel() for p in module.parameters())
+    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    return {
+        "num_decoder_layers": num_layers,
+        "block": (lo, hi),
+        "trainable_layer_indices": list(range(lo, hi + 1)),
+        "trainable_layer_names": trainable_layer_names,
+        "total_params": int(total),
+        "trainable_params": int(trainable),
+        "trainable_frac": (float(trainable) / float(total)) if total else 0.0,
+    }
 
 
 def _splitmix64(x: int) -> int:
