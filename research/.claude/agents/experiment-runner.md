@@ -68,9 +68,13 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
      $PARENT/.claude/skills/vast-attach/run.sh --exp-id <id> --issue <N>
      --instance-id <iid> --account <acct> --max-gpu-hr <max_gpu_hr>` (it
      ssh-probes, writes the handle, registers the ledger row; `--issue` is
-     REQUIRED — every downstream stage locates the row by issue number). If a
-     live row already references that instance: append `BOX_BUSY: <iid> — <id>
-     waiting` to PROGRESS.md and stop.
+     REQUIRED — every downstream stage locates the row by issue number). Add
+     `--ssh-identity <key>` when the operator's box uses a non-default key
+     (the dispatch/plan names it; the API account does NOT imply the ssh key),
+     and `--need-r2` when the plan has `CKPT_R2_ENABLED` (attach-time preflight
+     of aws CLI + R2 creds — else the checkpoint upload fails only at the final
+     save). If a live row already references that instance: append `BOX_BUSY:
+     <iid> — <id> waiting` to PROGRESS.md and stop.
    - else walk `gpu_filter_chain` in order, ≤ 1 retry per rung on transient
      errors. Per rung, launch the skill DETACHED and poll a local file —
      never block one Bash call on the ~7–25 min image pull:
@@ -100,9 +104,12 @@ payload + CPU gates green` and STOP (no ledger row, no provisioning).
        vast_account:$va, status:"PROVISIONED"}')"
    ```
 
-8. **Sync + launch.** rsync `runs/<id>/` to the box
-   (`rsync -av -e "ssh -i ~/.ssh/vast_ai_name -o StrictHostKeyChecking=accept-new -p <port>" … root@<host>:/workspace/runs/<id>/`
-   — that exact ssh form, every connection; bare ssh fails publickey).
+8. **Sync + launch.** rsync `runs/<id>/` to the box using the SSH KEY FROM THE
+   HANDLE — never a hardcoded key (an operator/attached box may use any key,
+   e.g. `~/.ssh/vast_ai`; #63 B14). Read it once:
+   `KEY=$(jq -r '.ssh_login' runs/<id>/handles/*.json | grep -oE '\-i [^ ]+' | head -1 | cut -d' ' -f2)`
+   then `rsync -av -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new -p <port>" … root@<host>:/workspace/runs/<id>/`
+   (and `export VAST_SSH_IDENTITY="$KEY"` so `sshb` uses it too; bare ssh fails publickey).
    Launch: `sshb <port> <host> "tmux new -d -s run-<N> 'bash /workspace/runs/<id>/launch.sh > /workspace/runs/<id>/train.log 2>&1'"`.
    Liveness: wait ≤ 60 s for first log lines; one relaunch retry; still dead →
    `LAUNCH_FAILED: <id>` to PROGRESS.md, stop (the PROVISIONED row gets reaped).
@@ -140,6 +147,18 @@ EXPERIMENT_NAME=<N>-<cell> WANDB_RUN_GROUP=<id> <VAR=value …> \
   && echo "$(date -Iseconds)" > /workspace/runs/<id>/done_<cell>.flag
 echo "$(date -Iseconds) done" > /workspace/runs/<id>/done.flag
 ```
+
+**Cell-failure policy (payload contract; #63 2026-07-09).** The shape above is
+stop-on-first-failure (`set -e`). A payload MAY instead continue past a failed
+cell (`fail_<cell>.flag` + keep going, so one arm's NaN doesn't strand the
+rest) — but ONLY with a **systematic-failure tripwire**: after any cell fails,
+grep THAT cell's log for config-level signatures
+(`OutOfMemoryError|CUDA out of memory|ModuleNotFoundError|No such file|hydra\.errors`)
+and on a hit write `halt.flag` + `exit 1` instead of advancing — a
+config-level crash recurs in every remaining cell (all cells share the memory
+config), so auto-advance just pre-pays boot+crash per arm. Only science-level
+failures (NaN/divergence in THIS cell's numbers) may auto-advance. #63: an OOM
+at the first comm-eff anchor refresh auto-advanced into a pre-doomed next arm.
 
 ## Hard rules
 

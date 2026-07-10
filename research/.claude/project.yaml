@@ -4,12 +4,18 @@
 # token-cost optimization (so fresh-context agents don't need an extra read), but
 # project.yaml is authoritative. If the two diverge, this file wins.
 #
-# Porting checklist (5 fields) — change these, the harness machinery comes along for free:
+# Porting checklist — change these, the harness machinery comes along for free:
 #   1. project.name + research_repo
 #   2. source_tree.path + protect/exception paths (if you fork a different upstream)
 #   3. vast_template.* (only if you maintain a different Vast.ai template)
 #   4. default_compute.gpu_filter_chain (only if the new project needs a different shape)
 #   5. .claude/GOAL.md (the project north-star — what "done" means)
+#   6. REINSTALL the reaper cron from the new checkout (bash .claude/hooks/install-reaper-cron.sh)
+#      and verify: crontab -l | grep verl-research-reaper points AT the new checkout (#63 B3)
+#   7. verify the Vast template's onstart branch pin (templates.json) matches source_tree.base_branch —
+#      a restricted fetch refspec on the box silently keeps the pinned branch (#63 B7)
+#   8. sweep CLAUDE.md + this file for stale absolute paths; run .claude/hooks/check-workspace.sh
+#      from the new checkout's research/ dir (#63 B4/B6)
 
 project:
   name: verl-compression-research
@@ -17,7 +23,11 @@ project:
   north_star_doc: .claude/GOAL.md       # the project north-star — what "done" means (agent-readable, operator-approved); THE single source of project intent
 
 workspace:
-  working_dir: /Users/shamane/Documents/verl/research/
+  # PATHS ARE DERIVED AT RUNTIME (#63 B6): every consumer self-locates (hooks from
+  # their own file path; _lib.sh via `git worktree list`). The values here are
+  # DOCUMENTATION of the current checkout — refreshed 2026-07-08 — and fallbacks
+  # only; a moved checkout must keep working without editing this file.
+  working_dir: /Users/shamane/Documents/new-harness/verl/research/
   secrets_file: $HOME/.config/verl-research/secrets.env
   secrets_required:
     - HF_TOKEN
@@ -66,7 +76,15 @@ naming:                                                       # ONE readable nam
   tmux: "run-<issue>"
 
 wandb:                                                        # single source of truth (was hardcoded in the monitor agent)
-  project: verl_compression_research
+  # PER-ISSUE PROJECTS (operator directive 2026-07-08): every issue gets its OWN
+  # WandB project named <issue>-<slug> (= run_id, e.g. 63-deepscaler-r1d-signed-ema-k20).
+  # The PLANNER emits `wandb_project: <run_id>` in every plan's yaml block (template
+  # carries the key); the runner exports PROJECT_NAME="$RUN_ID" in launch payloads and
+  # snapshots it into run.json (monitor/analyst read the snapshot, never this file).
+  # The shared name below is ONLY the legacy fallback for pre-#63 runs — never use it
+  # for new issues.
+  project_rule: "<issue>-<slug> (= run_id) — derived automatically at /plan time"
+  project: verl_compression_research                          # LEGACY fallback (pre-#63 runs) — do not use for new issues
   entity: shamanework-pl
   tail_rule: "the async uploader drops the last 1-2 steps — /analyze backfills them from train.log (scripts/backfill_wandb.py)"
 
@@ -78,9 +96,28 @@ reports:                                                      # publishing surfa
   publish_script: research/scripts/publish_run_report.py      # /close runs it at step 5c, AFTER the close comment exists (the page renders it): generates the run page, updates runs/index.html, copies small artifacts, uploads big ones to R2, commits (and pushes unless --no-push) the report repo. Nonzero exit = REPORT_PUBLISH_PARTIAL → /close flags a human and SKIPS the cleanup sweep.
   push_on_publish: true                                       # a push IS the deploy (Cloudflare Pages auto-builds) — that is the point
   r2:                                                         # big artifacts (checkpoints, weight dumps, full metrics) — NEVER into git
-    bucket_env: R2_BUCKET                                     # from secrets.env (aws CLI with --endpoint-url $R2_ENDPOINT; keys R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)
+    # BUCKET = `shamane-pluralis` (RESOLVED #63 B5, 2026-07-10). Earlier docs/secrets
+    #   set R2_BUCKET=`autonomous-harness-rlvr-compression`, which is NOT a bucket —
+    #   it is a top-level PREFIX inside shamane-pluralis (the R2 dashboard confirms;
+    #   the prefix carries a README). The verl ckpt-sink hard-guards the bucket to
+    #   `shamane-pluralis` (verl/workers/comm_eff/r2_sink.py:111), so the mislabelled
+    #   R2_BUCKET made the sink REFUSE + crash _save_checkpoint at the first save
+    #   (#63 b50 died at step 100; never surfaced before because no prior run reached
+    #   an R2-on checkpoint save). FIX: R2_BUCKET=shamane-pluralis in secrets. The
+    #   crash is now ALSO non-fatal in code (ray_trainer.py wraps the mirror in
+    #   try/except — a failed upload keeps the local ckpt + continues; commit 77c1b308).
+    # REQUIREMENTS (#63 B5): the box MUST have the `aws` CLI (the sink shells out to
+    #   `aws s3 cp`; #63's box had none despite the "aws already on box" claim —
+    #   pip install awscli). vast-attach --need-r2 now does a REAL write test to the
+    #   code-guard bucket (ce241d4e), not just `command -v aws`.
+    # ONE PER-RUN HOME, ONE BUCKET (shamane-pluralis; #63 B5 2026-07-10 operator directive —
+    # EVERYTHING for a run lives under autonomous-harness-rlvr-compression/<run_id>/; the old
+    # verl-research/ checkpoint prefix is RETIRED):
+    #   - REPORT artifacts (publish_run_report.py at /close): autonomous-harness-rlvr-compression/<run_id>/…
+    #   - TRAINING checkpoints (verl ckpt_r2 sink, during the run): autonomous-harness-rlvr-compression/<run_id>/<cell>/checkpoints/… (R2_EXPERIMENT=run_id, R2_REGIME=cell)
+    bucket_env: R2_BUCKET                                     # from secrets.env = shamane-pluralis (aws CLI with --endpoint-url $R2_ENDPOINT; keys R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)
     endpoint_env: R2_ENDPOINT
-    prefix: autonomous-harness-rlvr-compression               # per-run layout: <prefix>/<run_id>/…
+    prefix: runs                                              # report-artifact prefix used by publish_run_report.py. NOTE (#63 B5): the bucket README says reports live at `autonomous-harness-rlvr-compression/<run_id>/` — reconcile publish_run_report.py's prefix with that at /close time.
     console: https://dash.cloudflare.com/c0b687e3982c3fbcee1fc04607cd2683/r2/default/buckets/shamane-pluralis
 
 budget:                                                       # money caps (absorbed budget.json; scripts/check_budget.py reads THIS block)
@@ -97,14 +134,17 @@ verification:                                                 # WHERE heavy veri
   bounded_retry_rule: "every retry is counted in the ledger (launch_attempts<=3, fix_attempts<=3, revise_depth<=plan iterations, monitor cycles<=12); exhaustion stops with a named flag, never spins"
 
 source_tree:                                                  # the upstream code the experiments operate on
-  path: /Users/shamane/Documents/verl/
+  # path/protect/allowed values are DOCUMENTATION + fallback (#63 B6): the
+  # protect-upstream hook self-locates from its own file; do not rely on these
+  # absolutes surviving a checkout move.
+  path: /Users/shamane/Documents/new-harness/verl/
   remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
   upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
   base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here.
   protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
-    - /Users/shamane/Documents/verl/                          # everything UNDER verl/
+    - /Users/shamane/Documents/new-harness/verl/              # everything UNDER the checkout (hook self-locates; this line is documentation)
   allowed_paths:                                              # except these subtrees
-    - /Users/shamane/Documents/verl/research/                 # always writable
+    - /Users/shamane/Documents/new-harness/verl/research/     # always writable (hook self-locates; documentation)
   exception_branches:                                         # plus any path is writable when on these branches
     - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
     - autonomous-harness-*                                    # harness-engineering branches
@@ -120,11 +160,15 @@ vast_template:                                                # the locked Vast.
   registry_file: .claude/skills/vast-provision/templates.json
 
 vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
+  # PER-HANDLE ssh_login IS AUTHORITATIVE for any given box (#63 I7/B14): operator
+  # boxes arrive on arbitrary keys (e.g. ~/.ssh/vast_ai). This identity is only the
+  # PROVISION-TIME default; vast-attach --ssh-identity / VAST_SSH_IDENTITY override,
+  # and every consumer must use the handle's embedded ssh_login, never re-derive.
   identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Override at runtime with VAST_SSH_IDENTITY.
   pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
   # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.
 
-default_compute:                                              # planner emits these defaults unless the issue overrides
+default_compute:                                              # planner emits these defaults unless the issue overrides. Before sizing compute for a NON-default surface (model/response-length/rollout-n differ from the locked GSM8K surface), CHECK perf_profiles: below — a matching measured profile overrides the ladder pick; the ladder itself stays the default.
   gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
                                                               #   auto = hands-off: once the runner's PREPARE phase (implementation + CPU gates, laptop-only) is green it walks gpu_filter_chain and provisions by itself.
                                                               #   ask  = prepare everything, then PAUSE: needs:human "READY FOR GPU" comment on the issue; the operator hands over a box (`--attach <id>` → vast-attach registers it) or authorizes auto-provision (re-run with `--gpu auto`).
@@ -167,13 +211,28 @@ models:                                                       # RLVR-paper model
   test:
     - {slug: qwen25-math-1p5b,     hf_id: Qwen/Qwen2.5-Math-1.5B,                    chat_template: native, paper: minimal-rlvr}
     - {slug: qwen3-1p7b-base,      hf_id: Qwen/Qwen3-1.7B-Base,                      chat_template: native, paper: one-layer-enough}
-    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "smoke with MAX_RESPONSE_LENGTH=4096 for <think>+boxed room; truncation-only null reward = documented negative, not a hard fail"}
+    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "MEASURED #63: at resp 4096 truncation clip_ratio=0.73 — near-useless for reasoning evals; the real surface is 16K (clip 3%). Before sizing compute for it READ perf_profiles.r1distill-1p5b-16k-n16 below — single-GPU is proven too slow"}
     - {slug: open-nemotron-1p5b,   hf_id: nvidia/OpenReasoning-Nemotron-1.5B,        chat_template: native, paper: minimal-rlvr, note: "id resolved from spec (no explicit id given); loads on laptop. If it OOMs at smoke → recorded negative, dropped."}
     - {slug: qwen3-4b-base,        hf_id: Qwen/Qwen3-4B-Base,                        chat_template: native, paper: one-layer-enough}
   integrate-only:                                             # 7B/8B — registry + CPU load check only; NOT GPU-smoked (too big for 1×H200)
     - {slug: r1-distill-qwen-7b,   hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B,   chat_template: native, paper: rlvr-linearity}
     - {slug: r1-distill-llama-8b,  hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B,  chat_template: native, paper: rlvr-linearity}
     - {slug: qwen3-8b-base,        hf_id: Qwen/Qwen3-8B-Base,                        chat_template: native, paper: one-layer-enough}
+
+perf_profiles:                                                # MEASURED workload profiles (never guess/re-probe a known surface) — planner + experiment-runner MUST consult this before sizing compute for a matching surface. Values are EMPIRICAL (issue #63, 2026-07-08), not theoretical. The default_compute ladder is unchanged; a matching profile OVERRIDES the ladder choice.
+  r1distill-1p5b-16k-n16:                                     # ~1.5B reasoning model on the RLVR-Linearity repro surface
+    surface: {prompt: 2048, response: 16384, rollout_n: 16, train_batch: 128, algo: grpo}
+    single_gpu_h200: "FITS but DO NOT USE — no OOM (rollout gen peaks 138/143GB @ gpu_mem_util 0.85; training phase ~22GB with CPU offload ON), but step-1 = 1677s (~28 min) ⇒ 200 steps ≈ 90+ GPU-hr/arm. param+optimizer CPU offload is REQUIRED to fit 1 GPU and is itself a major slowdown."
+    quad_h200_dense: "DENSE / comm-eff-OFF ONLY. USE THIS SHAPE — step-1 = 489s incl. one-time compile (gen 240s of it); steady-state ~400-450s ⇒ ≤27h/arm @ 200 steps. CPU offload OFF (FSDP shards across ranks; launcher hardcoded False is correct on multi-GPU for a NO-anchor run); NGPUS_PER_NODE auto-detect works; ROLLOUT_TP=1 ⇒ 4 independent vLLM engines (right call for 1.5B — never TP>1 at this size); gpu_memory_utilization=0.85; ppo_max_token_len_per_gpu=30000; max_num_batched_tokens=35840; training-phase mem ~50GB/GPU; free_cache_engine=True absorbs the 130GB↔50GB rollout↔train swing."
+    quad_h200_comm_eff: "COMM-EFF ARMS (comm_eff.enabled=true) — DIFFERENT memory config, do NOT inherit the dense one. MEASURED #63 2026-07-09: with offload OFF / token-len 30000 the arms OOM at the FIRST anchor refresh (step = anchor.cadence/2, i.e. step 10 at cadence 20). Root cause: _maybe_comm_eff_anchor_refresh builds an UN-CHECKPOINTED full-model clone and runs an extra fwd+bwd → ~75-80GB activation surcharge stacked on the ~50GB train baseline (NOT the PowerSGD Q, which is ~6.6MB; snapshot+EMA already on CPU). WORKING CONFIG: param_offload=True + optimizer_offload=True (trailing Hydra override — launcher hardcodes False, $@ wins) AND ppo_max_token_len_per_gpu=20000 (cuts the token-linear surcharge ~22GB). Verified: b50 cleared the anchor at peak 124/143GB, 0 OOM. Cost: slower steps (offload transfer + more micro-batches) ⇒ ~550-600s/step. FLOOR: ppo_max_token_len_per_gpu MUST be ≥ max_prompt+max_response = 18432 (a sequence can't split across micro-batches; 16000 threw AssertionError max_token_len<max_seq_len). Definitive fix pending (exp branch): gradient checkpointing on the anchor clone (build_anchor_module in verl/workers/comm_eff/anchor.py) would remove the surcharge and restore offload-OFF/token-30000 speed."
+    rules:
+      - "DENSE vs COMM-EFF differ in memory at this surface: dense fits offload-OFF/token-30000; comm-eff arms need offload-ON + token-len 20000 (the anchor refresh's un-checkpointed clone is the difference — see quad_h200_comm_eff)"
+      - "CPU offload ON only when single-GPU fit OR a comm-eff anchor refresh demands it; OFF for a dense/no-anchor run on ≥2 GPUs (FSDP sharding beats CPU offload)"
+      - "ppo_max_token_len_per_gpu HARD FLOOR = max_prompt+max_response (one sequence can't split across micro-batches); it is the strongest non-code lever for the comm-eff anchor-refresh peak but cannot go below that floor"
+      - "comm-eff feasibility probe MUST run a comm_eff-ON cell PAST the first anchor fire (≥ anchor.delay_K+1 steps) — the anchor refresh is the peak-memory event; a dense-only or <first-fire probe cannot see the ceiling (#63: dense probe fit, comm-eff arms OOM'd at step 10)"
+      - "generation dominates the step: prefer N independent TP=1 vLLM engines over tensor-parallel for small models"
+      - "checkpoint→R2 (CKPT_R2_ENABLED) needs aws CLI + R2 creds ON THE BOX — preflight at attach/provision time, never discover at the final save"
+      - "resp 4096 on this model: clip_ratio 0.73 (73% truncated) vs 0.03 at 16K — reasoning evals need the 16K surface"
 
 default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
   run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)
@@ -184,7 +243,8 @@ fixed_control_surface:                                        # LOCKED training 
   doc: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh   # the launcher IS the authoritative value sheet (the old runs/FIXED_CONTROL_SURFACE.md sheet was pruned; values live in the launcher, per the rule below)
   rule: "every GSM8K comm-eff experiment runs the accelerated comm-eff base (launcher vast_comm_eff_accel_base_*.sh): accel surface (use_dynamic_bsz=True, resp 1024, rollout TP=1, gpu_mem_util 0.55, ppo_max_token 24576, 50 steps, test_freq 25, val_before_train=False) + signed_ema(α=0.25, β_anc=0.50) core + diagnostics=false speed knob, on the locked PowerSGD r=77 anchor substrate (anchor owns Q, cadence/delay_K=5, clean=0, replay_paired_batch, disable_custom_all_reduce). The ONLY axis that may vary is the merger (how the stale anchor gradient is USED). Dense (enabled=false on the same accel surface) is the reference (≈0.7657; comm-eff signed_ema(0.25,0.50) ≈0.7362). Values live in the launcher, NOT duplicated here."
   variable_axis: merger                                       # how M/δ is folded into the fast update; accel base default = signed_ema(α=0.25, β_anc=0.50). Substrate (powersgd r77, anchor owns_q) + accel surface are LOCKED.
-  measurement_knobs: [test_freq]                              # NOT control variables (validation is read-only) — canonical test_freq=25
+  measurement_knobs: [test_freq, val_before_train]            # NOT control variables (validation is read-only) — canonical test_freq=25
+  val_before_train_policy: "True ONLY for the FIRST cell on a NEW surface (it smoke-tests the val plumbing — parquet/reward-route/metric keys — before paid training; caught the #63 val-dataset correction). Every later cell shares the SAME base checkpoint ⇒ step-0 val is arm-invariant and already known ⇒ set False (saves ~5min/arm ≈ 1.5 USD at 16K/n16). Measured base R1-Distill-1.5B AIME avg@8 ≈ 0.19 (30 problems, std ~0.09)."
 
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
   dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones a PINNED branch (registry: .claude/skills/vast-provision/templates.json) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone with the exp bundle instead.

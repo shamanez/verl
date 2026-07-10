@@ -11,6 +11,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>
+wandb_project: <N>-<kebab-slug>   # REQUIRED = run_id: every issue gets its OWN WandB project (never the shared legacy project) — runner exports PROJECT_NAME from this
 title: <issue title>          # one line — SUMMARY.md rows and the run-report page read it
 kind: experiment
 tier: deep
@@ -74,6 +75,9 @@ stages:
 invariants:
   - {name: off-path-parity, check: "feature OFF ⇒ byte-identical to baseline", gate: hard}
   - {name: probe-trains-clean, check: "2 probe steps, no NaN/OOM", gate: hard}
+  # comm-eff sweeps: the probe MUST be a comm-eff cell run past the first anchor
+  # refresh (>= anchor.delay_K + 1 steps) — the paired-replay refresh is the
+  # peak-memory event (#63: dense probe fit; b50 OOM'd at step 10 / tick 20)
 ```
 
 ## Success criteria

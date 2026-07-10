@@ -45,7 +45,11 @@ def default_compute_score(
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
+    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500", "math-ai/aime24"]:
+        # math-ai/aime24 (issue #63): AIME-2024 val rows keep their HONEST name so
+        # WandB val-core keys read as AIME. It must live HERE (last-\boxed{} + is_equiv):
+        # the `data_source.startswith("aime")` branch below routes to math_dapo's
+        # "Answer:"-regex extractor, which ignores \boxed{} entirely.
         from . import math_reward
 
         res = math_reward.compute_score(solution_str, ground_truth)

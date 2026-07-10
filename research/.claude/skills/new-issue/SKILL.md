@@ -24,7 +24,11 @@ Turn the operator's request into a `research:claim` issue on the research repo
      ≈0.7362 comm-eff on the fast surface) and mark it `(proposed — edit me)`.
    - **slug** — 3–40 char kebab-case, self-describing (this becomes the run
      dir, branch, and WandB group: `<N>-<slug>`). No `c1`/`armA` patterns.
-3. Body template (short — the plan carries the detail later):
+3. Body template (short — the plan carries the detail later). **Full-spec
+   inputs**: when the operator pastes a detailed spec, preserve their
+   constraints VERBATIM in an `Operator spec` section under the header — the
+   planner reads only this issue, and compressed-away numbers are lost forever
+   (the "2–5 lines" guidance below applies to one-liner inputs only):
    ```
    kind: <kind>
    slug: <slug>

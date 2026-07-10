@@ -37,6 +37,11 @@ row=$(ledger_row_by_issue <N>); [[ -z "$row" ]] && row=$(ledger_row "$RUN_ID")  
   (env-failure history) is allowed, guarded by
   `bump_attempt "$RUN_ID" launch_attempts 3 || exit 1`. Anything else → refuse:
   the human gate is sacred.
+- **Clear any operator-stop sentinel before starting training** (#63 B10): a
+  relaunched run MUST be heartbeat-reapable again, so
+  `operator_stop_check "$RUN_ID" && operator_stop_clear "$RUN_ID"` before the
+  tmux launch — leaving it set would suppress the reaper's heartbeat triggers
+  for the resumed run (only the budget cap would remain).
 - `kind: analysis|implementation|brainstorm|literature` → no GPU. Refuse with
   the right next step (`/analyze <N>` for analysis; `/close <N>` for the rest).
 - Every `depends_on` issue must be terminal — `status:pass|stop|done` (a closed

@@ -36,9 +36,28 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
 
 ## Steps
 
-1. **Teardown check first (money before paperwork).** If the ledger row is
+1. **Checkpoint-in-R2 verify BEFORE teardown (data before money; #63 B5).**
+   Tearing down destroys the box's LOCAL checkpoints — so if `CKPT_R2_ENABLED`,
+   the R2 mirror must be CONFIRMED before the box dies, or a silently-failed
+   upload is lost forever (the sink is now best-effort/non-fatal: a failed
+   upload only WARNs + keeps the file local, so silence ≠ success). For each
+   cell that reached its save step (`done_<cell>.flag` / a `global_step_<S>`
+   locally, or a `[ckpt_r2] ... FAILED` line in the cell log): `aws s3 ls`
+   the expected key
+   (`autonomous-harness-rlvr-compression/<run_id>/<cell>/checkpoints/global_step_<S>/`,
+   bucket `R2_BUCKET`=shamane-pluralis, `--endpoint-url $R2_ENDPOINT`) and
+   confirm object count > 0. Any expected checkpoint MISSING from R2 but present
+   LOCALLY on the box → `aws s3 cp --recursive` it up and re-verify BEFORE
+   teardown. Missing from BOTH → `flag_human <N> "checkpoint <cell> lost — not
+   in R2, not on box"`. Only when every expected checkpoint is verified in R2 do
+   you proceed. (Everything lives under the one per-run home
+   autonomous-harness-rlvr-compression/<run_id>/; the old verl-research/ prefix
+   is retired — if any cell wrote there under old on-box code, MOVE it here.)
+2. **Teardown (money before paperwork).** If the ledger row is
    `RUNNING|PROVISIONED` → run `vast-teardown` now; verify `TORN_DOWN`. No
-   harness box may outlive its issue. **`EXTERNAL` rows are operator-managed:**
+   harness box may outlive its issue. (Semantics key on the ledger STATUS, not
+   the `external` flag: `RUNNING`+`external:true` = harness-managed attach —
+   teardown normally.) **`EXTERNAL` rows are operator-managed:**
    do NOT auto-destroy — ask (interactive) or run `flag_human <N> "external
    box <id> still up after /close — tear down when done"` and continue (the
    box may serve other work).
@@ -94,7 +113,10 @@ row=$(ledger_row_by_issue <N>); id=$(jq -r '.id // empty' <<<"$row")
    `bash scripts/close_cleanup.sh <N> <id>` — guarded (status:done + no live
    row ACROSS ALL ledger rows + SUMMARY row + report page present), it
    deletes `runs/<id>/`, the plan cache, torn-down handles, compacts the
-   ledger, and sweeps the issue's PROGRESS ticks. A guard refusal is a named
+   ledger, sweeps the issue's PROGRESS ticks, and **prunes the local `exp/<id>`
+   branch + any linked worktree** (`gh pr merge --delete-branch` removed only
+   the REMOTE branch; the local copy would otherwise linger — #63 B7) then
+   `fetch --prune`s stale remote-tracking refs. A guard refusal is a named
    reason to surface, not an error to retry.
 7. Print: what landed, PR URL, report URL, teardown confirmation, cost total.
 

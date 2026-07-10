@@ -557,9 +557,12 @@ def build_r2_sink_from_env(
 ) -> R2ArtifactSink:
     """Build a :class:`R2ArtifactSink` from the R2 env vars (fail-loud).
 
-    Key prefix is ``verl-research/<experiment>/<regime>/<artifact_kind>`` where
-    ``<experiment>``/``<regime>`` come from ``R2_EXPERIMENT`` / ``R2_REGIME``
-    (set by the launcher). The role + step/tick + filename are appended by the
+    Key prefix is ``autonomous-harness-rlvr-compression/<experiment>/<regime>/<artifact_kind>``
+    where ``<experiment>``/``<regime>`` come from ``R2_EXPERIMENT`` / ``R2_REGIME``
+    (set by the launcher). Everything for a run lives under the one per-run home
+    ``autonomous-harness-rlvr-compression/<run_id>/`` alongside its report
+    artifacts (#63 2026-07-10 operator directive — the old ``verl-research/``
+    prefix is retired). The role + step/tick + filename are appended by the
     caller as the ``key_suffix`` at upload time.
 
     ``async_mode`` / ``upload_workers`` / ``max_staged_gb`` configure the opt-in
@@ -575,7 +578,7 @@ def build_r2_sink_from_env(
         endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
     experiment = os.environ.get("R2_EXPERIMENT", "EXP-unknown")
     regime = os.environ.get("R2_REGIME", "regime")
-    key_prefix = f"verl-research/{experiment}/{regime}/{artifact_kind}"
+    key_prefix = f"autonomous-harness-rlvr-compression/{experiment}/{regime}/{artifact_kind}"
     manifest_path = os.path.join(manifest_dir or ".", "r2_manifest.jsonl")
     return R2ArtifactSink(
         bucket=bucket,

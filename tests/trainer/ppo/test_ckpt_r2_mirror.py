@@ -250,7 +250,7 @@ def test_key_suffix_is_relpath_from_default_local_dir(tmp_path, monkeypatch):
     host, dld, step_dir, expected = _make_host(tmp_path, enabled=True, world_size=2, global_steps=1)
     host._maybe_upload_checkpoint_to_r2(step_dir)
 
-    key_prefix = host._ckpt_r2_sink.key_prefix  # verl-research/EXP-58/regimeA/checkpoints
+    key_prefix = host._ckpt_r2_sink.key_prefix  # autonomous-harness-rlvr-compression/EXP-58/regimeA/checkpoints
     uploaded_suffixes = set()
     for c in calls:
         if "cp" in c:

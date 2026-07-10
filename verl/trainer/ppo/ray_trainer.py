@@ -1044,7 +1044,21 @@ class RayPPOTrainer:
         # async_save=false path, which is GRPO's default). When the flag is false,
         # NO r2_sink import happens and NO upload thread is spawned — byte-identical
         # to upstream verl. ---
-        self._maybe_upload_checkpoint_to_r2(local_global_step_folder)
+        # #63 B5 (2026-07-10): the R2 mirror is BEST-EFFORT — a failed upload
+        # (wrong bucket / missing aws CLI / creds / transient net) must NEVER crash
+        # training. Before this guard, a bucket-guard RuntimeError propagated out of
+        # _save_checkpoint and killed the cell at step SAVE_FREQ after a full clean
+        # run (issue #63 signed-ema-b50 died at step 100). The local checkpoint is
+        # kept on any failure (the sink deletes local only AFTER a verified upload),
+        # so it can be hand-mirrored later. Log loud, then continue.
+        try:
+            self._maybe_upload_checkpoint_to_r2(local_global_step_folder)
+        except Exception as _r2_exc:  # noqa: BLE001 — best-effort mirror, never fatal
+            print(
+                f"[comm_eff][r2] WARN checkpoint R2 upload FAILED — kept LOCAL at "
+                f"{local_global_step_folder}; training continues. cause: {_r2_exc!r}",
+                flush=True,
+            )
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (

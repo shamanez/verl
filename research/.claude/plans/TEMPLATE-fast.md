@@ -11,6 +11,7 @@
 ```yaml
 issue: <N>
 slug: <kebab-slug>            # becomes runs/<N>-<slug>/, branch exp/<N>-<slug>, WandB group
+wandb_project: <N>-<kebab-slug>   # REQUIRED = run_id: every issue gets its OWN WandB project (never the shared legacy project) — runner exports PROJECT_NAME from this
 title: <issue title>          # one line — SUMMARY.md rows and the run-report page read it
 kind: experiment              # experiment|ablation|implementation|brainstorm|literature|analysis
 tier: fast
@@ -41,7 +42,12 @@ e.g. "signed_ema(α=0.25) at cadence 10/10 reaches val/score ≥ 0.72 at step 50
 
 ## Cells
 <Every cell name says method + key knob. Banned: c1, c2, armA-….
- Config delta = env/Hydra overrides on the canonical launcher only.>
+ Config delta = env/Hydra overrides on the canonical launcher only.
+ VAL_BEFORE_TRAIN policy (#63 2026-07-09): True ONLY for the FIRST cell on a
+ new surface (it smoke-tests the val parquet/reward-route/metric keys before
+ paid training). Every later cell starts from the SAME base checkpoint, so its
+ step-0 val is arm-invariant and already measured — set VAL_BEFORE_TRAIN=False
+ there (saves ~5 min/arm; at 16K/n16 each redundant val ≈ $1.5).>
 
 | cell | config delta vs `vast_comm_eff_accel_base_…sh` | passes when |
 |---|---|---|
@@ -53,6 +59,7 @@ e.g. "signed_ema(α=0.25) at cadence 10/10 reaches val/score ≥ 0.72 at step 50
  Default predicate applies: PASS iff all ✓; STOP if falsified/budget/depth;
  REVISE (≤ iterations) with next_actions. A clean symmetric negative is PASS.>
 
+- [ ] resource-feasibility probe (ONLY when model/response-length/rollout-n differ from the locked surface AND no perf_profiles entry matches): 1-2 steps, val off — peak GPU mem + s/step recorded BEFORE the matrix spends. For a comm-eff sweep the probe cell MUST be a COMM-EFF cell run past the first anchor refresh (≥ anchor.delay_K + 1 steps): the paired-replay refresh is the peak-memory event — #63's dense-only probe fit fine, then b50 OOM'd at step 10 (tick 20)
 - [ ] every cell reaches step <S> with no NaN / non-finite grads
 - [ ] <headline metric vs numeric target>
 - [ ] <comparison vs baseline_run within tolerance>

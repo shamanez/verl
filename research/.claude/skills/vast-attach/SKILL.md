@@ -29,7 +29,9 @@ bash .claude/skills/vast-attach/run.sh --instance-id <id> --ssh-host H --ssh-por
 | `--instance-id` | **required.** Vast id (ssh/gpu auto-resolved from the API) or any label for a non-Vast box |
 | `--exp-id` | run id to file under — use the canonical `<N>-<slug>` (default `ATTACH-<id>`) |
 | `--ssh-host/--ssh-port/--num-gpus` | explicit endpoint (auto-resolved for real Vast ids) |
-| `--account` | `team` \| `private` (default private) — stamped on handle+row; teardown reads it back |
+| `--account` | `team` \| `private` (default private) — API-auth account for teardown; INDEPENDENT of the ssh key (stamped on handle+row) |
+| `--ssh-identity <key>` | explicit ssh key for THIS box. Precedence: `--ssh-identity` > `VAST_SSH_IDENTITY` env > team-convention key (`~/.ssh/Vast-Team`, only if nothing explicit) > project default (`~/.ssh/vast_ai_name`). Use it for operator boxes on a non-default key (e.g. `~/.ssh/vast_ai`) — the API account does NOT imply the key |
+| `--need-r2` | warn-only preflight (at attach time) that the box has the `aws` CLI + R2 creds — for checkpoint→R2 runs, so the upload can't fail only at the final save. Skipped (with a NOTE) under `--no-probe` |
 | `--manual` | ledger `status:EXTERNAL`: tracked by vast-cost, **never auto-reaped**; teardown is YOUR explicit act |
 | `--max-gpu-hr` | budget backstop for the default (RUNNING) lifecycle; default 24 |
 | `--no-probe` | skip the ssh reachability probe (non-standard boxes) |

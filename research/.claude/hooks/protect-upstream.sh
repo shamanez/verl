@@ -38,7 +38,11 @@ print(os.path.realpath(os.path.abspath(p)))
 ' "$RAW_ABS" 2>/dev/null || echo "$RAW_ABS")
 
 # Canonicalize the anchor the same way so prefix comparison is symmetric.
-VERL_ROOT_RAW="${VERL_ROOT:-/Users/shamane/Documents/verl}"
+# Self-locating (#63 B6): this hook lives at <checkout>/research/.claude/hooks/,
+# so the verl root is three dirs up — never a hardcoded absolute path (a moved
+# checkout would silently guard the WRONG tree). $VERL_ROOT still overrides.
+_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+VERL_ROOT_RAW="${VERL_ROOT:-$(cd "$_HOOK_DIR/../../.." && pwd)}"
 VERL_ROOT=$(python3 -c '
 import os, sys; print(os.path.realpath(os.path.abspath(sys.argv[1])))
 ' "$VERL_ROOT_RAW" 2>/dev/null || echo "$VERL_ROOT_RAW")
@@ -75,7 +79,7 @@ on an exp/<ID>-<slug> branch — never on main or in the parent checkout.
 If the canonical path resolved OUTSIDE the raw path, you may be writing through
 a symlink — check whether the target is intended.
 
-If you are intending to change harness state, write under /Users/shamane/Documents/verl/research/ instead.
+If you are intending to change harness state, write under $RESEARCH_ROOT/ instead.
 EOF
     exit 2
     ;;

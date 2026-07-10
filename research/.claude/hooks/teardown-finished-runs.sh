@@ -78,7 +78,12 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   fi
   # 2. heartbeat stale / never appeared (RUNNING only). sync-metrics refreshes
   #    incoming.log mtime ONLY on content advance, so mtime == training progress.
-  if [[ "$STATUS" == "RUNNING" && -z "$REASON" ]]; then
+  #    OPERATOR_STOP sentinel (#63 B10): the operator stopped this run ON PURPOSE
+  #    (reconfigure/inspect) — heartbeat silence is EXPECTED, do NOT reap on it.
+  #    Budget trigger (3.) still applies: a stopped box still bills.
+  if [[ "$STATUS" == "RUNNING" && -z "$REASON" && -f "$PROJECT_DIR/runs/$ID/OPERATOR_STOP" ]]; then
+    :  # heartbeat triggers suppressed
+  elif [[ "$STATUS" == "RUNNING" && -z "$REASON" ]]; then
     HB="$PROJECT_DIR/runs/$ID/metrics/incoming.log"
     if [[ -f "$HB" ]]; then
       LAST_MOD=$(stat -f %m "$HB" 2>/dev/null || stat -c %Y "$HB" 2>/dev/null || echo 0)

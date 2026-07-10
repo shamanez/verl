@@ -54,7 +54,7 @@ report repo's gitignored `artifacts/<run_id>/`. Config: `project.yaml reports:`.
 ## Quick start
 
 ```bash
-cd /Users/shamane/Documents/verl/research && claude
+cd <your-checkout>/research && claude   # research/ of the CURRENT checkout (verify: bash .claude/hooks/check-workspace.sh)
 /build "does signed_ema α=0.4 hold parity at cadence 10/10?"   # → #N
 # fresh window: /plan <N>      (ends at your approve)
 # fresh window: /execute <N>   (runs to status:done)

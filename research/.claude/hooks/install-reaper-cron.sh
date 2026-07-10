@@ -29,7 +29,18 @@ current="$(crontab -l 2>/dev/null || true)"
 
 case "${1:-install}" in
   --status)
-    grep -F "$MARK" <<<"$current" || echo "reaper cron: NOT installed"
+    installed_line=$(grep -F "$MARK" <<<"$current" || true)
+    if [[ -z "$installed_line" ]]; then
+      echo "reaper cron: NOT installed"
+    else
+      echo "$installed_line"
+      # Drift check (#63 B3): the cron must point at THIS checkout, else it
+      # reaps the wrong ledger and every box provisioned here is unguarded.
+      if ! grep -qF "CLAUDE_PROJECT_DIR=$RESEARCH_DIR " <<<"$installed_line"; then
+        echo "reaper cron: WARN — installed path is NOT this checkout ($RESEARCH_DIR)." >&2
+        echo "reaper cron: WARN — reinstall from here: bash $0" >&2
+      fi
+    fi
     ;;
   --remove)
     if grep -qF "$MARK" <<<"$current"; then

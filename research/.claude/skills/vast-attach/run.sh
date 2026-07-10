@@ -20,7 +20,7 @@ LEDGER="$PROJECT_DIR/.claude/state/runs.jsonl"
 
 EXP_ID=""; INSTANCE_ID=""; SSH_HOST=""; SSH_PORT=""; NUM_GPUS=""
 GPU_NAME=""; GPU_RAM="0"; DPH="0"; ACCOUNT="private"; REGISTER=1
-MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0; ISSUE=""
+MANUAL=0; MAX_GPU_HR="24"; NO_PROBE=0; ISSUE=""; SSH_IDENTITY_FLAG=""; NEED_R2=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +36,8 @@ while [[ $# -gt 0 ]]; do
     --account)     ACCOUNT="$2"; shift 2 ;;
     --max-gpu-hr)  MAX_GPU_HR="$2"; shift 2 ;;
     --manual)      MANUAL=1; shift ;;        # status EXTERNAL: tracked, never auto-reaped
+    --ssh-identity) SSH_IDENTITY_FLAG="$2"; shift 2 ;;  # explicit key for THIS box (beats VAST_SSH_IDENTITY + team default)
+    --need-r2)     NEED_R2=1; shift ;;       # preflight aws CLI + R2 creds on the box (checkpoint→R2 runs)
     --no-probe)    NO_PROBE=1; shift ;;      # skip the ssh reachability probe (non-standard boxes)
     --no-register) REGISTER=0; shift ;;      # handle only, no ledger row at all
     -h|--help)     sed -n '1,80p' "$SKILL_DIR/SKILL.md"; exit 0 ;;
@@ -67,8 +69,15 @@ fi
 
 EXP_ID="${EXP_ID:-ATTACH-$INSTANCE_ID}"
 GPU_NAME="${GPU_NAME:-unknown}"
-IDENTITY="${VAST_SSH_IDENTITY:-$HOME/.ssh/vast_ai_name}"
-[[ "$ACCOUNT" == "team" && -f "$HOME/.ssh/Vast-Team" ]] && IDENTITY="$HOME/.ssh/Vast-Team"
+# SSH identity precedence (#63 B14): --ssh-identity > VAST_SSH_IDENTITY env >
+# team-convention key (only when NOTHING explicit was given) > project default.
+# The API account (teardown auth) and the ssh key are INDEPENDENT — an operator's
+# team box may use any key; never couple the two.
+IDENTITY="${SSH_IDENTITY_FLAG:-${VAST_SSH_IDENTITY:-}}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITY="$HOME/.ssh/vast_ai_name"
+  [[ "$ACCOUNT" == "team" && -f "$HOME/.ssh/Vast-Team" ]] && IDENTITY="$HOME/.ssh/Vast-Team"
+fi
 SSH_LOGIN="ssh -i $IDENTITY -o StrictHostKeyChecking=accept-new -p $SSH_PORT root@$SSH_HOST"
 
 # REACHABILITY PROBE — never hand the harness an unreachable box (bounded 30s).
@@ -81,14 +90,53 @@ if [[ "$NO_PROBE" != "1" ]]; then
   fi
 fi
 
+# R2-dependency preflight (#63 B11, hardened B5 2026-07-10): checkpoint→R2 fails
+# at the step-100 SAVE — mid-run, killing the cell — when the box lacks the aws
+# CLI, lacks/has-wrong R2 creds, the bucket is unwritable, OR R2_BUCKET mismatches
+# the verl code guard (r2_sink.py R2_REQUIRED_BUCKET). A `command -v aws` presence
+# check misses ALL of the last three. So do a REAL write test + a guard-match check.
+# Surface HERE, at attach time. WARN-only (the operator may fix later), but LOUD.
+if (( NEED_R2 )) && [[ "$NO_PROBE" != "1" ]]; then
+  R2CHK=$(timeout 60 ssh -i "$IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" '
+      command -v aws >/dev/null && echo AWS_OK || echo AWS_MISSING
+      S="$HOME/.config/verl-research/secrets.env"
+      grep -qE "^(export )?R2_ACCESS_KEY_ID=" "$S" 2>/dev/null && echo R2CREDS_OK || echo R2CREDS_MISSING
+      source "$S" 2>/dev/null
+      echo "R2_BUCKET=${R2_BUCKET:-<unset>}"
+      # code guard: the ckpt sink refuses any bucket != R2_REQUIRED_BUCKET
+      G=$(grep -hoE "R2_REQUIRED_BUCKET *= *\"[^\"]+\"" /workspace/verl/verl/workers/comm_eff/r2_sink.py 2>/dev/null | grep -oE "\"[^\"]+\"" | tr -d \")
+      [ -n "$G" ] && { [ "$G" = "${R2_BUCKET:-}" ] && echo "GUARD_MATCH" || echo "GUARD_MISMATCH(code=$G)"; } || echo "GUARD_UNKNOWN(no checkout yet)"
+      # REAL write test to R2_BUCKET via the exact path the sink uses (aws s3 cp)
+      if command -v aws >/dev/null && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCESS_KEY_ID:-}" ]; then
+        EP="${R2_ENDPOINT:-https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com}"
+        echo t > /tmp/_r2pf.txt
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+          aws s3 cp /tmp/_r2pf.txt "s3://$R2_BUCKET/autonomous-harness-rlvr-compression/_attach_writetest.txt" --endpoint-url "$EP" >/dev/null 2>&1 \
+          && echo R2_WRITE_OK || echo R2_WRITE_FAIL
+      else echo R2_WRITE_SKIPPED; fi
+      ' 2>/dev/null || echo "R2CHK_UNREACHABLE")
+  if echo "$R2CHK" | grep -qE "MISSING|UNREACHABLE|GUARD_MISMATCH|R2_WRITE_FAIL"; then
+    echo "vast-attach: WARN --need-r2 preflight FAILED: $(echo "$R2CHK" | tr '\n' ' ')" >&2
+    echo "vast-attach:   -> fix BEFORE the run reaches a checkpoint save (step SAVE_FREQ): install aws (pip install awscli), set R2_BUCKET to the code-guard bucket, verify creds/writability. A save crash kills the cell mid-run." >&2
+  else
+    echo "vast-attach: --need-r2 preflight OK: $(echo "$R2CHK" | tr '\n' ' ')" >&2
+  fi
+elif (( NEED_R2 )); then
+  # --no-probe silences the preflight; say so — silence must not read as "clean" (#63 B11 review).
+  echo "vast-attach: NOTE --need-r2 requested but --no-probe set — R2 preflight NOT run; verify aws CLI + R2 creds on the box by hand." >&2
+fi
+
 HANDLE=$(jq -nc \
   --arg iid "$INSTANCE_ID" --arg host "$SSH_HOST" --argjson port "$SSH_PORT" \
   --argjson ng "$NUM_GPUS" --arg gn "$GPU_NAME" --argjson gr "$GPU_RAM" \
   --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" \
   --arg label "$EXP_ID" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg ident "$IDENTITY" \
   '{schema_version:"1", instance_id:$iid, ssh_host:$host, ssh_port:$port,
     num_gpus:$ng, gpu_name:$gn, gpu_ram:$gr, dph_total:$dph, ssh_login:$login,
-    label:$label, vast_account:$acct, created_at:$t, external:true}')
+    ssh_identity:$ident, label:$label, vast_account:$acct, created_at:$t,
+    external:true}')
 
 # Handle lands in BOTH homes: the run dir (runner contract) and the shared
 # state dir (vast-teardown's account-resolution fallback scans it).
