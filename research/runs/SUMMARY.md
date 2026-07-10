@@ -7,6 +7,7 @@ WandB, and git history. LOG.md is retired — its rows were folded in here 2026-
 
 | id | date | verdict | headline | issue | PR |
 |---|---|---|---|---|---|
+| 64-middle-block-freeze-grpo | 2026-07-11 | PASS | C(block): GSM8K 0.985/0.948 (block carries ~all RL gain); Big-Math 0.618/0.553 (clean neg, ~half). L11-15 freeze, comm-eff OFF. Boxes 44365338->44376214 (1xH200 team)+disk-full recovery. WandB 64-middle-block-freeze-grpo | #64 | shamanez/verl#24 |
 | 63-deepscaler-r1d-signed-ema-k20 | 2026-07-10 | PASS (directional/truncated) | signed_ema β_anc=0.50 vs dense: b50 AIME@100 0.2125 vs dense 0.254 (within band+noise); train-reward parity; operator-cut. WandB 63-deepscaler-r1d-signed-ema-k20; box 44208646 TORN_DOWN | #63 | shamanez/verl#22 |
 | 62-rlvr-models-datasets | 2026-07-07 | PASS | RLVR models+datasets enablement: 8/8 tokenizers, 5/5 schemas, 25/25 reward-preflight (CPU money gate), 25/25 GPU smoke cells non-null + no NaN, dense parity byte-identical. 5 test models × 5 math datasets; 3 integrate-only 7B/8B (CPU load). | #62 | shamanez/verl#21 |
 | EXP-61 | 2026-07-04 | PASS | [M4] Math-only projector ablation: best = adaptive_linear rolling_ls_k K=3 @ Δ*=1,h=1 (ratio 0.9888); deploy fixed damped_linear at freshest anchor; do-nothing optimal at op — confirms dataset-specific | #61 | — |
