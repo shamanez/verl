@@ -58,23 +58,22 @@ fi
 #    engine's WARNING + trainable-count log flag it before spend).
 # ---------------------------------------------------------------------------
 cd /workspace
-if [[ -f "$BUNDLE" ]]; then
-  echo "=== code_change: cloning exp/64 from $BUNDLE ==="
-  [[ -e "$VERL_DIR" ]] && mv "$VERL_DIR" "${VERL_DIR}.upstream.$(date +%s)"
+[[ -e "$VERL_DIR" ]] && mv "$VERL_DIR" "${VERL_DIR}.upstream.$(date +%s)"
+# code_change:true — the exp/64 freeze hook MUST be the verl SOURCE. Clone the
+# pushed branch straight from GitHub: the box has a fast datacenter link + access
+# (verified via git ls-remote), so there is NO 1.3 GB bundle upload from the
+# laptop. exp.bundle is only a crash-survival fallback if GitHub is unreachable.
+if git clone -b "$EXP_BRANCH" https://github.com/shamanez/verl.git "$VERL_DIR"; then
+  echo "=== code_change: cloned $EXP_BRANCH from GitHub ==="
+elif [[ -f "$BUNDLE" ]]; then
+  echo "=== GitHub clone failed — falling back to bundle $BUNDLE ==="
   git clone -b "$EXP_BRANCH" "$BUNDLE" "$VERL_DIR"
-  cd "$VERL_DIR"
-  git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
 else
-  echo "WARN: $BUNDLE absent — falling back to $BASE_BRANCH (freeze hook may be MISSING)." >&2
-  if [[ ! -d "$VERL_DIR/.git" ]]; then
-    [[ -e "$VERL_DIR" ]] && mv "$VERL_DIR" "${VERL_DIR}.stale.$(date +%s)"
-    git clone https://github.com/shamanez/verl.git "$VERL_DIR"
-  fi
-  cd "$VERL_DIR"
-  git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-  git fetch origin "$BASE_BRANCH"
-  git checkout -B "$BASE_BRANCH" FETCH_HEAD
+  echo "FATAL: cannot obtain $EXP_BRANCH (GitHub unreachable AND no bundle) — refusing to spend." >&2
+  exit 1
 fi
+cd "$VERL_DIR"
+git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
 CUR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "=== verl @ $(git rev-parse --short HEAD) (branch=$CUR) ==="
 # Editable install so the exp/64 source (freeze hook) is what runs.

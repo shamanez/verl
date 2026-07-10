@@ -18,3 +18,4 @@ Resume with:
   /execute 64 --gpu auto               # harness provisions (default ladder)
 
 Note for /analyze: C(block) needs operator-supplied S_base (base Qwen2.5-1.5B-Instruct GSM8K + Big-Math val-core scores) — VAL_BEFORE_TRAIN=False, so S_base is not measured at step 0.
+[2026-07-10T12:28:35+10:00] LAUNCHED: #64 run-64 on box 44365338 (1xH200, team) — GitHub-clone bootstrap (no bundle upload); 2 cells gsm8k->bigmath
