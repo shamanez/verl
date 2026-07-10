@@ -2,7 +2,7 @@
   "issue": 64,
   "run_id": "64-middle-block-freeze-grpo",
   "slug": "middle-block-freeze-grpo",
-  "title": "Blockwise-freeze GRPO: train only the middle block (L11–15) for 75 steps on GSM8K + Big-Math",
+  "title": "Blockwise-freeze GRPO: train only the middle block (L11\u201315) for 75 steps on GSM8K + Big-Math",
   "kind": "experiment",
   "branch": "exp/64-middle-block-freeze-grpo",
   "base_branch": "autonomous-harness-v1",
@@ -16,7 +16,7 @@
   "milestone": "none",
   "promote_launcher_as": "none",
   "baseline_run": "baseline",
-  "iterations": 4,
+  "iterations": 8,
   "tmux_session": "run-64",
   "remote_log": "/workspace/runs/64-middle-block-freeze-grpo/train.log",
   "remote_run_dir": "/workspace/runs/64-middle-block-freeze-grpo",
@@ -39,117 +39,92 @@
   },
   "cells": [
     {
-      "name": "freeze-block-l11-15-gsm8k",
-      "wandb_name": "64-freeze-block-l11-15-gsm8k",
+      "name": "frozen-gsm8k-s42",
+      "wandb_name": "64-frozen-gsm8k-s42",
+      "arm": "frozen",
       "dataset": "gsm8k",
+      "seed": 42,
       "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel (resp=1024, prompt=1024, dyn-bsz); dense ref S_full=0.7657 measured here",
-      "overrides": {
-        "env": {
-          "TRAIN_LAYERS": "11-15",
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "dense = comm-eff OFF. The accel wrapper hard-exports COMM_EFF_ENABLED=true, so the ENV switch is overridden; the trailing Hydra override actor_rollout_ref.actor.comm_eff.enabled=false is the real dense switch (both launchers pass \"$@\" LAST => last-wins)."
-      },
-      "passes_when": "C(block) = (S_block - S_base)/(0.7657 - S_base) >= 0.80 [PASS] or < 0.80 [clean negative]",
-      "val_core_key": "val-core/openai/gsm8k/{acc|reward}/mean@N"
+      "train_layers": "11-15",
+      "val_core_key": "val-core/openai/gsm8k/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
     },
     {
-      "name": "freeze-block-l11-15-bigmath",
-      "wandb_name": "64-freeze-block-l11-15-bigmath",
-      "dataset": "bigmath (HF gshasiri/Big-Math-RL-Verified-filtered; data_source=DigitalLearningGmbH/MATH-lighteval)",
-      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel speed knobs at resp=4096, prompt=1024 (the accel WRAPPER hard-pins resp=1024 so cannot host Big-Math)",
-      "data_prep": "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42 (run by launch.sh before the cell)",
-      "overrides": {
-        "env": {
-          "COMM_EFF_ENABLED": "false",
-          "TRAIN_LAYERS": "11-15",
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False",
-          "USE_DYNAMIC_BSZ": "True",
-          "ROLLOUT_TP": "1",
-          "ROLLOUT_GPU_MEM_UTIL": "0.55",
-          "PPO_MAX_TOKEN_LEN_PER_GPU": "24576",
-          "TRAIN_BATCH_SIZE": "128",
-          "PPO_MINI_BATCH_SIZE": "64",
-          "ROLLOUT_N": "8",
-          "ACTOR_LR": "1e-6",
-          "COMM_EFF_CAPTURE_ENABLED": "false",
-          "MAX_RESPONSE_LENGTH": "4096",
-          "MAX_PROMPT_LENGTH": "1024",
-          "DATA_DIR": "/root/data/bigmath"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "PPO_MAX_TOKEN_LEN_PER_GPU=24576 >= max_prompt+max_response = 5120 (one-sequence floor). USE_DYNAMIC_BSZ defaults False in this launcher => set True explicitly."
-      },
-      "passes_when": "fallback S_block - S_base > +0.03 (S_full unrecorded for Big-Math; C target >= 0.80 if S_full later supplied)",
-      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N"
-    },
-    {
-      "name": "dense-gsm8k",
-      "wandb_name": "64-dense-gsm8k",
+      "name": "frozen-gsm8k-s7",
+      "wandb_name": "64-frozen-gsm8k-s7",
+      "arm": "frozen",
       "dataset": "gsm8k",
+      "seed": 7,
       "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel (resp=1024, prompt=1024, dyn-bsz) — SAME surface as freeze-block-l11-15-gsm8k",
-      "arm": "dense control (full-parameter; NO TRAIN_LAYERS ⇒ freeze hook no-ops ⇒ all 1.54B params train)",
-      "overrides": {
-        "env": {
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "dense = comm-eff OFF (Hydra last-wins over the accel wrapper's forced COMM_EFF_ENABLED=true) AND no TRAIN_LAYERS. Only delta vs freeze-block-l11-15-gsm8k is the absent TRAIN_LAYERS ⇒ apples-to-apples S_full on the freeze surface.",
-        "launched_by": "launch_dense.sh (cell dense-gsm8k), tmux run-64-dense, on box 44365338 after the freeze cells"
-      },
-      "role": "S_full (GSM8K) — fresh in-run full-param dense; validates/replaces the 0.7657 fixed ref",
-      "val_core_key": "val-core/openai/gsm8k/{acc|reward}/mean@N"
+      "train_layers": "11-15",
+      "val_core_key": "val-core/openai/gsm8k/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
     },
     {
-      "name": "dense-bigmath",
-      "wandb_name": "64-dense-bigmath",
-      "dataset": "bigmath (HF gshasiri/Big-Math-RL-Verified-filtered; data_source=DigitalLearningGmbH/MATH-lighteval)",
+      "name": "dense-gsm8k-s42",
+      "wandb_name": "64-dense-gsm8k-s42",
+      "arm": "dense",
+      "dataset": "gsm8k",
+      "seed": 42,
+      "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
+      "train_layers": null,
+      "val_core_key": "val-core/openai/gsm8k/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
+    },
+    {
+      "name": "dense-gsm8k-s7",
+      "wandb_name": "64-dense-gsm8k-s7",
+      "arm": "dense",
+      "dataset": "gsm8k",
+      "seed": 7,
+      "launcher": "examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh",
+      "train_layers": null,
+      "val_core_key": "val-core/openai/gsm8k/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
+    },
+    {
+      "name": "frozen-bigmath-s42",
+      "wandb_name": "64-frozen-bigmath-s42",
+      "arm": "frozen",
+      "dataset": "bigmath",
+      "seed": 42,
       "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
-      "surface": "accel speed knobs at resp=4096, prompt=1024 — SAME surface as freeze-block-l11-15-bigmath",
-      "arm": "dense control (full-parameter; NO TRAIN_LAYERS)",
-      "overrides": {
-        "env": {
-          "COMM_EFF_ENABLED": "false",
-          "TOTAL_TRAINING_STEPS": "75",
-          "TEST_FREQ": "25",
-          "VAL_BEFORE_TRAIN": "False",
-          "USE_DYNAMIC_BSZ": "True",
-          "ROLLOUT_TP": "1",
-          "ROLLOUT_GPU_MEM_UTIL": "0.55",
-          "PPO_MAX_TOKEN_LEN_PER_GPU": "24576",
-          "TRAIN_BATCH_SIZE": "128",
-          "PPO_MINI_BATCH_SIZE": "64",
-          "ROLLOUT_N": "8",
-          "ACTOR_LR": "1e-6",
-          "COMM_EFF_CAPTURE_ENABLED": "false",
-          "MAX_RESPONSE_LENGTH": "4096",
-          "MAX_PROMPT_LENGTH": "1024",
-          "DATA_DIR": "/root/data/bigmath"
-        },
-        "hydra": [
-          "actor_rollout_ref.actor.comm_eff.enabled=false"
-        ],
-        "note": "Only delta vs freeze-block-l11-15-bigmath is the absent TRAIN_LAYERS. Supplies the Big-Math S_full that EXP-58 never recorded.",
-        "launched_by": "launch_dense.sh (cell dense-bigmath), tmux run-64-dense"
-      },
-      "role": "S_full (Big-Math) — the previously-missing full-param dense reference; makes C(block) computable for Big-Math (was fallback-only)",
-      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N"
+      "train_layers": "11-15",
+      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
+    },
+    {
+      "name": "frozen-bigmath-s7",
+      "wandb_name": "64-frozen-bigmath-s7",
+      "arm": "frozen",
+      "dataset": "bigmath",
+      "seed": 7,
+      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
+      "train_layers": "11-15",
+      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
+    },
+    {
+      "name": "dense-bigmath-s42",
+      "wandb_name": "64-dense-bigmath-s42",
+      "arm": "dense",
+      "dataset": "bigmath",
+      "seed": 42,
+      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
+      "train_layers": null,
+      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
+    },
+    {
+      "name": "dense-bigmath-s7",
+      "wandb_name": "64-dense-bigmath-s7",
+      "arm": "dense",
+      "dataset": "bigmath",
+      "seed": 7,
+      "launcher": "examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh",
+      "train_layers": null,
+      "val_core_key": "val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1",
+      "note": "frozen=train only decoder L11-15; dense=full-param (no TRAIN_LAYERS). comm-eff OFF. data.seed varies the replicate. Runs on exp/64-dense-wandbfix (native step-75 vals)."
     }
   ],
   "cblock_provenance": {
@@ -168,17 +143,13 @@
     "note": "C(block) is UNCOMPUTABLE until S_base lands. The analyst blocks on the operator-supplied S_base, never guesses."
   },
   "success_criteria": [
-    "resource-feasibility: by-reference-to-EXP-58; ≤2-step freeze-smoke confirms no-OOM/no-NaN under both shapes before the matrix spends (no separate probe cell).",
-    "freeze-correctness: trainable-param count ≈ 5/28 of decoder-layer params; only L11–15 requires_grad; embed/lm_head/final-norm frozen (logged pre-FSDP).",
-    "frozen-weight immutability: sampled frozen tensors unchanged after step 1; grad None/zero on all frozen params, non-None only on L11–15.",
-    "both cells reach step 75 with no NaN / non-finite grads.",
-    "GSM8K: with operator-supplied S_base, C = (S_block − S_base)/(0.7657 − S_base) ≥ 0.80 [PASS] or < 0.80 [clean negative].",
-    "clarification_needed (S_base): VAL_BEFORE_TRAIN=False per operator ⇒ S_base not measured. Operator supplies recorded base Qwen2.5-1.5B-Instruct GSM8K + Big-Math val-core scores; analyst plugs in, never guesses.",
-    "RESOLVED (Big-Math S_full): dense-bigmath (this run) supplies the full-param Big-Math S_full ⇒ C(block)_bigmath = (S_block − S_base)/(S_full_bigmath − S_base) is now computable; the +0.03 fallback is the backstop only if dense-bigmath fails.",
-    "APPLES-TO-APPLES dense arm added: dense-gsm8k gives a fresh in-run GSM8K S_full on the freeze surface (cross-checks the 0.7657 ref; use the in-run value for C to remove cross-run confound); dense-bigmath gives the Big-Math S_full. Both = full-param (no TRAIN_LAYERS), comm-eff OFF, same box/code/data.",
-    "Freeze-vs-dense comparison per dataset: report S_freeze, S_dense(=S_full), S_base, and C(block); PASS if C ≥ 0.80 (block carries the RL gain) or a clean symmetric negative."
+    "All 8 matrix cells reach step 75 with no NaN/non-finite grads; step-75 val lands in wandb natively (Tracking.finish / #65).",
+    "freeze-correctness (frozen cells): TRAIN_LAYERS=11-15 => ~15% params trainable (verify via optimizer ckpt = 60 tensors / ~234M if in doubt; the logger.info marker is not captured \u2014 see memory).",
+    "Per dataset, per seed: C(block,seed) = (S_frozen - S_base)/(S_dense - S_base). Report C at seed 42 and 7 => a 2-point spread (seed error bar). PASS if C>=0.80 on BOTH seeds (block carries the RL gain) or a clean symmetric negative on both.",
+    "S_dense = the fresh dense-<dataset>-s<seed> step-75 val (GSM8K AND Big-Math now both measured natively; the old 0.7657 fixed ref + the old frozen 0.7627/0.568 are cross-checks).",
+    "clarification_needed (S_base): operator-supplied base Qwen2.5-1.5B-Instruct GSM8K + Big-Math val-core scores (VAL_BEFORE_TRAIN=False on all cells). Analyst plugs in per dataset; same S_base across seeds/arms."
   ],
-  "pass_rule": "PASS iff all ✓; a clean symmetric negative (C < 0.80 with gates green) is PASS.",
+  "pass_rule": "PASS iff all \u2713; a clean symmetric negative (C < 0.80 with gates green) is PASS.",
   "verification_command": "python scripts/analyze.py runs/64-middle-block-freeze-grpo --emit verdict.md",
   "dense_control_added": {
     "by": "operator directive 2026-07-10 (apples-to-apples full-param dense vs block-freeze)",
@@ -187,5 +158,20 @@
     "logs": "train_dense.log + train_dense-<cell>.log",
     "done_flag": "done_dense.flag",
     "note": "Runs after the freeze cells on the SAME box 44365338 (warm: verl exp/64 + gsm8k+bigmath data already present). dense cell = freeze cell minus TRAIN_LAYERS."
+  },
+  "matrix": {
+    "design": "2x2x2 = {frozen,dense} x {gsm8k,bigmath} x {data.seed 42,7}. Only the freeze (TRAIN_LAYERS) and data.seed differ within a dataset. All on box 44376214, branch exp/64-dense-wandbfix.",
+    "launch_script": "runs/64-middle-block-freeze-grpo/launch_matrix.sh",
+    "tmux": "run-64-matrix",
+    "done_flag": "done_matrix.flag",
+    "seeds": {
+      "s42": "data.seed=42",
+      "s7": "data.seed=7"
+    }
+  },
+  "cross_check": {
+    "note": "first-attempt frozen cells on the OLD box (exp/64, data.seed=null, wandb-backfilled) \u2014 loose cross-check vs the fresh s42 cells, not part of the controlled 2-seed matrix.",
+    "frozen-gsm8k (old)": 0.7626990144048522,
+    "frozen-bigmath (old)": 0.568
   }
 }
