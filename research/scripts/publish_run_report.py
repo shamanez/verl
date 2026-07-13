@@ -316,8 +316,11 @@ def main():
     verdict = parse_verdict(close_md, verdict_md)
     pr_m = re.search(r"https://github\.com/[\w./-]+/pull/\d+", close_md or "")
     pr_url = pr_m.group(0) if pr_m else ""
-    wandb_url = (f"https://wandb.ai/{wandb_entity}/{wandb_project}/groups/{run_id}"
-                 if wandb_entity and wandb_project else "")
+    # WandB uses a PER-ISSUE project == run_id (the launcher exports PROJECT_NAME=$RUN_ID
+    # and WANDB_RUN_GROUP=$RUN_ID). project.yaml wandb.project is the GLOBAL default, NOT
+    # what per-issue runs log to, so link the per-issue project view directly.
+    wandb_url = (f"https://wandb.ai/{wandb_entity}/{run_id}"
+                 if wandb_entity else "")
     one_liner = ""
     if close_md:
         for ln in close_md.splitlines():
