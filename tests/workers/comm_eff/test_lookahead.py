@@ -15,23 +15,22 @@
 """CPU unit tests for the look-ahead (weight-projection) anchor module.
 
 Loads ``lookahead.py`` by file path (it depends only on torch + stdlib, so no
-package stubs are needed). Pins the M4 projector invariants:
+package stubs are needed). Pins the M4 fixed-linear projector invariants:
 
 1. **Generalized horizon math** — ``project(sources, ticks, fire_tick)``
    recovers a synthetic LINEAR weight trajectory EXACTLY at any ``(h, g)``,
    including ``h != g`` (the original naive-linear bug: the frozen seed
-   ``(2, -1)`` lands on the fire tick only when cadence == delay_K).
+   ``(2, -1)`` lands on the fire tick only when cadence == delay_K). This is the
+   RLVR-linearity paper's Eq 4 weight-space extrapolation (arXiv:2601.04537).
 2. **Seed reduction** — at ``h == g`` the generalized coefficients equal the
    frozen AsyncPP seed, and the tick-less fallback produces the identical
    ``theta_hat`` (operating-point behavior unchanged).
 3. **Exclusion set** — non-target and non-2D params take ``S0`` verbatim
    (the LayerNorm/embedding exclusion), by reference.
 4. **True-tick ring** — eviction bound, newest-first ``sources()``,
-   ``get()`` exact-match lookup, same-tick overwrite.
+   ``get()`` exact-match lookup, same-tick overwrite, min_points relaxation.
 5. **Rollout-source resolver** — ``auto`` resolves by projector state;
    explicit values pass through untouched.
-6. **Learned mode** — cold start is byte-identical to fixed-linear; the
-   retrospective residual is bounded and folded in.
 """
 
 import importlib.util
@@ -184,15 +183,11 @@ def test_ring_true_tick_keying_bound_and_sources():
 
 def test_lookahead_min_points_helper():
     """lookahead_min_snapshots resolution: -1 -> mode n_points; concrete pass-through; disabled -> 0."""
-    # Learned mode: n_points=3; default (-1) -> 3; explicit 2 -> 2.
-    learned = _cfg(mode="learned_linear_with_fixed_linear_cold_start")
-    assert _la.lookahead_num_source_points(learned) == 3
-    assert _la.lookahead_min_points(learned) == 3  # min_snapshots defaults to -1
-    learned.lookahead_min_snapshots = 2
-    assert _la.lookahead_min_points(learned) == 2
-    # Fixed mode: n_points=2; default -> 2.
     fixed = _cfg(mode="fixed_linear")
-    assert _la.lookahead_min_points(fixed) == 2
+    assert _la.lookahead_num_source_points(fixed) == 2
+    assert _la.lookahead_min_points(fixed) == 2  # min_snapshots defaults to -1
+    fixed.lookahead_min_snapshots = 2
+    assert _la.lookahead_min_points(fixed) == 2  # concrete value passes through
     # Disabled -> 0 regardless of the knob.
     off = _cfg(enabled=False)
     off.lookahead_min_snapshots = 2
@@ -202,18 +197,18 @@ def test_lookahead_min_points_helper():
 def test_ring_min_points_ready_early_but_retains_full():
     """min_points relaxes readiness (project at fire 2) while retention stays n_points.
 
-    Learned mode: n_points=3, min_points=2. ready() at 2 snapshots; sources()
-    then returns the 2 newest (compute_theta_hat handles s2=None); once a 3rd
-    arrives, retention is still bounded at 3 and sources() returns all 3.
+    Pure container behavior at n_points=3, min_points=2: ready() at 2 snapshots;
+    sources() then returns the 2 newest (compute_theta_hat handles the 2-source
+    case); once a 3rd arrives, retention is still bounded at 3.
     """
-    ring = _la.LookaheadSnapshotRing(n_points=3, keep_theta_hat=True, min_points=2)
+    ring = _la.LookaheadSnapshotRing(n_points=3, min_points=2)
     assert not ring.ready()  # 0 of 2
     ring.push(0, {"w": torch.tensor(0.0)})
     assert not ring.ready()  # 1 of 2
     ring.push(20, {"w": torch.tensor(20.0)})
     assert ring.ready()  # 2 of 2 -> the earliest legal (fire 2) projection
     snaps, ticks = ring.sources()
-    assert ticks == [20, 0] and len(snaps) == 2  # 2 sources legal (s2=None)
+    assert ticks == [20, 0] and len(snaps) == 2  # 2 sources legal
     ring.push(40, {"w": torch.tensor(40.0)})  # 3rd point; retention bound = n_points=3
     assert ring.ticks == [0, 20, 40]
     snaps, ticks = ring.sources()
@@ -236,17 +231,6 @@ def test_ring_min_points_bounds_asserted():
     assert not ring.ready()  # 2 of 3 -> NOT ready under the default threshold
 
 
-def test_ring_keeps_prev_theta_hat_only_when_asked():
-    ring = _la.LookaheadSnapshotRing(n_points=2, keep_theta_hat=False)
-    ring.set_prev_theta_hat(40, {"w": torch.tensor(0.0)})
-    assert ring.prev_theta_hat() == (None, -1)
-    ring = _la.LookaheadSnapshotRing(n_points=3, keep_theta_hat=True)
-    ring.set_prev_theta_hat(40, {"w": torch.tensor(0.0)})
-    hat, tick = ring.prev_theta_hat()
-    assert hat is not None and tick == 40
-    assert ring.total_retained() == 1  # counted in the memory report
-
-
 # =========================================================================== #
 # 5. Rollout-source resolver
 # =========================================================================== #
@@ -263,43 +247,6 @@ def test_resolver_explicit_values_pass_through():
 
 
 # =========================================================================== #
-# 6. Learned mode
-# =========================================================================== #
-def test_learned_cold_start_is_byte_identical_to_fixed_linear():
-    base, drift = _make_params()
-    sources = [_snap_at(30, base, drift), _snap_at(20, base, drift), _snap_at(10, base, drift)]
-    fixed = _la.LookaheadProjector(_cfg(mode="fixed_linear"), TARGETS)
-    learned = _la.LookaheadProjector(
-        _cfg(mode="learned_linear_with_fixed_linear_cold_start"), TARGETS
-    )
-    hat_f, _, _ = fixed.project(sources[:2], ticks=[30, 20], fire_tick=40)
-    hat_l, _, _ = learned.project(sources, ticks=[30, 20, 10], fire_tick=40)
-    for name in hat_f:
-        torch.testing.assert_close(hat_f[name], hat_l[name], rtol=0, atol=0)
-
-
-def test_learned_residual_update_is_bounded_and_folded_in():
-    base, drift = _make_params()
-    learned = _la.LookaheadProjector(
-        _cfg(mode="learned_linear_with_fixed_linear_cold_start"), TARGETS
-    )
-    name = "layers.0.q_proj.weight"
-    theta_hat_prev = {name: base[name].clone()}
-    # Huge retrospective error -> the residual must CLIP at 1e-3, not blow up.
-    theta_true_prev = {name: base[name] + 5.0}
-    residual = learned.update_from_retrospective(theta_true_prev, theta_hat_prev)
-    assert residual[name] == pytest.approx(1.0e-3)
-    vec = learned.residual_vector()
-    assert vec.numel() == 1 and float(vec[0]) == pytest.approx(1.0e-3)
-    # project() folds the residual into targets only.
-    sources = [_snap_at(30, base, drift), _snap_at(20, base, drift), _snap_at(10, base, drift)]
-    hat, _, _ = learned.project(sources, ticks=[30, 20, 10], fire_tick=40)
-    fixed = _la.LookaheadProjector(_cfg(mode="fixed_linear"), TARGETS)
-    hat_f, _, _ = fixed.project(sources[:2], ticks=[30, 20], fire_tick=40)
-    torch.testing.assert_close(hat[name], hat_f[name] + 1.0e-3, rtol=1e-6, atol=1e-7)
-
-
-# =========================================================================== #
 # Predicates
 # =========================================================================== #
 def test_enable_predicates_require_both_flags():
@@ -308,5 +255,4 @@ def test_enable_predicates_require_both_flags():
     assert not _la.lookahead_enabled(_cfg(enabled=True, mode="disabled"))
     assert not _la.lookahead_enabled(None)
     assert _la.lookahead_num_source_points(_cfg(mode="fixed_linear")) == 2
-    assert _la.lookahead_num_source_points(_cfg(mode="learned_linear_with_fixed_linear_cold_start")) == 3
     assert _la.lookahead_num_source_points(_cfg(enabled=False)) == 0

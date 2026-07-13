@@ -664,11 +664,11 @@ class TestWarmupModeKnobs(unittest.TestCase):
     """
 
     def _projector(self, **kw):
-        """A learned-mode projector-on anchor (n_points=3) with overrides."""
+        """A fixed_linear projector-on anchor (n_points=2) with overrides."""
         base = dict(
             enabled=True,
             lookahead_anchor=True,
-            lookahead_mode="learned_linear_with_fixed_linear_cold_start",
+            lookahead_mode="fixed_linear",
             owns_q=False,
         )
         base.update(kw)
@@ -702,21 +702,12 @@ class TestWarmupModeKnobs(unittest.TestCase):
             CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=2))
 
     def test_min_snapshots_range_validated(self):
-        # Learned mode n_points=3: 2 and 3 legal, 1 and 4 rejected.
-        for good in (2, 3):
-            cfg = CommEffConfig(anchor=self._projector(lookahead_min_snapshots=good))
-            self.assertEqual(cfg.anchor.lookahead_min_snapshots, good)
-        for bad in (1, 4):
+        # fixed_linear n_points=2: only 2 is legal; 1 and 3 are rejected.
+        cfg = CommEffConfig(anchor=self._projector(lookahead_min_snapshots=2))
+        self.assertEqual(cfg.anchor.lookahead_min_snapshots, 2)
+        for bad in (1, 3):
             with self.assertRaisesRegex(ValueError, "lookahead_min_snapshots must be"):
                 CommEffConfig(anchor=self._projector(lookahead_min_snapshots=bad))
-        # Fixed mode n_points=2: only 2 legal, 3 rejected.
-        fixed = dict(enabled=True, lookahead_anchor=True, lookahead_mode="fixed_linear", owns_q=False)
-        self.assertEqual(
-            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=2, **fixed)).anchor.lookahead_min_snapshots,
-            2,
-        )
-        with self.assertRaisesRegex(ValueError, "lookahead_min_snapshots must be"):
-            CommEffConfig(anchor=CommEffAnchorConfig(lookahead_min_snapshots=3, **fixed))
 
     def test_c1_arm_config_constructs(self):
         """The exact C1 arm shape (no_correct + min_snaps=2 + owns_q=false)."""

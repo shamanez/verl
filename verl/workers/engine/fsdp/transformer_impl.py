@@ -1570,9 +1570,7 @@ class FSDPEngine(BaseEngine):
         from verl.workers.comm_eff.lookahead import (
             LookaheadProjector,
             LookaheadSnapshotRing,
-            cross_rank_max_rel_dev,
             lookahead_enabled,
-            lookahead_learns,
             lookahead_min_points,
             lookahead_num_source_points,
             resolve_lookahead_rollout_source,
@@ -1828,7 +1826,6 @@ class FSDPEngine(BaseEngine):
             if la_ring is None:
                 la_ring = LookaheadSnapshotRing(
                     n_points=lookahead_num_source_points(anchor_cfg),
-                    keep_theta_hat=lookahead_learns(anchor_cfg),
                     min_points=lookahead_min_points(anchor_cfg),
                 )
                 state._lookahead_ring = la_ring
@@ -1844,9 +1841,8 @@ class FSDPEngine(BaseEngine):
             # point vLLM sampled the step-t rollouts from), NOT the fire tick:
             # targeting the fire tick overshoots the generator by the fire's
             # within-step offset (realized coeffs drift off the documented
-            # (2,-1) seed) and mis-keys the learned mode's retrospective lookup
-            # so the residual never updates. Legacy (non-replay) mode has no
-            # generator-snapshot concept -> target the fire tick.
+            # (2,-1) seed). Legacy (non-replay) mode has no generator-snapshot
+            # concept -> target the fire tick.
             _la_target_tick = int(step)
             if replay_mode:
                 _gs_gen_tick = ring.snapshot_tick(_gs_now)
@@ -1854,35 +1850,11 @@ class FSDPEngine(BaseEngine):
                     _la_target_tick = _gs_gen_tick
             _la_snaps, _la_ticks = la_ring.sources()
             if _la_snaps is not None:
-                # Learned mode: retrospective residual update BEFORE projecting.
-                # The prior fire's theta_hat predicted theta[t_prev_fire]; its
-                # exact ground truth is in the ring iff a source's true tick
-                # equals t_prev_fire (at cadence == delay_K that is THIS fire's
-                # freshly-pushed S0). Exact-match only — never the live weights
-                # (no-peek: only >=K-stale data feeds the projector).
-                if lookahead_learns(anchor_cfg):
-                    _prev_hat, _prev_fire_tick = la_ring.prev_theta_hat()
-                    _theta_true_prev = la_ring.get(_prev_fire_tick) if _prev_hat is not None else None
-                    if _prev_hat is not None and _theta_true_prev is not None:
-                        la_projector.update_from_retrospective(_theta_true_prev, _prev_hat)
-                        _res_dev = cross_rank_max_rel_dev(la_projector.residual_vector())
-                        if _res_dev is not None:
-                            print(
-                                f"[comm_eff][lookahead] step={step} learned-residual "
-                                f"cross_rank_max_rel_dev={_res_dev:.3e} (must be ~0)",
-                                flush=True,
-                            )
                 theta_hat, _la_excluded, _la_info = la_projector.project(
                     _la_snaps, ticks=_la_ticks, fire_tick=_la_target_tick
                 )
                 load_weights = theta_hat
                 _la_active = True
-                if lookahead_learns(anchor_cfg):
-                    # Keyed by the projection TARGET tick: the next fire's
-                    # freshly-pushed source snapshot carries exactly this true
-                    # tick (at cadence == delay_K), so la_ring.get() can hand
-                    # the retrospective update its exact ground truth.
-                    la_ring.set_prev_theta_hat(_la_target_tick, theta_hat)
                 state.lookahead_fires = int(getattr(state, "lookahead_fires", 0)) + 1
                 print(
                     f"[comm_eff][lookahead] step={step} mode={getattr(anchor_cfg, 'lookahead_mode', '?')} "

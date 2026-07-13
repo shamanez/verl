@@ -139,11 +139,9 @@ class CommEffAnchorConfig(BaseConfig):
             identical to today. See ``verl/workers/comm_eff/lookahead.py``.
         lookahead_mode (str): ``"disabled"`` (default) | ``"fixed_linear"``
             (frozen AsyncPP seed: pure linear extrapolation over the recorded
-            snapshot ticks) | ``"learned_linear_with_fixed_linear_cold_start"``
-            (same seed plus a small per-block residual trained ONLY from
-            retrospective prediction errors — the no-peek invariant). A stray
-            ``lookahead_anchor=true`` with ``lookahead_mode=disabled`` (or
-            vice-versa) is inert by design.
+            snapshot ticks — the RLVR-linearity paper's Eq 4 weight-space
+            extrapolation, arXiv:2601.04537). A stray ``lookahead_anchor=true``
+            with ``lookahead_mode=disabled`` (or vice-versa) is inert by design.
         lookahead_strength (float): Projection horizon multiplier ``alpha``.
             ``1.0`` (default) projects the full realized horizon (catch-up to
             the current tick); ``<1`` projects a shorter horizon; ``0`` degrades
@@ -175,13 +173,11 @@ class CommEffAnchorConfig(BaseConfig):
             {stale_correct, no_correct}.
         lookahead_min_snapshots (int): Minimum ring snapshots required before the
             projector engages. ``-1`` (DEFAULT): the mode's full source count
-            (2 for fixed_linear, 3 for the learned mode) — today's behavior. A
-            concrete value in ``[2, mode_n_points]`` lets the projector engage at
-            the earliest mathematically-legal fire: ``2`` projects from fire 2
-            (the first fire at which two ``>=K``-stale snapshots exist — fire 1
-            can NEVER project, a line needs 2 points). Retention is unchanged
-            (the ring still holds ``mode_n_points`` for the learned residual);
-            only readiness is relaxed. Requires the projector enabled.
+            (2 for fixed_linear) — today's behavior. A concrete value in
+            ``[2, mode_n_points]`` lets the projector engage at the earliest
+            mathematically-legal fire: ``2`` projects from fire 2 (the first
+            fire at which two ``>=K``-stale snapshots exist — fire 1 can NEVER
+            project, a line needs 2 points). Requires the projector enabled.
     """
 
     enabled: bool = False
