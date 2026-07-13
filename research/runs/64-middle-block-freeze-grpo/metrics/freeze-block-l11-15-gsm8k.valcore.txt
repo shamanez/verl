@@ -1,4 +1,0 @@
-step:25  val-core/openai/gsm8k/acc/mean@1:0.733131159969674 
-step:50  val-core/openai/gsm8k/acc/mean@1:0.756633813495072 
-step:75  val-core/openai/gsm8k/acc/mean@1:0.7626990144048522 
-  

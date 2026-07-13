@@ -1,4 +1,0 @@
-step:25  val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1:0.566 
-step:50  val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1:0.572 
-step:75  val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1:0.568 
-  
