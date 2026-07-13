@@ -185,6 +185,25 @@ def test_snapshot_target_filter():
     assert all("norm" not in n for n in snap)
 
 
+def test_full_snapshot_deduplicates_tied_parameters_and_excludes_buffers():
+    class _TiedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(8, 4)
+            self.lm_head = torch.nn.Linear(4, 8, bias=False)
+            self.lm_head.weight = self.embed_tokens.weight
+            self.register_buffer("inv_freq", torch.ones(4, dtype=torch.float32))
+            self.register_buffer("position_ids", torch.arange(4, dtype=torch.int64))
+
+    module = _TiedModel()
+    snap = snapshot_named_params(module.named_parameters(), target_substrs=None)
+
+    assert set(snap) == {"embed_tokens.weight"}
+    assert len(list(module.named_parameters(remove_duplicate=False))) == 2
+    assert "lm_head.weight" not in snap
+    assert "inv_freq" not in snap and "position_ids" not in snap
+
+
 # =========================================================================== #
 # extract_target_grads reads raw grads and applies no correction.
 # =========================================================================== #

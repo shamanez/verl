@@ -63,12 +63,15 @@ REAL recorded ticks and uses::
 which reduces EXACTLY to the frozen seed at ``h == g`` (behavior at the
 operating points unchanged) and projects to the true fire tick otherwise.
 
-**LayerNorm / embedding / lm_head excluded.** Per the linearity paper (Fig 8 /
-App A.2) norm + embedding layers have LOW linearity; extrapolating them injects
-error. Excluded params take the raw ``theta[t-K]`` (no projection). The decoder
-weight-matrix scope reuses the existing ``spectral.target_substr`` selector
-(``comm_eff.py:228-238``) so the exclusion set is exactly the merger's
-non-target set.
+**Mode-specific tensor coverage.** ``fixed_linear`` retains the linearity
+paper's decoder-matrix-only scope: norms, biases, embeddings and the LM head
+take the raw ``theta[t-K]``. ``rank1_relex`` instead follows RELEX Algorithms
+1--2 (arXiv:2605.21468): it finds and extrapolates one rank-1 checkpoint
+trajectory independently for every unique floating named parameter tensor. Tied
+parameters naturally appear once in ``named_parameters()``; untied LM heads
+remain independent tensors. This weight-projection coverage is deliberately
+separate from ``spectral.target_substr``, which still scopes only the downstream
+2-D decoder-gradient correction.
 
 **Cross-rank determinism.** ``theta_hat`` is a pure per-element function of the
 DP-identical FSDP snapshots, so it is trivially identical on every DP rank —
@@ -83,7 +86,9 @@ the snapshots, and loads ``theta_hat`` into the isolated anchor clone.
 from __future__ import annotations
 
 import logging
+import math
 from collections import OrderedDict
+from numbers import Integral
 from typing import Optional
 
 import torch
@@ -94,9 +99,13 @@ __all__ = [
     "LOOKAHEAD_MODES",
     "MODE_DISABLED",
     "MODE_FIXED_LINEAR",
+    "MODE_RANK1_RELEX",
     "LOOKAHEAD_ROLLOUT_SOURCES",
     "FIXED_LINEAR_COEFFS",
+    "DEFAULT_RANK1_CHUNK_NUMEL",
+    "Rank1ProjectionError",
     "lookahead_enabled",
+    "rank1_relex_enabled",
     "lookahead_num_source_points",
     "lookahead_min_points",
     "resolve_lookahead_rollout_source",
@@ -104,6 +113,10 @@ __all__ = [
     "compute_theta_hat",
     "LookaheadSnapshotRing",
     "LookaheadProjector",
+    "Rank1SnapshotHistory",
+    "project_rank1_tensor",
+    "Rank1RelexProjector",
+    "validate_rank1_broadcast_receipts",
 ]
 
 
@@ -114,7 +127,18 @@ __all__ = [
 # tuple is the config single-source.
 MODE_DISABLED = "disabled"
 MODE_FIXED_LINEAR = "fixed_linear"
-LOOKAHEAD_MODES = (MODE_DISABLED, MODE_FIXED_LINEAR)
+MODE_RANK1_RELEX = "rank1_relex"
+LOOKAHEAD_MODES = (MODE_DISABLED, MODE_FIXED_LINEAR, MODE_RANK1_RELEX)
+
+# Bound the largest temporary trajectory slab to W * 4 MiB at the default W4
+# window. The live projector makes two passes over each tensor (Gram, then
+# right-vector reconstruction) and never retains a model-sized direction.
+DEFAULT_RANK1_CHUNK_NUMEL = 1 << 20
+
+
+class Rank1ProjectionError(RuntimeError):
+    """Fail-closed error raised before a rank-1 anchor/M update can run."""
+
 
 # The fixed-linear (AsyncPP) coefficients for [theta[t-K], theta[t-2K]]:
 # theta_hat = 2*theta[t-K] - theta[t-2K]. This is the documented SEED — the
@@ -154,16 +178,31 @@ def lookahead_enabled(anchor_cfg) -> bool:
         return False
     if not bool(getattr(anchor_cfg, "lookahead_anchor", False)):
         return False
-    return str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED)) == MODE_FIXED_LINEAR
+    return str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED)) in (
+        MODE_FIXED_LINEAR,
+        MODE_RANK1_RELEX,
+    )
+
+
+def rank1_relex_enabled(anchor_cfg) -> bool:
+    """True iff the pure sliding rank-1 RELEX projector is active."""
+    return lookahead_enabled(anchor_cfg) and (
+        str(getattr(anchor_cfg, "lookahead_mode", MODE_DISABLED)) == MODE_RANK1_RELEX
+    )
 
 
 def lookahead_num_source_points(anchor_cfg) -> int:
     """Number of fire-aligned source snapshots the projector consumes.
 
     ``fixed_linear`` is FIRST-ORDER (``S0 = theta[t-K]``, ``S1 = theta[t-2K]``)
-    so it uses 2. Returns 0 when look-ahead is disabled.
+    so it uses 2. ``rank1_relex`` uses its complete configured sliding window,
+    including the oldest base checkpoint. Returns 0 when look-ahead is disabled.
     """
-    return 2 if lookahead_enabled(anchor_cfg) else 0
+    if not lookahead_enabled(anchor_cfg):
+        return 0
+    if rank1_relex_enabled(anchor_cfg):
+        return int(getattr(anchor_cfg, "lookahead_window_snapshots", 4))
+    return 2
 
 
 def lookahead_min_points(anchor_cfg) -> int:
@@ -456,3 +495,532 @@ class LookaheadProjector:
             coeffs = [1.0 + base_scale, -base_scale, 0.0]
         theta_hat, excluded = compute_theta_hat(sources, coeffs, target_substrs=self.target_substrs)
         return theta_hat, excluded, {"h": h, "g": g, "coeffs": tuple(coeffs)}
+
+
+def _rank1_tick(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise Rank1ProjectionError(f"rank1_relex {label} must be an integer optimizer tick; got {value!r}")
+    tick = int(value)
+    if tick < 0:
+        raise Rank1ProjectionError(f"rank1_relex {label} must be >= 0; got {tick}")
+    return tick
+
+
+def _validate_rank1_timeline(ticks, target_tick) -> tuple[list[int], int]:
+    clean = [_rank1_tick(t, f"history tick[{i}]") for i, t in enumerate(ticks)]
+    if len(clean) < 2:
+        raise Rank1ProjectionError(f"rank1_relex needs at least 2 checkpoints (base + 1 delta); got {len(clean)}")
+    if any(b <= a for a, b in zip(clean, clean[1:], strict=False)):
+        raise Rank1ProjectionError(f"rank1_relex history ticks must be unique and strictly increasing; got {clean}")
+    target = _rank1_tick(target_tick, "target_tick")
+    if target <= clean[-1]:
+        raise Rank1ProjectionError(f"rank1_relex target_tick={target} must be newer than latest exact tick={clean[-1]}")
+    return clean, target
+
+
+class Rank1SnapshotHistory:
+    """Strict sliding history for exact generator checkpoints.
+
+    The first pre-update generator snapshot is retained by reference as the
+    local base. Later entries are admitted only by the engine's exact delayed
+    transfer path. Duplicate and out-of-order transfers are excluded without
+    mutating the window; fixed-linear's permissive overwrite ring is untouched.
+    """
+
+    def __init__(self, window_snapshots: int = 4):
+        if isinstance(window_snapshots, bool) or not isinstance(window_snapshots, Integral):
+            raise Rank1ProjectionError(
+                f"rank1_relex window_snapshots must be an integer >= 2; got {window_snapshots!r}"
+            )
+        self.window_snapshots = int(window_snapshots)
+        if self.window_snapshots < 2:
+            raise Rank1ProjectionError(f"rank1_relex window_snapshots must be >= 2; got {self.window_snapshots}")
+        self._snaps: OrderedDict[int, dict] = OrderedDict()
+        # Lightweight schema only: retaining base tensor references here would
+        # keep the first full-model checkpoint alive after the window slides.
+        self._schema: Optional[dict[str, tuple[tuple[int, ...], torch.dtype, torch.device]]] = None
+        self.peak_retained = 0
+
+    def _validate_snapshot(
+        self,
+        snapshot,
+        *,
+        checkpoint: int,
+    ) -> dict[str, tuple[tuple[int, ...], torch.dtype, torch.device]]:
+        """Validate an exact checkpoint before it can drive Q or history.
+
+        Warmup Q refreshes consume raw exact transfers before the projector has
+        a complete window.  Validation therefore belongs at history admission,
+        not only in :meth:`Rank1RelexProjector.project`: otherwise malformed
+        weights could mutate Q several fires before the projector fails.
+        """
+        if not isinstance(snapshot, dict) or not snapshot:
+            raise Rank1ProjectionError("rank1_relex checkpoint snapshot must be a non-empty dict")
+
+        keys = set(snapshot)
+        if self._schema is not None and keys != set(self._schema):
+            expected_keys = set(self._schema)
+            missing = sorted(expected_keys - keys)[:5]
+            extra = sorted(keys - expected_keys)[:5]
+            raise Rank1ProjectionError(
+                f"rank1_relex checkpoint {checkpoint} key mismatch: missing={missing} extra={extra}"
+            )
+
+        schema: dict[str, tuple[tuple[int, ...], torch.dtype, torch.device]] = {}
+        for name in sorted(keys):
+            tensor = _validate_rank1_checkpoint_tensor(
+                snapshot[name],
+                name=name,
+                checkpoint=checkpoint,
+                expected=None,
+                chunk_numel=DEFAULT_RANK1_CHUNK_NUMEL,
+            )
+            metadata = (tuple(tensor.shape), tensor.dtype, tensor.device)
+            if self._schema is not None:
+                expected_shape, expected_dtype, expected_device = self._schema[name]
+                if metadata[0] != expected_shape:
+                    raise Rank1ProjectionError(
+                        f"rank1_relex checkpoint {checkpoint} parameter {name!r} shape mismatch: "
+                        f"expected {expected_shape}, got {metadata[0]}"
+                    )
+                if metadata[1] != expected_dtype:
+                    raise Rank1ProjectionError(
+                        f"rank1_relex checkpoint {checkpoint} parameter {name!r} dtype mismatch: "
+                        f"expected {expected_dtype}, got {metadata[1]}"
+                    )
+                if metadata[2] != expected_device:
+                    raise Rank1ProjectionError(
+                        f"rank1_relex checkpoint {checkpoint} parameter {name!r} device mismatch: "
+                        f"expected {expected_device}, got {metadata[2]}"
+                    )
+            schema[name] = metadata
+        return schema
+
+    def seed_base(self, tick: int, snapshot: dict) -> bool:
+        """Retain the first generator snapshot by reference; first call wins."""
+        tick = _rank1_tick(tick, "base tick")
+        if self._snaps:
+            return False
+        schema = self._validate_snapshot(snapshot, checkpoint=tick)
+        self._schema = schema
+        self._snaps[tick] = snapshot
+        self.peak_retained = 1
+        return True
+
+    def admit_exact(self, tick: int, snapshot: dict) -> bool:
+        """Admit a strictly newer exact delayed transfer and slide immediately."""
+        tick = _rank1_tick(tick, "exact transfer tick")
+        if not self._snaps:
+            raise Rank1ProjectionError("rank1_relex exact transfer arrived before the local base was seeded")
+        latest_tick = next(reversed(self._snaps))
+        if tick <= latest_tick:
+            if self.ready():
+                raise Rank1ProjectionError(
+                    f"rank1_relex full window requires a strictly newer exact transfer; "
+                    f"got tick={tick} after latest={latest_tick}"
+                )
+            # Pre-ready duplicate/out-of-order transfers still drive the raw,
+            # paired Q-only forward, so validate them before returning false.
+            self._validate_snapshot(snapshot, checkpoint=tick)
+            return False
+        self._validate_snapshot(snapshot, checkpoint=tick)
+        self._snaps[tick] = snapshot
+        while len(self._snaps) > self.window_snapshots:
+            self._snaps.popitem(last=False)
+        self.peak_retained = max(self.peak_retained, len(self._snaps))
+        assert len(self._snaps) <= self.window_snapshots
+        return True
+
+    def ready(self) -> bool:
+        return len(self._snaps) == self.window_snapshots
+
+    def sources(self):
+        """Return complete-window snapshots and ticks, both oldest-first."""
+        if not self.ready():
+            return None, None
+        items = list(self._snaps.items())
+        return [snapshot for _tick, snapshot in items], [int(tick) for tick, _snapshot in items]
+
+    def latest(self):
+        if not self._snaps:
+            return None, None
+        tick = next(reversed(self._snaps))
+        return self._snaps[tick], int(tick)
+
+    def total_retained(self) -> int:
+        return len(self._snaps)
+
+    @property
+    def ticks(self) -> list[int]:
+        return list(self._snaps.keys())
+
+
+def _rank1_delta_chunk(flat_snapshots, start: int, end: int) -> torch.Tensor:
+    base = flat_snapshots[0][start:end].to(torch.float32)
+    return torch.stack(
+        [snapshot[start:end].to(torch.float32) - base for snapshot in flat_snapshots[1:]],
+        dim=0,
+    )
+
+
+def _validate_rank1_checkpoint_tensor(
+    tensor,
+    *,
+    name: str,
+    checkpoint: int,
+    expected: Optional[torch.Tensor],
+    chunk_numel: int,
+) -> torch.Tensor:
+    """Validate one exact-checkpoint value with bounded finite checks."""
+    label = f"rank1_relex checkpoint {checkpoint} parameter {name!r}"
+    if not isinstance(tensor, torch.Tensor):
+        raise Rank1ProjectionError(f"{label} must be a torch.Tensor; got {type(tensor).__name__}")
+    if expected is not None:
+        if tensor.shape != expected.shape:
+            raise Rank1ProjectionError(
+                f"{label} shape mismatch: expected {tuple(expected.shape)}, got {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != expected.dtype:
+            raise Rank1ProjectionError(f"{label} dtype mismatch: expected {expected.dtype}, got {tensor.dtype}")
+        if tensor.device != expected.device:
+            raise Rank1ProjectionError(f"{label} device mismatch: expected {expected.device}, got {tensor.device}")
+    if not tensor.is_contiguous():
+        raise Rank1ProjectionError(f"{label} is non-contiguous; refusing an unbounded flatten copy")
+    flat = tensor.view(-1)
+    for start in range(0, flat.numel(), chunk_numel):
+        end = min(start + chunk_numel, flat.numel())
+        if not bool(torch.isfinite(flat[start:end]).all()):
+            raise Rank1ProjectionError(f"{label} contains a non-finite value in flattened chunk [{start}:{end}]")
+    return tensor
+
+
+def _rank1_ols(ticks: list[int], coefficients: torch.Tensor) -> tuple[float, float, float]:
+    t = torch.tensor(ticks, dtype=torch.float64, device=coefficients.device)
+    c = coefficients.to(torch.float64)
+    t_centered = t - t.mean()
+    denom = torch.sum(t_centered.square())
+    if not bool(torch.isfinite(denom)) or float(denom.item()) <= 0.0:
+        raise Rank1ProjectionError(f"rank1_relex OLS timestamps are degenerate: {ticks}")
+    c_mean = c.mean()
+    slope_t = torch.sum(t_centered * (c - c_mean)) / denom
+    intercept_t = c_mean - slope_t * t.mean()
+    fitted = slope_t * t + intercept_t
+    sse = torch.sum((c - fitted).square())
+    sst = torch.sum((c - c_mean).square())
+    r2_t = torch.ones((), dtype=torch.float64, device=c.device) if float(sst.item()) == 0.0 else 1.0 - sse / sst
+    if not bool(torch.isfinite(slope_t)) or not bool(torch.isfinite(intercept_t)) or not bool(torch.isfinite(r2_t)):
+        raise Rank1ProjectionError("rank1_relex OLS produced a non-finite slope, intercept, or R^2")
+    return float(slope_t.item()), float(intercept_t.item()), float(r2_t.item())
+
+
+def project_rank1_tensor(
+    snapshots: list[torch.Tensor],
+    ticks,
+    target_tick,
+    *,
+    strength: float = 1.0,
+    chunk_numel: int = DEFAULT_RANK1_CHUNK_NUMEL,
+) -> tuple[torch.Tensor, dict]:
+    """Project one tensor via a chunked rank-1 checkpoint trajectory.
+
+    ``snapshots[0]`` is the window base and ``snapshots[-1]`` is the newest
+    exact checkpoint. The zero base row is excluded, so W checkpoints produce
+    W-1 cumulative deltas. Gram construction and right-vector recovery are
+    bounded fp32 passes; coefficient OLS uses actual ticks in fp64. The final
+    increment is pinned to the newest exact tensor, preserving its off-subspace
+    residual.
+    """
+    clean_ticks, target = _validate_rank1_timeline(ticks, target_tick)
+    if len(snapshots) != len(clean_ticks):
+        raise Rank1ProjectionError(
+            f"rank1_relex snapshot/tick count mismatch: {len(snapshots)} snapshots vs {len(clean_ticks)} ticks"
+        )
+    try:
+        strength = float(strength)
+    except (TypeError, ValueError) as exc:
+        raise Rank1ProjectionError(f"rank1_relex strength must be finite and >= 0; got {strength!r}") from exc
+    if not math.isfinite(strength) or strength < 0.0:
+        raise Rank1ProjectionError(f"rank1_relex strength must be finite and >= 0; got {strength!r}")
+    if isinstance(chunk_numel, bool) or not isinstance(chunk_numel, Integral) or int(chunk_numel) < 1:
+        raise Rank1ProjectionError(f"rank1_relex chunk_numel must be an integer >= 1; got {chunk_numel!r}")
+    chunk_numel = int(chunk_numel)
+
+    if not snapshots or not all(isinstance(t, torch.Tensor) for t in snapshots):
+        raise Rank1ProjectionError("rank1_relex tensor history must contain only torch.Tensor values")
+    shape = snapshots[0].shape
+    dtype = snapshots[0].dtype
+    device = snapshots[0].device
+    if not torch.is_floating_point(snapshots[0]):
+        raise Rank1ProjectionError(f"rank1_relex tensor history must be floating point; got {dtype}")
+    for i, tensor in enumerate(snapshots):
+        if tensor.shape != shape:
+            raise Rank1ProjectionError(
+                f"rank1_relex tensor shape mismatch at checkpoint {i}: expected {tuple(shape)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if tensor.device != device:
+            raise Rank1ProjectionError(
+                f"rank1_relex tensor device mismatch at checkpoint {i}: expected {device}, got {tensor.device}"
+            )
+        if tensor.dtype != dtype:
+            raise Rank1ProjectionError(
+                f"rank1_relex tensor dtype mismatch at checkpoint {i}: expected {dtype}, got {tensor.dtype}"
+            )
+        if not tensor.is_contiguous():
+            raise Rank1ProjectionError(
+                f"rank1_relex tensor at checkpoint {i} is non-contiguous; refusing an unbounded flatten copy"
+            )
+
+    flat_snapshots = [tensor.view(-1) for tensor in snapshots]
+    numel = flat_snapshots[0].numel()
+    n_deltas = len(snapshots) - 1
+    gram = torch.zeros((n_deltas, n_deltas), dtype=torch.float32, device=device)
+    for start in range(0, numel, chunk_numel):
+        end = min(start + chunk_numel, numel)
+        deltas = _rank1_delta_chunk(flat_snapshots, start, end)
+        if not bool(torch.isfinite(deltas).all()):
+            raise Rank1ProjectionError(
+                f"rank1_relex encountered a non-finite checkpoint delta in flattened chunk [{start}:{end}]"
+            )
+        gram.add_(deltas @ deltas.transpose(0, 1))
+
+    energy = float(torch.trace(gram).item())
+    if not math.isfinite(energy):
+        raise Rank1ProjectionError("rank1_relex Gram energy is non-finite")
+    latest = snapshots[-1]
+    horizon = target - clean_ticks[-1]
+    if energy <= 0.0:
+        return latest, {
+            "sigma": 0.0,
+            "slope": 0.0,
+            "intercept": 0.0,
+            "evr": 0.0,
+            "r2": 1.0,
+            "zero_motion": True,
+            "delta_count": n_deltas,
+            "prediction_horizon": horizon,
+        }
+
+    try:
+        eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+    except Exception as exc:
+        raise Rank1ProjectionError(f"rank1_relex Gram eigensolver failed: {exc}") from exc
+    if not bool(torch.isfinite(eigenvalues).all()) or not bool(torch.isfinite(eigenvectors).all()):
+        raise Rank1ProjectionError("rank1_relex Gram eigensolver produced non-finite values")
+    positive = eigenvalues.clamp_min(0.0)
+    total_positive = float(positive.sum().item())
+    lambda1 = float(positive[-1].item())
+    if not math.isfinite(total_positive) or not math.isfinite(lambda1):
+        raise Rank1ProjectionError("rank1_relex eigenvalue energy is non-finite")
+    if total_positive <= 0.0 or lambda1 <= 0.0:
+        return latest, {
+            "sigma": 0.0,
+            "slope": 0.0,
+            "intercept": 0.0,
+            "evr": 0.0,
+            "r2": 1.0,
+            "zero_motion": True,
+            "delta_count": n_deltas,
+            "prediction_horizon": horizon,
+            "fit_kind": "two_checkpoint_secant" if n_deltas == 1 else "rank1_ols",
+        }
+
+    sigma = math.sqrt(lambda1)
+    if sigma <= max(sigma * 1e-6, 1e-12):
+        return latest, {
+            "sigma": sigma,
+            "slope": 0.0,
+            "intercept": 0.0,
+            "evr": lambda1 / total_positive,
+            "r2": 1.0,
+            "zero_motion": True,
+            "delta_count": n_deltas,
+            "prediction_horizon": horizon,
+            "fit_kind": "two_checkpoint_secant" if n_deltas == 1 else "rank1_ols",
+        }
+
+    u1 = eigenvectors[:, -1]
+    coefficients = u1 * sigma
+    if n_deltas == 1:
+        # A literal two-checkpoint window has one nonzero cumulative delta, so
+        # the paper's free-intercept fit over ``clean_ticks[1:]`` cannot identify
+        # a slope.  Use the known base coordinate c(t_base)=0 as the second
+        # point.  This is exactly the per-tensor secant
+        #
+        #   latest + alpha * horizon/gap * (latest - base),
+        #
+        # i.e. naive two-point linear extrapolation.  Keep this fallback local
+        # to W=2: adding the zero-base point to W>=3 would change the established
+        # RELEX/W4 fit and invalidate the completed reference run.
+        zero = torch.zeros(1, dtype=coefficients.dtype, device=coefficients.device)
+        fit_coefficients = torch.cat((zero, coefficients))
+        fit_ticks = clean_ticks
+        fit_kind = "two_checkpoint_secant"
+    else:
+        fit_coefficients = coefficients
+        fit_ticks = clean_ticks[1:]
+        fit_kind = "rank1_ols"
+    slope, intercept, r2 = _rank1_ols(fit_ticks, fit_coefficients)
+    scale = strength * slope * float(horizon)
+    if not math.isfinite(scale):
+        raise Rank1ProjectionError("rank1_relex pinned prediction scale is non-finite")
+    if scale == 0.0:
+        projected = latest
+    else:
+        projected = torch.empty_like(latest, memory_format=torch.preserve_format)
+        projected_flat = projected.view(-1)
+        latest_flat = latest.view(-1)
+        for start in range(0, numel, chunk_numel):
+            end = min(start + chunk_numel, numel)
+            deltas = _rank1_delta_chunk(flat_snapshots, start, end)
+            v1 = torch.sum(u1[:, None] * deltas, dim=0) / sigma
+            out = latest_flat[start:end].to(torch.float32) + scale * v1
+            if not bool(torch.isfinite(out).all()):
+                raise Rank1ProjectionError(
+                    f"rank1_relex produced a non-finite projected tensor in flattened chunk [{start}:{end}]"
+                )
+            projected_flat[start:end].copy_(out.to(latest.dtype))
+
+    return projected, {
+        "sigma": sigma,
+        "slope": slope,
+        "intercept": intercept,
+        "evr": lambda1 / total_positive,
+        "r2": r2,
+        "zero_motion": False,
+        "delta_count": n_deltas,
+        "prediction_horizon": horizon,
+        "fit_kind": fit_kind,
+    }
+
+
+class Rank1RelexProjector:
+    """Pure sliding RELEX projector over every exact parameter trajectory.
+
+    RELEX fits one rank-1 temporal subspace *per floating parameter tensor*, not
+    only for decoder matrices. The constructor deliberately has no target
+    selector: fixed-linear and spectral correction retain their decoder-only
+    selectors, but those selectors must never narrow rank1_relex coverage.
+    """
+
+    def __init__(self, anchor_cfg, *, chunk_numel: int = DEFAULT_RANK1_CHUNK_NUMEL):
+        self.window_snapshots = int(getattr(anchor_cfg, "lookahead_window_snapshots", 4))
+        self.strength = lookahead_strength(anchor_cfg)
+        self.chunk_numel = int(chunk_numel)
+
+    def project(self, sources: list[dict], ticks, target_tick: int):
+        clean_ticks, target = _validate_rank1_timeline(ticks, target_tick)
+        if len(sources) != self.window_snapshots or len(clean_ticks) != self.window_snapshots:
+            raise Rank1ProjectionError(
+                f"rank1_relex requires its complete W={self.window_snapshots} checkpoint window; "
+                f"got {len(sources)} snapshots and {len(clean_ticks)} ticks"
+            )
+        if not sources or not all(isinstance(snapshot, dict) and snapshot for snapshot in sources):
+            raise Rank1ProjectionError("rank1_relex history must contain non-empty checkpoint dicts")
+
+        base_keys = set(sources[0])
+        for i, snapshot in enumerate(sources[1:], start=1):
+            keys = set(snapshot)
+            if keys != base_keys:
+                missing = sorted(base_keys - keys)[:5]
+                extra = sorted(keys - base_keys)[:5]
+                raise Rank1ProjectionError(f"rank1_relex checkpoint {i} key mismatch: missing={missing} extra={extra}")
+
+        # Validate the complete exact checkpoints before constructing any
+        # projected tensor. Every unique named parameter, including norms,
+        # biases, embeddings, and an untied LM head, is a RELEX trajectory.
+        # A malformed tensor must fail before the clone or M/Q is touched.
+        for name in sorted(base_keys):
+            expected = _validate_rank1_checkpoint_tensor(
+                sources[0][name],
+                name=name,
+                checkpoint=0,
+                expected=None,
+                chunk_numel=self.chunk_numel,
+            )
+            for i, snapshot in enumerate(sources[1:], start=1):
+                _validate_rank1_checkpoint_tensor(
+                    snapshot[name],
+                    name=name,
+                    checkpoint=i,
+                    expected=expected,
+                    chunk_numel=self.chunk_numel,
+                )
+        latest = sources[-1]
+        target_names = sorted(name for name, tensor in latest.items() if torch.is_floating_point(tensor))
+        passthrough_names = sorted(set(latest) - set(target_names))
+        if not target_names:
+            raise Rank1ProjectionError("rank1_relex found no floating parameter tensors")
+
+        theta_hat = dict(latest)
+        stats = []
+        for name in target_names:
+            tensor_history = []
+            expected_shape = latest[name].shape
+            for i, snapshot in enumerate(sources):
+                tensor = snapshot.get(name)
+                if not isinstance(tensor, torch.Tensor):
+                    raise Rank1ProjectionError(
+                        f"rank1_relex parameter {name!r} is missing or non-tensor at checkpoint {i}"
+                    )
+                if tensor.shape != expected_shape:
+                    raise Rank1ProjectionError(
+                        f"rank1_relex parameter {name!r} shape mismatch at checkpoint {i}: "
+                        f"expected {tuple(expected_shape)}, got {tuple(tensor.shape)}"
+                    )
+                tensor_history.append(tensor)
+            try:
+                projected, tensor_stats = project_rank1_tensor(
+                    tensor_history,
+                    clean_ticks,
+                    target,
+                    strength=self.strength,
+                    chunk_numel=self.chunk_numel,
+                )
+            except Rank1ProjectionError as exc:
+                raise Rank1ProjectionError(f"rank1_relex parameter {name!r} failed: {exc}") from exc
+            theta_hat[name] = projected
+            stats.append(tensor_stats)
+
+        evrs = [float(s["evr"]) for s in stats]
+        r2s = [float(s["r2"]) for s in stats]
+        zero_motion = sum(bool(s["zero_motion"]) for s in stats)
+        info = {
+            "history_ticks": tuple(clean_ticks),
+            "checkpoint_count": len(clean_ticks),
+            "delta_count": len(clean_ticks) - 1,
+            "window_span": clean_ticks[-1] - clean_ticks[0],
+            "target_tick": target,
+            "prediction_horizon": target - clean_ticks[-1],
+            "targets_projected": len(stats),
+            "nonfloating_tensors_passthrough": len(passthrough_names),
+            "zero_motion_tensors": int(zero_motion),
+            "evr_mean": sum(evrs) / len(evrs),
+            "evr_min": min(evrs),
+            "r2_mean": sum(r2s) / len(r2s),
+            "r2_min": min(r2s),
+            "fit_kind": "two_checkpoint_secant" if len(clean_ticks) == 2 else "rank1_ols",
+        }
+        for key, value in info.items():
+            if key != "history_ticks" and isinstance(value, float) and not math.isfinite(value):
+                raise Rank1ProjectionError(f"rank1_relex aggregate {key} is non-finite")
+        return theta_hat, info
+
+
+def validate_rank1_broadcast_receipts(
+    *,
+    q_only: bool,
+    dp_multi: bool,
+    q_receipts,
+    m_receipts,
+    spectral_enabled: bool,
+) -> None:
+    """Enforce Q-only versus full-rank1 distributed broadcast contracts."""
+    if q_only and m_receipts is not None:
+        raise RuntimeError("rank1_relex q_only warmup must not broadcast M_anchor")
+    if not dp_multi:
+        return
+    if not q_receipts:
+        raise RuntimeError("rank1_relex anchor-owned Q broadcast returned no multi-rank receipts")
+    if not q_only and spectral_enabled and not m_receipts:
+        raise RuntimeError("rank1_relex full anchor M broadcast returned no multi-rank receipts")

@@ -758,13 +758,11 @@ class FSDPEngine(BaseEngine):
             )
         if n_trainable_with_grad == 0:
             raise RuntimeError(
-                "[TRAIN_LAYERS] grad-flow FAILED: NO trainable param received a gradient "
-                "(the block is not training)"
+                "[TRAIN_LAYERS] grad-flow FAILED: NO trainable param received a gradient (the block is not training)"
             )
         if self.rank == 0:
             logger.info(
-                "[TRAIN_LAYERS] grad-flow OK (step 1): 0 frozen params with grad, %d trainable "
-                "param tensors with grad",
+                "[TRAIN_LAYERS] grad-flow OK (step 1): 0 frozen params with grad, %d trainable param tensors with grad",
                 n_trainable_with_grad,
             )
 
@@ -1187,7 +1185,12 @@ class FSDPEngine(BaseEngine):
                 self._comm_eff_state.powersgd.unregister()
 
     def _forward_backward_batch_inner(
-        self, data: TensorDict, loss_function: Callable, forward_only=False
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        forward_only: bool = False,
+        run_backward: bool = True,
+        collect_outputs: bool = True,
     ) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
@@ -1216,15 +1219,25 @@ class FSDPEngine(BaseEngine):
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
-                if not forward_only:
+                if not forward_only and run_backward:
                     if scaler is not None:
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
 
-            output_lst.append(meta_info)
+            if collect_outputs:
+                output_lst.append(meta_info)
+            else:
+                # Q-only rank1 warmup needs autograd enabled so the forward
+                # activation hooks see the real graph, but it deliberately
+                # never backpropagates or consumes model outputs. Drop both
+                # graph roots before the next microbatch so memory stays bounded
+                # to one microbatch instead of accumulating the whole batch.
+                del loss, meta_info
 
         # postprocess and return
+        if not collect_outputs:
+            return []
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
@@ -1568,12 +1581,18 @@ class FSDPEngine(BaseEngine):
             verify_canary_on_snapshot,
         )
         from verl.workers.comm_eff.lookahead import (
+            MODE_FIXED_LINEAR,
             LookaheadProjector,
             LookaheadSnapshotRing,
+            Rank1ProjectionError,
+            Rank1RelexProjector,
+            Rank1SnapshotHistory,
             lookahead_enabled,
             lookahead_min_points,
             lookahead_num_source_points,
+            rank1_relex_enabled,
             resolve_lookahead_rollout_source,
+            validate_rank1_broadcast_receipts,
         )
 
         # Canonicalize FSDP wrap-infix so the (possibly fallback non-infixed)
@@ -1582,6 +1601,7 @@ class FSDPEngine(BaseEngine):
 
         cadence = int(getattr(anchor_cfg, "cadence", 20))
         delay_K = int(getattr(anchor_cfg, "delay_K", 20))
+        _rank1_mode = rank1_relex_enabled(anchor_cfg)
 
         # Advance the trainer-step counter the cadence is keyed on (1-based).
         state.anchor_step += 1
@@ -1681,6 +1701,58 @@ class FSDPEngine(BaseEngine):
                     )
                 _push_canary = snapshot_canary(gen_snapshot, target_substrs=target_substrs)
                 ring.push_snapshot(_gs_now, gen_snapshot, canary=_push_canary, tick=step)
+                if _rank1_mode:
+                    rank1_history = getattr(state, "_rank1_history", None)
+                    if rank1_history is None:
+                        rank1_history = Rank1SnapshotHistory(
+                            window_snapshots=int(getattr(anchor_cfg, "lookahead_window_snapshots", 4))
+                        )
+                        state._rank1_history = rank1_history
+                        # RELEX weight projection covers every unique floating
+                        # named parameter. The spectral selector remains scoped
+                        # independently to decoder-gradient correction.
+                        state._rank1_projector = Rank1RelexProjector(anchor_cfg)
+                        probe_cfg = getattr(state.config, "probe", None)
+                        if bool(getattr(probe_cfg, "rank1_projection_enabled", False)):
+                            from verl.workers.comm_eff.rank1_probe import Rank1ProjectionProbe
+
+                            probe_dir = str(getattr(probe_cfg, "out_dir", "")) or "./geometry_probe"
+                            rank0_only = bool(getattr(probe_cfg, "rank0_only", True))
+                            writer = not rank0_only or self.rank == 0
+                            probe_filename = (
+                                "rank1_projection_samples.jsonl"
+                                if rank0_only
+                                else f"rank1_projection_samples.rank{self.rank}.jsonl"
+                            )
+                            max_pending = (delay_K + cadence - 1) // cadence + 2
+                            state._rank1_projection_probe = Rank1ProjectionProbe(
+                                samples_per_tensor=int(getattr(probe_cfg, "rank1_projection_samples", 16)),
+                                max_pending=max_pending,
+                                out_path=os.path.join(probe_dir, probe_filename),
+                                writer=writer,
+                            )
+                            if writer:
+                                print(
+                                    f"[comm_eff][rank1-projection-probe] ENABLED "
+                                    f"samples_per_tensor={state._rank1_projection_probe.samples_per_tensor} "
+                                    f"max_pending={max_pending} out_dir={probe_dir}",
+                                    flush=True,
+                                )
+                    if rank1_history.seed_base(step, gen_snapshot):
+                        # Reuse the exact generator snapshot object already
+                        # allocated for replay: no second model copy. Retain the
+                        # matching first batch only so the first Q-only fire can
+                        # use the tick-1 base pair rather than replay warmup's
+                        # too-fresh current fallback.
+                        state._rank1_base_batch = clone_batch_for_replay(data, device=torch.device("cpu"))
+                        state._rank1_base_canary = _push_canary
+                        state.rank1_history_checkpoints = 1
+                        state.rank1_history_deltas = 0
+                        print(
+                            f"[comm_eff][rank1_relex] seeded local base tick={step} gs={_gs_now} "
+                            f"window={rank1_history.window_snapshots} (reused generator snapshot)",
+                            flush=True,
+                        )
                 print(
                     f"[comm_eff][stale-replay] snapshot_push gs={_gs_now} tick={step} "
                     f"device={_snap_device_str} snapshots_retained={len(ring.snapshot_steps)} "
@@ -1804,24 +1876,25 @@ class FSDPEngine(BaseEngine):
             if _snap_dev is not None:
                 _fire_canary = getattr(state, "_anchor_canary_by_tick", {}).get(_used_step)
 
-        # --- look-ahead (M4 weight projection): theta_hat[t] instead of raw stale ---
-        # Gated by anchor.lookahead_anchor + lookahead_mode (lookahead_enabled).
-        # OFF => this whole block is skipped: no ring, no projector, no extra
-        # logs — every path below is byte-identical to today. ON: each fire
-        # pushes its stale SOURCE snapshot into a dedicated ring (keyed by the
-        # snapshot's TRUE tick) and, once >= n_points sources are retained,
-        # loads the projected theta_hat into the clone instead of the raw stale
-        # weights. Warmup fires (ring not ready) fall back to the raw stale
-        # snapshot — and keep the stale PAIRED batch, so every fire stays
-        # internally consistent (weights <-> rollouts generated by them).
-        # theta_hat is a pure function of >=delay_K-stale, DP-identical
-        # snapshots (the no-peek invariant): the staleness asserts above guard
-        # the SOURCES; the projection never reads the live weights.
+        # --- look-ahead weight projection -------------------------------------
+        # fixed_linear and rank1_relex deliberately own separate histories and
+        # projectors. The fixed path below is unchanged/permissive. Rank1 admits
+        # only the first local generator base plus later exact delayed transfers;
+        # warmup fallbacks and current target snapshots never enter its window.
         _la_active = False  # theta_hat actually loaded THIS fire
         _la_info = None
+        _rank1_fire = False
+        _rank1_q_only = False
+        _rank1_q_only_batch = None
         load_weights = stale  # what the clone receives (raw stale by default)
         _src_tick = int(_snap_tick) if replay_mode else int(_used_step)
-        if lookahead_enabled(anchor_cfg):
+        _la_target_tick = int(step)
+        if replay_mode:
+            _gs_gen_tick = ring.snapshot_tick(_gs_now)
+            if _gs_gen_tick >= 0:
+                _la_target_tick = _gs_gen_tick
+
+        if lookahead_enabled(anchor_cfg) and str(getattr(anchor_cfg, "lookahead_mode", "")) == MODE_FIXED_LINEAR:
             la_ring = getattr(state, "_lookahead_ring", None)
             if la_ring is None:
                 la_ring = LookaheadSnapshotRing(
@@ -1843,11 +1916,6 @@ class FSDPEngine(BaseEngine):
             # within-step offset (realized coeffs drift off the documented
             # (2,-1) seed). Legacy (non-replay) mode has no generator-snapshot
             # concept -> target the fire tick.
-            _la_target_tick = int(step)
-            if replay_mode:
-                _gs_gen_tick = ring.snapshot_tick(_gs_now)
-                if _gs_gen_tick >= 0:
-                    _la_target_tick = _gs_gen_tick
             _la_snaps, _la_ticks = la_ring.sources()
             if _la_snaps is not None:
                 theta_hat, _la_excluded, _la_info = la_projector.project(
@@ -1889,6 +1957,170 @@ class FSDPEngine(BaseEngine):
                     f"paired stale batch retained for this fire)",
                     flush=True,
                 )
+        elif _rank1_mode:
+            rank1_history = getattr(state, "_rank1_history", None)
+            rank1_projector = getattr(state, "_rank1_projector", None)
+            if rank1_history is None or rank1_projector is None:
+                raise RuntimeError("rank1_relex history/projector was not seeded from the first generator snapshot")
+
+            admitted = False
+            if not bool(_warm_fb):
+                admitted = rank1_history.admit_exact(_src_tick, stale)
+                rank1_probe = getattr(state, "_rank1_projection_probe", None)
+                if admitted and rank1_probe is not None:
+                    probe_record = rank1_probe.resolve_exact(
+                        resolve_step=step,
+                        exact_tick=_src_tick,
+                        exact_snapshot=stale,
+                    )
+                    state.rank1_probe_predictions = rank1_probe.predictions_recorded
+                    state.rank1_probe_resolutions = rank1_probe.resolutions_completed
+                    state.rank1_probe_pending = len(rank1_probe.pending_ticks)
+                    if probe_record is not None:
+                        aggregate = probe_record["aggregate"]
+                        state.rank1_probe_projected_rmse = float(aggregate["projected_rmse"])
+                        state.rank1_probe_stale_rmse = float(aggregate["stale_rmse"])
+                        state.rank1_probe_skill = float(aggregate["skill"])
+                        state.rank1_probe_direction_cos = float(aggregate["direction_cos"])
+                        if rank1_probe.writer:
+                            print(
+                                f"[comm_eff][rank1-projection-probe] RESOLVED "
+                                f"target_tick={probe_record['target_tick']} source_tick={probe_record['source_tick']} "
+                                f"resolve_step={probe_record['resolution_step']} "
+                                f"projected_rmse={aggregate['projected_rmse']:.8g} "
+                                f"stale_rmse={aggregate['stale_rmse']:.8g} "
+                                f"skill={aggregate['skill']:.6f} "
+                                f"direction_cos={aggregate['direction_cos']:.6f} "
+                                f"beats_stale={aggregate['projection_beats_stale']}",
+                                flush=True,
+                            )
+                            for tensor_record in probe_record["tensors"]:
+                                metrics = tensor_record["metrics"]
+                                print(
+                                    f"[comm_eff][rank1-projection-probe] role={tensor_record['role']} "
+                                    f"name={tensor_record['name']} "
+                                    f"projected_rmse={metrics['projected_rmse']:.8g} "
+                                    f"stale_rmse={metrics['stale_rmse']:.8g} "
+                                    f"skill={metrics['skill']:.6f} "
+                                    f"direction_cos={metrics['direction_cos']:.6f}",
+                                    flush=True,
+                                )
+                if not admitted:
+                    print(
+                        f"[comm_eff][rank1_relex] step={step} excluded duplicate/out-of-order "
+                        f"exact transfer tick={_src_tick} history={rank1_history.ticks}",
+                        flush=True,
+                    )
+            state.rank1_history_checkpoints = rank1_history.total_retained()
+            state.rank1_history_deltas = max(0, rank1_history.total_retained() - 1)
+            state.rank1_window_span = (
+                rank1_history.ticks[-1] - rank1_history.ticks[0] if rank1_history.total_retained() > 1 else 0
+            )
+
+            _rank1_snaps, _rank1_ticks = rank1_history.sources()
+            if _rank1_snaps is not None and not admitted:
+                # A duplicate/out-of-order exact transfer is not a new
+                # checkpoint. Never extrapolate the old window toward a newer
+                # target and pretend a fresh rank1 fire occurred. Once M is
+                # ready, merely returning would let the correction hook apply
+                # the previous M on this skipped tick. Abort before clone/Q/M
+                # mutation instead; the normal aligned schedule always admits.
+                raise Rank1ProjectionError(
+                    f"rank1_relex full-window fire has no new exact checkpoint: "
+                    f"transfer_tick={_src_tick} history={rank1_history.ticks} step={step}"
+                )
+                return
+            if _rank1_snaps is not None:
+                # Finish every tensor projection before loading the clone or
+                # touching M/Q. Rank1ProjectionError therefore aborts the run
+                # without contaminating the anchor EMA.
+                theta_hat, _la_info = rank1_projector.project(
+                    _rank1_snaps,
+                    ticks=_rank1_ticks,
+                    target_tick=_la_target_tick,
+                )
+                rank1_probe = getattr(state, "_rank1_projection_probe", None)
+                if rank1_probe is not None:
+                    probe_summary = rank1_probe.record_prediction(
+                        fire_step=step,
+                        target_tick=_la_target_tick,
+                        source_tick=_rank1_ticks[-1],
+                        history_ticks=_rank1_ticks,
+                        projected=theta_hat,
+                        latest_exact=_rank1_snaps[-1],
+                    )
+                    state.rank1_probe_predictions = rank1_probe.predictions_recorded
+                    state.rank1_probe_resolutions = rank1_probe.resolutions_completed
+                    state.rank1_probe_pending = len(rank1_probe.pending_ticks)
+                    if rank1_probe.writer:
+                        print(
+                            f"[comm_eff][rank1-projection-probe] RECORDED "
+                            f"fire_step={step} target_tick={probe_summary['target_tick']} "
+                            f"source_tick={probe_summary['source_tick']} "
+                            f"history_ticks={probe_summary['history_ticks']} "
+                            f"selected={probe_summary['selected']} pending={probe_summary['pending']}",
+                            flush=True,
+                        )
+                load_weights = theta_hat
+                _la_active = True
+                _rank1_fire = True
+                state.lookahead_fires += 1
+                state.rank1_fires += 1
+                state.rank1_history_checkpoints = int(_la_info["checkpoint_count"])
+                state.rank1_history_deltas = int(_la_info["delta_count"])
+                state.rank1_window_span = int(_la_info["window_span"])
+                state.rank1_prediction_horizon = int(_la_info["prediction_horizon"])
+                state.rank1_evr_mean = float(_la_info["evr_mean"])
+                state.rank1_r2_mean = float(_la_info["r2_mean"])
+                state.rank1_zero_motion_tensors = int(_la_info["zero_motion_tensors"])
+                print(
+                    f"[comm_eff][rank1_relex] step={step} target_tick={_la_target_tick} "
+                    f"history_ticks={list(_la_info['history_ticks'])} "
+                    f"checkpoints={_la_info['checkpoint_count']} deltas={_la_info['delta_count']} "
+                    f"fit={_la_info['fit_kind']} "
+                    f"window_span={_la_info['window_span']} horizon={_la_info['prediction_horizon']} "
+                    f"parameter_tensors={_la_info['targets_projected']} "
+                    f"nonfloating_passthrough={_la_info['nonfloating_tensors_passthrough']} "
+                    f"zero_motion={_la_info['zero_motion_tensors']} "
+                    f"evr_mean={_la_info['evr_mean']:.6f} evr_min={_la_info['evr_min']:.6f} "
+                    f"r2_mean={_la_info['r2_mean']:.6f} r2_min={_la_info['r2_min']:.6f}",
+                    flush=True,
+                )
+            elif str(getattr(anchor_cfg, "warmup_mode", "")) == "q_only":
+                latest_snapshot, latest_tick = rank1_history.latest()
+                if bool(_warm_fb):
+                    load_weights = latest_snapshot
+                    _rank1_q_only_batch = getattr(state, "_rank1_base_batch", None)
+                    _fire_canary = getattr(state, "_rank1_base_canary", None)
+                    _rank1_q_source_tick = latest_tick
+                else:
+                    # Even when this exact generator snapshot is a duplicate
+                    # (multiple optimizer batches can share one rollout
+                    # generator), its replayed trajectories remain correctly
+                    # paired with `stale`. Exclude it from history but still run
+                    # the required observation-only Q refresh.
+                    load_weights = stale
+                    _rank1_q_only_batch = _replay_batch
+                    _rank1_q_source_tick = _src_tick
+                if _rank1_q_only_batch is None:
+                    raise RuntimeError("rank1_relex q_only warmup has no paired trajectory batch")
+                _rank1_q_only = True
+                state.rank1_q_only_fires += 1
+                print(
+                    f"[comm_eff][rank1_relex] step={step} Q_ONLY history_ticks={rank1_history.ticks} "
+                    f"source_tick={_rank1_q_source_tick} checkpoints={rank1_history.total_retained()}/"
+                    f"{rank1_history.window_snapshots} M=disabled correction=disabled",
+                    flush=True,
+                )
+            else:
+                state.warmup_no_correct_skips += 1
+                print(
+                    f"[comm_eff][rank1_relex] step={step} WARMUP no_correct -> anchor pass SKIPPED "
+                    f"history_ticks={rank1_history.ticks} checkpoints={rank1_history.total_retained()}/"
+                    f"{rank1_history.window_snapshots} (M untouched)",
+                    flush=True,
+                )
+                return
 
         # Ensure masking is off for the anchor pass and the path
         # tag is NOT "train" (the mask hook requires both to fire). We measure
@@ -1919,7 +2151,10 @@ class FSDPEngine(BaseEngine):
         # unchanged. The ring's batch pushes are left untouched either way:
         # the geometry probe and warmup/holdover fires still consume them.
         _rollout_source = resolve_lookahead_rollout_source(anchor_cfg)
-        if replay_mode:
+        if _rank1_q_only:
+            anchor_data = _rank1_q_only_batch.copy() if hasattr(_rank1_q_only_batch, "copy") else _rank1_q_only_batch
+            _batch_choice = "rank1_delayed_pair"
+        elif replay_mode:
             if _la_active and _rollout_source == "current_step":
                 anchor_data = data.copy() if hasattr(data, "copy") else data
                 _batch_choice = "current_step"
@@ -1988,8 +2223,9 @@ class FSDPEngine(BaseEngine):
             # Load the K-stale snapshot weights into the clone (NOT into the
             # live module — the live optimizer's params remain untouched).
             # With the look-ahead projector active, `load_weights` is the
-            # PROJECTED theta_hat (same key set as the stale snapshot — targets
-            # extrapolated, excluded params passed through by reference);
+            # PROJECTED theta_hat (same key set as the stale snapshot — fixed
+            # linear extrapolates only decoder targets, while rank1_relex
+            # extrapolates every unique named parameter tensor);
             # otherwise it IS the raw stale snapshot, byte-identical to today.
             # The snapshot is keyed by the live module's
             # (FSDP per-layer-wrapped) names — those carry the
@@ -2122,7 +2358,20 @@ class FSDPEngine(BaseEngine):
                 anchor_loss_function = self._wrap_anchor_loss_with_replay_relevance(
                     anchor_loss_function, _relevance_acc
                 )
-            self._forward_backward_batch_inner(anchor_data, anchor_loss_function, forward_only=False)
+            self._forward_backward_batch_inner(
+                anchor_data,
+                anchor_loss_function,
+                forward_only=False,
+                run_backward=not _rank1_q_only,
+                collect_outputs=not _rank1_q_only,
+            )
+
+            if _rank1_q_only:
+                dirty_grads = [name for name, p in anchor_module.named_parameters() if p.grad is not None]
+                assert not dirty_grads, (
+                    "rank1_relex q_only forward populated clone gradients despite run_backward=false: "
+                    f"{dirty_grads[:8]}"
+                )
 
             # Read G_anchor RAW per target (NO correct_matrix) off
             # the clone. full_grad_of is the identity — the clone is a plain
@@ -2130,12 +2379,13 @@ class FSDPEngine(BaseEngine):
             def _full_grad_of(grad):
                 return grad, {"grad_container_type": type(grad).__name__, "is_dtensor": str(isinstance(grad, DTensor))}
 
-            anchor_grads = extract_target_grads(
-                anchor_module.named_parameters(),
-                target_substrs=target_substrs,
-                max_targets=max_targets,
-                full_grad_of=_full_grad_of,
-            )
+            if not _rank1_q_only:
+                anchor_grads = extract_target_grads(
+                    anchor_module.named_parameters(),
+                    target_substrs=target_substrs,
+                    max_targets=max_targets,
+                    full_grad_of=_full_grad_of,
+                )
         finally:
             # Anchor-owns-Q: tear down the anchor's PowerSGD hooks on the clone and
             # clear the sketch-harvest mode so the live fast path is untouched.
@@ -2197,6 +2447,45 @@ class FSDPEngine(BaseEngine):
             "comm_eff anchor pass took an optimizer step (anchor_optimizer_steps "
             "must stay 0; snapshot is OFF the optimizer's param group)."
         )
+
+        if _rank1_q_only:
+            # Observation-only warmup: the autograd-enabled forward harvested V
+            # for Q, but no backward/gradient/M work is allowed below this
+            # barrier. Reuse the normal anchor-owned-Q update and broadcast
+            # primitives, with an explicit no-M receipt contract.
+            assert getattr(powersgd, "_sketch", None), (
+                "rank1_relex q_only forward harvested an empty PowerSGD activation sketch"
+            )
+            try:
+                q_updated = powersgd.anchor_update_basis()
+                q_receipts = powersgd.broadcast_basis(src=0)
+                m_receipts = None
+                assert q_updated, "rank1_relex q_only anchor_update_basis() did not refresh Q"
+                _dp_multi = False
+                if torch.distributed.is_initialized():
+                    try:
+                        _dp_multi = torch.distributed.get_world_size(group=self.get_data_parallel_group()) > 1
+                    except Exception:
+                        _dp_multi = False
+                validate_rank1_broadcast_receipts(
+                    q_only=True,
+                    dp_multi=_dp_multi,
+                    q_receipts=q_receipts,
+                    m_receipts=m_receipts,
+                    spectral_enabled=spectral is not None,
+                )
+                qdev = powersgd.verify_basis_agreement_across_ranks()
+                changed_q = sum(1 for receipt in (q_receipts or {}).values() if receipt.get("changed"))
+                print(
+                    f"[comm_eff][rank1_relex][q_only] step={step} Q updated={q_updated} "
+                    f"broadcast_boundaries={len(q_receipts or {})} changed={changed_q} "
+                    f"cross_rank_max_rel_dev={qdev if qdev is not None else 'n/a'} "
+                    f"M_receipts=0 clone_grads=0 anchor_backwards={state.anchor_backwards}",
+                    flush=True,
+                )
+            finally:
+                powersgd.clear_family_harvest()
+            return
 
         # Relevance diagnostic for this fire: loaded-weights re-score vs the
         # log-probs stored with the replayed trajectories. Greppable evidence
@@ -2477,6 +2766,14 @@ class FSDPEngine(BaseEngine):
                     _dp_multi = torch.distributed.get_world_size(group=self.get_data_parallel_group()) > 1
                 except Exception:
                     _dp_multi = False
+            if _rank1_fire:
+                validate_rank1_broadcast_receipts(
+                    q_only=False,
+                    dp_multi=_dp_multi,
+                    q_receipts=q_receipts,
+                    m_receipts=m_receipts,
+                    spectral_enabled=spectral is not None,
+                )
             if _dp_multi:
                 assert q_receipts, (
                     "comm_eff anchor-owns-Q: broadcast_basis() returned NO receipts on a "
@@ -2592,6 +2889,18 @@ class FSDPEngine(BaseEngine):
                     f"(targets matched=0); check target_substr / use_orig_params",
                     flush=True,
                 )
+
+        if _rank1_fire:
+            assert spectral is not None and anchor_grads and deltas, (
+                "rank1_relex full-window fire completed without a populated M_anchor update"
+            )
+            state.rank1_m_ready = True
+            print(
+                f"[comm_eff][rank1_relex] step={step} M_READY=true "
+                f"anchor_backwards={state.anchor_backwards} targets={len(anchor_grads)} "
+                f"correction_enabled_same_tick=true",
+                flush=True,
+            )
 
     def _comm_eff_geometry_probe_fire_stash(
         self,
@@ -3326,6 +3635,24 @@ class FSDPEngine(BaseEngine):
         # train_batch. Dense/disabled runs never advance this counter.
         state.spectral_step += 1
         if not state.should_run_spectral_correction():
+            return
+
+        # rank1_relex warmup has an explicit safety barrier. Do not rely on the
+        # merger's cold-M fallback: that path still traverses matrices, creates
+        # anchor entries, and increments correction counters. Cadence advances
+        # above, but the optimizer receives the untouched fast gradient until a
+        # complete-window projected anchor has successfully populated M.
+        if (
+            hasattr(state, "rank1_relex_active")
+            and state.rank1_relex_active()
+            and not bool(getattr(state, "rank1_m_ready", False))
+        ):
+            state.rank1_correction_bypass_ticks += 1
+            print(
+                f"[comm_eff][rank1_relex] correction BYPASS tick={state.spectral_step} "
+                f"rank1_m_ready=false spectral_corrections={state.spectral_corrections}",
+                flush=True,
+            )
             return
 
         # correction_mode="none" is inert: no summon, no

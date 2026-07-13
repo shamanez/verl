@@ -417,6 +417,32 @@ class CommEffState:
         # in the default stale_correct mode. On the earliest-legal (min_snaps=2)
         # arm this increments exactly once (fire 1), then the projector engages.
         self.warmup_no_correct_skips = 0
+        # Pure sliding rank1_relex state. These counters are emitted only when
+        # that mode is active, preserving fixed-linear/disabled metric output.
+        # rank1_m_ready is the explicit optimizer safety barrier: the correction
+        # hook advances cadence but returns before touching any matrix until a
+        # complete-window projected anchor has successfully updated M (and Q in
+        # the q_only/anchor-owned-Q arm).
+        self.rank1_m_ready = False
+        self.rank1_q_only_fires = 0
+        self.rank1_correction_bypass_ticks = 0
+        self.rank1_fires = 0
+        self.rank1_history_checkpoints = 0
+        self.rank1_history_deltas = 0
+        self.rank1_window_span = 0
+        self.rank1_prediction_horizon = 0
+        self.rank1_evr_mean = 0.0
+        self.rank1_r2_mean = 0.0
+        self.rank1_zero_motion_tensors = 0
+        # Causal sampled-weight probe. Scalar-only and telemetry-only; emitted
+        # only when probe.rank1_projection_enabled=true.
+        self.rank1_probe_predictions = 0
+        self.rank1_probe_resolutions = 0
+        self.rank1_probe_pending = 0
+        self.rank1_probe_projected_rmse = 0.0
+        self.rank1_probe_stale_rmse = 0.0
+        self.rank1_probe_skill = 0.0
+        self.rank1_probe_direction_cos = 0.0
         # Geometry probe. All None / 0 unless probe.geometry_enabled
         # (off-path parity: the OFF path builds no ring, no buffer, no stash).
         #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
@@ -699,6 +725,88 @@ class CommEffState:
             )
         self._built = True
 
+    def rank1_relex_active(self) -> bool:
+        """Whether this state owns the opt-in pure sliding rank1 projector."""
+        anchor_cfg = getattr(self.config, "anchor", None)
+        return bool(getattr(anchor_cfg, "lookahead_anchor", False)) and (
+            str(getattr(anchor_cfg, "lookahead_mode", "disabled")) == "rank1_relex"
+        )
+
+    def reset_rank1_runtime(self) -> None:
+        """Reset non-checkpointed rank1 state after loading model weights.
+
+        A resumed run must establish a new local base and refill the exact
+        checkpoint window. This mirrors a fresh worker even when a test or
+        orchestration path loads a checkpoint into an already-used process.
+        """
+        if not self.rank1_relex_active():
+            return
+        for name in (
+            "_rank1_history",
+            "_rank1_projector",
+            "_rank1_base_batch",
+            "_rank1_base_canary",
+            "_rank1_projection_probe",
+            "_anchor_replay_ring",
+            "_anchor_queue",
+            "_anchor_canary_by_tick",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+        self.anchor_step = 0
+        self.spectral_step = 0
+        self.anchor_backwards = 0
+        self.spectral_corrections = 0
+        self.anchor_q_updates = 0
+        self.anchor_q_broadcasts = 0
+        self.powersgd_basis_updates = 0
+        self.anchor_replay_fires = 0
+        self.lookahead_fires = 0
+        self.lookahead_warmup_fallbacks = 0
+        self.warmup_no_correct_skips = 0
+        self.rank1_m_ready = False
+        self.rank1_q_only_fires = 0
+        self.rank1_correction_bypass_ticks = 0
+        self.rank1_fires = 0
+        self.rank1_history_checkpoints = 0
+        self.rank1_history_deltas = 0
+        self.rank1_window_span = 0
+        self.rank1_prediction_horizon = 0
+        self.rank1_evr_mean = 0.0
+        self.rank1_r2_mean = 0.0
+        self.rank1_zero_motion_tensors = 0
+        self.rank1_probe_predictions = 0
+        self.rank1_probe_resolutions = 0
+        self.rank1_probe_pending = 0
+        self.rank1_probe_projected_rmse = 0.0
+        self.rank1_probe_stale_rmse = 0.0
+        self.rank1_probe_skill = 0.0
+        self.rank1_probe_direction_cos = 0.0
+        if self.spectral is not None:
+            # A resumed rank1 run rewarms from a fresh local checkpoint base.
+            # Clear every correction-family history, not only M_anchor, so an
+            # ef/delayed-ef/momentum ablation cannot resurrect pre-resume state
+            # when rank1_m_ready becomes true again.
+            for name in (
+                "_anchor",
+                "_ef_residual",
+                "_delayed_ef_delta",
+                "_delta_momentum",
+                "_delta_momentum_last_step",
+                "_adaptive_lambda_hist",
+                "_subbasis_energy_ratios",
+            ):
+                cache = getattr(self.spectral, name, None)
+                if cache is not None and hasattr(cache, "clear"):
+                    cache.clear()
+            if hasattr(self.spectral, "current_step"):
+                self.spectral.current_step = 0
+        if self.powersgd is not None:
+            getattr(self.powersgd, "_basis", {}).clear()
+            getattr(self.powersgd, "_sketch", {}).clear()
+            if hasattr(self.powersgd, "clear_family_harvest"):
+                self.powersgd.clear_family_harvest()
+
     def set_path_tag(self, tag: Optional[str]) -> None:
         """Stamp the current execution-path tag.
 
@@ -970,7 +1078,7 @@ class CommEffState:
         anchor_rollouts_generated, anchor_rewards_recomputed,
         anchor_optimizer_steps) are the load-bearing falsifiers.
         """
-        return {
+        out = {
             "comm_eff/mask_applications": self.mask_applications,
             "comm_eff/anchor_backwards": self.anchor_backwards,
             "comm_eff/spectral_corrections": self.spectral_corrections,
@@ -1010,6 +1118,36 @@ class CommEffState:
             # m1–m7 record written (0 unless probe.geometry_enabled).
             "comm_eff/geometry_probe_fires": self.geometry_probe_fires,
         }
+        if self.rank1_relex_active():
+            out.update(
+                {
+                    "comm_eff/rank1_m_ready": int(self.rank1_m_ready),
+                    "comm_eff/rank1_q_only_fires": self.rank1_q_only_fires,
+                    "comm_eff/rank1_correction_bypass_ticks": self.rank1_correction_bypass_ticks,
+                    "comm_eff/rank1_fires": self.rank1_fires,
+                    "comm_eff/rank1_history_checkpoints": self.rank1_history_checkpoints,
+                    "comm_eff/rank1_history_deltas": self.rank1_history_deltas,
+                    "comm_eff/rank1_window_span": self.rank1_window_span,
+                    "comm_eff/rank1_prediction_horizon": self.rank1_prediction_horizon,
+                    "comm_eff/rank1_evr_mean": self.rank1_evr_mean,
+                    "comm_eff/rank1_r2_mean": self.rank1_r2_mean,
+                    "comm_eff/rank1_zero_motion_tensors": self.rank1_zero_motion_tensors,
+                }
+            )
+            probe_cfg = getattr(self.config, "probe", None)
+            if bool(getattr(probe_cfg, "rank1_projection_enabled", False)):
+                out.update(
+                    {
+                        "comm_eff/rank1_probe_predictions": self.rank1_probe_predictions,
+                        "comm_eff/rank1_probe_resolutions": self.rank1_probe_resolutions,
+                        "comm_eff/rank1_probe_pending": self.rank1_probe_pending,
+                        "comm_eff/rank1_probe_projected_rmse": self.rank1_probe_projected_rmse,
+                        "comm_eff/rank1_probe_stale_rmse": self.rank1_probe_stale_rmse,
+                        "comm_eff/rank1_probe_skill": self.rank1_probe_skill,
+                        "comm_eff/rank1_probe_direction_cos": self.rank1_probe_direction_cos,
+                    }
+                )
+        return out
 
 
 def maybe_build_comm_eff_state(config: Any) -> Optional[CommEffState]:

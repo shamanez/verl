@@ -1043,6 +1043,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # not fire. Stamp "ckpt" so the assert trips on any leak.
         with self._comm_eff_path("ckpt"):
             self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        state = self._maybe_comm_eff_state()
+        if state is not None and hasattr(state, "reset_rank1_runtime") and state.rank1_relex_active():
+            state.reset_rank1_runtime()
+            print(
+                "[comm_eff][rank1_relex] checkpoint load reset local history/M/Q; "
+                "resume will seed a fresh base and rewarm",
+                flush=True,
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

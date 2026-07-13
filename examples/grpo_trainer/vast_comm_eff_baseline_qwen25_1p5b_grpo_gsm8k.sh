@@ -145,7 +145,8 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Dataset — preprocess GSM8K to parquet if not already there.
 # ---------------------------------------------------------------------------
-cd "${VERL_ROOT:-/workspace/verl}"
+VERL_ROOT="${VERL_ROOT:-/workspace/verl}"
+cd "$VERL_ROOT"
 
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
@@ -286,9 +287,16 @@ COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
 # correction tracks codec error rather than batch mismatch.
 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
+# Opt-in weight projection. Defaults keep the existing path strictly disabled.
+COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR="${COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR:-false}"
+COMM_EFF_ANCHOR_LOOKAHEAD_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_MODE:-disabled}"
+COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH="${COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH:-1.0}"
+COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE="${COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE:-auto}"
+COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS:-4}"
 # Warmup behavior before the look-ahead projector is ready. "stale_correct"
 # (default) = today's byte-identical behavior; "no_correct" = skip the anchor
-# pass + M update while warming (requires the projector on AND owns_q=false).
+# pass + M update while warming (requires the projector on AND owns_q=false);
+# "q_only" = rank1-only forward/no-backward Q refresh with M/correction off.
 COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-stale_correct}"
 # Min ring snapshots before the projector engages. -1 (default) = mode source
 # count; 2 = project from the earliest legal fire (fire 2).
@@ -351,6 +359,11 @@ COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQ
 # min_tick skips cold-Q ticks while preserving the max_ticks capture budget.
 COMM_EFF_CAPTURE_MIN_TICK="${COMM_EFF_CAPTURE_MIN_TICK:-0}"
 COMM_EFF_CAPTURE_RANK0_ONLY="${COMM_EFF_CAPTURE_RANK0_ONLY:-true}"    # capture rank0 only (disk guard); default true
+# --- causal sampled-weight verification for rank1_relex ---
+COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED="${COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED:-false}"
+COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES="${COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES:-16}"
+COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-}"
+COMM_EFF_PROBE_RANK0_ONLY="${COMM_EFF_PROBE_RANK0_ONLY:-true}"
 # --- PowerSGD activation compression ---
 COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"               # r=77 ≡ p=0.95 (0.05·H, H=1536)
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
@@ -378,8 +391,9 @@ if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
   echo "INFO: anchor ON (the base) -> ~3 GB no-hook clone/rank; the default PPO_MAX_TOKEN_LEN_PER_GPU=18432 fits 4×H200. If you raise it, prefer 8×GPU." >&2
 fi
 
-LOG="${LOG:-/workspace/verl/runs/${EXPERIMENT_NAME}/train.log}"
+LOG="${LOG:-$VERL_ROOT/runs/${EXPERIMENT_NAME}/train.log}"
 mkdir -p "$(dirname "$LOG")"
+COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-$(dirname "$LOG")/rank1_projection_probe}"
 
 cat <<EOF
 === launching communication-efficient GRPO ===
@@ -401,6 +415,7 @@ cat <<EOF
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
+  lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC (legacy: delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA)
   ef_powersgd:         ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP
@@ -504,6 +519,11 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.anchor.owns_q="$COMM_EFF_ANCHOR_OWNS_Q" \
   actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch="$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH" \
   actor_rollout_ref.actor.comm_eff.anchor.snapshot_device="$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor="$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_mode="$COMM_EFF_ANCHOR_LOOKAHEAD_MODE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_strength="$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_rollout_source="$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_window_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.anchor.warmup_mode="$COMM_EFF_ANCHOR_WARMUP_MODE" \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
@@ -554,6 +574,10 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
   actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
   actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \
+  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_enabled="$COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_samples="$COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES" \
+  actor_rollout_ref.actor.comm_eff.probe.out_dir="$COMM_EFF_PROBE_OUT_DIR" \
+  actor_rollout_ref.actor.comm_eff.probe.rank0_only="$COMM_EFF_PROBE_RANK0_ONLY" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
@@ -600,7 +624,7 @@ kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
 # local run directory after training and before done.flag. Best-effort only; the
 # local train.log remains authoritative.
 if command -v wandb >/dev/null 2>&1; then
-  WANDB_RUN_DIR=$(ls -dt /workspace/verl/wandb/run-* /workspace/verl/wandb/offline-run-* 2>/dev/null | head -1 || true)
+  WANDB_RUN_DIR=$(ls -dt "$VERL_ROOT"/wandb/run-* "$VERL_ROOT"/wandb/offline-run-* 2>/dev/null | head -1 || true)
   if [[ -n "${WANDB_RUN_DIR:-}" ]]; then
     echo "=== wandb sync $WANDB_RUN_DIR (flush final history before teardown) ==="
     timeout 240 wandb sync "$WANDB_RUN_DIR" 2>&1 | tail -8 \
@@ -608,7 +632,7 @@ if command -v wandb >/dev/null 2>&1; then
   fi
 fi
 
-touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
+touch "$VERL_ROOT/runs/${EXPERIMENT_NAME}/done.flag"
 echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
 # Propagate the training exit status so the  launch.sh `run_step` sees a
 # real failure (set -e / `|| true` semantics in the driver still apply).
