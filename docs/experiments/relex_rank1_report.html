@@ -1,0 +1,382 @@
+<!doctype html>
+<!--
+ Copyright 2024 Bytedance Ltd. and/or its affiliates
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sliding RELEX: two-circuit experiment report</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #09111f;
+      --panel: #111c2e;
+      --panel-2: #17243a;
+      --text: #eef4ff;
+      --muted: #aebbd0;
+      --line: #2b3b55;
+      --blue: #71b7ff;
+      --green: #6ee7a2;
+      --amber: #ffd166;
+      --red: #ff8585;
+      --purple: #c4a7ff;
+      --shadow: 0 18px 50px rgb(0 0 0 / 24%);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -10%, rgb(62 113 184 / 30%), transparent 34rem),
+        radial-gradient(circle at 95% 5%, rgb(122 85 195 / 22%), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a { color: var(--blue); }
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .94em;
+    }
+    code {
+      padding: .1rem .35rem;
+      border: 1px solid var(--line);
+      border-radius: .35rem;
+      background: rgb(255 255 255 / 5%);
+    }
+
+    .wrap { width: min(1180px, calc(100% - 2rem)); margin: 0 auto; }
+    header { padding: 4.5rem 0 2rem; }
+    .eyebrow {
+      margin: 0 0 .8rem;
+      color: var(--blue);
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-size: .78rem;
+    }
+    h1 { max-width: 900px; margin: 0; font-size: clamp(2.2rem, 6vw, 4.8rem); line-height: .98; letter-spacing: -.045em; }
+    h2 { margin: 0 0 1rem; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.02em; }
+    h3 { margin: 0 0 .55rem; font-size: 1.05rem; }
+    p { margin: .45rem 0 1rem; }
+    .lede { max-width: 820px; margin: 1.25rem 0; color: var(--muted); font-size: 1.14rem; }
+    .status-row { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1.4rem 0 0; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .45rem;
+      padding: .4rem .75rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgb(255 255 255 / 4%);
+      color: var(--muted);
+      font-size: .86rem;
+    }
+    .dot { width: .58rem; height: .58rem; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 .2rem rgb(110 231 162 / 12%); }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      border-block: 1px solid var(--line);
+      background: rgb(9 17 31 / 88%);
+      backdrop-filter: blur(14px);
+    }
+    nav .wrap { display: flex; gap: 1.15rem; overflow-x: auto; padding-block: .75rem; }
+    nav a { color: var(--muted); text-decoration: none; white-space: nowrap; font-size: .9rem; }
+    nav a:hover { color: var(--text); }
+
+    main { padding: 1.5rem 0 5rem; }
+    section { scroll-margin-top: 4rem; margin: 1rem 0 1.4rem; padding: 1.35rem; border: 1px solid var(--line); border-radius: 1rem; background: linear-gradient(145deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 1%)); box-shadow: var(--shadow); }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    .card { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--panel); }
+    .card p:last-child { margin-bottom: 0; }
+    .metric { margin: .1rem 0 .2rem; font-size: 2rem; font-weight: 780; letter-spacing: -.035em; }
+    .label { color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; }
+    .good { color: var(--green); }
+    .warn { color: var(--amber); }
+    .bad { color: var(--red); }
+    .accent { color: var(--blue); }
+    .muted { color: var(--muted); }
+
+    .callout { margin: 1rem 0 0; padding: .9rem 1rem; border-left: .25rem solid var(--amber); background: rgb(255 209 102 / 8%); border-radius: .25rem .7rem .7rem .25rem; }
+    .callout strong { color: var(--amber); }
+    .formula { overflow-x: auto; margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: #080f1b; color: #dceaff; text-align: center; font: 600 1rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: .7rem; align-items: stretch; margin: 1rem 0; }
+    .flow .node { padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--panel); }
+    .flow .arrow { align-self: center; color: var(--blue); font-size: 1.5rem; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: .8rem; }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    th, td { padding: .72rem .8rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--panel-2); color: var(--muted); font-size: .8rem; letter-spacing: .045em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    .right { text-align: right; }
+    ul, ol { padding-left: 1.25rem; }
+    li { margin: .35rem 0; }
+
+    .progress { height: .65rem; overflow: hidden; border-radius: 999px; background: #07101e; border: 1px solid var(--line); }
+    .progress > span { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--purple)); }
+    footer { padding: 0 0 3rem; color: var(--muted); font-size: .86rem; }
+
+    @media (max-width: 760px) {
+      header { padding-top: 2.8rem; }
+      .flow { grid-template-columns: 1fr; }
+      .flow .arrow { transform: rotate(90deg); justify-self: center; }
+      section { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <p class="eyebrow">Qwen2.5-Math-1.5B · MATH · GRPO</p>
+    <h1>Sliding RELEX two-circuit experiment report</h1>
+    <p class="lede">
+      A living report for the fast learner, projected delayed anchor, training–inference mismatch,
+      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Final comparison and
+      causal sampled-weight results will replace the pending cells as each GPU arm finishes.
+    </p>
+    <div class="status-row">
+      <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
+      <span class="pill">Updated 14 July 2026, 14:05 AEST</span>
+      <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
+      <span class="pill">Training commit <span class="mono">a7252bd6</span></span>
+    </div>
+  </header>
+
+  <nav aria-label="Report sections">
+    <div class="wrap">
+      <a href="#status">Status</a>
+      <a href="#answer">Anchor answer</a>
+      <a href="#mismatch">Train–inference mismatch</a>
+      <a href="#cadence">Cadence and delay</a>
+      <a href="#weights">Weight verification</a>
+      <a href="#results">Results</a>
+      <a href="#method">Method</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <section id="status">
+      <h2>Live status and remaining time</h2>
+      <div class="grid">
+        <article class="card">
+          <div class="label">Dense control</div>
+          <div class="metric good">67.41%</div>
+          <p>Completed 100/100 without a training failure.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/kvgtcs07">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">Active corrected arm</div>
+          <div class="metric accent">W=2 α=1</div>
+          <p>Two-checkpoint all-tensor secant projection; frozen-Q handoff enabled. Startup is in progress.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/vqe9554z">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">Estimated queue remainder</div>
+          <div class="metric warn">20–21 h</div>
+          <p>W=2, corrected W=4, W=2 no-increment, then fixed-linear, sequentially.</p>
+        </article>
+        <article class="card">
+          <div class="label">Likely finish</div>
+          <div class="metric">10–11</div>
+          <p>15 July 2026 AEST, assuming measured throughput and no fail-closed stop.</p>
+        </article>
+      </div>
+      <p class="muted">Measured wall times were 4 h 26 min dense and 5 h 05 min for the legacy W=4 run. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
+      <div class="progress" aria-label="Dense control complete and four corrected compressed arms remain"><span style="width: 20%"></span></div>
+    </section>
+
+    <section id="answer">
+      <h2>What is the anchor signal helping?</h2>
+      <p>
+        The completed projected run is a <strong>legacy pre-fix W=4 diagnostic</strong>, using two circuits:
+        a live fast learner and an isolated delayed anchor. It is not the corrected W=2 arm now running.
+        The anchor never optimizer-steps and never reads immediate fast weights.
+      </p>
+      <div class="flow" role="img" aria-label="Dense rollout produces rewards for compressed fast training; delayed exact checkpoints are projected into an anchor that supplies Q and M back to the fast circuit">
+        <div class="node"><strong>Dense inference</strong><br><span class="muted">vLLM rollout, rewards and GRPO advantages</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Compressed fast circuit</strong><br><span class="muted">PowerSGD forward/backward and optimizer</span></div>
+        <div class="arrow">←</div>
+        <div class="node"><strong>Projected anchor</strong><br><span class="muted">uncompressed clean forward/backward, Q and M only</span></div>
+      </div>
+      <p>The anchor contributes two distinct signals:</p>
+      <ol>
+        <li><strong>Q:</strong> an activation-energy basis that selects the low-dimensional information retained by PowerSGD. During Q-only warmup this is the only anchor output.</li>
+        <li><strong>M:</strong> an EMA of the clean, uncompressed anchor policy gradient. After readiness, it supplies gradient signs to the compressed fast circuit.</li>
+      </ol>
+      <div class="formula">G<sub>corr</sub> = 0.25 G<sub>fast</sub> + 0.75 |G<sub>fast</sub>| sign(M<sub>anchor</sub>)</div>
+      <p>
+        The intended role is therefore <strong>direction repair</strong>: magnitude remains tied to the fast
+        gradient, while the dense anchor supplies a cleaner sign reference. Because the anchor forward is
+        uncompressed, it may also bridge the large semantic gap between dense vLLM inference and the compressed
+        training surrogate.
+      </p>
+      <div class="grid">
+        <article class="card"><div class="label">Projected tensors</div><div class="metric">338/338</div><p>Embedding, norms, decoder tensors and other floating parameters.</p></article>
+        <article class="card"><div class="label">Gradient targets</div><div class="metric">196/196</div><p>Decoder matrices covered by spectral correction.</p></article>
+        <article class="card"><div class="label">Full anchor fires</div><div class="metric">7</div><p>At global steps 40, 50, 60, 70, 80, 90 and 100.</p></article>
+        <article class="card"><div class="label">Matrix corrections</div><div class="metric">23,716</div><p>Zero cold-M fallbacks; the path was materially active.</p></article>
+      </div>
+      <div class="callout"><strong>Interpretation limit.</strong> The counters prove that Q and M were active, but the legacy W=4 run also changed live Q inside unfinished PPO updates. Its 65.37% endpoint cannot isolate anchor benefit. The corrected W=4 rerun removes that confound; a matched PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
+    </section>
+
+    <section id="mismatch">
+      <h2>Training–inference mismatch: the important finding</h2>
+      <p>
+        Dense rollout generation and the PowerSGD training forward do not represent the same policy. The mismatch
+        diagnostic is enabled with <code>calculate_log_probs=True</code>; rollout importance sampling and rejection
+        sampling are off, so these numbers measure the gap without silently changing the objective. The reported
+        rollout→train KL is a sampled-token diagnostic, not an exact full-vocabulary KL.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Run</th><th class="right">Mean |prob diff|</th><th class="right">Probability correlation</th><th class="right">Rollout→train KL</th><th class="right">Final MATH</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Dense control</td><td class="right good">0.00231</td><td class="right good">0.99943</td><td class="right good">0.000263</td><td class="right">67.41%</td></tr>
+            <tr><td>Legacy W=4, pre-Q fix</td><td class="right bad">0.73544</td><td class="right bad">0.13981</td><td class="right bad">8.2676</td><td class="right">65.37%</td></tr>
+            <tr><td>Aborted W=2 diagnostic</td><td class="right warn">≈0.815</td><td class="right warn">≈0.036</td><td class="right warn">≈12.38</td><td class="right muted">Preserved, not comparable</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        This is <strong>not a small numerical engine mismatch</strong>. The legacy W=4 run nevertheless ended only 2.04 MATH
+        points behind dense while using about <strong>5.01% of dense-equivalent activation communication</strong>.
+        That is scientifically valuable, but it should be labelled robustness under mismatch—not evidence that the
+        mismatch is harmless or that the update is on-policy.
+      </p>
+      <h3>The cadence-boundary defect and correction</h3>
+      <p>
+        The audit found that anchor-owned Q was previously replaced at the start of a PPO train minibatch,
+        after <code>old_log_probs</code> had already been recomputed. At global step 10 this coincided with an
+        actor PPO-KL spike to −4.07. Commit <code>a7252bd6</code> now stages and broadcasts Q as a candidate,
+        keeps live Q frozen across all minibatches, activates it only after a successful
+        <code>update_actor</code>, and discards it if that update fails. M still corrects the firing optimizer
+        tick immediately; only Q visibility is delayed to the next paired old/current-policy step.
+      </p>
+      <h3>Why can it still learn?</h3>
+      <ul>
+        <li>The PPO old-policy log-probability is recomputed through the compressed PowerSGD path rather than using dense vLLM rollout log-probabilities as the PPO denominator. The corrected runs now guarantee the same frozen Q for old and current forwards.</li>
+        <li>Dense rollout rewards and group-relative advantages still provide task signal, even though the compressed training policy makes the update off-policy with respect to inference.</li>
+        <li>The uncompressed anchor gradient supplies a dense-policy directional reference, and gradient clipping bounds the very large compressed surrogate gradients. Both are plausible stabilizers, not yet isolated causes.</li>
+      </ul>
+      <div class="callout"><strong>Required follow-up.</strong> Report the complete mismatch trajectory for every arm and add a matched PowerSGD anchor-off run before making a causal claim about the anchor bridging this gap.</div>
+    </section>
+
+    <section id="cadence">
+      <h2>How cadence and delay depend on each other</h2>
+      <div class="formula">checkpoint gap ≈ C &nbsp; · &nbsp; forecast horizon ≈ K &nbsp; · &nbsp; difficulty ≈ K / C &nbsp; · &nbsp; history span ≈ (W − 1)C</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Quantity</th><th>Meaning</th><th>W=4 run</th><th>Effect when increased</th></tr></thead>
+          <tbody>
+            <tr><td>Cadence C</td><td>Interval between anchor refreshes</td><td>20 optimizer ticks</td><td>Less anchor cost, but Q/M is held longer and readiness is later</td></tr>
+            <tr><td>Delay K</td><td>Age of newest exact available checkpoint/batch</td><td>20 optimizer ticks</td><td>More storage and a longer, riskier forecast</td></tr>
+            <tr><td>Window W</td><td>Exact checkpoints used per tensor</td><td>4 checkpoints / 3 deltas</td><td>More denoising evidence, but slower readiness and more storage</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Here <strong>C=K=20</strong>, so every prediction covers one checkpoint interval. With two optimizer ticks
+        per trainer step, that means an anchor refresh every 10 global steps. W=4 first became ready at optimizer
+        tick 80/global step 40, using history <code>[1, 19, 39, 59]</code> to predict generator tick 79.
+      </p>
+      <p>
+        Under the corrected handoff, a Q candidate produced at tick 20 stays staged through the rest of that
+        actor update and becomes live at its successful exit. The next global step recomputes old log-probability
+        with that same Q and retains it through both optimizer ticks. This changes no checkpoint age, prediction
+        horizon, cadence, or delay; it only restores the PPO pairing invariant.
+      </p>
+      <ul>
+        <li><strong>Smaller C, fixed K:</strong> fresher Q/M and faster wall-clock refresh, but more anchor compute and a larger K/C extrapolation measured in checkpoint gaps.</li>
+        <li><strong>Larger C, fixed K:</strong> cheaper anchor operation and a wider history, but the correction is held stale longer between refreshes.</li>
+        <li><strong>Larger K, fixed C:</strong> the exact anchor source is older and the projector must forecast farther.</li>
+        <li><strong>W=2:</strong> ready near global step 20, but exactly a two-point secant with no meaningful EVR/R² diagnostic.</li>
+        <li><strong>W=4:</strong> ready near global step 40 and meaningfully estimates/denoises a rank-1 trajectory.</li>
+      </ul>
+      <p>The paper establishes rank-1 trajectory smoothness and denoising, but does not define this live asynchronous cadence/delay system; that part is our adaptation. See the <a href="https://arxiv.org/html/2605.21468v1#S4.SS3">RELEX ablations</a>.</p>
+    </section>
+
+    <section id="weights">
+      <h2>Is weight projection actually correct?</h2>
+      <p>
+        The completed W=4 run showed strong in-window structure: mean EVR <strong>0.958</strong> and mean temporal
+        R² <strong>0.993</strong>. Those values validate the fitted history, not future forecast accuracy.
+      </p>
+      <p>
+        The new W=2 arm activates the causal sampled-weight probe. It samples 16 deterministic scalar positions
+        from each of four roles—embedding, middle-layer <code>q_proj</code>, its input norm, and final norm—then
+        waits for the matching exact delayed checkpoint before scoring:
+      </p>
+      <div class="grid">
+        <article class="card"><div class="label">Projected error</div><div class="metric">RMSE</div><p>Distance from projected samples to the later exact checkpoint.</p></article>
+        <article class="card"><div class="label">Baseline error</div><div class="metric">Stale RMSE</div><p>Distance from the newest available exact checkpoint to that same target.</p></article>
+        <article class="card"><div class="label">Relative value</div><div class="metric">Skill</div><p><span class="mono">1 − projected SSE / stale SSE</span>; positive means projection wins.</p></article>
+        <article class="card"><div class="label">Direction</div><div class="metric">Cosine</div><p>Alignment between predicted and later-observed weight updates.</p></article>
+      </div>
+      <div class="callout"><strong>Pending.</strong> The legacy W=4 run predates this causal probe. Corrected W=2 and W=4 probe rows will be inserted here as delayed exact targets resolve. Every tensor is fitted and projected independently; there is no cross-tensor trajectory mixing.</div>
+    </section>
+
+    <section id="results">
+      <h2>MATH evaluation and comparison matrix</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Run</th><th class="right">Step 0</th><th class="right">25</th><th class="right">50</th><th class="right">75</th><th class="right">100</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td>Legacy W=4, pre-Q fix</td><td class="right">44.64%</td><td class="right">45.20%</td><td class="right">63.25%</td><td class="right">64.83%</td><td class="right">65.37%</td><td class="warn">Diagnostic only</td></tr>
+            <tr><td>Dense GRPO</td><td class="right">44.42%</td><td class="right">63.67%</td><td class="right">65.67%</td><td class="right">66.67%</td><td class="right">67.41%</td><td class="good">Complete</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="warn">Running</td></tr>
+            <tr><td>Corrected W=4 rank-1, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
+            <tr><td>W=2 no projected increment, α=0</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
+            <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted">Alpha=0 is a matched “no projected increment” control but retains the W=2 anchor circuit. Fixed-linear also differs in tensor scope and warmup, so neither is an anchor-off causal control.</p>
+    </section>
+
+    <section id="method">
+      <h2>Fixed experimental surface</h2>
+      <div class="grid">
+        <article class="card"><h3>Model and data</h3><p>Qwen/Qwen2.5-Math-1.5B<br>MATH train / MATH test<br>last <span class="mono">\boxed{}</span> + <span class="mono">is_equiv</span></p></article>
+        <article class="card"><h3>Generation</h3><p>1024 prompt + 3072 response<br>4096-token greedy evaluation<br>rollout group size 8</p></article>
+        <article class="card"><h3>Optimization</h3><p>GRPO mini-batch 256<br>learning rate 1e-6<br>KL coefficient 0.001</p></article>
+        <article class="card"><h3>Reproducibility</h3><p>100 training steps<br>evaluation every 25<br>2× NVIDIA H200</p></article>
+      </div>
+      <p>
+        Training and evaluation use the same Qwen chat-template framing as the RELEX evaluator: helpful-assistant
+        system text, the MATH problem in the user turn, the instruction to reason step by step and place the final
+        answer in <span class="mono">\boxed{}</span>, followed by the assistant prefix. Generation settings differ
+        only where the protocol requires them (training rollouts versus 4096-token greedy evaluation).
+      </p>
+      <p>
+        Code and discussion live in <a href="https://github.com/shamanez/verl/pull/25">draft PR #25</a>.
+        The report remains provisional until all queued runs, causal weight samples, and mismatch summaries are complete.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>Generated for the fork-only <span class="mono">exp/rank1-relax</span> experiment. Values are copied from completed GPU logs; pending values are explicitly marked.</p>
+  </footer>
+</body>
+</html>
