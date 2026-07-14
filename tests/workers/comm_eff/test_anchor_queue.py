@@ -203,6 +203,19 @@ def test_full_snapshot_deduplicates_tied_parameters_and_excludes_buffers():
     assert "lm_head.weight" not in snap
     assert "inv_freq" not in snap and "position_ids" not in snap
 
+    # The all-floating M selector consumes the same de-duplicated
+    # named_parameters() iterator: a tied LM head must not allocate/update a
+    # second EMA under an alias name.
+    module.embed_tokens.weight.grad = torch.ones_like(module.embed_tokens.weight)
+    grads = extract_target_grads(
+        module.named_parameters(),
+        target_substrs=("unused",),
+        target_scope="all_floating",
+        max_targets=-1,
+        full_grad_of=_identity_full_grad_of,
+    )
+    assert set(grads) == {"embed_tokens.weight"}
+
 
 # =========================================================================== #
 # extract_target_grads reads raw grads and applies no correction.
@@ -223,6 +236,22 @@ def test_extract_target_grads_is_raw_and_2d_only():
         assert g.dim() == 2
         assert torch.allclose(g, live[n].grad)
         assert g is not live[n].grad  # detached clone, not an alias
+
+
+def test_extract_target_grads_all_floating_includes_unique_1d_and_2d_params():
+    module = _TinyDecoder()
+    x = torch.randn(4, 8)
+    module(x).pow(2).mean().backward()
+    grads = extract_target_grads(
+        module.named_parameters(),
+        target_substrs=_TARGETS,
+        max_targets=-1,
+        full_grad_of=_identity_full_grad_of,
+        target_scope="all_floating",
+    )
+    expected = {name for name, p in module.named_parameters() if p.grad is not None and p.is_floating_point()}
+    assert set(grads) == expected
+    assert any("norm" in name and grad.dim() == 1 for name, grad in grads.items())
 
 
 def test_extract_target_grads_respects_max_targets():

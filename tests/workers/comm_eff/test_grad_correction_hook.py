@@ -104,6 +104,20 @@ class _TinyDecoder(torch.nn.Module):
         return x
 
 
+class _TinyAllParamModel(torch.nn.Module):
+    """Exercises embeddings, norms, biases, decoder weights, and an LM head."""
+
+    def __init__(self, d=8, vocab=16):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab, d)
+        self.norm = torch.nn.LayerNorm(d)
+        self.proj = torch.nn.Linear(d, d, bias=True)
+        self.lm_head = torch.nn.Linear(d, vocab, bias=False)
+
+    def forward(self, token_ids):
+        return self.lm_head(self.proj(self.norm(self.embed_tokens(token_ids))))
+
+
 class _MinimalConfig:
     """Duck-typed comm_eff config with .enabled and a .spectral sub-config."""
 
@@ -226,6 +240,40 @@ def test_norm_and_non_target_params_are_skipped():
     # carry "norm" not a proj substring and are correctly skipped.
     assert state.spectral_corrections == 8
     assert all("norm" not in n for n in state.spectral_rel_change)
+
+
+def test_all_floating_corrects_embedding_norm_bias_and_lm_head_once():
+    module = _TinyAllParamModel()
+    module(torch.randint(0, 16, (3, 4))).pow(2).mean().backward()
+    state = _build_state()
+    # Exercise the CPU-EMA storage branch used by the intended all-tensor run.
+    state.spectral.ema_device = "cpu"
+    named = list(module.named_parameters())
+    expected = {name for name, p in named if p.grad is not None and p.is_floating_point()}
+    before = {name: p.grad.detach().clone() for name, p in named if name in expected}
+    for name, p in named:
+        if name in expected:
+            state.spectral.update_anchor(name, -p.grad.detach().clone())
+
+    corrected = apply_spectral_correction_to_params(
+        module.named_parameters(),
+        spectral=state.spectral,
+        target_substrs=("unused_in_all_floating",),
+        target_scope="all_floating",
+        max_targets=-1,
+        state=state,
+        discovery_meta=_DISCOVERY_META,
+        full_grad_of=_full_grad_of,
+        writeback=_writeback,
+    )
+
+    assert corrected == len(expected)
+    assert set(state.spectral_rel_change) == expected
+    assert all(m.device.type == "cpu" for m in state.spectral._anchor.values())
+    assert {"embed_tokens.weight", "norm.weight", "norm.bias", "proj.bias", "lm_head.weight"} <= expected
+    for name, p in module.named_parameters():
+        if name in expected:
+            assert not torch.equal(p.grad, before[name]), name
 
 
 def test_writeback_mutates_the_grad_in_place():

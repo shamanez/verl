@@ -1053,6 +1053,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_q_broadcasts": 0,
                     "comm_eff/anchor_q_activations": 0,
                     "comm_eff/anchor_q_stage_overwrites": 0,
+                    "comm_eff/fast_q_bootstrap_done": 0,
+                    "comm_eff/fast_q_bootstrap_observations": 0,
+                    "comm_eff/fast_q_bootstrap_updates": 0,
+                    "comm_eff/fast_q_bootstrap_activations": 0,
+                    "comm_eff/fast_q_bootstrap_dense_observation_elements": 0.0,
+                    "comm_eff/fast_q_bootstrap_sync_elements": 0.0,
                     "comm_eff/merger_coldM_fallbacks": 0,
                     # Explicit zero on the disabled path for the family screen.
                     "comm_eff/family_screen_builds": 0,

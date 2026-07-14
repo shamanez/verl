@@ -988,6 +988,13 @@ class FSDPEngine(BaseEngine):
             return False
         tag = getattr(state, "path_tag", None)
         if tag == TRAIN_TAG:
+            compressor = state.powersgd
+            if hasattr(compressor, "fast_q_bootstrap_needed") and compressor.fast_q_bootstrap_needed():
+                raise RuntimeError(
+                    "comm_eff fast-Q bootstrap is still pending at the first compressed train forward. "
+                    "The old-logprob recompute must run first (compress_recompute=true; rollout-correction "
+                    "bypass mode is incompatible) so Q1 is frozen across the complete old/current PPO pair."
+                )
             return not forward_only
         if tag == OLD_LOGPROB_TAG:
             # Only when compress_recompute=true did the worker stamp mask_active
@@ -1177,6 +1184,61 @@ class FSDPEngine(BaseEngine):
             if _ps is not None and hasattr(_ps, "reset_tick_comm_counters"):
                 _ps.reset_tick_comm_counters()
         try:
+            # Optional one-time fast-network Q calibration.  It runs only on the
+            # first non-clean compressed old-logprob call.  The discarded prepass
+            # returns raw boundary activations while collecting a private V; the
+            # complete DP-consensus candidate is verified and atomically activated
+            # before this method computes any real old_log_probs.  Consequently
+            # the actual old-policy forward and every subsequent current-policy
+            # minibatch share exactly Q1, and the anchor remains the sole Q writer
+            # after this one-time handoff.
+            if _powersgd_hooks_live:
+                _bootstrap_state = getattr(self, "_comm_eff_state", None)
+                _bootstrap_compressor = getattr(_bootstrap_state, "powersgd", None)
+                _bootstrap_tag = getattr(_bootstrap_state, "path_tag", None)
+                from verl.workers.comm_eff.state import OLD_LOGPROB_TAG
+
+                if (
+                    forward_only
+                    and _bootstrap_tag == OLD_LOGPROB_TAG
+                    and _bootstrap_compressor is not None
+                    and hasattr(_bootstrap_compressor, "fast_q_bootstrap_needed")
+                    and _bootstrap_compressor.fast_q_bootstrap_needed()
+                ):
+                    _bootstrap_compressor.begin_fast_q_bootstrap_observation()
+                    try:
+                        self._forward_backward_batch_inner(
+                            data,
+                            loss_function,
+                            forward_only=True,
+                            run_backward=False,
+                            collect_outputs=False,
+                        )
+                        _bootstrap_compressor.finish_fast_q_bootstrap_observation()
+                        if not _bootstrap_compressor.stage_fast_q_bootstrap_basis():
+                            raise RuntimeError("comm_eff fast-Q bootstrap produced no candidate")
+                        _bootstrap_dev = _bootstrap_compressor.verify_fast_q_bootstrap_basis_across_ranks()
+                        if not _bootstrap_compressor.activate_staged_fast_q_bootstrap_basis():
+                            raise RuntimeError("comm_eff fast-Q bootstrap candidate did not activate")
+                        print(
+                            "[comm_eff][fast-q-bootstrap] activated before real old_logprob "
+                            f"global_step={getattr(self, '_comm_eff_global_step', 0)} "
+                            f"observations={_bootstrap_compressor.fast_q_bootstrap_observations} "
+                            f"updates={_bootstrap_compressor.fast_q_bootstrap_updates} "
+                            f"activations={_bootstrap_compressor.fast_q_bootstrap_activations} "
+                            f"dense_observation_elements="
+                            f"{_bootstrap_compressor.fast_q_bootstrap_dense_observation_elements:.0f} "
+                            f"sync_elements={_bootstrap_compressor.fast_q_bootstrap_sync_elements:.0f} "
+                            f"cross_rank_max_rel_dev={_bootstrap_dev}",
+                            flush=True,
+                        )
+                    except Exception:
+                        # No candidate from a partial/malformed prepass may leak
+                        # into a retry or the actual old-policy forward.  Live Q0
+                        # remains untouched unless the all-boundary commit above
+                        # completed successfully.
+                        _bootstrap_compressor.abort_fast_q_bootstrap()
+                        raise
             return self._forward_backward_batch_inner(data, loss_function, forward_only=forward_only)
         finally:
             if _mask_hooks_live:
@@ -1249,6 +1311,10 @@ class FSDPEngine(BaseEngine):
         if substrs is None:
             return ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
         return tuple(substrs)
+
+    def _comm_eff_target_scope(self, spec_cfg) -> str:
+        """M/correction selector policy; defaults preserve decoder matrices."""
+        return str(getattr(spec_cfg, "target_scope", "decoder_matrices"))
 
     def _dp_all_reduce_anchor_grads(self, anchor_grads: dict) -> dict:
         """All-reduce(MEAN) ``G_anchor`` across the actor DP group.
@@ -1649,6 +1715,7 @@ class FSDPEngine(BaseEngine):
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
+        target_scope = self._comm_eff_target_scope(spec_cfg)
         # Default to full coverage (-1); max_targets caps both anchor extraction
         # and merger writeback.
         max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
@@ -1891,6 +1958,8 @@ class FSDPEngine(BaseEngine):
         _rank1_fire = False
         _rank1_q_only = False
         _rank1_q_only_batch = None
+        _rank1_warm_correct = False
+        _rank1_warm_correct_batch = None
         load_weights = stale  # what the clone receives (raw stale by default)
         _src_tick = int(_snap_tick) if replay_mode else int(_used_step)
         _la_target_tick = int(step)
@@ -2117,6 +2186,35 @@ class FSDPEngine(BaseEngine):
                     f"{rank1_history.window_snapshots} M=disabled correction=disabled",
                     flush=True,
                 )
+            elif str(getattr(anchor_cfg, "warmup_mode", "")) == "stale_correct":
+                # Replay warmup normally falls back to the current fire batch
+                # because t-K does not exist yet. For rank1, fire 1 instead uses
+                # the explicitly retained tick-1 generator checkpoint and its
+                # paired tick-1 rollout batch. That gives M a real initial policy
+                # point and lets the fast correction consume it on this same
+                # optimizer tick. Later pre-readiness fires use their exact
+                # delayed checkpoint/trajectory pair.
+                latest_snapshot, latest_tick = rank1_history.latest()
+                if bool(_warm_fb):
+                    load_weights = latest_snapshot
+                    _rank1_warm_correct_batch = getattr(state, "_rank1_base_batch", None)
+                    _fire_canary = getattr(state, "_rank1_base_canary", None)
+                    _rank1_warm_source_tick = latest_tick
+                else:
+                    load_weights = stale
+                    _rank1_warm_correct_batch = _replay_batch
+                    _rank1_warm_source_tick = _src_tick
+                if _rank1_warm_correct_batch is None:
+                    raise RuntimeError("rank1_relex stale_correct warmup has no exact paired trajectory batch")
+                _rank1_warm_correct = True
+                state.rank1_warmup_correction_fires += 1
+                print(
+                    f"[comm_eff][rank1_relex] step={step} WARM_CORRECT "
+                    f"history_ticks={rank1_history.ticks} source_tick={_rank1_warm_source_tick} "
+                    f"checkpoints={rank1_history.total_retained()}/{rank1_history.window_snapshots} "
+                    f"M=dense correction=same_tick",
+                    flush=True,
+                )
             else:
                 state.warmup_no_correct_skips += 1
                 print(
@@ -2159,6 +2257,13 @@ class FSDPEngine(BaseEngine):
         if _rank1_q_only:
             anchor_data = _rank1_q_only_batch.copy() if hasattr(_rank1_q_only_batch, "copy") else _rank1_q_only_batch
             _batch_choice = "rank1_delayed_pair"
+        elif _rank1_warm_correct:
+            anchor_data = (
+                _rank1_warm_correct_batch.copy()
+                if hasattr(_rank1_warm_correct_batch, "copy")
+                else _rank1_warm_correct_batch
+            )
+            _batch_choice = "rank1_exact_warm_pair"
         elif replay_mode:
             if _la_active and _rollout_source == "current_step":
                 anchor_data = data.copy() if hasattr(data, "copy") else data
@@ -2380,7 +2485,7 @@ class FSDPEngine(BaseEngine):
 
             # Read G_anchor RAW per target (NO correct_matrix) off
             # the clone. full_grad_of is the identity — the clone is a plain
-            # nn.Module so its p.grad is already a full 2D tensor.
+            # nn.Module so its p.grad is already a full logical tensor.
             def _full_grad_of(grad):
                 return grad, {"grad_container_type": type(grad).__name__, "is_dtensor": str(isinstance(grad, DTensor))}
 
@@ -2390,6 +2495,7 @@ class FSDPEngine(BaseEngine):
                     target_substrs=target_substrs,
                     max_targets=max_targets,
                     full_grad_of=_full_grad_of,
+                    target_scope=target_scope,
                 )
         finally:
             # Anchor-owns-Q: tear down the anchor's PowerSGD hooks on the clone and
@@ -2514,14 +2620,15 @@ class FSDPEngine(BaseEngine):
             )
 
         # Coverage set-equality: the anchor M must cover every
-        # matrix the merger corrects (set-equal, NOT 4 / NOT boundary-only). Build
-        # the expected merger set from the SAME substring+2D selector the merger
+        # tensor the merger corrects (set-equal, NOT 4 / NOT boundary-only). Build
+        # the expected merger set from the SAME scope selector the merger
         # uses, over the live module's named_parameters (architecture == the
         # clone), and assert set(anchor_grads canon) == set(expected canon) when
         # uncapped. A mismatch emits the count plus the
         # symmetric difference so it is greppable. (Only meaningful when uncapped:
         # max_targets<0; a diagnostic cap deliberately narrows both.)
         from verl.workers.comm_eff.spectral_filter import _canon as _canon_cov
+        from verl.workers.comm_eff.spectral_filter import is_spectral_target
 
         try:
             with _summon_ctx():
@@ -2529,7 +2636,13 @@ class FSDPEngine(BaseEngine):
                 expected = {
                     _canon_cov(n)
                     for n, p in _inner_cov.named_parameters()
-                    if any(s in n for s in target_substrs) and getattr(p, "ndim", p.dim()) == 2
+                    if is_spectral_target(
+                        n,
+                        p,
+                        target_substrs=target_substrs,
+                        target_scope=target_scope,
+                    )
+                    and p.requires_grad
                 }
         except Exception as _cov_exc:  # pragma: no cover - defensive
             expected = set()
@@ -2584,12 +2697,18 @@ class FSDPEngine(BaseEngine):
                     "validation requires the paired-replay substrate (G_anc_rep is the "
                     "replay gradient). This indicates config drift; refusing to measure."
                 )
+            # m1--m7 includes matrix-only spectral/SVD statistics. M may cover
+            # all floating tensors, but keep this diagnostic on its historical
+            # 2-D decoder subset so 1-D norms/biases cannot enter matrix SVDs.
+            _probe_anchor_grads = {
+                n: g for n, g in anchor_grads.items() if g.dim() == 2 and any(s in n for s in target_substrs)
+            }
             self._comm_eff_geometry_probe_fire_stash(
                 state=state,
                 data=data,
                 loss_function=loss_function,
                 step=step,
-                anchor_grads=anchor_grads,
+                anchor_grads=_probe_anchor_grads,
                 target_substrs=target_substrs,
                 max_targets=max_targets,
                 warmup_fallback=bool(_warm_fb),
@@ -2696,6 +2815,7 @@ class FSDPEngine(BaseEngine):
                             target_substrs=target_substrs,
                             max_targets=max_targets,
                             full_grad_of=_full_grad_of_fresh,
+                            target_scope=target_scope,
                         )
                         # DP-reduce so G_fresh_anchor is the GLOBAL fresh grad (same
                         # scale as the K-stale G_anchor it is compared against).
@@ -2777,7 +2897,7 @@ class FSDPEngine(BaseEngine):
                     _dp_multi = torch.distributed.get_world_size(group=self.get_data_parallel_group()) > 1
                 except Exception:
                     _dp_multi = False
-            if _rank1_fire:
+            if _rank1_fire or _rank1_warm_correct:
                 validate_rank1_broadcast_receipts(
                     q_only=False,
                     dp_multi=_dp_multi,
@@ -2903,13 +3023,14 @@ class FSDPEngine(BaseEngine):
                     flush=True,
                 )
 
-        if _rank1_fire:
+        if _rank1_fire or _rank1_warm_correct:
             assert spectral is not None and anchor_grads and deltas, (
-                "rank1_relex ready fire completed without a populated M_anchor update"
+                "rank1_relex full anchor fire completed without a populated M_anchor update"
             )
             state.rank1_m_ready = True
             print(
                 f"[comm_eff][rank1_relex] step={step} M_READY=true "
+                f"source={'warm_exact_pair' if _rank1_warm_correct else 'projected'} "
                 f"anchor_backwards={state.anchor_backwards} targets={len(anchor_grads)} "
                 f"correction_enabled_same_tick=true",
                 flush=True,
@@ -3382,6 +3503,7 @@ class FSDPEngine(BaseEngine):
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
+        target_scope = self._comm_eff_target_scope(spec_cfg)
         max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
         _gs = int(getattr(state, "global_step", -1) or -1)
         # Align with EVERY other role via the SINGLE per-train_batch tick
@@ -3507,6 +3629,7 @@ class FSDPEngine(BaseEngine):
                     target_substrs=target_substrs,
                     max_targets=max_targets,
                     full_grad_of=_full_grad_of,
+                    target_scope=target_scope,
                 )
                 dense_grads = self._dp_all_reduce_anchor_grads(dense_grads)
                 n = capture_anchor_tensors(
@@ -3685,6 +3808,7 @@ class FSDPEngine(BaseEngine):
 
         spec_cfg = getattr(state.config, "spectral", None)
         target_substrs = self._comm_eff_target_names(spec_cfg)
+        target_scope = self._comm_eff_target_scope(spec_cfg)
         # Full coverage default (-1). max_targets caps the merger too, so a
         # residual cap would silently skip matrices the merger should correct.
         max_targets = int(getattr(spec_cfg, "max_targets", -1)) if spec_cfg is not None else -1
@@ -3711,7 +3835,7 @@ class FSDPEngine(BaseEngine):
             "world_size": str(torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1),
         }
 
-        # Expose original 2D named params and grads. FSDP1 can flatten wrapped
+        # Expose original named params and grads. FSDP1 can flatten wrapped
         # units into 1-D FlatParameters, so materialize original unflattened
         # params/grads via summon_full_params. FSDP2 keeps original names with
         # DTensor grads and can be iterated directly.
@@ -3719,7 +3843,7 @@ class FSDPEngine(BaseEngine):
             # with_grads=True surfaces the unsharded .grad on each original
             # param inside the context; writeback=True copies edits back into
             # the FlatParameter shard on exit. summon_full_params all-gathers,
-            # so this is the unsharded full-matrix view the filter needs.
+            # so this is the unsharded full-tensor view the filter needs.
             # NOTE: with_grads=True is ONLY supported when the module was wrapped
             # with use_orig_params=True (the launcher sets this for the
             # spectral correction). Guard so a misconfigured run fails loudly with a
@@ -3739,6 +3863,7 @@ class FSDPEngine(BaseEngine):
                     inner.named_parameters(),
                     spectral=spectral,
                     target_substrs=target_substrs,
+                    target_scope=target_scope,
                     max_targets=max_targets,
                     state=state,
                     discovery_meta=discovery_meta,
@@ -3751,6 +3876,7 @@ class FSDPEngine(BaseEngine):
                 inner.named_parameters(),
                 spectral=spectral,
                 target_substrs=target_substrs,
+                target_scope=target_scope,
                 max_targets=max_targets,
                 state=state,
                 discovery_meta=discovery_meta,
@@ -3762,6 +3888,7 @@ class FSDPEngine(BaseEngine):
         *,
         spectral,
         target_substrs,
+        target_scope,
         max_targets,
         state,
         discovery_meta,
@@ -3769,8 +3896,8 @@ class FSDPEngine(BaseEngine):
         """FSDP-agnostic core of the spectral grad-correction hook (CPU-testable).
 
         Iterates ``named_params`` (an iterator of ``(name, param)`` where each
-        ``param`` exposes a full logical-2D ``.grad`` — a plain ``Tensor`` or a
-        ``DTensor``), and for every targeted 2D matrix:
+        ``param`` exposes a full logical ``.grad`` — a plain ``Tensor`` or a
+        ``DTensor``), and for every configured target tensor:
 
         * logs the FSDP gradient representation once, **regardless of gradient
           magnitude** — it fires on the
@@ -3778,7 +3905,7 @@ class FSDPEngine(BaseEngine):
           degenerate-loss step still proves the hook ran;
         * applies the spectral filter and records the per-target
           ``||G_proj - G_mask|| / ||G_mask||`` ratio;
-        * writes the corrected full matrix back into the (possibly sharded)
+        * writes the corrected full tensor back into the (possibly sharded)
           grad in place and bumps ``state.spectral_corrections``.
 
         The iteration/discovery/correction loop itself lives in
@@ -3793,7 +3920,7 @@ class FSDPEngine(BaseEngine):
         from verl.workers.comm_eff.spectral_filter import apply_spectral_correction_to_params
 
         def full_grad_of(grad):
-            # Present a full logical 2D matrix to the (FSDP-agnostic) filter.
+            # Present a full logical tensor to the (FSDP-agnostic) filter.
             # FSDP2 shards weights as DTensors; full_tensor() all-gathers the
             # logical matrix. The logical shape is the DTensor's global .shape.
             # An FSDP1-summoned grad (or CPU/non-FSDP) is already the full tensor.
@@ -3834,6 +3961,7 @@ class FSDPEngine(BaseEngine):
             named_params,
             spectral=spectral,
             target_substrs=target_substrs,
+            target_scope=target_scope,
             max_targets=max_targets,
             state=state,
             discovery_meta=discovery_meta,

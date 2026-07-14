@@ -396,15 +396,21 @@ comm_eff:
 
     # Which rollouts the anchor consumes when the projector is on.
     # "auto" (default) -> "current_step" when the projector is active, else
-    # "stale_paired" (today's exact replay behavior). "current_step" = the
+    # "stale_paired" (today's exact replay behavior). Explicit stale_paired is
+    # also valid for rank1_relex only at strength=0, where theta_hat is exactly
+    # the newest transferred checkpoint and must consume its paired trajectories.
+    # "current_step" = the
     # anchor consumes the CURRENT tick's batch (the step-t rollouts matching
     # theta_hat[t]); requires the projector ON. "self_generate" is a reserved
     # not-implemented seam and is rejected at validation.
     lookahead_rollout_source: auto
 
     # What the anchor does at fires BEFORE the look-ahead projector is ready.
-    # "stale_correct" (default) = today's behavior: M from raw stale theta[t-K]
-    # + paired stale rollouts, folded every spectral.cadence ticks. "no_correct"
+    # "stale_correct" (default) = M from an exact checkpoint + its paired
+    # rollouts, folded every spectral.cadence ticks. In rank1_relex the first
+    # fire explicitly reuses the initial generator checkpoint/rollout pair, so
+    # M becomes ready and corrects the fast circuit on that same tick. Later
+    # pre-readiness fires use the exact delayed pair. "no_correct"
     # = do all ring bookkeeping but SKIP the anchor clone fwd/bwd + M update, so
     # M stays cold and the merger's cold-M guard passes fast grads through
     # unchanged until the first projected fire. no_correct requires the projector
@@ -457,8 +463,13 @@ comm_eff:
     # EMA decay for the anchor-gradient running matrix M_anchor.
     beta_anc: 0.95
 
-    # Substrings selecting which named 2D params receive correction (skips
-    # norms / biases / embeddings / lm head).
+    # Gradient/M target policy. "decoder_matrices" preserves the established
+    # substring-selected 2-D path. "all_floating" selects every unique named
+    # floating parameter tensor with a gradient, including norms, biases,
+    # embeddings, and an untied lm_head (tied weights are de-duplicated).
+    target_scope: decoder_matrices
+
+    # Substrings used only by target_scope=decoder_matrices.
     target_substr: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     # Cap on target matrices corrected per step. -1 means no cap and caps both
@@ -604,6 +615,13 @@ comm_eff:
     # Floor under the QR / singular-value floor for the q_cond diagnostic, so a
     # rank-deficient sketch never yields a non-finite condition number. > 0.
     reortho_eps: 1e-6
+
+    # Opt-in one-time fast-actor activation calibration. Before the first
+    # non-clean compressed old-logprob pass, observe that same trajectory batch
+    # once without projection, DP-pool V=Mᵀ(MQ0), atomically publish Q1, then
+    # run the real old/current PPO pair with Q1 frozen. false preserves the
+    # deterministic random Q0 bootstrap used by existing runs.
+    fast_q_bootstrap: false
 
     # Live Q-basis family consumed by orth(V). "act" uses activation energy;
     # {grad, adv, tail, hybrid, ticket} build gradient/advantage-oriented bases.

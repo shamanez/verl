@@ -644,13 +644,14 @@ def extract_target_grads(
     target_substrs,
     max_targets: int,
     full_grad_of: Callable,
+    target_scope: str = "decoder_matrices",
 ) -> dict:
-    """Extract the RAW per-target 2D gradient ``G_anchor`` for each target matrix.
+    """Extract the RAW gradient ``G_anchor`` for each configured target tensor.
 
     This mirrors the iteration/selection of the spectral hook's
-    ``apply_spectral_correction_to_params`` — same target substrings, same 2D
-    filter, same ``max_targets`` cap — but applies NO correction: it returns the
-    raw full 2D gradients exactly as backward produced them. The engine feeds
+    ``apply_spectral_correction_to_params`` — same scope, substrings, and
+    ``max_targets`` cap — but applies NO correction: it returns the raw full
+    gradients exactly as backward produced them. The engine feeds
     these straight into ``SpectralFilter.update_anchor``
     (the EMA) before any fast-path corrector is ever called.
 
@@ -658,7 +659,9 @@ def extract_target_grads(
         named_params: iterator of ``(name, param)`` whose ``.grad`` is the
             anchor backward's gradient (full logical 2D after FSDP unshard, via
             ``full_grad_of``).
-        target_substrs: substrings selecting the targeted 2D matrices.
+        target_substrs: substrings used by ``decoder_matrices``.
+        target_scope: ``decoder_matrices`` (substring-matched 2-D tensors) or
+            ``all_floating`` (every unique floating parameter with a gradient).
         max_targets: cap on the number of targets (``-1`` ⇒ no cap).
         full_grad_of: ``grad -> (full_2d_tensor, meta)`` — the FSDP unshard
             callable (identity for plain CPU/non-FSDP tensors). Same contract as
@@ -669,16 +672,21 @@ def extract_target_grads(
         live grads afterwards without disturbing the EMA inputs).
     """
     grads = {}
+    # Deferred import keeps anchor.py's light-weight utility import path free of
+    # spectral-filter construction and, critically, shares one selector with the
+    # fast merger so anchor coverage cannot drift from writeback coverage.
+    from verl.workers.comm_eff.spectral_filter import is_spectral_target
+
     for name, p in named_params:
         grad = getattr(p, "grad", None)
         if grad is None:
             continue
-        if not any(s in name for s in target_substrs):
+        if not is_spectral_target(name, p, target_substrs=target_substrs, target_scope=target_scope):
             continue
         if max_targets >= 0 and len(grads) >= max_targets:
             break
         full, _meta = full_grad_of(grad)
-        if full.dim() != 2:
+        if not full.is_floating_point():
             continue
         # Detached clone so a later optimizer_zero_grad on the live grads does not
         # alias/mutate what we already fed to the EMA.

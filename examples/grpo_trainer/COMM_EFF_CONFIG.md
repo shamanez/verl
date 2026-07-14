@@ -24,10 +24,13 @@ All knobs are env overrides read by the launcher and forwarded to
 
 The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
 surface-scoped benchmark from the GSM8K operating baseline below. Its default
-selection is intentionally pending until corrected W2, strict-readiness W4,
-progressive W2→W3→W4, W2 with no projected increment, and legacy
-`fixed_linear` all complete. The authoritative placeholder and preregistered
-selection rule live at
+selection is intentionally pending. Corrected W2 is complete and corrected
+strict-readiness W4 remains the active legacy-surface arm. After W4, the active
+queue is the two-arm qboot-v2 matrix: a no-projected-weight-increment control,
+then the complete qboot-v2 projection system. The old progressive-W4,
+W2-no-increment, and `fixed_linear` placeholders are superseded/not queued;
+`fixed_linear` remains an optional legacy follow-up. The authoritative
+placeholder and preregistered selection rule live at
 `research/.claude/project.yaml` → `compression_defaults.math_qwen25_math_1p5b`.
 
 The current W=4 values in
@@ -72,6 +75,7 @@ authoritative locked-surface value sheet) and
 | `COMM_EFF_POWERSGD_WARM_START` | `powersgd.warm_start` | `true` | Reuse the prior basis as the next update seed. |
 | `COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE` | `powersgd.compress_recompute` | `true` | Apply the same compression to the old-log-prob recompute path. |
 | `COMM_EFF_POWERSGD_SYNC_BASIS` | `powersgd.sync_basis` | `true` | Share a consensus basis across data-parallel ranks. |
+| `COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP` | `powersgd.fast_q_bootstrap` | `false` | Opt in to one discarded dense fast-actor observation on the first rollout batch, then DP-sync and atomically activate Q before the first compressed old/current PPO pair. Requires anchor-owned Q, recompute compression, synchronized `act` Q, and PowerSGD. |
 | `COMM_EFF_POWERSGD_QR_DTYPE` | `powersgd.qr_dtype` | `fp32` | QR precision used to orthogonalize the basis. |
 | `COMM_EFF_POWERSGD_Q_BASIS` | `powersgd.q_basis` | `act` | Live basis family. |
 
@@ -93,7 +97,7 @@ reference `M` and, when `anchor.owns_q=true`, refreshes the PowerSGD basis `Q`.
 | `COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH` | `anchor.lookahead_strength` | `1.0` | Scale the projected one-delay-horizon increment. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE` | `anchor.lookahead_rollout_source` | `auto` | Use current trajectories on projected fires when `auto`. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS` | `anchor.lookahead_window_snapshots` | `4` | Rank-1 checkpoint window including the oldest base; `W=2` is explicitly the per-tensor two-checkpoint secant/naive-linear fallback, while `W>=3` uses rank-1 OLS. Every unique floating named parameter tensor is projected independently. |
-| `COMM_EFF_ANCHOR_WARMUP_MODE` | `anchor.warmup_mode` | `stale_correct` | `q_only` is the canonical rank-1 warmup; `no_correct` is the fast-owned-Q ablation. |
+| `COMM_EFF_ANCHOR_WARMUP_MODE` | `anchor.warmup_mode` | `stale_correct` | `stale_correct` runs the paired exact anchor backward and populates M before rank-1 readiness; `q_only` refreshes only anchor-owned Q; `no_correct` is the fast-owned-Q ablation. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS` | `anchor.lookahead_min_snapshots` | `-1` | `-1` waits for the complete configured window. For rank-1, a concrete value in `[2,W]` enables progressive readiness while retaining at most W checkpoints; `2` starts with the earliest legal secant. |
 
 \* The baseline launcher pins `cadence`/`delay_K` = 20/20 (the k-collapse regime).
@@ -101,12 +105,14 @@ The generic engine's bare default is 5/5; the baseline wrapper overrides it.
 
 ### Strict versus progressive W4 readiness
 
-The comparison launcher keeps the original strict W4 arm unchanged with
-`window_snapshots=4` and `min_snapshots=-1`. Its separate
-`w4_progressive` arm uses `window_snapshots=4` and `min_snapshots=2`: it does
-not shrink the target window, but starts projecting and populating M as soon as
-two exact checkpoints exist. On this fixed C=K=20 surface with two optimizer
-ticks per global step, the intended schedule is:
+The retained legacy comparison launcher keeps the original strict W4 arm
+unchanged with `window_snapshots=4` and `min_snapshots=-1`. Its preregistered
+but unrun `w4_progressive` arm used `window_snapshots=4` and
+`min_snapshots=2`: it did not shrink the target window, but would have started
+projecting and populating M as soon as two exact checkpoints existed. The
+qboot-v2 composite supersedes that queued placeholder while retaining its
+W2/W3/W4 history-growth idea. On this fixed C=K=20 surface with two optimizer
+ticks per global step, the original intended schedule was:
 
 | global step | optimizer tick | available checkpoints | action |
 |---:|---:|---:|---|
@@ -115,13 +121,45 @@ ticks per global step, the intended schedule is:
 | 30 | 60 | 3 | all-tensor W3 rank-1 fit |
 | 40 onward | 80 onward | sliding W4 | full all-tensor W4 rank-1 OLS |
 
-The progressive-versus-strict W4 comparison measures the complete readiness
-policy, because earlier projection and earlier M activation move together. The
-progressive-versus-static-W2 comparison is the cleaner history-growth contrast:
-both start with the same W2 fire, then only the progressive arm expands to W3
-and W4. W3 has two cumulative deltas, so its direction is useful but its
+That old progressive-versus-strict comparison would have moved earlier
+projection and earlier M activation together. qboot-v2 instead makes M ready
+at the first fire for both new arms and uses the same W2/W3/W4 history schedule
+in both. W3 has two cumulative deltas, so its direction is useful but its
 two-point temporal OLS R² is tautologically one and must not be described as a
 strong denoising diagnostic.
+
+### qboot-v2 first-fire and progressive schedule
+
+The run-ready qboot-v2 launcher is
+`run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh`. At global step 1,
+after the initial rollouts exist but before their first old-log-probability
+calculation, both arms run one discarded dense no-grad observation through the
+exact fast actor on that rollout batch, build the consensus activation basis,
+and activate it before the real old-log-probability forward. This is a Q-only
+bootstrap: it does not compute gradients or M, and the first real PPO old and
+current-policy forwards therefore see the same Q.
+
+With C=K=20 optimizer ticks and two optimizer ticks per global step, both arms
+then follow this same anchor schedule:
+
+| global step | retained exact checkpoints | shared projector/anchor action |
+|---:|---:|---|
+| 1, pre-PPO | 0 | After initial rollout generation, dense fast observation on that batch; atomically install Q1 before old/current-policy forwards. No gradient or M. |
+| 10 | 1 | `stale_correct`: paired exact initial/base checkpoint and batch; dense backward; first all-floating M; stage the next anchor Q. |
+| 20 | 2 | Per-tensor W2 secant; dense backward/M/Q. |
+| 30 | 3 | Per-tensor W3 rank-1 OLS; dense backward/M/Q. |
+| 40 onward | sliding 4 | Per-tensor W4 rank-1 OLS; dense backward/M/Q. |
+
+The `no_weight_increment` arm retains the same W2/W3/W4 history, fires, M/Q
+work, and projection telemetry as the composite, but sets
+`lookahead_strength=0.0`. Its applied anchor weights are therefore exactly the
+newest transferred checkpoint, and `lookahead_rollout_source=stale_paired`
+routes that checkpoint's exact paired trajectories. The composite changes to
+`strength=1.0` and `rollout_source=auto`, which resolves to current trajectories
+on projected fires. This is the requested exact-pair systems control: the
+projector still computes diagnostics, but it cannot alter the control arm's
+weights. Because trajectory routing also differs, it is not a pure scalar-dose
+ablation.
 
 ## Merger — signed_ema
 
@@ -130,12 +168,26 @@ The merger folds the anchor `M` into the fast gradient via a signed EMA.
 | env | hydra | launcher default | meaning |
 |---|---|---:|---|
 | `COMM_EFF_SPECTRAL_ENABLED` | `spectral.enabled` | `true` | Enable anchor-guided gradient correction. |
+| `COMM_EFF_SPECTRAL_TARGET_SCOPE` | `spectral.target_scope` | `decoder_matrices` | `decoder_matrices` preserves the 196 substring-selected 2-D tensors. `all_floating` covers every de-duplicated floating parameter with a gradient, including embeddings, norms, biases, and an untied LM head. |
+| `COMM_EFF_SPECTRAL_DIAGNOSTICS` | `spectral.diagnostics` | `true` | Per-target diagnostic metrics. qboot-v2 pins this `false`; coverage/counter/integrity guards remain active without emitting hundreds of per-tensor values. |
 | `COMM_EFF_SPECTRAL_CORRECTION_MODE` | `spectral.correction_mode` | `signed_ema` | The merger mode. |
 | `COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA` | `spectral.signed_ema_alpha` | `0.25` | signed_ema mixing weight. |
 | `COMM_EFF_SPECTRAL_BETA_ANC` | `spectral.beta_anc` | `0.50` | Anchor-gradient EMA decay. |
 | `COMM_EFF_SPECTRAL_CADENCE` | `spectral.cadence` | `1` | Correction cadence in optimizer ticks. |
 | `COMM_EFF_SPECTRAL_EMA_DEVICE` | `spectral.ema_device` | `cpu` | Store correction state on CPU (OOM guard). |
-| `COMM_EFF_SPECTRAL_MAX_TARGETS` | `spectral.max_targets` | `-1` | `-1` = full coverage (all 196 matrices). |
+| `COMM_EFF_SPECTRAL_MAX_TARGETS` | `spectral.max_targets` | `-1` | `-1` = full coverage under the selected target scope. |
+
+For Qwen2.5-Math-1.5B, `all_floating` is 338 unique tensors: the existing 196
+decoder weights plus 84 q/k/v biases, 57 norms, and one tied embedding/LM-head
+tensor. Its fp32 M is 5.751 GiB per rank (4.881 GiB for the prior 196 plus
+0.870 GiB added). Rank-local copies scale linearly with actor DP size (about
+11.5 GiB total across this experiment's two actor ranks); each anchor fire also
+adds roughly 0.87 GiB of logical fp32 payload to both the anchor-gradient
+reduction and M broadcast.
+The qboot-v2 arms therefore pin `ema_device=cpu`, `max_targets=-1`, and
+`diagnostics=false`. Runtime coverage counters, not an architecture-hard-coded
+count, remain authoritative. The geometry/SVD probe stays restricted to its
+historical decoder-matrix subset.
 
 ## Capture probes
 
@@ -164,14 +216,20 @@ projection beat the newest exact/stale baseline on those samples.
 
 ## Common invocations
 
-Run the fixed Qwen2.5-Math-1.5B / MATH comparison matrix (W2 projection,
-strict W4, progressive W2→W3→W4, matched no-increment, legacy decoder-only
-linear, then dense), or pass selected arm names to resume the queue after an
-already completed arm:
+Run the qboot-v2 matrix in its preregistered order (two-circuit with zero applied
+projected weight increment, then the complete composite), or pass one arm
+explicitly:
 
 ```bash
-bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh
-bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh w4_progressive
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
+```
+
+The earlier comparison launcher is retained for provenance and explicit
+legacy arms; it is not the active post-W4 queue:
+
+```bash
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh fixed_linear
 ```
 
 Baseline (reproduces the collapse-regime config):

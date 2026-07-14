@@ -254,6 +254,7 @@ def test_same_worker_resume_clears_rank1_history_q_and_m():
     state._anchor_replay_ring = object()
     state.rank1_m_ready = True
     state.rank1_fires = 3
+    state.rank1_warmup_correction_fires = 1
     state.rank1_probe_predictions = 3
     state.rank1_probe_resolutions = 2
     state.spectral_step = 17
@@ -295,5 +296,6 @@ def test_same_worker_resume_clears_rank1_history_q_and_m():
     assert state.spectral_step == 0
     assert not state.rank1_m_ready
     assert state.rank1_fires == 0
+    assert state.rank1_warmup_correction_fires == 0
     assert state.rank1_probe_predictions == 0
     assert state.rank1_probe_resolutions == 0

@@ -195,6 +195,7 @@ actor_rollout_ref:
         cadence: 1
         diagnostics: true
         beta_anc: 0.95
+        target_scope: decoder_matrices
         target_substr:
         - q_proj
         - k_proj
@@ -237,6 +238,7 @@ actor_rollout_ref:
         sync_basis: true
         qr_dtype: fp32
         reortho_eps: 1.0e-06
+        fast_q_bootstrap: false
         q_basis: act
         q_basis_passive: []
         hybrid_act_cols: -1

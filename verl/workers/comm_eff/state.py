@@ -428,11 +428,16 @@ class CommEffState:
         # Pure sliding rank1_relex state. These counters are emitted only when
         # that mode is active, preserving fixed-linear/disabled metric output.
         # rank1_m_ready is the explicit optimizer safety barrier: the correction
-        # hook advances cadence but returns before touching any matrix until a
-        # complete-window projected anchor has successfully updated M (and Q in
-        # the q_only/anchor-owned-Q arm).
+        # hook advances cadence but returns before touching any tensor until a
+        # full anchor backward has successfully updated M. With
+        # warmup_mode=stale_correct this is the first exact initial-pair fire;
+        # with q_only/no_correct it remains the first projected fire.
         self.rank1_m_ready = False
         self.rank1_q_only_fires = 0
+        # Full first/pre-readiness anchor backwards requested by
+        # warmup_mode=stale_correct. Fire 1 consumes the exact initial
+        # checkpoint/trajectory pair and can make M ready on that same tick.
+        self.rank1_warmup_correction_fires = 0
         self.rank1_correction_bypass_ticks = 0
         self.rank1_fires = 0
         self.rank1_history_checkpoints = 0
@@ -580,6 +585,9 @@ class CommEffState:
                 hybrid_grad_cols=int(getattr(ps_cfg, "hybrid_grad_cols", -1)),
                 # Anchor cadence for the Q-broadcast byte amortization.
                 anchor_cadence=int(getattr(anc_cfg_for_q, "cadence", 1)) if anc_cfg_for_q is not None else 1,
+                # Optional one-time activation calibration on the fast actor,
+                # committed before the first compressed old/current PPO pair.
+                fast_q_bootstrap=bool(getattr(ps_cfg, "fast_q_bootstrap", False)),
                 state=self,
             )
             logger.info(
@@ -598,7 +606,8 @@ class CommEffState:
                 f"compress_recompute={self.powersgd.compress_recompute} "
                 f"sync_basis={self.powersgd.sync_basis} "
                 f"qr_dtype={getattr(ps_cfg, 'qr_dtype', 'fp32')} "
-                f"anchor_owns_q={self.powersgd.anchor_owns_q}",
+                f"anchor_owns_q={self.powersgd.anchor_owns_q} "
+                f"fast_q_bootstrap={self.powersgd.fast_q_bootstrap}",
                 flush=True,
             )
 
@@ -792,6 +801,7 @@ class CommEffState:
         self.warmup_no_correct_skips = 0
         self.rank1_m_ready = False
         self.rank1_q_only_fires = 0
+        self.rank1_warmup_correction_fires = 0
         self.rank1_correction_bypass_ticks = 0
         self.rank1_fires = 0
         self.rank1_history_checkpoints = 0
@@ -1067,6 +1077,22 @@ class CommEffState:
         )
         out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
         out["comm_eff/powersgd_applications"] = self.powersgd_applications
+        # One-time fast-network activation calibration.  Keep these separate
+        # from anchor_q_* and powersgd_basis_updates so the logs prove the
+        # bootstrap fired exactly once without mislabeling it as an anchor fire.
+        out["comm_eff/fast_q_bootstrap_done"] = int(getattr(self.powersgd, "fast_q_bootstrap_done", False))
+        out["comm_eff/fast_q_bootstrap_observations"] = int(getattr(self.powersgd, "fast_q_bootstrap_observations", 0))
+        out["comm_eff/fast_q_bootstrap_updates"] = int(getattr(self.powersgd, "fast_q_bootstrap_updates", 0))
+        out["comm_eff/fast_q_bootstrap_activations"] = int(getattr(self.powersgd, "fast_q_bootstrap_activations", 0))
+        out["comm_eff/fast_q_bootstrap_dense_observation_elements"] = float(
+            getattr(self.powersgd, "fast_q_bootstrap_dense_observation_elements", 0.0)
+        )
+        out["comm_eff/fast_q_bootstrap_sync_elements"] = float(
+            getattr(self.powersgd, "fast_q_bootstrap_sync_elements", 0.0)
+        )
+        bootstrap_dev = getattr(self.powersgd, "fast_q_bootstrap_cross_rank_max_rel_dev", None)
+        if bootstrap_dev is not None:
+            out["comm_eff/fast_q_bootstrap_cross_rank_max_rel_dev"] = float(bootstrap_dev)
         # Max relative cross-rank deviation of the
         # consensus basis Q after an update (0.0 = bit-identical on every DP
         # rank). Set by the staged-anchor or fast-owned-Q verification and
@@ -1146,6 +1172,7 @@ class CommEffState:
                 {
                     "comm_eff/rank1_m_ready": int(self.rank1_m_ready),
                     "comm_eff/rank1_q_only_fires": self.rank1_q_only_fires,
+                    "comm_eff/rank1_warmup_correction_fires": self.rank1_warmup_correction_fires,
                     "comm_eff/rank1_correction_bypass_ticks": self.rank1_correction_bypass_ticks,
                     "comm_eff/rank1_fires": self.rank1_fires,
                     "comm_eff/rank1_history_checkpoints": self.rank1_history_checkpoints,

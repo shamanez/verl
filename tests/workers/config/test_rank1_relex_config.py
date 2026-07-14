@@ -79,10 +79,15 @@ def test_rank1_no_correct_fast_owned_q_ablation_is_valid():
     assert not cfg.anchor.owns_q
 
 
-@pytest.mark.parametrize("warmup", ["stale_correct", "skip"])
-def test_rank1_rejects_stale_or_unknown_warmup(warmup):
+def test_rank1_stale_correct_first_fire_mode_is_valid():
+    cfg = _config(anchor=_anchor(warmup="stale_correct"))
+    assert cfg.anchor.warmup_mode == "stale_correct"
+    assert cfg.anchor.lookahead_min_snapshots == -1
+
+
+def test_rank1_rejects_unknown_warmup():
     with pytest.raises(ValueError, match="warmup_mode"):
-        _config(anchor=_anchor(warmup=warmup))
+        _config(anchor=_anchor(warmup="skip"))
 
 
 def test_q_only_is_rank1_only():
@@ -131,6 +136,19 @@ def test_rank1_requires_current_trajectories_and_exact_replay():
         _config(anchor=_anchor(lookahead_rollout_source="stale_paired"))
     with pytest.raises(ValueError, match="exact delayed"):
         _config(anchor=_anchor(replay_paired_batch=False))
+
+
+def test_rank1_zero_increment_control_uses_exact_paired_trajectories():
+    cfg = _config(
+        anchor=_anchor(
+            warmup="stale_correct",
+            lookahead_strength=0.0,
+            lookahead_rollout_source="stale_paired",
+            lookahead_min_snapshots=2,
+        )
+    )
+    assert cfg.anchor.lookahead_strength == 0.0
+    assert cfg.anchor.lookahead_rollout_source == "stale_paired"
 
 
 def test_rank1_requires_anchor_and_spectral_M_path():

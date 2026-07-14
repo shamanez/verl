@@ -168,6 +168,13 @@ class TestCommEffConfigSchema(unittest.TestCase):
                 dataclass_type=CommEffConfig,
             )
 
+    def test_spectral_target_scope_enum(self):
+        for scope in ("decoder_matrices", "all_floating"):
+            cfg = CommEffConfig(spectral=CommEffSpectralConfig(target_scope=scope))
+            self.assertEqual(cfg.spectral.target_scope, scope)
+        with self.assertRaisesRegex(ValueError, "target_scope"):
+            CommEffConfig(spectral=CommEffSpectralConfig(target_scope="all"))
+
     def test_post_init_validates_ranges(self):
         """__post_init__ rejects out-of-range mask.p / spectral.signed_ema_alpha."""
         with self.assertRaises(ValueError):
@@ -220,6 +227,7 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
         # The shared codebook must be synced across DP ranks by default.
         self.assertTrue(cfg.powersgd.sync_basis)
         self.assertEqual(cfg.powersgd.qr_dtype, "fp32")
+        self.assertFalse(cfg.powersgd.fast_q_bootstrap)
 
     def test_compression_type_enum_validated(self):
         with self.assertRaises(ValueError):
@@ -236,6 +244,56 @@ class TestCommEffPowerSGDConfig(unittest.TestCase):
             CommEffConfig(powersgd=CommEffPowerSGDConfig(update_cadence=0))
         with self.assertRaises(ValueError):
             CommEffConfig(powersgd=CommEffPowerSGDConfig(qr_dtype="float16"))
+
+    def test_fast_q_bootstrap_contract_is_opt_in_and_fail_closed(self):
+        from verl.workers.config import CommEffAnchorConfig, CommEffPowerSGDConfig
+
+        cfg = CommEffConfig(
+            enabled=True,
+            compression_type="powersgd",
+            anchor=CommEffAnchorConfig(enabled=True, owns_q=True),
+            powersgd=CommEffPowerSGDConfig(
+                fast_q_bootstrap=True,
+                compress_recompute=True,
+                sync_basis=True,
+                q_basis="act",
+            ),
+        )
+        self.assertTrue(cfg.powersgd.fast_q_bootstrap)
+        with self.assertRaisesRegex(ValueError, "powersgd.enabled"):
+            CommEffConfig(
+                enabled=True,
+                compression_type="powersgd",
+                anchor=CommEffAnchorConfig(enabled=True, owns_q=True),
+                powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=True),
+            )
+        with self.assertRaisesRegex(ValueError, "anchor.owns_q"):
+            CommEffConfig(
+                enabled=True,
+                compression_type="powersgd",
+                powersgd=CommEffPowerSGDConfig(fast_q_bootstrap=True),
+            )
+        with self.assertRaisesRegex(ValueError, "compress_recompute"):
+            CommEffConfig(
+                enabled=True,
+                compression_type="powersgd",
+                anchor=CommEffAnchorConfig(enabled=True, owns_q=True),
+                powersgd=CommEffPowerSGDConfig(fast_q_bootstrap=True, compress_recompute=False),
+            )
+        with self.assertRaisesRegex(ValueError, "sync_basis"):
+            CommEffConfig(
+                enabled=True,
+                compression_type="powersgd",
+                anchor=CommEffAnchorConfig(enabled=True, owns_q=True),
+                powersgd=CommEffPowerSGDConfig(fast_q_bootstrap=True, sync_basis=False),
+            )
+        with self.assertRaisesRegex(ValueError, "q_basis='act'"):
+            CommEffConfig(
+                enabled=True,
+                compression_type="powersgd",
+                anchor=CommEffAnchorConfig(enabled=True, owns_q=True),
+                powersgd=CommEffPowerSGDConfig(fast_q_bootstrap=True, q_basis="grad"),
+            )
 
     def test_resolve_compression_type_back_compat(self):
         """resolve_compression_type honors an explicit codec, else falls back to
@@ -600,9 +658,7 @@ class TestCommEffLookaheadConfig(unittest.TestCase):
         """Matching rollouts are THE DEFAULT whenever weight projection is ON."""
         from verl.workers.comm_eff.lookahead import resolve_lookahead_rollout_source
 
-        cfg = CommEffConfig(
-            anchor=CommEffAnchorConfig(lookahead_anchor=True, lookahead_mode="fixed_linear")
-        )
+        cfg = CommEffConfig(anchor=CommEffAnchorConfig(lookahead_anchor=True, lookahead_mode="fixed_linear"))
         self.assertEqual(resolve_lookahead_rollout_source(cfg.anchor), "current_step")
 
     def test_stray_flag_combinations_are_inert_not_errors(self):
