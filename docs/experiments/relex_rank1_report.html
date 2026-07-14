@@ -154,7 +154,7 @@
     </p>
     <div class="status-row">
       <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
-      <span class="pill">Updated 14 July 2026, 14:05 AEST</span>
+      <span class="pill">Updated 14 July 2026, 14:39 AEST</span>
       <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
       <span class="pill">Training commit <span class="mono">a7252bd6</span></span>
     </div>
@@ -185,7 +185,7 @@
         <article class="card">
           <div class="label">Active corrected arm</div>
           <div class="metric accent">W=2 α=1</div>
-          <p>Two-checkpoint all-tensor secant projection; frozen-Q handoff enabled. Startup is in progress.</p>
+          <p>Step 10/100 passed the first frozen-Q cadence gate. Initial MATH: 44.56%.</p>
           <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/vqe9554z">Open W&amp;B</a>
         </article>
         <article class="card">
@@ -273,6 +273,14 @@
         <code>update_actor</code>, and discards it if that update fails. M still corrects the firing optimizer
         tick immediately; only Q visibility is delayed to the next paired old/current-policy step.
       </p>
+      <p>
+        The corrected W=2 GPU gate passed at step 10: both DP ranks staged all 7 boundaries with cross-rank
+        deviation 0.0, then exactly one post-update activation landed. Counters were
+        <span class="mono">updates=1, broadcasts=1, activations=1, overwrites=0</span>. Cadence-boundary PPO-KL
+        was +0.0946 instead of −4.0669, while the sampled-token rollout→train KL remained 13.8568. This is the
+        desired distinction: internal PPO pairing is repaired; the broader dense/compressed mismatch is still
+        visible and scientifically material.
+      </p>
       <h3>Why can it still learn?</h3>
       <ul>
         <li>The PPO old-policy log-probability is recomputed through the compressed PowerSGD path rather than using dense vLLM rollout log-probabilities as the PPO denominator. The corrected runs now guarantee the same frozen Q for old and current forwards.</li>
@@ -344,7 +352,7 @@
           <tbody>
             <tr><td>Legacy W=4, pre-Q fix</td><td class="right">44.64%</td><td class="right">45.20%</td><td class="right">63.25%</td><td class="right">64.83%</td><td class="right">65.37%</td><td class="warn">Diagnostic only</td></tr>
             <tr><td>Dense GRPO</td><td class="right">44.42%</td><td class="right">63.67%</td><td class="right">65.67%</td><td class="right">66.67%</td><td class="right">67.41%</td><td class="good">Complete</td></tr>
-            <tr><td>Corrected W=2 secant, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="warn">Running</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="warn">Step 10/100</td></tr>
             <tr><td>Corrected W=4 rank-1, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
             <tr><td>W=2 no projected increment, α=0</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
             <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
