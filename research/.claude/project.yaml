@@ -305,7 +305,7 @@ compression_defaults:                                        # Surface-scoped pr
     runtime:
       implicit_arm: pending
       neutral_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_comm_eff_default_fsdp.sh
-      pending_rule: 'Corrected W2/W4 and both qboot-v2 arms must finish validity review before selection; current launcher values are provisional, not a selected default.'
+      pending_rule: 'Corrected W2/W4 are complete; both qboot-v2 arms must finish validity review before selection. Current launcher values are provisional, not a selected default.'
       promotion_rule: 'After every eligible arm finishes, a bare invocation of a neutral Qwen2.5-Math/MATH comm-eff launcher uses the selected arm; explicit method overrides remain allowed.'
       scope: 'This exact MATH benchmark launcher only; do not change generic actor/Hydra all-off defaults.'
       surfaces_to_update: ['neutral MATH launcher', 'project.yaml selected fields', 'COMM_EFF_CONFIG.md', 'RELEX HTML report', 'draft PR #25']
