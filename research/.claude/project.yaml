@@ -260,6 +260,7 @@ compression_defaults:                                        # Surface-scoped pr
       reward: 'last \boxed{} + is_equiv'
       training: 'GRPO; train_batch=512; mini_batch=256; rollout_n=8; prompt=1024; response=3072; lr=0.000001; kl=0.001; steps=100; eval_every=25'
       shared_compressed_substrate: 'PowerSGD rank=77; anchor cadence=20; delay_K=20; anchor owns Q; signed_ema alpha=0.25 beta_anc=0.50; corrected transactional Q staging'
+      anchor_objective: 'Ratio-one unclipped advantage policy gradient plus the configured reference-policy KL loss (low_var_kl, coefficient 0.001); no compressed-policy old_log_probs or PPO clipping in the anchor pass'
       qboot_v2_shared: 'One dense fast-actor Q bootstrap before the first compressed old/current PPO pair; stale_correct first-fire M; W=4 retention with min_snapshots=2; all_floating M on CPU with max_targets=-1 and diagnostics=false (338 unique tensors; 5.751 GiB fp32 M/rank on this model)'
       method_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
       matrix_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh
@@ -268,9 +269,11 @@ compression_defaults:                                        # Surface-scoped pr
       w2_rank1:
         run: relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b
         difference: 'rank1_relex; W=2 two-checkpoint all-tensor secant; strength=1.0; q_only warmup; causal projection probe enabled'
+        eligibility: pre_anchor_kl_fix_diagnostic
       w4_rank1:
         run: relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b
         difference: 'rank1_relex; W=4 rank-1 OLS over three deltas; strength=1.0; q_only warmup; causal projection probe enabled'
+        eligibility: pre_anchor_kl_fix_diagnostic
       qboot_v2_no_weight_increment:
         run: relex_cmp_qboot_v2_w4min2_allfloatm_alpha0_stalepaired_math_qwen25_math_1p5b
         difference: 'qboot-v2 control; initial fast-Q bootstrap; stale_correct first-fire all_floating M; progressive W2/W3/W4 projector telemetry; strength=0.0 so no projected weight increment is applied; newest exact checkpoint plus stale_paired trajectories; causal projection probe enabled'
@@ -279,12 +282,14 @@ compression_defaults:                                        # Surface-scoped pr
         trajectory: 'step0=0.4459783914; step25=0.6368547419; step50=0.6590636255; step75=0.6730692277; step100=0.6190476190; late instability after step 90'
         evidence: 'done.flag at 100/100; fast-Q observation/update/activation=1/1/1; anchor Q update/broadcast/activation=10/10/10; zero Q overwrites/disagreement; M=338 tensors; strength-zero probes projected_rmse==stale_rmse and skill=0; final comm ratio=0.0501351; final mismatch KL=13.7708'
         wandb: https://wandb.ai/shamanework-pl/verl_compression_research/runs/xcu56scj
+        eligibility: pre_anchor_kl_fix_diagnostic
       qboot_v2_composite:
         run: relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b
         difference: 'qboot-v2 composite; initial fast-Q bootstrap; stale_correct first-fire all_floating M; W2 at global step 20, W3 at 30, sliding W4 from 40; strength=1.0 per-tensor projection; auto/current trajectories on projected fires; causal projection probe enabled'
         status: active
         initial_math: 0.44677871148459386
         initial_evidence: 'fast-Q bootstrap observation/update/activation=1/1/1 before the first real PPO pair; zero bootstrap cross-rank disagreement'
+        eligibility: pre_anchor_kl_fix_diagnostic
     controls:
       dense:
         run: relex_cmp_dense_grpo_math_qwen25_math_1p5b
@@ -297,7 +302,7 @@ compression_defaults:                                        # Surface-scoped pr
         fixed_linear: relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b
     selection:
       candidates: [w2_rank1, w4_rank1, qboot_v2_no_weight_increment, qboot_v2_composite]
-      eligibility: 'Exact fixed surface; corrected Q-staging code; done.flag at 100/100; no early stop, NaN, or run error; transactional-Q counters valid; qboot-v2 fast-Q bootstrap counters valid where enabled; method-specific M coverage/projection integrity evidence and communication measured.'
+      eligibility: 'Exact fixed surface; corrected Q-staging code; KL-complete ratio-one anchor objective; done.flag at 100/100; no early stop, NaN, or run error; transactional-Q counters valid; qboot-v2 fast-Q bootstrap counters valid where enabled; method-specific M coverage/projection integrity evidence and communication measured. Runs produced before the anchor KL fix are diagnostics, not promotion candidates.'
       primary: 'Highest observed step-100 MATH-test accuracy among eligible compressed arms.'
       tie_breakers: ['lower rollout-to-train sampled KL', 'lower communication ratio', 'simpler method']
       disclosure: 'Publish the full trajectory, mismatch, communication, Q counters, and projection probes; validity overrides score. A one-seed winner is a benchmark champion, not a statistically established or external SOTA claim.'
@@ -313,7 +318,7 @@ compression_defaults:                                        # Surface-scoped pr
     runtime:
       implicit_arm: pending
       neutral_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_comm_eff_default_fsdp.sh
-      pending_rule: 'Corrected W2/W4 and the valid qboot-v2 no-weight-increment control are complete; the qboot-v2 composite must finish validity review before selection. Current launcher values are provisional, not a selected default.'
+      pending_rule: 'The pre-anchor-KL W2/W4/control results and active composite remain diagnostics. After the composite finishes, rerun at least the would-be promoted compressed arm with the KL-complete anchor objective and pass every validity gate before selection. Current launcher values are provisional, not a selected default.'
       promotion_rule: 'After every eligible arm finishes, a bare invocation of a neutral Qwen2.5-Math/MATH comm-eff launcher uses the selected arm; explicit method overrides remain allowed.'
       scope: 'This exact MATH benchmark launcher only; do not change generic actor/Hydra all-off defaults.'
       surfaces_to_update: ['neutral MATH launcher', 'project.yaml selected fields', 'COMM_EFF_CONFIG.md', 'RELEX HTML report', 'draft PR #25']
@@ -382,7 +387,13 @@ agent_models:
     machine-monitor:
       model: "claude-sonnet-5[1m]"
       effort: high
-      why: the DEFAULT per-cycle watcher — mechanical numeric health checks only (ssh/tmux liveness, per-GPU util, global_step advance, disk, done flags, wandb heartbeat). Zero judgment calls by design: anything anomalous is returned as evidence and escalated. Sonnet because it is the highest-frequency agent (30s cadence, ~80 polls/run) and speed/cost compound; the 2026-07-08 operator exception to the strict-Opus policy.
+      why: >-
+        the DEFAULT per-cycle watcher — mechanical numeric health checks only
+        (ssh/tmux liveness, per-GPU util, global_step advance, disk, done flags,
+        wandb heartbeat). Zero judgment calls by design: anything anomalous is
+        returned as evidence and escalated. Sonnet because it is the
+        highest-frequency agent (30s cadence, ~80 polls/run) and speed/cost
+        compound; the 2026-07-08 operator exception to the strict-Opus policy.
     training-log-monitor:
       model: "claude-opus-4-8[1m]"
       effort: high

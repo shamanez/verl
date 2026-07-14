@@ -200,7 +200,8 @@ class CommEffAnchorConfig(BaseConfig):
             4 therefore yields 3 nonzero cumulative deltas. Must be >= 2. At
             exactly 2, the one-delta rank-1 fit is explicitly the per-tensor
             two-checkpoint secant (naive linear extrapolation); W>=3 retains the
-            paper-style rank-1 OLS fit. This field is inert for every other mode.
+            RELEX-inspired rank-1 OLS fit adapted to the sliding live-training
+            window. This field is inert for every other mode.
     """
 
     enabled: bool = False

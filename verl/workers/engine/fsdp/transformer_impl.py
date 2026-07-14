@@ -2244,12 +2244,14 @@ class FSDPEngine(BaseEngine):
         #
         # Rollout-source resolution (anchor.lookahead_rollout_source): when the
         # look-ahead projector actually fired (_la_active) and the resolved
-        # source is "current_step", the anchor consumes THIS tick's batch — the
-        # step-t rollouts that the projected theta_hat[t] weights correspond to
-        # — instead of the stale t-delay_K replay batch. "auto" resolves to
-        # exactly that whenever the projector is on, so matching rollouts are
-        # the DEFAULT under weight projection; "stale_paired" (or projector
-        # OFF, or a warmup-fallback fire) keeps today's exact replay pairing.
+        # source is "current_step", the anchor consumes THIS tick's batch
+        # instead of the stale t-delay_K replay batch. Those trajectories are
+        # time-aligned with theta_hat[t]'s forecast target, but the live fast
+        # actor—not theta_hat[t]—generated them; this reduces temporal batch
+        # staleness without claiming an exact weight-policy pair. "auto"
+        # resolves to current_step whenever the projector is on;
+        # "stale_paired" (or projector OFF, or a warmup-fallback fire) keeps
+        # the exact checkpoint/replay pairing.
         # Legacy (non-replay) mode already consumes the current tick's batch —
         # unchanged. The ring's batch pushes are left untouched either way:
         # the geometry probe and warmup/holdover fires still consume them.
@@ -2446,10 +2448,12 @@ class FSDPEngine(BaseEngine):
             # MASKED fast path; reusing them against this UNMASKED forward makes
             # the GRPO importance ratio ≠ 1 → the PPO clip mangles G_anchor →
             # M_anchor was never the clean true gradient. anchor_pg_loss fixes
-            # that (gradient = -(A·∇logπ_unmasked) at the stale weights). The
-            # fast-path loss_function (real ratio/clip) is UNTOUCHED — this swap
-            # is anchor-pass-only. We bind the SAME actor config the fast path
-            # uses (read off the partial) so agg_loss normalizes identically.
+            # that: its ratio-one advantage gradient is evaluated at the stale
+            # weights, and the configured reference-policy KL term is retained.
+            # The fast-path loss_function (real ratio/clip) is UNTOUCHED — this
+            # swap is anchor-pass-only. We bind the SAME actor config the fast
+            # path uses (read off the partial) so aggregation and KL settings
+            # remain identical.
             anchor_loss_function = self._build_anchor_pg_loss(loss_function, anchor_pg_loss)
             # relevance probe (replay mode only): re-score the replayed
             # trajectories with the loaded stale weights against the log-probs

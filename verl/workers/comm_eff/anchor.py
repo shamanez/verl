@@ -18,13 +18,15 @@ The anchor circuit produces a CLEAN per-target gradient ``G_anchor`` that the
 spectral filter consumes into its anchor-gradient EMA ``M_anchor``. "Clean"
 means four things:
 
-* **Same loss as the fast path, UNMASKED.** The anchor reuses the GRPO
-  actor-loss over the rollout-expanded batch (``responses``, ``response_mask``,
-  ``old_log_probs``, ``advantages``, optional ``ref_log_prob``) — exactly the
-  fast path's ``ppo_loss`` — but with the activation masker DISABLED even though
-  it runs on the actor-train path (``mask_active=False`` ⇒
-  ``anchor_mask_applications == 0``). It is NOT a supervised next-token loss; it
-  does NOT generate rollouts; it does NOT recompute rewards.
+* **Same policy-gradient data and normalization, UNMASKED.** The anchor reuses
+  the rollout-expanded GRPO batch (``responses``, ``response_mask``,
+  ``advantages``) and the fast path's aggregation/normalization, but deliberately
+  computes the clean unclipped policy gradient with importance ratio fixed at
+  one, plus the configured reference-policy KL term when ``use_kl_loss`` is
+  enabled. It does not reuse ``ppo_loss`` or its masked-policy ``old_log_probs``.
+  The activation masker is DISABLED even though the pass runs on the actor-train
+  path (``mask_active=False`` ⇒ ``anchor_mask_applications == 0``). It is NOT a
+  supervised next-token loss; it does NOT generate rollouts or recompute rewards.
 
 * **K-stale snapshot, no optimizer step.** The anchor forwards from a
   ``delay_K``-stale weight snapshot taken OFF the optimizer's parameter group
@@ -146,7 +148,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     PPO clip then mangles the per-token loss, and the resulting ``G_anchor`` is
     NOT the clean unmasked policy gradient that ``M_anchor`` should represent.
 
-    **What this computes instead — the clean true gradient at θ_{t-K}.**
+    **What this computes instead — the clean ratio-one objective at θ_{t-K}.**
     With ratio ≡ 1 (no ``old_log_probs``, no clip), ``compute_policy_loss_vanilla``
     provably reduces to the per-token loss ``-advantages · logπ`` aggregated by
     ``agg_loss``; its gradient is ``-(A · ∇logπ_unmasked)`` — exactly "the clean
@@ -156,7 +158,9 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     so ``M_anchor`` lands at the identical scale as the fast-path clean gradient
     (under the default ``token-mean`` this equals the spec's
     ``-(A·logπ·mask).sum()/mask.sum()``; for other agg modes it stays faithful
-    to the fast path).
+    to the fast path). When ``use_kl_loss`` is enabled, the same configured
+    reference-policy KL penalty and coefficient are added after aggregation;
+    this is part of the locked GRPO objective and must be present in ``M``.
 
     Signature mirrors ``verl.workers.utils.losses.ppo_loss`` so it can be bound
     with ``functools.partial(anchor_pg_loss, config=actor_config)`` and dropped
@@ -170,7 +174,8 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
         model_output: dict with ``log_probs`` (per-token log-probs of the
             response, possibly nested) exactly as ``ppo_loss`` consumes.
         data: the rollout-expanded ``TensorDict`` (carries ``response_mask`` and
-            ``advantages``; ``old_log_probs`` is deliberately IGNORED).
+            ``advantages``, plus ``ref_log_prob`` when KL loss is enabled;
+            ``old_log_probs`` is deliberately IGNORED).
         dp_group: data-parallel process group (unused here; kept for signature
             parity with ``ppo_loss``).
 
@@ -181,7 +186,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     """
     # Lazy imports: keep module import cheap + CPU-testable; the engine path and
     # the CPU tests both have these available.
-    from verl.trainer.ppo.core_algos import agg_loss
+    from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
     from verl.utils.metric import AggregationType, Metric
     from verl.workers.utils.padding import no_padding_2_padding
 
@@ -198,9 +203,13 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
 
     metric_aggregation = AggregationType.SUM
 
-    # Select ONLY the fields the clean PG needs — NOT old_log_probs. This is the
-    # whole point: no importance ratio, so old_log_probs never enters.
-    selected = data.select("response_mask", "advantages").to_padded_tensor()
+    # Select the ratio-one objective fields — never old_log_probs. The optional
+    # reference log-probability is required whenever the fast objective enables
+    # KL loss, so the dense anchor proxy keeps the same regularizer.
+    fields = ["response_mask", "advantages"]
+    if config.use_kl_loss:
+        fields.append("ref_log_prob")
+    selected = data.select(*fields).to_padded_tensor()
     response_mask = selected["response_mask"].to(bool)
     advantages = selected["advantages"]
 
@@ -217,12 +226,27 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
         **config.global_batch_info,
     )
 
+    objective_loss = pg_loss
     metrics = {
         "actor/anchor_pg_loss": Metric(value=pg_loss, aggregation=metric_aggregation),
         # ratio is identically 1 here (no old_log_probs / no clip).
         "actor/anchor_ratio_mean": Metric(value=1.0, aggregation=AggregationType.MEAN),
     }
-    return pg_loss, metrics
+    if config.use_kl_loss:
+        ref_log_prob = selected["ref_log_prob"]
+        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+        kl_loss = agg_loss(
+            loss_mat=kld,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
+        objective_loss = objective_loss + kl_loss * config.kl_loss_coef
+        metrics["actor/anchor_kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        metrics["actor/anchor_kl_coef"] = config.kl_loss_coef
+
+    metrics["actor/anchor_total_loss"] = Metric(value=objective_loss, aggregation=metric_aggregation)
+    return objective_loss, metrics
 
 
 class AnchorStalenessQueue:

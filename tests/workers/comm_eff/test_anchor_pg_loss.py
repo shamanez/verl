@@ -17,15 +17,19 @@
 The anchor must not reuse the fast-path PPO ratio/clip loss: masked
 ``old_log_probs`` against the anchor's unmasked forward can corrupt
 ``G_anchor``. ``anchor_pg_loss`` uses ratio == 1, no clip, and no
-``old_log_probs``. These tests pin two invariants on a 2-token toy:
+``old_log_probs``. These tests pin three invariants on a 2-token toy:
 
-A. **Gradient == plain PG.** ``∂loss/∂θ == -(A · ∇logπ) / N`` (token-mean
-   normalization), i.e. the clean unmasked policy gradient — no ratio, no clip.
+A. **Gradient == plain PG when KL is disabled.** ``∂loss/∂θ ==
+   -(A · ∇logπ) / N`` (token-mean normalization), i.e. the clean unmasked
+   policy gradient — no ratio, no clip.
 B. **``old_log_probs`` is IGNORED.** The loss + gradient are byte-identical for
    wildly different ``old_log_probs`` (the corruption channel is gone), whereas
    the fast-path ``compute_policy_loss_vanilla`` produces a DIFFERENT gradient
    once ``old_log_probs != logπ`` (ratio != 1), proving the anchor and fast path
    intentionally differ here.
+C. **Configured KL is retained.** With ``use_kl_loss=true``, the anchor adds the
+   same reference-policy KL penalty, coefficient, mask, and normalization as
+   the locked fast objective without reintroducing the PPO ratio.
 
 Unlike the file-path-isolated harness in ``test_anchor_queue.py``, these tests
 import through the real ``verl`` package (the runner's env / the box both have
@@ -46,13 +50,23 @@ from tensordict import TensorDict
 class _Cfg:
     """Just the attributes anchor_pg_loss reads off ActorConfig."""
 
-    def __init__(self, loss_agg_mode="token-mean"):
+    def __init__(
+        self,
+        loss_agg_mode="token-mean",
+        *,
+        use_kl_loss=False,
+        kl_loss_coef=0.001,
+        kl_loss_type="low_var_kl",
+    ):
         self.loss_agg_mode = loss_agg_mode
         self.loss_scale_factor = None
         self.global_batch_info = {}
+        self.use_kl_loss = use_kl_loss
+        self.kl_loss_coef = kl_loss_coef
+        self.kl_loss_type = kl_loss_type
 
 
-def _make_batch(logits_param, advantages, response_mask, old_log_probs):
+def _make_batch(logits_param, advantages, response_mask, old_log_probs, ref_log_prob=None):
     """Build (model_output, data) for a 1-sequence, 2-token toy.
 
     ``logits_param`` is the single learnable scalar/tensor whose gradient we
@@ -64,14 +78,14 @@ def _make_batch(logits_param, advantages, response_mask, old_log_probs):
 
     bsz, resp_len = response_mask.shape
     model_output = {"log_probs": logits_param}
-    data = TensorDict(
-        {
-            "response_mask": response_mask,
-            "advantages": advantages,
-            "old_log_probs": old_log_probs,
-        },
-        batch_size=[bsz],
-    )
+    tensors = {
+        "response_mask": response_mask,
+        "advantages": advantages,
+        "old_log_probs": old_log_probs,
+    }
+    if ref_log_prob is not None:
+        tensors["ref_log_prob"] = ref_log_prob
+    data = TensorDict(tensors, batch_size=[bsz])
     # Non-tensor scalars anchor_pg_loss / agg_loss read off the batch (set via
     # the same util the engine uses, so they are stored as non-tensor metadata
     # and don't trip the TensorDict batch-dim check).
@@ -154,6 +168,106 @@ def test_anchor_pg_loss_ignores_old_log_probs(_identity_extract):
     torch.testing.assert_close(grad_a, grad_c, rtol=0, atol=0)
 
 
+def test_anchor_pg_loss_retains_configured_kl(_identity_extract):
+    """C: ratio-one anchor objective includes the locked reference KL term."""
+    from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    values = torch.tensor([[0.3, -0.7]])
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    old_log_probs = torch.tensor([[9.0, -9.0]])
+    ref_log_prob = torch.tensor([[0.1, -0.4]])
+    cfg = _Cfg(use_kl_loss=True, kl_loss_coef=0.001, kl_loss_type="low_var_kl")
+
+    anchor_log_probs = values.clone().requires_grad_(True)
+    model_output, data = _make_batch(
+        anchor_log_probs,
+        advantages,
+        response_mask,
+        old_log_probs,
+        ref_log_prob,
+    )
+    anchor_loss, metrics = anchor_pg_loss(cfg, model_output, data)
+    anchor_loss.backward()
+
+    manual_log_probs = values.clone().requires_grad_(True)
+    global_batch_info = {
+        "dp_size": 1,
+        "batch_num_tokens": None,
+        "global_batch_size": None,
+        "loss_scale_factor": None,
+    }
+    manual_pg = agg_loss(
+        loss_mat=-advantages * manual_log_probs,
+        loss_mask=response_mask.bool(),
+        loss_agg_mode="token-mean",
+        **global_batch_info,
+    )
+    manual_kld = kl_penalty(
+        logprob=manual_log_probs,
+        ref_logprob=ref_log_prob,
+        kl_penalty="low_var_kl",
+    )
+    manual_kl = agg_loss(
+        loss_mat=manual_kld,
+        loss_mask=response_mask.bool(),
+        loss_agg_mode="token-mean",
+        **global_batch_info,
+    )
+    manual_loss = manual_pg + 0.001 * manual_kl
+    manual_loss.backward()
+
+    torch.testing.assert_close(anchor_loss.detach(), manual_loss.detach(), rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(anchor_log_probs.grad, manual_log_probs.grad, rtol=1e-6, atol=1e-7)
+    assert metrics["actor/anchor_kl_loss"].values[0] == pytest.approx(float(manual_kl.detach()), rel=1e-6, abs=1e-7)
+    assert metrics["actor/anchor_kl_coef"] == 0.001
+    assert metrics["actor/anchor_total_loss"].values[0] == pytest.approx(
+        float(manual_loss.detach()), rel=1e-6, abs=1e-7
+    )
+
+
+def test_anchor_pg_loss_kl_depends_on_reference_not_old_policy(_identity_extract):
+    """KL-enabled anchor remains old-policy invariant but reference-sensitive."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    cfg = _Cfg(use_kl_loss=True)
+
+    def _loss_grad(old_lp, ref_lp):
+        lp = torch.tensor([[0.3, -0.7]], requires_grad=True)
+        mo, data = _make_batch(lp, advantages, response_mask, old_lp, ref_lp)
+        loss, _ = anchor_pg_loss(cfg, mo, data)
+        loss.backward()
+        return loss.detach().clone(), lp.grad.clone()
+
+    loss_a, grad_a = _loss_grad(torch.tensor([[9.0, -9.0]]), torch.tensor([[0.1, -0.4]]))
+    loss_b, grad_b = _loss_grad(torch.tensor([[-4.0, 4.0]]), torch.tensor([[0.1, -0.4]]))
+    loss_c, grad_c = _loss_grad(torch.tensor([[9.0, -9.0]]), torch.tensor([[-0.8, 0.2]]))
+
+    torch.testing.assert_close(loss_a, loss_b, rtol=0, atol=0)
+    torch.testing.assert_close(grad_a, grad_b, rtol=0, atol=0)
+    assert not torch.allclose(loss_a, loss_c, rtol=1e-6, atol=1e-7)
+    assert not torch.allclose(grad_a, grad_c, rtol=1e-6, atol=1e-7)
+
+
+def test_anchor_pg_loss_kl_requires_reference_log_probs(_identity_extract):
+    """KL-enabled anchor fails closed when its reference-policy term is absent."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    log_probs = torch.tensor([[0.3, -0.7]], requires_grad=True)
+    model_output, data = _make_batch(
+        log_probs,
+        torch.tensor([[1.5, -2.0]]),
+        torch.ones(1, 2),
+        torch.tensor([[9.0, -9.0]]),
+    )
+
+    with pytest.raises(KeyError, match="ref_log_prob"):
+        anchor_pg_loss(_Cfg(use_kl_loss=True), model_output, data)
+
+
 def test_fast_path_ppo_loss_DOES_depend_on_old_log_probs():
     """Contrast: compute_policy_loss_vanilla's grad changes with old_log_probs.
 
@@ -223,15 +337,23 @@ def test_anchor_pg_loss_round_trips_through_replay_clone(_identity_extract):
     advantages = torch.tensor([[1.5, -2.0]])
     response_mask = torch.ones(1, 2)
     old_log_probs = torch.tensor([[5.0, -5.0]])
+    ref_log_prob = torch.tensor([[0.1, -0.4]])
+    cfg = _Cfg(use_kl_loss=True)
 
     def _loss_grad(data):
         lp = torch.tensor([[0.3, -0.7]], requires_grad=True)
         mo = {"log_probs": lp}
-        loss, _ = anchor_pg_loss(_Cfg(), mo, data)
+        loss, _ = anchor_pg_loss(cfg, mo, data)
         loss.backward()
         return loss.detach().clone(), lp.grad.clone()
 
-    _mo, data = _make_batch(torch.tensor([[0.3, -0.7]], requires_grad=True), advantages, response_mask, old_log_probs)
+    _mo, data = _make_batch(
+        torch.tensor([[0.3, -0.7]], requires_grad=True),
+        advantages,
+        response_mask,
+        old_log_probs,
+        ref_log_prob,
+    )
     cloned = clone_batch_for_replay(data, device=torch.device("cpu"))
 
     loss_orig, grad_orig = _loss_grad(data)

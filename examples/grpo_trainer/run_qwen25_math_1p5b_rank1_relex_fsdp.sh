@@ -8,8 +8,9 @@ export VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 
 # The proof run is complete; this launcher now defaults to the required final
 # model while preserving every other fixed MATH/GRPO knob.
-# Method selection is still provisional: W=4 below is the paper-style arm being
-# measured, not a declared champion. After the corrected matrix completes, the
+# Method selection is still provisional: W=4 below is the RELEX-style sliding
+# adaptation being measured, not a declared champion. After the corrected
+# matrix completes, the
 # winner recorded in research/.claude/project.yaml will back a neutral MATH
 # launcher whose bare invocation selects that method. Until then, use explicit
 # comparison-arm names for scientific claims.

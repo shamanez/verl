@@ -432,7 +432,8 @@ comm_eff:
     # (including norms, biases, embeddings, and an untied lm_head). This is
     # independent of spectral.target_substr, which only scopes gradient
     # correction. W=2 is the explicit two-checkpoint/secant fallback; W>=3
-    # uses the paper-style rank-1 OLS fit. Inert for disabled/fixed_linear.
+    # uses the RELEX-inspired rank-1 OLS fit adapted to this sliding live-training
+    # window. Inert for disabled/fixed_linear.
     # Must be >= 2.
     lookahead_window_snapshots: 4
 
