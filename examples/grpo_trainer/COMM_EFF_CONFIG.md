@@ -24,10 +24,10 @@ All knobs are env overrides read by the launcher and forwarded to
 
 The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
 surface-scoped benchmark from the GSM8K operating baseline below. Its default
-selection is intentionally pending. Corrected W2 and corrected strict-readiness
-W4 are complete; the active qboot-v2 matrix is now running its
-no-projected-weight-increment control, followed by the complete qboot-v2
-projection system. The old progressive-W4,
+selection is intentionally pending. Corrected W2, corrected strict-readiness
+W4, and the qboot-v2 no-projected-weight-increment control are complete. The
+control was valid but destabilized late (67.31% at step 75 to 61.90% at step
+100); the matched qboot-v2 projection system is now active. The old progressive-W4,
 W2-no-increment, and `fixed_linear` placeholders are superseded/not queued;
 `fixed_linear` remains an optional legacy follow-up. The authoritative
 placeholder and preregistered selection rule live at

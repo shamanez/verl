@@ -457,9 +457,9 @@ EOF
 #       (1) `tail --pid="$TRAIN_PID" -F` — the follower DIES when the training
 #           process exits (clean or crash), closing the pipe so grep hits EOF and
 #           the subshell returns; nothing is left to wait on.
-#       (2) the watcher runs in its OWN process group (setsid) and the EXIT trap
-#           kills the WHOLE group (`kill -- -$PGID`), reaping tail+grep+subshell
-#           even if (1) somehow doesn't fire.
+#       (2) the watcher runs in its OWN process group (setsid); one cleanup
+#           function verifies that private PGID before signalling it, then reaps
+#           the launcher and removes the EXIT trap before the parent can return.
 #     Net: the watcher never leaves a dangling follower and never blocks this
 #     script on clean completion — for EVERY cell in the sequence.
 # ---------------------------------------------------------------------------
@@ -478,8 +478,8 @@ EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_p
 #
 #    : launch the training in the BACKGROUND, capture its PID, start the
 #    early-stop watcher bound to that PID, then `wait` on training explicitly.
-#    The watcher self-terminates when training exits (guard 1), and the EXIT
-#    trap reaps the watcher's whole process group (guard 2).
+#    The watcher self-terminates when training exits (guard 1), and the verified
+#    cleanup path reaps its private process group exactly once (guard 2).
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
@@ -592,9 +592,10 @@ TRAIN_PID=$!
 #  early-stop watcher — bound to TRAIN_PID + its own process group.
 # Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or
 # crash), so grep hits EOF and the watcher subshell returns. Guard 2: setsid
-# puts the watcher in its own pgroup; the EXIT trap kills the whole group so
-# nothing dangles. The watcher only SIGNALS (sentinel + log line); the
-# monitor/runner owns teardown.
+# puts the watcher in its own pgroup. Cleanup verifies that the recorded group
+# is private before signalling it, reaps the launcher exactly once, and clears
+# the EXIT trap before final W&B sync. The watcher only SIGNALS (sentinel + log
+# line); the monitor/runner owns teardown.
 setsid bash -c '
   LOG="$1"; RE="$2"; EXP="$3"; SENT="$4"; TPID="$5"
   for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
@@ -608,22 +609,44 @@ setsid bash -c '
   fi
 ' _ "$LOG" "$EARLY_STOP_RE" "$EXPERIMENT_NAME" "$EARLY_STOP_SENTINEL" "$TRAIN_PID" &
 EARLY_STOP_WATCHER_PID=$!
-# Reap the watcher's WHOLE process group on exit (guard 2). setsid makes the
-# watcher a group leader, so its PGID == its PID; kill -- -PGID reaps tail+grep
-# too. `|| true` so a self-terminated watcher (guard 1 already fired) is fine.
-trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null; true' EXIT
+EARLY_STOP_WATCHER_PGID="$(ps -o pgid= -p "$EARLY_STOP_WATCHER_PID" 2>/dev/null | tr -d '[:space:]')"
+EARLY_STOP_OWNER_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')"
+
+cleanup_early_stop_watcher() {
+  local pid="${EARLY_STOP_WATCHER_PID:-}"
+  local pgid="${EARLY_STOP_WATCHER_PGID:-}"
+  local owner_pgid="${EARLY_STOP_OWNER_PGID:-}"
+  [[ -n "$pid" ]] || return 0
+
+  # A negative PID signals a whole process group. Do that only when `setsid`
+  # demonstrably created the private group we requested. Falling back to the
+  # launcher PID is safer than ever signalling the training/sweep group; the
+  # watcher's `tail --pid=$TRAIN_PID` remains the independent self-exit guard.
+  if [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$pgid" == "$pid" && "$pgid" != "$owner_pgid" ]]; then
+    kill -- -"$pgid" 2>/dev/null || true
+  elif [[ "$pid" =~ ^[0-9]+$ ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  EARLY_STOP_WATCHER_PID=""
+  EARLY_STOP_WATCHER_PGID=""
+}
+
+trap cleanup_early_stop_watcher EXIT
 
 # Block on TRAINING ONLY (not the watcher) — when main_ppo finishes, we proceed
-# to done.flag immediately; the EXIT trap then reaps the watcher. `wait $PID`
+# to done.flag immediately; watcher cleanup is explicit before final sync. `wait $PID`
 # returns the child's exit status; capture it WITHOUT tripping `set -e` (the
 # `|| TRAIN_RC=$?` keeps a non-zero training exit from aborting before we can
 # clean up the watcher + write done.flag + propagate the status).
 TRAIN_RC=0
 wait "$TRAIN_PID" || TRAIN_RC=$?
 
-# Proactively stop the watcher now that training is done (belt-and-braces with
-# the EXIT trap + guard 1), so back-to-back cells never accumulate watchers.
-kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
+# Stop and reap the watcher once, then remove the EXIT trap. The old path sent
+# an unchecked group kill here and repeated it from EXIT after final sync; in a
+# nested multi-arm launcher that could terminate the sweep shell between arms.
+cleanup_early_stop_watcher
+trap - EXIT
 
 # ---------------------------------------------------------------------------
 # WandB final-flush. Ray teardown can race WandB's async uploader, so resync the

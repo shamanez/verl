@@ -149,12 +149,12 @@
     <h1>Sliding RELEX two-circuit experiment report</h1>
     <p class="lede">
       A living report for the fast learner, projected delayed anchor, training–inference mismatch,
-      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Corrected W=2 and strict W=4
-      are complete, and the first arm of the two-run qboot-v2 systems comparison is now live.
+      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Corrected W=2, strict W=4,
+      and the qboot-v2 no-weight-increment control are complete; the matched qboot-v2 composite is live.
     </p>
     <div class="status-row">
       <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
-      <span class="pill">Updated 15 July 2026, 00:27 AEST</span>
+      <span class="pill">Updated 15 July 2026, 05:30 AEST</span>
       <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
       <span class="pill">Active training commit <span class="mono">8bad0656</span></span>
     </div>
@@ -195,20 +195,26 @@
           <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/lzl4vlcr">Open W&amp;B</a>
         </article>
         <article class="card">
-          <div class="label">Active qboot-v2 control</div>
-          <div class="metric accent">44.60% @ 0</div>
-          <p>The no-weight-extrapolation arm passed initial MATH evaluation and is live; the complete qboot-v2 composite follows.</p>
+          <div class="label">qboot-v2, no weight increment</div>
+          <div class="metric warn">61.90%</div>
+          <p>Valid 100/100 control. It peaked at 67.31% at step 75, then destabilized late; the matched composite is now live.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/xcu56scj">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">Active qboot-v2 composite</div>
+          <div class="metric accent">44.68% @ 0</div>
+          <p>Initial evaluation and the one-time fast-Q 1/1/1 transaction passed with zero cross-rank disagreement.</p>
         </article>
       </div>
       <p class="muted">Measured training times were 4 h 26 min dense, 4 h 47 min corrected W=2, and 5 h 00 min corrected strict W=4. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
-      <div class="progress" aria-label="Dense control, corrected W2, and corrected W4 complete; qboot-v2 no-weight-extrapolation active; qboot-v2 composite planned"><span style="width: 60%"></span></div>
+      <div class="progress" aria-label="Dense control, corrected W2, corrected W4, and qboot-v2 no-weight-increment complete; qboot-v2 composite active"><span style="width: 80%"></span></div>
     </section>
 
     <section id="answer">
       <h2>What is the anchor signal helping?</h2>
       <p>
         Corrected W=2, corrected strict W=4, and the dense control are complete. The earlier W=4 result remains a
-        <strong>legacy pre-fix diagnostic</strong>; the qboot-v2 no-weight-extrapolation control is now running. Every two-circuit arm uses
+        <strong>legacy pre-fix diagnostic</strong>; the qboot-v2 no-weight-increment control is complete and its matched composite is running. Every two-circuit arm uses
         a live fast learner and an isolated delayed anchor. The anchor never optimizer-steps and never reads
         immediate fast weights.
       </p>
@@ -233,11 +239,11 @@
       </p>
       <div class="grid">
         <article class="card"><div class="label">Projected tensors</div><div class="metric">338/338</div><p>Embedding, norms, decoder tensors and other floating parameters.</p></article>
-        <article class="card"><div class="label">Gradient targets</div><div class="metric">196/196</div><p>Decoder matrices covered by spectral correction.</p></article>
+        <article class="card"><div class="label">qboot-v2 M targets</div><div class="metric">338/338</div><p>Every unique floating gradient-bearing parameter receives the dense anchor EMA.</p></article>
         <article class="card"><div class="label">Full anchor fires</div><div class="metric">9</div><p>Corrected W=2 fired at global steps 20 through 100 after one Q-only fire.</p></article>
         <article class="card"><div class="label">Matrix corrections</div><div class="metric">31,556</div><p>Zero cold-M fallbacks; the corrected path was materially active.</p></article>
       </div>
-      <div class="callout"><strong>Interpretation limit.</strong> Corrected W=2 ended at 67.89% and corrected strict W=4 at 66.91%, but one run per arm cannot establish statistical superiority. The active qboot-v2 strength-zero control isolates applied weight extrapolation while retaining Q, M, and signed correction; it is not an anchor-off or no-sign-correction arm. A matched PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
+      <div class="callout"><strong>Interpretation limit.</strong> The valid qboot-v2 strength-zero control ended at 61.90% after reaching 67.31% at step 75. It isolates zero applied weight extrapolation while retaining Q, all-floating M, signed correction, and stale-paired trajectories; it is not anchor-off or no-sign-correction. The matched composite must finish before attributing the late instability to the missing weight increment, and a separate PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
     </section>
 
     <section id="mismatch">
@@ -257,6 +263,7 @@
             <tr><td>Dense control</td><td class="right good">0.00231</td><td class="right good">0.99943</td><td class="right good">0.000263</td><td class="right">67.41%</td></tr>
             <tr><td>Corrected W=2 secant, α=1</td><td class="right bad">0.69027</td><td class="right bad">0.13979</td><td class="right bad">8.1250</td><td class="right good">67.89%</td></tr>
             <tr><td>Corrected strict W=4 rank-1, α=1</td><td class="right bad">0.74378</td><td class="right bad">0.10813</td><td class="right bad">12.1203</td><td class="right">66.91%</td></tr>
+            <tr><td>qboot-v2, no projected weight increment</td><td class="right bad">0.80726</td><td class="right bad">0.10653</td><td class="right bad">13.7708</td><td class="right warn">61.90%</td></tr>
             <tr><td>Legacy W=4, pre-Q fix</td><td class="right bad">0.73544</td><td class="right bad">0.13981</td><td class="right bad">8.2676</td><td class="right">65.37%</td></tr>
             <tr><td>Aborted W=2 diagnostic</td><td class="right warn">≈0.815</td><td class="right warn">≈0.036</td><td class="right warn">≈12.38</td><td class="right muted">Preserved, not comparable</td></tr>
           </tbody>
@@ -416,18 +423,18 @@
             <tr><td>Dense GRPO</td><td class="right">44.42%</td><td class="right">63.67%</td><td class="right">65.67%</td><td class="right">66.67%</td><td class="right">67.41%</td><td class="good">Complete</td></tr>
             <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right">60.86%</td><td class="right">65.07%</td><td class="right">66.99%</td><td class="right good">67.89%</td><td class="good">Complete</td></tr>
             <tr><td>Corrected W=4 rank-1, α=1</td><td class="right">44.64%</td><td class="right">48.04%</td><td class="right">63.61%</td><td class="right">65.79%</td><td class="right">66.91%</td><td class="good">Complete</td></tr>
-            <tr><td>qboot-v2, no projected weight increment</td><td class="right">44.60%</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="accent">Running</td></tr>
-            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued second after W=4</td></tr>
+            <tr><td>qboot-v2, no projected weight increment</td><td class="right">44.60%</td><td class="right">63.69%</td><td class="right">65.91%</td><td class="right good">67.31%</td><td class="right warn">61.90%</td><td class="good">Valid; late instability</td></tr>
+            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right">44.68%</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="accent">Running; fast-Q gate passed</td></tr>
             <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Optional; not queued</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run. Corrected strict W=4 finished 0.50 points below dense and 0.98 points below corrected W=2. These are single-seed differences, not replicated statistical comparisons. The active qboot-v2 control retains PowerSGD, the anchor, fast-Q bootstrap, first-fire M, all-floating M, and W2/W3/W4 telemetry, while strength zero prevents any projected increment from changing its anchor weights. It deliberately uses the newest checkpoint's stale-paired trajectories; it is not an anchor-off control or a sign-correction ablation.</p>
+      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run. Corrected strict W=4 finished 0.50 points below dense and 0.98 points below corrected W=2. The valid qboot-v2 control tracked dense through step 75, then fell 5.40 points to 61.90% by step 100. Its final grad norm was 67.07, PowerSGD reconstruction error 0.534, and rollout→train KL 13.77. Q update/broadcast/activation was 10/10/10 with zero overwrites or cross-rank disagreement, all 338 M targets were active, and every zero-strength probe returned projected RMSE exactly equal to stale RMSE. The late collapse is therefore a measured optimization outcome, not evidence that a projected increment accidentally leaked into the control. These are single-seed differences; causal attribution to weight projection waits for the matched composite.</p>
     </section>
 
     <section id="default-selection">
       <h2>Compression default and exact arm differences</h2>
-      <div class="callout"><strong>Placeholder—no winner yet.</strong> Corrected W=2 currently leads the completed compressed arms, but promotion waits until both qboot-v2 arms complete and pass the validity gates.</div>
+      <div class="callout"><strong>Placeholder—no winner yet.</strong> Corrected W=2 currently leads the valid completed compressed arms. The qboot-v2 no-weight-increment control is valid but not competitive at step 100; promotion still waits for the active matched composite to complete and pass the validity gates.</div>
       <p>Every compressed arm uses the same Qwen2.5-Math/MATH protocol, PowerSGD rank 77, cadence/delay 20/20, anchor-owned Q, signed-EMA gradient correction, and the corrected post-PPO Q activation transaction. The qstagefix-v1 W2/W4 arms use Q-only warmup and M on 196 decoder matrices. Both qboot-v2 arms add the same one-time dense fast-Q bootstrap, first-fire stale-correct M, progressive W2/W3/W4 readiness, and all-floating M; their applied weight increment and trajectory source differ as disclosed below.</p>
       <p class="muted">On this model, all-floating M covers 338 unique tensors (196 decoder weights, 84 q/k/v biases, 57 norms, and one tied embedding/LM-head tensor). The fp32 CPU EMA occupies 5.751 GiB per rank, 0.870 GiB more than the 196-target path; the added tensors also contribute about 0.87 GiB of logical fp32 payload to each anchor-gradient reduction and M broadcast. Both qboot-v2 arms disable per-target diagnostics while retaining coverage, consensus, and correction counters.</p>
       <div class="table-wrap">
