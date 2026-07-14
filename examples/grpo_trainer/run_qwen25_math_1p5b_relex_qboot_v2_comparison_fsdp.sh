@@ -27,6 +27,11 @@ else
   ARMS=("$@")
 fi
 
+if [[ -n "${EXPERIMENT_NAME_OVERRIDE:-}" && ${#ARMS[@]} -ne 1 ]]; then
+  echo "FATAL: EXPERIMENT_NAME_OVERRIDE requires exactly one selected arm" >&2
+  exit 2
+fi
+
 run_arm() {
   local arm="$1"
   local experiment strength role rollout_source
@@ -49,6 +54,11 @@ run_arm() {
       return 2
       ;;
   esac
+
+  # A corrected single-arm validation may use a fresh run name while reusing
+  # this exact locked configuration. Multi-arm queues reject the override above
+  # to prevent directory/W&B collisions.
+  experiment="${EXPERIMENT_NAME_OVERRIDE:-$experiment}"
 
   local run_dir="$VERL_ROOT/runs/$experiment"
   if [[ -e "$run_dir" && "${ALLOW_EXISTING_RUN:-0}" != "1" ]]; then

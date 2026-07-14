@@ -147,6 +147,11 @@ and activate it before the real old-log-probability forward. This is a Q-only
 bootstrap: it does not compute gradients or M, and the first real PPO old and
 current-policy forwards therefore see the same Q.
 
+For an immutable corrected rerun, either comparison launcher accepts
+`EXPERIMENT_NAME_OVERRIDE` only when exactly one arm is selected. This changes
+the run directory/W&B name, not the arm configuration; multi-arm use is rejected
+to prevent two cells from colliding.
+
 With C=K=20 optimizer ticks and two optimizer ticks per global step, both arms
 then follow this same anchor schedule:
 

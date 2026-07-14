@@ -18,6 +18,11 @@ else
   ARMS=("$@")
 fi
 
+if [[ -n "${EXPERIMENT_NAME_OVERRIDE:-}" && ${#ARMS[@]} -ne 1 ]]; then
+  echo "FATAL: EXPERIMENT_NAME_OVERRIDE requires exactly one selected arm" >&2
+  exit 2
+fi
+
 run_arm() {
   local arm="$1"
   local experiment mode window min_snapshots strength warmup probe_enabled comm_enabled
@@ -65,6 +70,11 @@ run_arm() {
       return 2
       ;;
   esac
+
+  # A single-arm validation may supply a unique immutable run name without
+  # copying the locked arm definition. Multi-arm queues reject this override
+  # above so two cells can never collide in one directory/W&B run.
+  experiment="${EXPERIMENT_NAME_OVERRIDE:-$experiment}"
 
   local run_dir="$VERL_ROOT/runs/$experiment"
   if [[ -e "$run_dir" && "${ALLOW_EXISTING_RUN:-0}" != "1" ]]; then
