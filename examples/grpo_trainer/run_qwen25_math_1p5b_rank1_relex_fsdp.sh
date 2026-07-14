@@ -8,6 +8,11 @@ export VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 
 # The proof run is complete; this launcher now defaults to the required final
 # model while preserving every other fixed MATH/GRPO knob.
+# Method selection is still provisional: W=4 below is the paper-style arm being
+# measured, not a declared champion. After the corrected matrix completes, the
+# winner recorded in research/.claude/project.yaml will back a neutral MATH
+# launcher whose bare invocation selects that method. Until then, use explicit
+# comparison-arm names for scientific claims.
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Math-1.5B}"
 export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then

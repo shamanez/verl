@@ -246,6 +246,63 @@ fixed_control_surface:                                        # LOCKED training 
   measurement_knobs: [test_freq, val_before_train]            # NOT control variables (validation is read-only) — canonical test_freq=25
   val_before_train_policy: "True ONLY for the FIRST cell on a NEW surface (it smoke-tests the val plumbing — parquet/reward-route/metric keys — before paid training; caught the #63 val-dataset correction). Every later cell shares the SAME base checkpoint ⇒ step-0 val is arm-invariant and already known ⇒ set False (saves ~5min/arm ≈ 1.5 USD at 16K/n16). Measured base R1-Distill-1.5B AIME avg@8 ≈ 0.19 (30 problems, std ~0.09)."
 
+compression_defaults:                                        # Surface-scoped promoted defaults; do not replace the global GSM8K baseline or generic Hydra all-off compatibility.
+  math_qwen25_math_1p5b:
+    status: pending_results                                   # pending_results | selected | no_eligible_champion
+    claim_scope: 'Best observed compressed arm on this exact controlled matrix; not literature/global SOTA while the evidence is single-seed and internal.'
+    protocol:
+      model: Qwen/Qwen2.5-Math-1.5B
+      data: 'MATH train split; MATH test split'
+      data_source: DigitalLearningGmbH/MATH-lighteval
+      prompt_template: examples/grpo_trainer/relex_qwen_chat_template.jinja
+      training_rollouts: 'temperature=1.0; sampling enabled; n=8'
+      evaluation: '4096-token context; greedy; temperature=0.0'
+      reward: 'last \boxed{} + is_equiv'
+      training: 'GRPO; train_batch=512; mini_batch=256; rollout_n=8; prompt=1024; response=3072; lr=0.000001; kl=0.001; steps=100; eval_every=25'
+      shared_compressed_substrate: 'PowerSGD rank=77; anchor cadence=20; delay_K=20; anchor owns Q; paired replay; signed_ema alpha=0.25 beta_anc=0.50; corrected transactional Q staging'
+      method_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
+      matrix_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh
+    candidates:
+      w2_rank1:
+        run: relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b
+        difference: 'rank1_relex; W=2 two-checkpoint all-tensor secant; strength=1.0; q_only warmup; causal projection probe enabled'
+      w4_rank1:
+        run: relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b
+        difference: 'rank1_relex; W=4 rank-1 OLS over three deltas; strength=1.0; q_only warmup; causal projection probe enabled'
+      w2_no_increment:
+        run: relex_cmp_qstagefix_v1_w2_alltensor_alpha0_math_qwen25_math_1p5b
+        difference: 'matched W=2 anchor/Q/M schedule with strength=0.0, so no projected weight increment; q_only warmup; causal projection probe enabled'
+      fixed_linear:
+        run: relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b
+        difference: 'legacy two-source fixed_linear projection; decoder matrices only; strength=1.0; stale_correct warmup; causal rank1 projection probe disabled'
+    controls:
+      dense:
+        run: relex_cmp_dense_grpo_math_qwen25_math_1p5b
+        role: 'reference only; compression, anchor, Q/M correction, and lookahead disabled; never eligible as the compression default'
+      excluded_diagnostics: ['legacy pre-Q-fix W4', 'aborted pre-fix W2', 'Qwen2.5-1.5B-Instruct proof runs']
+    selection:
+      candidates: [w2_rank1, w4_rank1, w2_no_increment, fixed_linear]
+      eligibility: 'Exact fixed surface; corrected Q-staging code; done.flag at 100/100; no early stop, NaN, or run error; transactional-Q counters valid; method-specific integrity evidence and communication measured.'
+      primary: 'Highest observed step-100 MATH-test accuracy among eligible compressed arms.'
+      tie_breakers: ['lower rollout-to-train sampled KL', 'lower communication ratio', 'simpler method']
+      disclosure: 'Publish the full trajectory, mismatch, communication, Q counters, and projection probes; validity overrides score. A one-seed winner is a benchmark champion, not a statistically established or external SOTA claim.'
+    selected:
+      arm: pending
+      run: pending
+      final_math: pending
+      delta_vs_dense: pending
+      communication_ratio: pending
+      mismatch: pending
+      wandb: pending
+      evidence_commit: pending
+    runtime:
+      implicit_arm: pending
+      neutral_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_comm_eff_default_fsdp.sh
+      pending_rule: 'The current W=4 values in the rank1_relex launcher are provisional experiment values, not a selected default.'
+      promotion_rule: 'After every eligible arm finishes, a bare invocation of a neutral Qwen2.5-Math/MATH comm-eff launcher uses the selected arm; explicit method overrides remain allowed.'
+      scope: 'This exact MATH benchmark launcher only; do not change generic actor/Hydra all-off defaults.'
+      surfaces_to_update: ['neutral MATH launcher', 'project.yaml selected fields', 'COMM_EFF_CONFIG.md', 'RELEX HTML report', 'draft PR #25']
+
 launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
   dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones a PINNED branch (registry: .claude/skills/vast-provision/templates.json) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone by cloning exp/<id> straight from origin/GitHub (bundle = offline crash-survival fallback, not uploaded).
   naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"

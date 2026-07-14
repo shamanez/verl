@@ -154,7 +154,7 @@
     </p>
     <div class="status-row">
       <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
-      <span class="pill">Updated 14 July 2026, 19:12 AEST</span>
+      <span class="pill">Updated 14 July 2026, 20:19 AEST</span>
       <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
       <span class="pill">Training commit <span class="mono">a7252bd6</span></span>
     </div>
@@ -386,6 +386,31 @@
         </table>
       </div>
       <p class="muted">Corrected W=2 finished 0.48 points above the single dense run, but this is not a replicated statistical comparison. Alpha=0 is the matched “no projected increment” control and retains the W=2 anchor circuit. Fixed-linear also differs in tensor scope and warmup, so neither is an anchor-off causal control.</p>
+    </section>
+
+    <section id="default-selection">
+      <h2>Compression default and exact arm differences</h2>
+      <div class="callout"><strong>Placeholder—no winner yet.</strong> The current W=4 launcher values are provisional experiment values, not the default selected by this matrix. Promotion happens only after every corrected arm completes and passes the validity gates.</div>
+      <p>Every compressed arm uses the same Qwen2.5-Math/MATH protocol, PowerSGD rank 77, cadence/delay 20/20, anchor-owned Q, paired replay, signed-EMA gradient correction, and the corrected post-PPO Q activation transaction. M correction remains scoped to the same 196 decoder matrices; “all-tensor” below describes projected anchor weights. Only the dimensions below intentionally differ.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Arm / exact experiment</th><th>Weight projection</th><th>Readiness and tensor scope</th><th>Anchor/probe behavior</th><th>Scientific role</th></tr></thead>
+          <tbody>
+            <tr><td>Dense<br><span class="mono">relex_cmp_dense_grpo_math_qwen25_math_1p5b</span></td><td>None; communication efficiency disabled</td><td>No window or projected tensors</td><td>No anchor, Q/M correction, or projection probe</td><td>Uncompressed reference; never eligible as the compression default</td></tr>
+            <tr><td>Corrected W=2 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b</span></td><td>Two-checkpoint per-tensor secant; strength 1.0</td><td>One Q-only fire; M-ready at optimizer tick 40/global step 20; every floating tensor</td><td>Anchor owns Q and supplies dense M; causal sampled-weight probe enabled</td><td>Naive all-tensor linear baseline and eligible candidate</td></tr>
+            <tr><td>Corrected W=4 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b</span></td><td>Rank-1 OLS over three checkpoint deltas; strength 1.0</td><td>Three Q-only fires; M-ready at tick 80/global step 40; every floating tensor</td><td>Anchor owns Q and supplies dense M; causal sampled-weight probe enabled</td><td>Paper-style RELEX candidate and eligible candidate</td></tr>
+            <tr><td>W=2 α=0<br><span class="mono">relex_cmp_qstagefix_v1_w2_alltensor_alpha0_math_qwen25_math_1p5b</span></td><td>Output stays at the newest exact checkpoint; strength 0.0</td><td>Same one-fire W=2 readiness, Q-only warmup, and all-tensor machinery as W=2 α=1</td><td>Retains the same anchor/Q/M schedule and causal probe</td><td>Matched no-increment ablation—not anchor-off or compression-off</td></tr>
+            <tr><td>Legacy fixed-linear<br><span class="mono">relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b</span></td><td>Legacy two-source fixed-linear extrapolation; strength 1.0</td><td>Stale-correct warmup; full M/Q from the first fire; decoder matrices only, other parameters stay at the newest stale checkpoint</td><td>Retains anchor-owned Q and dense M correction; rank-1 causal probe disabled</td><td>Legacy systems comparator and eligible candidate</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The selected default will be the highest step-100 MATH-test result among valid completed compressed arms;
+        a tied result is resolved by lower rollout-to-train sampled KL, then lower communication ratio, then method
+        simplicity. Completion, fixed-surface parity, transactional-Q counters, and method-specific integrity evidence
+        are mandatory. Dense and every pre-fix/aborted run are excluded.
+      </p>
+      <div class="callout"><strong>Claim boundary.</strong> The final winner will be called the <em>best observed compression configuration on this exact locked benchmark</em>. A single-seed internal matrix does not establish literature-wide or statistically replicated SOTA.</div>
     </section>
 
     <section id="method">

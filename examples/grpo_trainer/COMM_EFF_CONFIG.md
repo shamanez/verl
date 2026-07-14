@@ -20,6 +20,24 @@ vLLM policy. The Hydra dataclass defaults remain all-off, so
 All knobs are env overrides read by the launcher and forwarded to
 `actor_rollout_ref.actor.comm_eff.*`.
 
+## Qwen2.5-Math/MATH compression default (pending)
+
+The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
+surface-scoped benchmark from the GSM8K operating baseline below. Its default
+selection is intentionally pending until corrected W2, corrected W4, W2 with no
+projected increment, and legacy `fixed_linear` all complete. The authoritative
+placeholder and preregistered selection rule live at
+`research/.claude/project.yaml` → `compression_defaults.math_qwen25_math_1p5b`.
+
+The current W=4 values in
+`run_qwen25_math_1p5b_rank1_relex_fsdp.sh` are provisional experiment values,
+not a selected champion. After the matrix closes, the best valid compressed arm
+will be promoted to the neutral
+`run_qwen25_math_1p5b_comm_eff_default_fsdp.sh` launcher so omitting method
+knobs selects it; explicit overrides will remain available. The claim will be
+“best observed on the locked single-seed matrix,” not literature/global SOTA
+without broader replication and comparison.
+
 ## Current baseline (the problem state)
 
 The baseline deliberately sits in the **k-collapse regime**: high anchor latency
