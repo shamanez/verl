@@ -381,10 +381,18 @@ class CommEffState:
         #   anchor_q_updates    — orth(V) Q refreshes the ANCHOR computed from its
         #                         slow-net stale-forward activations (replaces the
         #                         fast net's maybe_update_basis in owns_q mode).
-        #   anchor_q_broadcasts — dist.broadcast of (Q, M) from the anchor-owning
-        #                         rank to every DP rank (one per refresh).
+        #   anchor_q_broadcasts — dist.broadcast of a staged Q candidate from the
+        #                         anchor-owning rank (one per refresh).
+        #   anchor_q_activations — successful update_actor-exit handoffs that made
+        #                          a staged Q live for the next PPO policy pair.
+        #   anchor_q_stage_overwrites — extra candidate fires within one actor
+        #                               update (explicit last-candidate-wins).
         self.anchor_q_updates = 0
         self.anchor_q_broadcasts = 0
+        self.anchor_q_activations = 0
+        self.anchor_q_stage_overwrites = 0
+        object.__setattr__(self, "_powersgd_q_agreement_checked", False)
+        object.__setattr__(self, "_powersgd_q_agreement_dev", None)
         # Per-step count of matrices the signed_ema merger no-op'd to
         # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
         # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
@@ -732,6 +740,25 @@ class CommEffState:
             str(getattr(anchor_cfg, "lookahead_mode", "disabled")) == "rank1_relex"
         )
 
+    def reset_anchor_q_runtime(self) -> None:
+        """Reset non-checkpointed anchor-owned Q state after a weight load."""
+
+        self.anchor_q_updates = 0
+        self.anchor_q_broadcasts = 0
+        self.anchor_q_activations = 0
+        self.anchor_q_stage_overwrites = 0
+        object.__setattr__(self, "_powersgd_q_agreement_checked", False)
+        object.__setattr__(self, "_powersgd_q_agreement_dev", None)
+        if self.powersgd is not None:
+            if hasattr(self.powersgd, "reset_basis_runtime"):
+                self.powersgd.reset_basis_runtime()
+            else:
+                getattr(self.powersgd, "_basis", {}).clear()
+                getattr(self.powersgd, "_pending_anchor_basis", {}).clear()
+                getattr(self.powersgd, "_sketch", {}).clear()
+                if hasattr(self.powersgd, "clear_family_harvest"):
+                    self.powersgd.clear_family_harvest()
+
     def reset_rank1_runtime(self) -> None:
         """Reset non-checkpointed rank1 state after loading model weights.
 
@@ -757,8 +784,7 @@ class CommEffState:
         self.spectral_step = 0
         self.anchor_backwards = 0
         self.spectral_corrections = 0
-        self.anchor_q_updates = 0
-        self.anchor_q_broadcasts = 0
+        self.reset_anchor_q_runtime()
         self.powersgd_basis_updates = 0
         self.anchor_replay_fires = 0
         self.lookahead_fires = 0
@@ -801,11 +827,6 @@ class CommEffState:
                     cache.clear()
             if hasattr(self.spectral, "current_step"):
                 self.spectral.current_step = 0
-        if self.powersgd is not None:
-            getattr(self.powersgd, "_basis", {}).clear()
-            getattr(self.powersgd, "_sketch", {}).clear()
-            if hasattr(self.powersgd, "clear_family_harvest"):
-                self.powersgd.clear_family_harvest()
 
     def set_path_tag(self, tag: Optional[str]) -> None:
         """Stamp the current execution-path tag.
@@ -1047,9 +1068,9 @@ class CommEffState:
         out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
         out["comm_eff/powersgd_applications"] = self.powersgd_applications
         # Max relative cross-rank deviation of the
-        # consensus basis Q after the first update (0.0 = bit-identical on every
-        # DP rank). Set once by update_actor's verify_basis_agreement_across_ranks
-        # and omitted until the check runs.
+        # consensus basis Q after an update (0.0 = bit-identical on every DP
+        # rank). Set by the staged-anchor or fast-owned-Q verification and
+        # omitted until the check runs.
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
@@ -1100,6 +1121,8 @@ class CommEffState:
             # Anchor-owns-Q counters plus merger cold-M fallbacks.
             "comm_eff/anchor_q_updates": self.anchor_q_updates,
             "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
+            "comm_eff/anchor_q_activations": self.anchor_q_activations,
+            "comm_eff/anchor_q_stage_overwrites": self.anchor_q_stage_overwrites,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
             # ef_powersgd shape-aware residual resets this step.
             "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,

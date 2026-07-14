@@ -934,8 +934,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # reuses this same mask_active=False). Surfaced as
                 # comm_eff/clean_steps.
                 comm_eff_state.clean_steps += 1
+        actor_update_succeeded = False
         try:
             output = self.actor.train_mini_batch(data=data)
+            actor_update_succeeded = True
         finally:
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
@@ -950,13 +952,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # maybe_update_basis. Strict no-op for the mask/dense/disabled
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
-                # When the anchor owns Q, the fast net is a pure
-                # read-only consumer — its end-of-step basis update is GATED OFF
-                # (Q is updated only by the anchor's slow-net forward +
-                # broadcast, in the engine's _maybe_comm_eff_anchor_refresh).
-                # The fast-side sketch accumulation is already gated off in
-                # _should_accumulate_sketch, so there is no V to consume here.
-                fast_owns_q = not bool(getattr(powersgd, "anchor_owns_q", False)) if powersgd is not None else False
+                # When the anchor owns Q, the fast net is a pure read-only
+                # consumer. An anchor fire occurs inside train_mini_batch, after
+                # this batch's old_log_probs were already recomputed. The anchor
+                # therefore stages Q_{t+1}; publish it only after ALL PPO
+                # minibatches sharing those old_log_probs have completed. The
+                # next global step's old-logprob and train forwards then see the
+                # same new Q. The fast-side sketch accumulation stays gated off.
+                anchor_owns_q = bool(getattr(powersgd, "anchor_owns_q", False)) if powersgd is not None else False
+                if powersgd is not None and anchor_owns_q:
+                    if actor_update_succeeded:
+                        # Every rank executes this handoff, even ranks on which
+                        # train_mini_batch returned no metrics. The compressor
+                        # candidate was already broadcast/verified collectively
+                        # at the anchor fire, so this outer exception boundary is
+                        # a local atomic handoff (no deadlock-prone collective).
+                        try:
+                            did_activate = powersgd.activate_staged_anchor_basis()
+                        except Exception:
+                            powersgd.discard_staged_anchor_basis()
+                            raise
+                        if did_activate:
+                            print(
+                                f"[comm_eff][q-stage] activated after update_actor global_step={global_step} "
+                                f"generation={powersgd.anchor_basis_generation} "
+                                f"activations={getattr(comm_eff_state, 'anchor_q_activations', 0)}",
+                                flush=True,
+                            )
+                    else:
+                        # A candidate was derived from an update that did not
+                        # commit. Never let it leak into a later policy pair.
+                        powersgd.discard_staged_anchor_basis()
+                fast_owns_q = not anchor_owns_q
                 if powersgd is not None and fast_owns_q:
                     did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
                     # After the first basis update, verify Q is bit-identical on
@@ -1024,6 +1051,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # Explicit zeros on the disabled path for anchor-owned-Q counters.
                     "comm_eff/anchor_q_updates": 0,
                     "comm_eff/anchor_q_broadcasts": 0,
+                    "comm_eff/anchor_q_activations": 0,
+                    "comm_eff/anchor_q_stage_overwrites": 0,
                     "comm_eff/merger_coldM_fallbacks": 0,
                     # Explicit zero on the disabled path for the family screen.
                     "comm_eff/family_screen_builds": 0,
@@ -1051,6 +1080,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "resume will seed a fresh base and rewarm",
                 flush=True,
             )
+        elif state is not None:
+            # Staging is shared by every anchor-owned-Q arm. Even modes that do
+            # not own rank1 trajectory history must never activate a candidate
+            # computed from weights that preceded this checkpoint load.
+            powersgd = getattr(state, "powersgd", None)
+            if powersgd is not None and bool(getattr(powersgd, "anchor_owns_q", False)):
+                state.reset_anchor_q_runtime()
+                print(
+                    "[comm_eff] checkpoint load reset non-checkpointed anchor-owned Q runtime",
+                    flush=True,
+                )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

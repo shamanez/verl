@@ -2451,14 +2451,16 @@ class FSDPEngine(BaseEngine):
         if _rank1_q_only:
             # Observation-only warmup: the autograd-enabled forward harvested V
             # for Q, but no backward/gradient/M work is allowed below this
-            # barrier. Reuse the normal anchor-owned-Q update and broadcast
-            # primitives, with an explicit no-M receipt contract.
+            # barrier. Stage Q_{t+1} and broadcast that candidate without
+            # changing the live Q_t used by this update_actor's already-
+            # recomputed old_log_probs or any of its train minibatches. The
+            # worker activates it only after every minibatch finishes.
             assert getattr(powersgd, "_sketch", None), (
                 "rank1_relex q_only forward harvested an empty PowerSGD activation sketch"
             )
             try:
-                q_updated = powersgd.anchor_update_basis()
-                q_receipts = powersgd.broadcast_basis(src=0)
+                q_updated = powersgd.anchor_update_basis(staged=True)
+                q_receipts = powersgd.broadcast_basis(src=0, staged=True)
                 m_receipts = None
                 assert q_updated, "rank1_relex q_only anchor_update_basis() did not refresh Q"
                 _dp_multi = False
@@ -2474,10 +2476,12 @@ class FSDPEngine(BaseEngine):
                     m_receipts=m_receipts,
                     spectral_enabled=spectral is not None,
                 )
-                qdev = powersgd.verify_basis_agreement_across_ranks()
+                qdev = powersgd.verify_basis_agreement_across_ranks(staged=True)
+                object.__setattr__(state, "_powersgd_q_agreement_checked", True)
+                object.__setattr__(state, "_powersgd_q_agreement_dev", qdev)
                 changed_q = sum(1 for receipt in (q_receipts or {}).values() if receipt.get("changed"))
                 print(
-                    f"[comm_eff][rank1_relex][q_only] step={step} Q updated={q_updated} "
+                    f"[comm_eff][rank1_relex][q_only] step={step} Q staged={q_updated} "
                     f"broadcast_boundaries={len(q_receipts or {})} changed={changed_q} "
                     f"cross_rank_max_rel_dev={qdev if qdev is not None else 'n/a'} "
                     f"M_receipts=0 clone_grads=0 anchor_backwards={state.anchor_backwards}",
@@ -2723,10 +2727,12 @@ class FSDPEngine(BaseEngine):
 
         # Anchor-owned Q. Now that the slow-net activations are
         # harvested into V (during the clean anchor forward above), compute
-        # Q ← orth(V) on the ANCHOR (DP-synced) and BROADCAST both Q and the freshly
-        # EMA'd M to every DP rank with a positive receipt. The fast net's local
-        # Q-update is gated OFF (engine_workers.py), so the anchor is the SOLE Q
-        # writer. All ranks reach this in lockstep (the anchor fired on all ranks).
+        # Q_{t+1} ← orth(V) on the ANCHOR (DP-synced), stage/broadcast that
+        # candidate, and broadcast freshly EMA'd M to every DP rank with a
+        # positive receipt. Live Q_t remains frozen through every minibatch in
+        # this update_actor; engine_workers activates the candidate afterward.
+        # The fast net's local Q-update is gated OFF, so the anchor is the sole
+        # candidate writer. All ranks reach this in lockstep.
         if do_anchor_q:
             # Fail-closed must-fire invariant: the anchor clone's clean forward MUST have
             # harvested slow-net activations into the sketch V (it persists past the
@@ -2741,8 +2747,8 @@ class FSDPEngine(BaseEngine):
                 "register no-op?). Q would be silently zero-filled under sync_basis. Refusing "
                 "to continue."
             )
-            q_updated = powersgd.anchor_update_basis()
-            q_receipts = powersgd.broadcast_basis(src=0)
+            q_updated = powersgd.anchor_update_basis(staged=True)
+            q_receipts = powersgd.broadcast_basis(src=0, staged=True)
             # The M broadcast only applies when a merger
             # reads sign(M) — i.e. spectral is on. The A1 plain-PowerSGD arm
             # (spectral None) has no M; only Q is broadcast. Q-update/broadcast
@@ -2789,13 +2795,15 @@ class FSDPEngine(BaseEngine):
             # Cross-rank consensus guard (must not raise): the anchor-owned Q must
             # be identical on every DP rank + both boundary sides.
             try:
-                qdev = powersgd.verify_basis_agreement_across_ranks()
+                qdev = powersgd.verify_basis_agreement_across_ranks(staged=True)
+                object.__setattr__(state, "_powersgd_q_agreement_checked", True)
+                object.__setattr__(state, "_powersgd_q_agreement_dev", qdev)
             except RuntimeError:
                 raise
             if q_receipts:
                 changed_q = sum(1 for r in q_receipts.values() if r.get("changed"))
                 print(
-                    f"[comm_eff][bcast] step={step} Q updated={q_updated} broadcast boundaries={len(q_receipts)} "
+                    f"[comm_eff][bcast] step={step} Q staged={q_updated} broadcast boundaries={len(q_receipts)} "
                     f"changed={changed_q} cross_rank_max_rel_dev={qdev if qdev is not None else 'n/a'} "
                     f"anchor_q_updates={getattr(state, 'anchor_q_updates', 0)} "
                     f"anchor_q_broadcasts={getattr(state, 'anchor_q_broadcasts', 0)} "

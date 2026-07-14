@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Sequential Qwen2.5-Math-1.5B / MATH comparison matrix for rank1_relex.
 #
-# Default order: W2/secant, matched W2 no-increment, legacy decoder-only
-# fixed_linear, strict dense GRPO. Pass arm names to run a subset, e.g.
+# Default order: W2/secant, corrected W4 rank1, matched W2 no-increment,
+# legacy decoder-only fixed_linear, strict dense GRPO. Pass arm names to run a
+# subset, e.g.
 #
-#   bash run_qwen25_math_1p5b_relex_comparison_fsdp.sh w2_rank1 w2_no_increment fixed_linear
+#   bash run_qwen25_math_1p5b_relex_comparison_fsdp.sh w2_rank1 w4_rank1 w2_no_increment fixed_linear
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +13,7 @@ VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 LAUNCHER="$HERE/run_qwen25_math_1p5b_rank1_relex_fsdp.sh"
 
 if (( $# == 0 )); then
-  ARMS=(w2_rank1 w2_no_increment fixed_linear dense)
+  ARMS=(w2_rank1 w4_rank1 w2_no_increment fixed_linear dense)
 else
   ARMS=("$@")
 fi
@@ -25,18 +26,25 @@ run_arm() {
 
   case "$arm" in
     w2_rank1)
-      experiment="relex_cmp_w2_rank1_alpha1_math_qwen25_math_1p5b"
+      experiment="relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b"
       mode=rank1_relex window=2 strength=1.0 warmup=q_only probe_enabled=true comm_enabled=true
       ;;
+    w4_rank1)
+      # Corrected rerun of the original W=4 arm. The qstagefix label distinguishes
+      # the frozen-Q PPO handoff from the legacy diagnostic run whose anchor Q
+      # changed inside update_actor at cadence boundaries.
+      experiment="relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b"
+      mode=rank1_relex window=4 strength=1.0 warmup=q_only probe_enabled=true comm_enabled=true
+      ;;
     w2_no_increment)
-      experiment="relex_cmp_w2_rank1_alpha0_math_qwen25_math_1p5b"
+      experiment="relex_cmp_qstagefix_v1_w2_alltensor_alpha0_math_qwen25_math_1p5b"
       mode=rank1_relex window=2 strength=0.0 warmup=q_only probe_enabled=true comm_enabled=true
       ;;
     fixed_linear)
       # Legacy comparator: two-source linear projection over decoder matrices
       # only. q_only is rank1-only, so this uses the canonical stale_correct
       # warmup and discloses that schedule difference in the run name/docs.
-      experiment="relex_cmp_fixed_linear_decoder_math_qwen25_math_1p5b"
+      experiment="relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b"
       mode=fixed_linear window=2 strength=1.0 warmup=stale_correct probe_enabled=false comm_enabled=true
       ;;
     dense)
@@ -46,7 +54,7 @@ run_arm() {
       anchor_enabled=false anchor_owns_q=false replay=false lookahead=false spectral=false correction=none
       ;;
     *)
-      echo "FATAL: unknown arm '$arm' (expected w2_rank1, w2_no_increment, fixed_linear, dense)" >&2
+      echo "FATAL: unknown arm '$arm' (expected w2_rank1, w4_rank1, w2_no_increment, fixed_linear, dense)" >&2
       return 2
       ;;
   esac

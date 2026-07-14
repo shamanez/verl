@@ -42,6 +42,9 @@ class _PowerSGDState:
     def __init__(self):
         self.path_tag = None
         self.anchor_q_updates = 0
+        self.anchor_q_broadcasts = 0
+        self.anchor_q_activations = 0
+        self.anchor_q_stage_overwrites = 0
         self.powersgd_applications = 0
         self.powersgd_basis_updates = 0
 
@@ -85,9 +88,13 @@ def test_q_only_autograd_forward_refreshes_q_without_backward_or_m():
         assert all(parameter.grad is None for parameter in model.parameters())
         assert set(compressor._sketch) == set(compressor.boundary_indices)
         q_before = {layer: basis.clone() for layer, basis in compressor._basis.items()}
+        compressor.set_anchor_sketch_mode(False)
+        probe_input = torch.randn(5, 32)
+        with torch.no_grad():
+            projected_before_stage = model(probe_input)
 
-        assert compressor.anchor_update_basis()
-        q_receipts = compressor.broadcast_basis()
+        assert compressor.anchor_update_basis(staged=True)
+        q_receipts = compressor.broadcast_basis(staged=True)
         validate_rank1_broadcast_receipts(
             q_receipts=q_receipts,
             m_receipts=None,
@@ -97,7 +104,57 @@ def test_q_only_autograd_forward_refreshes_q_without_backward_or_m():
         )
 
         assert state.anchor_q_updates == 1
+        # The slow-net candidate is ready, but the old/current policy pair keeps
+        # the exact live Q until the complete actor update commits.
+        assert all(torch.equal(compressor._basis[layer], q_before[layer]) for layer in q_before)
+        assert any(not torch.equal(compressor._pending_anchor_basis[layer], q_before[layer]) for layer in q_before)
+        assert compressor.anchor_basis_generation == 0
+        with torch.no_grad():
+            projected_while_staged = model(probe_input)
+        torch.testing.assert_close(projected_while_staged, projected_before_stage, rtol=0, atol=0)
+
+        # A second anchor fire in the same actor transaction is explicitly
+        # last-candidate-wins, while live Q remains frozen.
+        first_candidate = {layer: basis.clone() for layer, basis in compressor._pending_anchor_basis.items()}
+        compressor.set_context(global_step=11)
+        compressor.set_anchor_sketch_mode(True)
+        model(torch.randn(12, 32))
+        compressor.set_anchor_sketch_mode(False)
+        assert compressor.anchor_update_basis(staged=True)
+        compressor.broadcast_basis(staged=True)
+        assert state.anchor_q_updates == 2
+        assert state.anchor_q_stage_overwrites == 1
+        assert any(
+            not torch.equal(compressor._pending_anchor_basis[layer], first_candidate[layer])
+            for layer in first_candidate
+        )
+        assert all(torch.equal(compressor._basis[layer], q_before[layer]) for layer in q_before)
+
+        assert compressor.activate_staged_anchor_basis()
         assert any(not torch.equal(compressor._basis[layer], q_before[layer]) for layer in q_before)
+        assert compressor._pending_anchor_basis == {}
+        assert compressor.anchor_basis_generation == 1
+        assert state.anchor_q_activations == 1
+        assert not compressor.activate_staged_anchor_basis()
+        with torch.no_grad():
+            projected_after_activation = model(probe_input)
+        assert not torch.equal(projected_after_activation, projected_before_stage)
+
+        live_after_activation = {layer: basis.clone() for layer, basis in compressor._basis.items()}
+        compressor._pending_anchor_basis = {
+            layer: torch.flip(basis, dims=(0,)) for layer, basis in live_after_activation.items()
+        }
+        assert compressor.discard_staged_anchor_basis()
+        assert compressor._pending_anchor_basis == {}
+        assert all(
+            torch.equal(compressor._basis[layer], live_after_activation[layer]) for layer in live_after_activation
+        )
+        assert not compressor.discard_staged_anchor_basis()
+
+        compressor.reset_basis_runtime()
+        assert compressor._basis == {}
+        assert compressor._pending_anchor_basis == {}
+        assert compressor.anchor_basis_generation == 0
         assert all(parameter.grad is None for parameter in model.parameters())
         assert spectral._anchor == {}
         assert compressor._sketch == {}
@@ -212,6 +269,7 @@ def test_same_worker_resume_clears_rank1_history_q_and_m():
     )
     state.powersgd = SimpleNamespace(
         _basis={0: torch.ones(4, 2)},
+        _pending_anchor_basis={0: torch.ones(4, 2)},
         _sketch={0: torch.ones(4, 2)},
         clear_family_harvest=lambda: None,
     )
@@ -232,6 +290,7 @@ def test_same_worker_resume_clears_rank1_history_q_and_m():
     assert state.spectral._subbasis_energy_ratios == []
     assert state.spectral.current_step == 0
     assert state.powersgd._basis == {}
+    assert state.powersgd._pending_anchor_basis == {}
     assert state.powersgd._sketch == {}
     assert state.spectral_step == 0
     assert not state.rank1_m_ready

@@ -178,6 +178,10 @@ class PowerSGDActivationCompressor:
     * ``maybe_update_basis()`` runs the block-power-iteration ``Q ← orth(V)`` at
       cadence, AFTER the gradient-bearing actor work — called by the engine's
       end-of-train_batch hook so ``Q`` is frozen across the paired GRPO forwards.
+    * Anchor-owned basis refreshes can be staged during PPO minibatches and
+      activated only after the complete ``update_actor`` call. This keeps the
+      old-logprob recompute and every current-policy minibatch on exactly the
+      same live ``Q_t``.
 
     The basis lives on the worker (one ``Q`` per boundary layer), so it persists
     across steps (warm start) independent of the hook register/unregister cycle.
@@ -279,6 +283,17 @@ class PowerSGDActivationCompressor:
         # Lazily bootstrapped on first register() once H is known. Persists
         # across steps (warm block power iteration) — NOT cleared by unregister.
         self._basis: dict[int, torch.Tensor] = {}
+        # Anchor-owned Q_{t+1} candidate. The anchor can fire inside one of the
+        # PPO minibatches, after old_log_probs were already recomputed with Q_t.
+        # Publishing directly into _basis there would make that minibatch use a
+        # different policy denominator. Keep the candidate isolated until the
+        # worker finishes every minibatch in update_actor, then atomically
+        # activate it for the NEXT old-logprob/train pair.
+        self._pending_anchor_basis: dict[int, torch.Tensor] = {}
+        # Monotonic successful handoff generation. This is deliberately distinct
+        # from anchor_q_updates: a candidate can be staged and then discarded if
+        # the enclosing actor update fails.
+        self._anchor_basis_generation = 0
         # Per-boundary accumulated sketch V (H, r), fp32. Reset after each
         # orth(V); accumulated under no_grad on compressed train forwards only.
         self._sketch: dict[int, torch.Tensor] = {}
@@ -1107,15 +1122,19 @@ class PowerSGDActivationCompressor:
             self._state.note_family_screen(len(families))
         return out
 
-    def anchor_update_basis(self) -> bool:
-        """``Q <- orth(V)`` from the anchor's slow-net sketch.
+    def anchor_update_basis(self, *, staged: bool = False) -> bool:
+        """Build ``Q <- orth(V)`` from the anchor's slow-net sketch.
 
         The SAME block-power-iteration math as :meth:`maybe_update_basis` (DP-sync
         of the raw sketch over the DP group, then fp32 ``orth(V)`` per boundary),
         but driven by the anchor refresh (cadence already gated by the engine —
         called only when the anchor fires) instead of the fast end-of-step hook,
         and consuming V built from the slow-net stale-weight forward activations.
-        Clears the sketch after. Returns True iff any Q was updated.
+        Clears the sketch after. By default the result replaces live ``Q`` for
+        backwards-compatible standalone callers. With ``staged=True`` it is
+        written to ``_pending_anchor_basis`` and the live basis is unchanged;
+        :meth:`activate_staged_anchor_basis` publishes it after all PPO
+        minibatches finish. Returns True iff any Q candidate was built.
 
         **Live family path.** When ``q_basis != "act"`` the consumed
         sketch is built from the family's statistic (``_compute_family_V`` on the
@@ -1145,6 +1164,19 @@ class PowerSGDActivationCompressor:
                 return False
             if not is_act and not (self._family_M or self._family_Gb):
                 return False
+
+        target_basis = self._pending_anchor_basis if staged else self._basis
+        if staged:
+            # Each anchor fire publishes one complete candidate generation.
+            # Never mix missing entries from a previous fire into a new one. If
+            # an unusually small cadence fires more than once inside one
+            # update_actor, define the transaction explicitly as
+            # last-candidate-wins and surface that overwrite in diagnostics.
+            if self._pending_anchor_basis and self._state is not None:
+                if hasattr(self._state, "anchor_q_stage_overwrites"):
+                    self._state.anchor_q_stage_overwrites += 1
+            self._pending_anchor_basis = {}
+            target_basis = self._pending_anchor_basis
 
         # Tail/hybrid need a warm act basis as their act-reference: the deflation
         # subspace and hybrid act columns must not come from the evolving family Q.
@@ -1196,7 +1228,7 @@ class PowerSGDActivationCompressor:
                 q_new = orthonormalize(Vsum.to(self.qr_dtype), eps=self.reortho_eps)
             else:
                 q_new = self._build_family_Q(live_family, layer_idx, Vsum, q_act_override=q_act_warm)
-            self._basis[layer_idx] = q_new.to(device=self._sketch_device(), dtype=torch.float32)
+            target_basis[layer_idx] = q_new.to(device=self._sketch_device(), dtype=torch.float32)
             updated = True
 
         self._reset_sketch()
@@ -1206,11 +1238,12 @@ class PowerSGDActivationCompressor:
                 self._state.anchor_q_updates += 1
         return updated
 
-    def broadcast_basis(self, *, src: int = 0) -> Optional[dict]:
+    def broadcast_basis(self, *, src: int = 0, staged: bool = False) -> Optional[dict]:
         """``dist.broadcast`` the anchor's Q to every DP rank plus receipt.
 
-        Broadcasts each boundary's ``Q`` from rank ``src`` (the anchor-owning
-        rank) over the DP group, in the FIXED ``sorted(boundary_indices)`` order
+        Broadcasts each boundary's ``Q`` from DP-group-local rank ``src`` (the
+        anchor-owning rank) over the DP group, in the FIXED
+        ``sorted(boundary_indices)`` order
         so every rank issues the identical collective sequence. Returns a per-
         boundary receipt dict ``{layer_idx: {src_checksum, recv_checksum,
         changed}}`` so the engine can log a ``[comm_eff][bcast]`` line and assert
@@ -1218,7 +1251,9 @@ class PowerSGDActivationCompressor:
         when the source changed. Returns ``None`` when distributed is unavailable
         / single-rank (broadcast is a trivial no-op there).
 
-        With ``sync_basis=true`` the consensus ``orth(V)`` already produced a
+        ``staged=True`` broadcasts ``_pending_anchor_basis`` without modifying
+        the live basis used by the current PPO update. With ``sync_basis=true``
+        the consensus ``orth(V)`` already produced a
         bit-identical Q on every rank, so this broadcast is belt-and-braces — but
         it is the load-bearing positive-receipt mechanism the sole-writer invariant
         requires: it proves every fast/DP rank holds the anchor's Q (a dropped
@@ -1230,9 +1265,16 @@ class PowerSGDActivationCompressor:
         world = torch.distributed.get_world_size(group=group)
         if world <= 1:
             return None
+        # torch.distributed.broadcast's ``src`` is a GLOBAL rank even when a
+        # subgroup is supplied. Callers reason in DP-local ranks; translate here
+        # so DP group 1 does not accidentally wait for global rank 0.
+        global_src = int(src)
+        if group is not None and hasattr(torch.distributed, "get_global_rank"):
+            global_src = int(torch.distributed.get_global_rank(group, int(src)))
+        basis_store = self._pending_anchor_basis if staged else self._basis
         receipts: dict = {}
         for layer_idx in self._boundary_for_update():
-            q = self._basis.get(layer_idx, None)
+            q = basis_store.get(layer_idx, None)
             if q is None:
                 # Should not happen post-update, but keep the collective symmetric:
                 # every rank must broadcast SOMETHING for this boundary. Seed a
@@ -1245,25 +1287,83 @@ class PowerSGDActivationCompressor:
                     base_seed=self.base_seed,
                     layer_idx=layer_idx,
                 ).to(device=self._sketch_device(), dtype=torch.float32)
-                self._basis[layer_idx] = q
+                basis_store[layer_idx] = q
             # Pre-broadcast checksum (what THIS rank held going in).
-            pre = float((q.detach().to(torch.float64) * self._ramp_like(q)).sum().item())
+            candidate_pre = float((q.detach().to(torch.float64) * self._ramp_like(q)).sum().item())
+            comparison_q = self._basis.get(layer_idx, q) if staged else q
+            pre = float((comparison_q.detach().to(torch.float64) * self._ramp_like(comparison_q)).sum().item())
             q_contig = q.detach().to(torch.float32).contiguous()
-            torch.distributed.broadcast(q_contig, src=src, group=group)
+            torch.distributed.broadcast(q_contig, src=global_src, group=group)
             # copy_ the received value into the held basis (the receipt: every
             # non-src rank's Q is now bit-equal to src's).
-            self._basis[layer_idx] = q_contig.to(device=self._sketch_device(), dtype=torch.float32)
-            post_basis = self._basis[layer_idx]
+            basis_store[layer_idx] = q_contig.to(device=self._sketch_device(), dtype=torch.float32)
+            post_basis = basis_store[layer_idx]
             post = float((post_basis.detach().to(torch.float64) * self._ramp_like(post_basis)).sum().item())
             receipts[layer_idx] = {
                 "src_checksum": post,  # after broadcast every rank == src's value
                 "recv_checksum": post,
                 "pre_checksum": pre,
+                "candidate_pre_checksum": candidate_pre,
                 "changed": bool(abs(post - pre) > 0.0),
             }
         if receipts and self._state is not None and hasattr(self._state, "anchor_q_broadcasts"):
             self._state.anchor_q_broadcasts += 1
         return receipts
+
+    def activate_staged_anchor_basis(self) -> bool:
+        """Publish the staged anchor candidate for the next PPO policy pair.
+
+        The worker calls this exactly once after ``train_mini_batch`` returns,
+        when every current-policy minibatch that shares the batch's recomputed
+        ``old_log_probs`` has completed. No collective is required here because
+        :meth:`broadcast_basis` already made the pending candidate identical on
+        every DP rank.
+        """
+
+        # Do not introduce a collective at the outer update_actor exception
+        # boundary: if one rank raises while another succeeds, a collective in
+        # ``finally`` could strand the survivor. The candidate was already
+        # broadcast and collectively verified at its in-step anchor fire; this
+        # commit is intentionally a local atomic pointer handoff on every rank.
+        if not self._pending_anchor_basis:
+            return False
+
+        expected = set(self._boundary_for_update())
+        received = set(self._pending_anchor_basis)
+        if received != expected:
+            raise RuntimeError(
+                "comm_eff.powersgd: staged anchor Q is incomplete at update_actor exit "
+                f"(expected boundaries={sorted(expected)}, received={sorted(received)}). "
+                "Refusing a partial basis activation."
+            )
+        self._basis = dict(self._pending_anchor_basis)
+        self._pending_anchor_basis = {}
+        self._anchor_basis_generation += 1
+        if self._state is not None and hasattr(self._state, "anchor_q_activations"):
+            self._state.anchor_q_activations += 1
+        return True
+
+    def discard_staged_anchor_basis(self) -> bool:
+        """Discard a candidate produced by an actor update that did not commit."""
+
+        had_pending = bool(self._pending_anchor_basis)
+        self._pending_anchor_basis = {}
+        return had_pending
+
+    @property
+    def anchor_basis_generation(self) -> int:
+        """Number of staged anchor-Q generations successfully made live."""
+
+        return int(self._anchor_basis_generation)
+
+    def reset_basis_runtime(self) -> None:
+        """Clear all non-checkpointed Q/sketch state after loading weights."""
+
+        self._basis.clear()
+        self._pending_anchor_basis.clear()
+        self._anchor_basis_generation = 0
+        self._reset_sketch()
+        self.clear_family_harvest()
 
     @staticmethod
     def _ramp_like(q: torch.Tensor) -> torch.Tensor:
@@ -1282,16 +1382,17 @@ class PowerSGDActivationCompressor:
         Prefer the registered ``boundary_indices`` (identical on every rank by
         construction — they come from ``decoder_boundary_indices(L, pp_size)`` on
         the same model). Fall back to the sorted union of locally-bootstrapped
-        bases / sketches if the compressor was never registered (unit tests).
+        bases / staged candidates / sketches if the compressor was never
+        registered (unit tests).
         """
         if self.boundary_indices:
             return sorted(self.boundary_indices)
-        return sorted(set(self._basis.keys()) | set(self._sketch.keys()))
+        return sorted(set(self._basis.keys()) | set(self._pending_anchor_basis.keys()) | set(self._sketch.keys()))
 
     def _sketch_device(self):
         """Device the sketch / basis live on (first available basis or sketch,
         else CPU). Used to place the zero-sketch contribution + the new basis."""
-        for d in (self._sketch, self._basis):
+        for d in (self._sketch, self._pending_anchor_basis, self._basis):
             for t in d.values():
                 return t.device
         return torch.device("cpu")
@@ -1319,7 +1420,7 @@ class PowerSGDActivationCompressor:
         the training mesh). Pure setter; no collective."""
         self._dp_process_group = group
 
-    def basis_checksums(self) -> dict:
+    def basis_checksums(self, *, staged: bool = False) -> dict:
         """Per-boundary fp64 checksum of the current basis Q.
 
         Returns ``{layer_idx: float}`` — a deterministic scalar summary of each
@@ -1327,9 +1428,10 @@ class PowerSGDActivationCompressor:
         differences all show up). The engine all-gathers these across ranks and
         verifies that ``sync_basis`` produced an identical consensus ``Q`` on
         every rank. Pure read."""
+        basis_store = self._pending_anchor_basis if staged else self._basis
         out: dict = {}
         for layer_idx in self._boundary_for_update():
-            q = self._basis.get(layer_idx, None)
+            q = basis_store.get(layer_idx, None)
             if q is None:
                 continue
             qd = q.detach().to(torch.float64)
@@ -1340,7 +1442,7 @@ class PowerSGDActivationCompressor:
             out[layer_idx] = float((qd * ramp).sum().item())
         return out
 
-    def verify_basis_agreement_across_ranks(self, *, atol: float = 1e-6) -> Optional[float]:
+    def verify_basis_agreement_across_ranks(self, *, atol: float = 1e-6, staged: bool = False) -> Optional[float]:
         """Assert ``Q`` is identical on every DP rank.
 
         All-gathers a per-boundary checksum VECTOR (built over the FIXED
@@ -1369,7 +1471,7 @@ class PowerSGDActivationCompressor:
         idxs = self._boundary_for_update()
         if not idxs:
             return None
-        sums = self.basis_checksums()
+        sums = self.basis_checksums(staged=staged)
         # Fixed-order vector over the FIXED boundary set (0.0 for any boundary
         # missing locally — should not happen post-update, but keeps it symmetric).
         dev = self._sketch_device()
