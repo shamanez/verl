@@ -149,12 +149,12 @@
     <h1>Sliding RELEX two-circuit experiment report</h1>
     <p class="lede">
       A living report for the fast learner, projected delayed anchor, training–inference mismatch,
-      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Final comparison and
-      causal sampled-weight results will replace the pending cells as each GPU arm finishes.
+      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Corrected W=2 is now
+      complete; the remaining cells will be replaced as corrected W=4 and the controls finish.
     </p>
     <div class="status-row">
       <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
-      <span class="pill">Updated 14 July 2026, 14:39 AEST</span>
+      <span class="pill">Updated 14 July 2026, 19:12 AEST</span>
       <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
       <span class="pill">Training commit <span class="mono">a7252bd6</span></span>
     </div>
@@ -183,32 +183,34 @@
           <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/kvgtcs07">Open W&amp;B</a>
         </article>
         <article class="card">
-          <div class="label">Active corrected arm</div>
-          <div class="metric accent">W=2 α=1</div>
-          <p>Step 10/100 passed the first frozen-Q cadence gate. Initial MATH: 44.56%.</p>
+          <div class="label">Corrected W=2 secant</div>
+          <div class="metric good">67.89%</div>
+          <p>Completed 100/100 with all ten staged-Q handoffs valid and zero overwrites.</p>
           <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/vqe9554z">Open W&amp;B</a>
         </article>
         <article class="card">
-          <div class="label">Estimated queue remainder</div>
-          <div class="metric warn">20–21 h</div>
-          <p>W=2, corrected W=4, W=2 no-increment, then fixed-linear, sequentially.</p>
+          <div class="label">Active corrected arm</div>
+          <div class="metric accent">W=4 α=1</div>
+          <p>Corrected rank-1 OLS rerun is live; W=2 no-increment and fixed-linear follow.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/lzl4vlcr">Open W&amp;B</a>
         </article>
         <article class="card">
-          <div class="label">Likely finish</div>
-          <div class="metric">10–11</div>
-          <p>15 July 2026 AEST, assuming measured throughput and no fail-closed stop.</p>
+          <div class="label">Estimated queue remainder</div>
+          <div class="metric warn">14–16 h</div>
+          <p>Likely finish around 09:00–11:00 on 15 July AEST if measured throughput holds.</p>
         </article>
       </div>
-      <p class="muted">Measured wall times were 4 h 26 min dense and 5 h 05 min for the legacy W=4 run. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
-      <div class="progress" aria-label="Dense control complete and four corrected compressed arms remain"><span style="width: 20%"></span></div>
+      <p class="muted">Measured training times were 4 h 26 min dense and 4 h 47 min corrected W=2. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
+      <div class="progress" aria-label="Dense control and corrected W2 complete; three corrected comparison arms remain"><span style="width: 40%"></span></div>
     </section>
 
     <section id="answer">
       <h2>What is the anchor signal helping?</h2>
       <p>
-        The completed projected run is a <strong>legacy pre-fix W=4 diagnostic</strong>, using two circuits:
-        a live fast learner and an isolated delayed anchor. It is not the corrected W=2 arm now running.
-        The anchor never optimizer-steps and never reads immediate fast weights.
+        Corrected W=2 and the dense control are complete. The earlier W=4 result remains a
+        <strong>legacy pre-fix diagnostic</strong>; corrected W=4 is now running. Every two-circuit arm uses
+        a live fast learner and an isolated delayed anchor. The anchor never optimizer-steps and never reads
+        immediate fast weights.
       </p>
       <div class="flow" role="img" aria-label="Dense rollout produces rewards for compressed fast training; delayed exact checkpoints are projected into an anchor that supplies Q and M back to the fast circuit">
         <div class="node"><strong>Dense inference</strong><br><span class="muted">vLLM rollout, rewards and GRPO advantages</span></div>
@@ -232,10 +234,10 @@
       <div class="grid">
         <article class="card"><div class="label">Projected tensors</div><div class="metric">338/338</div><p>Embedding, norms, decoder tensors and other floating parameters.</p></article>
         <article class="card"><div class="label">Gradient targets</div><div class="metric">196/196</div><p>Decoder matrices covered by spectral correction.</p></article>
-        <article class="card"><div class="label">Full anchor fires</div><div class="metric">7</div><p>At global steps 40, 50, 60, 70, 80, 90 and 100.</p></article>
-        <article class="card"><div class="label">Matrix corrections</div><div class="metric">23,716</div><p>Zero cold-M fallbacks; the path was materially active.</p></article>
+        <article class="card"><div class="label">Full anchor fires</div><div class="metric">9</div><p>Corrected W=2 fired at global steps 20 through 100 after one Q-only fire.</p></article>
+        <article class="card"><div class="label">Matrix corrections</div><div class="metric">31,556</div><p>Zero cold-M fallbacks; the corrected path was materially active.</p></article>
       </div>
-      <div class="callout"><strong>Interpretation limit.</strong> The counters prove that Q and M were active, but the legacy W=4 run also changed live Q inside unfinished PPO updates. Its 65.37% endpoint cannot isolate anchor benefit. The corrected W=4 rerun removes that confound; a matched PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
+      <div class="callout"><strong>Interpretation limit.</strong> Corrected W=2 ended at 67.89%, but one run cannot establish superiority over dense, and W=2 α=0 has not finished. The legacy W=4 endpoint cannot isolate anchor benefit because it changed live Q inside unfinished PPO updates. Corrected W=4 removes that confound; a matched PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
     </section>
 
     <section id="mismatch">
@@ -253,16 +255,17 @@
           </thead>
           <tbody>
             <tr><td>Dense control</td><td class="right good">0.00231</td><td class="right good">0.99943</td><td class="right good">0.000263</td><td class="right">67.41%</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right bad">0.69027</td><td class="right bad">0.13979</td><td class="right bad">8.1250</td><td class="right good">67.89%</td></tr>
             <tr><td>Legacy W=4, pre-Q fix</td><td class="right bad">0.73544</td><td class="right bad">0.13981</td><td class="right bad">8.2676</td><td class="right">65.37%</td></tr>
             <tr><td>Aborted W=2 diagnostic</td><td class="right warn">≈0.815</td><td class="right warn">≈0.036</td><td class="right warn">≈12.38</td><td class="right muted">Preserved, not comparable</td></tr>
           </tbody>
         </table>
       </div>
       <p>
-        This is <strong>not a small numerical engine mismatch</strong>. The legacy W=4 run nevertheless ended only 2.04 MATH
-        points behind dense while using about <strong>5.01% of dense-equivalent activation communication</strong>.
-        That is scientifically valuable, but it should be labelled robustness under mismatch—not evidence that the
-        mismatch is harmless or that the update is on-policy.
+        This is <strong>not a small numerical engine mismatch</strong>. Corrected W=2 nevertheless ended 0.48 MATH
+        points above the single dense control while using about <strong>5.01% of dense-equivalent activation communication</strong>.
+        That is scientifically valuable, but without replicated seeds it should be labelled robustness under mismatch—not
+        evidence of superiority, that the mismatch is harmless, or that the update is on-policy.
       </p>
       <h3>The cadence-boundary defect and correction</h3>
       <p>
@@ -272,6 +275,11 @@
         keeps live Q frozen across all minibatches, activates it only after a successful
         <code>update_actor</code>, and discards it if that update fails. M still corrects the firing optimizer
         tick immediately; only Q visibility is delayed to the next paired old/current-policy step.
+      </p>
+      <p>
+        This was <strong>not compression inside the anchor gradient</strong>. The isolated anchor hook observes the
+        raw dense activation to build the next Q sketch and explicitly returns that activation unchanged. The defect
+        was only that the resulting Q candidate became visible to the fast circuit before the PPO policy pair ended.
       </p>
       <p>
         The corrected W=2 GPU gate passed at step 10: both DP ranks staged all 7 boundaries with cross-rank
@@ -287,7 +295,7 @@
         <li>Dense rollout rewards and group-relative advantages still provide task signal, even though the compressed training policy makes the update off-policy with respect to inference.</li>
         <li>The uncompressed anchor gradient supplies a dense-policy directional reference, and gradient clipping bounds the very large compressed surrogate gradients. Both are plausible stabilizers, not yet isolated causes.</li>
       </ul>
-      <div class="callout"><strong>Required follow-up.</strong> Report the complete mismatch trajectory for every arm and add a matched PowerSGD anchor-off run before making a causal claim about the anchor bridging this gap.</div>
+      <div class="callout"><strong>Required follow-up.</strong> Complete the matched arms, then run the separate mismatch screen: paired dense/compressed logits, short rank-154/rank-307 pilots, and calibrated correction only if importance-sampling ESS remains usable. An anchor-off run is still required before making a causal claim about the anchor bridging this gap.</div>
     </section>
 
     <section id="cadence">
@@ -331,7 +339,7 @@
         R² <strong>0.993</strong>. Those values validate the fitted history, not future forecast accuracy.
       </p>
       <p>
-        The new W=2 arm activates the causal sampled-weight probe. It samples 16 deterministic scalar positions
+        The corrected W=2 arm activated the causal sampled-weight probe. It samples 16 deterministic scalar positions
         from each of four roles—embedding, middle-layer <code>q_proj</code>, its input norm, and final norm—then
         waits for the matching exact delayed checkpoint before scoring:
       </p>
@@ -341,7 +349,25 @@
         <article class="card"><div class="label">Relative value</div><div class="metric">Skill</div><p><span class="mono">1 − projected SSE / stale SSE</span>; positive means projection wins.</p></article>
         <article class="card"><div class="label">Direction</div><div class="metric">Cosine</div><p>Alignment between predicted and later-observed weight updates.</p></article>
       </div>
-      <div class="callout"><strong>Pending.</strong> The legacy W=4 run predates this causal probe. Corrected W=2 and W=4 probe rows will be inserted here as delayed exact targets resolve. Every tensor is fitted and projected independently; there is no cross-tensor trajectory mixing.</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Corrected W=2 probe</th><th class="right">Samples</th><th class="right">Projected RMSE</th><th class="right">Stale RMSE</th><th class="right">Skill</th><th class="right">Mean direction cosine</th><th class="right">Wins</th></tr></thead>
+          <tbody>
+            <tr><td>All four roles</td><td class="right">512</td><td class="right good">1.0097e−5</td><td class="right">1.5038e−5</td><td class="right good">+0.5491</td><td class="right good">0.7458</td><td class="right">7/8 horizons</td></tr>
+            <tr><td>Embedding</td><td class="right">128</td><td class="right">4.5039e−6</td><td class="right">4.7375e−6</td><td class="right good">+0.0962</td><td class="right">0.6734</td><td class="right">4/8</td></tr>
+            <tr><td>Decoder <span class="mono">q_proj</span></td><td class="right">128</td><td class="right">1.2255e−5</td><td class="right">1.3687e−5</td><td class="right good">+0.1982</td><td class="right">0.4700</td><td class="right">5/8</td></tr>
+            <tr><td>Input layer norm</td><td class="right">128</td><td class="right good">1.0880e−5</td><td class="right">2.0119e−5</td><td class="right good">+0.7076</td><td class="right good">0.7695</td><td class="right">7/8</td></tr>
+            <tr><td>Final norm</td><td class="right">128</td><td class="right good">1.0907e−5</td><td class="right">1.7029e−5</td><td class="right good">+0.5898</td><td class="right good">0.8173</td><td class="right">8/8</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The first resolved horizon missed stale (skill −0.181); the next seven all won, ending at skill +0.780
+        and direction cosine 0.906. One ninth prediction remained pending when training ended because its future exact
+        checkpoint lies beyond step 100. These results show that the secant mechanism executed correctly and became
+        predictively useful on the sampled coordinates; they do not establish whole-tensor or multi-seed superiority.
+      </p>
+      <div class="callout"><strong>Scope.</strong> Corrected W=2 is a two-checkpoint all-tensor secant, not the non-trivial W=4 rank-1 OLS fit. Every full tensor is projected independently, while this causal score observes only four tensors and 16 deterministic coordinates per tensor per horizon. Corrected W=4 will supply the paper-style comparison.</div>
     </section>
 
     <section id="results">
@@ -352,14 +378,14 @@
           <tbody>
             <tr><td>Legacy W=4, pre-Q fix</td><td class="right">44.64%</td><td class="right">45.20%</td><td class="right">63.25%</td><td class="right">64.83%</td><td class="right">65.37%</td><td class="warn">Diagnostic only</td></tr>
             <tr><td>Dense GRPO</td><td class="right">44.42%</td><td class="right">63.67%</td><td class="right">65.67%</td><td class="right">66.67%</td><td class="right">67.41%</td><td class="good">Complete</td></tr>
-            <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="warn">Step 10/100</td></tr>
-            <tr><td>Corrected W=4 rank-1, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right">60.86%</td><td class="right">65.07%</td><td class="right">66.99%</td><td class="right good">67.89%</td><td class="good">Complete</td></tr>
+            <tr><td>Corrected W=4 rank-1, α=1</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="warn">Running</td></tr>
             <tr><td>W=2 no projected increment, α=0</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
             <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Queued</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="muted">Alpha=0 is a matched “no projected increment” control but retains the W=2 anchor circuit. Fixed-linear also differs in tensor scope and warmup, so neither is an anchor-off causal control.</p>
+      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run, but this is not a replicated statistical comparison. Alpha=0 is the matched “no projected increment” control and retains the W=2 anchor circuit. Fixed-linear also differs in tensor scope and warmup, so neither is an anchor-off causal control.</p>
     </section>
 
     <section id="method">
