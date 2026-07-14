@@ -24,9 +24,10 @@ All knobs are env overrides read by the launcher and forwarded to
 
 The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
 surface-scoped benchmark from the GSM8K operating baseline below. Its default
-selection is intentionally pending until corrected W2, corrected W4, W2 with no
-projected increment, and legacy `fixed_linear` all complete. The authoritative
-placeholder and preregistered selection rule live at
+selection is intentionally pending until corrected W2, strict-readiness W4,
+progressive W2→W3→W4, W2 with no projected increment, and legacy
+`fixed_linear` all complete. The authoritative placeholder and preregistered
+selection rule live at
 `research/.claude/project.yaml` → `compression_defaults.math_qwen25_math_1p5b`.
 
 The current W=4 values in
@@ -93,10 +94,34 @@ reference `M` and, when `anchor.owns_q=true`, refreshes the PowerSGD basis `Q`.
 | `COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE` | `anchor.lookahead_rollout_source` | `auto` | Use current trajectories on projected fires when `auto`. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS` | `anchor.lookahead_window_snapshots` | `4` | Rank-1 checkpoint window including the oldest base; `W=2` is explicitly the per-tensor two-checkpoint secant/naive-linear fallback, while `W>=3` uses rank-1 OLS. Every unique floating named parameter tensor is projected independently. |
 | `COMM_EFF_ANCHOR_WARMUP_MODE` | `anchor.warmup_mode` | `stale_correct` | `q_only` is the canonical rank-1 warmup; `no_correct` is the fast-owned-Q ablation. |
-| `COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS` | `anchor.lookahead_min_snapshots` | `-1` | Fixed-linear readiness override; rank-1 requires `-1`. |
+| `COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS` | `anchor.lookahead_min_snapshots` | `-1` | `-1` waits for the complete configured window. For rank-1, a concrete value in `[2,W]` enables progressive readiness while retaining at most W checkpoints; `2` starts with the earliest legal secant. |
 
 \* The baseline launcher pins `cadence`/`delay_K` = 20/20 (the k-collapse regime).
 The generic engine's bare default is 5/5; the baseline wrapper overrides it.
+
+### Strict versus progressive W4 readiness
+
+The comparison launcher keeps the original strict W4 arm unchanged with
+`window_snapshots=4` and `min_snapshots=-1`. Its separate
+`w4_progressive` arm uses `window_snapshots=4` and `min_snapshots=2`: it does
+not shrink the target window, but starts projecting and populating M as soon as
+two exact checkpoints exist. On this fixed C=K=20 surface with two optimizer
+ticks per global step, the intended schedule is:
+
+| global step | optimizer tick | available checkpoints | action |
+|---:|---:|---:|---|
+| 10 | 20 | 1 | Q-only; M and correction remain disabled |
+| 20 | 40 | 2 | all-tensor W2 secant; first dense anchor backward/M update |
+| 30 | 60 | 3 | all-tensor W3 rank-1 fit |
+| 40 onward | 80 onward | sliding W4 | full all-tensor W4 rank-1 OLS |
+
+The progressive-versus-strict W4 comparison measures the complete readiness
+policy, because earlier projection and earlier M activation move together. The
+progressive-versus-static-W2 comparison is the cleaner history-growth contrast:
+both start with the same W2 fire, then only the progressive arm expands to W3
+and W4. W3 has two cumulative deltas, so its direction is useful but its
+two-point temporal OLS R² is tautologically one and must not be described as a
+strong denoising diagnostic.
 
 ## Merger — signed_ema
 
@@ -140,12 +165,13 @@ projection beat the newest exact/stale baseline on those samples.
 ## Common invocations
 
 Run the fixed Qwen2.5-Math-1.5B / MATH comparison matrix (W2 projection,
-matched no-increment, legacy decoder-only linear, then dense), or pass selected
-arm names to resume the queue after an already completed arm:
+strict W4, progressive W2→W3→W4, matched no-increment, legacy decoder-only
+linear, then dense), or pass selected arm names to resume the queue after an
+already completed arm:
 
 ```bash
 bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh
-bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh w2_rank1 w2_no_increment fixed_linear
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh w4_progressive
 ```
 
 Baseline (reproduces the collapse-regime config):

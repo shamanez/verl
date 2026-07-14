@@ -413,9 +413,11 @@ comm_eff:
     warmup_mode: stale_correct
 
     # Minimum ring snapshots before the projector engages. -1 (default) = the
-    # mode's source count (2 for fixed_linear). 2 = project from the earliest
-    # legal fire (fire 2). rank1_relex rejects concrete values and uses only its
-    # complete window below. Requires the projector on; validated to [2, n_points].
+    # mode's source count (2 for fixed_linear; the complete window below for
+    # rank1_relex). 2 = project from the earliest legal fire (fire 2). With
+    # rank1_relex and min<W, the fit grows from the W2 secant through each
+    # available rank-1 OLS history, then retains/slides the complete W. Requires
+    # the projector on; validated to [2, n_points].
     lookahead_min_snapshots: -1
 
     # Complete sliding rank1_relex window, including its oldest base checkpoint.

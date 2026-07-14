@@ -1704,14 +1704,19 @@ class FSDPEngine(BaseEngine):
                 if _rank1_mode:
                     rank1_history = getattr(state, "_rank1_history", None)
                     if rank1_history is None:
+                        rank1_min_snapshots = lookahead_min_points(anchor_cfg)
                         rank1_history = Rank1SnapshotHistory(
-                            window_snapshots=int(getattr(anchor_cfg, "lookahead_window_snapshots", 4))
+                            window_snapshots=int(getattr(anchor_cfg, "lookahead_window_snapshots", 4)),
+                            min_snapshots=rank1_min_snapshots,
                         )
                         state._rank1_history = rank1_history
                         # RELEX weight projection covers every unique floating
                         # named parameter. The spectral selector remains scoped
                         # independently to decoder-gradient correction.
-                        state._rank1_projector = Rank1RelexProjector(anchor_cfg)
+                        state._rank1_projector = Rank1RelexProjector(
+                            anchor_cfg,
+                            min_snapshots=rank1_min_snapshots,
+                        )
                         probe_cfg = getattr(state.config, "probe", None)
                         if bool(getattr(probe_cfg, "rank1_projection_enabled", False)):
                             from verl.workers.comm_eff.rank1_probe import Rank1ProjectionProbe
@@ -2026,7 +2031,7 @@ class FSDPEngine(BaseEngine):
                 # the previous M on this skipped tick. Abort before clone/Q/M
                 # mutation instead; the normal aligned schedule always admits.
                 raise Rank1ProjectionError(
-                    f"rank1_relex full-window fire has no new exact checkpoint: "
+                    f"rank1_relex ready fire has no new exact checkpoint: "
                     f"transfer_tick={_src_tick} history={rank1_history.ticks} step={step}"
                 )
                 return
@@ -2900,7 +2905,7 @@ class FSDPEngine(BaseEngine):
 
         if _rank1_fire:
             assert spectral is not None and anchor_grads and deltas, (
-                "rank1_relex full-window fire completed without a populated M_anchor update"
+                "rank1_relex ready fire completed without a populated M_anchor update"
             )
             state.rank1_m_ready = True
             print(
@@ -3649,7 +3654,7 @@ class FSDPEngine(BaseEngine):
         # merger's cold-M fallback: that path still traverses matrices, creates
         # anchor entries, and increments correction counters. Cadence advances
         # above, but the optimizer receives the untouched fast gradient until a
-        # complete-window projected anchor has successfully populated M.
+        # ready projected anchor has successfully populated M.
         if (
             hasattr(state, "rank1_relex_active")
             and state.rank1_relex_active()

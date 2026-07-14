@@ -36,13 +36,13 @@ def _load(mod_name, rel_path):
 _la = _load("verl_workers_comm_eff_rank1_relex_testonly", "verl/workers/comm_eff/lookahead.py")
 
 
-def _cfg(*, window=4, strength=1.0, mode="rank1_relex", enabled=True):
+def _cfg(*, window=4, min_snapshots=-1, strength=1.0, mode="rank1_relex", enabled=True):
     return types.SimpleNamespace(
         lookahead_anchor=enabled,
         lookahead_mode=mode,
         lookahead_strength=strength,
         lookahead_rollout_source="auto",
-        lookahead_min_snapshots=-1,
+        lookahead_min_snapshots=min_snapshots,
         lookahead_window_snapshots=window,
     )
 
@@ -79,6 +79,12 @@ def test_rank1_mode_uses_complete_configured_window():
     assert _la.lookahead_min_points(cfg) == 5
 
 
+def test_rank1_progressive_mode_resolves_explicit_minimum_without_shrinking_window():
+    cfg = _cfg(window=4, min_snapshots=2)
+    assert _la.lookahead_num_source_points(cfg) == 4
+    assert _la.lookahead_min_points(cfg) == 2
+
+
 def test_w4_exact_schedule_and_sliding_rebase():
     history = _la.Rank1SnapshotHistory(4)
     assert history.seed_base(1, {"w": torch.tensor([1.0])})
@@ -91,6 +97,48 @@ def test_w4_exact_schedule_and_sliding_rebase():
     assert len(snapshots) == 4
     assert history.admit_exact(79, {"w": torch.tensor([79.0])})
     assert history.ticks == [19, 39, 59, 79]
+    assert history.peak_retained == 4
+
+
+def test_w4_progressive_projects_with_two_then_three_then_four_checkpoints():
+    cfg = _cfg(window=4, min_snapshots=2)
+    history = _la.Rank1SnapshotHistory(4, min_snapshots=2)
+    snapshots, base, direction = _linear_history([1, 19, 39, 59, 79])
+    projector = _la.Rank1RelexProjector(cfg, chunk_numel=2)
+
+    assert history.seed_base(1, snapshots[0])
+    assert not history.ready()
+    assert history.sources() == (None, None)
+
+    expected_stages = [
+        (19, snapshots[1], 39, 2, "two_checkpoint_secant"),
+        (39, snapshots[2], 59, 3, "rank1_ols"),
+        (59, snapshots[3], 79, 4, "rank1_ols"),
+    ]
+    for source_tick, snapshot, target_tick, checkpoint_count, fit_kind in expected_stages:
+        assert history.admit_exact(source_tick, snapshot)
+        assert history.ready()
+        sources, ticks = history.sources()
+        assert len(sources) == checkpoint_count
+        assert len(ticks) == checkpoint_count
+
+        projected, info = projector.project(sources, ticks, target_tick=target_tick)
+        torch.testing.assert_close(
+            projected["layers.0.q_proj.weight"],
+            base + float(target_tick) * direction,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        assert info["checkpoint_count"] == checkpoint_count
+        assert info["delta_count"] == checkpoint_count - 1
+        assert info["fit_kind"] == fit_kind
+
+    # The target remains W=4: once full, each new exact transfer slides rather
+    # than growing the retained history beyond four model checkpoints.
+    assert history.admit_exact(79, snapshots[4])
+    sources, ticks = history.sources()
+    assert ticks == [19, 39, 59, 79]
+    assert len(sources) == 4
     assert history.peak_retained == 4
 
 

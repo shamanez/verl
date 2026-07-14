@@ -269,6 +269,9 @@ compression_defaults:                                        # Surface-scoped pr
       w4_rank1:
         run: relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b
         difference: 'rank1_relex; W=4 rank-1 OLS over three deltas; strength=1.0; q_only warmup; causal projection probe enabled'
+      w4_progressive:
+        run: relex_cmp_qstagefix_v1_w4_progressive_min2_alltensor_alpha1_math_qwen25_math_1p5b
+        difference: 'rank1_relex; retain/slide at W=4 but become ready with min_snapshots=2: W2 secant at global step 20, W3 rank-1 OLS at step 30, then full W4 rank-1 OLS from step 40; strength=1.0; q_only warmup; causal projection probe enabled'
       w2_no_increment:
         run: relex_cmp_qstagefix_v1_w2_alltensor_alpha0_math_qwen25_math_1p5b
         difference: 'matched W=2 anchor/Q/M schedule with strength=0.0, so no projected weight increment; q_only warmup; causal projection probe enabled'
@@ -281,7 +284,7 @@ compression_defaults:                                        # Surface-scoped pr
         role: 'reference only; compression, anchor, Q/M correction, and lookahead disabled; never eligible as the compression default'
       excluded_diagnostics: ['legacy pre-Q-fix W4', 'aborted pre-fix W2', 'Qwen2.5-1.5B-Instruct proof runs']
     selection:
-      candidates: [w2_rank1, w4_rank1, w2_no_increment, fixed_linear]
+      candidates: [w2_rank1, w4_rank1, w4_progressive, w2_no_increment, fixed_linear]
       eligibility: 'Exact fixed surface; corrected Q-staging code; done.flag at 100/100; no early stop, NaN, or run error; transactional-Q counters valid; method-specific integrity evidence and communication measured.'
       primary: 'Highest observed step-100 MATH-test accuracy among eligible compressed arms.'
       tie_breakers: ['lower rollout-to-train sampled KL', 'lower communication ratio', 'simpler method']

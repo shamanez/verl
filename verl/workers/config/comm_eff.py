@@ -178,11 +178,15 @@ class CommEffAnchorConfig(BaseConfig):
             Validated against {stale_correct, no_correct, q_only}.
         lookahead_min_snapshots (int): Minimum ring snapshots required before the
             projector engages. ``-1`` (DEFAULT): the mode's full source count
-            (2 for fixed_linear) — today's behavior. A concrete value in
+            (2 for fixed_linear, ``lookahead_window_snapshots`` for rank1_relex)
+            — today's behavior. A concrete value in
             ``[2, mode_n_points]`` lets the projector engage at the earliest
             mathematically-legal fire: ``2`` projects from fire 2 (the first
             fire at which two ``>=K``-stale snapshots exist — fire 1 can NEVER
-            project, a line needs 2 points). Requires the projector enabled.
+            project, a line needs 2 points). For rank1_relex, the fit grows from
+            the two-checkpoint secant through the available rank-1 OLS histories
+            until the complete sliding window is retained. Requires the projector
+            enabled.
         lookahead_window_snapshots (int): Complete sliding window size for
             ``rank1_relex``, including its oldest local base checkpoint. Default
             4 therefore yields 3 nonzero cumulative deltas. Must be >= 2. At
@@ -1039,7 +1043,7 @@ class CommEffConfig(BaseConfig):
             if not self.spectral.enabled:
                 raise ValueError(
                     "comm_eff.anchor.lookahead_mode='rank1_relex' requires spectral.enabled=true "
-                    "so the first full-window anchor can populate M_anchor and enable correction"
+                    "so the first ready projection can populate M_anchor and enable correction"
                 )
             if self.spectral.correction_mode == "none":
                 raise ValueError(
@@ -1048,18 +1052,13 @@ class CommEffConfig(BaseConfig):
             if self.anchor.cadence % self.spectral.cadence != 0:
                 raise ValueError(
                     "comm_eff.anchor.lookahead_mode='rank1_relex' requires anchor.cadence to be divisible by "
-                    "spectral.cadence so correction fires on the same tick as the first full-window M update; "
+                    "spectral.cadence so correction fires on the same tick as the first ready M update; "
                     f"got anchor.cadence={self.anchor.cadence}, spectral.cadence={self.spectral.cadence}"
                 )
             if self.anchor.lookahead_rollout_source == "stale_paired":
                 raise ValueError(
                     "comm_eff.anchor.lookahead_mode='rank1_relex' requires current trajectories at "
                     "readiness; use lookahead_rollout_source='auto' or 'current_step'"
-                )
-            if self.anchor.lookahead_min_snapshots != -1:
-                raise ValueError(
-                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires "
-                    "lookahead_min_snapshots=-1; lookahead_window_snapshots is its sole readiness threshold"
                 )
         if self.anchor.warmup_mode == "q_only":
             if not _rank1_relex:
@@ -1086,7 +1085,9 @@ class CommEffConfig(BaseConfig):
                     "capture_g_dense/capture_fresh_anchor probes"
                 )
         # lookahead_min_snapshots: -1 (mode default) or a concrete count in
-        # [2, mode_n_points]. Any non-(-1) value requires the projector on.
+        # [2, mode_n_points]. For rank1_relex, an early concrete threshold grows
+        # the fit as exact checkpoints arrive while retaining/sliding the full W.
+        # Any non-(-1) value requires the projector on.
         if self.anchor.lookahead_min_snapshots != -1:
             if not lookahead_enabled(self.anchor):
                 raise ValueError(

@@ -212,10 +212,12 @@ def lookahead_min_points(anchor_cfg) -> int:
     source count :func:`lookahead_num_source_points` (2 for fixed_linear) —
     today's behavior. A concrete value (config-validated to ``[2, n_points]``)
     lets the projector engage at the earliest mathematically-legal fire (2 =
-    fire 2). This is the SINGLE readiness threshold the ring keys :meth:`ready`
-    on, so the no_correct skip gate and the projected-vs-fallback decision share
-    it (a second hardcoded ``n_points`` check would silently extend the skip
-    window). Returns 0 when look-ahead is disabled.
+    fire 2). For ``rank1_relex``, the history continues growing and then sliding
+    up to its configured complete window after this threshold is reached. This
+    is the SINGLE readiness threshold the ring keys :meth:`ready` on, so the
+    no_correct skip gate and the projected-vs-fallback decision share it (a
+    second hardcoded ``n_points`` check would silently extend the skip window).
+    Returns 0 when look-ahead is disabled.
     """
     n = lookahead_num_source_points(anchor_cfg)
     if n == 0:
@@ -525,9 +527,11 @@ class Rank1SnapshotHistory:
     local base. Later entries are admitted only by the engine's exact delayed
     transfer path. Duplicate and out-of-order transfers are excluded without
     mutating the window; fixed-linear's permissive overwrite ring is untouched.
+    ``min_snapshots`` controls readiness only: retained history continues to
+    grow and then slide at ``window_snapshots``.
     """
 
-    def __init__(self, window_snapshots: int = 4):
+    def __init__(self, window_snapshots: int = 4, *, min_snapshots: Optional[int] = None):
         if isinstance(window_snapshots, bool) or not isinstance(window_snapshots, Integral):
             raise Rank1ProjectionError(
                 f"rank1_relex window_snapshots must be an integer >= 2; got {window_snapshots!r}"
@@ -535,6 +539,17 @@ class Rank1SnapshotHistory:
         self.window_snapshots = int(window_snapshots)
         if self.window_snapshots < 2:
             raise Rank1ProjectionError(f"rank1_relex window_snapshots must be >= 2; got {self.window_snapshots}")
+        if min_snapshots is None:
+            min_snapshots = self.window_snapshots
+        if isinstance(min_snapshots, bool) or not isinstance(min_snapshots, Integral):
+            raise Rank1ProjectionError(
+                f"rank1_relex min_snapshots must be an integer in [2, {self.window_snapshots}]; got {min_snapshots!r}"
+            )
+        self.min_snapshots = int(min_snapshots)
+        if not 2 <= self.min_snapshots <= self.window_snapshots:
+            raise Rank1ProjectionError(
+                f"rank1_relex min_snapshots must be in [2, {self.window_snapshots}]; got {self.min_snapshots}"
+            )
         self._snaps: OrderedDict[int, dict] = OrderedDict()
         # Lightweight schema only: retaining base tensor references here would
         # keep the first full-model checkpoint alive after the window slides.
@@ -549,8 +564,8 @@ class Rank1SnapshotHistory:
     ) -> dict[str, tuple[tuple[int, ...], torch.dtype, torch.device]]:
         """Validate an exact checkpoint before it can drive Q or history.
 
-        Warmup Q refreshes consume raw exact transfers before the projector has
-        a complete window.  Validation therefore belongs at history admission,
+        Warmup Q refreshes consume raw exact transfers before the projector is
+        ready. Validation therefore belongs at history admission,
         not only in :meth:`Rank1RelexProjector.project`: otherwise malformed
         weights could mutate Q several fires before the projector fails.
         """
@@ -616,7 +631,7 @@ class Rank1SnapshotHistory:
         if tick <= latest_tick:
             if self.ready():
                 raise Rank1ProjectionError(
-                    f"rank1_relex full window requires a strictly newer exact transfer; "
+                    f"rank1_relex ready history requires a strictly newer exact transfer; "
                     f"got tick={tick} after latest={latest_tick}"
                 )
             # Pre-ready duplicate/out-of-order transfers still drive the raw,
@@ -632,10 +647,10 @@ class Rank1SnapshotHistory:
         return True
 
     def ready(self) -> bool:
-        return len(self._snaps) == self.window_snapshots
+        return len(self._snaps) >= self.min_snapshots
 
     def sources(self):
-        """Return complete-window snapshots and ticks, both oldest-first."""
+        """Return all retained ready snapshots and ticks, both oldest-first."""
         if not self.ready():
             return None, None
         items = list(self._snaps.items())
@@ -903,17 +918,39 @@ class Rank1RelexProjector:
     selectors, but those selectors must never narrow rank1_relex coverage.
     """
 
-    def __init__(self, anchor_cfg, *, chunk_numel: int = DEFAULT_RANK1_CHUNK_NUMEL):
+    def __init__(
+        self,
+        anchor_cfg,
+        *,
+        min_snapshots: Optional[int] = None,
+        chunk_numel: int = DEFAULT_RANK1_CHUNK_NUMEL,
+    ):
         self.window_snapshots = int(getattr(anchor_cfg, "lookahead_window_snapshots", 4))
+        if min_snapshots is None:
+            configured_min = int(getattr(anchor_cfg, "lookahead_min_snapshots", -1))
+            min_snapshots = self.window_snapshots if configured_min == -1 else configured_min
+        if isinstance(min_snapshots, bool) or not isinstance(min_snapshots, Integral):
+            raise Rank1ProjectionError(
+                f"rank1_relex min_snapshots must be an integer in [2, {self.window_snapshots}]; got {min_snapshots!r}"
+            )
+        self.min_snapshots = int(min_snapshots)
+        if not 2 <= self.min_snapshots <= self.window_snapshots:
+            raise Rank1ProjectionError(
+                f"rank1_relex min_snapshots must be in [2, {self.window_snapshots}]; got {self.min_snapshots}"
+            )
         self.strength = lookahead_strength(anchor_cfg)
         self.chunk_numel = int(chunk_numel)
 
     def project(self, sources: list[dict], ticks, target_tick: int):
         clean_ticks, target = _validate_rank1_timeline(ticks, target_tick)
-        if len(sources) != self.window_snapshots or len(clean_ticks) != self.window_snapshots:
+        if len(sources) != len(clean_ticks):
             raise Rank1ProjectionError(
-                f"rank1_relex requires its complete W={self.window_snapshots} checkpoint window; "
-                f"got {len(sources)} snapshots and {len(clean_ticks)} ticks"
+                f"rank1_relex snapshot/tick count mismatch: got {len(sources)} snapshots and {len(clean_ticks)} ticks"
+            )
+        if not self.min_snapshots <= len(clean_ticks) <= self.window_snapshots:
+            raise Rank1ProjectionError(
+                f"rank1_relex requires between min={self.min_snapshots} and "
+                f"W={self.window_snapshots} checkpoints; got {len(clean_ticks)}"
             )
         if not sources or not all(isinstance(snapshot, dict) and snapshot for snapshot in sources):
             raise Rank1ProjectionError("rank1_relex history must contain non-empty checkpoint dicts")
@@ -926,7 +963,7 @@ class Rank1RelexProjector:
                 extra = sorted(keys - base_keys)[:5]
                 raise Rank1ProjectionError(f"rank1_relex checkpoint {i} key mismatch: missing={missing} extra={extra}")
 
-        # Validate the complete exact checkpoints before constructing any
+        # Validate all retained exact checkpoints before constructing any
         # projected tensor. Every unique named parameter, including norms,
         # biases, embeddings, and an untied LM head, is a RELEX trajectory.
         # A malformed tensor must fail before the clone or M/Q is touched.

@@ -66,6 +66,7 @@ def _config(*, anchor=None, powersgd=None, spectral=None, probe=None, capture=No
 def test_rank1_defaults_and_canonical_q_only_roundtrip():
     cfg = _config()
     assert cfg.anchor.lookahead_window_snapshots == 4
+    assert cfg.anchor.lookahead_min_snapshots == -1
     assert cfg.anchor.warmup_mode == "q_only"
     assert cfg.anchor.owns_q
     assert cfg.powersgd.q_basis == "act"
@@ -100,9 +101,17 @@ def test_rank1_w2_secant_fallback_is_valid():
     assert cfg.anchor.lookahead_window_snapshots == 2
 
 
-def test_rank1_window_is_sole_readiness_threshold():
-    with pytest.raises(ValueError, match="sole readiness threshold"):
-        _config(anchor=_anchor(lookahead_min_snapshots=3))
+@pytest.mark.parametrize("minimum", [2, 3, 4])
+def test_rank1_progressive_readiness_threshold_is_bounded_by_window(minimum):
+    cfg = _config(anchor=_anchor(lookahead_min_snapshots=minimum))
+    assert cfg.anchor.lookahead_window_snapshots == 4
+    assert cfg.anchor.lookahead_min_snapshots == minimum
+
+
+@pytest.mark.parametrize("minimum", [0, 1, 5])
+def test_rank1_progressive_readiness_threshold_rejects_out_of_range_values(minimum):
+    with pytest.raises(ValueError, match="lookahead_min_snapshots"):
+        _config(anchor=_anchor(lookahead_min_snapshots=minimum))
 
 
 @pytest.mark.parametrize("mode", ["disabled", "fixed_linear"])
