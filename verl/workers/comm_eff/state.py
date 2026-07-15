@@ -376,6 +376,7 @@ def maybe_build_comm_eff_state(config: Any) -> Optional[CommEffState]:
 
 
 def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
+    """Return the combined runtime metrics for an active communication-efficient state."""
     if state is None:
         return {}
     output = state.metrics()
