@@ -29,11 +29,11 @@ __all__ = ["BaseRollout"]
 class BaseRollout(ABC):
     """Base class for rollout.
 
-    Rollout generation runs mask-free even while ``comm_eff`` is enabled. The
-    activation hooks are attached only to the actor-train engine during
-    ``update_actor``; rollout backends never hold ``CommEffState`` and never set
-    the ``train`` path tag. Weight sync carries normal actor weights only, not
-    masks, anchor EMA, or spectral caches.
+    Rollout generation stays on the ordinary dense rollout backend even while
+    ``comm_eff`` is enabled. PowerSGD boundary hooks belong only to the actor-
+    train engine during ``update_actor``; rollout backends never hold
+    ``CommEffState``. Weight sync carries actor weights only, never PowerSGD Q or
+    anchor-owned M.
     """
 
     def __init__(

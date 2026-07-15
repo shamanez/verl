@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cloudflare R2 artifact sink for the comm-eff weight / gradient dumps.
+"""Cloudflare R2 sink for on-the-go training-checkpoint mirroring.
 
-The heavy diagnostic tensors (full per-step weight snapshots, raw per-tick
-gradient dumps) are far too large to keep on the box or rsync to the laptop —
-an 80-step bf16 weight trajectory is ~246 GB, the per-TICK variant ~492 GB.
-This module makes local disk a STAGING area only: a ``.pt`` is written locally
-by the observer / capture writer, uploaded to R2, verified, recorded in a small
-local manifest, and then the local ``.pt`` is deleted. Steady-state local
-footprint is one in-flight snapshot, not the whole trajectory.
+Each file in a completed ``global_step_<N>/`` checkpoint tree is staged locally,
+uploaded to R2, verified, recorded in a small local manifest, and then deleted
+when configured. This bounds local checkpoint storage while preserving the
+directory layout needed for resume. The root
+``latest_checkpointed_iteration.txt`` marker is uploaded from a temporary copy,
+so the live local marker remains available for in-place resume.
 
 Design contract:
 
@@ -36,23 +35,22 @@ Design contract:
 3. **Upload -> verify -> manifest -> delete-local.** Each upload shells out to
    ``aws s3 cp`` against the R2 S3-compatible endpoint, verifies the remote
    object size (and optionally a sha256 round-trip), appends one row to a local
-   ``r2_manifest.jsonl``, then deletes the local ``.pt`` IFF verification passed.
+   ``r2_manifest.jsonl``, then deletes the local checkpoint file IFF verification
+   passed.
    On ANY failure the local file is KEPT so the run can retry / the operator can
    recover it; the small manifest stays local regardless.
 
 We shell out to the ``aws`` CLI rather than add a ``boto3`` dependency: the repo
 has zero boto3/s3 imports, the harness already shells out to ``vastai`` / ``gh``
-/ ``rsync``, and ``aws s3 cp`` handles multipart upload of multi-GB ``.pt`` files
+/ ``rsync``, and ``aws s3 cp`` handles multipart upload of large checkpoint files
 to a Cloudflare R2 endpoint out of the box. All subprocess calls go through this
 module's ``subprocess`` reference so tests can monkeypatch it with no network.
 
 Async mode (opt-in)
 -------------------
-The default :meth:`R2ArtifactSink.upload` is SYNCHRONOUS: it blocks the training
-step until the cp -> verify -> manifest -> delete-local sequence completes. For a
-~480 GB per-tick trajectory at a ~60-90 MiB/s single-stream R2 ceiling that block
-dominates the step. When ``async_mode=True`` the sink instead decouples uploading
-from compute:
+The default :meth:`R2ArtifactSink.upload` is SYNCHRONOUS: it blocks until the
+cp -> verify -> manifest -> delete-local sequence completes. When
+``async_mode=True`` the sink instead decouples checkpoint uploading from compute:
 
 * :meth:`upload` ENQUEUES the job and returns immediately (non-blocking);
 * a pool of ``upload_workers`` daemon threads each pop a job and run the SAME
@@ -64,7 +62,7 @@ from compute:
   incomplete);
 * :meth:`upload` applies disk BACKPRESSURE: it blocks the producer once the
   staged (queued + in-flight) bytes exceed ``max_staged_bytes``, so the local
-  ``full/`` staging area never overflows the box disk even if uploads fall
+  checkpoint staging tree never overflows the box disk even if uploads fall
   behind compute.
 
 When ``async_mode=False`` (the default) the sink is byte-identical to before: no
@@ -120,11 +118,10 @@ def _sha256(path: str, chunk: int = 8 << 20) -> str:
 
 
 class R2ArtifactSink:
-    """Upload-then-delete sink for heavy ``.pt`` artifacts, backed by R2.
+    """Upload-then-delete sink for checkpoint files, backed by R2.
 
-    Constructed once per writer (rank 0) when the relevant ``r2_enabled`` flag is
-    set. :meth:`upload` is the single entry point used by both the weight-traj
-    observer and the gradient capture writer.
+    Constructed once on the rank-0 trainer when checkpoint mirroring is enabled.
+    :meth:`upload` accepts one file from the checkpoint tree at a time.
     """
 
     def __init__(
@@ -143,7 +140,6 @@ class R2ArtifactSink:
         async_mode: bool = False,
         upload_workers: int = 4,
         max_staged_gb: float = 80.0,
-        flush_timeout_s: float = 1800.0,
     ):
         # Hard bucket guard — fail loud, never write to the wrong bucket.
         if bucket != R2_REQUIRED_BUCKET:
@@ -152,9 +148,7 @@ class R2ArtifactSink:
                 "Set R2_BUCKET=shamane-pluralis in the secrets file."
             )
         if not endpoint:
-            raise RuntimeError(
-                "R2 sink requires R2_ENDPOINT (or R2_ACCOUNT_ID to derive it); none found in the env."
-            )
+            raise RuntimeError("R2 sink requires R2_ENDPOINT (or R2_ACCOUNT_ID to derive it); none found in the env.")
         if not access_key_id or not secret_access_key:
             # Do NOT echo the (empty) values — just name the missing keys.
             raise RuntimeError(
@@ -186,17 +180,12 @@ class R2ArtifactSink:
         if float(max_staged_gb) <= 0:
             raise ValueError(f"R2 sink max_staged_gb must be > 0; got {max_staged_gb}")
         self.max_staged_bytes = int(float(max_staged_gb) * _BYTES_PER_GB)
-        # Default finite timeout for the per-step flush barrier (H3) so a slow/hung
-        # uploader cannot block the optimizer step forever. ``<= 0`` => wait forever
-        # (the original unbounded behaviour, opt-in only). Explicit close() / atexit
-        # use their own bounded timeouts.
-        self.flush_timeout_s = float(flush_timeout_s)
         # Serialize manifest appends across the worker pool (and harmless on the
         # synchronous path).
         self._manifest_lock = threading.Lock()
         # Worker pool + job queue, built lazily on the first async upload so the
         # synchronous path stays byte-identical (no threads ever started).
-        self._jobs: "queue.Queue" = queue.Queue()
+        self._jobs: queue.Queue = queue.Queue()
         self._workers: list = []
         self._workers_started = False
         self._closed = False
@@ -234,7 +223,7 @@ class R2ArtifactSink:
         Synchronous (default) mode: runs the cp -> verify -> manifest -> delete-local
         sequence inline and returns the manifest row dict. Raises on cp/verify
         failure and KEEPS the local file in that case (so a failed upload never
-        loses the tensor) — byte-identical to the original behaviour.
+        loses the checkpoint file).
 
         Async mode (``async_mode=True``): ENQUEUES the job and returns ``None``
         immediately (non-blocking). The worker pool runs the identical
@@ -251,7 +240,7 @@ class R2ArtifactSink:
         """The cp -> verify -> manifest -> delete-local sequence (sync + worker shared).
 
         Returns the manifest row dict. Raises on cp/verify failure and KEEPS the
-        local file in that case (so a failed upload never loses the tensor).
+        local file in that case (so a failed upload never loses checkpoint state).
         """
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"R2 upload: local artifact missing: {local_path}")
@@ -274,8 +263,17 @@ class R2ArtifactSink:
 
         # Verify via head-object: ContentLength must match the local size.
         head = self._run(
-            [self.aws_bin, "s3api", "head-object", "--bucket", self.bucket, "--key", key,
-             "--endpoint-url", self.endpoint]
+            [
+                self.aws_bin,
+                "s3api",
+                "head-object",
+                "--bucket",
+                self.bucket,
+                "--key",
+                key,
+                "--endpoint-url",
+                self.endpoint,
+            ]
         )
         if head.returncode != 0:
             raise RuntimeError(
@@ -285,7 +283,7 @@ class R2ArtifactSink:
         try:
             head_obj = json.loads(head.stdout)
         except (ValueError, json.JSONDecodeError) as e:
-            raise RuntimeError(f"R2 verify: could not parse head-object for {uri}: {e}; local file KEPT.")
+            raise RuntimeError(f"R2 verify: could not parse head-object for {uri}: {e}; local file KEPT.") from e
         remote_bytes = int(head_obj.get("ContentLength", -1))
         if remote_bytes != local_bytes:
             raise RuntimeError(
@@ -315,7 +313,7 @@ class R2ArtifactSink:
         # upload (cp + head-object size/sha match) is the row written, so a row in
         # the manifest always attests to a real, verified R2 object (the async path
         # shares this method, so its rows are likewise verified-only — never a
-        # phantom "dumped but not uploaded" entry). The append is serialized across
+        # phantom "recorded but not uploaded" entry). The append is serialized across
         # the worker pool with ``_manifest_lock`` ONLY in async mode; the
         # synchronous (default, ``async_mode=False``) path takes the SAME
         # lock-free code path as before so it stays byte-identical, not merely
@@ -432,9 +430,7 @@ class R2ArtifactSink:
                 return
             n = len(self._errors)
             head = "; ".join(f"{k}: {m}" for k, m in self._errors[:3])
-        raise RuntimeError(
-            f"R2 async upload had {n} permanent failure(s); local files KEPT. First: {head}"
-        )
+        raise RuntimeError(f"R2 async upload had {n} permanent failure(s); local files KEPT. First: {head}")
 
     def flush(self, timeout: Optional[float] = None) -> None:
         """Barrier: block until the queue is drained, then fail-loud on any failure.
@@ -442,7 +438,7 @@ class R2ArtifactSink:
         Blocks until ALL queued + in-flight uploads have completed (a no-op on the
         synchronous path / before any async upload). RAISES if any upload
         permanently failed — so a flush at the per-N-steps checkpoint, or at run
-        end, never lets a silently-incomplete trajectory through. ``timeout`` (when
+        end, never lets a silently-incomplete checkpoint mirror through. ``timeout`` (when
         given) bounds the wait per the underlying join; ``None`` waits forever.
         """
         if not self.async_mode or not self._workers_started:
@@ -472,7 +468,7 @@ class R2ArtifactSink:
         alive — close() must NEVER report clean success while uploads are still
         hung. A hung shutdown reported as clean is the silent-data-loss anti-pattern
         async mode exists to prevent (the daemon worker would then be killed at
-        process exit, possibly mid-manifest-write, leaving the trajectory
+        process exit, possibly mid-manifest-write, leaving the checkpoint mirror
         unverifiably incomplete). The worker pool is always torn down (sentinels +
         join) in the ``finally`` regardless of whether we raise.
         """
@@ -482,7 +478,7 @@ class R2ArtifactSink:
         try:
             if self.async_mode and self._workers_started:
                 self.flush(timeout=timeout)
-        except BaseException as e:  # capture flush failure/timeout; still tear down
+        except BaseException as e:  # retain flush failure/timeout; still tear down
             flush_error = e
         finally:
             self._closed = True
@@ -530,7 +526,7 @@ class R2ArtifactSink:
         except Exception as e:  # atexit must not raise
             logger.error(
                 "comm_eff.r2: !!! ATEXIT CLOSE SURFACED AN R2 UPLOAD FAILURE/TIMEOUT !!! "
-                "the trajectory may be INCOMPLETE (local files KEPT): %s",
+                "the checkpoint mirror may be INCOMPLETE (local files KEPT): %s",
                 e,
             )
 
@@ -546,31 +542,27 @@ class R2ArtifactSink:
 
 def build_r2_sink_from_env(
     *,
-    artifact_kind: str,
     manifest_dir: str,
     delete_local: bool = True,
     verify: str = "size",
     async_mode: bool = False,
     upload_workers: int = 4,
     max_staged_gb: float = 80.0,
-    flush_timeout_s: float = 1800.0,
 ) -> R2ArtifactSink:
     """Build a :class:`R2ArtifactSink` from the R2 env vars (fail-loud).
 
-    Key prefix is ``autonomous-harness-rlvr-compression/<experiment>/<regime>/<artifact_kind>``
+    Key prefix is ``autonomous-harness-rlvr-compression/<experiment>/<regime>/checkpoints``
     where ``<experiment>``/``<regime>`` come from ``R2_EXPERIMENT`` / ``R2_REGIME``
     (set by the launcher). Everything for a run lives under the one per-run home
     ``autonomous-harness-rlvr-compression/<run_id>/`` alongside its report
     artifacts (#63 2026-07-10 operator directive — the old ``verl-research/``
-    prefix is retired). The role + step/tick + filename are appended by the
-    caller as the ``key_suffix`` at upload time.
+    prefix is retired). The path relative to the local checkpoint root is
+    appended by the caller as ``key_suffix`` at upload time.
 
     ``async_mode`` / ``upload_workers`` / ``max_staged_gb`` configure the opt-in
     background-upload pool (see :class:`R2ArtifactSink`). Defaults keep the sink
     synchronous + byte-identical to the original behaviour.
     """
-    if artifact_kind not in ("weights", "grads", "checkpoints"):
-        raise ValueError(f"artifact_kind must be one of (weights, grads, checkpoints); got {artifact_kind!r}")
     bucket = os.environ.get("R2_BUCKET", "")
     endpoint = os.environ.get("R2_ENDPOINT", "")
     account_id = os.environ.get("R2_ACCOUNT_ID", "")
@@ -578,7 +570,7 @@ def build_r2_sink_from_env(
         endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
     experiment = os.environ.get("R2_EXPERIMENT", "EXP-unknown")
     regime = os.environ.get("R2_REGIME", "regime")
-    key_prefix = f"autonomous-harness-rlvr-compression/{experiment}/{regime}/{artifact_kind}"
+    key_prefix = f"autonomous-harness-rlvr-compression/{experiment}/{regime}/checkpoints"
     manifest_path = os.path.join(manifest_dir or ".", "r2_manifest.jsonl")
     return R2ArtifactSink(
         bucket=bucket,
@@ -592,38 +584,33 @@ def build_r2_sink_from_env(
         async_mode=async_mode,
         upload_workers=upload_workers,
         max_staged_gb=max_staged_gb,
-        flush_timeout_s=flush_timeout_s,
     )
 
 
 def maybe_build_r2_sink(
     *,
     enabled: bool,
-    artifact_kind: str,
     manifest_dir: str,
     delete_local: bool = True,
     verify: str = "size",
     async_mode: bool = False,
     upload_workers: int = 4,
     max_staged_gb: float = 80.0,
-    flush_timeout_s: float = 1800.0,
 ) -> Optional[R2ArtifactSink]:
     """Return an :class:`R2ArtifactSink` iff ``enabled``, else ``None`` (strict no-op).
 
-    When disabled the caller keeps writing local ``.pt`` files exactly as before
-    (byte-identical behavior). When enabled, creds are read from the env and the
-    bucket guard fails loud on a misconfiguration. The async knobs are forwarded
+    When disabled the caller keeps writing local checkpoint files exactly as
+    before. When enabled, credentials are read from the env and the bucket
+    guard fails loud on a misconfiguration. The async knobs are forwarded
     to the sink; their defaults keep it synchronous (today's behaviour).
     """
     if not enabled:
         return None
     return build_r2_sink_from_env(
-        artifact_kind=artifact_kind,
         manifest_dir=manifest_dir,
         delete_local=delete_local,
         verify=verify,
         async_mode=async_mode,
         upload_workers=upload_workers,
         max_staged_gb=max_staged_gb,
-        flush_timeout_s=flush_timeout_s,
     )

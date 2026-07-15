@@ -208,11 +208,11 @@ trainer:
   # via the existing R2ArtifactSink (async upload -> head-object verify -> manifest
   # row -> delete-local), so peak local disk stays ~1 in-flight ckpt + staging
   # instead of the keep-all total. The CKPT_R2_* knobs below configure that sink;
-  # they are read from the environment by _save_checkpoint (mirroring the
-  # WEIGHT_TRAJ_R2_* convention) and are only declared here so Hydra struct mode
+  # they are read from the environment by _save_checkpoint and the flag is
+  # declared here so Hydra struct mode
   # accepts the launcher's trainer.checkpoint_r2_enabled override. See
   # verl/trainer/ppo/ray_trainer.py::_save_checkpoint and
-  # verl/workers/comm_eff/r2_sink.py::build_r2_sink_from_env (artifact_kind=checkpoints).
+  # verl/workers/comm_eff/r2_sink.py::build_r2_sink_from_env.
   checkpoint_r2_enabled: false
 
   # Timeout (in seconds) for Ray worker to wait for registration

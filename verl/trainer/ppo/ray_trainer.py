@@ -1103,20 +1103,18 @@ class RayPPOTrainer:
         )
         from verl.workers.comm_eff.r2_sink import maybe_build_r2_sink
 
-        # Env knobs mirror the WEIGHT_TRAJ_R2_* convention (CKPT_R2_*). manifest_dir
-        # is the run-local default_local_dir so the checkpoints r2_manifest.jsonl
+        # CKPT_R2_* environment knobs configure the checkpoint sink. manifest_dir
+        # is the run-local default_local_dir so the checkpoint r2_manifest.jsonl
         # sits alongside the (deleted) staging tree and is synced back by the monitor.
         manifest_dir = os.path.abspath(self.config.trainer.default_local_dir)
         self._ckpt_r2_delete_local = os.environ.get("CKPT_R2_DELETE_LOCAL", "true").lower() == "true"
         self._ckpt_r2_sink = maybe_build_r2_sink(
             enabled=True,
-            artifact_kind="checkpoints",
             manifest_dir=manifest_dir,
             delete_local=self._ckpt_r2_delete_local,
             async_mode=os.environ.get("CKPT_R2_ASYNC", "true").lower() == "true",
             upload_workers=int(os.environ.get("CKPT_R2_WORKERS", "4")),
             max_staged_gb=float(os.environ.get("CKPT_R2_MAX_STAGED_GB", "50")),
-            flush_timeout_s=float(os.environ.get("CKPT_R2_FLUSH_TIMEOUT", "1800")),
         )
         return self._ckpt_r2_sink
 
@@ -1149,8 +1147,7 @@ class RayPPOTrainer:
             sink.upload(local_path=fpath, key_suffix=key_suffix, meta={"global_step": step})
             n_files += 1
         print(
-            f"[ckpt_r2] queued {n_files} file(s) from {local_global_step_folder} "
-            f"-> R2 (async, step={step})",
+            f"[ckpt_r2] queued {n_files} file(s) from {local_global_step_folder} -> R2 (async, step={step})",
             flush=True,
         )
 

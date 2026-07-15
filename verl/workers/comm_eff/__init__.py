@@ -12,28 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Communication-efficient pipeline-adaptation worker package.
+"""Communication-efficient GRPO worker package.
 
-The two-circuit compression method (activation masking + async unmasked anchor
-circuit + spectral gradient correction). Disabled by default; see
+The retained pipeline combines rank-77 PowerSGD activation projection, a
+delayed paired dense anchor, signed-EMA gradient correction, and rank-1 RELEX
+weight projection. It is disabled by default; see
 ``verl.workers.config.comm_eff.CommEffConfig``.
 
-Only ``state`` is imported eagerly because it is cheap (no torch heavy lifting
-at import time). The actual masking / anchor / spectral kernels are imported
-lazily by ``CommEffState.maybe_build`` and run **only** when
-``comm_eff.enabled=true``; the disabled path never reaches them.
+Only ``state`` is imported eagerly. Runtime kernels are imported lazily and
+run only when ``comm_eff.enabled=true``.
 """
 
 from .state import (
-    CommEffState,
     comm_eff_metrics,
     maybe_build_comm_eff_state,
-    resolve_compression_type,
 )
 
 __all__ = [
-    "CommEffState",
     "comm_eff_metrics",
     "maybe_build_comm_eff_state",
-    "resolve_compression_type",
 ]

@@ -27,7 +27,7 @@ run_arm() {
   local arm="$1"
   local experiment mode window min_snapshots strength warmup comm_enabled
   local compression_type=powersgd
-  local anchor_enabled=true anchor_owns_q=true replay=true lookahead=true spectral=true correction=signed_ema
+  local anchor_enabled=true anchor_owns_q=true replay=true lookahead=true spectral=true
 
   case "$arm" in
     w2_rank1)
@@ -36,7 +36,7 @@ run_arm() {
       ;;
     w4_rank1)
       # Corrected rerun of the original W=4 arm. The qstagefix label distinguishes
-      # the frozen-Q PPO handoff from the legacy diagnostic run whose anchor Q
+      # the frozen-Q PPO handoff from the earlier diagnostic run whose anchor Q
       # changed inside update_actor at cadence boundaries.
       experiment="relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b"
       mode=rank1_relex window=4 min_snapshots=-1 strength=1.0 warmup=q_only comm_enabled=true
@@ -56,7 +56,7 @@ run_arm() {
       experiment="relex_cmp_dense_grpo_math_qwen25_math_1p5b"
       mode=disabled window=2 min_snapshots=-1 strength=0.0 warmup=stale_correct comm_enabled=false
       compression_type=dense
-      anchor_enabled=false anchor_owns_q=false replay=false lookahead=false spectral=false correction=signed_ema
+      anchor_enabled=false anchor_owns_q=false replay=false lookahead=false spectral=false
       ;;
     *)
       echo "FATAL: unknown arm '$arm' (expected w2_rank1, w4_rank1, w4_progressive, w2_no_increment, dense)" >&2
@@ -100,7 +100,6 @@ run_arm() {
     COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH="$strength" \
     COMM_EFF_ANCHOR_WARMUP_MODE="$warmup" \
     COMM_EFF_SPECTRAL_ENABLED="$spectral" \
-    COMM_EFF_SPECTRAL_CORRECTION_MODE="$correction" \
     bash "$LAUNCHER"
 
   if [[ ! -f "$run_dir/done.flag" ]]; then

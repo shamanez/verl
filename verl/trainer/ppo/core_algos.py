@@ -1292,7 +1292,7 @@ def compute_policy_loss_vanilla(
     https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
     The comm_eff anchor does not call this clipped loss directly. It uses the
-    corresponding ratio-one vanilla surrogate for its unmasked K-stale or
+    corresponding ratio-one vanilla surrogate for its dense delayed or RELEX-
     projected forward, while mirroring rollout importance weights and every
     additive regularizer from the resolved actor objective. The deliberate
     exceptions are ``old_log_prob``, PPO importance ratio, and clipping, which

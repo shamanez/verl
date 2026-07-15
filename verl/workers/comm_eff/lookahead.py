@@ -69,8 +69,8 @@ class Rank1ProjectionError(RuntimeError):
 #   "auto"          -> resolves to "current_step" when look-ahead is enabled,
 #                      else "stale_paired" (matching rollouts are THE DEFAULT
 #                      whenever weight projection is ON; zero effect when OFF).
-#   "stale_paired"  -> today's exact behavior: the replayed t-delay_K batch in
-#                      replay mode. (Legacy non-replay mode ALREADY consumes the
+#   "stale_paired"  -> the replayed t-delay_K batch in
+#                      replay mode. Non-replay mode consumes the
 #                      current tick's batch, so this option only changes
 #                      behavior in replay mode.)
 #   "current_step"  -> replay mode consumes a copy of the CURRENT tick's batch.
@@ -79,9 +79,7 @@ class Rank1ProjectionError(RuntimeError):
 #                      not by projected theta_hat[t]. Config-validated to require
 #                      the projector ON (stale-weights + fresh-rollouts is an
 #                      unsupported ablation).
-#   "self_generate" -> RESERVED seam for a future "anchor generates its own
-#                      rollouts" option; REJECTED at config validation.
-LOOKAHEAD_ROLLOUT_SOURCES = ("auto", "stale_paired", "current_step", "self_generate")
+LOOKAHEAD_ROLLOUT_SOURCES = ("auto", "stale_paired", "current_step")
 
 
 def lookahead_enabled(anchor_cfg) -> bool:
@@ -140,14 +138,12 @@ def lookahead_strength(anchor_cfg) -> float:
 def resolve_lookahead_rollout_source(anchor_cfg) -> str:
     """Resolve ``anchor.lookahead_rollout_source`` to a concrete source.
 
-    Pure function (unit-testable, no side effects). ``"auto"`` (the default)
+    This function has no side effects. ``"auto"`` (the default)
     resolves to ``"current_step"`` iff the look-ahead projector is enabled
     (:func:`lookahead_enabled`) and to ``"stale_paired"`` otherwise — so the
     matching-rollouts behavior is THE DEFAULT whenever weight projection is ON
     and has ZERO effect when it is OFF. Explicit values pass through unchanged;
-    the invalid combinations (``current_step`` without the projector,
-    ``self_generate``) are rejected up front by the config ``__post_init__``,
-    not here.
+    invalid combinations are rejected up front by the config ``__post_init__``.
     """
     src = str(getattr(anchor_cfg, "lookahead_rollout_source", "auto")) if anchor_cfg is not None else "auto"
     if src == "auto":

@@ -57,8 +57,8 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data.
 
-    The comm_eff anchor deliberately does NOT call this function. Its stale,
-    unmasked forward cannot form a meaningful PPO ratio against
+    The comm_eff anchor deliberately does NOT call this function. Its dense
+    delayed/projected forward cannot form the declared anchor objective from
     ``old_log_probs`` produced by the compressed fast policy. Instead it calls
     ``anchor_pg_loss`` with ratio fixed at one, while retaining this path's
     rollout fields, aggregation/normalization, and configured reference-policy

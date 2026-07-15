@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
-# Pure sliding rank1_relex + Q-only warmup on the fixed Qwen2.5/MATH control.
+# Current qboot-v2 rank1_relex run on Qwen2.5-Math-1.5B and MATH.
 # The 1024-token prompt plus 3072-token response is the 4096-token protocol.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 
-# The proof run is complete; this launcher now defaults to the required final
-# model while preserving every other fixed MATH/GRPO knob.
-# Method selection is still provisional: W=4 below is the RELEX-style sliding
-# adaptation being measured, not a declared champion. After the corrected
-# matrix completes, the
-# winner recorded in research/.claude/project.yaml will back a neutral MATH
-# launcher whose bare invocation selects that method. Until then, use explicit
-# comparison-arm names for scientific claims.
+# Bare invocation reproduces the latest qboot-v2 composite surface.
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Math-1.5B}"
 export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
@@ -33,7 +26,7 @@ export KL_LOSS_COEF=0.001
 
 # Match RELEX/scripts/eval.py's Qwen prompt byte-for-byte for BOTH rollout
 # training and validation. The prepared parquet intentionally stays unchanged:
-# this template replaces its legacy user suffix and pins RELEX's explicit
+# this template replaces the prepared parquet's user suffix and pins RELEX's explicit
 # system message, avoiding the Math base tokenizer's duplicate boxed prompt.
 RELEX_QWEN_CHAT_TEMPLATE_FILE="$HERE/relex_qwen_chat_template.jinja"
 if [[ ! -f "$RELEX_QWEN_CHAT_TEMPLATE_FILE" ]]; then
@@ -54,8 +47,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
 export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
-export COMM_EFF_POWERSGD_Q_BASIS="${COMM_EFF_POWERSGD_Q_BASIS:-act}"
-export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
 export COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
@@ -68,13 +60,12 @@ export COMM_EFF_ANCHOR_LOOKAHEAD_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_MODE:-rank1_r
 export COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH="${COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH:-1.0}"
 export COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE="${COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE:-auto}"
 export COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS:-4}"
-export COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-q_only}"
-export COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:--1}"
+export COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-stale_correct}"
+export COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:-2}"
 export COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
-export COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-decoder_matrices}"
-export COMM_EFF_SPECTRAL_DIAGNOSTICS="${COMM_EFF_SPECTRAL_DIAGNOSTICS:-true}"
+export COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-all_floating}"
+export COMM_EFF_SPECTRAL_DIAGNOSTICS="${COMM_EFF_SPECTRAL_DIAGNOSTICS:-false}"
 export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
-export COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"
 export COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.50}"
 export COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}"
 export COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"
@@ -82,14 +73,13 @@ export COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
 
 # Run controls may change duration/logging, but not the fixed scientific surface.
 # MATH has 14 full 512-prompt batches per epoch after prompt filtering. Eight
-# epochs are therefore required for trainer.total_training_steps=100 to be the
-# actual stopping condition (the inherited two-epoch default stops at step 28).
+# epochs ensure trainer.total_training_steps=100 is the stopping condition.
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-8}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 export TEST_FREQ="${TEST_FREQ:-25}"
 export SAVE_FREQ="${SAVE_FREQ:--1}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-rank1_relex_qonly_math_qwen25_1p5b}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-relex_qboot_v2_w4min2_allfloatm_math_qwen25_math_1p5b}"
 export LOG="${LOG:-$VERL_ROOT/runs/$EXPERIMENT_NAME/train.log}"
 
 exec bash "$HERE/vast_comm_eff_engine_grpo.sh" \

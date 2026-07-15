@@ -41,7 +41,7 @@ __all__ = [
 
 TRAIN_TAG = "train"
 OLD_LOGPROB_TAG = "old_logprob"
-PATH_TAGS = (TRAIN_TAG, "rollout", OLD_LOGPROB_TAG, "ref_logprob", "val", "infer", "ckpt")
+PATH_TAGS = (TRAIN_TAG, OLD_LOGPROB_TAG, "ref_logprob", "ckpt")
 
 
 def _is_enabled(config: Any) -> bool:
@@ -88,7 +88,6 @@ class CommEffState:
         self.anchor_q_broadcasts = 0
         self.anchor_q_activations = 0
         self.anchor_q_stage_overwrites = 0
-        self.family_screen_builds = 0
         object.__setattr__(self, "_powersgd_q_agreement_checked", False)
         object.__setattr__(self, "_powersgd_q_agreement_dev", None)
 
@@ -147,10 +146,6 @@ class CommEffState:
                 qr_dtype=str(cfg.qr_dtype),
                 reortho_eps=float(cfg.reortho_eps),
                 anchor_owns_q=bool(anchor_cfg.owns_q),
-                q_basis=str(cfg.q_basis),
-                q_basis_passive=list(cfg.q_basis_passive),
-                hybrid_act_cols=int(cfg.hybrid_act_cols),
-                hybrid_grad_cols=int(cfg.hybrid_grad_cols),
                 anchor_cadence=int(anchor_cfg.cadence),
                 fast_q_bootstrap=bool(cfg.fast_q_bootstrap),
                 state=self,
@@ -170,7 +165,6 @@ class CommEffState:
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
                 ema_device=str(cfg.ema_device),
-                correction_mode=str(cfg.correction_mode),
                 signed_ema_alpha=float(cfg.signed_ema_alpha),
                 diagnostics=bool(cfg.diagnostics),
             )
@@ -204,8 +198,6 @@ class CommEffState:
                 getattr(self.powersgd, "_basis", {}).clear()
                 getattr(self.powersgd, "_pending_anchor_basis", {}).clear()
                 getattr(self.powersgd, "_sketch", {}).clear()
-                if hasattr(self.powersgd, "clear_family_harvest"):
-                    self.powersgd.clear_family_harvest()
 
     def reset_rank1_runtime(self) -> None:
         """Reset local RELEX history after model weights are loaded."""
@@ -257,9 +249,9 @@ class CommEffState:
             raise ValueError(f"unknown comm_eff path tag {tag!r}; expected one of {PATH_TAGS} or None")
         self.path_tag = tag
 
-    def should_run_spectral_correction(self, step: Optional[int] = None) -> bool:
+    def should_run_spectral_correction(self) -> bool:
         cadence = int(self.config.spectral.cadence)
-        current = self.spectral_step if step is None else int(step)
+        current = self.spectral_step
         return current > 0 and current % cadence == 0
 
     def note_powersgd_application(self) -> None:
@@ -268,16 +260,14 @@ class CommEffState:
     def note_powersgd_basis_update(self) -> None:
         self.powersgd_basis_updates += 1
 
-    def note_family_screen(self, n_families: int = 0) -> None:
-        del n_families
-        self.family_screen_builds += 1
-
     def spectral_metrics(self) -> dict:
         if self.spectral is None or not self.spectral_rel_change:
             return {}
         values = list(self.spectral_rel_change.values())
         output = {"comm_eff/spectral/rel_change_mean": sum(values) / len(values)}
-        output.update({f"comm_eff/spectral/rel_change/{name}": value for name, value in self.spectral_rel_change.items()})
+        output.update(
+            {f"comm_eff/spectral/rel_change/{name}": value for name, value in self.spectral_rel_change.items()}
+        )
         return output
 
     def powersgd_metrics(self) -> dict:
@@ -290,13 +280,9 @@ class CommEffState:
                 getattr(self.powersgd, "last_y_coords_per_token", self.powersgd.rank)
             ),
             "comm_eff/fast_q_bootstrap_done": int(getattr(self.powersgd, "fast_q_bootstrap_done", False)),
-            "comm_eff/fast_q_bootstrap_observations": int(
-                getattr(self.powersgd, "fast_q_bootstrap_observations", 0)
-            ),
+            "comm_eff/fast_q_bootstrap_observations": int(getattr(self.powersgd, "fast_q_bootstrap_observations", 0)),
             "comm_eff/fast_q_bootstrap_updates": int(getattr(self.powersgd, "fast_q_bootstrap_updates", 0)),
-            "comm_eff/fast_q_bootstrap_activations": int(
-                getattr(self.powersgd, "fast_q_bootstrap_activations", 0)
-            ),
+            "comm_eff/fast_q_bootstrap_activations": int(getattr(self.powersgd, "fast_q_bootstrap_activations", 0)),
             "comm_eff/fast_q_bootstrap_dense_observation_elements": float(
                 getattr(self.powersgd, "fast_q_bootstrap_dense_observation_elements", 0.0)
             ),
@@ -310,7 +296,9 @@ class CommEffState:
             output["comm_eff/powersgd_q_cond"] = (
                 sum(finite) / len(finite) if len(finite) == len(q_conditions) else float("inf")
             )
-            output.update({f"comm_eff/powersgd_q_cond/layer_{idx}": value for idx, value in sorted(q_conditions.items())})
+            output.update(
+                {f"comm_eff/powersgd_q_cond/layer_{idx}": value for idx, value in sorted(q_conditions.items())}
+            )
         reconstruction = getattr(self.powersgd, "last_reconstruction_rel_error", {})
         if reconstruction:
             output["comm_eff/powersgd_reconstruction_rel_error"] = sum(reconstruction.values()) / len(reconstruction)
@@ -355,7 +343,6 @@ class CommEffState:
             "comm_eff/anchor_q_activations": self.anchor_q_activations,
             "comm_eff/anchor_q_stage_overwrites": self.anchor_q_stage_overwrites,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
-            "comm_eff/family_screen_builds": self.family_screen_builds,
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
         }
         if self.rank1_relex_active():

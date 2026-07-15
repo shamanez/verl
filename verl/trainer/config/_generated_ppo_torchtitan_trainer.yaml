@@ -133,40 +133,30 @@ actor_rollout_ref:
     comm_eff:
       _target_: verl.workers.config.CommEffConfig
       enabled: false
-      compression_type: dense
-      clean_cadence: 0
-      mask:
-        _target_: verl.workers.config.CommEffMaskConfig
-        enabled: true
-        p: 0.95
-        seed: 0
-        pp_size: 8
-        mask_recompute: false
-        rescale: false
-        rescale_mode: auto
+      compression_type: powersgd
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
-        enabled: false
-        cadence: 1
-        delay_K: 1
-        owns_q: false
-        replay_paired_batch: false
+        enabled: true
+        cadence: 20
+        delay_K: 20
+        owns_q: true
+        replay_paired_batch: true
         batch_scope: ppo_minibatch
-        snapshot_device: gpu
-        lookahead_anchor: false
-        lookahead_mode: disabled
+        snapshot_device: cpu
+        lookahead_anchor: true
+        lookahead_mode: rank1_relex
         lookahead_strength: 1.0
         lookahead_rollout_source: auto
         warmup_mode: stale_correct
-        lookahead_min_snapshots: -1
+        lookahead_min_snapshots: 2
         lookahead_window_snapshots: 4
       spectral:
         _target_: verl.workers.config.CommEffSpectralConfig
-        enabled: false
+        enabled: true
+        beta_anc: 0.5
         cadence: 1
-        diagnostics: true
-        beta_anc: 0.95
-        target_scope: decoder_matrices
+        diagnostics: false
+        target_scope: all_floating
         target_substr:
         - q_proj
         - k_proj
@@ -176,31 +166,12 @@ actor_rollout_ref:
         - up_proj
         - down_proj
         max_targets: -1
-        ema_device: gpu
-        correction_mode: none
-        inject_gamma: 1.0
-        blend_eta: 0.5
-        signed_ema_alpha: 0.0
-        ef_decay: 0.0
-        ef_clip: 0.0
-        delayed_ef_lambda: 0.0
-        delta_subbasis_rank: 0
-        delta_subbasis_family: tail
-        r_delta: 0
-        delta_subbasis_weight: 1.0
-        delta_subbasis_decay_steps: 0
-        delta_subbasis_hold_steps: 0
-        perturb_sigma: 0.0
-        perturb_seed: 0
-        delta_momentum_mu: 0.0
-        delta_momentum_age_decay: false
-        adaptive_lambda_mode: 'off'
-        adaptive_lambda_kappa: 0.0
-        lambda_cap: 2.0
+        ema_device: cpu
+        signed_ema_alpha: 0.25
       powersgd:
         _target_: verl.workers.config.CommEffPowerSGDConfig
         enabled: true
-        rank: 102
+        rank: 77
         seed: 0
         pp_size: 8
         update_cadence: 1
@@ -209,53 +180,7 @@ actor_rollout_ref:
         sync_basis: true
         qr_dtype: fp32
         reortho_eps: 1.0e-06
-        fast_q_bootstrap: false
-        q_basis: act
-        q_basis_passive: []
-        hybrid_act_cols: -1
-        hybrid_grad_cols: -1
-      capture:
-        _target_: verl.workers.config.CommEffCaptureConfig
-        enabled: false
-        capture_dir: ''
-        max_ticks: 10
-        stratified_targets: 0
-        capture_g_dense: false
-        capture_fresh_anchor: false
-        fresh_anchor_loss: clean_pg
-        dump_dtype: fp32
-        rank0_only: true
-        min_tick: 0
-        r2_enabled: false
-        r2_delete_local: true
-        r2_async: false
-        r2_upload_workers: 4
-        r2_max_staged_gb: 80.0
-        r2_flush_timeout_s: 1800.0
-      probe:
-        _target_: verl.workers.config.CommEffProbeConfig
-        geometry_enabled: false
-        out_dir: ''
-        rank0_only: true
-        m4_lags: 5
-        per_target_sidecar: true
-        rank1_projection_enabled: false
-        rank1_projection_samples: 16
-        weight_traj:
-          _target_: verl.workers.config.CommEffWeightTrajConfig
-          enabled: false
-          out_dir: ''
-          dump_dtype: bf16
-          per_tick: false
-          every_steps: 1
-          rank0_only: true
-          r2_enabled: false
-          r2_delete_local: true
-          r2_async: false
-          r2_flush_every_steps: 10
-          r2_upload_workers: 4
-          r2_max_staged_gb: 80.0
-          r2_flush_timeout_s: 1800.0
+        fast_q_bootstrap: true
     qat:
       enable: false
       mode: w4a16

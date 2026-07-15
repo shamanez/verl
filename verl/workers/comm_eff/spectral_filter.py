@@ -22,7 +22,7 @@ and blends its sign with ``sign(M)``::
 
 An unwarmed or shape-mismatched anchor entry is a strict no-op for that tensor.
 FSDP extraction and writeback remain engine responsibilities; this module only
-operates on logical full tensors and is CPU-testable.
+operates on logical full tensors.
 """
 
 from __future__ import annotations
@@ -73,7 +73,6 @@ class SpectralFilter:
         *,
         beta_anc: float = 0.50,
         ema_device: str = "cpu",
-        correction_mode: str = "signed_ema",
         signed_ema_alpha: float = 0.25,
         diagnostics: bool = False,
     ):
@@ -81,14 +80,11 @@ class SpectralFilter:
             raise ValueError(f"beta_anc must be in [0, 1]; got {beta_anc}")
         if ema_device not in ("gpu", "cpu"):
             raise ValueError(f"ema_device must be one of (gpu, cpu); got {ema_device!r}")
-        if correction_mode != "signed_ema":
-            raise ValueError(f"only correction_mode='signed_ema' is supported; got {correction_mode!r}")
         if not 0.0 <= float(signed_ema_alpha) <= 1.0:
             raise ValueError(f"signed_ema_alpha must be in [0, 1]; got {signed_ema_alpha}")
 
         self.beta_anc = float(beta_anc)
         self.ema_device = str(ema_device)
-        self.correction_mode = "signed_ema"
         self.signed_ema_alpha = float(signed_ema_alpha)
         self.diagnostics = bool(diagnostics)
         self.merger_coldM_fallbacks = 0
@@ -105,7 +101,7 @@ class SpectralFilter:
         store_device = self._ema_storage_device(grad.device)
         if anchor is None or tuple(anchor.shape) != tuple(grad.shape):
             anchor = torch.zeros(grad.shape, dtype=torch.float32, device=store_device)
-            if store_device.type == "cpu" and grad.device.type == "cuda":
+            if store_device.type == "cpu" and grad.device.type != "cpu":
                 anchor = anchor.pin_memory()
             self._anchor[name] = anchor
         return anchor
@@ -124,7 +120,7 @@ class SpectralFilter:
         updated = self.beta_anc * anchor + (1.0 - self.beta_anc) * g_anchor.to(torch.float32)
         store_device = self._ema_storage_device(g_anchor.device)
         stored = updated.to(store_device)
-        if store_device.type == "cpu" and g_anchor.device.type == "cuda":
+        if store_device.type == "cpu" and g_anchor.device.type != "cpu":
             stored = stored.pin_memory()
         self._anchor[name] = stored
         return updated

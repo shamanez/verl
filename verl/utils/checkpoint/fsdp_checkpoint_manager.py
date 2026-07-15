@@ -40,14 +40,14 @@ from .checkpoint_manager import BaseCheckpointManager
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
-# Substrings that would indicate comm_eff compression state leaked into a
-# saved/synced model state_dict. The masking circuit is hook-based (no
-# nn.Parameter / buffer), so a correct implementation never produces such a key.
-_COMM_EFF_STATE_KEY_MARKERS = ("comm_eff", "activation_mask", "_mask", "anchor_ema", "spectral_cache")
+# Substrings that indicate retained communication-efficient runtime state leaked
+# into a saved/synced actor state_dict. The current PowerSGD, anchor, and
+# signed-EMA state lives outside the model's parameters and buffers.
+_COMM_EFF_STATE_KEY_MARKERS = ("comm_eff", "powersgd", "anchor_state", "signed_ema")
 
 
 def _assert_no_comm_eff_state(state_dict: dict) -> None:
-    """Raise if any comm_eff/mask/anchor/spectral tensor leaked into ``state_dict``.
+    """Raise if communication-efficient runtime state leaked into ``state_dict``.
 
     Contamination guard for checkpoint save (and, by reuse, the merged HF
     export). Weight sync to rollout uses the same actor state_dict, so this also
@@ -58,16 +58,14 @@ def _assert_no_comm_eff_state(state_dict: dict) -> None:
     if not isinstance(state_dict, dict):
         return
     leaked = [
-        k
-        for k in state_dict
-        if isinstance(k, str) and any(marker in k for marker in _COMM_EFF_STATE_KEY_MARKERS)
+        k for k in state_dict if isinstance(k, str) and any(marker in k for marker in _COMM_EFF_STATE_KEY_MARKERS)
     ]
     if leaked:
         raise AssertionError(
-            "comm_eff/mask state leaked into the actor checkpoint state_dict "
-            f"(keys: {leaked[:8]}{'...' if len(leaked) > 8 else ''}). The masking "
-            "circuit must be hook-based (no parameters/buffers) so synced weights "
-            "carry only the normal actor-optimizer update. This is a hard falsifier."
+            "communication-efficient runtime state leaked into the actor checkpoint state_dict "
+            f"(keys: {leaked[:8]}{'...' if len(leaked) > 8 else ''}). PowerSGD Q, anchor state, "
+            "and signed-EMA M must remain outside model parameters/buffers so synced weights "
+            "contain only the actor model state."
         )
 
 
@@ -297,15 +295,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
-                    # Contamination guard: the comm_eff masking circuit must
-                    # NEVER write its state (masks / anchor EMA / spectral caches)
-                    # into the saved actor weights — the checkpoint, and therefore
-                    # the weights synced to rollout, must carry only the normal
-                    # actor-optimizer update. The masker registers ephemeral
-                    # forward HOOKS (no nn.Parameters / buffers), so a clean
-                    # implementation produces a state_dict with no comm_eff keys;
-                    # this assert makes a future regression (e.g. registering a
-                    # mask buffer) a loud failure at save time.
+                    # Contamination guard: PowerSGD Q, anchor state, and signed-
+                    # EMA M live outside the actor module. The saved checkpoint,
+                    # and therefore weights synced to rollout, must contain only
+                    # normal actor model state. Make any future auxiliary-state
+                    # leak a loud save-time failure.
                     _assert_no_comm_eff_state(model_state_dict)
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)

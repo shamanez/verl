@@ -37,7 +37,6 @@ __all__ = [
     "CommEffConfig",
 ]
 
-Q_BASIS_FAMILIES = ("act", "grad", "adv", "tail", "hybrid", "ticket")
 COMPRESSION_TYPES = ("dense", "powersgd")
 
 
@@ -88,7 +87,6 @@ class CommEffSpectralConfig(BaseConfig):
     )
     max_targets: int = -1
     ema_device: str = "cpu"
-    correction_mode: str = "signed_ema"
     signed_ema_alpha: float = 0.25
 
 
@@ -112,10 +110,6 @@ class CommEffPowerSGDConfig(BaseConfig):
     qr_dtype: str = "fp32"
     reortho_eps: float = 1e-6
     fast_q_bootstrap: bool = True
-    q_basis: str = "act"
-    q_basis_passive: list = field(default_factory=list)
-    hybrid_act_cols: int = -1
-    hybrid_grad_cols: int = -1
 
 
 @dataclass
@@ -169,19 +163,14 @@ class CommEffConfig(BaseConfig):
                 "comm_eff.anchor.batch_scope must be one of (ppo_minibatch, rollout_batch); "
                 f"got {self.anchor.batch_scope!r}"
             )
-        if self.anchor.snapshot_device not in ("gpu", "cpu"):
-            raise ValueError(
-                f"comm_eff.anchor.snapshot_device must be one of (gpu, cpu); got {self.anchor.snapshot_device!r}"
-            )
+        if self.anchor.snapshot_device != "cpu":
+            raise ValueError(f"comm_eff.anchor.snapshot_device must be 'cpu'; got {self.anchor.snapshot_device!r}")
         if self.anchor.lookahead_mode not in LOOKAHEAD_MODES:
             raise ValueError(
                 f"comm_eff.anchor.lookahead_mode must be one of {LOOKAHEAD_MODES}; got {self.anchor.lookahead_mode!r}"
             )
         if self.anchor.lookahead_strength < 0.0:
-            raise ValueError(
-                "comm_eff.anchor.lookahead_strength must be >= 0; "
-                f"got {self.anchor.lookahead_strength}"
-            )
+            raise ValueError(f"comm_eff.anchor.lookahead_strength must be >= 0; got {self.anchor.lookahead_strength}")
         if self.anchor.lookahead_rollout_source not in LOOKAHEAD_ROLLOUT_SOURCES:
             raise ValueError(
                 "comm_eff.anchor.lookahead_rollout_source must be one of "
@@ -193,8 +182,7 @@ class CommEffConfig(BaseConfig):
             )
         if self.anchor.warmup_mode not in ("stale_correct", "q_only"):
             raise ValueError(
-                "comm_eff.anchor.warmup_mode must be one of (stale_correct, q_only); "
-                f"got {self.anchor.warmup_mode!r}"
+                f"comm_eff.anchor.warmup_mode must be one of (stale_correct, q_only); got {self.anchor.warmup_mode!r}"
             )
         if isinstance(self.anchor.lookahead_window_snapshots, bool) or not isinstance(
             self.anchor.lookahead_window_snapshots, int
@@ -205,8 +193,7 @@ class CommEffConfig(BaseConfig):
             )
         if self.anchor.lookahead_window_snapshots < 2:
             raise ValueError(
-                "comm_eff.anchor.lookahead_window_snapshots must be >= 2; "
-                f"got {self.anchor.lookahead_window_snapshots}"
+                f"comm_eff.anchor.lookahead_window_snapshots must be >= 2; got {self.anchor.lookahead_window_snapshots}"
             )
         if isinstance(self.anchor.lookahead_min_snapshots, bool) or not isinstance(
             self.anchor.lookahead_min_snapshots, int
@@ -217,9 +204,7 @@ class CommEffConfig(BaseConfig):
             )
         if self.anchor.lookahead_min_snapshots != -1:
             if not rank1_relex_enabled(self.anchor):
-                raise ValueError(
-                    "comm_eff.anchor.lookahead_min_snapshots is only meaningful with active rank1_relex"
-                )
+                raise ValueError("comm_eff.anchor.lookahead_min_snapshots is only meaningful with active rank1_relex")
             if not 2 <= self.anchor.lookahead_min_snapshots <= self.anchor.lookahead_window_snapshots:
                 raise ValueError(
                     "comm_eff.anchor.lookahead_min_snapshots must be -1 or in "
@@ -246,15 +231,9 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.ema_device must be one of (gpu, cpu); got {self.spectral.ema_device!r}"
             )
-        if self.spectral.correction_mode != "signed_ema":
-            raise ValueError(
-                "comm_eff.spectral.correction_mode must be 'signed_ema'; "
-                f"got {self.spectral.correction_mode!r}"
-            )
         if not 0.0 <= self.spectral.signed_ema_alpha <= 1.0:
             raise ValueError(
-                "comm_eff.spectral.signed_ema_alpha must be in [0, 1]; "
-                f"got {self.spectral.signed_ema_alpha}"
+                f"comm_eff.spectral.signed_ema_alpha must be in [0, 1]; got {self.spectral.signed_ema_alpha}"
             )
 
     def _validate_powersgd(self) -> None:
@@ -267,39 +246,11 @@ class CommEffConfig(BaseConfig):
         if self.powersgd.pp_size < 1:
             raise ValueError(f"comm_eff.powersgd.pp_size must be >= 1; got {self.powersgd.pp_size}")
         if self.powersgd.update_cadence < 1:
-            raise ValueError(
-                f"comm_eff.powersgd.update_cadence must be >= 1; got {self.powersgd.update_cadence}"
-            )
-        if self.powersgd.qr_dtype not in ("fp32", "bf16"):
-            raise ValueError(
-                f"comm_eff.powersgd.qr_dtype must be one of (fp32, bf16); got {self.powersgd.qr_dtype!r}"
-            )
+            raise ValueError(f"comm_eff.powersgd.update_cadence must be >= 1; got {self.powersgd.update_cadence}")
+        if self.powersgd.qr_dtype != "fp32":
+            raise ValueError(f"comm_eff.powersgd.qr_dtype must be 'fp32'; got {self.powersgd.qr_dtype!r}")
         if self.powersgd.reortho_eps <= 0.0:
-            raise ValueError(
-                f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}"
-            )
-        if self.powersgd.q_basis not in Q_BASIS_FAMILIES:
-            raise ValueError(
-                f"comm_eff.powersgd.q_basis must be one of {Q_BASIS_FAMILIES}; got {self.powersgd.q_basis!r}"
-            )
-        for family in list(self.powersgd.q_basis_passive):
-            if family not in Q_BASIS_FAMILIES:
-                raise ValueError(
-                    "comm_eff.powersgd.q_basis_passive entries must each be one of "
-                    f"{Q_BASIS_FAMILIES}; got {family!r}"
-                )
-        hybrid_used = self.powersgd.q_basis == "hybrid" or "hybrid" in list(self.powersgd.q_basis_passive)
-        if hybrid_used:
-            act_cols = self.powersgd.hybrid_act_cols
-            grad_cols = self.powersgd.hybrid_grad_cols
-            if (act_cols < 0) != (grad_cols < 0):
-                raise ValueError(
-                    "comm_eff.powersgd.hybrid_act_cols and hybrid_grad_cols must both be -1 or both be >= 0"
-                )
-            if act_cols >= 0 and act_cols + grad_cols != self.powersgd.rank:
-                raise ValueError(
-                    "comm_eff.powersgd.hybrid_act_cols + hybrid_grad_cols must equal powersgd.rank"
-                )
+            raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
 
     def _validate_cross_circuit_contract(self) -> None:
         from verl.workers.comm_eff.lookahead import rank1_relex_enabled
@@ -322,9 +273,7 @@ class CommEffConfig(BaseConfig):
             if not self.spectral.enabled:
                 raise ValueError("comm_eff.anchor.lookahead_mode='rank1_relex' requires spectral.enabled=true")
             if self.anchor.cadence % self.spectral.cadence != 0:
-                raise ValueError(
-                    "comm_eff.anchor.cadence must be divisible by spectral.cadence for rank1_relex"
-                )
+                raise ValueError("comm_eff.anchor.cadence must be divisible by spectral.cadence for rank1_relex")
             if self.anchor.lookahead_rollout_source == "stale_paired" and self.anchor.lookahead_strength != 0.0:
                 raise ValueError(
                     "rank1_relex with nonzero strength requires auto/current_step trajectories; "
@@ -337,8 +286,6 @@ class CommEffConfig(BaseConfig):
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires PowerSGD")
             if not self.anchor.owns_q:
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
-            if self.powersgd.q_basis != "act" or list(self.powersgd.q_basis_passive):
-                raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires only the activation Q basis")
         if self.powersgd.fast_q_bootstrap:
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
@@ -348,5 +295,3 @@ class CommEffConfig(BaseConfig):
                 raise ValueError(
                     "comm_eff.powersgd.fast_q_bootstrap=true requires compress_recompute=true and sync_basis=true"
                 )
-            if self.powersgd.q_basis != "act":
-                raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires q_basis='act'")
