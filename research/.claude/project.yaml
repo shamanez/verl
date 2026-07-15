@@ -51,7 +51,7 @@ github:
     status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
     milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
     kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature, analysis
-    pause: [needs:human, awaiting:approval]                   # the DURABLE pause signals (set via _lib.sh flag_human / flag_awaiting_approval; cleared by the resuming stage). PROGRESS.md lines are only a local capped echo.
+    pause: ["needs:human", "awaiting:approval"]               # the DURABLE pause signals (set via _lib.sh flag_human / flag_awaiting_approval; cleared by the resuming stage). PROGRESS.md lines are only a local capped echo.
   plan_home: issue-body                                       # the plan's SSOT is the ISSUE BODY between <!-- plan:start --> / <!-- plan:end --> markers (_lib.sh plan_publish/plan_fetch). Local .claude/state/plan-cache/<N>.md is a gitignored derived cache; .claude/plans/ holds ONLY the two plan templates. Human edits to the plan block ON GitHub are authoritative — every gating stage re-fetches.
 
 commands:                                                     # the per-issue stage commands (skills in .claude/skills/) — each invokable as /<name> <issue>
