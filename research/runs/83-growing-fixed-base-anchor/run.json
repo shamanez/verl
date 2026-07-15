@@ -60,19 +60,53 @@
         "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "sliding_window",
         "VAL_BEFORE_TRAIN": "False"
       }
+    },
+    {
+      "name": "proj-w2-smoke",
+      "wandb_name": "83-proj-w2-smoke",
+      "gate": false,
+      "post_arm": true,
+      "step_target": 24,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w2-smoke/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "2",
+        "VAL_BEFORE_TRAIN": "False",
+        "TEST_FREQ": "1000",
+        "TOTAL_TRAINING_STEPS": "24"
+      }
+    },
+    {
+      "name": "proj-w4-smoke",
+      "wandb_name": "83-proj-w4-smoke",
+      "gate": false,
+      "post_arm": true,
+      "step_target": 44,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w4-smoke/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS": "4",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "4",
+        "VAL_BEFORE_TRAIN": "False",
+        "TEST_FREQ": "1000",
+        "TOTAL_TRAINING_STEPS": "44"
+      }
     }
   ],
   "success_criteria": [
     "probe reaches step 24 on 2xH200 with no OOM; peak GPU mem + s/step recorded in `runs/83-growing-fixed-base-anchor/`",
     "probe step-20 per-fire log line reads `history_mode=growing_fixed_base` (code touch effective)",
     "both full arms reach step 100 with no NaN / non-finite grads",
-    "growing arm `train.log` shows `history_mode=growing_fixed_base` with per-fire `checkpoints` growing 2→~10; control shows `history_mode=sliding_window` capped at 4",
-    "`val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N` at step 100 (read from the on-box `train.log` capture, not WandB alone — see Notes): growing ≥ control − 1.0 point (primary bar; step 75 corroborates; step 25/50 expected ~identical)",
-    "secondary (directional, not a hard gate): growing arm compressed-vs-dense mismatch and per-fire `evr_mean`/`r2_mean` ≤/≥ control (equal-or-better projection quality); `actor/anchor_kl_loss` not worse"
+    "growing arm `train.log` shows `history_mode=growing_fixed_base` with per-fire `checkpoints` growing 2\u2192~10; control shows `history_mode=sliding_window` capped at 4",
+    "`val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N` at step 100 (read from the on-box `train.log` capture, not WandB alone \u2014 see Notes): growing \u2265 control \u2212 1.0 point (primary bar; step 75 corroborates; step 25/50 expected ~identical)",
+    "secondary (directional, not a hard gate): growing arm compressed-vs-dense mismatch and per-fire `evr_mean`/`r2_mean` \u2264/\u2265 control (equal-or-better projection quality); `actor/anchor_kl_loss` not worse",
+    "post-arm smokes pass: proj-w2-smoke step 24 with fixed-W2 secant fires (checkpoints=2/2); proj-w4-smoke step 44 with step-40 fire showing full W4 fit (checkpoints=4/4); no NaN/OOM",
+    "every cell's anchor fires replay the full rollout batch (512 prompts / 4096 seqs)",
+    "current-method ladder evidenced in the arms' per-fire lines (W2 secant at 2 checkpoints, full fit at >=4)"
   ],
   "hypothesis": "With batch_scope=rollout_batch held equal on both arms, growing_fixed_base is non-inferior to the paired sliding_window control on MATH val accuracy at step 100 (within 1.0 absolute point) with no divergence AND equal-or-lower compressed-vs-dense mismatch. Clean negative: growing landing >=1.0 point below control at step 100, or NaN/divergent, or raising mismatch.",
   "wandb": {
-    "project": "verl_compression_research",
+    "project": "83-growing-fixed-base-anchor",
     "entity": "shamanework-pl",
     "group": "83-growing-fixed-base-anchor"
   },
