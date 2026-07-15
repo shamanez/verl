@@ -36,12 +36,20 @@ def _load(mod_name, rel_path):
 _la = _load("verl_workers_comm_eff_rank1_relex_testonly", "verl/workers/comm_eff/lookahead.py")
 
 
-def _cfg(*, window=4, min_snapshots=-1, strength=1.0, mode="rank1_relex", enabled=True):
+def _cfg(
+    *,
+    window=4,
+    min_snapshots=-1,
+    strength=1.0,
+    mode="rank1_relex",
+    enabled=True,
+    rollout_source="auto",
+):
     return types.SimpleNamespace(
         lookahead_anchor=enabled,
         lookahead_mode=mode,
         lookahead_strength=strength,
-        lookahead_rollout_source="auto",
+        lookahead_rollout_source=rollout_source,
         lookahead_min_snapshots=min_snapshots,
         lookahead_window_snapshots=window,
     )
@@ -77,6 +85,27 @@ def test_rank1_mode_uses_complete_configured_window():
     assert _la.rank1_relex_enabled(cfg)
     assert _la.lookahead_num_source_points(cfg) == 5
     assert _la.lookahead_min_points(cfg) == 5
+
+
+def test_rank1_enable_predicates_require_master_flag_and_supported_mode():
+    assert _la.lookahead_enabled(_cfg())
+    assert _la.rank1_relex_enabled(_cfg())
+    assert not _la.lookahead_enabled(_cfg(enabled=False))
+    assert not _la.rank1_relex_enabled(_cfg(enabled=False))
+    assert not _la.lookahead_enabled(_cfg(mode="disabled"))
+    assert not _la.lookahead_enabled(_cfg(mode="unknown"))
+    assert not _la.lookahead_enabled(None)
+    assert _la.lookahead_num_source_points(_cfg(enabled=False)) == 0
+    assert _la.lookahead_min_points(_cfg(enabled=False)) == 0
+
+
+def test_rollout_source_auto_tracks_rank1_state_and_explicit_values_pass_through():
+    assert _la.resolve_lookahead_rollout_source(_cfg()) == "current_step"
+    assert _la.resolve_lookahead_rollout_source(_cfg(enabled=False)) == "stale_paired"
+    assert _la.resolve_lookahead_rollout_source(_cfg(mode="disabled")) == "stale_paired"
+    assert _la.resolve_lookahead_rollout_source(None) == "stale_paired"
+    assert _la.resolve_lookahead_rollout_source(_cfg(rollout_source="stale_paired")) == "stale_paired"
+    assert _la.resolve_lookahead_rollout_source(_cfg(rollout_source="current_step")) == "current_step"
 
 
 def test_rank1_progressive_mode_resolves_explicit_minimum_without_shrinking_window():
@@ -404,18 +433,6 @@ def test_bf16_restoration_and_zero_motion_identity():
     assert unchanged is still[-1]
     assert stats["zero_motion"]
     assert stats["evr"] == 0.0 and stats["slope"] == 0.0
-
-
-def test_rank1_never_calls_fixed_linear_math(monkeypatch):
-    ticks = [1, 7, 20, 31]
-    snapshots, _base, _direction = _linear_history(ticks)
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("fixed_linear compute_theta_hat must not be called")
-
-    monkeypatch.setattr(_la, "compute_theta_hat", forbidden)
-    projected, info = _la.Rank1RelexProjector(_cfg()).project(snapshots, ticks, 45)
-    assert projected and info["targets_projected"] == len(snapshots[-1])
 
 
 @pytest.mark.parametrize(

@@ -2,8 +2,8 @@
 # Sequential Qwen2.5-Math-1.5B / MATH comparison matrix for rank1_relex.
 #
 # Default order: W2/secant, corrected strict-readiness W4, progressive
-# W2->W3->W4 readiness, matched W2 no-increment, legacy decoder-only
-# fixed_linear, strict dense GRPO. Pass arm names to run a subset, e.g.
+# W2->W3->W4 readiness, matched W2 no-increment, and strict dense GRPO.
+# Pass arm names to run a subset, e.g.
 #
 #   bash run_qwen25_math_1p5b_relex_comparison_fsdp.sh w2_rank1 w4_rank1 w4_progressive
 set -Eeuo pipefail
@@ -13,7 +13,7 @@ VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 LAUNCHER="$HERE/run_qwen25_math_1p5b_rank1_relex_fsdp.sh"
 
 if (( $# == 0 )); then
-  ARMS=(w2_rank1 w4_rank1 w4_progressive w2_no_increment fixed_linear dense)
+  ARMS=(w2_rank1 w4_rank1 w4_progressive w2_no_increment dense)
 else
   ARMS=("$@")
 fi
@@ -25,48 +25,41 @@ fi
 
 run_arm() {
   local arm="$1"
-  local experiment mode window min_snapshots strength warmup probe_enabled comm_enabled
+  local experiment mode window min_snapshots strength warmup comm_enabled
   local compression_type=powersgd
   local anchor_enabled=true anchor_owns_q=true replay=true lookahead=true spectral=true correction=signed_ema
 
   case "$arm" in
     w2_rank1)
       experiment="relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b"
-      mode=rank1_relex window=2 min_snapshots=-1 strength=1.0 warmup=q_only probe_enabled=true comm_enabled=true
+      mode=rank1_relex window=2 min_snapshots=-1 strength=1.0 warmup=q_only comm_enabled=true
       ;;
     w4_rank1)
       # Corrected rerun of the original W=4 arm. The qstagefix label distinguishes
       # the frozen-Q PPO handoff from the legacy diagnostic run whose anchor Q
       # changed inside update_actor at cadence boundaries.
       experiment="relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b"
-      mode=rank1_relex window=4 min_snapshots=-1 strength=1.0 warmup=q_only probe_enabled=true comm_enabled=true
+      mode=rank1_relex window=4 min_snapshots=-1 strength=1.0 warmup=q_only comm_enabled=true
       ;;
     w4_progressive)
       # Keep W=4 as the retained target window, but start from the earliest
       # legal two-checkpoint estimate: W2 secant at global step 20, W3 rank1 at
       # step 30, then sliding W4 from step 40 onward (C=K=20, two ticks/step).
       experiment="relex_cmp_qstagefix_v1_w4_progressive_min2_alltensor_alpha1_math_qwen25_math_1p5b"
-      mode=rank1_relex window=4 min_snapshots=2 strength=1.0 warmup=q_only probe_enabled=true comm_enabled=true
+      mode=rank1_relex window=4 min_snapshots=2 strength=1.0 warmup=q_only comm_enabled=true
       ;;
     w2_no_increment)
       experiment="relex_cmp_qstagefix_v1_w2_alltensor_alpha0_math_qwen25_math_1p5b"
-      mode=rank1_relex window=2 min_snapshots=-1 strength=0.0 warmup=q_only probe_enabled=true comm_enabled=true
-      ;;
-    fixed_linear)
-      # Legacy comparator: two-source linear projection over decoder matrices
-      # only. q_only is rank1-only, so this uses the canonical stale_correct
-      # warmup and discloses that schedule difference in the run name/docs.
-      experiment="relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b"
-      mode=fixed_linear window=2 min_snapshots=-1 strength=1.0 warmup=stale_correct probe_enabled=false comm_enabled=true
+      mode=rank1_relex window=2 min_snapshots=-1 strength=0.0 warmup=q_only comm_enabled=true
       ;;
     dense)
       experiment="relex_cmp_dense_grpo_math_qwen25_math_1p5b"
-      mode=disabled window=2 min_snapshots=-1 strength=0.0 warmup=stale_correct probe_enabled=false comm_enabled=false
+      mode=disabled window=2 min_snapshots=-1 strength=0.0 warmup=stale_correct comm_enabled=false
       compression_type=dense
-      anchor_enabled=false anchor_owns_q=false replay=false lookahead=false spectral=false correction=none
+      anchor_enabled=false anchor_owns_q=false replay=false lookahead=false spectral=false correction=signed_ema
       ;;
     *)
-      echo "FATAL: unknown arm '$arm' (expected w2_rank1, w4_rank1, w4_progressive, w2_no_increment, fixed_linear, dense)" >&2
+      echo "FATAL: unknown arm '$arm' (expected w2_rank1, w4_rank1, w4_progressive, w2_no_increment, dense)" >&2
       return 2
       ;;
   esac
@@ -83,7 +76,7 @@ run_arm() {
   fi
 
   echo "=== comparison arm=$arm experiment=$experiment ==="
-  echo "    mode=$mode window=$window min_snapshots=$min_snapshots strength=$strength warmup=$warmup probe=$probe_enabled comm_eff=$comm_enabled codec=$compression_type"
+  echo "    mode=$mode window=$window min_snapshots=$min_snapshots strength=$strength warmup=$warmup comm_eff=$comm_enabled codec=$compression_type"
   env \
     PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}" \
     EXPERIMENT_NAME="$experiment" \
@@ -108,10 +101,6 @@ run_arm() {
     COMM_EFF_ANCHOR_WARMUP_MODE="$warmup" \
     COMM_EFF_SPECTRAL_ENABLED="$spectral" \
     COMM_EFF_SPECTRAL_CORRECTION_MODE="$correction" \
-    COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED="$probe_enabled" \
-    COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES="${COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES:-16}" \
-    COMM_EFF_PROBE_OUT_DIR="$run_dir/rank1_projection_probe" \
-    COMM_EFF_PROBE_RANK0_ONLY=true \
     bash "$LAUNCHER"
 
   if [[ ! -f "$run_dir/done.flag" ]]; then

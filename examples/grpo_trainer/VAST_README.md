@@ -38,11 +38,15 @@ ssh. `pkill -f "pip install"` over ssh kills your own shell — use
 
 ## Convention
 
-Filename: `vast_<scenario>_<model>_<algo>_<dataset>.sh`. Examples:
+The current launchers on the Qwen2.5-Math-1.5B / MATH surface:
 
-- `vast_smoke_qwen25_0p5b_grpo_gsm8k.sh` — single-GPU smoke
-- `vast_baseline_qwen3_4b_grpo_gsm8k.sh` — M0 baseline (to be added)
-- `vast_baseline_qwen3_1p7b_grpo_gsm8k.sh` — cheap-tier baseline (to be added)
+- `vast_comm_eff_engine_grpo.sh`: the shared, model/dataset-agnostic comm-eff
+  engine (every MATH launcher `exec`s it; `MODEL_PATH` / `DATA_DIR` /
+  `EXPERIMENT_NAME` are supplied by the caller). Dense control = same engine with
+  `COMM_EFF_ENABLED=false`.
+- `run_qwen25_math_1p5b_rank1_relex_fsdp.sh`: the MATH method/base launcher.
+- `run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh`: comparison matrix.
+- `run_qwen25_math_1p5b_relex_comparison_fsdp.sh`: legacy matrix + dense arm.
 
 Each launcher:
 
@@ -91,7 +95,7 @@ forwarded through the launcher's trailing `"$@"`. Example:
 
 ```bash
 COMM_EFF_MASK_RECOMPUTE=false EXPERIMENT_NAME=mask_recompute_off \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
+  bash examples/grpo_trainer/vast_comm_eff_engine_grpo.sh \
   trainer.total_training_steps=10
 ```
 
@@ -136,11 +140,11 @@ git checkout — no scp, no `/tmp` scripts, no laptop-side file transfers.
 ## Iteration loop (e.g. fitting GPUs, fighting OOM)
 
 ```text
-laptop:  edit examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
-laptop:  git commit -am "smoke: drop batch to 4 for OOM"
+laptop:  edit examples/grpo_trainer/vast_comm_eff_engine_grpo.sh
+laptop:  git commit -am "engine: drop batch to 4 for OOM"
 laptop:  git push origin autonomous-harness-v1
 box:     cd /workspace/verl && git pull
-box:     bash examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
+box:     bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
 ```
 
 Repeat. No need to re-provision the box for code changes — the verl

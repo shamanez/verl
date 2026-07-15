@@ -8,27 +8,30 @@
 
 ## 1. What this fork is for
 
-This is **not** vanilla verl. It's a private research fork building a
-**communication-efficient, pipeline-parallel verl GRPO trainer**: the *training*
-path (activation + gradient traffic across pipeline-stage boundaries) runs under
-a communication-efficient method — per-element (per-token, per-dimension)
-activation masking at the boundaries, with optional anchor + spectral correction. Rollouts may come from ordinary,
-non-pipeline-parallel verl + vLLM. Trained on **Qwen2.5-1.5B-Instruct + GSM8K**.
-With the method disabled, training is byte-identical to upstream verl. The
-project's goal is captured in
-[`research/.claude/GOAL.md`](research/.claude/GOAL.md); the engineering map is
-[`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
+This private fork builds a **communication-efficient, pipeline-parallel verl GRPO
+trainer**. PowerSGD projects boundary activations, a delayed dense anchor supplies
+`Q` and `M`, and RELEX projects anchor weights forward. Rollouts may use ordinary
+verl + vLLM; disabling the method leaves the dense upstream path. See
+[`research/.claude/GOAL.md`](research/.claude/GOAL.md) and [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
 
-**Fixed control variables — do not change without a separate justification:**
-- **Model**: Qwen2.5-1.5B-Instruct (the dense control is anchored to it).
-- **RL loss**: vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
-- **Hardware**: default **1×H200** on Vast.ai via the fixed
-  `verl-research-vllm020` template; provisioning ladder 1×H200 → 1×B200 →
-  2×H200, machine reliability strictly >0.99 on every rung (see
-  `research/.claude/project.yaml` `default_compute`). 1–8 GPUs supported.
-- **Datasets**: EASY = GSM8K (the default); HARD = Big-Math
-  (`gshasiri/Big-Math-RL-Verified-filtered`) at `MAX_RESPONSE_LENGTH=4096`.
-  Registry: `research/.claude/project.yaml` `datasets:`.
+**Current default answer/reference surface (report `df10b9be`):**
+- **Model/data**: `Qwen/Qwen2.5-Math-1.5B`; MATH train/test from
+  `EleutherAI/hendrycks_math`; last-`\boxed{}` + `is_equiv` reward.
+- **GRPO**: batch 512, mini-batch 256, rollout `n=8`, prompt/response 1024/3072,
+  AdamW `1e-6`, `low_var_kl=0.001`, reward-side KL off, entropy 0, 100 steps,
+  evaluation every 25; the reference run used **2×H200 NVL**.
+- **Activation projection**: PowerSGD rank 77; synchronized, warm-started,
+  activation-derived `Q`, owned by the anchor and read by the fast path.
+- **Anchor signal**: paired dense CPU replay, cadence/delay 20/20 optimizer ticks,
+  256-prompt PPO-mini-batch scope, and all-floating signed-EMA `M` (338 tensors,
+  `alpha=0.25`, `beta_anc=0.50`).
+- **Latest completed reference**: qboot-v2 composite — fast-Q bootstrap,
+  `stale_correct`, RELEX W2→W3→W4 (`window=4`, min 2, strength 1), current trajectories.
+- **Scientific status**: this is the default surface/reference, **not a promoted
+  compression champion**. The completed run predates anchor-KL parity; its corrected
+  rerun stopped before the first dense anchor backward. Generic Hydra stays all-off.
+
+Exact values: `research/.claude/project.yaml` `compression_defaults.math_qwen25_math_1p5b`.
 
 ## 2. Where to look
 
@@ -43,14 +46,13 @@ under `research/`. The project's north-star — what "done" means — is
 | **How the comm-eff method is actually implemented in this fork** | [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md) — per-component map (mask / anchor / spectral / FSDP integration), end-to-end data flow, and an explicit "what's NOT yet implemented" gap list |
 | **The stage commands** (one per lifecycle stage, `/<cmd> <issue>`) | `research/researcher_steps.md` (index) → `research/.claude/skills/*/SKILL.md` |
 | Harness operator manual (human-only, hosted HTML; design rationale lives there) | link at the top of `research/researcher_steps.md` |
-| Leaf subagent definitions | `research/.claude/agents/*.md` |
-| **Dense control launcher (= comm-eff OFF)** | `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh` (on the project.yaml base branch) |
-| **Comm-eff method launcher** (baseline = run it with `COMM_EFF_ENABLED=false`) | `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` — the canonical accelerated base (`project.yaml default_baseline.launcher`); the older generic `vast_comm_eff_baseline_*.sh` is superseded |
+| **Current experiment report** | `docs/experiments/relex_rank1_report.html` |
+| **MATH dense control** | `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense` |
+| **Latest completed comm-eff reference** | `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite` (explicit arm required; bare invocation runs a matrix) |
 | **Where finished-run verdicts + reports live** (published, never local) | issue close comment (SSOT) → https://com-eff-rlvr.pages.dev/runs/ (auto-published by `/close`) → R2 bucket `shamane-pluralis`, everything for a run under prefix `autonomous-harness-rlvr-compression/<run_id>/…` — reports at `…/<run_id>/…` and training checkpoints at `…/<run_id>/<cell>/checkpoints/…` (the old `verl-research/` prefix is retired); config: `project.yaml` `reports.r2` |
 | Vast-ai launcher conventions + launch-script stability contract | `examples/grpo_trainer/VAST_README.md` |
 | Vast template registry (FIXED, one entry) | `research/.claude/skills/vast-provision/templates.json` |
 | Credentials (path only — never echo values) | `~/.config/verl-research/secrets.env` (`chmod 600`) |
-| **Project north-star (what "done" means)** | `research/.claude/GOAL.md` |
 
 The GitHub repo the harness watches is
 **`shamanez/verl-compression-research`** (private) — the issue queue only:
@@ -166,7 +168,7 @@ touch ~/.claude-kill-switch
 rm ~/.claude-kill-switch
 ```
 
-### Manual baseline launch (bypass the harness)
+### Manual reference launch (bypass the harness)
 
 Provision directly with `research/.claude/skills/vast-provision/run.sh` (locked
 template `verl-research-vllm020`, hash `3b0f8b726ac3036d6c007bfa13b6d75f` — its
@@ -174,7 +176,8 @@ onstart script handles docker + verl install (editable, `--no-deps`); the
 HF/WandB/R2 secrets are seeded onto the box by the provisioning tools
 (`_seed_secrets.sh`, called from vast-provision/vast-attach), NOT the onstart),
 then ssh in and run
-`examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`. Full procedure:
+`bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite`.
+This reproduces the latest completed diagnostic reference, not a promoted arm. Full procedure:
 operator-manual appendix (link at the top of `research/researcher_steps.md`).
 
 ## 5. Commits

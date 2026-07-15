@@ -21,9 +21,7 @@ each pipeline-boundary block's hidden-state output ``M`` (shape ``(N, H)`` —
     M_hat = (M @ Q) @ Q.T            # forward; Q DETACHED, M in-graph (NO STE)
 
 The boundary therefore transmits only the ``N·r`` projected coordinates
-``Y = M @ Q`` (plus the communication-free shared ``Q``), the identical logical
-PP byte budget as the PRF mask at ``p = 1 − r/H`` (``r=102 ≡ p=0.95`` at
-``H=2048``).
+``Y = M @ Q`` plus the communication-free shared ``Q``.
 
 Three properties make this correct:
 
@@ -57,10 +55,7 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-# Reuse the mask's boundary-selection + decoder-discovery helpers so the
-# PowerSGD codec masks/compresses EXACTLY the same boundary blocks as the PRF
-# mask (the matched-budget comparison requires identical boundary placement).
-from verl.workers.comm_eff.activation_mask import (
+from verl.workers.comm_eff.boundary import (
     decoder_boundary_indices,
     find_decoder_layers,
 )
@@ -76,10 +71,10 @@ __all__ = [
 ]
 
 # Per-layer seed mixing constants. seed_L = (base_seed*MIX_BASE +
-# layer_idx*MIX_LAYER) & MASK31. The mask keeps the value positive int31 so it is
+# layer_idx*MIX_LAYER) & MASK31. The bit mask keeps the value positive int31 so it is
 # a valid torch.Generator manual_seed on every backend.
-_PRF_MIX_BASE = 1_000_003
-_PRF_MIX_LAYER = 7919
+_SEED_MIX_BASE = 1_000_003
+_SEED_MIX_LAYER = 7919
 _MASK31 = 0x7FFFFFFF
 
 # Q-basis families with implemented sketch construction. "act" is the
@@ -92,10 +87,10 @@ def powersgd_layer_seed(base_seed: int, layer_idx: int) -> int:
     """Deterministic per-layer basis seed.
 
     ``seed_L = (base_seed·1_000_003 + layer_idx·7919) & 0x7FFFFFFF``. Pure — no
-    side effects. The mask keeps it int31-positive so the same value is a legal
+    side effects. The bit mask keeps it int31-positive so the same value is a legal
     ``torch.Generator.manual_seed`` on CPU and every accelerator.
     """
-    return (int(base_seed) * _PRF_MIX_BASE + int(layer_idx) * _PRF_MIX_LAYER) & _MASK31
+    return (int(base_seed) * _SEED_MIX_BASE + int(layer_idx) * _SEED_MIX_LAYER) & _MASK31
 
 
 def orthonormalize(mat: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
@@ -169,8 +164,7 @@ def init_basis(
 class PowerSGDActivationCompressor:
     """Installs/clears in-graph PowerSGD projection hooks on boundary blocks.
 
-    Mirrors :class:`verl.workers.comm_eff.activation_mask.ActivationMasker`'s
-    lifecycle so the engine can drive it identically:
+    The engine drives the codec through a register/context/update lifecycle:
 
     * ``register(module)`` discovers the boundary decoder blocks, lazily
       bootstraps each block's deterministic basis ``Q`` and installs a
@@ -353,9 +347,8 @@ class PowerSGDActivationCompressor:
         #                        compressed forward per boundary (codec health).
         self.last_q_cond: dict[int, float] = {}
         self.last_reconstruction_rel_error: dict[int, float] = {}
-        # The logical PP byte budget actually carried, n·r per token-layer; the
-        # engine logs comm_eff/logical_pp_bytes_powersgd_y_only against the PRF
-        # equivalent for budget-equality checks.
+        # The logical PP payload actually carried, n·r coordinates per
+        # token-layer.
         self.last_y_coords_per_token: int = self.rank
 
         # Measured inter-stage communication volume (per optimizer
@@ -623,56 +616,6 @@ class PowerSGDActivationCompressor:
                     compressor.tick_elems_compressed += float(N) * float(r_sent)
                     compressor.tick_elems_dense_equiv += float(N) * float(Hdim)
 
-                # Dump A (the boundary activation M), A_hat=(A@Q)Q.T and
-                # the basis Q for THIS boundary, keyed by the UNIFIED
-                # (global_step, optimizer_tick) so the analyst can recompute
-                # reconstruction_rel_error from the dumped fp32 tensors and confirm
-                # it matches `rel` above (the fp32-dump-fidelity invariant). Key on
-                # state.current_optimizer_tick() — the SAME
-                # tick the merger / anchor / G_dense dumps use — NOT the
-                # per-micro-batch fwd_generation. Keying on fwd_generation made the
-                # activation dumps open a fresh tick per micro-batch forward and
-                # starve the max_ticks budget before any gradient dump ran (no
-                # G_comp/G_corr/G_dense landed). fwd_generation is kept in `extra`
-                # for disambiguation. Gated on the gradient-bearing fast forward
-                # (grad_enabled) so it captures the SAME activations the codec used.
-                _state = compressor._state
-                _w = getattr(_state, "_capture_writer", None) if _state is not None else None
-                if _w is not None and grad_enabled and not compressor._anchor_sketch_mode:
-                    _tname = f"boundary_{layer_idx}"
-                    _tick = _state.capture_tick() if hasattr(_state, "capture_tick") else 0
-                    _stats = {
-                        "layer_idx": int(layer_idx),
-                        "rank": int(q_act.shape[1]),
-                        "fwd_generation": int(compressor._fwd_generation),
-                        "reconstruction_rel_error": rel,
-                        "q_cond": q_cond,
-                    }
-                    _w.dump(
-                        role="A",
-                        target_name=_tname,
-                        tensor=M32,
-                        global_step=int(compressor._global_step),
-                        optimizer_tick=int(_tick),
-                        extra=_stats,
-                    )
-                    _w.dump(
-                        role="A_hat",
-                        target_name=_tname,
-                        tensor=Mhat32,
-                        global_step=int(compressor._global_step),
-                        optimizer_tick=int(_tick),
-                        extra=_stats,
-                    )
-                    _w.dump(
-                        role="Q",
-                        target_name=_tname,
-                        tensor=q_fp32,
-                        global_step=int(compressor._global_step),
-                        optimizer_tick=int(_tick),
-                        extra=_stats,
-                    )
-
                 # Block-power-iteration sketch V += Mᵀ (M Q) = Mᵀ Y, OFF the
                 # graph, accumulated ONLY on the gradient-bearing actor-train
                 # forward (path_tag == train) and at most once per forward
@@ -690,7 +633,7 @@ class PowerSGDActivationCompressor:
                         compressor._sketch_count[layer_idx] = compressor._sketch_count.get(layer_idx, 0) + 1
                     compressor._sketched_this_gen[layer_idx] = compressor._fwd_generation
 
-            # Count one projection application (mirrors the mask counter).
+            # Count one projection application.
             state = compressor._state
             if state is not None:
                 if hasattr(state, "note_powersgd_application"):
@@ -742,13 +685,12 @@ class PowerSGDActivationCompressor:
     # ----------------------------------------------------------------------
     # Basis update (block power iteration) — called AFTER the actor backward
     # ----------------------------------------------------------------------
-    def maybe_update_basis(self, *, is_clean_step: bool) -> bool:
+    def maybe_update_basis(self) -> bool:
         """Run ``Q ← orth(V)`` at cadence, AFTER the gradient-bearing actor work.
 
-        Called by the engine's end-of-``train_batch`` hook. Skips the update on a
-        clean step (the dense refresh keeps the prior basis, mirroring the mask's
-        no-V-no-Q-on-clean rule) and on non-cadence steps. Clears the sketch
-        after a successful update. Returns True iff Q was updated.
+        Called by the engine's end-of-``train_batch`` hook. Skips non-cadence
+        steps, clears the sketch after a successful update, and returns True iff
+        Q was updated.
 
         Because this runs AFTER backward, ``Q`` was frozen for both paired GRPO
         forwards of this step; the update advances ``Q_t → Q_{t+1}`` for the NEXT
@@ -765,7 +707,7 @@ class PowerSGDActivationCompressor:
         ``V_global = Σ_ranks Σ_microbatch Mᵀ(MQ)`` (the global activation
         second-moment projected through ``Q``) → bit-identical consensus ``Q`` on
         every rank, differing only per boundary. DP training is untouched; this
-        is just an ``H×r`` all-reduce per boundary at each non-clean update.
+        is just an ``H×r`` all-reduce per boundary at each update.
 
         Orthonormalization is scale-invariant, so summing the raw per-rank ``V``s
         (rather than averaging) is exactly the pooled direction — no per-rank
@@ -789,11 +731,6 @@ class PowerSGDActivationCompressor:
             "FAST net must NEVER update Q when the anchor owns it. The engine_workers "
             "gate (fast_owns_q) must have leaked."
         )
-        if is_clean_step:
-            # No V accumulated on a clean step (the train forward ran dense, no
-            # hook) — nothing to do; keep Q_t. Clear any stray sketch defensively.
-            self._reset_sketch()
-            return False
         gs = int(self._global_step)
         cadence = max(1, int(self.update_cadence))
         # gs <= 0 is the pre-train boundary; never update there.

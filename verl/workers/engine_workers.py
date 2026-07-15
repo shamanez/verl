@@ -44,7 +44,6 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
 from verl.workers.comm_eff import maybe_build_comm_eff_state
-from verl.workers.comm_eff.capture import maybe_build_weight_traj_observer
 from verl.workers.comm_eff.state import comm_eff_metrics
 from verl.workers.config import (
     ActorConfig,
@@ -704,9 +703,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        # Reference-policy log-prob is an RL-measurement path; masking must not
-        # fire here. The tag trips the assert if this path ever shares the actor
-        # engine.
+        # Reference-policy log-prob is an RL-measurement path. The path tag keeps
+        # actor-train compression confined even if this path shares the engine.
         with self._comm_eff_path("ref_logprob"):
             output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
@@ -715,54 +713,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        # Old-policy log-prob recompute is an RL-measurement path. By default no
-        # compression hooks register here. When mask_recompute or
-        # compress_recompute is enabled, this path is deliberately compressed
-        # under the "old_logprob" tag and then restores the prior mask_active
-        # state on exit.
+        # With compress_recompute enabled, old-policy log-prob uses the same
+        # frozen PowerSGD basis as the paired actor-train forward.
         with self._comm_eff_path("old_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
-            # Thread the trainer step so clean-step gates and PRF keys see the
-            # real global_step. No-op when disabled.
-            global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
-            stamped_mask_active = False
-            prev_mask_active = False
+            self._comm_eff_thread_global_step(data, comm_eff_state)
+            stamped_compression_active = False
+            prev_compression_active = False
             if comm_eff_state is not None:
-                mask_cfg = getattr(comm_eff_state.config, "mask", None)
-                mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
-                mask_recompute = bool(getattr(mask_cfg, "mask_recompute", False)) if mask_cfg is not None else False
-                # On a clean step the old-logprob recompute MUST run
-                # unmasked too (both gradient-feeding forwards clean ⇒ the PPO
-                # IS ratio r≈1 and the train forward sees the true dense grad).
-                # So suppress the mask_recompute stamp when is_clean_step().
-                clean_step = comm_eff_state.is_clean_step(global_step)
-                if (
-                    mask_enabled
-                    and mask_recompute
-                    and not clean_step
-                    and getattr(comm_eff_state, "masker", None) is not None
-                ):
-                    prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
-                    comm_eff_state.mask_active = True
-                    stamped_mask_active = True
-                # PowerSGD compress_recompute projects old-logprob through the
-                # same frozen Q_t as train. Because this recompute is no_grad, it
-                # does not update the basis sketch. Clean steps stay dense.
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
-                if not clean_step and getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute:
-                    prev_mask_active = bool(getattr(comm_eff_state, "mask_active", False))
-                    comm_eff_state.mask_active = True
-                    stamped_mask_active = True
-            # Stamp the stable per-row id so the masked old-logprob recompute keys
-            # each token's per-element mask on the SAME (sample_id, position_id) as
-            # the actor-train forward (no-op when disabled / no masker).
-            self._comm_eff_stamp_sample_ids(data, comm_eff_state)
+                if getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute:
+                    prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
+                    comm_eff_state.compression_active = True
+                    stamped_compression_active = True
             try:
                 output = self.actor.infer_batch(data)
             finally:
-                if stamped_mask_active and comm_eff_state is not None:
-                    comm_eff_state.mask_active = prev_mask_active
+                if stamped_compression_active and comm_eff_state is not None:
+                    comm_eff_state.compression_active = prev_compression_active
 
         return output.cpu() if output is not None else None
 
@@ -787,17 +756,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 logger.info("comm_eff: disabled (no-op) — dense GRPO path unchanged")
                 object.__setattr__(self, "_comm_eff_marker_logged", True)
             if state is not None:
-                # Construct the masker (no hooks yet — the engine registers them
-                # only inside the train forward/backward) and attach the state to
-                # the underlying train engine so its forward-hook lifecycle and
-                # grad-correction hook can see it. The state is the single object
-                # shared between the worker (sets mask_active around update_actor)
-                # and the engine (registers/clears hooks gated on mask_active).
+                # Build the retained circuits and attach their shared state to
+                # the actor engine. The worker scopes compression_active around
+                # paired forwards; the engine owns hook and correction lifetimes.
                 engine = getattr(getattr(self, "actor", None), "engine", None)
                 if engine is not None:
                     state.build(getattr(engine, "module", None))
                     object.__setattr__(engine, "_comm_eff_state", state)
-                    logger.info("comm_eff: enabled — mask circuit attached to actor train engine")
+                    logger.info("comm_eff: enabled — retained pipeline attached to actor train engine")
                     # Bind the actor DP group so the PowerSGD basis all-reduce
                     # pools sketches over exactly the data-parallel ranks.
                     powersgd = getattr(state, "powersgd", None)
@@ -828,62 +794,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             logger.warning("comm_eff.powersgd: could not bind DP group (%s); using world group", e)
         return getattr(self, "_comm_eff_state", None)
 
-    def _maybe_weight_traj_observer(self):
-        """Return this worker's weight-trajectory observer, building once.
-
-        Built INDEPENDENTLY of ``comm_eff.enabled`` (read straight off
-        ``comm_eff.probe.weight_traj.enabled``) so the plain-GRPO regime (codec
-        OFF, ``comm_eff.enabled=false`` ⇒ no comm_eff state) is still
-        instrumented. ``None`` when the flag is off — a strict no-op: no observer,
-        no summon, no I/O, train path byte-identical. Attached to the actor train
-        engine so ``BaseEngine.train_batch``'s ``_maybe_comm_eff_weight_traj``
-        hook can reach it. Dump-only — it never touches the optimizer/EMA/Q.
-        """
-        if getattr(self, "_weight_traj_observer_built", False):
-            return getattr(self, "_weight_traj_observer", None)
-        observer = None
-        try:
-            comm_eff_cfg = self.config.actor.get("comm_eff", None)
-            observer = maybe_build_weight_traj_observer(comm_eff_cfg)
-        except Exception as e:  # pragma: no cover - defensive: never break training
-            logger.warning("comm_eff.weight_traj: observer build failed (%s); instrument off", e)
-            observer = None
-        object.__setattr__(self, "_weight_traj_observer", observer)
-        object.__setattr__(self, "_weight_traj_observer_built", True)
-        if observer is not None:
-            engine = getattr(getattr(self, "actor", None), "engine", None)
-            if engine is not None:
-                object.__setattr__(engine, "_weight_traj_observer", observer)
-                logger.info("comm_eff.weight_traj: instrument attached to actor train engine")
-        return observer
-
-    def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
-        """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
-
-        The per-element mask keys on each token's ``(sample_id, position_id)``;
-        ``sample_id`` is the row's index in this rank's batch. compute_log_prob
-        and update_actor receive that batch in identical row order, so the id is
-        consistent across both forwards and rides each row through PPO mini-batch
-        splitting / dynamic-bsz repacking. No-op when masking is off.
-        """
-        if state is None or getattr(state, "masker", None) is None:
-            return
-        if "comm_eff_sample_id" in data.keys():
-            return
-        bsz = data.batch_size[0]
-        data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
-
     def _comm_eff_thread_global_step(self, data: TensorDict, state) -> Optional[int]:
         """Thread the trainer step onto the comm_eff state.
 
         The trainer stamps ``batch.meta_info["comm_eff_global_step"]`` before each
         ``update_actor`` / ``compute_log_prob`` call; ``DataProto.to_tensordict``
         carries ``meta_info`` into the worker ``data`` as non-tensor entries, so
-        we read it back here with ``tu.get``. The value is stored on
-        ``state.global_step`` (and mirrored onto the train engine's
-        ``_comm_eff_global_step`` so the mask PRF key is keyed on the real
-        trainer step instead of the stale 0 default) and returned for the
-        clean-step decision.
+        we read it back here with ``tu.get``. The value is stored on the shared
+        state and mirrored onto the train engine for PowerSGD cadence, anchor
+        timing, and rank-1 RELEX history.
 
         We use a comm_eff-private meta_info key (``comm_eff_global_step``) rather
         than the bare ``global_steps``: the vLLM rollout already emits
@@ -892,10 +811,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         collide in ``to_tensordict``'s "meta key must not be a batch column"
         assert. A private key cannot collide with any batch column.
 
-        Returns ``None`` and is a strict no-op when ``state`` is ``None`` (the
-        disabled / dense path) or when the key is absent (an entrypoint the
-        trainer did not stamp, e.g. a unit test) — in which case the prior
-        ``state.global_step`` is left untouched so behavior is unchanged.
+        Returns ``None`` when ``state`` is absent or the caller did not stamp a
+        step; in either case existing runtime state is left untouched.
         """
         if state is None:
             return None
@@ -904,8 +821,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return None
         gs = int(gs)
         state.global_step = gs
-        # Mirror onto the train engine so ActivationMasker.set_context keys the
-        # PRF mask on the real trainer step (was hard-defaulted to 0 before).
         engine = getattr(getattr(self, "actor", None), "engine", None)
         if engine is not None:
             object.__setattr__(engine, "_comm_eff_global_step", gs)
@@ -915,14 +830,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _comm_eff_path(self, tag: str):
         """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
 
-        The activation-mask hook asserts the state's
-        ``path_tag == "train"`` before firing, so stamping ``"old_logprob"`` /
-        ``"ref_logprob"`` / ``"infer"`` / ``"ckpt"`` here turns any mask leak
-        onto an RL-measurement path into an assertion instead of silent
-        gradient corruption. A strict no-op when comm_eff is disabled (no state)
-        — the ``None`` guard keeps the dense GRPO path untouched. The prior tag
-        is restored on exit so nesting (e.g. checkpoint forward inside a train
-        step) does not lose the outer context.
+        PowerSGD is allowed only on the actor-train path and, when explicitly
+        configured, the paired old-logprob recompute. The prior tag is restored
+        on exit so nested operations cannot leak compression into inference,
+        validation, reference-policy, or checkpoint paths.
         """
         state = self._maybe_comm_eff_state()
         if state is None:
@@ -947,74 +858,32 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         #
         # Optimizer-step ordering. Per
         # actor train_batch (reached via train_mini_batch -> engine.train_batch):
-        #   [anchor: UNMASKED K-stale fwd/bwd -> RAW G_anchor -> EMA, NO step]
-        #   -> masked fwd/bwd -> FSDP grad reduction -> spectral correction -> AdamW.
+        #   [anchor: DENSE K-stale fwd/bwd -> RAW G_anchor -> EMA, NO step]
+        #   -> compressed fwd/bwd -> FSDP reduction -> signed EMA -> AdamW.
         # Building the state here attaches the SpectralFilter (+ the anchor's
         # staleness queue, lazily) to the actor train engine; the engine's
         # _maybe_comm_eff_anchor_refresh hook fires at the TOP of
-        # BaseEngine.train_batch (before the masked path; G_anchor is read
+        # BaseEngine.train_batch (before the compressed path; G_anchor is read
         # raw before any correction) and the _maybe_comm_eff_grad_correction hook
         # fires AFTER backward (grads FSDP-reduced) and BEFORE optimizer_step.
         # The anchor cadence (comm_eff.anchor.cadence) gates per-step firing.
         comm_eff_state = self._maybe_comm_eff_state()
 
-        # Thread the trainer step and decide whether this whole step runs
-        # unmasked (the periodic clean optimizer-state refresh). No-op when
-        # disabled (state None ⇒ global_step None ⇒ clean_step False).
+        # Thread the real trainer step into the retained circuits.
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
-        clean_step = comm_eff_state.is_clean_step(global_step) if comm_eff_state is not None else False
 
-        # Weight-trajectory instrument. Built independently of comm_eff
-        # (so the codec-OFF regime is instrumented); strict no-op when the flag is
-        # off. When active on the dense path (no comm_eff state), mirror the
-        # trainer step onto the engine so the per-tick snapshot is keyed on the real
-        # global_step (the comm_eff state's threader is a no-op when state=None).
-        weight_traj_observer = self._maybe_weight_traj_observer()
-        if weight_traj_observer is not None and comm_eff_state is None:
-            _wt_gs = tu.get(data, key="comm_eff_global_step", default=None)
-            if _wt_gs is not None:
-                engine = getattr(getattr(self, "actor", None), "engine", None)
-                if engine is not None:
-                    object.__setattr__(engine, "_comm_eff_global_step", int(_wt_gs))
-
-        # Mask-active flag scope: set ONLY around the actor-train forward/backward
-        # so the masking forward-hooks fire exclusively on this path. The engine
-        # registers hooks on entry to its train forward_backward_batch and removes
-        # them on exit, gated on this flag; log_prob / infer / ref / validation /
-        # checkpoint forwards never set it, so they stay uncompressed.
-        #
-        # On a clean step, force mask_active=False so NO mask hooks
-        # register for this train forward — the step takes the uncompressed
-        # dense path (no clone, no spectral surgery; it inherits that path's FSDP
-        # correctness) and the single optimizer.step() (base.py:178) refreshes
-        # AdamW on the true dense gradient. The path_tag stays "train" (the clean
-        # step is still the actor-train path, merely unmasked); _comm_eff_mask_active
-        # short-circuits on mask_active=False so no hooks fire regardless of tag.
-        # The per-element mask is keyed on each token's stable (sample_id,
-        # position_id) + global_step, so the masked-step PRF schedule is
-        # deterministic across mixed masked/clean steps regardless of packing.
-        #
-        # Stamp the stable per-row id BEFORE train_mini_batch splits the batch
-        # into PPO mini-batches, so each token carries the same sample_id in the
-        # train forward and the old-logprob recompute (no-op when disabled).
-        self._comm_eff_stamp_sample_ids(data, comm_eff_state)
+        # Scope projection hooks to the actor-train forward/backward. Other paths
+        # never set this flag and therefore remain dense.
         if comm_eff_state is not None:
-            comm_eff_state.mask_active = not clean_step
-            # Stamp the only path tag the mask hook is allowed to fire on.
+            comm_eff_state.compression_active = True
             comm_eff_state.set_path_tag("train")
-            if clean_step:
-                # Count the clean step once per trainer step (the train stamp
-                # fires once per update_actor; train_mini_batch's PPO inner loop
-                # reuses this same mask_active=False). Surfaced as
-                # comm_eff/clean_steps.
-                comm_eff_state.clean_steps += 1
         actor_update_succeeded = False
         try:
             output = self.actor.train_mini_batch(data=data)
             actor_update_succeeded = True
         finally:
             if comm_eff_state is not None:
-                comm_eff_state.mask_active = False
+                comm_eff_state.compression_active = False
                 comm_eff_state.set_path_tag(None)
                 # PowerSGD block-power-iteration basis update. Runs
                 # ONCE per trainer step, AFTER all PPO mini-batch forwards/backwards
@@ -1022,9 +891,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # every gradient-bearing actor-train forward) and AFTER the
                 # gradient-bearing work (so Q was frozen for both paired GRPO
                 # forwards this step). Sets Q_t -> Q_{t+1} for the NEXT
-                # step. Skipped on a clean step and on non-cadence steps inside
-                # maybe_update_basis. Strict no-op for the mask/dense/disabled
-                # codecs (powersgd is None there).
+                # step. Non-cadence steps are skipped inside maybe_update_basis.
+                # Strict no-op for dense/disabled runs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
                 # When the anchor owns Q, the fast net is a pure read-only
                 # consumer. An anchor fire occurs inside train_mini_batch, after
@@ -1059,7 +927,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         powersgd.discard_staged_anchor_basis()
                 fast_owns_q = not anchor_owns_q
                 if powersgd is not None and fast_owns_q:
-                    did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
+                    did_update = powersgd.maybe_update_basis()
                     # After the first basis update, verify Q is bit-identical on
                     # every DP rank. This gate is symmetric across ranks and
                     # raises on a real divergence.
@@ -1089,7 +957,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # (dense-equiv) over the fast-train forward; add the amortized per-tick
         # Q-broadcast term (H·r/cadence per boundary) and snapshot into last_elems_*
         # so powersgd_metrics() surfaces comm/bytes_compressed + comm/bytes_dense_equiv
-        # + comm/bytes_ratio. No-op for the mask/dense/disabled codecs.
+        # + comm/bytes_ratio. No-op for dense/disabled runs.
         if comm_eff_state is not None:
             _ps = getattr(comm_eff_state, "powersgd", None)
             if _ps is not None and hasattr(_ps, "add_amortized_q_broadcast_bytes"):
@@ -1098,20 +966,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 _ps.last_elems_dense_equiv = float(getattr(_ps, "tick_elems_dense_equiv", 0.0))
 
         # Surface the comm_eff operation counters into training metrics. When
-        # disabled we emit explicit zeros (mask_applications / anchor_backwards /
-        # spectral_corrections == 0) so the no-op is machine-checkable; emitting a
+        # disabled we emit explicit zeros for the retained circuits so the no-op
+        # is machine-checkable; emitting a
         # constant metric is not a numerical side effect on training. `output` is
         # None on non-output ranks (train_mini_batch only populates metrics on the
         # mp-src rank), in which case there is nothing to annotate.
         if output is not None:
             if comm_eff_state is None:
                 counters = {
-                    "comm_eff/mask_applications": 0,
                     "comm_eff/anchor_backwards": 0,
                     "comm_eff/spectral_corrections": 0,
                     # Anchor counters: explicit zeros on the disabled path so
                     # the no-op stays machine-checkable.
-                    "comm_eff/anchor_mask_applications": 0,
                     "comm_eff/anchor_grad_corrected": 0,
                     "comm_eff/anchor_rollouts_generated": 0,
                     "comm_eff/anchor_rewards_recomputed": 0,
@@ -1123,8 +989,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_update_prompt_equivalents_global": 0,
                     "comm_eff/anchor_rollout_n": 0,
                     "comm_eff/anchor_batch_scope_rollout": 0,
-                    # Explicit zero on the disabled path.
-                    "comm_eff/clean_steps": 0,
                     # Explicit zeros on the disabled path for PowerSGD counters.
                     "comm_eff/powersgd_applications": 0,
                     "comm_eff/powersgd_basis_updates": 0,
@@ -1140,6 +1004,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/fast_q_bootstrap_dense_observation_elements": 0.0,
                     "comm_eff/fast_q_bootstrap_sync_elements": 0.0,
                     "comm_eff/merger_coldM_fallbacks": 0,
+                    "comm_eff/anchor_replay_fires": 0,
                     # Explicit zero on the disabled path for the family screen.
                     "comm_eff/family_screen_builds": 0,
                 }
@@ -1154,8 +1019,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
-        # A checkpoint load may run a forward on the actor module; masking must
-        # not fire. Stamp "ckpt" so the assert trips on any leak.
+        # A checkpoint load may run an actor forward; keep it outside compression.
         with self._comm_eff_path("ckpt"):
             self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
         state = self._maybe_comm_eff_state()
@@ -1181,42 +1045,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
-        # Checkpoint save must not carry comm_eff/mask state into synced weights
-        # and must not fire a mask. Stamp "ckpt".
+        # Checkpoint save must not carry a live compressed-forward context.
         with self._comm_eff_path("ckpt"):
             self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def comm_eff_close(self, timeout: Optional[float] = None):
-        """Run-end barrier for the comm_eff diagnostic R2 upload pipeline.
-
-        Wires the ``close()`` lifecycle contract into the engine teardown (the
-        trainer calls this on its final-step shutdown path). It drains + joins any
-        ASYNC R2 upload pool behind:
-
-        * the weight-trajectory observer (``_weight_traj_observer``), and
-        * the comm_eff gradient/activation capture writer
-          (``_comm_eff_state._capture_writer``),
-
-        and FAILS LOUD: if any async upload permanently failed (or the drain timed
-        out with workers still alive) the underlying ``close()`` raises, and we let
-        it propagate so the run ends non-zero instead of silently dropping
-        snapshots / leaving phantom manifest rows. This is the explicit run-end
-        path the ``atexit`` net only best-effort backstops.
-
-        Strict no-op on the dense / non-capture / synchronous-R2 paths: a missing
-        observer/writer or a sink that never queued anything makes ``close()`` a
-        cheap return, so a run without the feature is unaffected. Idempotent
-        (each ``close()`` guards its own ``_closed`` flag). ``ONE_TO_ALL`` so every
-        rank closes its own (rank-0-only) sink symmetrically; inactive ranks no-op.
-        """
-        observer = getattr(self, "_weight_traj_observer", None)
-        if observer is not None and hasattr(observer, "close"):
-            observer.close(timeout=timeout)
-        state = getattr(self, "_comm_eff_state", None)
-        writer = getattr(state, "_capture_writer", None) if state is not None else None
-        if writer is not None and hasattr(writer, "close"):
-            writer.close(timeout=timeout)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):

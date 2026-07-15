@@ -113,7 +113,7 @@ class BaseEngine:
         """comm_eff spectral gradient-correction hook point (strict no-op when disabled).
 
         Sits between the backward pass and the optimizer step — the point at
-        which the two-circuit method applies spectral correction to the masked
+        which the retained pipeline applies signed-EMA correction to compressed
         gradients before ``optimizer_step``. When comm_eff is disabled (the
         default: no ``_comm_eff_state`` is attached to the engine, or it is
         ``None``) this returns immediately, touching neither the gradients nor
@@ -129,15 +129,15 @@ class BaseEngine:
         # gradient matrices and bump state.spectral_corrections, here — after
         # backward / FSDP reduction and before optimizer_step / grad clipping.
         # The base implementation is a no-op even when a state is attached so a
-        # backend without a spectral override (or a mask-only run) leaves grads
+        # backend without a spectral override leaves grads
         # untouched.
 
     def _maybe_comm_eff_anchor_refresh(self, data: TensorDict, loss_function: Callable) -> None:
         """comm_eff anchor-circuit hook point (strict no-op when disabled).
 
-        Sits at the TOP of train_batch — the unmasked K-stale GRPO-actor-loss
+        Sits at the TOP of train_batch — the dense K-stale GRPO-actor-loss
         fwd/bwd that produces RAW G_anchor for the spectral EMA, before the
-        masked fast path runs. When comm_eff is disabled (the default) this
+        compressed fast path runs. When comm_eff is disabled (the default) this
         returns immediately, touching neither gradients nor any collective op.
 
         Backend engines that implement the anchor circuit override this method
@@ -150,64 +150,6 @@ class BaseEngine:
             return
         # Enabled path: backends OVERRIDE this method (see
         # FSDPEngine._maybe_comm_eff_anchor_refresh for the clone-no-hook impl).
-
-    def _maybe_comm_eff_capture_g_dense(self, data: TensorDict, loss_function: Callable) -> None:
-        """Parallel UNCOMPRESSED G_dense capture hook (strict no-op
-        when disabled or when comm_eff.capture.capture_g_dense is false).
-
-        Sits between the compressed ``forward_backward_batch`` (which leaves the
-        fast COMPRESSED gradient G_comp on the live params) and the grad-correction
-        hook. The backend override runs a SECOND, UNCOMPRESSED forward/backward of
-        the SAME fast-path GRPO loss on an ISOLATED no-hook clone (off the
-        optimizer's param group) to capture G_dense alongside G_comp at the SAME
-        step, then dumps it (detached/dump-only) and discards it. It NEVER touches
-        the optimizer, the EMA, the sketch V, or Q (the measurement-only invariant).
-
-        The base implementation is a no-op so a backend without the override (or a
-        non-capture run) leaves the train path byte-identical.
-        """
-        state = getattr(self, "_comm_eff_state", None)
-        if state is None or not getattr(state, "enabled", False):
-            return
-        # Enabled path: backends OVERRIDE this method (see
-        # FSDPEngine._maybe_comm_eff_capture_g_dense for the clone-no-hook impl).
-
-    def _maybe_comm_eff_geometry_probe(self) -> None:
-        """Geometry-probe hook point (strict no-op when disabled).
-
-        Sits AFTER the grad-correction hook and BEFORE ``optimizer_step`` — the
-        point where the fast compressed per-target gradient ``G_comp(t)`` is
-        final. The FSDP backend override extracts it per tick (CPU staging into
-        the m4 lag buffer + the fire-aware ring) and, at anchor fires, emits the
-        complete m1–m7 record. Telemetry-only: never touches gradients, the
-        optimizer, the EMA, V, or Q. When comm_eff (or the probe flag) is
-        disabled this returns immediately — the base implementation is a no-op
-        even when a state is attached, so a backend without the override leaves
-        the train path byte-identical.
-        """
-        state = getattr(self, "_comm_eff_state", None)
-        if state is None or not getattr(state, "enabled", False):
-            return
-        # Enabled path: backends OVERRIDE this method (see
-        # FSDPEngine._maybe_comm_eff_geometry_probe).
-
-    def _maybe_comm_eff_weight_traj(self) -> None:
-        """Weight-trajectory FULL-weight hook point (strict no-op when disabled).
-
-        EXP-43 dump-only instrument. Sits BEFORE ``optimizer_step`` and records the
-        tick's pre-update FULL weight matrices of EVERY floating param (no subset,
-        no sketch). Gated on the ``_weight_traj_observer`` attribute, NOT the
-        comm_eff state — so it instruments the plain-GRPO (codec OFF) regime too.
-        Telemetry-only: it never touches gradients, the optimizer, the EMA, V or Q.
-        When the observer is absent (the default) this returns immediately and the
-        train path is byte-identical; the FSDP backend OVERRIDES this method to do
-        the summon + full-weight dump.
-        """
-        observer = getattr(self, "_weight_traj_observer", None)
-        if observer is None or not getattr(observer, "enabled", False):
-            return
-        # Enabled path: backends OVERRIDE this method (see
-        # FSDPEngine._maybe_comm_eff_weight_traj).
 
     def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
         """
@@ -224,28 +166,14 @@ class BaseEngine:
 
         self.optimizer_zero_grad()
         # Anchor circuit. Runs at the top of train_batch:
-        # unmasked K-stale fwd/bwd on a no-hook clone -> RAW G_anchor -> spectral
-        # EMA, BEFORE the masked fast path. No-op when disabled.
+        # dense K-stale fwd/bwd on a no-hook clone -> RAW G_anchor -> spectral
+        # EMA, BEFORE the compressed fast path. No-op when disabled.
         self._maybe_comm_eff_anchor_refresh(data, loss_function)
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
-        # Capture the parallel UNCOMPRESSED G_dense (on an isolated
-        # clone) alongside the live compressed G_comp, BEFORE the merger rewrites
-        # the grads. Strict no-op unless comm_eff.capture.capture_g_dense=true.
-        # Dump-only — never touches the optimizer.
-        self._maybe_comm_eff_capture_g_dense(data, loss_function)
         # comm_eff spectral gradient correction (no-op when disabled) runs after
         # backward and before the optimizer step, so it would correct grads in
         # place; disabled => grads are untouched.
         self._maybe_comm_eff_grad_correction()
-        # Geometry probe: per-tick G_comp staging plus per-fire metrics, after
-        # correction and before the optimizer step. Telemetry-only; strict no-op
-        # unless comm_eff.probe.geometry_enabled.
-        self._maybe_comm_eff_geometry_probe()
-        # Weight-trajectory (EXP-43): per-step/per-tick FULL weight snapshot,
-        # BEFORE the optimizer step so it records the tick's pre-update weights
-        # θ[t]. Dump-only; strict no-op unless a weight-traj observer is attached
-        # (comm_eff.probe.weight_traj.enabled). Independent of the codec.
-        self._maybe_comm_eff_weight_traj()
         grad_norm = self.optimizer_step()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]

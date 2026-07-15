@@ -32,6 +32,7 @@ import unittest
 import torch
 import torch.nn as nn
 
+from verl.workers.comm_eff.boundary import decoder_boundary_indices, find_decoder_layers
 from verl.workers.comm_eff.powersgd_activation import (
     PowerSGDActivationCompressor,
     init_basis,
@@ -67,6 +68,25 @@ class _TinyModel(nn.Module):
         for blk in self.layers:
             x = blk(x)
         return x
+
+
+class TestPipelineBoundaries(unittest.TestCase):
+    def test_even_partition_excludes_final_shard(self):
+        self.assertEqual(decoder_boundary_indices(16, 8), [1, 3, 5, 7, 9, 11, 13])
+
+    def test_uneven_partition(self):
+        self.assertEqual(decoder_boundary_indices(10, 4), [2, 5, 7])
+
+    def test_single_stage_has_no_boundary(self):
+        self.assertEqual(decoder_boundary_indices(16, 1), [])
+
+    def test_pipeline_size_is_capped_at_layer_count(self):
+        self.assertEqual(decoder_boundary_indices(4, 8), [0, 1, 2])
+
+    def test_decoder_discovery(self):
+        layers = find_decoder_layers(_TinyModel(32))
+        self.assertIsNotNone(layers)
+        self.assertEqual(len(layers), 4)
 
 
 class TestPowerSGDSeed(unittest.TestCase):
@@ -161,7 +181,7 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
         comp.register(model)
         return model, comp, state
 
-    def test_boundaries_match_mask_selection(self):
+    def test_pipeline_boundaries(self):
         _, comp, _ = self._build()
         self.assertEqual(comp.boundary_indices, [0, 1, 2])
 
@@ -216,7 +236,7 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
         for k in comp._basis:
             self.assertTrue(torch.equal(comp._basis[k], Q_after_fwd[k]))
         # Only maybe_update_basis advances it, and the result is orthonormal.
-        updated = comp.maybe_update_basis(is_clean_step=False)
+        updated = comp.maybe_update_basis()
         self.assertTrue(updated)
         self.assertEqual(state.powersgd_basis_updates, 1)
         for k in comp._basis:
@@ -226,25 +246,17 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
             self.assertLess(err, 1e-4)
         self.assertFalse(comp._sketch)  # cleared
 
-    def test_clean_step_does_not_update_basis(self):
-        H = 64
-        model, comp, _ = self._build(H=H)
-        comp.set_context(global_step=2)
-        model(torch.randn(20, H, requires_grad=True)).pow(2).sum().backward()
-        self.assertFalse(comp.maybe_update_basis(is_clean_step=True))
-        self.assertFalse(comp._sketch)
-
     def test_update_cadence_gates_basis_update(self):
         H = 64
         model, comp, _ = self._build(H=H, update_cadence=2)
         # step 1 (odd) — no update under cadence 2
         comp.set_context(global_step=1)
         model(torch.randn(20, H, requires_grad=True)).pow(2).sum().backward()
-        self.assertFalse(comp.maybe_update_basis(is_clean_step=False))
+        self.assertFalse(comp.maybe_update_basis())
         # step 2 (even) — updates
         comp.set_context(global_step=2)
         model(torch.randn(20, H, requires_grad=True)).pow(2).sum().backward()
-        self.assertTrue(comp.maybe_update_basis(is_clean_step=False))
+        self.assertTrue(comp.maybe_update_basis())
 
     def test_diagnostics_finite(self):
         H = 64
