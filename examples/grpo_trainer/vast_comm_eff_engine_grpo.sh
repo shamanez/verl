@@ -222,8 +222,12 @@ export CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-true}"
 export CKPT_R2_MAX_STAGED_GB="${CKPT_R2_MAX_STAGED_GB:-50}"
 export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-4}"
 
-# WandB project + experiment.
-export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
+# WandB project + experiment. Harness runs set WANDB_RUN_GROUP to the per-issue
+# run_id (e.g. 83-growing-fixed-base-anchor); default the project to it so each
+# issue gets its own issue-prefixed WandB project automatically. An explicit
+# PROJECT_NAME still wins; standalone engine runs (no group) keep the shared
+# verl_compression_research fallback.
+export PROJECT_NAME="${PROJECT_NAME:-${WANDB_RUN_GROUP:-verl_compression_research}}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_math_1p5b_grpo_math_comm_eff}"
 
 # Token budget per micro-batch for dynamic batching. The actor budget is 18432
