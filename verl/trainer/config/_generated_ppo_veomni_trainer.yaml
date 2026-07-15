@@ -153,6 +153,8 @@ actor_rollout_ref:
         warmup_mode: stale_correct
         lookahead_min_snapshots: 2
         lookahead_window_snapshots: 4
+        lookahead_history_mode: sliding_window
+        lookahead_max_snapshots: -1
       spectral:
         _target_: verl.workers.config.CommEffSpectralConfig
         enabled: true
