@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# launch.sh — issue #83: test growing_fixed_base rank1_relex anchor mode.
-# code_change: true (env passthrough for lookahead_history_mode / _max_snapshots
-# on exp/83-growing-fixed-base-anchor @ 7939529a).
+# launch.sh v2 — issue #83: best weight-projection method by end-to-end accuracy
+# (fast ablation; operator redirection 2026-07-15 supersedes the v1 100-step arms).
+# code_change: true (exp/83-growing-fixed-base-anchor @ 91ecbdd4).
 #
-# Cells (sequential, ONE box): probe (GO/NO-GO gate) -> growing arm -> sliding
-# control. The probe is stop-the-world: if it fails OR does not prove the growing
-# mode actually took effect, we HALT before spending the two full arms.
+# Cells (sequential, ONE box, unattended): mem-probe [v1 gate, done-flag skip] ->
+# w2-fire-smoke (gate) -> w4-fire-smoke (gate) -> proj-current-60 -> proj-w2-60 ->
+# proj-w4-60. Gates are stop-the-world; accuracy arms continue on science-level
+# failure (the ranking survives a dead arm) and halt on config-level signatures.
 #
 # Logs: each cell writes $RUN_DIR/<cell>/train.log (analyst greps
 # runs/<id>/*/train.log). A background `tail -F` mirrors the ACTIVE cell's log
@@ -43,7 +44,7 @@ else
 fi
 cd /workspace/verl
 git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-echo "=== verl HEAD: $(git rev-parse HEAD) (want 7939529a) ==="
+echo "=== verl HEAD: $(git rev-parse HEAD) (want 91ecbdd4) ==="
 # uv is absent on some operator-attach boxes (and refuses system-python without a
 # venv); prefer uv when usable, else fall back to system pip. All heavy deps are
 # already installed, so this --no-deps editable install only re-points the `verl`
@@ -93,6 +94,13 @@ HALTED=0
 run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
   local cell="$1" gate="$2"; shift 2
   local cdir="$RUN_DIR/$cell" clog
+  # Skip-if-done: idempotent relaunch — a cell that already completed in a prior
+  # launch of this run (done flag present) is carried forward, not re-run. This is
+  # how the passed v1 mem-probe carries into the v2 chain.
+  if [[ -f "$RUN_DIR/done_$cell.flag" ]]; then
+    echo "=== CELL $cell SKIP (done flag from a previous launch: $(cat "$RUN_DIR/done_$cell.flag")) ==="
+    return 0
+  fi
   mkdir -p "$cdir"; clog="$cdir/train.log"; : > "$clog"
   echo ""
   echo "=== CELL $cell START $(date -Iseconds) (gate=$gate) ==="
@@ -125,43 +133,73 @@ run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
   return 0
 }
 
-# --- Cell 1: mem-probe / GO-NO-GO gate (24 steps, no val) -------------------
+# smoke_signature_gate <cell> <grep-ERE> <label>: after a gate smoke completes,
+# prove its config actually took effect (the silent-failure class this issue hit
+# twice: struct-mode reject + PR #27's YAML gap). Missing signature -> HALT.
+smoke_signature_gate() {
+  local cell="$1" re="$2" label="$3"
+  (( HALTED == 1 )) && return 0
+  if grep -qE "$re" "$RUN_DIR/$cell/train.log"; then
+    echo "=== signature gate OK: $cell shows $label ==="
+  else
+    echo "FATAL: $cell finished but signature '$label' ($re) NOT in its log — config silently ineffective; halting before the arms spend." \
+      | tee -a "$RUN_DIR/$cell/train.log"
+    printf '%s signature-gate %s\n' "$(date -Iseconds)" "$cell" > "$RUN_DIR/halt.flag"
+    HALTED=1
+  fi
+}
+
+# --- Cell 1: v1 mem-probe / GO-NO-GO gate (24 steps, growing config) ---------
+# Done-flag skip carries the v1 pass forward; if absent (fresh box) it re-runs.
 run_cell rollout-batch-mem-probe 1 \
   COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
   COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE=growing_fixed_base \
   COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS=-1 \
   VAL_BEFORE_TRAIN=False TEST_FREQ=1000 TOTAL_TRAINING_STEPS=24
+smoke_signature_gate rollout-batch-mem-probe 'history_mode=growing_fixed_base' 'growing_fixed_base fire (v1 invariant + growing-mechanism deliverable)'
 
-# Silent-failure gate at the probe boundary (plan correctness invariant): the
-# probe MUST prove the growing mode took effect before the matrix spends. A probe
-# that reached the end but never fired history_mode=growing_fixed_base means the
-# env passthrough was silently ineffective -> a null masquerading as a result.
+# --- Cell 2: W2 fire-smoke (gate, 12 steps, one anchor fire at step 10) ------
 if (( HALTED == 0 )); then
-  if grep -qE 'history_mode=growing_fixed_base' "$RUN_DIR/rollout-batch-mem-probe/train.log"; then
-    echo "=== silent-failure gate OK: probe fired history_mode=growing_fixed_base ==="
-  else
-    echo "FATAL: probe finished but NO 'history_mode=growing_fixed_base' per-fire line — env passthrough silently ineffective; refusing to spend the matrix." \
-      | tee -a "$RUN_DIR/rollout-batch-mem-probe/train.log"
-    printf '%s probe-no-growing-fire\n' "$(date -Iseconds)" > "$RUN_DIR/halt.flag"
-    HALTED=1
-  fi
+  run_cell w2-fire-smoke 1 \
+    COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
+    COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=2 \
+    VAL_BEFORE_TRAIN=False TEST_FREQ=1000 TOTAL_TRAINING_STEPS=12
+  smoke_signature_gate w2-fire-smoke 'checkpoints=[0-9]+/2|window=2 ' 'window=2 config (fire denominator /2 or engine echo)'
 fi
 
-# --- Cell 2: growing arm (100 steps, val@0/25/50/75/100) --------------------
+# --- Cell 3: W4 fire-smoke (gate, 12 steps, one warmup fire at step 10) ------
 if (( HALTED == 0 )); then
-  run_cell growing-fixed-base-rollout-batch 0 \
+  run_cell w4-fire-smoke 1 \
     COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
-    COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE=growing_fixed_base \
-    COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS=-1 \
-    VAL_BEFORE_TRAIN=True
+    COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS=4 \
+    COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=4 \
+    VAL_BEFORE_TRAIN=False TEST_FREQ=1000 TOTAL_TRAINING_STEPS=12
+  smoke_signature_gate w4-fire-smoke 'min_snapshots=4' 'min_snapshots=4 config (engine echo)'
 fi
 
-# --- Cell 3: sliding-window paired control (100 steps, no step-0 val) -------
+# --- Cell 4: accuracy arm, CURRENT progressive baseline (60 steps) -----------
+# VAL_BEFORE_TRAIN=True gives the single arm-invariant step-0 val + val route smoke.
 if (( HALTED == 0 )); then
-  run_cell sliding-window-rollout-batch 0 \
+  run_cell proj-current-60 0 \
     COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
-    COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE=sliding_window \
-    VAL_BEFORE_TRAIN=False
+    VAL_BEFORE_TRAIN=True TEST_FREQ=20 TOTAL_TRAINING_STEPS=60
+fi
+
+# --- Cell 5: accuracy arm, fixed W2 secant (60 steps) ------------------------
+if (( HALTED == 0 )); then
+  run_cell proj-w2-60 0 \
+    COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
+    COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=2 \
+    VAL_BEFORE_TRAIN=False TEST_FREQ=20 TOTAL_TRAINING_STEPS=60
+fi
+
+# --- Cell 6: accuracy arm, fixed W4 full fit (60 steps) ----------------------
+if (( HALTED == 0 )); then
+  run_cell proj-w4-60 0 \
+    COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
+    COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS=4 \
+    COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=4 \
+    VAL_BEFORE_TRAIN=False TEST_FREQ=20 TOTAL_TRAINING_STEPS=60
 fi
 
 if (( HALTED == 1 )); then

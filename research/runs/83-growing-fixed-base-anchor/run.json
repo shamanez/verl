@@ -2,7 +2,7 @@
   "issue": 83,
   "run_id": "83-growing-fixed-base-anchor",
   "slug": "growing-fixed-base-anchor",
-  "title": "Test growing_fixed_base rank1_relex anchor mode (2xH200, rollout_batch)",
+  "title": "Best weight-projection method by end-to-end accuracy (fast ablation, rollout_batch)",
   "kind": "experiment",
   "tier": "fast",
   "branch": "exp/83-growing-fixed-base-anchor",
@@ -15,10 +15,10 @@
   ],
   "milestone": "none",
   "promote_launcher_as": "none",
-  "baseline_run": "sliding-window-rollout-batch",
+  "baseline_run": "proj-current-60",
   "depends_on": [],
   "iterations": 2,
-  "step_target": 100,
+  "step_target": 60,
   "canonical_launcher": "examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh",
   "cells": [
     {
@@ -37,74 +37,86 @@
       }
     },
     {
-      "name": "growing-fixed-base-rollout-batch",
-      "wandb_name": "83-growing-fixed-base-rollout-batch",
-      "gate": false,
-      "step_target": 100,
-      "log": "/workspace/runs/83-growing-fixed-base-anchor/growing-fixed-base-rollout-batch/train.log",
-      "overrides": {
-        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
-        "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "growing_fixed_base",
-        "COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS": "-1",
-        "VAL_BEFORE_TRAIN": "True"
-      }
-    },
-    {
-      "name": "sliding-window-rollout-batch",
-      "wandb_name": "83-sliding-window-rollout-batch",
-      "gate": false,
-      "step_target": 100,
-      "log": "/workspace/runs/83-growing-fixed-base-anchor/sliding-window-rollout-batch/train.log",
-      "overrides": {
-        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
-        "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "sliding_window",
-        "VAL_BEFORE_TRAIN": "False"
-      }
-    },
-    {
-      "name": "proj-w2-smoke",
-      "wandb_name": "83-proj-w2-smoke",
-      "gate": false,
-      "post_arm": true,
-      "step_target": 24,
-      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w2-smoke/train.log",
+      "name": "w2-fire-smoke",
+      "wandb_name": "83-w2-fire-smoke",
+      "gate": true,
+      "step_target": 12,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/w2-fire-smoke/train.log",
       "overrides": {
         "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
         "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "2",
         "VAL_BEFORE_TRAIN": "False",
         "TEST_FREQ": "1000",
-        "TOTAL_TRAINING_STEPS": "24"
+        "TOTAL_TRAINING_STEPS": "12"
       }
     },
     {
-      "name": "proj-w4-smoke",
-      "wandb_name": "83-proj-w4-smoke",
-      "gate": false,
-      "post_arm": true,
-      "step_target": 44,
-      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w4-smoke/train.log",
+      "name": "w4-fire-smoke",
+      "wandb_name": "83-w4-fire-smoke",
+      "gate": true,
+      "step_target": 12,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/w4-fire-smoke/train.log",
       "overrides": {
         "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
         "COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS": "4",
         "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "4",
         "VAL_BEFORE_TRAIN": "False",
         "TEST_FREQ": "1000",
-        "TOTAL_TRAINING_STEPS": "44"
+        "TOTAL_TRAINING_STEPS": "12"
+      }
+    },
+    {
+      "name": "proj-current-60",
+      "wandb_name": "83-proj-current-60",
+      "gate": false,
+      "step_target": 60,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-current-60/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "VAL_BEFORE_TRAIN": "True",
+        "TEST_FREQ": "20",
+        "TOTAL_TRAINING_STEPS": "60"
+      }
+    },
+    {
+      "name": "proj-w2-60",
+      "wandb_name": "83-proj-w2-60",
+      "gate": false,
+      "step_target": 60,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w2-60/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "2",
+        "VAL_BEFORE_TRAIN": "False",
+        "TEST_FREQ": "20",
+        "TOTAL_TRAINING_STEPS": "60"
+      }
+    },
+    {
+      "name": "proj-w4-60",
+      "wandb_name": "83-proj-w4-60",
+      "gate": false,
+      "step_target": 60,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/proj-w4-60/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS": "4",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS": "4",
+        "VAL_BEFORE_TRAIN": "False",
+        "TEST_FREQ": "20",
+        "TOTAL_TRAINING_STEPS": "60"
       }
     }
   ],
   "success_criteria": [
-    "probe reaches step 24 on 2xH200 with no OOM; peak GPU mem + s/step recorded in `runs/83-growing-fixed-base-anchor/`",
-    "probe step-20 per-fire log line reads `history_mode=growing_fixed_base` (code touch effective)",
-    "both full arms reach step 100 with no NaN / non-finite grads",
-    "growing arm `train.log` shows `history_mode=growing_fixed_base` with per-fire `checkpoints` growing 2\u2192~10; control shows `history_mode=sliding_window` capped at 4",
-    "`val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N` at step 100 (read from the on-box `train.log` capture, not WandB alone \u2014 see Notes): growing \u2265 control \u2212 1.0 point (primary bar; step 75 corroborates; step 25/50 expected ~identical)",
-    "secondary (directional, not a hard gate): growing arm compressed-vs-dense mismatch and per-fire `evr_mean`/`r2_mean` \u2264/\u2265 control (equal-or-better projection quality); `actor/anchor_kl_loss` not worse",
-    "post-arm smokes pass: proj-w2-smoke step 24 with fixed-W2 secant fires (checkpoints=2/2); proj-w4-smoke step 44 with step-40 fire showing full W4 fit (checkpoints=4/4); no NaN/OOM",
-    "every cell's anchor fires replay the full rollout batch (512 prompts / 4096 seqs)",
-    "current-method ladder evidenced in the arms' per-fire lines (W2 secant at 2 checkpoints, full fit at >=4)"
+    "chain runs unattended end-to-end (2 fire-smokes + 3 arms) with no human intervention and no unexplained halt",
+    "both fire-smokes pass their signature gates (boot + first anchor fire + correct config echo: window=2 / min_snapshots=4)",
+    "all 3 accuracy arms reach step 60 with no NaN; distinctive per-fire signatures present (progressive ladder / checkpoints=2/2 / checkpoints=4/4)",
+    "every arm's anchor fires replay the full rollout batch (512 prompts / 4096 seqs)",
+    "val@20/40/60 for all three arms (+ step-0 on baseline) captured from on-box train.log; step-60 val backfilled to WandB",
+    "verdict.md ranks {current, W2, W4} by val@60 (0.5pt tie bar; tiebreaks val@40, stability, evr/r2) and notes the growing_fixed_base accuracy deferral (mechanism validated by the v1 probe)"
   ],
-  "hypothesis": "With batch_scope=rollout_batch held equal on both arms, growing_fixed_base is non-inferior to the paired sliding_window control on MATH val accuracy at step 100 (within 1.0 absolute point) with no divergence AND equal-or-lower compressed-vs-dense mismatch. Clean negative: growing landing >=1.0 point below control at step 100, or NaN/divergent, or raising mismatch.",
+  "hypothesis": "Projection fit order materially affects rank-1 RELEX anchor projection quality, measurable end-to-end: best of {current progressive min2/window4, fixed W2 secant, fixed W4 full-fit} decided by MATH val accuracy at step 60 (val@40 corroborates; <0.5pt = tie -> val@40, stability, evr/r2). All at batch_scope=rollout_batch. growing_fixed_base accuracy deferred (byte-identical to sliding until step 50).",
   "wandb": {
     "project": "83-growing-fixed-base-anchor",
     "entity": "shamanework-pl",
