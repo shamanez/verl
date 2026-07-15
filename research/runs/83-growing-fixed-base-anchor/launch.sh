@@ -23,6 +23,7 @@ ID="83-growing-fixed-base-anchor"
 RUN_DIR="/workspace/runs/$ID"
 RUN_LOG="$RUN_DIR/train.log"          # heartbeat aggregate + tmux redirect target
 mkdir -p "$RUN_DIR"
+rm -f "$RUN_DIR/halt.flag"   # a fresh launch supersedes any prior halt verdict
 echo "=== [83] launch.sh start $(date -Iseconds) ==="
 
 # ---------------------------------------------------------------------------
@@ -96,8 +97,14 @@ fi
 # share the memory/config surface), so a hit HALTS the sweep instead of paying
 # boot+crash per arm. Anything else on a full arm is treated as science-level
 # (NaN/divergence in THIS arm) and the sweep continues so the other arm runs.
-CONFIG_LEVEL_RE='OutOfMemoryError|CUDA out of memory|ModuleNotFoundError|No module named|No such file or directory|hydra\.errors|is not in struct|ConfigAttributeError|ConfigKeyError|Error executing job|cgroup pids.max|requires .*GPUs; detected'
+# NOTE deliberately NOT in this list: 'Error executing job' (Hydra prints it for
+# ANY task exception incl. a NaN crash -> would misclassify every science failure
+# as config-level and halt the chain) and the generic 'No such file or directory'
+# (incidental ENOENT noise in ray/wandb teardown would do the same). Python-level
+# FileNotFoundError still catches genuine boot-phase path errors.
+CONFIG_LEVEL_RE='OutOfMemoryError|CUDA out of memory|ModuleNotFoundError|No module named|FileNotFoundError|hydra\.errors|is not in struct|ConfigAttributeError|ConfigKeyError|cgroup pids.max|requires .*GPUs; detected'
 HALTED=0
+SKIPPED_CELLS=" "   # cells carried forward via done flag this launch (gate greps skip them)
 
 run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
   local cell="$1" gate="$2"; shift 2
@@ -107,6 +114,7 @@ run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
   # how the passed v1 mem-probe carries into the v2 chain.
   if [[ -f "$RUN_DIR/done_$cell.flag" ]]; then
     echo "=== CELL $cell SKIP (done flag from a previous launch: $(cat "$RUN_DIR/done_$cell.flag")) ==="
+    SKIPPED_CELLS+="$cell "
     return 0
   fi
   mkdir -p "$cdir"; clog="$cdir/train.log"; : > "$clog"
@@ -124,6 +132,7 @@ run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
   echo "=== CELL $cell END rc=$rc $(date -Iseconds) ==="
   if (( rc == 0 )); then
     echo "$(date -Iseconds)" > "$RUN_DIR/done_$cell.flag"
+    rm -f "$RUN_DIR/fail_$cell.flag"   # a pass supersedes any stale fail flag
     return 0
   fi
   if (( gate == 1 )); then
@@ -147,11 +156,20 @@ run_cell() {   # run_cell <cell> <gate:0|1> <ENVVAR=val ...>
 smoke_signature_gate() {
   local cell="$1" re="$2" label="$3"
   (( HALTED == 1 )) && return 0
+  if [[ "$SKIPPED_CELLS" == *" $cell "* ]]; then
+    echo "=== signature gate SKIP: $cell carried forward via done flag (invariant established by the pass that wrote it) ==="
+    return 0
+  fi
   if grep -qE "$re" "$RUN_DIR/$cell/train.log"; then
     echo "=== signature gate OK: $cell shows $label ==="
   else
-    echo "FATAL: $cell finished but signature '$label' ($re) NOT in its log — config silently ineffective; halting before the arms spend." \
-      | tee -a "$RUN_DIR/$cell/train.log"
+    # stdout only — NEVER tee the regex/label into the grepped log (self-poison:
+    # a relaunch would false-pass by matching this very message). The cell log
+    # gets an unmatchable marker, and the done flag is removed so a relaunch
+    # RE-RUNS the cell instead of skipping straight to a poisoned grep.
+    echo "FATAL: $cell finished without its config signature ($label) — config silently ineffective; halting before the arms spend."
+    echo "SIGNATURE_GATE_FAIL $cell" >> "$RUN_DIR/$cell/train.log"
+    rm -f "$RUN_DIR/done_$cell.flag"
     printf '%s signature-gate %s\n' "$(date -Iseconds)" "$cell" > "$RUN_DIR/halt.flag"
     HALTED=1
   fi
@@ -182,7 +200,7 @@ if (( HALTED == 0 )); then
     COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS=4 \
     COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=4 \
     VAL_BEFORE_TRAIN=False TEST_FREQ=1000 TOTAL_TRAINING_STEPS=12
-  smoke_signature_gate w4-fire-smoke 'min_snapshots=4' 'min_snapshots=4 config (engine echo)'
+  smoke_signature_gate w4-fire-smoke 'checkpoints=[0-9]+/4|window=4 ' 'window-4 warmup fire (checkpoints=N/4; min_snapshots=4 behavioral proof lands in the W4 arm: fires 1-3 warmup, fire 4 fit=rank1_ols)'
 fi
 
 # --- Cell 4: accuracy arm, CURRENT progressive baseline (60 steps) -----------
