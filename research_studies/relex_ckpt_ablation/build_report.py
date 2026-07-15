@@ -144,12 +144,14 @@ def main():
     ap.add_argument("--plots", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--updated", default="")
+    ap.add_argument("--count_digest", default="", help="Optional report_digest.json from the consecutive-count sweep (outputs_consec).")
     args = ap.parse_args()
 
     D = json.load(open(args.digest))
     S, BT, META = D["scalars"], D["by_type"], D["meta"]
     GAP = json.load(open(args.gap_digest))
     gap_summary = GAP["summary"]
+    COUNT = json.load(open(args.count_digest))["scalars"] if args.count_digest and os.path.exists(args.count_digest) else None
 
     def g(method, W, h, r, field):
         return S.get(f"{method}|W{W}|h{h}|r{r}", {}).get(field)
@@ -339,6 +341,56 @@ def main():
     pin4 = g("rank1_relex", 4, 1, 1, "pooled_skill")
     base4 = g("relex_from_base", 4, 1, 1, "pooled_skill")
 
+    # ---- consecutive-count sweep (optional) --------------------------------
+    count_section = ""
+    count_navlink = ""
+    if COUNT:
+        cW = sorted({int(k.split("|")[1][1:]) for k in COUNT if k.startswith("rank1_relex|")})
+        def cget(W, f):
+            return COUNT.get(f"rank1_relex|W{W}|h1|r1", {}).get(f)
+        rows = "\n".join(
+            f"<tr><td class='right'>{W}</td>"
+            f"<td class='mono right'>{f3(cget(W,'pooled_skill'))} &plusmn; {(cget(W,'pooled_skill_std') or 0):.2f}</td>"
+            f"<td class='mono right'>{f3(cget(W,'macro_cos'))}</td>"
+            f"<td class='mono right'>{f3(cget(W,'frac_win'), False)}</td>"
+            f"<td class='right'>{cget(W,'n_anchors')}</td></tr>" for W in cW)
+        lo_W, hi_W = cW[0], cW[-1]
+        s_lo, s_hi = cget(lo_W, "pooled_skill"), cget(hi_W, "pooled_skill")
+        improved = (s_lo is not None and s_hi is not None and s_hi > s_lo + 0.02)
+        crossed = (s_hi is not None and s_hi > 0)
+        verdict = (
+            (f"Adding consecutive checkpoints DOES move skill upward: W={lo_W} {f3(s_lo)} to W={hi_W} {f3(s_hi)}. "
+             + ("It even crosses zero (beats stale) at the largest window, so with enough consecutive history our own projector starts to work on the dense trajectory too."
+                if crossed else
+                "It is still below zero at W={0}, so more history helps but our short-horizon pinned projector needs more than {0} consecutive checkpoints (or the temporal denoising RELEX gets from ~50-75) to clear the stale baseline.".format(hi_W)))
+            if improved else
+            (f"Adding consecutive checkpoints does NOT rescue our projector here: skill stays near {f3(s_hi)} from W={lo_W} to W={hi_W}. "
+             "Because the projector is pinned to the latest checkpoint and only steps one gap ahead, a better-denoised direction is not enough when the per-step motion it must predict is itself noise-dominated; the payoff still requires either RELEX's long from-base horizon or the live circuit's compression."))
+        count_navlink = '<a href="#count">Count sweep</a>'
+        count_section = f"""
+<section id="count">
+  <h2>Follow-up - does adding consecutive checkpoints help our projector?</h2>
+  <p>The gap sweep and the RELEX paper both point at one untested corner: our study only ever used a
+  <em>few</em> checkpoints (W=2 to 8). RELEX instead fits ~50-125 checkpoints sampled at every step. This
+  follow-up isolates the checkpoint <strong>count</strong> using our own projector unchanged: feed it
+  W = {', '.join(map(str, cW))} <strong>consecutive</strong> checkpoints (stride 1, from the early trajectory,
+  steps 1-12), deltas from the window base, pinned to latest, projecting one step ahead. It does NOT
+  reproduce RELEX (no from-the-pretrained-base reconstruction, no long horizon); it just asks whether more
+  consecutive history sharpens our rank-1 estimate.</p>
+  <figure>{IMG('count_sweep.png', 'skill vs number of consecutive checkpoints')}
+    <figcaption>Pooled forecast skill (blue, left axis) and mean per-tensor update-direction cosine (green,
+    right axis) vs the number of consecutive checkpoints W, at gap 1, horizon 1, with our pinned rank-1
+    projector.</figcaption></figure>
+  <div class="table-wrap"><table>
+    <thead><tr><th class="right">W (consecutive)</th><th class="right">pooled skill</th>
+      <th class="right">dir cos</th><th class="right">frac win</th><th class="right">n anchors</th></tr></thead>
+    <tbody>{rows}</tbody></table></div>
+  <div class="callout blue"><strong>Result.</strong> {verdict}</div>
+  <p class="muted">Caveat: this uses deltas from the window's earliest checkpoint (as the live projector
+  does), a stride-1 spacing, and a one-step horizon - not RELEX's from-pretrained-base, full-prefix,
+  10-20x-horizon recipe. It isolates the count axis for OUR projector only.</p>
+</section>"""
+
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -373,6 +425,7 @@ def main():
   <a href="#h5">H5 pin vs base</a>
   <a href="#h6">H6 by tensor</a>
   <a href="#gap">Gap sweep</a>
+  {count_navlink}
   <a href="#results">Results table</a>
   <a href="#live">Live check</a>
   <a href="#decision">Decision</a>
@@ -599,7 +652,7 @@ def main():
   rank-77 subspace and so makes consecutive updates collinear. That is the reconciliation: the projector is
   a good idea <em>because</em> the fast circuit is compressed, not in spite of it.</div>
 </section>
-
+{count_section}
 <section id="results">
   <h2>Full results table</h2>
   <p>Every (method, window, horizon) at rank 1, aggregated over anchor positions (mean &plusmn; standard
