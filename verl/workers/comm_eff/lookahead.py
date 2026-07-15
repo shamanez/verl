@@ -35,6 +35,9 @@ __all__ = [
     "LOOKAHEAD_MODES",
     "MODE_DISABLED",
     "MODE_RANK1_RELEX",
+    "HISTORY_MODES",
+    "MODE_SLIDING_WINDOW",
+    "MODE_GROWING_FIXED_BASE",
     "LOOKAHEAD_ROLLOUT_SOURCES",
     "DEFAULT_RANK1_CHUNK_NUMEL",
     "Rank1ProjectionError",
@@ -42,6 +45,8 @@ __all__ = [
     "rank1_relex_enabled",
     "lookahead_num_source_points",
     "lookahead_min_points",
+    "lookahead_history_mode",
+    "lookahead_max_snapshots",
     "resolve_lookahead_rollout_source",
     "Rank1SnapshotHistory",
     "project_rank1_tensor",
@@ -54,6 +59,20 @@ __all__ = [
 MODE_DISABLED = "disabled"
 MODE_RANK1_RELEX = "rank1_relex"
 LOOKAHEAD_MODES = (MODE_DISABLED, MODE_RANK1_RELEX)
+
+# Anchor checkpoint retention for rank1_relex.
+#   "sliding_window"     -> keep only the last W checkpoints; the delta base is
+#                           the oldest snapshot still in the window and it
+#                           advances as the window slides (default, bounded
+#                           memory, tracks local drift).
+#   "growing_fixed_base" -> pin the seeded base for the whole run and keep
+#                           appending checkpoints so the delta history grows
+#                           (RELEX-faithful: a longer, denoised lever arm for
+#                           the rank-1 fit). ``lookahead_max_snapshots`` caps
+#                           retention; -1 is unbounded.
+MODE_SLIDING_WINDOW = "sliding_window"
+MODE_GROWING_FIXED_BASE = "growing_fixed_base"
+HISTORY_MODES = (MODE_SLIDING_WINDOW, MODE_GROWING_FIXED_BASE)
 
 # Bound the largest temporary trajectory slab to W * 4 MiB at the default W4
 # window. The live projector makes two passes over each tensor (Gram, then
@@ -125,6 +144,29 @@ def lookahead_min_points(anchor_cfg) -> int:
     return raw
 
 
+def lookahead_history_mode(anchor_cfg) -> str:
+    """Anchor checkpoint retention mode, or the sliding-window default.
+
+    ``sliding_window`` keeps the last ``window`` checkpoints (base slides);
+    ``growing_fixed_base`` pins the seeded base and grows the delta history.
+    Only meaningful when rank-1 RELEX is active.
+    """
+    if anchor_cfg is None:
+        return MODE_SLIDING_WINDOW
+    mode = str(getattr(anchor_cfg, "lookahead_history_mode", MODE_SLIDING_WINDOW))
+    return mode if mode in HISTORY_MODES else MODE_SLIDING_WINDOW
+
+
+def lookahead_max_snapshots(anchor_cfg) -> int:
+    """Retention cap for ``growing_fixed_base``; ``-1`` (default) is unbounded."""
+    if anchor_cfg is None:
+        return -1
+    try:
+        return int(getattr(anchor_cfg, "lookahead_max_snapshots", -1))
+    except (TypeError, ValueError):
+        return -1
+
+
 def lookahead_strength(anchor_cfg) -> float:
     """Scale the RELEX-predicted increment beyond the latest checkpoint."""
     if anchor_cfg is None:
@@ -173,16 +215,36 @@ def _validate_rank1_timeline(ticks, target_tick) -> tuple[list[int], int]:
 
 
 class Rank1SnapshotHistory:
-    """Strict sliding history for exact generator checkpoints.
+    """Strict retained history for exact generator checkpoints.
 
     The first pre-update generator snapshot is retained by reference as the
     local base. Later entries are admitted only by the engine's exact delayed
     transfer path. Duplicate and out-of-order transfers are excluded without
-    mutating the window. ``min_snapshots`` controls readiness only: retained
-    history continues to grow and then slide at ``window_snapshots``.
+    mutating the history. ``min_snapshots`` controls readiness only.
+
+    Two retention modes select what plays the role of the delta base:
+
+    * ``sliding_window`` (default): keep the most recent ``window_snapshots``
+      checkpoints. The base is the oldest snapshot still in the window and it
+      advances as the window slides, so deltas are cumulative from a moving
+      local reference. Bounded memory; tracks local drift.
+    * ``growing_fixed_base``: pin the seeded base for the whole run and never
+      evict it; every later checkpoint is appended so the base-relative delta
+      history keeps growing (RELEX-faithful, a longer denoised lever arm for
+      the rank-1 fit). ``max_snapshots`` optionally caps retention, evicting
+      the oldest NON-base entry so the fixed base always survives; ``-1`` is
+      unbounded (one full-model CPU snapshot is retained per checkpoint, so
+      memory grows with the run).
     """
 
-    def __init__(self, window_snapshots: int = 4, *, min_snapshots: Optional[int] = None):
+    def __init__(
+        self,
+        window_snapshots: int = 4,
+        *,
+        min_snapshots: Optional[int] = None,
+        history_mode: str = MODE_SLIDING_WINDOW,
+        max_snapshots: int = -1,
+    ):
         if isinstance(window_snapshots, bool) or not isinstance(window_snapshots, Integral):
             raise Rank1ProjectionError(
                 f"rank1_relex window_snapshots must be an integer >= 2; got {window_snapshots!r}"
@@ -201,9 +263,30 @@ class Rank1SnapshotHistory:
             raise Rank1ProjectionError(
                 f"rank1_relex min_snapshots must be in [2, {self.window_snapshots}]; got {self.min_snapshots}"
             )
+        if history_mode not in HISTORY_MODES:
+            raise Rank1ProjectionError(f"rank1_relex history_mode must be one of {HISTORY_MODES}; got {history_mode!r}")
+        self.history_mode = str(history_mode)
+        if isinstance(max_snapshots, bool) or not isinstance(max_snapshots, Integral):
+            raise Rank1ProjectionError(
+                f"rank1_relex max_snapshots must be -1 (unbounded) or an integer >= window; got {max_snapshots!r}"
+            )
+        self.max_snapshots = int(max_snapshots)
+        if self.history_mode == MODE_GROWING_FIXED_BASE:
+            if self.max_snapshots != -1 and self.max_snapshots < self.window_snapshots:
+                raise Rank1ProjectionError(
+                    f"rank1_relex max_snapshots must be -1 or >= window_snapshots={self.window_snapshots}; "
+                    f"got {self.max_snapshots}"
+                )
+        elif self.max_snapshots != -1:
+            raise Rank1ProjectionError(
+                "rank1_relex max_snapshots is only meaningful in growing_fixed_base history_mode; "
+                f"got {self.max_snapshots} with history_mode={self.history_mode!r}"
+            )
         self._snaps: OrderedDict[int, dict] = OrderedDict()
-        # Lightweight schema only: retaining base tensor references here would
-        # keep the first full-model checkpoint alive after the window slides.
+        # Lightweight schema only. In sliding_window mode retaining base tensor
+        # references here would keep the first full-model checkpoint alive after
+        # the window slides; in growing_fixed_base mode the base is deliberately
+        # pinned in ``_snaps`` (that is the whole point of the fixed base).
         self._schema: Optional[dict[str, tuple[tuple[int, ...], torch.dtype, torch.device]]] = None
         self.peak_retained = 0
 
@@ -274,7 +357,7 @@ class Rank1SnapshotHistory:
         return True
 
     def admit_exact(self, tick: int, snapshot: dict) -> bool:
-        """Admit a strictly newer exact delayed transfer and slide immediately."""
+        """Admit a strictly newer exact delayed transfer; retain per history_mode."""
         tick = _rank1_tick(tick, "exact transfer tick")
         if not self._snaps:
             raise Rank1ProjectionError("rank1_relex exact transfer arrived before the local base was seeded")
@@ -291,11 +374,29 @@ class Rank1SnapshotHistory:
             return False
         self._validate_snapshot(snapshot, checkpoint=tick)
         self._snaps[tick] = snapshot
-        while len(self._snaps) > self.window_snapshots:
-            self._snaps.popitem(last=False)
+        if self.history_mode == MODE_SLIDING_WINDOW:
+            while len(self._snaps) > self.window_snapshots:
+                self._snaps.popitem(last=False)
+            assert len(self._snaps) <= self.window_snapshots
+        else:
+            # growing_fixed_base: the seeded base (first entry) is pinned for
+            # the whole run so every delta is measured against it. Only an
+            # explicit max_snapshots cap trims history, and it evicts the
+            # OLDEST NON-base entry so the fixed base always survives.
+            if self.max_snapshots > 0:
+                while len(self._snaps) > self.max_snapshots:
+                    self._evict_oldest_non_base()
+                assert len(self._snaps) <= self.max_snapshots
         self.peak_retained = max(self.peak_retained, len(self._snaps))
-        assert len(self._snaps) <= self.window_snapshots
         return True
+
+    def _evict_oldest_non_base(self) -> None:
+        """Drop the oldest non-base snapshot, preserving the pinned fixed base."""
+        keys = iter(self._snaps)
+        next(keys)  # the pinned fixed base is the first entry; never evict it
+        victim = next(keys, None)  # oldest checkpoint after the base
+        if victim is not None:
+            del self._snaps[victim]
 
     def ready(self) -> bool:
         return len(self._snaps) >= self.min_snapshots
@@ -561,12 +662,15 @@ def project_rank1_tensor(
 
 
 class Rank1RelexProjector:
-    """Pure sliding RELEX projector over every exact parameter trajectory.
+    """Pure RELEX projector over every exact parameter trajectory.
 
     RELEX fits one rank-1 temporal subspace *per floating parameter tensor*, not
     only for decoder matrices. The constructor deliberately has no target
     selector, so downstream spectral-correction targeting cannot narrow RELEX
-    coverage.
+    coverage. In ``sliding_window`` history mode the fit sees the last
+    ``window_snapshots`` checkpoints; in ``growing_fixed_base`` mode it sees the
+    whole retained history (base + every appended checkpoint, up to
+    ``max_snapshots``), so the number of checkpoints per fire grows over the run.
     """
 
     def __init__(
@@ -589,6 +693,8 @@ class Rank1RelexProjector:
             raise Rank1ProjectionError(
                 f"rank1_relex min_snapshots must be in [2, {self.window_snapshots}]; got {self.min_snapshots}"
             )
+        self.history_mode = lookahead_history_mode(anchor_cfg)
+        self.max_snapshots = lookahead_max_snapshots(anchor_cfg)
         self.strength = lookahead_strength(anchor_cfg)
         self.chunk_numel = int(chunk_numel)
 
@@ -598,10 +704,17 @@ class Rank1RelexProjector:
             raise Rank1ProjectionError(
                 f"rank1_relex snapshot/tick count mismatch: got {len(sources)} snapshots and {len(clean_ticks)} ticks"
             )
-        if not self.min_snapshots <= len(clean_ticks) <= self.window_snapshots:
+        n_checkpoints = len(clean_ticks)
+        if self.history_mode == MODE_GROWING_FIXED_BASE:
+            upper = self.max_snapshots if self.max_snapshots and self.max_snapshots > 0 else n_checkpoints
+            upper_label = f"max={upper}" if self.max_snapshots and self.max_snapshots > 0 else "unbounded"
+        else:
+            upper = self.window_snapshots
+            upper_label = f"W={self.window_snapshots}"
+        if not self.min_snapshots <= n_checkpoints <= upper:
             raise Rank1ProjectionError(
                 f"rank1_relex requires between min={self.min_snapshots} and "
-                f"W={self.window_snapshots} checkpoints; got {len(clean_ticks)}"
+                f"{upper_label} checkpoints; got {n_checkpoints}"
             )
         if not sources or not all(isinstance(snapshot, dict) and snapshot for snapshot in sources):
             raise Rank1ProjectionError("rank1_relex history must contain non-empty checkpoint dicts")
@@ -675,6 +788,7 @@ class Rank1RelexProjector:
         zero_motion = sum(bool(s["zero_motion"]) for s in stats)
         info = {
             "history_ticks": tuple(clean_ticks),
+            "history_mode": self.history_mode,
             "checkpoint_count": len(clean_ticks),
             "delta_count": len(clean_ticks) - 1,
             "window_span": clean_ticks[-1] - clean_ticks[0],

@@ -42,9 +42,39 @@ never re-randomized.
 ## Weight projection (`anchor.lookahead_mode`)
 
 - `rank1_relex` (default): forecast each anchor tensor forward with a rank-1 fit
-  over the last `W` anchor snapshots (`window 4`, `min 2`, `strength 1`); the
-  window ramps W2 → W3 → W4 as snapshots accumulate.
+  over the retained anchor snapshots (`min 2`, `strength 1`); the fit ramps
+  W2 → W3 → W4 as snapshots accumulate.
 - `disabled`: no forecast; the anchor uses its stale weights as-is.
+
+## Delta base / history (`anchor.lookahead_history_mode`)
+
+Both modes compute cumulative deltas against a single base (`snapshot − base`,
+never consecutive diffs), run the same per-tensor rank-1 Gram SVD and OLS fit
+over the checkpoints' actual ticks, and pin the prediction to the newest exact
+tensor (`latest + strength · slope · horizon · v1`, preserving its off-subspace
+residual). They differ only in what plays the role of the base and how history
+is retained.
+
+- `sliding_window` (default): keep the last `lookahead_window_snapshots`
+  checkpoints (`window 4`). The base is the oldest snapshot still in the window,
+  so it advances as the window slides and the deltas track *local* drift.
+  Bounded memory. `lookahead_max_snapshots` must stay `-1` here.
+- `growing_fixed_base`: pin the first (seeded) anchor snapshot as a fixed base
+  for the whole run and never evict it; every later exact checkpoint is appended,
+  so the base-relative delta history keeps growing. This is the RELEX-faithful
+  regime (deltas measured from a fixed origin over a long prefix), which gives a
+  better-conditioned rank-1 direction and a more noise-robust extrapolation slope
+  the longer training runs, at the cost of retaining one full-model CPU snapshot
+  per checkpoint. `lookahead_max_snapshots` caps retention (`-1` = unbounded, the
+  default; a positive value must be `>= lookahead_window_snapshots` and evicts the
+  oldest **non-base** entry so the fixed base always survives). Warmup is
+  unchanged: the projector still waits for `lookahead_min_snapshots` checkpoints
+  before it engages.
+
+Rule of thumb: prefer `growing_fixed_base` when the concern is anchor-weight
+*staleness / divergence* (a long, denoised lever arm projects the stale
+checkpoint forward more reliably); prefer `sliding_window` when the trajectory is
+strongly non-stationary (a local base adapts to bends) or CPU memory is tight.
 
 ## Anchor batch scope (`anchor.batch_scope`)
 

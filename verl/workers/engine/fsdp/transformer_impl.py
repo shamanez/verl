@@ -1149,6 +1149,8 @@ class FSDPEngine(BaseEngine):
             Rank1ProjectionError,
             Rank1RelexProjector,
             Rank1SnapshotHistory,
+            lookahead_history_mode,
+            lookahead_max_snapshots,
             lookahead_min_points,
             rank1_relex_enabled,
             resolve_lookahead_rollout_source,
@@ -1268,6 +1270,8 @@ class FSDPEngine(BaseEngine):
                         rank1_history = Rank1SnapshotHistory(
                             window_snapshots=int(getattr(anchor_cfg, "lookahead_window_snapshots", 4)),
                             min_snapshots=rank1_min_snapshots,
+                            history_mode=lookahead_history_mode(anchor_cfg),
+                            max_snapshots=lookahead_max_snapshots(anchor_cfg),
                         )
                         state._rank1_history = rank1_history
                         # RELEX weight projection covers every unique floating
@@ -1487,6 +1491,7 @@ class FSDPEngine(BaseEngine):
                 print(
                     f"[comm_eff][rank1_relex] step={step} target_tick={_la_target_tick} "
                     f"history_ticks={list(_la_info['history_ticks'])} "
+                    f"history_mode={_la_info['history_mode']} "
                     f"checkpoints={_la_info['checkpoint_count']} deltas={_la_info['delta_count']} "
                     f"fit={_la_info['fit_kind']} "
                     f"window_span={_la_info['window_span']} horizon={_la_info['prediction_horizon']} "

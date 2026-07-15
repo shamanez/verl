@@ -44,9 +44,20 @@ COMPRESSION_TYPES = ("dense", "powersgd")
 class CommEffAnchorConfig(BaseConfig):
     """Delayed dense anchor and RELEX weight-projection configuration.
 
-    ``rank1_relex`` keeps a sliding window of exact checkpoints. With two
-    checkpoints it is the ordinary per-tensor secant; with three or more it
-    fits the rank-1 trajectory using the checkpoints' actual ticks.
+    ``rank1_relex`` fits a per-tensor rank-1 trajectory over exact checkpoints.
+    Two checkpoints give the ordinary per-tensor secant; three or more fit the
+    rank-1 trajectory using the checkpoints' actual ticks.
+
+    ``lookahead_history_mode`` selects the delta base:
+
+    * ``sliding_window`` (default): keep the last ``lookahead_window_snapshots``
+      checkpoints; the base is the oldest snapshot still in the window and it
+      advances as the window slides. Bounded memory; tracks local drift.
+    * ``growing_fixed_base``: pin the seeded base for the whole run and keep
+      appending checkpoints so the base-relative delta history grows
+      (RELEX-faithful, a longer denoised lever arm). ``lookahead_max_snapshots``
+      caps retention (``-1`` unbounded); one full-model CPU snapshot is kept per
+      checkpoint, so memory grows with the run.
     """
 
     enabled: bool = True
@@ -63,6 +74,8 @@ class CommEffAnchorConfig(BaseConfig):
     warmup_mode: str = "stale_correct"
     lookahead_min_snapshots: int = 2
     lookahead_window_snapshots: int = 4
+    lookahead_history_mode: str = "sliding_window"
+    lookahead_max_snapshots: int = -1
 
 
 @dataclass
@@ -144,8 +157,10 @@ class CommEffConfig(BaseConfig):
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
+            HISTORY_MODES,
             LOOKAHEAD_MODES,
             LOOKAHEAD_ROLLOUT_SOURCES,
+            MODE_GROWING_FIXED_BASE,
             lookahead_enabled,
             rank1_relex_enabled,
         )
@@ -210,6 +225,36 @@ class CommEffConfig(BaseConfig):
                     "comm_eff.anchor.lookahead_min_snapshots must be -1 or in "
                     f"[2, {self.anchor.lookahead_window_snapshots}]; got {self.anchor.lookahead_min_snapshots}"
                 )
+        if self.anchor.lookahead_history_mode not in HISTORY_MODES:
+            raise ValueError(
+                f"comm_eff.anchor.lookahead_history_mode must be one of {HISTORY_MODES}; "
+                f"got {self.anchor.lookahead_history_mode!r}"
+            )
+        if isinstance(self.anchor.lookahead_max_snapshots, bool) or not isinstance(
+            self.anchor.lookahead_max_snapshots, int
+        ):
+            raise ValueError(
+                "comm_eff.anchor.lookahead_max_snapshots must be -1 (unbounded) or an integer "
+                f">= lookahead_window_snapshots; got {self.anchor.lookahead_max_snapshots!r}"
+            )
+        if self.anchor.lookahead_history_mode == MODE_GROWING_FIXED_BASE:
+            if not rank1_relex_enabled(self.anchor):
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_history_mode='growing_fixed_base' requires active rank1_relex"
+                )
+            if self.anchor.lookahead_max_snapshots != -1 and (
+                self.anchor.lookahead_max_snapshots < self.anchor.lookahead_window_snapshots
+            ):
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_max_snapshots must be -1 or "
+                    f">= lookahead_window_snapshots={self.anchor.lookahead_window_snapshots}; "
+                    f"got {self.anchor.lookahead_max_snapshots}"
+                )
+        elif self.anchor.lookahead_max_snapshots != -1:
+            raise ValueError(
+                "comm_eff.anchor.lookahead_max_snapshots is only meaningful with "
+                "lookahead_history_mode='growing_fixed_base'; leave it at -1 for sliding_window"
+            )
 
     def _validate_spectral(self) -> None:
         for name in ("enabled", "diagnostics"):
