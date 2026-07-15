@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # launch.sh — issue #83: test growing_fixed_base rank1_relex anchor mode.
 # code_change: true (env passthrough for lookahead_history_mode / _max_snapshots
-# on exp/83-growing-fixed-base-anchor @ 40a30270).
+# on exp/83-growing-fixed-base-anchor @ 7939529a).
 #
 # Cells (sequential, ONE box): probe (GO/NO-GO gate) -> growing arm -> sliding
 # control. The probe is stop-the-world: if it fails OR does not prove the growing
@@ -43,8 +43,14 @@ else
 fi
 cd /workspace/verl
 git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-echo "=== verl HEAD: $(git rev-parse HEAD) (want 40a30270) ==="
-uv pip install --no-deps -e . > /workspace/pip.log 2>&1 \
+echo "=== verl HEAD: $(git rev-parse HEAD) (want 7939529a) ==="
+# uv is absent on some operator-attach boxes (and refuses system-python without a
+# venv); prefer uv when usable, else fall back to system pip. All heavy deps are
+# already installed, so this --no-deps editable install only re-points the `verl`
+# package at the fresh exp/83 checkout -- pip and uv are equivalent for that.
+if command -v uv >/dev/null 2>&1; then UVPIP="uv pip"; else UVPIP="python3 -m pip"; fi
+echo "=== editable install via: $UVPIP ==="
+$UVPIP install --no-deps -e . > /workspace/pip.log 2>&1 \
   || { echo "FATAL: pip install failed (see /workspace/pip.log)" >&2; tail -20 /workspace/pip.log >&2; exit 1; }
 python3 -c "import verl" || { echo "FATAL: verl import failed after bootstrap" >&2; exit 1; }
 
