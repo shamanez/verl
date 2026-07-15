@@ -170,6 +170,25 @@ if [[ "$NO_PROBE" != "1" ]]; then
   # step), BEFORE the --need-r2 preflight so that preflight validates the creds
   # we just pushed. Best-effort: a failure WARNs but never blocks the attach.
   seed_secrets_to_box "$SSH_HOST" "$SSH_PORT" "$IDENTITY" || true
+fi
+
+# BOX-FACTS HARVEST (one bounded ssh, piggybacks the probe): recorded in the
+# handle so later stages don't re-discover them per launch. container_label
+# (/root/.vast_containerlabel, e.g. C.44955290) is the operator's pointer for a
+# MANUAL destroy when the id is synthetic (harness cannot vastai-destroy those;
+# 2026-07-15 #83). uv_present spares the runner a failed `uv pip` on operator
+# boxes that ship without uv (same incident).
+CONTAINER_LABEL=""; UV_PRESENT="unknown"; PY_VER=""
+if [[ "$NO_PROBE" != "1" ]]; then
+  FACTS=$(timeout 30 ssh -i "$IDENTITY" -o ConnectTimeout=8 -o BatchMode=yes \
+      -o StrictHostKeyChecking=accept-new -p "$SSH_PORT" "root@$SSH_HOST" '
+      echo "LBL=$(cat /root/.vast_containerlabel 2>/dev/null)"
+      command -v uv >/dev/null 2>&1 && echo "UV=true" || echo "UV=false"
+      echo "PY=$(python3 --version 2>/dev/null | cut -d" " -f2)"
+      ' 2>/dev/null || true)
+  CONTAINER_LABEL=$(echo "$FACTS" | sed -n 's/^LBL=//p' | head -1)
+  UV_PRESENT=$(echo "$FACTS" | sed -n 's/^UV=//p' | head -1); UV_PRESENT="${UV_PRESENT:-unknown}"
+  PY_VER=$(echo "$FACTS" | sed -n 's/^PY=//p' | head -1)
 else
   echo "vast-attach: NOTE --no-probe set — secrets NOT auto-seeded; ensure /root/.config/verl-research/secrets.env exists on the box by hand." >&2
 fi
@@ -217,10 +236,12 @@ HANDLE=$(jq -nc \
   --argjson dph "$DPH" --arg login "$SSH_LOGIN" --arg acct "$ACCOUNT" \
   --arg label "$EXP_ID" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg ident "$IDENTITY" --argjson synth "$SYNTHETIC" \
+  --arg clabel "$CONTAINER_LABEL" --arg uv "$UV_PRESENT" --arg py "$PY_VER" \
   '{schema_version:"1", instance_id:$iid, ssh_host:$host, ssh_port:$port,
     num_gpus:$ng, gpu_name:$gn, gpu_ram:$gr, dph_total:$dph, ssh_login:$login,
     ssh_identity:$ident, label:$label, vast_account:$acct, created_at:$t,
-    external:true, synthetic_instance_id:($synth==1)}')
+    external:true, synthetic_instance_id:($synth==1),
+    container_label:$clabel, uv_present:$uv, python3_version:$py}')
 
 # Handle lands in BOTH homes: the run dir (runner contract) and the shared
 # state dir (vast-teardown's account-resolution fallback scans it).

@@ -36,13 +36,16 @@ re-author what is already committed.
    `origin/<base_branch>` (project.yaml `source_tree.base_branch` — NEVER a
    hardcoded branch name), push BEFORE anything else (crash survival).
    `code_change: true`: apply the patch to `target_modules` on that branch in
-   your worktree (protect-upstream allows exp/* writes), commit, push, and
-   `git bundle create $PARENT/runs/<id>/exp.bundle exp/<id>`. If the branch
-   already exists with the implementation committed, do NOT re-author — fetch
-   and bundle it. The bundle is a **LOCAL crash-survival artifact only** (cheap
-   on disk): the box bootstraps by cloning `exp/<id>` straight from origin (see
-   the launch.sh shape + step 8), so the ~1.3 GB bundle is **NOT uploaded** in
-   the common case — `origin/exp/<id>`, pushed just above, IS the durable copy.
+   your worktree (protect-upstream allows exp/* writes), commit, push. If the
+   branch already exists with the implementation committed, do NOT re-author —
+   fetch it. **Bundle is lazy:** create
+   `git bundle create $PARENT/runs/<id>/exp.bundle exp/<id>` ONLY if the push
+   to origin FAILED (offline PREPARE). A successful push makes `origin/exp/<id>`
+   the durable copy — a ~1.3 GB bundle adds nothing but PREPARE minutes and
+   disk (2026-07-15 #83: the always-built bundle was never needed and its
+   speculative background upload was killed as moot). The bundle is NEVER
+   uploaded pre-emptively in any case (step 8): the box clones from origin, and
+   the bundle is rsynced ONLY after an on-box clone has actually failed.
 
 3. **Snapshot `runs/<id>/run.json`** — everything downstream stages need so
    the plan file can be deleted mid-flight: issue, run_id, title (the plan's
@@ -57,9 +60,18 @@ re-author what is already committed.
    `$PARENT/.claude/skills/launch/commit-hotfix.template.sh` →
    `runs/<id>/commit-hotfix.sh`.
 
-5. **ONE CPU sanity pass** (imports/paths/config render — bounded: one pass,
-   one fix attempt, never a loop). Real numerics are validated only by the
-   on-box probe cell — do not simulate training on the MacBook.
+5. **ONE CPU sanity pass** (bounded: one pass, one fix attempt, never a loop).
+   MUST include, for EACH distinct cell config, the REAL Hydra composition
+   path — not just dataclass instantiation:
+   `PYTHONPATH=<worktree> python3 scripts/print_cfg.py --cfg job <exactly the
+   Hydra overrides that cell's env deltas resolve to via the engine>` and
+   assert the resolved values match the cell's intent. Struct-mode rejects
+   (`Key '<k>' is not in struct`) surface ONLY on this composition path — a
+   dataclass-only gate passes them straight to the GPU (2026-07-15 #83: PR #27
+   added dataclass fields without the actor.yaml keys; the dataclass gate was
+   green and the crash cost a full launch+classify+fix cycle on a paid box).
+   Real numerics are validated only by the on-box probe cell — do not simulate
+   training on the MacBook.
 
 `compute=prepare-only` → print `READY_FOR_GPU: <id> — branch exp/<id> pushed,
 payload + CPU gates green` and STOP (no ledger row, no provisioning).
@@ -175,8 +187,16 @@ a GitHub-unreachable probe (rare). Then PROVE the change's hook is importable
 #!/usr/bin/env bash
 set -euo pipefail
 cd /workspace
-[[ -e verl ]] && mv verl "verl.upstream.$(date +%s)"
-if git clone -b exp/<id> https://github.com/shamanez/verl.git verl; then
+# FAST PATH first (relaunches, seconds): reuse the existing checkout via
+# fetch + hard reset — a full re-clone costs minutes per launch and piles up
+# verl.upstream.* dirs on the 200G disk (2026-07-15 #83 hit both).
+if [[ -d verl/.git ]] \
+   && (cd verl && git remote set-url origin https://github.com/shamanez/verl.git \
+       && git fetch origin exp/<id> && git checkout -B exp/<id> FETCH_HEAD \
+       && git reset --hard FETCH_HEAD); then
+  echo "=== code_change: reused checkout, reset to origin/exp/<id> ==="
+elif { [[ -e verl ]] && mv verl "verl.stale.$(date +%s)"; true; } \
+     && git clone -b exp/<id> https://github.com/shamanez/verl.git verl; then
   echo "=== code_change: cloned exp/<id> from GitHub ==="
 elif [[ -f /workspace/runs/<id>/exp.bundle ]]; then
   echo "=== GitHub unreachable — falling back to exp.bundle ==="
@@ -186,8 +206,12 @@ else
   echo "  recovery: rsync ONLY runs/<id>/exp.bundle to the box, then relaunch." >&2
   exit 1
 fi
-cd verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-uv pip install --no-deps -e . > /workspace/pip.log 2>&1
+cd /workspace/verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
+echo "=== verl HEAD: $(git rev-parse HEAD) ==="   # echo the REAL sha; never hardcode an expected one
+# uv is absent on many operator-attach boxes (and refuses system python without a
+# venv) — prefer uv when usable, else system pip (equivalent for --no-deps -e .).
+if command -v uv >/dev/null 2>&1; then UVPIP="uv pip"; else UVPIP="python3 -m pip"; fi
+$UVPIP install --no-deps -e . > /workspace/pip.log 2>&1
 python3 -c "import verl" || { echo "FATAL: verl import failed after bootstrap" >&2; exit 1; }
 # + assert THIS change's hook is present, e.g.
 #   python3 -c "from verl.workers.comm_eff.activation_mask import parse_train_layers"
@@ -206,7 +230,9 @@ branch surviving.
 cd /workspace
 if [[ ! -d verl/.git ]]; then
   git clone -b <base_branch> https://github.com/shamanez/verl.git verl \
-    && (cd verl && uv pip install --no-deps -e . > /workspace/pip.log 2>&1)
+    && (cd verl \
+        && { command -v uv >/dev/null 2>&1 && UVPIP="uv pip" || UVPIP="python3 -m pip"; } \
+        && $UVPIP install --no-deps -e . > /workspace/pip.log 2>&1)
 fi
 cd /workspace/verl && git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
 # Use FETCH_HEAD, not origin/<base_branch>: a template clone made with a
