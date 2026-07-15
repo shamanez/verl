@@ -17,6 +17,7 @@ Usage (on the box):
   python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath \
     --train-cap 20000 --val-size 500 --seed 42
 """
+
 from __future__ import annotations
 
 import argparse
@@ -65,12 +66,24 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hf-dataset", default="gshasiri/Big-Math-RL-Verified-filtered")
     ap.add_argument("--local_save_dir", default="/root/data/bigmath")
-    ap.add_argument("--train-cap", type=int, default=20000,
-                    help="shuffle then keep this many train rows (>> steps*batch needed); 0 = keep all")
-    ap.add_argument("--val-size", type=int, default=500,
-                    help="shuffle then keep this many validation rows for periodic eval speed; 0 = keep all")
-    ap.add_argument("--max-solve-rate", type=float, default=None,
-                    help="if set, keep only train rows with llama8b_solve_rate <= this (harder subset)")
+    ap.add_argument(
+        "--train-cap",
+        type=int,
+        default=20000,
+        help="shuffle then keep this many train rows (>> steps*batch needed); 0 = keep all",
+    )
+    ap.add_argument(
+        "--val-size",
+        type=int,
+        default=500,
+        help="shuffle then keep this many validation rows for periodic eval speed; 0 = keep all",
+    )
+    ap.add_argument(
+        "--max-solve-rate",
+        type=float,
+        default=None,
+        help="if set, keep only train rows with llama8b_solve_rate <= this (harder subset)",
+    )
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -88,8 +101,7 @@ def main() -> int:
 
     if args.max_solve_rate is not None:
         train = train.filter(
-            lambda e: e.get("llama8b_solve_rate") is not None
-            and float(e["llama8b_solve_rate"]) <= args.max_solve_rate
+            lambda e: e.get("llama8b_solve_rate") is not None and float(e["llama8b_solve_rate"]) <= args.max_solve_rate
         )
 
     train = train.shuffle(seed=args.seed)

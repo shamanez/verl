@@ -50,11 +50,10 @@ for key in dict.fromkeys(preview_keys):
 # in cwd (research/), a shared dir no cleanup step ever removes.
 _wdir = os.environ.get("WANDB_DIR")
 if not _wdir:
-    _p = Path(log_path).resolve()           # runs/<id>/metrics/train.log -> runs/<id>
+    _p = Path(log_path).resolve()  # runs/<id>/metrics/train.log -> runs/<id>
     _wdir = str(_p.parents[1]) if len(_p.parents) >= 2 else str(_p.parent)
 os.makedirs(_wdir, exist_ok=True)
-run = wandb.init(project="verl_compression_research", entity="shamanework-pl",
-                 id=run_id, resume="must", dir=_wdir)
+run = wandb.init(project="verl_compression_research", entity="shamanework-pl", id=run_id, resume="must", dir=_wdir)
 wandb.log(metrics, step=target)
 wandb.finish()
 print("RELOG DONE for", run_id, "step", target)
