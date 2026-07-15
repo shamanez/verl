@@ -597,16 +597,6 @@ class RayPPOTrainer:
         return batch_reward
 
     def _validate(self, merged: bool = False):
-        # Mask-contamination invariant: validation must run mask-free even
-        # while comm_eff.mask.enabled=true. This holds structurally, not by
-        # accident: _validate only drives rollout generation (generate_sequences)
-        # and reward scoring — it never calls update_actor, so the actor engine's
-        # mask hooks are never registered (they are installed only inside
-        # update_actor's train forward and removed on exit) and the worker's
-        # comm_eff path_tag is never "train" on this path. Any recompute_log_prob
-        # here routes through compute_log_prob, which stamps the "old_logprob"
-        # tag, so the mask hook's assert would trip on a leak. val/test_score is
-        # therefore identical mask-on vs mask-off.
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -1113,20 +1103,18 @@ class RayPPOTrainer:
         )
         from verl.workers.comm_eff.r2_sink import maybe_build_r2_sink
 
-        # Env knobs mirror the WEIGHT_TRAJ_R2_* convention (CKPT_R2_*). manifest_dir
-        # is the run-local default_local_dir so the checkpoints r2_manifest.jsonl
+        # CKPT_R2_* environment knobs configure the checkpoint sink. manifest_dir
+        # is the run-local default_local_dir so the checkpoint r2_manifest.jsonl
         # sits alongside the (deleted) staging tree and is synced back by the monitor.
         manifest_dir = os.path.abspath(self.config.trainer.default_local_dir)
         self._ckpt_r2_delete_local = os.environ.get("CKPT_R2_DELETE_LOCAL", "true").lower() == "true"
         self._ckpt_r2_sink = maybe_build_r2_sink(
             enabled=True,
-            artifact_kind="checkpoints",
             manifest_dir=manifest_dir,
             delete_local=self._ckpt_r2_delete_local,
             async_mode=os.environ.get("CKPT_R2_ASYNC", "true").lower() == "true",
             upload_workers=int(os.environ.get("CKPT_R2_WORKERS", "4")),
             max_staged_gb=float(os.environ.get("CKPT_R2_MAX_STAGED_GB", "50")),
-            flush_timeout_s=float(os.environ.get("CKPT_R2_FLUSH_TIMEOUT", "1800")),
         )
         return self._ckpt_r2_sink
 
@@ -1159,8 +1147,7 @@ class RayPPOTrainer:
             sink.upload(local_path=fpath, key_suffix=key_suffix, meta={"global_step": step})
             n_files += 1
         print(
-            f"[ckpt_r2] queued {n_files} file(s) from {local_global_step_folder} "
-            f"-> R2 (async, step={step})",
+            f"[ckpt_r2] queued {n_files} file(s) from {local_global_step_folder} -> R2 (async, step={step})",
             flush=True,
         )
 
@@ -1435,13 +1422,9 @@ class RayPPOTrainer:
 
     def _compute_old_log_prob(self, batch: DataProto):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-        # Step-stamp guard: stamp the trainer step BEFORE to_tensordict so the comm_eff
-        # worker's old-logprob recompute sees the same global_step as the matching
-        # update_actor and can run unmasked on a clean step (both gradient-feeding
-        # forwards clean ⇒ IS ratio r≈1). A comm_eff-private meta key (NOT bare
-        # "global_steps", which the vLLM rollout already emits as a per-sample
-        # batch column ⇒ to_tensordict meta-vs-column collision). No-op for
-        # dense/disabled runs.
+        # Stamp before conversion so the worker uses the same PowerSGD/anchor
+        # clock for this old-logprob recompute and the paired actor update. The
+        # private key avoids colliding with vLLM's per-sample ``global_steps``.
         batch.meta_info["comm_eff_global_step"] = self.global_steps
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1484,7 +1467,7 @@ class RayPPOTrainer:
         # response_mask / old_log_probs / advantages / optional ref_log_prob)
         # flows unchanged into update_actor -> train_mini_batch -> per-mini-batch
         # engine.train_batch(data, loss_fn). The anchor circuit reads THIS same
-        # batch inside FSDPEngine._maybe_comm_eff_anchor_refresh for its unmasked
+        # batch inside FSDPEngine._maybe_comm_eff_anchor_refresh for its dense
         # K-stale fwd/bwd — it generates NO new rollouts and recomputes NO rewards
         # (those happened upstream of this method). No separate anchor batch is
         # constructed or synced to rollout replicas.
@@ -1492,13 +1475,7 @@ class RayPPOTrainer:
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
-        # Step-stamp guard: stamp the trainer step so the comm_eff worker can gate the
-        # periodic clean (unmasked) optimizer step. to_tensordict() carries
-        # meta_info into the worker `data`; engine_workers.update_actor reads it
-        # back via tu.get(data, "comm_eff_global_step"). A comm_eff-private key
-        # (NOT bare "global_steps", which the vLLM rollout already emits as a
-        # per-sample batch column ⇒ to_tensordict meta-vs-column collision).
-        # Harmless for dense/disabled runs (the worker short-circuits on None).
+        # Thread the same private PowerSGD/anchor clock into the actor update.
         batch.meta_info["comm_eff_global_step"] = self.global_steps
         # update actor
         batch_td = batch.to_tensordict()
@@ -1962,15 +1939,6 @@ class RayPPOTrainer:
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                    # comm_eff R2 run-end barrier: drain + fail-loud on the async
-                    # weight-traj / capture upload pool so the final in-flight
-                    # snapshots complete and any permanent upload failure surfaces
-                    # as a non-zero run exit (the atexit net only best-effort
-                    # backstops). Strict no-op on the dense / synchronous-R2 / no-
-                    # capture path. Guarded by hasattr so a worker group without the
-                    # RPC (older worker) is unaffected.
-                    if hasattr(self.actor_rollout_wg, "comm_eff_close"):
-                        self.actor_rollout_wg.comm_eff_close()
                     # checkpoint->R2 run-end drain barrier (EXP-58): flush the async
                     # checkpoint upload queue + fail-loud on any unverified upload, so
                     # the final in-flight checkpoint completes and a partial mirror is
@@ -1991,11 +1959,6 @@ class RayPPOTrainer:
                     self.train_dataset.on_batch_end(batch=batch)
 
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
-        # comm_eff R2 run-end barrier on this fallthrough too (loop exits without
-        # is_last_step), so the async upload pool is drained + fails loud regardless
-        # of how the loop terminates. Strict no-op without the feature.
-        if hasattr(self.actor_rollout_wg, "comm_eff_close"):
-            self.actor_rollout_wg.comm_eff_close()
         # checkpoint->R2 run-end drain barrier (EXP-58) on this fallthrough too, so the
         # async checkpoint upload pool is drained + fails loud regardless of how the
         # loop terminates. Strict no-op without the feature.

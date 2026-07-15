@@ -17,19 +17,23 @@ conflict.
 Ground-truth per dataset (probed 2026-07-07):
   math        EleutherAI/hendrycks_math      answer = \\boxed{} span of `solution`  (7 subject configs, concat)
   numina-cot  AI-MO/NuminaMath-CoT           answer = \\boxed{} span of `solution`
-  deepscaler  qingy2024/DeepScaleR-40k       answer = `solution` (already the bare short answer; train-only -> carve test)
-  skywork-or1 Skywork/Skywork-OR1-RL-Data    answer = json.loads(reward_model.ground_truth)[0]  (split "math"; carve test)
+  deepscaler  qingy2024/DeepScaleR-40k       answer = `solution`
+                                               (bare short answer; carve test from train)
+  skywork-or1 Skywork/Skywork-OR1-RL-Data    answer = json.loads(reward_model.ground_truth)[0]
+                                               (split "math"; carve test from train)
   dapo-math   BytedTsinghua-SIA/DAPO-Math-17k answer = reward_model.ground_truth (plain str; train-only -> carve test)
 
 Output: <save_dir>/train.parquet + <save_dir>/test.parquet, consumed by the
-canonical comm-eff launcher via DATA_DIR (it skips its gsm8k auto-prep when both
-files exist). On-box DATA_DIR dirs: math, numina_cot, deepscaler, skywork_or1,
-dapo_math (slug with '-' -> '_').
+canonical comm-eff launcher via DATA_DIR. MATH is the default surface; when both
+files exist the launcher consumes them instead of invoking its MATH fallback
+prep. On-box DATA_DIR dirs: math, numina_cot, deepscaler, skywork_or1, dapo_math
+(slug with '-' -> '_').
 
 Usage (on the box, one dir per dataset):
   python3 research/scripts/prepare_rlvr_math.py --dataset math \
     --local_save_dir /root/data/math --train-cap 20000 --val-size 500 --seed 42
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,7 +80,7 @@ def _first_of_jsonlist(gt) -> str | None:
     string ('34'). Return the first element for a list, else the stripped string."""
     if gt is None:
         return None
-    if isinstance(gt, (list, tuple)):
+    if isinstance(gt, list | tuple):
         return str(gt[0]).strip() if gt else None
     s = str(gt).strip()
     if s.startswith("[") and s.endswith("]"):
@@ -100,8 +104,15 @@ def _strip_dapo(content: str) -> str:
 SPECS = {
     "math": {
         "hf_id": "EleutherAI/hendrycks_math",
-        "configs": ["algebra", "counting_and_probability", "geometry",
-                    "intermediate_algebra", "number_theory", "prealgebra", "precalculus"],
+        "configs": [
+            "algebra",
+            "counting_and_probability",
+            "geometry",
+            "intermediate_algebra",
+            "number_theory",
+            "prealgebra",
+            "precalculus",
+        ],
         "train_split": "train",
         "test_split": "test",
         "problem": lambda r: r["problem"],
@@ -126,7 +137,7 @@ SPECS = {
     "skywork-or1": {
         "hf_id": "Skywork/Skywork-OR1-RL-Data",
         "configs": [None],
-        "train_split": "math",   # non-standard splits: math | code
+        "train_split": "math",  # non-standard splits: math | code
         "test_split": None,
         "problem": lambda r: r["prompt"][0]["content"],
         "answer": lambda r: _first_of_jsonlist(r.get("reward_model", {}).get("ground_truth")),
@@ -151,8 +162,7 @@ def build_row(spec, split: str, problem: str, answer: str, idx: int) -> dict:
         "prompt": [{"role": "user", "content": content}],
         "ability": "math",
         "reward_model": {"style": "rule", "ground_truth": answer},
-        "extra_info": {"split": split, "index": idx, "answer": answer,
-                       "hf_id": spec["hf_id"]},
+        "extra_info": {"split": split, "index": idx, "answer": answer, "hf_id": spec["hf_id"]},
     }
 
 
@@ -216,8 +226,7 @@ def _prep_split(spec, split_label, native_split, cap, seed):
     ds = ds.shuffle(seed=seed)
     if cap and cap > 0:
         ds = ds.select(range(min(cap, len(ds))))
-    mapped = ds.map(map_example(spec, split_label), with_indices=True,
-                    remove_columns=ds.column_names)
+    mapped = ds.map(map_example(spec, split_label), with_indices=True, remove_columns=ds.column_names)
     # map cannot drop rows by returning None -> None rows survive as all-None dicts;
     # filter them out on the mapped dataset.
     mapped = mapped.filter(lambda r: r.get("data_source") is not None)
@@ -228,10 +237,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dataset", required=True, choices=SLUGS)
     ap.add_argument("--local_save_dir", required=True)
-    ap.add_argument("--train-cap", type=int, default=20000,
-                    help="shuffle then keep this many train rows; 0 = keep all")
-    ap.add_argument("--val-size", type=int, default=500,
-                    help="held-out eval rows; for train-only datasets these are carved from train")
+    ap.add_argument("--train-cap", type=int, default=20000, help="shuffle then keep this many train rows; 0 = keep all")
+    ap.add_argument(
+        "--val-size",
+        type=int,
+        default=500,
+        help="held-out eval rows; for train-only datasets these are carved from train",
+    )
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -250,12 +262,12 @@ def main() -> int:
         train_raw = full.select(range(val_n, len(full)))
         if args.train_cap and args.train_cap > 0:
             train_raw = train_raw.select(range(min(args.train_cap, len(train_raw))))
-        test = test_raw.map(map_example(spec, "test"), with_indices=True,
-                            remove_columns=test_raw.column_names).filter(
-            lambda r: r.get("data_source") is not None)
-        train = train_raw.map(map_example(spec, "train"), with_indices=True,
-                              remove_columns=train_raw.column_names).filter(
-            lambda r: r.get("data_source") is not None)
+        test = test_raw.map(map_example(spec, "test"), with_indices=True, remove_columns=test_raw.column_names).filter(
+            lambda r: r.get("data_source") is not None
+        )
+        train = train_raw.map(
+            map_example(spec, "train"), with_indices=True, remove_columns=train_raw.column_names
+        ).filter(lambda r: r.get("data_source") is not None)
 
     train_path = os.path.join(out, "train.parquet")
     test_path = os.path.join(out, "test.parquet")

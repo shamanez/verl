@@ -1,105 +1,56 @@
-# Group Relative Policy Optimization (GRPO)
+# Communication-efficient GRPO launchers (Qwen2.5-Math-1.5B / MATH)
 
-In reinforcement learning, classic algorithms like PPO rely on a "critic" model to estimate the value of actions, guiding the learning process. However, training this critic model can be resource-intensive.
+This directory holds the launchers for **this fork's** communication-efficient
+GRPO baseline. The fixed surface is **`Qwen/Qwen2.5-Math-1.5B` on MATH**
+(last-`\boxed{}` + `is_equiv` reward). With the method disabled
+(`COMM_EFF_ENABLED=false`) training is byte-identical to upstream verl.
 
-GRPO simplifies this process by eliminating the need for a separate critic model. Instead, it operates as follows:
-- Group Sampling: for a given problem, the model generates multiple possible solutions, forming a "group" of outputs.
-- Reward Assignment: each solution is evaluated and assigned a reward based on its correctness or quality.
-- Baseline Calculation: the average reward of the group serves as a baseline.
-- Policy Update: the model updates its parameters by comparing each solution's reward to the group baseline, reinforcing better-than-average solutions and discouraging worse-than-average ones.
+> This is not the upstream verl example set. The project-level source of truth is
+> [`research/.claude/project.yaml`](../../research/.claude/project.yaml)
+> (`compression_defaults.math_qwen25_math_1p5b`); what "done" means lives in
+> [`research/.claude/GOAL.md`](../../research/.claude/GOAL.md).
 
-For more details, refer to the original paper [DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models](https://arxiv.org/pdf/2402.03300).
+## What GRPO is (in one paragraph)
 
-## Key Components
+GRPO drops PPO's critic: for each prompt it samples a group of `n` completions,
+scores each against the reward, and uses the group mean as the baseline, so
+better-than-average completions are reinforced and worse-than-average ones are
+discouraged. This fork runs vanilla GRPO (no DAPO / GSPO), with reference-policy
+`low_var_kl=0.001`, reward-side KL disabled, and entropy coefficient zero on the
+method path. Reference: [DeepSeekMath](https://arxiv.org/pdf/2402.03300).
 
-- No Value Function (Critic-less): unlike PPO, GRPO does not train a separate value network (critic).
-- Group Sampling (Grouped Rollouts): instead of evaluating one rollout per input, GRPO generates multiple completions (responses) from the current policy for each prompt. This set of completions is referred to as a group.
-- Relative Rewards: within each group, completions are scored (e.g., based on correctness), and rewards are normalized relative to the group.
+## Files
 
-## Important knobs
+| File | Role |
+|---|---|
+| `vast_comm_eff_engine_grpo.sh` | The shared, **model/dataset-agnostic** comm-eff engine. Every launcher below `exec`s it; `MODEL_PATH` / `DATA_DIR` / `EXPERIMENT_NAME` are supplied by the caller. Dense control = run it with `COMM_EFF_ENABLED=false`. |
+| `run_qwen25_math_1p5b_rank1_relex_fsdp.sh` | The MATH **method/base launcher**: pins the Qwen2.5-Math-1.5B / MATH surface (prompt/response 1024/3072, batch 512, mini 256, `n=8`, AdamW `1e-6`, `kl=0.001`) and the RELEX chat template, then execs the engine. |
+| `run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh` | Runs the qboot-v2 rank-1 RELEX comparisons; `composite` is the current reference arm. |
+| `run_qwen25_math_1p5b_relex_comparison_fsdp.sh` | The **dense control** and focused RELEX rank-1 comparison launcher. |
+| `relex_qwen_chat_template.jinja` | RELEX Qwen chat template, loaded by the base launcher for rollout + validation parity. |
+| `COMM_EFF_CONFIG.md` | Compact run command and current defaults. |
+| `VAST_README.md` | Vast.ai launch conventions + the launch-script stability contract. |
 
-- `actor_rollout_ref.rollout.n`: per-prompt sample count (required >= 2 for GRPO).
-- `data.train_batch_size`: prompts per global step. Total trajectories = `train_batch_size * rollout.n`.
-- `actor_rollout_ref.actor.ppo_mini_batch_size`: global mini-batch for actor updates (must divide `train_batch_size * n`).
-- `actor_rollout_ref.actor.ppo_epochs`: inner-loop epochs over the sampled trajectories.
-- `actor_rollout_ref.actor.clip_ratio`: PPO clip range, default `0.2`.
-- `actor_rollout_ref.actor.loss_agg_mode`: `token-mean` (default), `seq-mean-token-sum`, or `seq-mean-token-mean`.
-- `actor_rollout_ref.actor.use_kl_loss=True` + `actor_rollout_ref.actor.kl_loss_coef` / `kl_loss_type`: regularise toward the reference policy via KL loss on the actor.
-- `algorithm.adv_estimator=grpo`.
+## Running it
 
-## Dr. GRPO
-
-To enable Dr. GRPO (see [Understanding R1-Zero-Like Training](https://arxiv.org/pdf/2503.20783)), set on top of the canonical GRPO overrides:
-
-```
-actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm
-actor_rollout_ref.actor.use_kl_loss=False
-algorithm.norm_adv_by_std_in_grpo=False
-```
-
-## Canonical scripts
-
-All scripts in this directory follow the naming convention:
-
-```
-run_<model>_<train-backend>[_<platform-or-variant>].sh
-```
-
-Where:
-- `<model>` is the canonical size for a model family
-  (`qwen3_8b` for dense text, `qwen3_30b_a3b` for MoE, `qwen2_5_vl_7b` / `qwen3_vl_8b` for vision,
-  `qwen3_235b_a22b` / `deepseek_v3_671b` for scale demos).
-- `<train-backend>` ∈ {`fsdp`, `megatron`, `mindspeed`}.
-- `<platform-or-variant>` is used only for hardware-specific variants such as `gb200`, `fp8`, `veomni`,
-  or MindSpeed NPU scripts.
-- `INFER_BACKEND` selects rollout backend inside scripts that support multiple choices
-  (`vllm`, `sglang`, or `trtllm`).
-- `DEVICE` selects GPU/NPU paths inside scripts that support both platforms.
-
-Every script exposes the commonly tuned knobs as environment variables at the top, so you can run:
+The MATH launchers require a prepared MATH dataset in `DATA_DIR` (they FATAL if
+`train.parquet` / `test.parquet` are absent). The canonical prep is
+[`research/scripts/prepare_rlvr_math.py`](../../research/scripts/prepare_rlvr_math.py);
+a bare engine run falls back to `examples/data_preprocess/math_dataset.py`.
 
 ```bash
-MODEL_PATH=Qwen/Qwen3-14B \
-NNODES=2 NGPUS_PER_NODE=8 \
-INFER_BACKEND=sglang ROLLOUT_N=8 TRAIN_BATCH_SIZE=2048 \
-bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+# Comm-eff method run (the reference surface):
+bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
+
+# Dense control (comm-eff OFF, same surface, the parity bar):
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
+
+# Latest completed comm-eff reference (explicit arm required):
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
 ```
 
-### Defaults
-
-- `dynamic batch size` and `sequence balancing` are enabled by default on all scripts.
-- Text LLM scripts train on `gsm8k + math` by default; vision scripts train on `geo3k`.
-- Scale-demo scripts (235B, 671B) train on `dapo-math-17k` / `aime-2024`.
-
-### Matrix
-
-| Model family          | `vllm` | `sglang` | `trtllm` | Train backend   | Platforms |
-| --------------------- | :----: | :------: | :------: | --------------- | --------- |
-| Qwen3-8B (dense)      | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (FSDP + MindSpeed), `_gb200` variant |
-| Qwen2.5-VL-7B         | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia    |
-| Qwen3-VL-8B           | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP) |
-| Qwen3-VL-30B-A3B      | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP, VeOmni) |
-| Qwen3-VL-235B-A22B    | ✓      |          |          | Megatron        | nvidia    |
-| Qwen3-30B-A3B (MoE)   | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (MindSpeed, VeOmni) |
-| Qwen3-235B-A22B       | ✓      |          | ✓        | Megatron        | nvidia, npu |
-| Qwen3-Next-80B-A3B    | ✓      |          |          | FSDP            | npu       |
-| Qwen3.5-27B (dense)   | ✓      |          |          | FSDP2           | nvidia, npu |
-| Qwen3.5-35B (dense)   | ✓      |          |          | FSDP2, Megatron | nvidia, npu |
-| Qwen3.5-35B-A3B (MoE) |        | ✓        |          | VeOmni          | nvidia    |
-| Qwen3.5-122B-A10B     | ✓      |          |          | Megatron        | nvidia    |
-| DeepSeek-V3 671B      | ✓      |          |          | Megatron        | nvidia    |
-| GLM-4.1V-9B           | ✓      |          |          | FSDP            | nvidia    |
-| MiniCPM-o-2.6         | ✓      |          |          | FSDP            | nvidia    |
-| Moonlight-16B-A3B     | ✓      |          |          | Megatron        | nvidia    |
-| Nemotron-Nano-v3-30B-A3B | ✓   |          |          | Megatron        | nvidia    |
-| Seed-OSS-36B          | ✓      |          |          | FSDP2           | nvidia    |
-| GPT-OSS-20B           |        | ✓        |          | FSDP            | nvidia    |
-| Mistral-Nemo-12B (RM demo) | ✓ |          |          | FSDP            | nvidia    |
-
-LoRA variants live in `examples/tuning/lora/`, profiling variants in `examples/profile/`.
-Scale / hardware-specific demos (e.g. `run_qwen3_8b_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
-
-## Reference
-
-- See [verl baselines](https://verl.readthedocs.io/en/latest/algo/baseline.html) for reference metrics.
-- Qwen2.5 GRPO training log: [experiments/gsm8k/qwen2-7b-fsdp2.log](https://github.com/eric-haibin-lin/verl-data/blob/experiments/gsm8k/qwen2-7b-fsdp2.log).
+Common knobs are exposed as environment variables at the top of each launcher
+(`MODEL_PATH`, `DATA_DIR`, `ROLLOUT_N`, `TRAIN_BATCH_SIZE`, `MAX_RESPONSE_LENGTH`,
+the `COMM_EFF_*` family, …). Hardware provisioning and the launch flow are driven
+by the harness under `research/`; see
+[`research/researcher_steps.md`](../../research/researcher_steps.md).

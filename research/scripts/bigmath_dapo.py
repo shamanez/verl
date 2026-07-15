@@ -1,29 +1,23 @@
 """Preprocess gshasiri/Big-Math-RL-Verified-filtered to verl parquet format.
 
-Mirrors examples/data_preprocess/gsm8k.py's row schema, routing the reward to
-"math_bigmath" (verl.utils.reward_score.__init__ -> math_reward.compute_score).
-math_reward pulls the last \\boxed{} from the full solution string (no truncation)
-and checks it with is_equiv (normalized LaTeX/numeric equivalence: 1/2 == \\frac{1}{2}).
-The routing wrapper maps the 0/1 float to a {score: ±1, acc: bool} dict so WandB
-metrics are consistent with GSM8K runs.
-
-Do NOT use data_source="math_dapo" for Big-Math: math_dapo's default verify path is
-is_correct_minerva, which searches for an "Answer:" regex token and ignores \\boxed{}.
-It only accidentally scores +1 when a very short numeric answer appears in the last
-300-char tail AND the normalization round-trip happens to be lossless. Confirmed broken
-on 2026-06-01 (all rollouts scored -1.0 despite correct \\boxed{} outputs).
+This is a non-default dataset utility. It emits the same parquet row schema as
+the current MATH preparation and uses
+``DigitalLearningGmbH/MATH-lighteval`` reward routing: extract the last
+``\\boxed{}`` answer and compare it with ``is_equiv``.
 
 Source columns: problem (str), answer (str, verified final answer), source,
 domain (list), llama8b_solve_rate (float, difficulty proxy; lower = harder).
 Splits: train (123,602), validation (6,506).
 
 Output: <save_dir>/train.parquet + <save_dir>/test.parquet, consumed by the
-vast_comm_eff launcher via DATA_DIR (it skips its gsm8k prep when both exist).
+comm-eff launcher when DATA_DIR points at this directory. The prepared files are
+used instead of the launcher's default MATH fallback prep.
 
 Usage (on the box):
   python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath \
     --train-cap 20000 --val-size 500 --seed 42
 """
+
 from __future__ import annotations
 
 import argparse
@@ -72,12 +66,24 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hf-dataset", default="gshasiri/Big-Math-RL-Verified-filtered")
     ap.add_argument("--local_save_dir", default="/root/data/bigmath")
-    ap.add_argument("--train-cap", type=int, default=20000,
-                    help="shuffle then keep this many train rows (>> steps*batch needed); 0 = keep all")
-    ap.add_argument("--val-size", type=int, default=500,
-                    help="shuffle then keep this many validation rows for periodic eval speed; 0 = keep all")
-    ap.add_argument("--max-solve-rate", type=float, default=None,
-                    help="if set, keep only train rows with llama8b_solve_rate <= this (harder subset)")
+    ap.add_argument(
+        "--train-cap",
+        type=int,
+        default=20000,
+        help="shuffle then keep this many train rows (>> steps*batch needed); 0 = keep all",
+    )
+    ap.add_argument(
+        "--val-size",
+        type=int,
+        default=500,
+        help="shuffle then keep this many validation rows for periodic eval speed; 0 = keep all",
+    )
+    ap.add_argument(
+        "--max-solve-rate",
+        type=float,
+        default=None,
+        help="if set, keep only train rows with llama8b_solve_rate <= this (harder subset)",
+    )
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -95,8 +101,7 @@ def main() -> int:
 
     if args.max_solve_rate is not None:
         train = train.filter(
-            lambda e: e.get("llama8b_solve_rate") is not None
-            and float(e["llama8b_solve_rate"]) <= args.max_solve_rate
+            lambda e: e.get("llama8b_solve_rate") is not None and float(e["llama8b_solve_rate"]) <= args.max_solve_rate
         )
 
     train = train.shuffle(seed=args.seed)

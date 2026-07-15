@@ -8,8 +8,16 @@ command per stage, surfaced as three phase windows: `/build` → `/plan <N>` →
 
 ## Project in one line
 
-A **communication-efficient, pipeline-parallel GRPO trainer** — Qwen2.5-1.5B-Instruct + GSM8K.
+A **communication-efficient, pipeline-parallel GRPO trainer** —
+`Qwen/Qwen2.5-Math-1.5B` on MATH train/test.
 What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
+
+The active method surface is qboot-v2: PowerSGD activation projection at rank
+77 with an activation-derived, anchor-owned `Q`; paired dense anchor replay at
+cadence/delay 20/20; progressive rank-1 RELEX weight projection (W2→W3→W4,
+window 4, minimum 2); and signed-EMA gradient correction (`alpha=0.25`,
+`beta_anc=0.50`) over all floating parameters on CPU. The dense control uses the
+same model, data, and GRPO settings with communication efficiency disabled.
 
 ## Canonical docs (single source each; link, don't duplicate)
 
@@ -19,7 +27,6 @@ What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
 | **The commands** — phases, stages, human-only skills | [`researcher_steps.md`](researcher_steps.md) |
 | Operating config — repos, labels, naming, budget, verification policy, compute | [`.claude/project.yaml`](.claude/project.yaml) |
 | **The operator manual** (workflow, compute, money, design rationale — human-only, hosted) | [manual](https://claude.ai/code/artifact/33a69614-404b-42fe-9fea-029f1c73d874) |
-| Engineering map of the method | [`../CODE_WALKTHROUGH.md`](../CODE_WALKTHROUGH.md) |
 
 ## Layout
 

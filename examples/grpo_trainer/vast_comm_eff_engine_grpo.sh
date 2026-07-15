@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
-# vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh
+# vast_comm_eff_engine_grpo.sh
 #
-# COMMUNICATION-EFFICIENT GRPO — Qwen2.5-1.5B-Instruct on GSM8K, 1..8 GPUs
-# (default box: 1×H200 per project.yaml `default_compute`; legacy 4..8 shapes
-# on explicit operator request), FSDP + vLLM rollout. Mirrors the dense baseline launcher
-# (vast_baseline_qwen25_1p5b_grpo_gsm8k.sh) one-for-one in training shape so
-# the two compare apples-to-apples; the ONLY differences are the
-# communication-efficient method's hydra knobs and the no-KL / no-entropy
-# objective.
+# COMMUNICATION-EFFICIENT GRPO engine: model/dataset-agnostic, driven by env
+# (default surface: Qwen2.5-Math-1.5B on MATH, 1..8 GPUs; the completed
+# reference used 2×H200 NVL), FSDP + vLLM rollout. This is the shared engine every MATH launcher
+# `exec`s (MODEL_PATH / DATA_DIR / EXPERIMENT_NAME are overridden by the caller);
+# the dense control is the same surface with `COMM_EFF_ENABLED=false`. The ONLY
+# differences from dense are the communication-efficient method's Hydra knobs.
 #
 # ===========================================================================
 # Canonical communication-efficient base launcher. The defaults below configure
-# the anchor circuit on a PowerSGD codec. Every circuit is still an
-# independent env toggle so ablations stay one-liners:
+# the anchor circuit on a PowerSGD codec. The retained settings remain explicit
+# environment variables:
 #
 #   comm-eff master ........ COMM_EFF_ENABLED          (true)     off => dense path
 #   codec .................. COMM_EFF_COMPRESSION_TYPE (powersgd) compression codec
-#   PowerSGD rank .......... COMM_EFF_POWERSGD_RANK    (77)       byte-matched to mask p=0.95 (H=1536)
-#   anchor ................. COMM_EFF_ANCHOR_ENABLED   (true)     stale full-grad reference M
+#   PowerSGD rank .......... COMM_EFF_POWERSGD_RANK    (77)
+#   anchor ................. COMM_EFF_ANCHOR_ENABLED   (true)     paired dense-gradient reference M
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
-#   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
-#   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
+#   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (20)       forward from theta_{t-20}
+#   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (20)       recompute M+Q every 20 ticks
 #   anchor batch scope ..... COMM_EFF_ANCHOR_BATCH_SCOPE (ppo_minibatch) shared Q+M data scope
-#   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (signed_ema)  folds anchor M into G via a signed EMA
+#   weight projection ...... rank1_relex W4/min2/strength1         progressive W2->W3->W4
 #   merger EMA decay ....... COMM_EFF_SPECTRAL_BETA_ANC         (0.50)        anchor-gradient EMA decay
-#   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    periodic uncompressed step
-#   PRF mask ............... COMM_EFF_MASK_ENABLED     (false)    prf_mask codec
 #
 # Base in one line: PowerSGD r=77 plus a continuously maintained, stale,
-# full-coverage (196 matrices, DP-reduced) anchor gradient M, refreshed every
+# full-coverage (all floating parameters, DP-reduced) anchor gradient M, refreshed every
 # `cadence` ticks from a no-hook isolated clone; the anchor OWNS the PowerSGD
 # basis Q (computes Q<-orth(V) from its stale-forward activations and broadcasts
 # it — the fast circuit is a read-only consumer, fail-closed from ever writing
@@ -50,24 +47,19 @@
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: 1..8 GPUs; default box 1×H200 (project ladder — project.yaml
-# `default_compute`). The anchor allocates a ~3 GB
+# Hardware: 1..8 GPUs; the completed reference used 2×H200 NVL. The project
+# provisioning ladder may select another compatible shape. The anchor allocates a ~3 GB
 # no-hook clone/rank for its stale forward-backward, so the default actor token
-# budget is already halved (PPO_MAX_TOKEN_LEN_PER_GPU=18432, sized to fit the
-# legacy 4×H200 shape and comfortable on 1×H200 at resp=1024); this
-# is the default memory posture. Disabling the anchor (COMM_EFF_ANCHOR_ENABLED=false,
-# a reference-only ablation) frees the clone and you can raise it back to 36864.
+# budget is already bounded (PPO_MAX_TOKEN_LEN_PER_GPU=18432) for the 1024/3072
+# prompt/response surface.
 #
 # Examples:
 #   # signed_ema is the default merger. Override run length / name as needed:
 #   TOTAL_TRAINING_STEPS=100 EXPERIMENT_NAME=ce_100 bash <thisfile>
 #   # dense control via the same launcher:
 #   COMM_EFF_ENABLED=false EXPERIMENT_NAME=ce_off_dense bash <thisfile>
-#   # prf_mask codec comparison run; cannot anchor-own Q:
-#   COMM_EFF_COMPRESSION_TYPE=prf_mask COMM_EFF_MASK_ENABLED=true \
-#     COMM_EFF_ANCHOR_OWNS_Q=false EXPERIMENT_NAME=ce_mask_ref bash <thisfile>
 #
-# See examples/grpo_trainer/COMM_EFF_CONFIG.md for the full knob reference and
+# See examples/grpo_trainer/COMM_EFF_CONFIG.md for the compact current defaults and
 # examples/grpo_trainer/VAST_README.md for the broader Vast.ai pattern.
 set -euo pipefail
 
@@ -103,14 +95,9 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — 1..8 (default 1, matching the 1×H200 default box).
-#    Since 2026-07-03 single-GPU is the DEFAULT (proven on 1×H200 for both the
-#    GSM8K fast surface and Big-Math @ resp 4096; DP degree changes only the
-#    reduction order at fixed global batch, and the 16K-context rationale
-#    behind the old 4..8 mandate is defused by resp<=4096 surfaces). The legacy
-#    4×H200 / 8×H100 shapes remain supported for explicit operator request.
-#    ALLOW_SINGLE_GPU is accepted for back-compat but no longer required;
-#    REQUIRE_MULTI_GPU=1 restores the legacy 4..8 hard gate.
+# 2. GPU count — 1..8. The completed reference used 2×H200 NVL; the same
+#    fixed model/data/method surface can run on another compatible shape.
+#    REQUIRE_MULTI_GPU=1 optionally enforces the existing 4-GPU gate.
 # ---------------------------------------------------------------------------
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
 GPU_MIN=1
@@ -120,8 +107,7 @@ fi
 if (( DETECTED_GPUS < GPU_MIN || DETECTED_GPUS > 8 )); then
   echo "FATAL: this recipe requires ${GPU_MIN}..8 GPUs; detected $DETECTED_GPUS" >&2
   if (( GPU_MIN > 1 )); then
-    echo "       (1.5B GRPO with 16K response + n=8 rollouts needs the headroom;" >&2
-    echo "        set ALLOW_SINGLE_GPU=1 for the single-GPU weight-trajectory collection path)" >&2
+    echo "       (REQUIRE_MULTI_GPU=1 requested the multi-GPU gate.)" >&2
   fi
   exit 1
 fi
@@ -144,16 +130,19 @@ if [[ "$PIDS_MAX" =~ ^[0-9]+$ ]] && (( PIDS_MAX <= 2048 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Dataset — preprocess GSM8K to parquet if not already there.
+# 4. Dataset — MATH parquet (auto-prep fallback if not already there).
+#    The canonical MATH prep is research/scripts/prepare_rlvr_math.py (last-\boxed{}
+#    + is_equiv reward); MATH launchers pre-prepare and pass DATA_DIR, so this
+#    upstream fallback only fires for a bare engine run with no prepared data.
 # ---------------------------------------------------------------------------
 VERL_ROOT="${VERL_ROOT:-/workspace/verl}"
 cd "$VERL_ROOT"
 
-DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
+DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
-  echo "=== preprocess GSM8K -> $DATA_DIR ==="
+  echo "=== preprocess MATH -> $DATA_DIR ==="
   mkdir -p "$DATA_DIR"
-  python3 examples/data_preprocess/gsm8k.py --local_save_dir "$DATA_DIR"
+  python3 examples/data_preprocess/math_dataset.py --local_save_dir "$DATA_DIR"
 fi
 export TRAIN_FILE="$DATA_DIR/train.parquet"
 export TEST_FILE="$DATA_DIR/test.parquet"
@@ -161,15 +150,14 @@ echo "=== train: $(python3 -c "import pyarrow.parquet as p; print(p.read_table('
 echo "=== test:  $(python3 -c "import pyarrow.parquet as p; print(p.read_table('$TEST_FILE').num_rows)") rows ==="
 
 # ---------------------------------------------------------------------------
-# 5. Model + training config — matches the dense baseline launcher 1:1
-#    EXCEPT the objective is no-KL no-entropy (the method's design) and
-#    `actor.fsdp_config.use_orig_params=true` (REQUIRED so the anchor + merger
-#    hooks see full 2D Tensor gradients post-FSDP-reduce — the base needs it).
+# 5. Model + training config. `actor.fsdp_config.use_orig_params=true` is
+#    required so the anchor and signed-EMA hooks see full 2D Tensor gradients
+#    after FSDP reduction.
 # ---------------------------------------------------------------------------
-export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
+export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Math-1.5B}"
 
 # Rollout shape — n=8 rollouts/prompt, paged KV.
-export ROLLOUT_TP="${ROLLOUT_TP:-2}"
+export ROLLOUT_TP="${ROLLOUT_TP:-1}"
 # Clamp TP to the detected GPU count: the single-GPU collection path forces TP=1
 # (rollout tensor-parallel can't exceed the device count). No effect on >=TP GPUs.
 if (( ROLLOUT_TP > DETECTED_GPUS )); then
@@ -177,20 +165,16 @@ if (( ROLLOUT_TP > DETECTED_GPUS )); then
   export ROLLOUT_TP="$DETECTED_GPUS"
 fi
 export ROLLOUT_N="${ROLLOUT_N:-8}"
-export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.4}"
+export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.55}"
 
-# Batch sizes — match baseline.
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
-export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-64}"
+# Batch sizes — qboot-v2 reference surface.
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
+export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-256}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 export LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
-# Static batching for trackability: dynamic batching OFF by default => each
-# micro-batch is exactly ppo_micro_batch_size_per_gpu=1 sequence with
-# deterministic packing (one sequence per forward, easy to follow). Flip
-# USE_DYNAMIC_BSZ=True to restore token-balanced dynamic batching (the
-# per-element mask is packing-invariant, so both modes are correct).
-export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+# The reference uses dynamic token-balanced micro-batching.
+export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
 
 # Train-inference mismatch DIAGNOSTIC (read-only; does NOT change training).
 # calculate_log_probs=True makes vLLM return its rollout log-probs so the trainer
@@ -198,33 +182,29 @@ export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 # train-engine-recomputed old_log_prob). Rollout CORRECTION stays STRICTLY OFF
 # (rollout_is/rollout_rs=null, bypass_mode=false): old_log_prob is always
 # recomputed by the train engine and vLLM log-probs are never used in the loss.
-# NB with comm-eff masking + mask_recompute=true the recompute is masked, so for
-# comm-eff runs the diff also reflects masking — read it on the dense control
-# (COMM_EFF_ENABLED=false) for the pure train-inference mismatch.
 export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
 
-# Context windows — match baseline (16K response).
+# Context window — 4096 total tokens in the reference protocol.
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-3072}"
 
-# GRPO objective — no KL, no entropy (communication-efficient method design;
-# this matches the dense baseline, which is also no-KL, for apples-to-apples).
+# GRPO objective. The canonical MATH wrapper pins these values for comparisons.
 export ACTOR_LR="${ACTOR_LR:-1e-6}"
-export USE_KL_LOSS="${USE_KL_LOSS:-False}"
+export USE_KL_LOSS="${USE_KL_LOSS:-True}"
 export USE_KL_IN_REWARD="${USE_KL_IN_REWARD:-False}"
-export KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}"   # unused when USE_KL_LOSS=False
+export KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}"
 export ENTROPY_COEFF="${ENTROPY_COEFF:-0}"
 
-# Run schedule — match baseline.
-export TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
-export SAVE_FREQ="${SAVE_FREQ:-50}"
+# Run schedule — eight dataset epochs allow the explicit 100-step cap to win.
+export TOTAL_EPOCHS="${TOTAL_EPOCHS:-8}"
+export SAVE_FREQ="${SAVE_FREQ:--1}"
 export TEST_FREQ="${TEST_FREQ:-25}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 
 # ---------------------------------------------------------------------------
-# Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58). Mirrors the naming of the
-# WEIGHT_TRAJ_R2_* knobs. When CKPT_R2_ENABLED=false (DEFAULT) the trainer's
+# Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58). When
+# CKPT_R2_ENABLED=false (DEFAULT) the trainer's
 # _save_checkpoint is byte-identical to upstream verl (no R2 threads, no r2_sink
 # import on the save path) — the whole feature is a strict no-op. Set true to
 # mirror every global_step_<N>/ tree (all rank shards + data.pt + huggingface +
@@ -233,55 +213,42 @@ export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 # staging instead of the keep-all total. The CKPT_R2_* async knobs are consumed by
 # _save_checkpoint via the env; only CKPT_R2_ENABLED is threaded through Hydra
 # (trainer.checkpoint_r2_enabled) since that is the gate. R2 creds/prefix come from
-# the SAME env as the weight-traj stream (R2_BUCKET/R2_ENDPOINT|R2_ACCOUNT_ID/
+# the shared R2 env (R2_BUCKET/R2_ENDPOINT|R2_ACCOUNT_ID/
 # R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_EXPERIMENT/R2_REGIME) — the checkpoints
-# land under autonomous-harness-rlvr-compression/$R2_EXPERIMENT/$R2_REGIME/checkpoints (a DISTINCT prefix
-# from .../weights, so no key collision with the weight-traj snapshots).
+# land under autonomous-harness-rlvr-compression/$R2_EXPERIMENT/$R2_REGIME/checkpoints.
 export CKPT_R2_ENABLED="${CKPT_R2_ENABLED:-false}"
 export CKPT_R2_ASYNC="${CKPT_R2_ASYNC:-true}"
 export CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-true}"
 export CKPT_R2_MAX_STAGED_GB="${CKPT_R2_MAX_STAGED_GB:-50}"
 export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-4}"
-export CKPT_R2_FLUSH_TIMEOUT="${CKPT_R2_FLUSH_TIMEOUT:-1800}"
 
 # WandB project + experiment.
 export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_1p5b_grpo_gsm8k_comm_eff_baseline}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_math_1p5b_grpo_math_comm_eff}"
 
-# Token budget per micro-batch for dynamic batching. Actor budget halved to
-# 18432 (from 36864) to fit the anchor's ~3 GB clone on 4×H200; log_prob/ref
-# keep 36864 because those paths do not allocate the clone.
+# Token budget per micro-batch for dynamic batching. The actor budget is 18432
+# to leave room for the anchor's isolated clone; log-probability paths can use a
+# larger budget because they do not allocate that clone.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-18432}"
 LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-36864}"
 
 # ---------------------------------------------------------------------------
 # 6. Communication-efficient method.
-#    Defaults configure the PowerSGD + anchor delayed-EF path while exposing
+#    Defaults configure the PowerSGD + delayed dense-anchor path while exposing
 #    comm-eff knobs as env overrides. Field names mirror the actor config schema;
 #    Hydra struct mode rejects unknown keys.
 # ---------------------------------------------------------------------------
 COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master switch (false => dense)
-# --- codec selector: dense | prf_mask | powersgd ---
-# powersgd is the default codec and is the only codec compatible with anchor-owned
-# Q. prf_mask is available for comparison runs; dense disables communication
-# compression.
+# --- codec selector: dense | powersgd ---
+# PowerSGD is the communication-efficient path; dense is the control.
 COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
-# --- activation mask (reference-only codec; OFF in the PowerSGD anchor base) ---
-COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
-COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.9}"                             # masked fraction for prf_mask
-COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-true}"               # inverted-dropout h*mask/(1-p)
-COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"            # mask the old_logprob forward too
-COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                         # PRF base seed
-COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                   # simulated pipeline depth (boundary blocks)
-# --- periodic dense step: 0=OFF. Kept only as a diagnostic control. ---
-COMM_EFF_CLEAN_CADENCE="${COMM_EFF_CLEAN_CADENCE:-0}"
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
-COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-5}"
+COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
 # The anchor forwards from a delay_K-tick-stale weight snapshot.
-COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-5}"
+COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
 # When true, only the anchor refresh updates the PowerSGD basis Q.
 COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
 # Paired replay uses the same batch/weights the fast circuit saw so the
@@ -293,24 +260,23 @@ COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true
 # bounds peak activation memory.
 COMM_EFF_ANCHOR_BATCH_SCOPE="${COMM_EFF_ANCHOR_BATCH_SCOPE:-ppo_minibatch}"
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
-# Opt-in weight projection. Defaults keep the existing path strictly disabled.
-COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR="${COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR:-false}"
-COMM_EFF_ANCHOR_LOOKAHEAD_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_MODE:-disabled}"
+# Rank1-RELEX projects each floating weight tensor independently.
+COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR="${COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR:-true}"
+COMM_EFF_ANCHOR_LOOKAHEAD_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_MODE:-rank1_relex}"
 COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH="${COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH:-1.0}"
 COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE="${COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE:-auto}"
 COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS:-4}"
-# Warmup behavior before the look-ahead projector is ready. "stale_correct"
-# (default) = today's byte-identical behavior; "no_correct" = skip the anchor
-# pass + M update while warming (requires the projector on AND owns_q=false);
-# "q_only" = rank1-only forward/no-backward Q refresh with M/correction off.
+# Warmup behavior before the rank1-RELEX projector is ready. "stale_correct"
+# runs the delayed dense-anchor path; "q_only" performs a rank1-only
+# forward/no-backward Q refresh with M/correction off.
 COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-stale_correct}"
-# Min ring snapshots before the projector engages. -1 (default) = mode source
-# count; 2 = project from the earliest legal fire (fire 2).
-COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:--1}"
+# Min ring snapshots before the projector engages. Two starts from the earliest
+# legal fire; -1 waits for the full retained window.
+COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:-2}"
 # --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
-COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-decoder_matrices}"
-COMM_EFF_SPECTRAL_DIAGNOSTICS="${COMM_EFF_SPECTRAL_DIAGNOSTICS:-true}"
+COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-all_floating}"
+COMM_EFF_SPECTRAL_DIAGNOSTICS="${COMM_EFF_SPECTRAL_DIAGNOSTICS:-false}"
 COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.50}"       # anchor-gradient EMA decay (signed_ema baseline)
 COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}"   # signed_ema mixing weight
 # Correction cadence in optimizer ticks.
@@ -318,69 +284,15 @@ COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload full-coverage M (OOM guard)
 # Cap target matrices per correction. -1 means no cap.
 COMM_EFF_SPECTRAL_MAX_TARGETS="${COMM_EFF_SPECTRAL_MAX_TARGETS:--1}"
-# signed_ema folds the anchor M into the fast gradient via a signed EMA.
-COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-signed_ema}"
-# Legacy dose knob, retained for the plain-PowerSGD limiting case (lambda=0.0); unused by signed_ema.
-COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
-COMM_EFF_SPECTRAL_INJECT_GAMMA="${COMM_EFF_SPECTRAL_INJECT_GAMMA:-1.0}"             # force when correction_mode=inject
-COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"                   # weight when correction_mode=blend
-# --- ef_powersgd merger ---
-COMM_EFF_SPECTRAL_EF_DECAY="${COMM_EFF_SPECTRAL_EF_DECAY:-0.0}"
-COMM_EFF_SPECTRAL_EF_CLIP="${COMM_EFF_SPECTRAL_EF_CLIP:-0.0}"
-# --- optional additive stale-anchor sub-basis ---
-COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK:-0}"
-COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY:-tail}"  # tail | grad
-# Sub-basis weight schedule. With decay_steps=0 the weight is constant.
-COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT:-1.0}"
-COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS:-0}"
-COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS="${COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS:-0}"
-# --- optional zero-mean perturbation after correction ---
-COMM_EFF_SPECTRAL_PERTURB_SIGMA="${COMM_EFF_SPECTRAL_PERTURB_SIGMA:-0.0}"
-COMM_EFF_SPECTRAL_PERTURB_SEED="${COMM_EFF_SPECTRAL_PERTURB_SEED:-0}"
-# --- optional correction momentum ---
-COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU:-0.0}"
-COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY="${COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY:-false}"  # true|false
-# --- optional adaptive delayed-EF dose ---
-COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE:-off}"  # off|cos|ratio
-COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA="${COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA:-0.0}"
-COMM_EFF_SPECTRAL_LAMBDA_CAP="${COMM_EFF_SPECTRAL_LAMBDA_CAP:-2.0}"
-# --- optional correction-delta compression ---
-COMM_EFF_SPECTRAL_R_DELTA="${COMM_EFF_SPECTRAL_R_DELTA:-0}"
-# --- Q-basis family ---
-COMM_EFF_POWERSGD_Q_BASIS="${COMM_EFF_POWERSGD_Q_BASIS:-act}"
-# Passive families are accumulated inside the anchor pass without affecting
-# the live fast path or optimizer.
-COMM_EFF_POWERSGD_Q_BASIS_PASSIVE="${COMM_EFF_POWERSGD_Q_BASIS_PASSIVE:-[]}"
-# Hybrid split at fixed rank r; -1/-1 lets the implementation choose.
-COMM_EFF_POWERSGD_HYBRID_ACT_COLS="${COMM_EFF_POWERSGD_HYBRID_ACT_COLS:--1}"
-COMM_EFF_POWERSGD_HYBRID_GRAD_COLS="${COMM_EFF_POWERSGD_HYBRID_GRAD_COLS:--1}"
-# --- optional tensor capture probes ---
-COMM_EFF_CAPTURE_ENABLED="${COMM_EFF_CAPTURE_ENABLED:-false}"
-COMM_EFF_CAPTURE_DIR="${COMM_EFF_CAPTURE_DIR:-/workspace/captures}"   # rsynced to runs//captures/
-COMM_EFF_CAPTURE_MAX_TICKS="${COMM_EFF_CAPTURE_MAX_TICKS:-10}"        # audit needs ~5-10 ticks
-COMM_EFF_CAPTURE_STRATIFIED="${COMM_EFF_CAPTURE_STRATIFIED:-0}"       # >0 => N targets/matrix-type (volume guard)
-COMM_EFF_CAPTURE_G_DENSE="${COMM_EFF_CAPTURE_G_DENSE:-false}"         # parallel uncompressed G_dense backward (highest-OOM-risk probe)
-COMM_EFF_CAPTURE_FRESH_ANCHOR="${COMM_EFF_CAPTURE_FRESH_ANCHOR:-false}"  # delay_K=0 fresh-anchor measurement probe (the Option-A dense reference)
-# Loss for the delay_K=0 fresh-anchor probe. Dump-only; never optimizer input.
-COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS="${COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS:-clean_pg}"
-COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQUIRED for the fidelity invariant
-# min_tick skips cold-Q ticks while preserving the max_ticks capture budget.
-COMM_EFF_CAPTURE_MIN_TICK="${COMM_EFF_CAPTURE_MIN_TICK:-0}"
-COMM_EFF_CAPTURE_RANK0_ONLY="${COMM_EFF_CAPTURE_RANK0_ONLY:-true}"    # capture rank0 only (disk guard); default true
-# --- causal sampled-weight verification for rank1_relex ---
-COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED="${COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED:-false}"
-COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES="${COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES:-16}"
-COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-}"
-COMM_EFF_PROBE_RANK0_ONLY="${COMM_EFF_PROBE_RANK0_ONLY:-true}"
 # --- PowerSGD activation compression ---
-COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"               # r=77 ≡ p=0.95 (0.05·H, H=1536)
+COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
-COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks (same as mask)
+COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"           # boundary blocks
 COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # orth(V) every N steps
 COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"  # carry Q across steps
 COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"  # project old-logprob too
 COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-reduce V across DP => single shared consensus Q (REQUIRED under DP)
-COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"  # one discarded dense observation before the first compressed old-logprob
+COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"  # one discarded dense observation before the first compressed old-logprob
 COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 required for stable orthogonalization
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
@@ -402,7 +314,6 @@ fi
 
 LOG="${LOG:-$VERL_ROOT/runs/${EXPERIMENT_NAME}/train.log}"
 mkdir -p "$(dirname "$LOG")"
-COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-$(dirname "$LOG")/rank1_projection_probe}"
 
 cat <<EOF
 === launching communication-efficient GRPO ===
@@ -419,22 +330,12 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense can fall back to mask.enabled)
-  mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
-  powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
-  clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|powersgd)
+  powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED target_scope=$COMM_EFF_SPECTRAL_TARGET_SCOPE diagnostics=$COMM_EFF_SPECTRAL_DIAGNOSTICS beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC (legacy: delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA)
-  ef_powersgd:         ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP
-  subbasis:            delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA
-  subbasis schedule:   delta_subbasis_weight=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT decay_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS hold_steps=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS
-  perturb:             perturb_sigma=$COMM_EFF_SPECTRAL_PERTURB_SIGMA perturb_seed=$COMM_EFF_SPECTRAL_PERTURB_SEED
-  delta_momentum:      delta_momentum_mu=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU age_decay=$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY
-  adaptive_lambda:     adaptive_lambda_mode=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE kappa=$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA lambda_cap=$COMM_EFF_SPECTRAL_LAMBDA_CAP
-  q_basis:             live=$COMM_EFF_POWERSGD_Q_BASIS passive=$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE hybrid=($COMM_EFF_POWERSGD_HYBRID_ACT_COLS+$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS)
-  capture:             enabled=$COMM_EFF_CAPTURE_ENABLED dir=$COMM_EFF_CAPTURE_DIR max_ticks=$COMM_EFF_CAPTURE_MAX_TICKS min_tick=$COMM_EFF_CAPTURE_MIN_TICK stratified=$COMM_EFF_CAPTURE_STRATIFIED rank0_only=$COMM_EFF_CAPTURE_RANK0_ONLY g_dense=$COMM_EFF_CAPTURE_G_DENSE fresh_anchor=$COMM_EFF_CAPTURE_FRESH_ANCHOR fresh_anchor_loss=$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS dump_dtype=$COMM_EFF_CAPTURE_DUMP_DTYPE
+  signed EMA:           alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -478,16 +379,53 @@ rm -f "$EARLY_STOP_SENTINEL"
 EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_params.*(error|Error|assert)|could not convert string to float|aten::copy_.*(mismatch|size)|torch\.distributed\.fsdp.*(error|Error)|(loss|grad_norm|pg_loss|policy_loss|reward)[^A-Za-z].{0,80}\b([Nn]a[Nn]|[Ii]nf)\b|\b([Nn]a[Nn]|[Ii]nf)\b.{0,40}(loss|grad_norm))'
 
 # ---------------------------------------------------------------------------
-# 7. Launch — reuse upstream's per-recipe script for the verbatim main_ppo
-#    invocation, overriding the OOM-relevant + comm-eff Hydra knobs. Every
-#    enabled flag comes from env so the full ablation grid is a one-liner.
+# 7. Launch the retained GRPO surface directly. Every method flag comes from
+#    env so the rank1-RELEX comparisons and dense control share one engine.
 #
 #    : launch the training in the BACKGROUND, capture its PID, start the
 #    early-stop watcher bound to that PID, then `wait` on training explicitly.
 #    The watcher self-terminates when training exits (guard 1), and the verified
 #    cleanup path reaps its private process group exactly once (guard 2).
 # ---------------------------------------------------------------------------
-bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
+python3 -m verl.trainer.main_ppo \
+  algorithm.adv_estimator=grpo \
+  data.train_files="$TRAIN_FILE" \
+  data.val_files="$TEST_FILE" \
+  data.train_batch_size="$TRAIN_BATCH_SIZE" \
+  data.max_prompt_length="$MAX_PROMPT_LENGTH" \
+  data.max_response_length="$MAX_RESPONSE_LENGTH" \
+  data.filter_overlong_prompts=True \
+  data.truncation=error \
+  actor_rollout_ref.model.path="$MODEL_PATH" \
+  actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  actor_rollout_ref.actor.optim.lr="$ACTOR_LR" \
+  actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH_SIZE" \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE_PER_GPU" \
+  actor_rollout_ref.actor.use_kl_loss="$USE_KL_LOSS" \
+  actor_rollout_ref.actor.kl_loss_coef="$KL_LOSS_COEF" \
+  actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+  actor_rollout_ref.actor.entropy_coeff="$ENTROPY_COEFF" \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+  actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP" \
+  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.gpu_memory_utilization="$ROLLOUT_GPU_MEM_UTIL" \
+  actor_rollout_ref.rollout.enable_chunked_prefill=False \
+  actor_rollout_ref.rollout.enforce_eager=False \
+  actor_rollout_ref.rollout.free_cache_engine=True \
+  actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
+  actor_rollout_ref.rollout.n="$ROLLOUT_N" \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  trainer.critic_warmup=0 \
+  trainer.logger='["console","wandb"]' \
+  trainer.project_name="$PROJECT_NAME" \
+  trainer.experiment_name="$EXPERIMENT_NAME" \
+  trainer.n_gpus_per_node="$NGPUS_PER_NODE" \
+  trainer.nnodes="${NNODES:-1}" \
+  trainer.save_freq="$SAVE_FREQ" \
+  trainer.test_freq="$TEST_FREQ" \
+  trainer.total_epochs="$TOTAL_EPOCHS" \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
   actor_rollout_ref.actor.use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE_PER_GPU" \
@@ -515,13 +453,6 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   trainer.checkpoint_r2_enabled="$CKPT_R2_ENABLED" \
   actor_rollout_ref.actor.comm_eff.enabled="$COMM_EFF_ENABLED" \
   actor_rollout_ref.actor.comm_eff.compression_type="$COMM_EFF_COMPRESSION_TYPE" \
-  actor_rollout_ref.actor.comm_eff.clean_cadence="$COMM_EFF_CLEAN_CADENCE" \
-  actor_rollout_ref.actor.comm_eff.mask.enabled="$COMM_EFF_MASK_ENABLED" \
-  actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
-  actor_rollout_ref.actor.comm_eff.mask.rescale="$COMM_EFF_MASK_RESCALE" \
-  actor_rollout_ref.actor.comm_eff.mask.mask_recompute="$COMM_EFF_MASK_RECOMPUTE" \
-  actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
-  actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
@@ -543,11 +474,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.spectral.ema_device="$COMM_EFF_SPECTRAL_EMA_DEVICE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
   actor_rollout_ref.actor.comm_eff.spectral.cadence="$COMM_EFF_SPECTRAL_CADENCE" \
-  actor_rollout_ref.actor.comm_eff.spectral.correction_mode="$COMM_EFF_SPECTRAL_CORRECTION_MODE" \
   actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha="$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA" \
-  actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda="$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" \
-  actor_rollout_ref.actor.comm_eff.spectral.inject_gamma="$COMM_EFF_SPECTRAL_INJECT_GAMMA" \
-  actor_rollout_ref.actor.comm_eff.spectral.blend_eta="$COMM_EFF_SPECTRAL_BLEND_ETA" \
   actor_rollout_ref.actor.comm_eff.powersgd.rank="$COMM_EFF_POWERSGD_RANK" \
   actor_rollout_ref.actor.comm_eff.powersgd.seed="$COMM_EFF_POWERSGD_SEED" \
   actor_rollout_ref.actor.comm_eff.powersgd.pp_size="$COMM_EFF_POWERSGD_PP_SIZE" \
@@ -558,39 +485,6 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.fast_q_bootstrap="$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP" \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
-  actor_rollout_ref.actor.comm_eff.powersgd.q_basis="$COMM_EFF_POWERSGD_Q_BASIS" \
-  actor_rollout_ref.actor.comm_eff.powersgd.q_basis_passive="$COMM_EFF_POWERSGD_Q_BASIS_PASSIVE" \
-  actor_rollout_ref.actor.comm_eff.powersgd.hybrid_act_cols="$COMM_EFF_POWERSGD_HYBRID_ACT_COLS" \
-  actor_rollout_ref.actor.comm_eff.powersgd.hybrid_grad_cols="$COMM_EFF_POWERSGD_HYBRID_GRAD_COLS" \
-  actor_rollout_ref.actor.comm_eff.spectral.ef_decay="$COMM_EFF_SPECTRAL_EF_DECAY" \
-  actor_rollout_ref.actor.comm_eff.spectral.ef_clip="$COMM_EFF_SPECTRAL_EF_CLIP" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_rank="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_family="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_weight="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_WEIGHT" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_decay_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_DECAY_STEPS" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_subbasis_hold_steps="$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_HOLD_STEPS" \
-  actor_rollout_ref.actor.comm_eff.spectral.r_delta="$COMM_EFF_SPECTRAL_R_DELTA" \
-  actor_rollout_ref.actor.comm_eff.spectral.perturb_sigma="$COMM_EFF_SPECTRAL_PERTURB_SIGMA" \
-  actor_rollout_ref.actor.comm_eff.spectral.perturb_seed="$COMM_EFF_SPECTRAL_PERTURB_SEED" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_momentum_mu="$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_MU" \
-  actor_rollout_ref.actor.comm_eff.spectral.delta_momentum_age_decay="$COMM_EFF_SPECTRAL_DELTA_MOMENTUM_AGE_DECAY" \
-  actor_rollout_ref.actor.comm_eff.spectral.adaptive_lambda_mode="$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_MODE" \
-  actor_rollout_ref.actor.comm_eff.spectral.adaptive_lambda_kappa="$COMM_EFF_SPECTRAL_ADAPTIVE_LAMBDA_KAPPA" \
-  actor_rollout_ref.actor.comm_eff.spectral.lambda_cap="$COMM_EFF_SPECTRAL_LAMBDA_CAP" \
-  actor_rollout_ref.actor.comm_eff.capture.enabled="$COMM_EFF_CAPTURE_ENABLED" \
-  actor_rollout_ref.actor.comm_eff.capture.capture_dir="$COMM_EFF_CAPTURE_DIR" \
-  actor_rollout_ref.actor.comm_eff.capture.max_ticks="$COMM_EFF_CAPTURE_MAX_TICKS" \
-  actor_rollout_ref.actor.comm_eff.capture.stratified_targets="$COMM_EFF_CAPTURE_STRATIFIED" \
-  actor_rollout_ref.actor.comm_eff.capture.capture_g_dense="$COMM_EFF_CAPTURE_G_DENSE" \
-  actor_rollout_ref.actor.comm_eff.capture.capture_fresh_anchor="$COMM_EFF_CAPTURE_FRESH_ANCHOR" \
-  actor_rollout_ref.actor.comm_eff.capture.fresh_anchor_loss="$COMM_EFF_CAPTURE_FRESH_ANCHOR_LOSS" \
-  actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
-  actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
-  actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \
-  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_enabled="$COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED" \
-  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_samples="$COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES" \
-  actor_rollout_ref.actor.comm_eff.probe.out_dir="$COMM_EFF_PROBE_OUT_DIR" \
-  actor_rollout_ref.actor.comm_eff.probe.rank0_only="$COMM_EFF_PROBE_RANK0_ONLY" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &

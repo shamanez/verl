@@ -1,195 +1,169 @@
-# Vast.ai launchers (`vast_*.sh`)
+# Vast.ai communication-efficient GRPO launchers
 
-Branch: **`autonomous-harness-v1`** on `shamanez/verl`. This is the stable home
-for vast.ai-specific GRPO smoke + research launchers. Upstream
-`verl-project/verl` knows nothing about these files; we keep the fork's
-mainline mergeable with upstream by isolating fork-specific scripts to
-this branch and to the `vast_*` naming convention.
-
-## Two ways to make a box runnable
-
-**Method 1 — locked template (clean, the default).** Provision with the
-`verl-research-vllm020` template (registry:
-`research/.claude/skills/vast-provision/templates.json`): its docker image
-ships torch+vLLM and the onstart script installs verl (editable, `--no-deps`).
-The HF/WandB/R2 secrets file is pushed onto the box by the provisioning tools
-(`_seed_secrets.sh`, run from vast-provision/vast-attach) — NOT by the onstart —
-so the launcher finds `~/.config/verl-research/secrets.env` and just runs.
-
-**Method 2 — bare box (operator-provided instance, no verl image).** Proven
-2026-07-03 on a 1×H200 (Ubuntu 24.04, CUDA 12.6 driver). System python3.12 is
-fine. Steps: (1) rsync the **laptop checkout** to `/root/verl` (private repo —
-no git creds on the box): exclude `.git`, `research/`, `__pycache__`,
-`.claude`. (2) Install the FSDP+vLLM subset of
-`scripts/install_vllm_sglang_mcore.sh` (`USE_MEGATRON=0`, skip sglang/apex):
-`vllm==0.11.0` (supported range `>=0.8.5,<=0.12.0`; pulls torch 2.8 **cu126**,
-required on CUDA-12.6-driver boxes where the template's cu130 stack cannot
-run), the script's basic-packages list, the prebuilt flash-attn 2.8.1
-`cu12torch2.8…cp312` wheel, then `pip install --no-deps -e /root/verl`.
-(3) Create `~/.config/verl-research/secrets.env` (ONLY the HF_TOKEN +
-WANDB_API_KEY lines, `chmod 600`). (4) Run the same launchers.
-Gotchas: Vast WAN is often ~100 KB/s to pypi/github → pip hangs on
-"Downloading…" with no error; download wheels on the laptop
-(`pip download --platform manylinux2014_x86_64 --python-version 312
---only-binary=:all:`) and rsync them over, then install
-`--no-index --find-links`. Run installs inside tmux with a logfile and poll by
-ssh. `pkill -f "pip install"` over ssh kills your own shell — use
-`pkill -f "pip [i]nstall"`.
-
-## Convention
-
-Filename: `vast_<scenario>_<model>_<algo>_<dataset>.sh`. Examples:
-
-- `vast_smoke_qwen25_0p5b_grpo_gsm8k.sh` — single-GPU smoke
-- `vast_baseline_qwen3_4b_grpo_gsm8k.sh` — M0 baseline (to be added)
-- `vast_baseline_qwen3_1p7b_grpo_gsm8k.sh` — cheap-tier baseline (to be added)
-
-Each launcher:
-
-1. Sources `~/.config/verl-research/secrets.env` on the box (HF + WandB
-   only; never reads `VAST_API_KEY`).
-2. Hard-fails if `VAST_API_KEY` is present on the box (defense-in-depth
-   against accidentally scp'ing the laptop's full secrets file).
-3. Reuses upstream's per-model launcher (e.g.
-   `run_qwen3_4b_fsdp.sh`) and overrides Hydra knobs via CLI. This keeps
-   the upstream-mergeable surface narrow.
-
-## Stability contract: experiment sandbox vs. promoted launcher
-
-The whole point of this convention is that, after dozens of experiments, you
-can still answer *"what were the real settings that worked?"* in one place.
-Two zones, one direction of flow:
-
-| Zone | What lives here | Stability |
-|---|---|---|
-| **Experiment sandbox** — `research/runs/run-id/` (+ `exp/*` branches) | per-run `config.yaml`, generated `launch.sh`, code patches, arbitrary knob overrides | **Volatile by design.** Any setting may change run-to-run. Never the source of truth. |
-| **Promoted launcher** — `examples/grpo_trainer/vast_*.sh` (this dir, `autonomous-harness-v1`) | the canonical, validated invocation for a scenario | **Canonical.** Changes only via a reviewed PR after a PASS. |
-
-**On-box bootstrap: the restricted-refspec trap (#63 B7).** The locked Vast
-template's onstart clones the fork with a fetch refspec restricted to its
-PINNED branch — so on the box, `git fetch origin <base-branch>` populates only
-`FETCH_HEAD`, NOT the `origin/<base-branch>` tracking ref, and a subsequent
-`git checkout <base-branch>` silently stays on the pinned (wrong) branch.
-Every launch.sh bootstrap MUST use the refspec-independent pattern and VERIFY:
+These launchers run the current qboot-v2 pipeline on the
+`Qwen/Qwen2.5-Math-1.5B` + MATH train/test surface. The reference command is:
 
 ```bash
-git fetch origin "$BASE_BRANCH" \
-  || { echo "FATAL: fetch origin $BASE_BRANCH failed" >&2; exit 1; }   # else FETCH_HEAD is stale
+bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
+```
+
+The explicit launcher enables communication efficiency. Generic Hydra
+configuration keeps `actor_rollout_ref.actor.comm_eff.enabled=false`, so code
+outside this launch path remains dense by default.
+
+## Current launcher map
+
+| Launcher | Purpose |
+| --- | --- |
+| `run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite` | Latest completed qboot-v2 reference arm |
+| `run_qwen25_math_1p5b_rank1_relex_fsdp.sh` | Direct Qwen-Math/MATH method launcher |
+| `vast_comm_eff_engine_grpo.sh` | Shared FSDP + vLLM engine used by the MATH wrappers |
+| `run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense` | Dense control on the same model, data, and GRPO surface |
+
+The current method settings are:
+
+- PowerSGD activation projection at rank 77 with synchronized, warm-started,
+  activation-derived `Q` and fast-Q bootstrap;
+- a paired dense anchor at cadence/delay 20/20 optimizer ticks, scoped to one
+  PPO mini-batch, with replay/snapshots on CPU and anchor-owned `Q`;
+- RELEX rank-1 weight projection with progressive W2 → W3 → W4 history,
+  window 4/minimum 2, strength 1, `auto` trajectory routing, and
+  `stale_correct`;
+- signed-EMA `M` over all floating targets, beta 0.50, alpha 0.25, stored on
+  CPU.
+
+See `examples/grpo_trainer/COMM_EFF_CONFIG.md` for the current run defaults.
+
+## Preparing a Vast.ai box
+
+### Locked template
+
+Provision with the `verl-research-vllm020` entry in
+`research/.claude/skills/vast-provision/templates.json`. Its image supplies the
+CUDA, PyTorch, and vLLM stack, and its startup installs this checkout in editable
+mode with `--no-deps`.
+
+The provisioning tools place only the runtime Hugging Face, W&B, and R2
+credentials required by the harness. The launcher reads
+`~/.config/verl-research/secrets.env`; the template startup does not embed
+secrets.
+
+### Operator-provided box
+
+For a bare instance:
+
+1. Copy the private checkout to `/workspace/verl` without `.git`, local run
+   outputs, caches, or laptop credentials.
+2. Install the FSDP + vLLM dependency subset supported by this checkout, then
+   run `pip install --no-deps -e /workspace/verl`.
+3. Create `~/.config/verl-research/secrets.env` with only the runtime
+   credentials needed on the box and set mode `600`.
+4. Prepare MATH train/test parquet files under `/workspace/data/math`, or set
+   `DATA_DIR` to another prepared directory.
+5. Run the explicit reference launcher above from `/workspace/verl`.
+
+The shared engine can prepare MATH when its `DATA_DIR` lacks `train.parquet`
+and `test.parquet`. Reference experiments should pre-prepare those files using
+the canonical project data path so their inputs are deliberate and auditable.
+
+## What the launcher pins
+
+The Qwen-Math wrapper pins the scientific surface before delegating to the
+shared engine:
+
+| Area | Value |
+| --- | --- |
+| Model | `Qwen/Qwen2.5-Math-1.5B` |
+| Data | Prepared MATH train/test parquet files |
+| Train / PPO mini-batch | 512 / 256 prompts |
+| Rollouts per prompt | 8 |
+| Prompt / response length | 1024 / 3072 tokens |
+| Actor learning rate | `1e-6` |
+| Reference KL | `low_var_kl`, coefficient `0.001` |
+| Total steps / validation cadence | 100 / 25 |
+| Activation projection | PowerSGD rank 77 |
+| Anchor cadence / delay | 20 / 20 optimizer ticks |
+| RELEX | `rank1_relex`, W4 retention, minimum 2, strength 1 |
+| Anchor gradient state | Signed EMA, all floating, beta 0.50, alpha 0.25, CPU |
+
+Every launcher prints its resolved model, data files, GRPO shape, and
+communication-efficient settings before starting Python. Training also runs
+under shell tracing, so the fully expanded Hydra command is present in
+`train.log`.
+
+## Canonical launcher and experiment overrides
+
+An experiment should call the existing launcher and override only the variable
+being tested. For example, to test the larger anchor data scope while retaining
+the current reference everywhere else:
+
+```bash
+COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
+  EXPERIMENT_NAME=qboot_v2_rollout_scope \
+  bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
+```
+
+Hydra overrides may be appended after the launcher arguments when an
+environment variable is not exposed. The resolved command, rather than a
+handwritten run note, is authoritative for what executed.
+
+## Branch bootstrap on the box
+
+The template can use a restricted fetch refspec, so fetching a branch may only
+update `FETCH_HEAD`. Bootstrap a requested branch from that object and verify
+the resulting commit:
+
+```bash
+git fetch origin "$BASE_BRANCH" || exit 1
 git checkout -B "$BASE_BRANCH" FETCH_HEAD
-# Verify the COMMIT, not the branch NAME: `checkout -B` always makes HEAD's name
-# == $BASE_BRANCH, so a name check is vacuous — it would pass even if a failed
-# fetch left FETCH_HEAD on the template's pinned branch (the exact B7 bug).
 want=$(git ls-remote origin "refs/heads/$BASE_BRANCH" | cut -f1)
-[[ -n "$want" && "$(git rev-parse HEAD)" == "$want" ]] \
-  || { echo "FATAL: HEAD is not origin/$BASE_BRANCH tip after bootstrap" >&2; exit 1; }
+[[ -n "$want" && "$(git rev-parse HEAD)" == "$want" ]] || exit 1
 ```
 
-**Canonical launcher + CLI overrides.** A run never re-types the baseline. It
-calls the canonical `vast_*.sh` and overrides only the knob(s) it's testing —
-either via the launcher's `${VAR:-default}` env vars or via Hydra args
-forwarded through the launcher's trailing `"$@"`. Example:
+Checking the commit is essential because `checkout -B` always gives the local
+branch the requested name, even when the fetched object is not the intended
+remote tip.
 
-```bash
-COMM_EFF_MASK_RECOMPUTE=false EXPERIMENT_NAME=mask_recompute_off \
-  bash examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh \
-  trainer.total_training_steps=10
-```
+## Iteration loop
 
-Everything the baseline run used stays in one file; the run log records only
-the delta.
-
-### Provenance — the real settings are always captured
-
-Hand-written manifests and plan tables drift from the command that actually
-ran — after enough experiments you can no longer trust prose to tell you the
-real settings. So we never rely on prose: we read the launched command back.
-
-- Every launcher runs under `set -x`, so `train.log` contains the fully
-  shell-expanded `python3 -m verl.trainer.main_ppo …` command.
-- The analyst runs `research/scripts/capture_resolved_config.py runs/run-id`
-  on **every** completed run, emitting `resolved_params.txt` (Hydra last-wins,
-  one `key=value` per line) + `resolved_cmd.txt`. That file — not prose — is
-  the source of truth for what ran, and the verdict pastes its headline knobs.
-
-### Promotion (auto-propose on PASS, human-merge)
-
-When a run PASSes, `log-writer` **derives the promoted launcher's parameters
-from `resolved_params.txt`** (never from the plan or a manifest), regenerates
-the run's `REPRODUCIBILITY.md` from it, and opens a **draft** PR (base
-`autonomous-harness-v1`) so a human reviews the exact diff before it becomes
-canonical. A proven config thus lands in `examples/grpo_trainer/` carrying the
-exact values that worked, plus a provenance header (run-id, commit, verdict,
-headline metric). Draft = nothing becomes canonical without your merge.
-
-## How this composes with the harness
-
-The `verl-research-vllm020` vast.ai Template (in
-`research/.claude/skills/vast-provision/templates.json`) clones THIS branch
-of THIS fork into `/workspace/verl` at instance start and runs
-`pip install --no-deps -e .` (preserves the verlai image's bundled torch /
-vllm / megatron / TE / deepep — drift would silently break vllm rollouts).
-
-The `vast-provision` skill provisions an instance from the Template. From
-that point on, **everything** the box needs to run an experiment is in this
-git checkout — no scp, no `/tmp` scripts, no laptop-side file transfers.
-
-## Iteration loop (e.g. fitting GPUs, fighting OOM)
+The checkout is installed editable, so code or launcher updates do not require
+reprovisioning:
 
 ```text
-laptop:  edit examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
-laptop:  git commit -am "smoke: drop batch to 4 for OOM"
-laptop:  git push origin autonomous-harness-v1
-box:     cd /workspace/verl && git pull
-box:     bash examples/grpo_trainer/vast_smoke_qwen25_0p5b_grpo_gsm8k.sh
+laptop: update and push the experiment branch
+box:    cd /workspace/verl && fetch the exact branch commit
+box:    run the Qwen-Math/MATH launcher
 ```
 
-Repeat. No need to re-provision the box for code changes — the verl
-install is editable (`pip install -e .`), so a `git pull` is enough.
+Keep run-specific configuration in its experiment branch and run directory.
+Only a human-reviewed, validated configuration should change the canonical
+launcher defaults.
 
-## Why the protect-upstream hook allows writes here
+## Host checks
 
-The research harness's `research/.claude/hooks/protect-upstream.sh` refuses
-edits under `verl/` unless the current branch matches `exp/*` OR
-`autonomous-harness-*` (the named exception — satisfied by the harness
-base branch `autonomous-harness-v1` — added when this branch became
-the home for fork-specific launchers).
+### Process limit
 
-## Secret hygiene checklist on the box
-
-- [ ] `~/.config/verl-research/secrets.env` contains ONLY `HF_TOKEN` and
-      `WANDB_API_KEY`.
-- [ ] `grep -E '^export VAST' ~/.config/verl-research/secrets.env`
-      returns nothing (exit 1). Note the `^export ` prefix — the laptop's
-      secrets file uses `export NAME=...` form, so the bare-name grep
-      misses everything and produces a zero-byte stripped file.
-- [ ] Inside the running container (or current SSH session) `env | grep
-      ^VAST` returns nothing.
-
-## Vast.ai host gotcha — check `cgroup/pids.max` BEFORE running the smoke
-
-The verl FSDP + vLLM + Ray stack peaks at ~1700 pthreads at the
-FSDP→vLLM weight-transfer boundary. Vast.ai hosts vary in their docker
-daemon `--pids-limit` configuration (observed 1792 vs 7680 on two
-different A100-80GB hosts). On a 1792 host the smoke dies inside
-`verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py` with the
-misleading `Resource temporarily unavailable (src/thread.cpp:241)` ZMQ
-error. **Always probe before running:**
+The FSDP + vLLM + Ray stack can approach the container process limit. Check the
+host before a long run:
 
 ```bash
-ssh -i ~/.ssh/vast_ai -p <port> root@<host> 'cat /sys/fs/cgroup/pids/pids.max'
-# >= 4096 → safe to run
-# 1792    → tear down, provision a different host
+cat /sys/fs/cgroup/pids/pids.max
 ```
 
-The cgroup file is read-only from inside the container even with
-`--cap-add=SYS_ADMIN` (Vast silently strips it). The only fix is
-host-selection. Full diagnostic notes in
-`research/.claude/skills/vast-provision/SKILL.md` ("Container limits on
-Vast.ai (cgroup PIDs cap)" section).
+Use a host with at least 4096 available process IDs. A low container limit is
+not repairable from inside the container; reprovision on a different host.
 
-## ulimit -n bump (already in the launcher)
+### File descriptors
 
-`vast_smoke_qwen25_*.sh` bump `ulimit -n 65535` before any python3 call.
-The default 1024 makes verl's Ray + vLLM ZMQ socket allocation hit
-EMFILE during EngineCore init. The bump is necessary but not sufficient
-— the cgroup pids cap is the harder wall (see previous section).
+The shared engine raises the file-descriptor limit to 65535 before launching
+Python. This is required for Ray and vLLM socket creation but does not replace
+the process-limit check.
+
+## Secret hygiene
+
+- Keep the on-box secrets file owner-readable only (`chmod 600`).
+- Never place laptop provisioning credentials on the training box.
+- Never put secret values in launch arguments, logs, run manifests, commits, or
+  issue comments.
+- Verify the running environment contains only the credentials required by the
+  training process.

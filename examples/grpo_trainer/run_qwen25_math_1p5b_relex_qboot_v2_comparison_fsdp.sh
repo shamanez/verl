@@ -9,12 +9,11 @@
 #   * W=4 retention with min_snapshots=2 gives W2, W3, then sliding W4;
 #   * every unique floating gradient-bearing parameter is covered by M.
 #
-# The no_weight_increment arm still computes W2/W3/W4 telemetry, but strength 0
+# The no_weight_increment arm still computes W2/W3/W4 estimates, but strength 0
 # makes the applied anchor weights exactly the newest transferred checkpoint;
 # stale_paired routes that checkpoint's exact paired trajectories. The
 # composite arm sets strength 1, projects every floating weight tensor
-# independently, and uses current trajectories on projected fires. fixed_linear
-# is intentionally not in this queue; it remains an optional legacy follow-up.
+# independently, and uses current trajectories on projected fires.
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,7 +84,6 @@ run_arm() {
     COMM_EFF_ENABLED=true \
     COMM_EFF_COMPRESSION_TYPE=powersgd \
     COMM_EFF_POWERSGD_RANK=77 \
-    COMM_EFF_POWERSGD_Q_BASIS=act \
     COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE=true \
     COMM_EFF_POWERSGD_SYNC_BASIS=true \
     COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP=true \
@@ -104,15 +102,10 @@ run_arm() {
     COMM_EFF_SPECTRAL_ENABLED=true \
     COMM_EFF_SPECTRAL_TARGET_SCOPE=all_floating \
     COMM_EFF_SPECTRAL_DIAGNOSTICS=false \
-    COMM_EFF_SPECTRAL_CORRECTION_MODE=signed_ema \
     COMM_EFF_SPECTRAL_BETA_ANC=0.50 \
     COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA=0.25 \
     COMM_EFF_SPECTRAL_EMA_DEVICE=cpu \
     COMM_EFF_SPECTRAL_MAX_TARGETS=-1 \
-    COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED=true \
-    COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES="${COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES:-16}" \
-    COMM_EFF_PROBE_OUT_DIR="$run_dir/rank1_projection_probe" \
-    COMM_EFF_PROBE_RANK0_ONLY=true \
     bash "$LAUNCHER"
 
   if [[ ! -f "$run_dir/done.flag" ]]; then

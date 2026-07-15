@@ -12,73 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Asynchronous unmasked anchor circuit.
+"""Delayed paired dense-anchor helpers for communication-efficient GRPO.
 
-The anchor circuit produces a CLEAN per-target gradient ``G_anchor`` that the
-spectral filter consumes into its anchor-gradient EMA ``M_anchor``. "Clean"
-means four things:
+The anchor replays a generator-consistent GRPO batch at a delayed or RELEX-
+projected checkpoint, evaluates the clean ratio-one policy-gradient objective,
+and feeds the raw dense gradient into the signed-EMA reference ``M``. It runs
+on an isolated model clone and never takes an optimizer step.
 
-* **Same objective data, weighting, regularizers, and normalization, UNMASKED.** The anchor reuses
-  the rollout-expanded GRPO batch (``responses``, ``response_mask``,
-  ``advantages``) and the fast path's aggregation/normalization, but deliberately
-  computes the clean unclipped policy gradient with importance ratio fixed at
-  one. Rollout importance weights, entropy regularization, and the configured
-  reference-policy KL term are mirrored exactly. It does not reuse ``ppo_loss``
-  or its masked-policy ``old_log_probs``; unsupported policy-loss modes fail
-  closed rather than silently defining a different ``M`` objective.
-  The activation masker is DISABLED even though the pass runs on the actor-train
-  path (``mask_active=False`` ⇒ ``anchor_mask_applications == 0``). It is NOT a
-  supervised next-token loss; it does NOT generate rollouts or recompute rewards.
-
-* **K-stale snapshot, no optimizer step.** The anchor forwards from a
-  ``delay_K``-stale weight snapshot taken OFF the optimizer's parameter group
-  (so the optimizer never sees it and no accidental step occurs), and takes NO
-  ``optimizer.step()`` of its own (``anchor_optimizer_steps == 0``).
-
-* **Generator-consistent (paired) batch.** With ``anchor.replay_paired_batch=true``
-  (the launcher base) the anchor replays the paired
-  ``(batch[t-delay_K], generator_snapshot)`` that produced the matching fast
-  rollout, so ``M_anchor`` is the dense gradient at the SAME ``(batch, θ)`` the
-  fast path compressed — the residual is codec error, not a batch effect. This
-  on-policy pairing is what makes ``M`` a valid dense reference.
-
-* **Raw gradient into the EMA, before any correction.** ``G_anchor`` is read
-  RAW per target and fed to ``SpectralFilter.update_anchor`` BEFORE any
-  fast-path merger (``delayed_ef_matrix`` / ``signed_ema_matrix`` /
-  ``inject_matrix`` / ``blend_matrix``) runs (``anchor_grad_corrected == 0``).
-  The anchor gradient is never the input to the correction.
-
-This module owns the FSDP-AGNOSTIC pieces so they are unit-testable on CPU with
-no distributed runtime:
-
-* :class:`AnchorStalenessQueue` — a bounded ring of weight snapshots keyed by
-  trainer step, returning the ``t - delay_K`` snapshot (or the oldest available
-  while the queue is still warming up).
-* :func:`snapshot_named_params` — detached CPU/GPU clones of the model's named
-  parameters, explicitly DECOUPLED from the optimizer's param group.
-* :func:`extract_target_grads` — the raw per-target 2D gradient extraction
-  protocol (mirrors the spectral hook's iteration), returning
-  ``{name: full_2d_grad}`` with NO correction applied.
-* :func:`feed_anchor_grads_into_ema` — wires the raw grads into
-  ``SpectralFilter.update_anchor`` and reports ``||ΔM_anchor||`` per target so
-  the engine can log EMA evolution.
-
-The actual unmasked forward/backward on the (possibly sharded) FSDP module lives
-in the engine (``FSDPEngine._maybe_comm_eff_anchor_refresh``), which calls these
-helpers; keeping the fwd/bwd there is what lets the pure logic above stay
-CPU-testable.
+This module contains the FSDP-agnostic queue, replay, snapshot, loss, gradient
+extraction, and EMA-update pieces. The FSDP forward/backward integration lives
+in ``FSDPEngine._maybe_comm_eff_anchor_refresh``.
 """
 
 from __future__ import annotations
 
 import copy
-import logging
 from collections import OrderedDict
 from typing import Callable, Optional
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "AnchorStalenessQueue",
@@ -90,29 +42,19 @@ __all__ = [
     "anchor_pg_loss",
     "build_anchor_module",
     "assert_anchor_module_isolated",
-    "capture_anchor_tensors",
     "clone_batch_for_replay",
     "select_anchor_batch_for_scope",
     "maybe_build_replay_ring",
-    "replay_relevance_stats",
     "snapshot_canary",
     "verify_canary_on_module",
-    # Geometry probe helpers (pure, CPU-testable)
-    "grad_summary_stats",
-    "paired_cosine",
-    "cos_over_targets",
-    "delta_stats_over_targets",
-    "matrix_median",
-    "geometry_fire_record",
-    "append_jsonl",
 ]
 
 
 def _canon(name: str) -> str:
     """Strip the FSDP per-layer-wrap infix from a parameter name.
 
-    Mirrors ``spectral_filter._canon`` (kept local so this CPU-testable module
-    has no cross-module import dependency). When ``build_anchor_module`` falls
+    Mirrors ``spectral_filter._canon`` and stays local to avoid a cross-module
+    import dependency. When ``build_anchor_module`` falls
     back to a config-rebuild, the rebuilt clone is a PLAIN module whose
     ``named_parameters()`` names lack the ``._fsdp_wrapped_module.`` infix the
     live (per-layer FSDP-wrapped) ``inner_module`` may carry. Matching the
@@ -129,7 +71,6 @@ def _canon(name: str) -> str:
 def anchor_should_fire(step: int, cadence: int, enabled: bool) -> bool:
     """True iff the anchor refresh fires on trainer ``step``.
 
-    Pure predicate (no side effects) so the cadence policy is unit-testable.
     ``step`` is 1-based (the engine advances it before the check). The anchor
     fires when ``enabled`` and ``(step % cadence) == 0`` — so ``cadence=1`` fires
     every step and ``cadence=20`` fires on steps 20, 40, ...
@@ -145,16 +86,15 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     **Why this replaces the fast-path ``ppo_loss`` for the anchor refresh.**
     The anchor circuit does ONE forward/backward per refresh, so the PPO
     *importance ratio* ``exp(logπ_new − old_log_probs)`` is not just unnecessary,
-    it is actively *wrong* here: the batch's ``old_log_probs`` were produced by
-    the MASKED fast path, while the anchor re-forwards UNMASKED at the
+    it is actively *wrong* here: the anchor re-forwards at the
     ``delay_K``-stale weights. That mismatch drives the ratio away from 1, the
     PPO clip then mangles the per-token loss, and the resulting ``G_anchor`` is
-    NOT the clean unmasked policy gradient that ``M_anchor`` should represent.
+    NOT the clean dense policy gradient that ``M_anchor`` should represent.
 
     **What this computes instead — the clean ratio-one objective at θ_{t-K}.**
     With ratio ≡ 1 (no ``old_log_probs``, no clip), ``compute_policy_loss_vanilla``
     provably reduces to the per-token loss ``-advantages · logπ`` aggregated by
-    ``agg_loss``; its gradient is ``-(A · ∇logπ_unmasked)`` — exactly "the clean
+    ``agg_loss``; its gradient is ``-(A · ∇logπ)`` — exactly "the clean
     step's gradient, evaluated at the stale weights". We reuse the SAME log-prob
     extraction (``no_padding_2_padding``), the SAME field selection/padding, and
     the SAME ``agg_loss`` + ``global_batch_info`` normalization as ``ppo_loss``
@@ -193,8 +133,8 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
         ``actor/anchor_ratio_mean`` (≡ 1.0 by construction) under MEAN
         aggregation.
     """
-    # Lazy imports: keep module import cheap + CPU-testable; the engine path and
-    # the CPU tests both have these available.
+    # Lazy imports keep this module cheap to import; the engine path provides
+    # these dependencies when the anchor objective runs.
     from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
     from verl.utils.metric import AggregationType, Metric
     from verl.workers.utils.padding import no_padding_2_padding
@@ -272,7 +212,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     loss_agg_mode = config.loss_agg_mode
 
     # ratio ≡ 1 (no clip): the per-token PPO loss collapses to -A·logπ, whose
-    # gradient is the clean unmasked policy gradient -(A·∇logπ). agg_loss applies
+    # gradient is the clean dense policy gradient -(A·∇logπ). agg_loss applies
     # the response_mask and the same normalization the fast path uses.
     per_token_pg = -advantages * log_prob
     if "rollout_is_weights" in selected:
@@ -410,8 +350,8 @@ def clone_batch_for_replay(data, device=None):
     """Deep clone of a train_batch TensorDict for the anchor replay ring.
 
     A deep clone at STORE time is required: ``_forward_backward_batch_inner``
-    mutates the live batch in place (``tu.assign_non_tensor``), and the masked
-    fast path consumes the same TensorDict right after the anchor hook. The
+    mutates the live batch in place (``tu.assign_non_tensor``), and the
+    compressed fast path consumes the same TensorDict right after the anchor hook. The
     clone (a) shallow-copies the key->value mapping (so later key assignment on
     the live batch never touches the stored copy) and (b) deep-clones every
     tensor leaf, detached, optionally moved to ``device`` (``"cpu"`` keeps the
@@ -430,7 +370,7 @@ def clone_batch_for_replay(data, device=None):
 def select_anchor_batch_for_scope(batch_scope: str, current_batch, rollout_batch=None):
     """Resolve the anchor's current data source without a silent fallback.
 
-    ``rollout_batch`` is the complete worker-local actor update captured before
+    ``rollout_batch`` is the complete worker-local actor update retained before
     PPO splitting. Requesting it outside that context is a correctness error;
     falling back to ``current_batch`` would silently turn a 512-prompt request
     back into the historical 256-prompt scope.
@@ -554,8 +494,8 @@ class AnchorReplayRing:
         plus the current (newest) gs awaiting its batches — ``maxlen + 1``.
 
     Holds ``tick -> (batch_clone, gs)`` and ``gs -> (snapshot, canary,
-    push_tick)`` (``push_snapshot`` is idempotent per ``gs``). Pure container —
-    no collectives, no RNG, CPU-testable.
+    push_tick)`` (``push_snapshot`` is idempotent per ``gs``). The container
+    performs no collectives and draws no RNG.
     """
 
     def __init__(self, delay_K: int, cadence: int = 1):
@@ -677,30 +617,14 @@ class AnchorReplayRing:
         return list(self._snapshots.keys())
 
 
-def replay_relevance_stats(log_probs: torch.Tensor, ref_log_probs: torch.Tensor, response_mask: torch.Tensor):
-    """Masked ``(sum, count)`` of ``|logπ_loaded − logπ_reference|`` over response tokens.
-
-    The replayed batch stores the log-probs its trajectories were generated or
-    scored with. The anchor's clean forward at the loaded snapshot weights
-    re-scores the same tokens; close agreement indicates the snapshot matches
-    the batch's generator. Pure detached arithmetic: fp32, no grad, no
-    collective; the caller aggregates the (sum, count) pairs across micro-batches.
-    """
-    mask = response_mask.to(torch.bool)
-    diff = (log_probs.detach().to(torch.float32) - ref_log_probs.detach().to(torch.float32)).abs()
-    sel = diff[mask]
-    return float(sel.sum().item()), int(mask.sum().item())
-
-
 def maybe_build_replay_ring(state, anchor_cfg, delay_K: int, cadence: int = 1) -> Optional[AnchorReplayRing]:
     """Build (once, on the state) and return the replay ring iff
     ``anchor.replay_paired_batch`` is true; return ``None`` otherwise.
 
     ``cadence`` is the anchor fire cadence — it keys the ring's fire-aware
     retention (only ticks a future fire can request are stored). The OFF path
-    constructs NOTHING (no ring, no buffers) — the flag-OFF parity invariant,
-    CPU-testable: ``maybe_build_replay_ring(state, cfg_off, K) is None`` and
-    leaves no ``_anchor_replay_ring`` attribute behind.
+    constructs no ring or buffers and leaves no ``_anchor_replay_ring``
+    attribute behind.
     """
     if not bool(getattr(anchor_cfg, "replay_paired_batch", False)):
         return None
@@ -968,290 +892,6 @@ def assert_anchor_module_isolated(
             "FSDP module — criterion 13 at risk (clone must be a fresh deep-copy, "
             "not an alias)."
         )
-
-
-def capture_anchor_tensors(
-    *,
-    writer,
-    role: str,
-    grads: dict,
-    global_step: int,
-    optimizer_tick: int,
-) -> int:
-    """Dump a ``{name: tensor}`` map under ``role`` (detached/fp32).
-
-    Pure I/O — used for the K-stale ``G_anchor`` map (role ``"G_anchor"``), the
-    anchor EMA ``M`` map (role ``"M"``), and the ``delay_K=0`` fresh-anchor
-    measurement grad (role ``"G_fresh_anchor"``). The writer detaches + clones, so
-    this NEVER feeds the optimizer or the EMA (the measurement-only invariant).
-    No-op (returns 0) when ``writer is None``. Returns the number of tensors
-    written.
-    """
-    if writer is None or not grads:
-        return 0
-    n = 0
-    for name, t in grads.items():
-        if t is None:
-            continue
-        if writer.dump(
-            role=role,
-            target_name=name,
-            tensor=t,
-            global_step=global_step,
-            optimizer_tick=optimizer_tick,
-        ):
-            n += 1
-    return n
-
-
-# --------------------------------------------------------------------------- #
-# Geometry probe helpers: pure math (no engine/FSDP/distributed deps).
-#
-# The probe's invariant: everything below is TELEMETRY-ONLY. Nothing here is
-# ever written back into a gradient, an EMA, the sketch V, Q, or the optimizer
-# (probes_never_feed_optimizer). All inputs arrive detached; all math is fp32.
-# --------------------------------------------------------------------------- #
-
-_PROBE_EPS = 1e-12
-
-
-def grad_summary_stats(t: torch.Tensor, *, top_frac: float = 0.01, power_iters: int = 24) -> dict:
-    """m7 per-target stats of a 2D gradient: Frobenius norm, top singular value
-    (deterministic power iteration — no RNG, reproducible), stable rank
-    ``‖G‖_F²/‖G‖₂²``, and top-``top_frac`` coordinate ENERGY mass (the fraction
-    of Σg² carried by the largest-|g| 1% of coordinates — the standard top-k
-    sparsity statistic; the never-measured "RLVR grads are sparse" claim).
-
-    Runs on whatever device ``t`` lives on (the engine calls it on GPU at stash
-    time so the heavy reductions never hit the CPU); returns plain floats.
-    Zero matrix → ``{fro: 0, sigma1: 0, stable_rank: 0, top1pct_mass: 0}``.
-    """
-    a = t.detach().to(torch.float32)
-    assert a.dim() == 2, f"grad_summary_stats expects a 2D matrix, got shape {tuple(a.shape)}"
-    fro = float(torch.linalg.norm(a).item())
-    if fro <= _PROBE_EPS:
-        return {"fro": 0.0, "sigma1": 0.0, "stable_rank": 0.0, "top1pct_mass": 0.0}
-    # Deterministic power iteration on AᵀA for σ1 (seedless: a normalized ones
-    # vector cannot be orthogonal to the top singular subspace of a real-world
-    # gradient; 24 iterations puts σ1 within ~1% for decaying spectra).
-    n = a.shape[1]
-    v = torch.full((n,), 1.0 / (n**0.5), dtype=torch.float32, device=a.device)
-    sigma1 = 0.0
-    for _ in range(max(1, int(power_iters))):
-        u = a @ v
-        u_norm = torch.linalg.norm(u)
-        if float(u_norm.item()) <= _PROBE_EPS:
-            break
-        w = a.T @ (u / u_norm)
-        w_norm = torch.linalg.norm(w)
-        sigma1 = float(w_norm.item())
-        if sigma1 <= _PROBE_EPS:
-            break
-        v = w / w_norm
-    sigma1 = max(sigma1, _PROBE_EPS)
-    stable_rank = (fro * fro) / (sigma1 * sigma1)
-    flat = a.reshape(-1)
-    k = max(1, int(round(float(top_frac) * flat.numel())))
-    topk = torch.topk(flat.abs(), k, sorted=False).values
-    top_mass = float((topk * topk).sum().item()) / (fro * fro)
-    return {"fro": fro, "sigma1": sigma1, "stable_rank": float(stable_rank), "top1pct_mass": float(top_mass)}
-
-
-def paired_cosine(
-    a: torch.Tensor, b: torch.Tensor, *, norm_a: Optional[float] = None, norm_b: Optional[float] = None
-) -> Optional[float]:
-    """fp32 cosine between two same-shape tensors; cached norms avoid re-reducing
-    multi-GB CPU tensors per pairing. Returns ``None`` (excluded from medians,
-    counted by the caller) when either side is numerically zero because a cosine
-    with the zero vector is undefined."""
-    af = a.detach().to(torch.float32).reshape(-1)
-    bf = b.detach().to(torch.float32).reshape(-1)
-    assert af.numel() == bf.numel(), f"paired_cosine shape mismatch: {tuple(a.shape)} vs {tuple(b.shape)}"
-    na = float(torch.linalg.norm(af).item()) if norm_a is None else float(norm_a)
-    nb = float(torch.linalg.norm(bf).item()) if norm_b is None else float(norm_b)
-    if na <= _PROBE_EPS or nb <= _PROBE_EPS:
-        return None
-    return float(torch.dot(af, bf).item()) / (na * nb)
-
-
-def cos_over_targets(a: dict, b: dict, *, norms_a: Optional[dict] = None, norms_b: Optional[dict] = None) -> dict:
-    """Per-target cosines over the INTERSECTION of two ``{name: tensor}`` maps
-    (keys are canonical names; on the healthy path the sets are identical — the
-    caller asserts coverage). ``None`` cosines (zero vectors) are kept so the
-    caller can count exclusions."""
-    norms_a = norms_a or {}
-    norms_b = norms_b or {}
-    out = {}
-    for name in sorted(set(a.keys()) & set(b.keys())):
-        out[name] = paired_cosine(a[name], b[name], norm_a=norms_a.get(name), norm_b=norms_b.get(name))
-    return out
-
-
-def delta_stats_over_targets(rep: dict, ring: dict, *, ring_norms: Optional[dict] = None) -> tuple:
-    """m5 within-pair codec error per target: ``δ = G_anc_rep(t) − G_comp_ring(t−K)``
-    on IDENTICAL (batch, θ). Returns ``(ratio, cos)`` dicts where
-    ``ratio[name] = ‖δ‖/‖G_comp_ring‖`` and ``cos[name] = cos(δ, G_comp_ring)``.
-
-    Scale contract: both inputs MUST already be DP-MEAN-reduced under the same
-    loss normalization. The engine feeds the ``_dp_all_reduce_anchor_grads``
-    (MEAN) anchor gradient and the FSDP-mean fast gradient, both normalized by
-    the same ``agg_loss`` global_batch_info.
-    This function applies NO rescaling of its own (pure linearity), which is
-    exactly what the scale-consistency unit test pins: feeding a SUM-reduced
-    side inflates the ratio by the world size.
-    """
-    ring_norms = ring_norms or {}
-    ratios: dict = {}
-    coses: dict = {}
-    for name in sorted(set(rep.keys()) & set(ring.keys())):
-        r = rep[name].detach().to(torch.float32)
-        g = ring[name].detach().to(torch.float32)
-        assert r.shape == g.shape, f"delta_stats shape mismatch for {name}: {r.shape} vs {g.shape}"
-        ng = ring_norms.get(name)
-        ng = float(torch.linalg.norm(g).item()) if ng is None else float(ng)
-        delta = r - g
-        nd = float(torch.linalg.norm(delta).item())
-        if ng <= _PROBE_EPS:
-            ratios[name] = None
-            coses[name] = None
-            continue
-        ratios[name] = nd / ng
-        if nd <= _PROBE_EPS:
-            coses[name] = None
-        else:
-            coses[name] = float(torch.dot(delta.reshape(-1), g.reshape(-1)).item()) / (nd * ng)
-    return ratios, coses
-
-
-def matrix_median(values) -> Optional[float]:
-    """Median over one fire's per-target scalars, skipping ``None`` entries.
-
-    Returns ``None`` when nothing is left.
-    """
-    import statistics
-
-    vals = [v for v in (values.values() if isinstance(values, dict) else values) if v is not None]
-    if not vals:
-        return None
-    return float(statistics.median(vals))
-
-
-def geometry_fire_record(
-    *,
-    step: int,
-    tick: int,
-    warmup_fallback: bool,
-    fire_index: int,
-    g_comp: dict,
-    g_comp_norms: dict,
-    rep: dict,
-    rep_norms: dict,
-    old: dict,
-    old_norms: dict,
-    rep_stats: dict,
-    lag_entries: dict,
-    ring_entry: Optional[tuple],
-    ring_tick: Optional[int],
-    prev_rep: Optional[tuple],
-    loss_mismatch_nats: Optional[float],
-    used_tick: int,
-    batch_gs: int,
-    realized_weight_delay: int,
-    m4_lags: int = 5,
-) -> tuple:
-    """Assemble ONE fire's m1–m7 record (the stepA_fires.jsonl line) plus the
-    per-target sidecar map. Pure CPU fp32 math over already-detached maps.
-
-    Field names are the stable log/artifact contract:
-    ``step, tick, warmup_fallback, m1_matrix_median, m2_matrix_median,
-    m3_matrix_median, m4_j1..m4_j{m4_lags}, m5_ratio_matrix_median,
-    m5_cos_matrix_median, m6_matrix_median, m7_stable_rank_median,
-    m7_top1pct_mass_median, loss_mismatch_nats`` (+ provenance extras).
-    Missing structures (warmup: no ring entry / no prev fire / short lag
-    history) yield ``None`` (JSON null) — gates only read post-warmup fires.
-    """
-    # m1/m2/m3 — the H_validity / H_decorr discriminator triple.
-    m1 = cos_over_targets(g_comp, rep, norms_a=g_comp_norms, norms_b=rep_norms)
-    m2 = cos_over_targets(g_comp, old, norms_a=g_comp_norms, norms_b=old_norms)
-    m3 = cos_over_targets(rep, old, norms_a=rep_norms, norms_b=old_norms)
-    # m4 — fast-gradient lag autocorrelation, j=1..m4_lags.
-    m4_medians = {}
-    for j in range(1, int(m4_lags) + 1):
-        entry = lag_entries.get(int(tick) - j)
-        if entry is None:
-            m4_medians[j] = None
-            continue
-        lag_grads, lag_norms = entry
-        m4_medians[j] = matrix_median(cos_over_targets(g_comp, lag_grads, norms_a=g_comp_norms, norms_b=lag_norms))
-    # m5 — within-pair codec error vs the exact t−K ring entry.
-    if ring_entry is not None:
-        ring_grads, ring_norms = ring_entry
-        m5_ratio, m5_cos = delta_stats_over_targets(rep, ring_grads, ring_norms=ring_norms)
-    else:
-        m5_ratio, m5_cos = {}, {}
-    # m6 — M_rep cross-fire persistence (β_anc=0 ⇒ M_rep == G_anc_rep per fire).
-    if prev_rep is not None:
-        prev_grads, prev_norms = prev_rep
-        m6 = cos_over_targets(rep, prev_grads, norms_a=rep_norms, norms_b=prev_norms)
-    else:
-        m6 = {}
-    # m7 — team-premise stats on the VALID gradient (computed at stash time).
-    m7_sr = {n: s.get("stable_rank") for n, s in rep_stats.items()}
-    m7_top = {n: s.get("top1pct_mass") for n, s in rep_stats.items()}
-
-    record = {
-        "step": int(step),
-        "tick": int(tick),
-        "warmup_fallback": bool(warmup_fallback),
-        "m1_matrix_median": matrix_median(m1),
-        "m2_matrix_median": matrix_median(m2),
-        "m3_matrix_median": matrix_median(m3),
-        "m5_ratio_matrix_median": matrix_median(m5_ratio) if m5_ratio else None,
-        "m5_cos_matrix_median": matrix_median(m5_cos) if m5_cos else None,
-        "m6_matrix_median": matrix_median(m6) if m6 else None,
-        "m7_stable_rank_median": matrix_median(m7_sr),
-        "m7_top1pct_mass_median": matrix_median(m7_top),
-        "loss_mismatch_nats": loss_mismatch_nats,
-        "n_targets": len(m1),
-        "fire_index": int(fire_index),
-        "used_tick": int(used_tick),
-        "batch_gs": int(batch_gs),
-        "realized_weight_delay": int(realized_weight_delay),
-        "ring_tick_consumed": int(ring_tick) if (ring_entry is not None and ring_tick is not None) else None,
-    }
-    for j in range(1, int(m4_lags) + 1):
-        record[f"m4_j{j}"] = m4_medians.get(j)
-
-    per_target = {
-        name: {
-            "m1": m1.get(name),
-            "m2": m2.get(name),
-            "m3": m3.get(name),
-            "m5_ratio": m5_ratio.get(name),
-            "m5_cos": m5_cos.get(name),
-            "m6": m6.get(name),
-            "m7_stable_rank": m7_sr.get(name),
-            "m7_top1pct_mass": m7_top.get(name),
-            "g_comp_norm": g_comp_norms.get(name),
-            "rep_norm": rep_norms.get(name),
-            "old_norm": old_norms.get(name),
-        }
-        for name in sorted(m1.keys())
-    }
-    return record, per_target
-
-
-def append_jsonl(path: str, obj: dict) -> None:
-    """Append one JSON object as a line to ``path`` (parent dirs created).
-    fsync'd so a box death right after a fire still leaves the line on disk."""
-    import json
-    import os
-
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "a") as f:
-        f.write(json.dumps(obj) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
 
 
 def feed_anchor_grads_into_ema(grads: dict, spectral, *, state=None) -> dict:
