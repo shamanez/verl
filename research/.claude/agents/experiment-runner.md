@@ -192,12 +192,12 @@ cd /workspace
 # verl.upstream.* dirs on the 200G disk (2026-07-15 #83 hit both).
 if [[ -d verl/.git ]] \
    && (cd verl && git remote set-url origin https://github.com/shamanez/verl.git \
-       && git fetch origin exp/<id> && git checkout -B exp/<id> FETCH_HEAD \
+       && git fetch --depth 1 origin exp/<id> && git checkout -B exp/<id> FETCH_HEAD \
        && git reset --hard FETCH_HEAD); then
   echo "=== code_change: reused checkout, reset to origin/exp/<id> ==="
 elif { [[ -e verl ]] && mv verl "verl.stale.$(date +%s)"; true; } \
-     && git clone -b exp/<id> https://github.com/shamanez/verl.git verl; then
-  echo "=== code_change: cloned exp/<id> from GitHub ==="
+     && git clone --depth 1 --single-branch -b exp/<id> https://github.com/shamanez/verl.git verl; then
+  echo "=== code_change: shallow single-branch clone of exp/<id> ==="
 elif [[ -f /workspace/runs/<id>/exp.bundle ]]; then
   echo "=== GitHub unreachable — falling back to exp.bundle ==="
   git clone -b exp/<id> /workspace/runs/<id>/exp.bundle verl
@@ -229,7 +229,7 @@ branch surviving.
 ```bash
 cd /workspace
 if [[ ! -d verl/.git ]]; then
-  git clone -b <base_branch> https://github.com/shamanez/verl.git verl \
+  git clone --depth 1 --single-branch -b <base_branch> https://github.com/shamanez/verl.git verl \
     && (cd verl \
         && { command -v uv >/dev/null 2>&1 && UVPIP="uv pip" || UVPIP="python3 -m pip"; } \
         && $UVPIP install --no-deps -e . > /workspace/pip.log 2>&1)
@@ -239,7 +239,7 @@ cd /workspace/verl && git remote set-url origin https://github.com/shamanez/verl
 # restricted refspec (e.g. --branch X --depth 1) has no origin/<base_branch>
 # remote-tracking ref, so `checkout -B <base> origin/<base>` fatals. `git fetch
 # origin <base>` always populates FETCH_HEAD regardless of the clone's refspec.
-git fetch origin <base_branch> || { echo "FATAL: fetch <base_branch> failed" >&2; exit 1; }
+git fetch --depth 1 origin <base_branch> || { echo "FATAL: fetch <base_branch> failed" >&2; exit 1; }
 git checkout -B <base_branch> FETCH_HEAD
 ```
 
