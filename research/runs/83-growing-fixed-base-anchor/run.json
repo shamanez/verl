@@ -6,7 +6,7 @@
   "kind": "experiment",
   "tier": "fast",
   "branch": "exp/83-growing-fixed-base-anchor",
-  "commit": "7939529a1b43d589bede0db95b65c47103080918",
+  "commit": "91ecbdd4bfbd723d686af278dc076da80a6d5554",
   "base_branch": "autonomous-harness-v1",
   "code_change": true,
   "target_modules": [
