@@ -1611,6 +1611,23 @@ class FSDPEngine(BaseEngine):
                 _current_anchor_batch.copy() if hasattr(_current_anchor_batch, "copy") else _current_anchor_batch
             )
             _batch_choice = "current_step"
+        # comm_eff: anchor_data is a copy of a replay-ring batch and does not
+        # carry the dynamic micro-batch packing keys that engine_workers injects
+        # onto the live update batch. Without them prepare_micro_batches() asserts
+        # on a missing max_token_len_per_gpu when use_dynamic_bsz is True (the
+        # actor default). Propagate the SAME packing budget the fast update path
+        # uses; this only affects micro-batch grouping, never the anchor
+        # loss/gradient (token-mean normalization is recomputed independently).
+        for _mb_key, _mb_default in (
+            ("use_dynamic_bsz", self.engine_config.use_dynamic_bsz),
+            ("max_token_len_per_gpu", self.engine_config.max_token_len_per_gpu),
+            ("micro_batch_size_per_gpu", self.engine_config.micro_batch_size_per_gpu),
+        ):
+            if _mb_key not in anchor_data.keys():
+                tu.assign_non_tensor(
+                    anchor_data,
+                    **{_mb_key: tu.get_non_tensor_data(data=data, key=_mb_key, default=_mb_default)},
+                )
         if _la_active:
             print(
                 f"[comm_eff][lookahead] step={step} fire pairing: weights=projected(t={_la_target_tick}) "
