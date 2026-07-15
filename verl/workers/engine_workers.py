@@ -233,6 +233,71 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
+    @contextmanager
+    def _comm_eff_anchor_batch_context(self, data: TensorDict, batch_size_per_dp: int):
+        """Expose one immutable pre-split actor batch to an opt-in full anchor.
+
+        ``train_mini_batch`` owns the only point at which the complete
+        worker-local update batch still exists.  The FSDP anchor normally sees
+        only one iterator-produced PPO mini-batch.  Under
+        ``anchor.batch_scope=rollout_batch`` we deep-clone the complete batch to
+        CPU before that split and lend it to the engine for this update only.
+        Paired replay/rank1 warmup retain independent deep clones of this
+        private full-update source, so no later mini-batch metadata mutation or
+        transient-context cleanup can break the retained checkpoint/batch
+        association.
+
+        The scope is shared by the anchor-owned Q observation and dense M
+        backward.  Cleanup is fail-closed and exception-safe: a stale context
+        may never leak into the next actor update.
+        """
+        state = getattr(self.engine, "_comm_eff_state", None)
+        anchor_cfg = getattr(getattr(state, "config", None), "anchor", None)
+        if state is None or anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)):
+            yield
+            return
+
+        dp_size = int(self.engine.get_data_parallel_size())
+        update_sequences_global = int(batch_size_per_dp) * dp_size
+        # These stamps ride mini-batch clones into delayed replay.  In
+        # particular, they let telemetry report the honest fraction of the
+        # complete update even after the source batch has become stale.
+        tu.assign_non_tensor(
+            data,
+            comm_eff_update_sequences_local=int(batch_size_per_dp),
+            comm_eff_update_sequences_global=update_sequences_global,
+        )
+
+        scope = str(getattr(anchor_cfg, "batch_scope", "ppo_minibatch"))
+        if scope == "ppo_minibatch":
+            yield
+            return
+        if scope != "rollout_batch":  # validated earlier; retain a local fail-closed guard
+            raise RuntimeError(f"unsupported comm_eff anchor batch_scope={scope!r}")
+
+        attr = "_comm_eff_rollout_batch"
+        if hasattr(self.engine, attr):
+            raise RuntimeError("comm_eff rollout-batch anchor context leaked across actor updates")
+
+        from verl.workers.comm_eff.anchor import clone_batch_for_replay
+
+        full_batch = clone_batch_for_replay(data, device=torch.device("cpu"))
+        # The trainer's inherited global_batch_size is the PPO mini-batch size.
+        # Replace it on the private full clone so every aggregation mode (not
+        # only the locked token-mean mode) normalizes over this complete batch.
+        tu.assign_non_tensor(full_batch, global_batch_size=update_sequences_global)
+        if int(full_batch.shape[0]) != int(batch_size_per_dp):
+            raise RuntimeError(
+                "comm_eff rollout-batch clone changed the worker-local row count: "
+                f"expected={batch_size_per_dp} got={full_batch.shape[0]}"
+            )
+        object.__setattr__(self.engine, attr, full_batch)
+        try:
+            yield
+        finally:
+            if hasattr(self.engine, attr):
+                delattr(self.engine, attr)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
         """Split a batch into N mini-batches run for multiple epochs
@@ -273,6 +338,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         )
 
         with (
+            self._comm_eff_anchor_batch_context(data, batch_size_per_dp),
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
@@ -572,6 +638,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
             if self.distillation_enabled:
+                comm_eff = actor_config.comm_eff
+                anchor = getattr(comm_eff, "anchor", None)
+                if bool(getattr(comm_eff, "enabled", False)) and bool(getattr(anchor, "enabled", False)):
+                    raise ValueError(
+                        "comm_eff anchor objective parity does not yet support "
+                        "distillation_ppo_loss. Disable the anchor or implement and test "
+                        "an explicit ratio-one mapping for every distillation term."
+                    )
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
@@ -934,8 +1008,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # reuses this same mask_active=False). Surfaced as
                 # comm_eff/clean_steps.
                 comm_eff_state.clean_steps += 1
+        actor_update_succeeded = False
         try:
             output = self.actor.train_mini_batch(data=data)
+            actor_update_succeeded = True
         finally:
             if comm_eff_state is not None:
                 comm_eff_state.mask_active = False
@@ -950,13 +1026,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # maybe_update_basis. Strict no-op for the mask/dense/disabled
                 # codecs (powersgd is None there).
                 powersgd = getattr(comm_eff_state, "powersgd", None)
-                # When the anchor owns Q, the fast net is a pure
-                # read-only consumer — its end-of-step basis update is GATED OFF
-                # (Q is updated only by the anchor's slow-net forward +
-                # broadcast, in the engine's _maybe_comm_eff_anchor_refresh).
-                # The fast-side sketch accumulation is already gated off in
-                # _should_accumulate_sketch, so there is no V to consume here.
-                fast_owns_q = not bool(getattr(powersgd, "anchor_owns_q", False)) if powersgd is not None else False
+                # When the anchor owns Q, the fast net is a pure read-only
+                # consumer. An anchor fire occurs inside train_mini_batch, after
+                # this batch's old_log_probs were already recomputed. The anchor
+                # therefore stages Q_{t+1}; publish it only after ALL PPO
+                # minibatches sharing those old_log_probs have completed. The
+                # next global step's old-logprob and train forwards then see the
+                # same new Q. The fast-side sketch accumulation stays gated off.
+                anchor_owns_q = bool(getattr(powersgd, "anchor_owns_q", False)) if powersgd is not None else False
+                if powersgd is not None and anchor_owns_q:
+                    if actor_update_succeeded:
+                        # Every rank executes this handoff, even ranks on which
+                        # train_mini_batch returned no metrics. The compressor
+                        # candidate was already broadcast/verified collectively
+                        # at the anchor fire, so this outer exception boundary is
+                        # a local atomic handoff (no deadlock-prone collective).
+                        try:
+                            did_activate = powersgd.activate_staged_anchor_basis()
+                        except Exception:
+                            powersgd.discard_staged_anchor_basis()
+                            raise
+                        if did_activate:
+                            print(
+                                f"[comm_eff][q-stage] activated after update_actor global_step={global_step} "
+                                f"generation={powersgd.anchor_basis_generation} "
+                                f"activations={getattr(comm_eff_state, 'anchor_q_activations', 0)}",
+                                flush=True,
+                            )
+                    else:
+                        # A candidate was derived from an update that did not
+                        # commit. Never let it leak into a later policy pair.
+                        powersgd.discard_staged_anchor_basis()
+                fast_owns_q = not anchor_owns_q
                 if powersgd is not None and fast_owns_q:
                     did_update = powersgd.maybe_update_basis(is_clean_step=clean_step)
                     # After the first basis update, verify Q is bit-identical on
@@ -1015,7 +1116,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_rollouts_generated": 0,
                     "comm_eff/anchor_rewards_recomputed": 0,
                     "comm_eff/anchor_optimizer_steps": 0,
-                    "comm_eff/anchor_batch_fraction": 1.0,
+                    "comm_eff/anchor_batch_fraction": 0.0,
+                    "comm_eff/anchor_batch_sequences_global": 0,
+                    "comm_eff/anchor_update_sequences_global": 0,
+                    "comm_eff/anchor_batch_prompt_equivalents_global": 0,
+                    "comm_eff/anchor_update_prompt_equivalents_global": 0,
+                    "comm_eff/anchor_rollout_n": 0,
+                    "comm_eff/anchor_batch_scope_rollout": 0,
                     # Explicit zero on the disabled path.
                     "comm_eff/clean_steps": 0,
                     # Explicit zeros on the disabled path for PowerSGD counters.
@@ -1024,6 +1131,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # Explicit zeros on the disabled path for anchor-owned-Q counters.
                     "comm_eff/anchor_q_updates": 0,
                     "comm_eff/anchor_q_broadcasts": 0,
+                    "comm_eff/anchor_q_activations": 0,
+                    "comm_eff/anchor_q_stage_overwrites": 0,
+                    "comm_eff/fast_q_bootstrap_done": 0,
+                    "comm_eff/fast_q_bootstrap_observations": 0,
+                    "comm_eff/fast_q_bootstrap_updates": 0,
+                    "comm_eff/fast_q_bootstrap_activations": 0,
+                    "comm_eff/fast_q_bootstrap_dense_observation_elements": 0.0,
+                    "comm_eff/fast_q_bootstrap_sync_elements": 0.0,
                     "comm_eff/merger_coldM_fallbacks": 0,
                     # Explicit zero on the disabled path for the family screen.
                     "comm_eff/family_screen_builds": 0,
@@ -1043,6 +1158,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # not fire. Stamp "ckpt" so the assert trips on any leak.
         with self._comm_eff_path("ckpt"):
             self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
+        state = self._maybe_comm_eff_state()
+        if state is not None and hasattr(state, "reset_rank1_runtime") and state.rank1_relex_active():
+            state.reset_rank1_runtime()
+            print(
+                "[comm_eff][rank1_relex] checkpoint load reset local history/M/Q; "
+                "resume will seed a fresh base and rewarm",
+                flush=True,
+            )
+        elif state is not None:
+            # Staging is shared by every anchor-owned-Q arm. Even modes that do
+            # not own rank1 trajectory history must never activate a candidate
+            # computed from weights that preceded this checkpoint load.
+            powersgd = getattr(state, "powersgd", None)
+            if powersgd is not None and bool(getattr(powersgd, "anchor_owns_q", False)):
+                state.reset_anchor_q_runtime()
+                print(
+                    "[comm_eff] checkpoint load reset non-checkpointed anchor-owned Q runtime",
+                    flush=True,
+                )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

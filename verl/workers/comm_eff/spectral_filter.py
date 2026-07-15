@@ -50,7 +50,37 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "SpectralFilter",
     "apply_spectral_correction_to_params",
+    "is_spectral_target",
 ]
+
+
+SPECTRAL_TARGET_SCOPES = ("decoder_matrices", "all_floating")
+
+
+def is_spectral_target(
+    name: str,
+    tensor: torch.Tensor,
+    *,
+    target_substrs,
+    target_scope: str = "decoder_matrices",
+) -> bool:
+    """Return whether ``tensor`` belongs to the configured M/correction set.
+
+    ``decoder_matrices`` is the historical selector: a named tensor must be 2-D
+    and match one of ``target_substrs``. ``all_floating`` intentionally ignores
+    names and dimensionality and admits every floating parameter tensor. The
+    caller first skips ``grad is None``, so this means every trainable floating
+    tensor that actually participated in the backward. Iteration comes from
+    ``named_parameters()`` with its default duplicate removal, which prevents a
+    tied embedding/LM-head tensor from being processed twice.
+    """
+    if target_scope not in SPECTRAL_TARGET_SCOPES:
+        raise ValueError(
+            f"unknown comm_eff spectral target_scope={target_scope!r}; expected one of {SPECTRAL_TARGET_SCOPES}"
+        )
+    if target_scope == "all_floating":
+        return bool(tensor.is_floating_point())
+    return tensor.dim() == 2 and any(s in name for s in target_substrs)
 
 
 def _canon(name: str) -> str:
@@ -1024,6 +1054,7 @@ def apply_spectral_correction_to_params(
     *,
     spectral: SpectralFilter,
     target_substrs,
+    target_scope: str = "decoder_matrices",
     max_targets: int,
     state,
     discovery_meta: dict,
@@ -1038,21 +1069,21 @@ def apply_spectral_correction_to_params(
     ``tests/workers/comm_eff/test_grad_correction_hook.py``). The FSDP-specific
     bits are injected as callables:
 
-    * ``full_grad_of(grad) -> (full_2d_tensor, meta)`` resolves the **full
-      logical 2D matrix** for a raw ``.grad`` (identity for a plain CPU/FSDP1-
+    * ``full_grad_of(grad) -> (full_tensor, meta)`` resolves the **full logical
+      tensor** for a raw ``.grad`` (identity for a plain CPU/FSDP1-
       summoned tensor; ``grad.full_tensor()`` for an FSDP2 ``DTensor``) and
       returns a small ``meta`` dict (container type, is_dtensor, placements,
       mesh) describing the container — recorded once in the discovery log.
-    * ``writeback(grad, g_proj)`` copies the corrected full matrix back into the
+    * ``writeback(grad, g_proj)`` copies the corrected full tensor back into the
       (possibly sharded) ``.grad`` in place.
 
     Discovery/correction contract:
     * the discovery log is recorded **once**, on the first target with a
       non-``None`` grad, **regardless of gradient magnitude** (a near-zero grad
       still proves the hook ran — only ``grad is None`` is skipped); and
-    * ``state.spectral_corrections`` increments per corrected 2D matrix.
+    * ``state.spectral_corrections`` increments per corrected parameter tensor.
 
-    Returns the number of matrices corrected.
+    Returns the number of parameter tensors corrected.
     """
     # correction_mode="none" is inert by contract: no per-target
     # walk, no writeback, no counter bump; the optimizer consumes the raw
@@ -1135,15 +1166,17 @@ def apply_spectral_correction_to_params(
         grad = getattr(p, "grad", None)
         if grad is None:
             continue
-        if not any(s in name for s in target_substrs):
+        if not is_spectral_target(name, p, target_substrs=target_substrs, target_scope=target_scope):
             continue
         if max_targets >= 0 and corrected >= max_targets:
             break
 
         full, container_meta = full_grad_of(grad)
         logical_shape = tuple(full.shape)
-        if full.dim() != 2:
-            # Skip non-2D targets (norms/biases excluded by substr anyway).
+        # Defensive dtype check after a possible DTensor all-gather. Parameter
+        # selection already rejects non-floating tensors; do not let an exotic
+        # gradient container silently route integer state into the corrector.
+        if not full.is_floating_point():
             continue
 
         if not instrumented:

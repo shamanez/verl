@@ -376,6 +376,13 @@ comm_eff:
     # weights. Uses the paired replay ring when enabled.
     replay_paired_batch: false
 
+    # Data scope shared by the dense anchor gradient M and anchor-owned Q
+    # observation. "ppo_minibatch" preserves the historical one-mini-batch
+    # behavior; "rollout_batch" uses the complete pre-split actor update batch.
+    # This is intentionally a combined Q+M anchor-signal knob, not a pure-M
+    # ablation, because both signals come from the same anchor forward.
+    batch_scope: ppo_minibatch
+
     # Where anchor weight snapshots live between ticks: "gpu" or "cpu".
     snapshot_device: gpu
 
@@ -386,8 +393,8 @@ comm_eff:
     lookahead_anchor: false
 
     # "disabled" | "fixed_linear" (frozen AsyncPP seed over the recorded
-    # snapshot ticks) | "learned_linear_with_fixed_linear_cold_start" (seed +
-    # small per-block residual trained only from retrospective errors).
+    # snapshot ticks) | "rank1_relex" (sliding per-tensor rank-1 trajectory
+    # SVD + actual-tick OLS, pinned to the newest exact checkpoint).
     lookahead_mode: disabled
 
     # Projection horizon multiplier alpha: 1.0 = full catch-up to the current
@@ -396,25 +403,46 @@ comm_eff:
 
     # Which rollouts the anchor consumes when the projector is on.
     # "auto" (default) -> "current_step" when the projector is active, else
-    # "stale_paired" (today's exact replay behavior). "current_step" = the
+    # "stale_paired" (today's exact replay behavior). Explicit stale_paired is
+    # also valid for rank1_relex only at strength=0, where theta_hat is exactly
+    # the newest transferred checkpoint and must consume its paired trajectories.
+    # "current_step" = the
     # anchor consumes the CURRENT tick's batch (the step-t rollouts matching
     # theta_hat[t]); requires the projector ON. "self_generate" is a reserved
     # not-implemented seam and is rejected at validation.
     lookahead_rollout_source: auto
 
     # What the anchor does at fires BEFORE the look-ahead projector is ready.
-    # "stale_correct" (default) = today's behavior: M from raw stale theta[t-K]
-    # + paired stale rollouts, folded every spectral.cadence ticks. "no_correct"
+    # "stale_correct" (default) = M from an exact checkpoint + its paired
+    # rollouts, folded every spectral.cadence ticks. In rank1_relex the first
+    # fire explicitly reuses the initial generator checkpoint/rollout pair, so
+    # M becomes ready and corrects the fast circuit on that same tick. Later
+    # pre-readiness fires use the exact delayed pair. "no_correct"
     # = do all ring bookkeeping but SKIP the anchor clone fwd/bwd + M update, so
     # M stays cold and the merger's cold-M guard passes fast grads through
     # unchanged until the first projected fire. no_correct requires the projector
-    # on AND owns_q=false.
+    # on AND owns_q=false. "q_only" is rank1-only: run the anchor forward without
+    # backward to refresh anchor-owned Q while keeping M/correction disabled.
     warmup_mode: stale_correct
 
     # Minimum ring snapshots before the projector engages. -1 (default) = the
-    # mode's source count (2 fixed / 3 learned). 2 = project from the earliest
-    # legal fire (fire 2). Requires the projector on; validated to [2, n_points].
+    # mode's source count (2 for fixed_linear; the complete window below for
+    # rank1_relex). 2 = project from the earliest legal fire (fire 2). With
+    # rank1_relex and min<W, the fit grows from the W2 secant through each
+    # available rank-1 OLS history, then retains/slides the complete W. Requires
+    # the projector on; validated to [2, n_points].
     lookahead_min_snapshots: -1
+
+    # Complete sliding rank1_relex window, including its oldest base checkpoint.
+    # W4 produces three nonzero cumulative deltas; W5 produces four. RELEX fits
+    # one trajectory independently for every unique floating named parameter tensor
+    # (including norms, biases, embeddings, and an untied lm_head). This is
+    # independent of spectral.target_substr, which only scopes gradient
+    # correction. W=2 is the explicit two-checkpoint/secant fallback; W>=3
+    # uses the RELEX-inspired rank-1 OLS fit adapted to this sliding live-training
+    # window. Inert for disabled/fixed_linear.
+    # Must be >= 2.
+    lookahead_window_snapshots: 4
 
   # Spectral-correction sub-config (inert while enabled=false). Applies an
   # anchor-guided correction to the fast-path gradient after actor backward /
@@ -427,6 +455,7 @@ comm_eff:
 
     # Whether anchor-guided gradient correction runs (gated by comm_eff.enabled)
     enabled: false
+
     # Correction cadence in optimizer steps. 1 = fire every step (strict no-op
     # default). Validated >= 1. Mirrors anchor.cadence; set == anchor.cadence so
     # corrections use a freshly-refreshed anchor EMA.
@@ -442,8 +471,13 @@ comm_eff:
     # EMA decay for the anchor-gradient running matrix M_anchor.
     beta_anc: 0.95
 
-    # Substrings selecting which named 2D params receive correction (skips
-    # norms / biases / embeddings / lm head).
+    # Gradient/M target policy. "decoder_matrices" preserves the established
+    # substring-selected 2-D path. "all_floating" selects every unique named
+    # floating parameter tensor with a gradient, including norms, biases,
+    # embeddings, and an untied lm_head (tied weights are de-duplicated).
+    target_scope: decoder_matrices
+
+    # Substrings used only by target_scope=decoder_matrices.
     target_substr: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     # Cap on target matrices corrected per step. -1 means no cap and caps both
@@ -477,11 +511,11 @@ comm_eff:
     # Unused unless correction_mode=signed_ema. [0, 1].
     signed_ema_alpha: 0.0
 
-    # Error-feedback residual knobs (correction_mode=ef_powersgd).
-    # ef_decay: EMA decay on the accumulated off-subspace residual, [0, 1).
-    # ef_clip:  residual norm cap as a FRACTION of ||G_comp|| (shape-aware), >= 0.
-    # ef_decay=0 and ef_clip=0 yields G_corr == G_comp.
+    # EMA decay on the accumulated off-subspace residual, [0, 1).
     ef_decay: 0.0
+
+    # Residual norm cap as a fraction of ||G_comp|| (shape-aware), >= 0.
+    # Together, ef_decay=0 and ef_clip=0 yields G_corr == G_comp.
     ef_clip: 0.0
 
     # delayed_ef residual weight lambda in
@@ -493,31 +527,48 @@ comm_eff:
     # correction term. r=0 skips the branch; r_delta=0 leaves the correction
     # uncompressed. The forward codec Q is untouched.
     delta_subbasis_rank: 0
+
+    # Candidate family used to construct the optional stale-anchor sub-basis.
     delta_subbasis_family: tail
+
+    # Rank used to compress the correction delta. 0 leaves it uncompressed.
     r_delta: 0
 
     # Sub-basis weight schedule. The weight can hold for
     # delta_subbasis_hold_steps, then linearly decay over
     # delta_subbasis_decay_steps. All >= 0.
     delta_subbasis_weight: 1.0
+
+    # Number of steps over which the sub-basis weight decays linearly.
     delta_subbasis_decay_steps: 0
+
+    # Number of steps to hold the initial sub-basis weight before decay.
     delta_subbasis_hold_steps: 0
 
     # Optional zero-mean, cross-rank-identical perturbation added after delayed_ef
     # correction. perturb_sigma=0 disables it. perturb_sigma >= 0.
     perturb_sigma: 0.0
+
+    # Deterministic seed for the optional cross-rank-identical perturbation.
     perturb_seed: 0
 
     # Normalized correction-delta momentum. mu=0 disables it. When age_decay is
     # true, held corrections fade with age. mu in [0, 1); age_decay is a strict bool.
     delta_momentum_mu: 0.0
+
+    # Whether held correction momentum decays as its source becomes older.
     delta_momentum_age_decay: false
 
     # Optional adaptive delayed_ef dose. mode in {off, cos, ratio}; kappa >= 0;
     # lambda_cap >= 0. Keep "off" quoted because bare off is YAML-1.1 boolean false.
     adaptive_lambda_mode: "off"
+
+    # Gain applied to the centered adaptive-lambda diagnostic.
     adaptive_lambda_kappa: 0.0
+
+    # Upper bound for the adaptive correction dose.
     lambda_cap: 2.0
+
   # (inert unless parent enabled=true AND compression_type=powersgd). The codec
   # replaces each boundary block's hidden state M with its rank-r projection onto
   # a shared frozen per-layer orthonormal basis Q: M_hat=(M@Q)@Qᵀ (Q detached, M
@@ -573,6 +624,13 @@ comm_eff:
     # rank-deficient sketch never yields a non-finite condition number. > 0.
     reortho_eps: 1e-6
 
+    # Opt-in one-time fast-actor activation calibration. Before the first
+    # non-clean compressed old-logprob pass, observe that same trajectory batch
+    # once without projection, DP-pool V=Mᵀ(MQ0), atomically publish Q1, then
+    # run the real old/current PPO pair with Q1 frozen. false preserves the
+    # deterministic random Q0 bootstrap used by existing runs.
+    fast_q_bootstrap: false
+
     # Live Q-basis family consumed by orth(V). "act" uses activation energy;
     # {grad, adv, tail, hybrid, ticket} build gradient/advantage-oriented bases.
     q_basis: act
@@ -584,6 +642,8 @@ comm_eff:
     # Hybrid family column split at fixed rank r. -1/-1 lets the implementation
     # choose; explicit non-negative values must sum to rank.
     hybrid_act_cols: -1
+
+    # Explicit gradient-family columns for the hybrid basis, or -1 for automatic.
     hybrid_grad_cols: -1
 
   # Optional tensor capture. When enabled, comm-eff hooks dump detached tensors
@@ -641,8 +701,13 @@ comm_eff:
     # with compute; close() drains + fails loud at run end. See weight_traj for the
     # field semantics (the capture path has no per-step flush cadence).
     r2_async: false
+
+    # Number of background R2 upload workers when asynchronous upload is enabled.
     r2_upload_workers: 4
+
+    # Maximum local staged upload volume before producers apply backpressure.
     r2_max_staged_gb: 80.0
+
     # ASYNC only. Finite timeout (s) for the run-end close() drain barrier so a
     # slow/hung uploader cannot block forever on queue.join(). <=0 => wait forever
     # (the original unbounded behaviour). The capture path has no per-step flush
@@ -674,6 +739,15 @@ comm_eff:
     # Also append the per-target scalar arrays behind each matrix-median to
     # stepA_fires_targets.jsonl (scalars only, ~KBs per fire).
     per_target_sidecar: true
+
+    # Causal sampled-weight check for rank1_relex. At projection time this
+    # stores only a few deterministic fp32 scalars from representative tensors;
+    # it scores them only when that target checkpoint later arrives through the
+    # delayed exact-transfer path. It never reads the live fast network.
+    rank1_projection_enabled: false
+
+    # Deterministic scalar samples retained per representative tensor. [1, 64].
+    rank1_projection_samples: 16
 
     # Weight-trajectory FULL-weight recorder (dump-only). OFF by default.
     # Built independently of comm_eff.enabled, so the plain-GRPO (codec-OFF)

@@ -154,6 +154,8 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
             sync_basis=False,
             qr_dtype="fp32",
             reortho_eps=1e-6,
+            anchor_owns_q=kw.pop("anchor_owns_q", False),
+            fast_q_bootstrap=kw.pop("fast_q_bootstrap", False),
             state=state,
         )
         comp.register(model)
@@ -205,7 +207,6 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
         H = 64
         model, comp, state = self._build(H=H)
         comp.set_context(global_step=1)
-        Q0 = {k: comp._basis.get(k, None) for k in comp.boundary_indices}
         # First forward bootstraps the basis; capture AFTER it exists.
         model(torch.randn(20, H, requires_grad=True)).pow(2).sum().backward()
         Q_after_fwd = {k: comp._basis[k].clone() for k in comp._basis}
@@ -258,6 +259,71 @@ class TestPowerSGDCompressorLifecycle(unittest.TestCase):
             self.assertLessEqual(v, 1.0 + 1e-6)
         self.assertEqual(comp.last_y_coords_per_token, 16)
 
+    def test_fast_q_bootstrap_is_raw_atomic_one_shot_and_resettable(self):
+        H = 64
+        model, comp, state = self._build(H=H, anchor_owns_q=True, fast_q_bootstrap=True)
+        x = torch.randn(20, H)
+
+        # Establish the byte-exact dense output without projection hooks.
+        comp.unregister()
+        with torch.no_grad():
+            dense = model(x)
+        comp.register(model)
+
+        comp.begin_fast_q_bootstrap_observation()
+        comp.set_context(global_step=1)
+        with torch.no_grad():
+            observed = model(x)
+        # The observation pass is discarded/raw, not a Q0-compressed policy
+        # evaluation, and it must not count as a codec application.
+        torch.testing.assert_close(observed, dense, rtol=0, atol=0)
+        self.assertEqual(state.powersgd_applications, 0)
+        self.assertEqual(set(comp._fast_q_bootstrap_sketch), set(comp.boundary_indices))
+        q0 = {layer: basis.clone() for layer, basis in comp._basis.items()}
+
+        comp.finish_fast_q_bootstrap_observation()
+        self.assertTrue(comp.stage_fast_q_bootstrap_basis())
+        # Staging is transactionally isolated: every live boundary is still Q0.
+        self.assertTrue(all(torch.equal(comp._basis[layer], q0[layer]) for layer in q0))
+        self.assertEqual(set(comp._pending_fast_q_bootstrap_basis), set(comp.boundary_indices))
+        self.assertTrue(any(not torch.equal(comp._pending_fast_q_bootstrap_basis[layer], q0[layer]) for layer in q0))
+        self.assertIsNone(comp.verify_fast_q_bootstrap_basis_across_ranks())
+        self.assertTrue(comp.activate_staged_fast_q_bootstrap_basis())
+        self.assertTrue(comp.fast_q_bootstrap_done)
+        self.assertFalse(comp.fast_q_bootstrap_needed())
+        self.assertEqual(comp.fast_q_bootstrap_observations, 1)
+        self.assertEqual(comp.fast_q_bootstrap_updates, 1)
+        self.assertEqual(comp.fast_q_bootstrap_activations, 1)
+        self.assertGreater(comp.fast_q_bootstrap_dense_observation_elements, 0)
+        self.assertEqual(comp.fast_q_bootstrap_sync_elements, 0.0)  # single-process CPU test
+        self.assertFalse(comp.activate_staged_fast_q_bootstrap_basis())
+        with self.assertRaisesRegex(RuntimeError, "one-shot"):
+            comp.begin_fast_q_bootstrap_observation()
+
+        # Checkpoint/runtime reset intentionally re-arms calibration because Q is
+        # non-checkpointed and would otherwise resume from random Q0 again.
+        comp.reset_basis_runtime()
+        self.assertTrue(comp.fast_q_bootstrap_needed())
+        self.assertFalse(comp.fast_q_bootstrap_done)
+        self.assertEqual(comp.fast_q_bootstrap_observations, 0)
+        self.assertEqual(comp.fast_q_bootstrap_updates, 0)
+        self.assertEqual(comp.fast_q_bootstrap_activations, 0)
+
+    def test_fast_q_bootstrap_abort_never_changes_live_basis(self):
+        H = 64
+        model, comp, _ = self._build(H=H, anchor_owns_q=True, fast_q_bootstrap=True)
+        comp.begin_fast_q_bootstrap_observation()
+        comp.set_context(global_step=1)
+        with torch.no_grad():
+            model(torch.randn(20, H))
+        q0 = {layer: basis.clone() for layer, basis in comp._basis.items()}
+        comp.finish_fast_q_bootstrap_observation()
+        self.assertTrue(comp.stage_fast_q_bootstrap_basis())
+        self.assertTrue(comp.abort_fast_q_bootstrap())
+        self.assertEqual(comp._pending_fast_q_bootstrap_basis, {})
+        self.assertTrue(all(torch.equal(comp._basis[layer], q0[layer]) for layer in q0))
+        self.assertFalse(comp.fast_q_bootstrap_done)
+
 
 class TestPowerSGDCollectiveHelpers(unittest.TestCase):
     """CPU-checkable helper invariants for the real DP sync path.
@@ -270,9 +336,16 @@ class TestPowerSGDCollectiveHelpers(unittest.TestCase):
         torch.manual_seed(0)
         model = _TinyModel(64)
         comp = PowerSGDActivationCompressor(
-            rank=16, base_seed=0, pp_size=4, update_cadence=1, warm_start=True,
-            compress_recompute=True, sync_basis=kw.pop("sync_basis", True),
-            qr_dtype="fp32", reortho_eps=1e-6, state=_FakeState(),
+            rank=16,
+            base_seed=0,
+            pp_size=4,
+            update_cadence=1,
+            warm_start=True,
+            compress_recompute=True,
+            sync_basis=kw.pop("sync_basis", True),
+            qr_dtype="fp32",
+            reortho_eps=1e-6,
+            state=_FakeState(),
         )
         comp.register(model)
         return model, comp

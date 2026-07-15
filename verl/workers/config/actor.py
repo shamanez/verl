@@ -223,6 +223,29 @@ class ActorConfig(BaseConfig):
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
 
+        # The dense anchor M is a control signal for the fast actor, so silently
+        # changing its objective is unsafe. anchor_pg_loss implements an explicit
+        # ratio-one mapping for vanilla PPO and mirrors every additive objective
+        # term; other policy-loss modes need their own reviewed, tested mapping.
+        # Reject them before the first paid actor tick instead of discovering a
+        # mismatch at the first anchor cadence boundary.
+        comm_eff = self.comm_eff
+        anchor = getattr(comm_eff, "anchor", None)
+        if bool(getattr(comm_eff, "enabled", False)) and bool(getattr(anchor, "enabled", False)):
+            policy_loss = self.policy_loss
+            loss_mode = (
+                policy_loss.get("loss_mode", "vanilla")
+                if hasattr(policy_loss, "get")
+                else getattr(policy_loss, "loss_mode", "vanilla")
+            )
+            if loss_mode != "vanilla":
+                raise ValueError(
+                    "comm_eff anchor objective parity currently supports "
+                    "actor.policy_loss.loss_mode='vanilla' only; "
+                    f"got {loss_mode!r}. Implement and test an explicit ratio-one "
+                    "anchor mapping before enabling this policy loss."
+                )
+
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""
         if not self.use_dynamic_bsz:

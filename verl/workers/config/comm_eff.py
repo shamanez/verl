@@ -123,6 +123,14 @@ class CommEffAnchorConfig(BaseConfig):
             the fast circuit's rollout. This makes the anchor gradient comparable
             to the retained fast gradient at the same batch/weight point. When
             ``false``, the anchor uses the current batch with stale weights.
+        batch_scope (str): Data scope consumed by the shared anchor forward.
+            ``"ppo_minibatch"`` (default) preserves the historical behavior:
+            one complete PPO mini-batch (including every rollout in each GRPO
+            group) supplies both the dense anchor gradient ``M`` and the
+            anchor-owned PowerSGD activation sketch ``Q``. ``"rollout_batch"``
+            consumes the complete pre-split actor update batch instead. The
+            latter is a combined anchor-signal knob, not a pure-M ablation,
+            because Q and M deliberately share the same anchor forward.
         snapshot_device (str): Where the anchor weight snapshots live between
             ticks — ``"gpu"`` (default, faithful: detached clones stay on each
             param's device, today's exact behaviour) or ``"cpu"`` (memory-lean:
@@ -140,8 +148,11 @@ class CommEffAnchorConfig(BaseConfig):
         lookahead_mode (str): ``"disabled"`` (default) | ``"fixed_linear"``
             (frozen AsyncPP seed: pure linear extrapolation over the recorded
             snapshot ticks — the RLVR-linearity paper's Eq 4 weight-space
-            extrapolation, arXiv:2601.04537). A stray ``lookahead_anchor=true``
-            with ``lookahead_mode=disabled`` (or vice-versa) is inert by design.
+            extrapolation, arXiv:2601.04537) | ``"rank1_relex"`` (pure sliding
+            rank-1 trajectory SVD + actual-tick OLS independently for every
+            unique floating named parameter, pinned to the newest exact
+            checkpoint). A stray ``lookahead_anchor=true`` with
+            ``lookahead_mode=disabled`` (or vice-versa) is inert by design.
         lookahead_strength (float): Projection horizon multiplier ``alpha``.
             ``1.0`` (default) projects the full realized horizon (catch-up to
             the current tick); ``<1`` projects a shorter horizon; ``0`` degrades
@@ -152,7 +163,9 @@ class CommEffAnchorConfig(BaseConfig):
             ``"stale_paired"`` otherwise — so matching rollouts are THE DEFAULT
             whenever weight projection is ON and the knob has zero effect when
             it is OFF. ``"stale_paired"`` = today's exact behavior (the replayed
-            ``t-delay_K`` batch in replay mode). ``"current_step"`` = the anchor
+            ``t-delay_K`` batch in replay mode), and is also the required paired
+            source for the ``rank1_relex`` strength-zero control whose projected
+            increment is exactly zero. ``"current_step"`` = the anchor
             consumes the CURRENT tick's batch — the step-``t`` rollouts that the
             projected ``theta_hat[t]`` corresponds to; requires the projector ON
             (stale-weights + fresh-rollouts is an unsupported ablation).
@@ -169,15 +182,34 @@ class CommEffAnchorConfig(BaseConfig):
             cold-M guard passes the fast gradient through UNCHANGED (no
             correction) until the FIRST projected fire. Only meaningful with the
             look-ahead projector on; requires ``owns_q=false`` (a skipped anchor
-            pass must not be the sole Q updater). Validated against
-            {stale_correct, no_correct}.
+            pass must not be the sole Q updater). ``"q_only"`` is rank1-only:
+            before readiness it runs an autograd-enabled anchor forward without
+            backward, refreshes anchor-owned Q, and leaves M/correction disabled.
+            For ``rank1_relex``, ``"stale_correct"`` has a stricter first-fire
+            contract than the legacy fallback: it reuses the exact first local
+            generator checkpoint and its paired first rollout batch, performs a
+            dense anchor backward, and makes M available to the fast correction
+            on that same optimizer tick. Later pre-readiness fires use their
+            exact delayed checkpoint/trajectory pair.
+            Validated against {stale_correct, no_correct, q_only}.
         lookahead_min_snapshots (int): Minimum ring snapshots required before the
             projector engages. ``-1`` (DEFAULT): the mode's full source count
-            (2 for fixed_linear) — today's behavior. A concrete value in
+            (2 for fixed_linear, ``lookahead_window_snapshots`` for rank1_relex)
+            — today's behavior. A concrete value in
             ``[2, mode_n_points]`` lets the projector engage at the earliest
             mathematically-legal fire: ``2`` projects from fire 2 (the first
             fire at which two ``>=K``-stale snapshots exist — fire 1 can NEVER
-            project, a line needs 2 points). Requires the projector enabled.
+            project, a line needs 2 points). For rank1_relex, the fit grows from
+            the two-checkpoint secant through the available rank-1 OLS histories
+            until the complete sliding window is retained. Requires the projector
+            enabled.
+        lookahead_window_snapshots (int): Complete sliding window size for
+            ``rank1_relex``, including its oldest local base checkpoint. Default
+            4 therefore yields 3 nonzero cumulative deltas. Must be >= 2. At
+            exactly 2, the one-delta rank-1 fit is explicitly the per-tensor
+            two-checkpoint secant (naive linear extrapolation); W>=3 retains the
+            RELEX-inspired rank-1 OLS fit adapted to the sliding live-training
+            window. This field is inert for every other mode.
     """
 
     enabled: bool = False
@@ -185,6 +217,7 @@ class CommEffAnchorConfig(BaseConfig):
     delay_K: int = 20
     owns_q: bool = False
     replay_paired_batch: bool = False
+    batch_scope: str = "ppo_minibatch"
     snapshot_device: str = "gpu"
     lookahead_anchor: bool = False
     lookahead_mode: str = "disabled"
@@ -192,6 +225,7 @@ class CommEffAnchorConfig(BaseConfig):
     lookahead_rollout_source: str = "auto"
     warmup_mode: str = "stale_correct"
     lookahead_min_snapshots: int = -1
+    lookahead_window_snapshots: int = 4
 
 
 @dataclass
@@ -222,11 +256,17 @@ class CommEffSpectralConfig(BaseConfig):
             no-op and the actor path is identical to dense GRPO.
         beta_anc (float): EMA decay for the anchor-gradient running matrix
             ``M_anchor``. Default ``0.95``.
-        target_substr (list[str]): Substrings used to SELECT which named 2D
-            parameters receive correction. A parameter is targeted iff its name
-            contains one of these substrings AND its logical shape is 2D.
-            Defaults select the decoder attention/MLP projection matrices and
-            skip norms, biases, embeddings and the lm head.
+        target_scope (str): Target-selector policy. ``"decoder_matrices"``
+            (default) preserves the substring-selected 2D decoder-matrix path.
+            ``"all_floating"`` selects every unique named floating parameter
+            tensor that produced a gradient, including embeddings, norms,
+            biases, and an untied LM head. PyTorch ``named_parameters()``
+            de-duplicates tied parameters, so a tied embedding/LM-head weight is
+            corrected once.
+        target_substr (list[str]): Substrings used when
+            ``target_scope="decoder_matrices"``. A parameter is targeted iff
+            its name contains one of these substrings AND its logical shape is
+            2D. Ignored by ``all_floating``.
         max_targets (int): Cap on the number of target matrices corrected per
             step. ``-1`` means no cap. The cap applies to both anchor extraction
             and merger writeback.
@@ -280,6 +320,11 @@ class CommEffSpectralConfig(BaseConfig):
     # True = current behavior, byte-identical. Neutral: nothing the optimizer
     # sees changes; the canary assert and aggregate counters are preserved.
     diagnostics: bool = True
+    # Default keeps the established 196 decoder-matrix selector. Opting into
+    # all_floating extends M/correction coverage to every unique floating
+    # parameter tensor that received a gradient (including 1-D norms/biases and
+    # embeddings/lm_head).
+    target_scope: str = "decoder_matrices"
     target_substr: list = field(
         default_factory=lambda: [
             "q_proj",
@@ -514,6 +559,12 @@ class CommEffPowerSGDConfig(BaseConfig):
             the singular-value floor used in the ``q_cond`` diagnostic, to keep a
             rank-deficient sketch from producing a non-finite condition number.
             Must be ``> 0``.
+        fast_q_bootstrap (bool): Opt-in one-time activation calibration before
+            the first compressed old/current PPO pair. The fast actor runs one
+            discarded dense no-grad observation on that trajectory batch,
+            DP-pools ``V=Mᵀ(MQ0)``, atomically publishes the complete ``Q1``,
+            and then returns to read-only Q ownership. Default ``False`` keeps
+            the deterministic random bootstrap and existing runs unchanged.
     """
 
     enabled: bool = True
@@ -526,6 +577,7 @@ class CommEffPowerSGDConfig(BaseConfig):
     sync_basis: bool = True
     qr_dtype: str = "fp32"
     reortho_eps: float = 1e-6
+    fast_q_bootstrap: bool = False
     # Q-basis family: the content of the sketch consumed by ``orth(V)`` at fixed
     # rank. ``act`` builds V from boundary activations. Other families use
     # alternate GRPO-related sketch sources while keeping the same byte budget.
@@ -723,7 +775,7 @@ class CommEffWeightTrajConfig(BaseConfig):
 
 @dataclass
 class CommEffProbeConfig(BaseConfig):
-    """Geometry probe for paired anchor replay; off by default.
+    """Telemetry-only geometry and rank1 weight probes; off by default.
 
     **Telemetry-only by contract.** When ``geometry_enabled=true`` the harness
     measures, at every anchor fire on the paired-replay path, the
@@ -762,6 +814,13 @@ class CommEffProbeConfig(BaseConfig):
             196-matrix arrays behind each median) to
             ``<out_dir>/stepA_fires_targets.jsonl``. Scalars only — a few tens
             of KB per fire, not a tensor dump. Default true.
+        rank1_projection_enabled (bool): Causally score a few deterministic
+            scalar samples from representative embedding, decoder, and norm
+            tensors. A forecast is recorded at projection time and compared
+            only when that exact target checkpoint later arrives through the
+            delayed-transfer path. Never reads the live fast network.
+        rank1_projection_samples (int): Scalars sampled per representative
+            tensor, in [1, 64]. Default 16 (only a few hundred bytes pending).
     """
 
     geometry_enabled: bool = False
@@ -769,6 +828,8 @@ class CommEffProbeConfig(BaseConfig):
     rank0_only: bool = True
     m4_lags: int = 5
     per_target_sidecar: bool = True
+    rank1_projection_enabled: bool = False
+    rank1_projection_samples: int = 16
     # Weight-trajectory FULL-weight recorder (dump-only). Off by default; no
     # observer/summon/IO is built unless weight_traj.enabled. Independent of the
     # geometry probe and of comm_eff.enabled.
@@ -893,6 +954,11 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.spectral.diagnostics must be a bool; got "
                 f"{type(self.spectral.diagnostics).__name__} ({self.spectral.diagnostics!r})"
             )
+        if self.spectral.target_scope not in ("decoder_matrices", "all_floating"):
+            raise ValueError(
+                "comm_eff.spectral.target_scope must be one of "
+                f"(decoder_matrices, all_floating); got {self.spectral.target_scope!r}"
+            )
         # Anchor cadence/staleness.
         if self.anchor.cadence < 1:
             raise ValueError(f"comm_eff.anchor.cadence must be >= 1; got {self.anchor.cadence}")
@@ -904,6 +970,11 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.anchor.replay_paired_batch must be a bool; got "
                 f"{type(self.anchor.replay_paired_batch).__name__} ({self.anchor.replay_paired_batch!r})"
+            )
+        if self.anchor.batch_scope not in ("ppo_minibatch", "rollout_batch"):
+            raise ValueError(
+                "comm_eff.anchor.batch_scope must be one of (ppo_minibatch, rollout_batch); "
+                f"got {self.anchor.batch_scope!r}"
             )
         # Snapshot storage enum (mirrors spectral.ema_device). "gpu" keeps the
         # snapshots on device; "cpu" moves the delay_K+1 full snapshots off HBM.
@@ -920,6 +991,7 @@ class CommEffConfig(BaseConfig):
             LOOKAHEAD_ROLLOUT_SOURCES,
             lookahead_enabled,
             lookahead_num_source_points,
+            rank1_relex_enabled,
         )
 
         if not isinstance(self.anchor.lookahead_anchor, bool):
@@ -929,8 +1001,7 @@ class CommEffConfig(BaseConfig):
             )
         if self.anchor.lookahead_mode not in LOOKAHEAD_MODES:
             raise ValueError(
-                f"comm_eff.anchor.lookahead_mode must be one of {LOOKAHEAD_MODES}; "
-                f"got {self.anchor.lookahead_mode!r}"
+                f"comm_eff.anchor.lookahead_mode must be one of {LOOKAHEAD_MODES}; got {self.anchor.lookahead_mode!r}"
             )
         if not float(self.anchor.lookahead_strength) >= 0.0:
             raise ValueError(
@@ -959,9 +1030,9 @@ class CommEffConfig(BaseConfig):
         # BEFORE the look-ahead projector is ready, and how early it engages.
         # All additive — the defaults (stale_correct, -1) reproduce today's
         # behavior byte-identically.
-        if self.anchor.warmup_mode not in ("stale_correct", "no_correct"):
+        if self.anchor.warmup_mode not in ("stale_correct", "no_correct", "q_only"):
             raise ValueError(
-                f"comm_eff.anchor.warmup_mode must be one of (stale_correct, no_correct); "
+                f"comm_eff.anchor.warmup_mode must be one of (stale_correct, no_correct, q_only); "
                 f"got {self.anchor.warmup_mode!r}"
             )
         if self.anchor.warmup_mode == "no_correct":
@@ -988,8 +1059,84 @@ class CommEffConfig(BaseConfig):
                     "the entire wait (the cold-Q blowup). Set anchor.owns_q=false so the FAST net "
                     "owns and refreshes Q (E1)."
                 )
+        _rank1_relex = rank1_relex_enabled(self.anchor)
+        if _rank1_relex:
+            if isinstance(self.anchor.lookahead_window_snapshots, bool) or not isinstance(
+                self.anchor.lookahead_window_snapshots, int
+            ):
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_window_snapshots must be an integer >= 2; "
+                    f"got {self.anchor.lookahead_window_snapshots!r}"
+                )
+            if self.anchor.lookahead_window_snapshots < 2:
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_window_snapshots must be >= 2 "
+                    "(oldest base + at least 1 delta; W=2 uses the explicit secant fallback); "
+                    f"got {self.anchor.lookahead_window_snapshots}"
+                )
+            if not self.anchor.enabled:
+                raise ValueError("comm_eff.anchor.lookahead_mode='rank1_relex' requires anchor.enabled=true")
+            if self.anchor.warmup_mode not in ("q_only", "no_correct", "stale_correct"):
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires warmup_mode='q_only', "
+                    "'no_correct', or 'stale_correct'"
+                )
+            if not self.anchor.replay_paired_batch:
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires "
+                    "anchor.replay_paired_batch=true for exact delayed checkpoint/trajectory pairs"
+                )
+            if not self.spectral.enabled:
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires spectral.enabled=true "
+                    "so the first ready projection can populate M_anchor and enable correction"
+                )
+            if self.spectral.correction_mode == "none":
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires an active spectral correction_mode"
+                )
+            if self.anchor.cadence % self.spectral.cadence != 0:
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires anchor.cadence to be divisible by "
+                    "spectral.cadence so correction fires on the same tick as the first ready M update; "
+                    f"got anchor.cadence={self.anchor.cadence}, spectral.cadence={self.spectral.cadence}"
+                )
+            if self.anchor.lookahead_rollout_source == "stale_paired" and self.anchor.lookahead_strength != 0.0:
+                raise ValueError(
+                    "comm_eff.anchor.lookahead_mode='rank1_relex' requires current trajectories at "
+                    "readiness when lookahead_strength>0; use lookahead_rollout_source='auto' or "
+                    "'current_step'. stale_paired is reserved for the strength=0 no-projected-"
+                    "increment control, whose newest exact checkpoint must remain paired with the "
+                    "trajectory batch it generated."
+                )
+        if self.anchor.warmup_mode == "q_only":
+            if not _rank1_relex:
+                raise ValueError(
+                    "comm_eff.anchor.warmup_mode='q_only' is rank1_relex-only and requires the "
+                    "look-ahead projector ON with lookahead_mode='rank1_relex'"
+                )
+            if self.compression_type != "powersgd" or not self.powersgd.enabled:
+                raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires the PowerSGD codec enabled")
+            if not self.anchor.owns_q:
+                raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
+            if self.powersgd.q_basis != "act":
+                raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires powersgd.q_basis='act'")
+            if list(self.powersgd.q_basis_passive):
+                raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires an empty powersgd.q_basis_passive list")
+            if self.probe.geometry_enabled:
+                raise ValueError(
+                    "comm_eff.anchor.warmup_mode='q_only' is incompatible with "
+                    "probe.geometry_enabled=true (the probe requires gradients)"
+                )
+            if self.capture.enabled and (self.capture.capture_g_dense or self.capture.capture_fresh_anchor):
+                raise ValueError(
+                    "comm_eff.anchor.warmup_mode='q_only' is incompatible with active gradient-dependent "
+                    "capture_g_dense/capture_fresh_anchor probes"
+                )
         # lookahead_min_snapshots: -1 (mode default) or a concrete count in
-        # [2, mode_n_points]. Any non-(-1) value requires the projector on.
+        # [2, mode_n_points]. For rank1_relex, an early concrete threshold grows
+        # the fit as exact checkpoints arrive while retaining/sliding the full W.
+        # Any non-(-1) value requires the projector on.
         if self.anchor.lookahead_min_snapshots != -1:
             if not lookahead_enabled(self.anchor):
                 raise ValueError(
@@ -1115,7 +1262,12 @@ class CommEffConfig(BaseConfig):
                 )
         # Geometry-probe knobs. Bool flags must be strict bools; m4_lags is
         # bounded so the lag buffer remains small.
-        for _bname in ("geometry_enabled", "rank0_only", "per_target_sidecar"):
+        for _bname in (
+            "geometry_enabled",
+            "rank0_only",
+            "per_target_sidecar",
+            "rank1_projection_enabled",
+        ):
             _bval = getattr(self.probe, _bname)
             if not isinstance(_bval, bool):
                 raise ValueError(f"comm_eff.probe.{_bname} must be a bool; got {type(_bval).__name__} ({_bval!r})")
@@ -1123,6 +1275,27 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.probe.m4_lags must be in [1, 5] (lag buffer <=6-entry bound); got {self.probe.m4_lags}"
             )
+        if isinstance(self.probe.rank1_projection_samples, bool) or not isinstance(
+            self.probe.rank1_projection_samples, int
+        ):
+            raise ValueError(
+                "comm_eff.probe.rank1_projection_samples must be an integer in [1, 64]; "
+                f"got {self.probe.rank1_projection_samples!r}"
+            )
+        if not 1 <= self.probe.rank1_projection_samples <= 64:
+            raise ValueError(
+                f"comm_eff.probe.rank1_projection_samples must be in [1, 64]; got {self.probe.rank1_projection_samples}"
+            )
+        if self.probe.rank1_projection_enabled:
+            if not _rank1_relex:
+                raise ValueError(
+                    "comm_eff.probe.rank1_projection_enabled=true requires active lookahead_mode='rank1_relex'"
+                )
+            if not self.anchor.replay_paired_batch:
+                raise ValueError(
+                    "comm_eff.probe.rank1_projection_enabled=true requires anchor.replay_paired_batch=true "
+                    "so forecasts resolve only against causally arriving exact checkpoints"
+                )
         if self.probe.geometry_enabled:
             # The probe measures paired replay. Without replay there is no
             # generator-consistent anchor gradient to measure.
@@ -1191,13 +1364,9 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.probe.weight_traj.r2_flush_every_steps must be >= 1; got {wt.r2_flush_every_steps}"
             )
         if int(wt.r2_upload_workers) < 1:
-            raise ValueError(
-                f"comm_eff.probe.weight_traj.r2_upload_workers must be >= 1; got {wt.r2_upload_workers}"
-            )
+            raise ValueError(f"comm_eff.probe.weight_traj.r2_upload_workers must be >= 1; got {wt.r2_upload_workers}")
         if float(wt.r2_max_staged_gb) <= 0.0:
-            raise ValueError(
-                f"comm_eff.probe.weight_traj.r2_max_staged_gb must be > 0; got {wt.r2_max_staged_gb}"
-            )
+            raise ValueError(f"comm_eff.probe.weight_traj.r2_max_staged_gb must be > 0; got {wt.r2_max_staged_gb}")
         # Periodic clean-step cadence. 0 = off. A negative value is a config
         # error, not a silent disable.
         if self.clean_cadence < 0:
@@ -1237,6 +1406,33 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.powersgd.qr_dtype must be one of (fp32, bf16); got {self.powersgd.qr_dtype!r}")
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
+        if not isinstance(self.powersgd.fast_q_bootstrap, bool):
+            raise ValueError(
+                "comm_eff.powersgd.fast_q_bootstrap must be a bool; got "
+                f"{type(self.powersgd.fast_q_bootstrap).__name__} ({self.powersgd.fast_q_bootstrap!r})"
+            )
+        if self.enabled and self.compression_type == "powersgd" and self.powersgd.fast_q_bootstrap:
+            if not self.powersgd.enabled:
+                raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires powersgd.enabled=true")
+            if not self.anchor.owns_q:
+                raise ValueError(
+                    "comm_eff.powersgd.fast_q_bootstrap=true requires anchor.owns_q=true: "
+                    "the fast actor is a one-time initializer and must become read-only after handoff"
+                )
+            if not self.powersgd.compress_recompute:
+                raise ValueError(
+                    "comm_eff.powersgd.fast_q_bootstrap=true requires compress_recompute=true so the "
+                    "calibrated Q is live before, and identical across, the old/current PPO pair"
+                )
+            if not self.powersgd.sync_basis:
+                raise ValueError(
+                    "comm_eff.powersgd.fast_q_bootstrap=true requires sync_basis=true for a shared DP codebook"
+                )
+            if self.powersgd.q_basis != "act":
+                raise ValueError(
+                    "comm_eff.powersgd.fast_q_bootstrap=true currently requires q_basis='act'; "
+                    "the no-grad prepass observes activations and cannot construct grad/adv/tail families"
+                )
         # FROZEN-Q footgun guard. With anchor.owns_q=true the anchor is the ONLY
         # Q updater and the fast-path basis update is fail-closed; if the anchor
         # is ALSO off, NOTHING ever updates Q, so the PowerSGD codec runs on its

@@ -1,0 +1,11 @@
+{%- set old_suffix = " Let's think step by step and output the final answer within \\boxed{}." -%}
+{%- set relex_suffix = "\nPlease reason step by step, and put your final answer within \\boxed{}." -%}
+{{- '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' -}}
+{%- for message in messages -%}
+{%- if message['role'] == 'user' -%}
+{{- '<|im_start|>user\n' + (message['content'] | replace(old_suffix, relex_suffix)) + '<|im_end|>\n' -}}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- '<|im_start|>assistant\n' -}}
+{%- endif -%}

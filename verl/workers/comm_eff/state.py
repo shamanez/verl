@@ -322,16 +322,23 @@ class CommEffState:
         #   anchor_optimizer_steps    — optimizer.step() calls on the anchor pass.
         #                               MUST stay 0 (snapshot off the optimizer's
         #                               param group; the anchor only reads grads).
-        #   anchor_batch_fraction     — fraction of the rollout-expanded batch the
-        #                               anchor backward consumed (1.0 = whole
-        #                               batch; <1.0 ⇒ an OOM-bounded subset, which
-        #                               the engine logs with a reason).
+        #   anchor_batch_fraction     — fraction of the complete rollout-expanded
+        #                               actor update batch consumed by the latest
+        #                               anchor Q/M pass. Historical PPO-minibatch
+        #                               scope is therefore <1 when an update has
+        #                               multiple PPO mini-batches.
         self.anchor_mask_applications = 0
         self.anchor_grad_corrected = 0
         self.anchor_rollouts_generated = 0
         self.anchor_rewards_recomputed = 0
         self.anchor_optimizer_steps = 0
-        self.anchor_batch_fraction = 1.0
+        self.anchor_batch_fraction = 0.0
+        self.anchor_batch_sequences_global = 0
+        self.anchor_update_sequences_global = 0
+        self.anchor_batch_prompt_equivalents_global = 0
+        self.anchor_update_prompt_equivalents_global = 0
+        self.anchor_rollout_n = 0
+        self.anchor_batch_scope_rollout = int(getattr(config.anchor, "batch_scope", "ppo_minibatch") == "rollout_batch")
         # Monotonic trainer-step counter the anchor cadence is keyed on (advanced
         # once per actor train_batch).
         self.anchor_step = 0
@@ -381,10 +388,18 @@ class CommEffState:
         #   anchor_q_updates    — orth(V) Q refreshes the ANCHOR computed from its
         #                         slow-net stale-forward activations (replaces the
         #                         fast net's maybe_update_basis in owns_q mode).
-        #   anchor_q_broadcasts — dist.broadcast of (Q, M) from the anchor-owning
-        #                         rank to every DP rank (one per refresh).
+        #   anchor_q_broadcasts — dist.broadcast of a staged Q candidate from the
+        #                         anchor-owning rank (one per refresh).
+        #   anchor_q_activations — successful update_actor-exit handoffs that made
+        #                          a staged Q live for the next PPO policy pair.
+        #   anchor_q_stage_overwrites — extra candidate fires within one actor
+        #                               update (explicit last-candidate-wins).
         self.anchor_q_updates = 0
         self.anchor_q_broadcasts = 0
+        self.anchor_q_activations = 0
+        self.anchor_q_stage_overwrites = 0
+        object.__setattr__(self, "_powersgd_q_agreement_checked", False)
+        object.__setattr__(self, "_powersgd_q_agreement_dev", None)
         # Per-step count of matrices the signed_ema merger no-op'd to
         # G_noisy because M was cold (||M||<=eps). On step 1 == corrected (M cold,
         # NOT zeroed); → 0 after M warms. The silent grad-zeroing falsifier.
@@ -417,6 +432,37 @@ class CommEffState:
         # in the default stale_correct mode. On the earliest-legal (min_snaps=2)
         # arm this increments exactly once (fire 1), then the projector engages.
         self.warmup_no_correct_skips = 0
+        # Pure sliding rank1_relex state. These counters are emitted only when
+        # that mode is active, preserving fixed-linear/disabled metric output.
+        # rank1_m_ready is the explicit optimizer safety barrier: the correction
+        # hook advances cadence but returns before touching any tensor until a
+        # full anchor backward has successfully updated M. With
+        # warmup_mode=stale_correct this is the first exact initial-pair fire;
+        # with q_only/no_correct it remains the first projected fire.
+        self.rank1_m_ready = False
+        self.rank1_q_only_fires = 0
+        # Full first/pre-readiness anchor backwards requested by
+        # warmup_mode=stale_correct. Fire 1 consumes the exact initial
+        # checkpoint/trajectory pair and can make M ready on that same tick.
+        self.rank1_warmup_correction_fires = 0
+        self.rank1_correction_bypass_ticks = 0
+        self.rank1_fires = 0
+        self.rank1_history_checkpoints = 0
+        self.rank1_history_deltas = 0
+        self.rank1_window_span = 0
+        self.rank1_prediction_horizon = 0
+        self.rank1_evr_mean = 0.0
+        self.rank1_r2_mean = 0.0
+        self.rank1_zero_motion_tensors = 0
+        # Causal sampled-weight probe. Scalar-only and telemetry-only; emitted
+        # only when probe.rank1_projection_enabled=true.
+        self.rank1_probe_predictions = 0
+        self.rank1_probe_resolutions = 0
+        self.rank1_probe_pending = 0
+        self.rank1_probe_projected_rmse = 0.0
+        self.rank1_probe_stale_rmse = 0.0
+        self.rank1_probe_skill = 0.0
+        self.rank1_probe_direction_cos = 0.0
         # Geometry probe. All None / 0 unless probe.geometry_enabled
         # (off-path parity: the OFF path builds no ring, no buffer, no stash).
         #   fast_grad_ring      — FastGradRing of G_comp(t−K) (≤2 entries, CPU).
@@ -546,6 +592,9 @@ class CommEffState:
                 hybrid_grad_cols=int(getattr(ps_cfg, "hybrid_grad_cols", -1)),
                 # Anchor cadence for the Q-broadcast byte amortization.
                 anchor_cadence=int(getattr(anc_cfg_for_q, "cadence", 1)) if anc_cfg_for_q is not None else 1,
+                # Optional one-time activation calibration on the fast actor,
+                # committed before the first compressed old/current PPO pair.
+                fast_q_bootstrap=bool(getattr(ps_cfg, "fast_q_bootstrap", False)),
                 state=self,
             )
             logger.info(
@@ -564,7 +613,8 @@ class CommEffState:
                 f"compress_recompute={self.powersgd.compress_recompute} "
                 f"sync_basis={self.powersgd.sync_basis} "
                 f"qr_dtype={getattr(ps_cfg, 'qr_dtype', 'fp32')} "
-                f"anchor_owns_q={self.powersgd.anchor_owns_q}",
+                f"anchor_owns_q={self.powersgd.anchor_owns_q} "
+                f"fast_q_bootstrap={self.powersgd.fast_q_bootstrap}",
                 flush=True,
             )
 
@@ -698,6 +748,111 @@ class CommEffState:
                 flush=True,
             )
         self._built = True
+
+    def rank1_relex_active(self) -> bool:
+        """Whether this state owns the opt-in pure sliding rank1 projector."""
+        anchor_cfg = getattr(self.config, "anchor", None)
+        return bool(getattr(anchor_cfg, "lookahead_anchor", False)) and (
+            str(getattr(anchor_cfg, "lookahead_mode", "disabled")) == "rank1_relex"
+        )
+
+    def reset_anchor_q_runtime(self) -> None:
+        """Reset non-checkpointed anchor-owned Q state after a weight load."""
+
+        self.anchor_q_updates = 0
+        self.anchor_q_broadcasts = 0
+        self.anchor_q_activations = 0
+        self.anchor_q_stage_overwrites = 0
+        object.__setattr__(self, "_powersgd_q_agreement_checked", False)
+        object.__setattr__(self, "_powersgd_q_agreement_dev", None)
+        if self.powersgd is not None:
+            if hasattr(self.powersgd, "reset_basis_runtime"):
+                self.powersgd.reset_basis_runtime()
+            else:
+                getattr(self.powersgd, "_basis", {}).clear()
+                getattr(self.powersgd, "_pending_anchor_basis", {}).clear()
+                getattr(self.powersgd, "_sketch", {}).clear()
+                if hasattr(self.powersgd, "clear_family_harvest"):
+                    self.powersgd.clear_family_harvest()
+
+    def reset_rank1_runtime(self) -> None:
+        """Reset non-checkpointed rank1 state after loading model weights.
+
+        A resumed run must establish a new local base and refill the exact
+        checkpoint window. This mirrors a fresh worker even when a test or
+        orchestration path loads a checkpoint into an already-used process.
+        """
+        if not self.rank1_relex_active():
+            return
+        for name in (
+            "_rank1_history",
+            "_rank1_projector",
+            "_rank1_base_batch",
+            "_rank1_base_canary",
+            "_rank1_projection_probe",
+            "_anchor_replay_ring",
+            "_anchor_queue",
+            "_anchor_canary_by_tick",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+        self.anchor_step = 0
+        self.spectral_step = 0
+        self.anchor_backwards = 0
+        self.anchor_batch_fraction = 0.0
+        self.anchor_batch_sequences_global = 0
+        self.anchor_update_sequences_global = 0
+        self.anchor_batch_prompt_equivalents_global = 0
+        self.anchor_update_prompt_equivalents_global = 0
+        self.anchor_rollout_n = 0
+        self.anchor_batch_scope_rollout = int(
+            getattr(self.config.anchor, "batch_scope", "ppo_minibatch") == "rollout_batch"
+        )
+        self.spectral_corrections = 0
+        self.reset_anchor_q_runtime()
+        self.powersgd_basis_updates = 0
+        self.anchor_replay_fires = 0
+        self.lookahead_fires = 0
+        self.lookahead_warmup_fallbacks = 0
+        self.warmup_no_correct_skips = 0
+        self.rank1_m_ready = False
+        self.rank1_q_only_fires = 0
+        self.rank1_warmup_correction_fires = 0
+        self.rank1_correction_bypass_ticks = 0
+        self.rank1_fires = 0
+        self.rank1_history_checkpoints = 0
+        self.rank1_history_deltas = 0
+        self.rank1_window_span = 0
+        self.rank1_prediction_horizon = 0
+        self.rank1_evr_mean = 0.0
+        self.rank1_r2_mean = 0.0
+        self.rank1_zero_motion_tensors = 0
+        self.rank1_probe_predictions = 0
+        self.rank1_probe_resolutions = 0
+        self.rank1_probe_pending = 0
+        self.rank1_probe_projected_rmse = 0.0
+        self.rank1_probe_stale_rmse = 0.0
+        self.rank1_probe_skill = 0.0
+        self.rank1_probe_direction_cos = 0.0
+        if self.spectral is not None:
+            # A resumed rank1 run rewarms from a fresh local checkpoint base.
+            # Clear every correction-family history, not only M_anchor, so an
+            # ef/delayed-ef/momentum ablation cannot resurrect pre-resume state
+            # when rank1_m_ready becomes true again.
+            for name in (
+                "_anchor",
+                "_ef_residual",
+                "_delayed_ef_delta",
+                "_delta_momentum",
+                "_delta_momentum_last_step",
+                "_adaptive_lambda_hist",
+                "_subbasis_energy_ratios",
+            ):
+                cache = getattr(self.spectral, name, None)
+                if cache is not None and hasattr(cache, "clear"):
+                    cache.clear()
+            if hasattr(self.spectral, "current_step"):
+                self.spectral.current_step = 0
 
     def set_path_tag(self, tag: Optional[str]) -> None:
         """Stamp the current execution-path tag.
@@ -938,10 +1093,26 @@ class CommEffState:
         )
         out["comm_eff/powersgd_basis_updates"] = self.powersgd_basis_updates
         out["comm_eff/powersgd_applications"] = self.powersgd_applications
+        # One-time fast-network activation calibration.  Keep these separate
+        # from anchor_q_* and powersgd_basis_updates so the logs prove the
+        # bootstrap fired exactly once without mislabeling it as an anchor fire.
+        out["comm_eff/fast_q_bootstrap_done"] = int(getattr(self.powersgd, "fast_q_bootstrap_done", False))
+        out["comm_eff/fast_q_bootstrap_observations"] = int(getattr(self.powersgd, "fast_q_bootstrap_observations", 0))
+        out["comm_eff/fast_q_bootstrap_updates"] = int(getattr(self.powersgd, "fast_q_bootstrap_updates", 0))
+        out["comm_eff/fast_q_bootstrap_activations"] = int(getattr(self.powersgd, "fast_q_bootstrap_activations", 0))
+        out["comm_eff/fast_q_bootstrap_dense_observation_elements"] = float(
+            getattr(self.powersgd, "fast_q_bootstrap_dense_observation_elements", 0.0)
+        )
+        out["comm_eff/fast_q_bootstrap_sync_elements"] = float(
+            getattr(self.powersgd, "fast_q_bootstrap_sync_elements", 0.0)
+        )
+        bootstrap_dev = getattr(self.powersgd, "fast_q_bootstrap_cross_rank_max_rel_dev", None)
+        if bootstrap_dev is not None:
+            out["comm_eff/fast_q_bootstrap_cross_rank_max_rel_dev"] = float(bootstrap_dev)
         # Max relative cross-rank deviation of the
-        # consensus basis Q after the first update (0.0 = bit-identical on every
-        # DP rank). Set once by update_actor's verify_basis_agreement_across_ranks
-        # and omitted until the check runs.
+        # consensus basis Q after an update (0.0 = bit-identical on every DP
+        # rank). Set by the staged-anchor or fast-owned-Q verification and
+        # omitted until the check runs.
         qdev = getattr(self, "_powersgd_q_agreement_dev", None)
         if qdev is not None:
             out["comm_eff/powersgd_q_cross_rank_max_rel_dev"] = float(qdev)
@@ -970,7 +1141,7 @@ class CommEffState:
         anchor_rollouts_generated, anchor_rewards_recomputed,
         anchor_optimizer_steps) are the load-bearing falsifiers.
         """
-        return {
+        out = {
             "comm_eff/mask_applications": self.mask_applications,
             "comm_eff/anchor_backwards": self.anchor_backwards,
             "comm_eff/spectral_corrections": self.spectral_corrections,
@@ -980,6 +1151,12 @@ class CommEffState:
             "comm_eff/anchor_rewards_recomputed": self.anchor_rewards_recomputed,
             "comm_eff/anchor_optimizer_steps": self.anchor_optimizer_steps,
             "comm_eff/anchor_batch_fraction": self.anchor_batch_fraction,
+            "comm_eff/anchor_batch_sequences_global": self.anchor_batch_sequences_global,
+            "comm_eff/anchor_update_sequences_global": self.anchor_update_sequences_global,
+            "comm_eff/anchor_batch_prompt_equivalents_global": self.anchor_batch_prompt_equivalents_global,
+            "comm_eff/anchor_update_prompt_equivalents_global": self.anchor_update_prompt_equivalents_global,
+            "comm_eff/anchor_rollout_n": self.anchor_rollout_n,
+            "comm_eff/anchor_batch_scope_rollout": self.anchor_batch_scope_rollout,
             # Cumulative count of clean (unmasked) optimizer steps fired.
             # Monotonic; increments at exactly steps clean_cadence, 2*clean_cadence,
             # ... so logs can confirm that the clean cadence fired correctly.
@@ -992,6 +1169,8 @@ class CommEffState:
             # Anchor-owns-Q counters plus merger cold-M fallbacks.
             "comm_eff/anchor_q_updates": self.anchor_q_updates,
             "comm_eff/anchor_q_broadcasts": self.anchor_q_broadcasts,
+            "comm_eff/anchor_q_activations": self.anchor_q_activations,
+            "comm_eff/anchor_q_stage_overwrites": self.anchor_q_stage_overwrites,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
             # ef_powersgd shape-aware residual resets this step.
             "comm_eff/residual_reset_on_shape_mismatch": self.residual_reset_on_shape_mismatch,
@@ -1010,6 +1189,37 @@ class CommEffState:
             # m1–m7 record written (0 unless probe.geometry_enabled).
             "comm_eff/geometry_probe_fires": self.geometry_probe_fires,
         }
+        if self.rank1_relex_active():
+            out.update(
+                {
+                    "comm_eff/rank1_m_ready": int(self.rank1_m_ready),
+                    "comm_eff/rank1_q_only_fires": self.rank1_q_only_fires,
+                    "comm_eff/rank1_warmup_correction_fires": self.rank1_warmup_correction_fires,
+                    "comm_eff/rank1_correction_bypass_ticks": self.rank1_correction_bypass_ticks,
+                    "comm_eff/rank1_fires": self.rank1_fires,
+                    "comm_eff/rank1_history_checkpoints": self.rank1_history_checkpoints,
+                    "comm_eff/rank1_history_deltas": self.rank1_history_deltas,
+                    "comm_eff/rank1_window_span": self.rank1_window_span,
+                    "comm_eff/rank1_prediction_horizon": self.rank1_prediction_horizon,
+                    "comm_eff/rank1_evr_mean": self.rank1_evr_mean,
+                    "comm_eff/rank1_r2_mean": self.rank1_r2_mean,
+                    "comm_eff/rank1_zero_motion_tensors": self.rank1_zero_motion_tensors,
+                }
+            )
+            probe_cfg = getattr(self.config, "probe", None)
+            if bool(getattr(probe_cfg, "rank1_projection_enabled", False)):
+                out.update(
+                    {
+                        "comm_eff/rank1_probe_predictions": self.rank1_probe_predictions,
+                        "comm_eff/rank1_probe_resolutions": self.rank1_probe_resolutions,
+                        "comm_eff/rank1_probe_pending": self.rank1_probe_pending,
+                        "comm_eff/rank1_probe_projected_rmse": self.rank1_probe_projected_rmse,
+                        "comm_eff/rank1_probe_stale_rmse": self.rank1_probe_stale_rmse,
+                        "comm_eff/rank1_probe_skill": self.rank1_probe_skill,
+                        "comm_eff/rank1_probe_direction_cos": self.rank1_probe_direction_cos,
+                    }
+                )
+        return out
 
 
 def maybe_build_comm_eff_state(config: Any) -> Optional[CommEffState]:

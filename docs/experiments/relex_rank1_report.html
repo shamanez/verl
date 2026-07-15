@@ -1,0 +1,512 @@
+<!doctype html>
+<!--
+ Copyright 2024 Bytedance Ltd. and/or its affiliates
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sliding RELEX: two-circuit experiment report</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #09111f;
+      --panel: #111c2e;
+      --panel-2: #17243a;
+      --text: #eef4ff;
+      --muted: #aebbd0;
+      --line: #2b3b55;
+      --blue: #71b7ff;
+      --green: #6ee7a2;
+      --amber: #ffd166;
+      --red: #ff8585;
+      --purple: #c4a7ff;
+      --shadow: 0 18px 50px rgb(0 0 0 / 24%);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -10%, rgb(62 113 184 / 30%), transparent 34rem),
+        radial-gradient(circle at 95% 5%, rgb(122 85 195 / 22%), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a { color: var(--blue); }
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .94em;
+    }
+    code {
+      padding: .1rem .35rem;
+      border: 1px solid var(--line);
+      border-radius: .35rem;
+      background: rgb(255 255 255 / 5%);
+    }
+
+    .wrap { width: min(1180px, calc(100% - 2rem)); margin: 0 auto; }
+    header { padding: 4.5rem 0 2rem; }
+    .eyebrow {
+      margin: 0 0 .8rem;
+      color: var(--blue);
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-size: .78rem;
+    }
+    h1 { max-width: 900px; margin: 0; font-size: clamp(2.2rem, 6vw, 4.8rem); line-height: .98; letter-spacing: -.045em; }
+    h2 { margin: 0 0 1rem; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.02em; }
+    h3 { margin: 0 0 .55rem; font-size: 1.05rem; }
+    p { margin: .45rem 0 1rem; }
+    .lede { max-width: 820px; margin: 1.25rem 0; color: var(--muted); font-size: 1.14rem; }
+    .status-row { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1.4rem 0 0; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .45rem;
+      padding: .4rem .75rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgb(255 255 255 / 4%);
+      color: var(--muted);
+      font-size: .86rem;
+    }
+    .dot { width: .58rem; height: .58rem; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 .2rem rgb(110 231 162 / 12%); }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      border-block: 1px solid var(--line);
+      background: rgb(9 17 31 / 88%);
+      backdrop-filter: blur(14px);
+    }
+    nav .wrap { display: flex; gap: 1.15rem; overflow-x: auto; padding-block: .75rem; }
+    nav a { color: var(--muted); text-decoration: none; white-space: nowrap; font-size: .9rem; }
+    nav a:hover { color: var(--text); }
+
+    main { padding: 1.5rem 0 5rem; }
+    section { scroll-margin-top: 4rem; margin: 1rem 0 1.4rem; padding: 1.35rem; border: 1px solid var(--line); border-radius: 1rem; background: linear-gradient(145deg, rgb(255 255 255 / 4%), rgb(255 255 255 / 1%)); box-shadow: var(--shadow); }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    .card { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--panel); }
+    .card p:last-child { margin-bottom: 0; }
+    .metric { margin: .1rem 0 .2rem; font-size: 2rem; font-weight: 780; letter-spacing: -.035em; }
+    .label { color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; }
+    .good { color: var(--green); }
+    .warn { color: var(--amber); }
+    .bad { color: var(--red); }
+    .accent { color: var(--blue); }
+    .muted { color: var(--muted); }
+
+    .callout { margin: 1rem 0 0; padding: .9rem 1rem; border-left: .25rem solid var(--amber); background: rgb(255 209 102 / 8%); border-radius: .25rem .7rem .7rem .25rem; }
+    .callout strong { color: var(--amber); }
+    .formula { overflow-x: auto; margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: #080f1b; color: #dceaff; text-align: center; font: 600 1rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: .7rem; align-items: stretch; margin: 1rem 0; }
+    .flow .node { padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--panel); }
+    .flow .arrow { align-self: center; color: var(--blue); font-size: 1.5rem; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: .8rem; }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    th, td { padding: .72rem .8rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--panel-2); color: var(--muted); font-size: .8rem; letter-spacing: .045em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    .right { text-align: right; }
+    ul, ol { padding-left: 1.25rem; }
+    li { margin: .35rem 0; }
+
+    .progress { height: .65rem; overflow: hidden; border-radius: 999px; background: #07101e; border: 1px solid var(--line); }
+    .progress > span { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--purple)); }
+    footer { padding: 0 0 3rem; color: var(--muted); font-size: .86rem; }
+
+    @media (max-width: 760px) {
+      header { padding-top: 2.8rem; }
+      .flow { grid-template-columns: 1fr; }
+      .flow .arrow { transform: rotate(90deg); justify-self: center; }
+      section { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <p class="eyebrow">Qwen2.5-Math-1.5B · MATH · GRPO</p>
+    <h1>Sliding RELEX two-circuit experiment report</h1>
+    <p class="lede">
+      A living report for the fast learner, projected delayed anchor, training–inference mismatch,
+      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. The complete pre-anchor-KL
+      diagnostic matrix selected W=2 provisionally. Its KL-complete validation was stopped at global step 12,
+      before the first dense anchor backward, so no compression default is promoted.
+    </p>
+    <div class="status-row">
+      <span class="pill"><span class="dot"></span> Experiment queue intentionally stopped</span>
+      <span class="pill">Updated 15 July 2026</span>
+      <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
+      <span class="pill">KL-complete code commit <span class="mono">30164149</span></span>
+    </div>
+  </header>
+
+  <nav aria-label="Report sections">
+    <div class="wrap">
+      <a href="#status">Status</a>
+      <a href="#answer">Anchor answer</a>
+      <a href="#mismatch">Train–inference mismatch</a>
+      <a href="#cadence">Cadence and delay</a>
+      <a href="#weights">Weight verification</a>
+      <a href="#results">Results</a>
+      <a href="#method">Method</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <section id="status">
+      <h2>Final experiment status</h2>
+      <div class="grid">
+        <article class="card">
+          <div class="label">Dense control</div>
+          <div class="metric good">67.41%</div>
+          <p>Completed 100/100 without a training failure.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/kvgtcs07">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">Corrected W=2 secant</div>
+          <div class="metric good">67.89%</div>
+          <p>Completed 100/100 with all ten staged-Q handoffs valid and zero overwrites.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/vqe9554z">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">Corrected strict W=4</div>
+          <div class="metric good">66.91%</div>
+          <p>Completed 100/100 in 5 h 00 min with valid staged-Q handoffs and positive causal projection skill.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/lzl4vlcr">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">qboot-v2, no weight increment</div>
+          <div class="metric warn">61.90%</div>
+          <p>Valid 100/100 control. It peaked at 67.31% at step 75, then destabilized late.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/xcu56scj">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">qboot-v2 composite</div>
+          <div class="metric good">66.85%</div>
+          <p>Valid 100/100 diagnostic with every Q/M transaction invariant satisfied.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/v9sfxnaz">Open W&amp;B</a>
+        </article>
+        <article class="card">
+          <div class="label">KL-complete W=2 validation</div>
+          <div class="metric warn">Stopped at 12/100</div>
+          <p>The step-10 Q-only transaction passed; the run stopped before the first dense anchor backward at step 20.</p>
+        </article>
+      </div>
+      <p class="muted">Measured training times were 4 h 26 min dense, 4 h 47 min corrected W=2, and 5 h 00 min corrected strict W=4. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
+      <div class="progress" aria-label="Exploratory queue closed without an eligible compression default"><span style="width: 100%"></span></div>
+    </section>
+
+    <section id="answer">
+      <h2>What is the anchor signal helping?</h2>
+      <p>
+        Corrected W=2, corrected strict W=4, and the dense control are complete. The earlier W=4 result remains a
+        <strong>legacy pre-fix diagnostic</strong>; both qboot-v2 arms are now complete. Every two-circuit arm uses
+        a live fast learner and an isolated delayed anchor. The anchor never optimizer-steps and never reads
+        immediate fast weights.
+      </p>
+      <div class="flow" role="img" aria-label="Dense rollout produces rewards for compressed fast training; delayed exact checkpoints are projected into an anchor that supplies Q and M back to the fast circuit">
+        <div class="node"><strong>Dense inference</strong><br><span class="muted">vLLM rollout, rewards and GRPO advantages</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Compressed fast circuit</strong><br><span class="muted">PowerSGD forward/backward and optimizer</span></div>
+        <div class="arrow">←</div>
+        <div class="node"><strong>Projected anchor</strong><br><span class="muted">uncompressed clean forward/backward, Q and M only</span></div>
+      </div>
+      <p>The anchor contributes two distinct signals:</p>
+      <ol>
+        <li><strong>Q:</strong> an activation-energy basis that selects the low-dimensional information retained by PowerSGD. During Q-only warmup this is the only anchor output.</li>
+        <li><strong>M:</strong> an EMA of the clean, uncompressed anchor policy gradient. After readiness, it supplies gradient signs to the compressed fast circuit.</li>
+      </ol>
+      <div class="formula">G<sub>corr</sub> = 0.25 G<sub>fast</sub> + 0.75 |G<sub>fast</sub>| sign(M<sub>anchor</sub>)</div>
+      <p>
+        The intended role is therefore <strong>direction repair</strong>: magnitude remains tied to the fast
+        gradient, while the dense anchor supplies a cleaner sign reference. Because the anchor forward is
+        uncompressed, it may also bridge the large semantic gap between dense vLLM inference and the compressed
+        training surrogate.
+      </p>
+      <div class="grid">
+        <article class="card"><div class="label">Projected tensors</div><div class="metric">338/338</div><p>Embedding, norms, decoder tensors and other floating parameters.</p></article>
+        <article class="card"><div class="label">qboot-v2 M targets</div><div class="metric">338/338</div><p>Every unique floating gradient-bearing parameter receives the dense anchor EMA.</p></article>
+        <article class="card"><div class="label">Full anchor fires</div><div class="metric">9</div><p>Corrected W=2 fired at global steps 20 through 100 after one Q-only fire.</p></article>
+        <article class="card"><div class="label">Matrix corrections</div><div class="metric">31,556</div><p>Zero cold-M fallbacks; the corrected path was materially active.</p></article>
+      </div>
+      <div class="callout"><strong>Interpretation limit.</strong> The valid qboot-v2 strength-zero control ended at 61.90% after reaching 67.31% at step 75; the matched composite ended at 66.85%. This shows that the complete projection/current-trajectory package avoided the control's severe late decline in this seed. It does not isolate weight extrapolation alone because the control also uses stale-paired rather than current trajectories, and neither arm is anchor-off or no-sign-correction. A dedicated factorial control would be required for a causal “projection alone helps” or “anchor helps” claim.</div>
+      <div class="callout"><strong>Anchor-objective audit.</strong> The locked fast GRPO objective includes a reference-policy KL loss with coefficient 0.001. The completed runs on immutable pre-fix commits used that KL in the fast PPO update, but their dense anchor M contained only the ratio-one advantage-policy gradient. “Dense and uncompressed” therefore did not mean “the same objective”: the sign reference steering the fast circuit omitted one of the terms steering the fast actor. The corrected W2 validation stopped at global step 12, before its first dense anchor backward at step 20. Existing runs remain useful diagnostics, but none validates the objective-parity-complete M path and none is eligible for default promotion.</div>
+      <div class="callout"><strong>Permanent prevention rule.</strong> <code>M_anchor</code> must be the dense, uncompressed gradient of the same resolved actor objective, evaluated under the explicitly declared ratio-one surrogate. The implementation now binds the same actor config and mirrors rollout importance weights, entropy regularization, reference-KL type/coefficient, response mask, and loss normalization. The only intentional exceptions are compressed-policy <code>old_log_probs</code>, PPO importance ratio, and clipping, which are invalid between the compressed fast policy and stale/projected uncompressed anchor. Active anchors accept only vanilla plain <code>ppo_loss</code>; non-vanilla policy loss and distillation fail before training, while the runtime binder independently rejects an unexpected fast loss. Missing entropy or reference log-probabilities also fail closed, before any <code>parity=PASS</code> line can be emitted. Focused CPU tests compare the complete fast/anchor gradient at ratio one and exercise missing-input, unsupported-mode, and wrong-callable failures.</div>
+      <div class="callout"><strong>512-prompt anchor knob.</strong> Every completed comparison arm used the historical <code>anchor.batch_scope=ppo_minibatch</code> behavior: with locked <code>actor.shuffle=false</code>, each fire consumed 256 complete prompt groups × 8 responses = 2,048 sequences, exactly half of the 512-prompt actor update. Their legacy <code>anchor_batch_fraction=1.0</code> meant 100% of the selected PPO mini-batch, not 100% of the actor update; new telemetry uses the full-update denominator and reports 0.5. The opt-in <code>rollout_batch</code> scope consumes all 512 groups/4,096 sequences, retains complete eight-response GRPO groups, and normalizes once over the DP-global valid-token count while dynamic microbatches bound peak activation memory. This shared Q+M scope is covered by focused CPU tests but was not GPU-validated. It approximately doubles anchor compute and CPU replay payload per fire but does not increase Q/M communication.</div>
+    </section>
+
+    <section id="mismatch">
+      <h2>Training–inference mismatch: the important finding</h2>
+      <p>
+        Dense rollout generation and the PowerSGD training forward do not represent the same policy. The mismatch
+        diagnostic is enabled with <code>calculate_log_probs=True</code>; rollout importance sampling and rejection
+        sampling are off, so these numbers measure the gap without silently changing the objective. The reported
+        rollout→train KL is a sampled-token diagnostic, not an exact full-vocabulary KL.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Run</th><th class="right">Mean |prob diff|</th><th class="right">Probability correlation</th><th class="right">Rollout→train KL</th><th class="right">Final MATH</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Dense control</td><td class="right good">0.00231</td><td class="right good">0.99943</td><td class="right good">0.000263</td><td class="right">67.41%</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right bad">0.69027</td><td class="right bad">0.13979</td><td class="right bad">8.1250</td><td class="right good">67.89%</td></tr>
+            <tr><td>Corrected strict W=4 rank-1, α=1</td><td class="right bad">0.74378</td><td class="right bad">0.10813</td><td class="right bad">12.1203</td><td class="right">66.91%</td></tr>
+            <tr><td>qboot-v2, no projected weight increment</td><td class="right bad">0.80726</td><td class="right bad">0.10653</td><td class="right bad">13.7708</td><td class="right warn">61.90%</td></tr>
+            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right bad">0.73836</td><td class="right bad">0.13963</td><td class="right bad">10.7300</td><td class="right">66.85%</td></tr>
+            <tr><td>Legacy W=4, pre-Q fix</td><td class="right bad">0.73544</td><td class="right bad">0.13981</td><td class="right bad">8.2676</td><td class="right">65.37%</td></tr>
+            <tr><td>Aborted W=2 diagnostic</td><td class="right warn">≈0.815</td><td class="right warn">≈0.036</td><td class="right warn">≈12.38</td><td class="right muted">Preserved, not comparable</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        This is <strong>not a small numerical engine mismatch</strong>. Corrected W=2 nevertheless ended 0.48 MATH
+        points above the single dense control while using about <strong>5.01% of dense-equivalent activation communication</strong>.
+        That is scientifically valuable, but without replicated seeds it should be labelled robustness under mismatch—not
+        evidence of superiority, that the mismatch is harmless, or that the update is on-policy.
+      </p>
+      <h3>The cadence-boundary defect and correction</h3>
+      <p>
+        The audit found that anchor-owned Q was previously replaced at the start of a PPO train minibatch,
+        after <code>old_log_probs</code> had already been recomputed. At global step 10 this coincided with an
+        actor PPO-KL spike to −4.07. Commit <code>a7252bd6</code> now stages and broadcasts Q as a candidate,
+        keeps live Q frozen across all minibatches, activates it only after a successful
+        <code>update_actor</code>, and discards it if that update fails. M still corrects the firing optimizer
+        tick immediately; only Q visibility is delayed to the next paired old/current-policy step.
+      </p>
+      <p>
+        This was <strong>not compression inside the anchor gradient</strong>. The isolated anchor hook observes the
+        raw dense activation to build the next Q sketch and explicitly returns that activation unchanged. The defect
+        was only that the resulting Q candidate became visible to the fast circuit before the PPO policy pair ended.
+      </p>
+      <p>
+        The corrected W=2 GPU gate passed at step 10: both DP ranks staged all 7 boundaries with cross-rank
+        deviation 0.0, then exactly one post-update activation landed. Counters were
+        <span class="mono">updates=1, broadcasts=1, activations=1, overwrites=0</span>. Cadence-boundary PPO-KL
+        was +0.0946 instead of −4.0669, while the sampled-token rollout→train KL remained 13.8568. This is the
+        desired distinction: internal PPO pairing is repaired; the broader dense/compressed mismatch is still
+        visible and scientifically material.
+      </p>
+      <p>
+        Corrected strict W=4 completed the same gate with Q update/broadcast/activation counters
+        <span class="mono">10/10/10</span>, zero stage overwrites, and zero cross-rank Q deviation. Its final
+        compressed-communication ratio was <strong>0.05014</strong>. This validates the Q transaction and
+        communication path; its larger final rollout→train KL shows that transactional correctness does not remove
+        the separate training–inference mismatch.
+      </p>
+      <h3>Why can it still learn?</h3>
+      <ul>
+        <li>The PPO old-policy log-probability is recomputed through the compressed PowerSGD path rather than using dense vLLM rollout log-probabilities as the PPO denominator. The corrected runs now guarantee the same frozen Q for old and current forwards.</li>
+        <li>Dense rollout rewards and group-relative advantages still provide task signal, even though the compressed training policy makes the update off-policy with respect to inference.</li>
+        <li>The uncompressed anchor gradient supplies a dense-policy directional reference, and gradient clipping bounds the very large compressed surrogate gradients. Both are plausible stabilizers, not yet isolated causes.</li>
+      </ul>
+      <div class="callout"><strong>Required follow-up.</strong> Complete the matched arms, then run the separate mismatch screen: paired dense/compressed logits, short rank-154/rank-307 pilots, and calibrated correction only if importance-sampling ESS remains usable. An anchor-off run is still required before making a causal claim about the anchor bridging this gap.</div>
+    </section>
+
+    <section id="cadence">
+      <h2>How cadence and delay depend on each other</h2>
+      <div class="formula">checkpoint gap ≈ C &nbsp; · &nbsp; forecast horizon ≈ K &nbsp; · &nbsp; difficulty ≈ K / C &nbsp; · &nbsp; history span ≈ (W − 1)C</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Quantity</th><th>Meaning</th><th>W=4 run</th><th>Effect when increased</th></tr></thead>
+          <tbody>
+            <tr><td>Cadence C</td><td>Interval between anchor refreshes</td><td>20 optimizer ticks</td><td>Less anchor cost, but Q/M is held longer and readiness is later</td></tr>
+            <tr><td>Delay K</td><td>Age of newest exact available checkpoint/batch</td><td>20 optimizer ticks</td><td>More storage and a longer, riskier forecast</td></tr>
+            <tr><td>Window W</td><td>Exact checkpoints used per tensor</td><td>4 checkpoints / 3 deltas</td><td>More denoising evidence, but slower readiness and more storage</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Here <strong>C=K=20</strong>, so every prediction covers one checkpoint interval. With two optimizer ticks
+        per trainer step, that means an anchor refresh every 10 global steps. W=4 first became ready at optimizer
+        tick 80/global step 40, using history <code>[1, 19, 39, 59]</code> to predict generator tick 79.
+      </p>
+      <p>
+        The reconstruction-error drop after global step 10 is only the first anchor-owned PowerSGD Q refresh:
+        the candidate is built at tick 20 and becomes visible at step 11. It is <strong>not</strong> a projected
+        anchor gradient or spectral correction. Strict W=2 has no projection, dense anchor backward, or M before
+        global step 20; all three become ready together at step 20. Strict W=4 receives Q-only refreshes at steps
+        10, 20, and 30, then first projects weights, runs the dense anchor backward, and enables M at step 40.
+        Consequently, W=4's entropy turn around step 20 cannot be caused by M—it precedes M by 20 global steps.
+      </p>
+      <p>
+        Under the corrected handoff, a Q candidate produced at tick 20 stays staged through the rest of that
+        actor update and becomes live at its successful exit. The next global step recomputes old log-probability
+        with that same Q and retains it through both optimizer ticks. This changes no checkpoint age, prediction
+        horizon, cadence, or delay; it only restores the PPO pairing invariant.
+      </p>
+      <p>
+        The qboot-v2 arms add one transaction-safe Q observation before the first compressed old-log-probability:
+        exact live fast weights and the first rollout batch produce Q1 without a backward pass, then the real old and
+        current PPO forwards both use Q1. At global step 10, <code>stale_correct</code> runs the paired initial/base
+        anchor backward and makes all-floating M available. The shared W=4/minimum-2 history then computes W2 at
+        step 20, W3 at 30, and sliding W4 from 40. In the control, strength zero keeps the applied weights at the
+        newest exact checkpoint and uses its paired stale trajectories; the composite applies strength one and uses
+        current trajectories on projected fires.
+      </p>
+      <ul>
+        <li><strong>Smaller C, fixed K:</strong> fresher Q/M and faster wall-clock refresh, but more anchor compute and a larger K/C extrapolation measured in checkpoint gaps.</li>
+        <li><strong>Larger C, fixed K:</strong> cheaper anchor operation and a wider history, but the correction is held stale longer between refreshes.</li>
+        <li><strong>Larger K, fixed C:</strong> the exact anchor source is older and the projector must forecast farther.</li>
+        <li><strong>W=2:</strong> ready near global step 20, but exactly a two-point secant with no meaningful EVR/R² diagnostic.</li>
+        <li><strong>W=4:</strong> ready near global step 40 and meaningfully estimates/denoises a rank-1 trajectory.</li>
+        <li><strong>qboot-v2 progressive W=4:</strong> retains/slides at four checkpoints but becomes ready with two: secant at step 20, rank-1 OLS over two deltas at step 30, and full three-delta W=4 OLS from step 40. M already exists from the first fire at step 10, so readiness no longer gates its initial activation.</li>
+      </ul>
+      <p>The paper establishes rank-1 trajectory smoothness and denoising, but does not define this live asynchronous cadence/delay system; that part is our adaptation. See the <a href="https://arxiv.org/html/2605.21468v1#S4.SS3">RELEX ablations</a>.</p>
+    </section>
+
+    <section id="weights">
+      <h2>Is weight projection actually correct?</h2>
+      <p>
+        The legacy pre-fix W=4 run showed strong in-window structure: mean EVR <strong>0.958</strong> and mean temporal
+        R² <strong>0.993</strong>. Those values validate the fitted history, not future forecast accuracy.
+      </p>
+      <p>
+        The corrected W=2 arm activated the causal sampled-weight probe. It samples 16 deterministic scalar positions
+        from each of four roles—embedding, middle-layer <code>q_proj</code>, its input norm, and final norm—then
+        waits for the matching exact delayed checkpoint before scoring:
+      </p>
+      <div class="grid">
+        <article class="card"><div class="label">Projected error</div><div class="metric">RMSE</div><p>Distance from projected samples to the later exact checkpoint.</p></article>
+        <article class="card"><div class="label">Baseline error</div><div class="metric">Stale RMSE</div><p>Distance from the newest available exact checkpoint to that same target.</p></article>
+        <article class="card"><div class="label">Relative value</div><div class="metric">Skill</div><p><span class="mono">1 − projected SSE / stale SSE</span>; positive means projection wins.</p></article>
+        <article class="card"><div class="label">Direction</div><div class="metric">Cosine</div><p>Alignment between predicted and later-observed weight updates.</p></article>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Corrected W=2 probe</th><th class="right">Samples</th><th class="right">Projected RMSE</th><th class="right">Stale RMSE</th><th class="right">Skill</th><th class="right">Mean direction cosine</th><th class="right">Wins</th></tr></thead>
+          <tbody>
+            <tr><td>All four roles</td><td class="right">512</td><td class="right good">1.0097e−5</td><td class="right">1.5038e−5</td><td class="right good">+0.5491</td><td class="right good">0.7458</td><td class="right">7/8 horizons</td></tr>
+            <tr><td>Embedding</td><td class="right">128</td><td class="right">4.5039e−6</td><td class="right">4.7375e−6</td><td class="right good">+0.0962</td><td class="right">0.6734</td><td class="right">4/8</td></tr>
+            <tr><td>Decoder <span class="mono">q_proj</span></td><td class="right">128</td><td class="right">1.2255e−5</td><td class="right">1.3687e−5</td><td class="right good">+0.1982</td><td class="right">0.4700</td><td class="right">5/8</td></tr>
+            <tr><td>Input layer norm</td><td class="right">128</td><td class="right good">1.0880e−5</td><td class="right">2.0119e−5</td><td class="right good">+0.7076</td><td class="right good">0.7695</td><td class="right">7/8</td></tr>
+            <tr><td>Final norm</td><td class="right">128</td><td class="right good">1.0907e−5</td><td class="right">1.7029e−5</td><td class="right good">+0.5898</td><td class="right good">0.8173</td><td class="right">8/8</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The first resolved horizon missed stale (skill −0.181); the next seven all won, ending at skill +0.780
+        and direction cosine 0.906. One ninth prediction remained pending when training ended because its future exact
+        checkpoint lies beyond step 100. These results show that the secant mechanism executed correctly and became
+        predictively useful on the sampled coordinates; they do not establish whole-tensor or multi-seed superiority.
+      </p>
+      <p>
+        Corrected strict W=4 resolved six causal horizons, and the four-role aggregate beat stale on all six.
+        Across horizons, mean projected RMSE was <strong>1.0708e−5</strong> versus stale RMSE
+        <strong>1.1711e−5</strong>, mean skill was <strong>+0.1576</strong>, and mean direction cosine was
+        <strong>0.5800</strong>. Its final in-window fit was mean EVR <strong>0.9695</strong> and mean R²
+        <strong>0.9911</strong>. The effect was heterogeneous: embedding samples lost all six horizons, while
+        decoder and norm samples supplied the aggregate gain. The non-trivial W=4 projector therefore executed
+        correctly and had sampled causal predictive value, but its advantage was materially smaller and less
+        uniform than W=2's in this single run.
+      </p>
+      <p>
+        The qboot-v2 composite resolved eight horizons and won three. Its mean projected RMSE was
+        <strong>1.2485e−5</strong> versus stale RMSE <strong>1.2246e−5</strong>, mean skill was
+        <strong>−0.0580</strong>, and mean direction cosine was <strong>0.3982</strong>. All 338 tensors were
+        projected and transaction invariants passed, so this is evidence that the mechanism ran—not that the
+        W2→W3→W4 predictor beat the newest exact checkpoint on the sampled coordinates. One terminal prediction
+        correctly remains pending because its delayed exact target would arrive at global step 110.
+      </p>
+      <div class="callout"><strong>Scope.</strong> Every full tensor is projected independently, while the causal score observes only four tensors and 16 deterministic coordinates per tensor per horizon. W=2's two-checkpoint secant is algebraically exact on its one delta; strict W=4 supplies the non-trivial rank-1 OLS comparison. One final W=4 prediction remains pending because its matching future checkpoint lies beyond step 100.</div>
+    </section>
+
+    <section id="results">
+      <h2>MATH evaluation and comparison matrix</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Run</th><th class="right">Step 0</th><th class="right">25</th><th class="right">50</th><th class="right">75</th><th class="right">100</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td>Legacy W=4, pre-Q fix</td><td class="right">44.64%</td><td class="right">45.20%</td><td class="right">63.25%</td><td class="right">64.83%</td><td class="right">65.37%</td><td class="warn">Diagnostic only</td></tr>
+            <tr><td>Dense GRPO</td><td class="right">44.42%</td><td class="right">63.67%</td><td class="right">65.67%</td><td class="right">66.67%</td><td class="right">67.41%</td><td class="good">Complete</td></tr>
+            <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right">60.86%</td><td class="right">65.07%</td><td class="right">66.99%</td><td class="right good">67.89%</td><td class="good">Complete</td></tr>
+            <tr><td>Corrected W=4 rank-1, α=1</td><td class="right">44.64%</td><td class="right">48.04%</td><td class="right">63.61%</td><td class="right">65.79%</td><td class="right">66.91%</td><td class="good">Complete</td></tr>
+            <tr><td>qboot-v2, no projected weight increment</td><td class="right">44.60%</td><td class="right">63.69%</td><td class="right">65.91%</td><td class="right good">67.31%</td><td class="right warn">61.90%</td><td class="good">Valid; late instability</td></tr>
+            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right">44.68%</td><td class="right">63.51%</td><td class="right">65.43%</td><td class="right good">67.47%</td><td class="right">66.85%</td><td class="good">Valid pre-anchor-KL diagnostic</td></tr>
+            <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Optional; not queued</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run and 1.04 points above the qboot-v2 composite, so it wins the registered diagnostic primary without invoking tie-breakers. The qboot-v2 control tracked dense through step 75, then fell 5.40 points to 61.90% by step 100; the composite fell only 0.62 points from its step-75 peak and ended at 66.85%. Both qboot-v2 arms passed Q/M transaction and tensor-coverage invariants. The zero-strength probes were bit-identical to the newest exact checkpoint, while the composite's nonzero probes had negative mean skill. This supports the full projection/current-trajectory package over the control in this seed, but does not isolate projection from trajectory-source differences. All these arms used the pre-anchor-KL objective and remain diagnostics only.</p>
+    </section>
+
+    <section id="default-selection">
+      <h2>Compression default and exact arm differences</h2>
+      <div class="callout"><strong>No eligible default is selected.</strong> Pre-anchor-KL W=2 won the completed diagnostic matrix at 67.89%, 1.04 points above the qboot-v2 composite. Its objective-parity-complete rerun was intentionally stopped at global step 12, after the first Q-only transaction and before the first dense M backward. The generic Hydra path therefore remains all-off and no neutral implicit-default launcher is created.</div>
+      <div class="callout"><strong>Operator knobs.</strong> Anchor sample scope is <code>COMM_EFF_ANCHOR_BATCH_SCOPE</code> (<code>ppo_minibatch</code> for 256 prompts or <code>rollout_batch</code> for all 512). Fast and anchor reference-KL type/coefficient, entropy, rollout weighting, mask, and aggregation must match; the only intentional anchor exceptions are ratio one and no PPO clipping. History retention is <code>COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS</code>; <code>COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS=2</code> enables progressive W2→W3→W4 readiness while <code>-1</code> waits for the full window. Cadence and delay are separate optimizer-tick controls and must be recorded with the window.</div>
+      <div class="callout"><strong>Reference run v9sfxnaz.</strong> The qboot-v2 composite used commit <code>8bad0656</code>, 2×H200, Qwen2.5-Math-1.5B/MATH, batch 512, PPO mini-batch 256, rollout n=8, prompt/response 1024/3072, AdamW 1e-6, 100 steps, PowerSGD rank 77, fast-Q bootstrap, cadence/delay 20/20, progressive window 4/minimum 2, strength 1, auto/current trajectories, and signed-EMA all-floating M over 338 tensors. Its effective historical anchor scope was 256 prompts. It ended at 66.85%, communication ratio 5.0136%, and sampled mismatch KL 10.73. All Q/M transaction gates passed, but its dense M omitted the fast actor's KL term; it is a pre-anchor-KL diagnostic, not validation of the current parity code.</div>
+      <p>Every compressed arm uses the same Qwen2.5-Math/MATH protocol, PowerSGD rank 77, cadence/delay 20/20, anchor-owned Q, signed-EMA gradient correction, and the corrected post-PPO Q activation transaction. The qstagefix-v1 W2/W4 arms use Q-only warmup and M on 196 decoder matrices. Both qboot-v2 arms add the same one-time dense fast-Q bootstrap, first-fire stale-correct M, progressive W2/W3/W4 readiness, and all-floating M; their applied weight increment and trajectory source differ as disclosed below.</p>
+      <p class="muted">On this model, all-floating M covers 338 unique tensors (196 decoder weights, 84 q/k/v biases, 57 norms, and one tied embedding/LM-head tensor). The fp32 CPU EMA occupies 5.751 GiB per rank, 0.870 GiB more than the 196-target path; the added tensors also contribute about 0.87 GiB of logical fp32 payload to each anchor-gradient reduction and M broadcast. Both qboot-v2 arms disable per-target diagnostics while retaining coverage, consensus, and correction counters.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Arm / exact experiment</th><th>Weight projection</th><th>Readiness and tensor scope</th><th>Anchor/probe behavior</th><th>Scientific role</th></tr></thead>
+          <tbody>
+            <tr><td>Dense<br><span class="mono">relex_cmp_dense_grpo_math_qwen25_math_1p5b</span></td><td>None; communication efficiency disabled</td><td>No window or projected tensors</td><td>No anchor, Q/M correction, or projection probe</td><td>Uncompressed reference; never eligible as the compression default</td></tr>
+            <tr><td>Corrected W=2 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b</span></td><td>Two-checkpoint per-tensor secant across all floating model tensors; strength 1.0</td><td>One Q-only fire; decoder-matrix M ready at optimizer tick 40/global step 20</td><td>Anchor owns Q and supplies dense M to 196 decoder matrices; causal sampled-weight probe enabled</td><td>Pre-anchor-KL diagnostic; requires corrected validation before promotion</td></tr>
+            <tr><td>Corrected W=4 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b</span></td><td>Rank-1 OLS over three checkpoint deltas, independently across all floating model tensors; strength 1.0</td><td>Three Q-only fires; decoder-matrix M ready at tick 80/global step 40</td><td>Anchor owns Q and supplies dense M to 196 decoder matrices; causal sampled-weight probe enabled</td><td>RELEX-style adaptation diagnostic; requires corrected validation before promotion</td></tr>
+            <tr><td>qboot-v2 no increment<br><span class="mono">relex_cmp_qboot_v2_w4min2_allfloatm_alpha0_stalepaired_math_qwen25_math_1p5b</span></td><td>W2/W3/W4 projector runs for telemetry; strength 0.0 means applied weights stay at the newest exact checkpoint</td><td>Fast-Q bootstrap at step 1 after rollouts but before PPO; first all-floating M at global step 10; W2/W3/W4 readiness at 20/30/40; stale-paired trajectories</td><td>Anchor owns Q; every unique floating gradient-bearing parameter receives M; causal probe enabled</td><td>Pre-anchor-KL two-circuit control diagnostic; not anchor-off</td></tr>
+            <tr><td>qboot-v2 composite<br><span class="mono">relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b</span></td><td>W2 secant, W3/W4 rank-1 OLS per floating tensor; strength 1.0</td><td>Same fast-Q bootstrap, first-fire all-floating M, and 20/30/40 readiness; current trajectories on projected fires</td><td>Anchor owns Q; every unique floating gradient-bearing parameter receives M; causal probe enabled</td><td>Complete pre-anchor-KL diagnostic; 66.85%, corrected validation still required</td></tr>
+            <tr><td>Legacy fixed-linear<br><span class="mono">relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b</span></td><td>Legacy two-source fixed-linear extrapolation; strength 1.0</td><td>Stale-correct warmup; decoder matrices only, other parameters stay at the newest stale checkpoint</td><td>Anchor-owned Q and dense M correction; rank-1 causal probe disabled</td><td>Optional legacy comparator; not queued and not eligible unless completed later</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A future default may be selected only from valid 100/100 objective-parity-complete compressed arms. Highest
+        step-100 MATH is primary; ties use lower rollout-to-train sampled KL, lower communication ratio, then method
+        simplicity. Transactional-Q counters, M coverage, and projection-integrity evidence remain mandatory.
+      </p>
+      <div class="callout"><strong>Claim boundary.</strong> The present matrix supports the narrower observation that the combined projection/current-trajectory package was more stable than its no-increment/stale-paired control late in this seed. It does not isolate projection alone, validate the corrected KL-complete M path, or establish a statistically replicated or literature-wide SOTA.</div>
+    </section>
+
+    <section id="method">
+      <h2>Fixed experimental surface</h2>
+      <div class="grid">
+        <article class="card"><h3>Model and data</h3><p>Qwen/Qwen2.5-Math-1.5B<br>MATH train / MATH test<br>last <span class="mono">\boxed{}</span> + <span class="mono">is_equiv</span></p></article>
+        <article class="card"><h3>Generation</h3><p>1024 prompt + 3072 response<br>4096 total configured context<br>rollout group size 8</p></article>
+        <article class="card"><h3>Optimization</h3><p>GRPO mini-batch 256<br>learning rate 1e-6<br>KL coefficient 0.001</p></article>
+        <article class="card"><h3>Reproducibility</h3><p>100 training steps<br>evaluation every 25<br>2× NVIDIA H200</p></article>
+      </div>
+      <p>
+        Training and evaluation use the same Qwen chat-template framing as the RELEX evaluator: helpful-assistant
+        system text, the MATH problem in the user turn, the instruction to reason step by step and place the final
+        answer in <span class="mono">\boxed{}</span>, followed by the assistant prefix. Generation settings differ
+        only where the protocol requires them. Evaluation is greedy with a maximum 3072 generated tokens; the
+        configured prompt-plus-response budget is 4096, unlike the paper evaluator's 4096 generated-token cap.
+      </p>
+      <p>
+        Code and discussion live in <a href="https://github.com/shamanez/verl/pull/25">draft PR #25</a>.
+        The preregistered post-W4 order and exact overrides live in the
+        <a href="../../examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh">qboot-v2 matrix launcher</a>.
+        The experiment queue is closed without a promoted default. A future study should compare 256 versus 512
+        anchor prompts, W2 versus progressive/strict W4, and cadence/delay under the same objective-parity-complete
+        code over multiple seeds.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>Generated for the fork-only <span class="mono">exp/rank1-relax</span> experiment. Completed-run values are copied from GPU logs; the stopped KL-complete attempt is explicitly separated from completed evidence.</p>
+  </footer>
+</body>
+</html>

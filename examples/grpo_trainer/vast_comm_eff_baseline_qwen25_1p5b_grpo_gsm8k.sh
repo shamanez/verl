@@ -21,6 +21,7 @@
 #   anchor owns Q .......... COMM_EFF_ANCHOR_OWNS_Q    (true)     the ONLY thing that updates Q
 #   anchor staleness ....... COMM_EFF_ANCHOR_DELAY_K   (5)        forward from theta_{t-5}
 #   anchor refresh ......... COMM_EFF_ANCHOR_CADENCE   (5)        recompute M+Q every 5 ticks
+#   anchor batch scope ..... COMM_EFF_ANCHOR_BATCH_SCOPE (ppo_minibatch) shared Q+M data scope
 #   merger ................. COMM_EFF_SPECTRAL_CORRECTION_MODE (signed_ema)  folds anchor M into G via a signed EMA
 #   merger EMA decay ....... COMM_EFF_SPECTRAL_BETA_ANC         (0.50)        anchor-gradient EMA decay
 #   clean cadence .......... COMM_EFF_CLEAN_CADENCE    (0=OFF)    periodic uncompressed step
@@ -145,7 +146,8 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Dataset — preprocess GSM8K to parquet if not already there.
 # ---------------------------------------------------------------------------
-cd "${VERL_ROOT:-/workspace/verl}"
+VERL_ROOT="${VERL_ROOT:-/workspace/verl}"
+cd "$VERL_ROOT"
 
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
@@ -285,16 +287,30 @@ COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
 # Paired replay uses the same batch/weights the fast circuit saw so the
 # correction tracks codec error rather than batch mismatch.
 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
+# Shared data scope for the anchor-owned Q observation and dense M backward.
+# ppo_minibatch preserves the historical half-update behavior; rollout_batch
+# consumes the complete pre-split actor update while dynamic microbatching still
+# bounds peak activation memory.
+COMM_EFF_ANCHOR_BATCH_SCOPE="${COMM_EFF_ANCHOR_BATCH_SCOPE:-ppo_minibatch}"
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
+# Opt-in weight projection. Defaults keep the existing path strictly disabled.
+COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR="${COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR:-false}"
+COMM_EFF_ANCHOR_LOOKAHEAD_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_MODE:-disabled}"
+COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH="${COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH:-1.0}"
+COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE="${COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE:-auto}"
+COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS:-4}"
 # Warmup behavior before the look-ahead projector is ready. "stale_correct"
 # (default) = today's byte-identical behavior; "no_correct" = skip the anchor
-# pass + M update while warming (requires the projector on AND owns_q=false).
+# pass + M update while warming (requires the projector on AND owns_q=false);
+# "q_only" = rank1-only forward/no-backward Q refresh with M/correction off.
 COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-stale_correct}"
 # Min ring snapshots before the projector engages. -1 (default) = mode source
 # count; 2 = project from the earliest legal fire (fire 2).
 COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:--1}"
 # --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
+COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-decoder_matrices}"
+COMM_EFF_SPECTRAL_DIAGNOSTICS="${COMM_EFF_SPECTRAL_DIAGNOSTICS:-true}"
 COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.50}"       # anchor-gradient EMA decay (signed_ema baseline)
 COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}"   # signed_ema mixing weight
 # Correction cadence in optimizer ticks.
@@ -351,6 +367,11 @@ COMM_EFF_CAPTURE_DUMP_DTYPE="${COMM_EFF_CAPTURE_DUMP_DTYPE:-fp32}"    # fp32 REQ
 # min_tick skips cold-Q ticks while preserving the max_ticks capture budget.
 COMM_EFF_CAPTURE_MIN_TICK="${COMM_EFF_CAPTURE_MIN_TICK:-0}"
 COMM_EFF_CAPTURE_RANK0_ONLY="${COMM_EFF_CAPTURE_RANK0_ONLY:-true}"    # capture rank0 only (disk guard); default true
+# --- causal sampled-weight verification for rank1_relex ---
+COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED="${COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED:-false}"
+COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES="${COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES:-16}"
+COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-}"
+COMM_EFF_PROBE_RANK0_ONLY="${COMM_EFF_PROBE_RANK0_ONLY:-true}"
 # --- PowerSGD activation compression ---
 COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"               # r=77 ≡ p=0.95 (0.05·H, H=1536)
 COMM_EFF_POWERSGD_SEED="${COMM_EFF_POWERSGD_SEED:-0}"                 # per-layer basis seed base
@@ -359,6 +380,7 @@ COMM_EFF_POWERSGD_UPDATE_CADENCE="${COMM_EFF_POWERSGD_UPDATE_CADENCE:-1}"  # ort
 COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"  # carry Q across steps
 COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"  # project old-logprob too
 COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"  # all-reduce V across DP => single shared consensus Q (REQUIRED under DP)
+COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"  # one discarded dense observation before the first compressed old-logprob
 COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"      # fp32 required for stable orthogonalization
 COMM_EFF_POWERSGD_REORTHO_EPS="${COMM_EFF_POWERSGD_REORTHO_EPS:-1e-6}"
 
@@ -378,8 +400,9 @@ if [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]]; then
   echo "INFO: anchor ON (the base) -> ~3 GB no-hook clone/rank; the default PPO_MAX_TOKEN_LEN_PER_GPU=18432 fits 4×H200. If you raise it, prefer 8×GPU." >&2
 fi
 
-LOG="${LOG:-/workspace/verl/runs/${EXPERIMENT_NAME}/train.log}"
+LOG="${LOG:-$VERL_ROOT/runs/${EXPERIMENT_NAME}/train.log}"
 mkdir -p "$(dirname "$LOG")"
+COMM_EFF_PROBE_OUT_DIR="${COMM_EFF_PROBE_OUT_DIR:-$(dirname "$LOG")/rank1_projection_probe}"
 
 cat <<EOF
 === launching communication-efficient GRPO ===
@@ -398,10 +421,11 @@ cat <<EOF
   comm_eff master:     $COMM_EFF_ENABLED
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd; dense can fall back to mask.enabled)
   mask:                enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE
-  powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
+  powersgd:            rank=$COMM_EFF_POWERSGD_RANK update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE  (active iff compression_type=powersgd)
   clean_cadence:       $COMM_EFF_CLEAN_CADENCE  (0=off)
-  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
-  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
+  anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
+  lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS
+  spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED target_scope=$COMM_EFF_SPECTRAL_TARGET_SCOPE diagnostics=$COMM_EFF_SPECTRAL_DIAGNOSTICS beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   spectral correction: mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC (legacy: delayed_ef_lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA inject_gamma=$COMM_EFF_SPECTRAL_INJECT_GAMMA blend_eta=$COMM_EFF_SPECTRAL_BLEND_ETA)
   ef_powersgd:         ef_decay=$COMM_EFF_SPECTRAL_EF_DECAY ef_clip=$COMM_EFF_SPECTRAL_EF_CLIP
   subbasis:            delta_subbasis_rank=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_RANK family=$COMM_EFF_SPECTRAL_DELTA_SUBBASIS_FAMILY r_delta=$COMM_EFF_SPECTRAL_R_DELTA
@@ -439,9 +463,9 @@ EOF
 #       (1) `tail --pid="$TRAIN_PID" -F` — the follower DIES when the training
 #           process exits (clean or crash), closing the pipe so grep hits EOF and
 #           the subshell returns; nothing is left to wait on.
-#       (2) the watcher runs in its OWN process group (setsid) and the EXIT trap
-#           kills the WHOLE group (`kill -- -$PGID`), reaping tail+grep+subshell
-#           even if (1) somehow doesn't fire.
+#       (2) the watcher runs in its OWN process group (setsid); one cleanup
+#           function verifies that private PGID before signalling it, then reaps
+#           the launcher and removes the EXIT trap before the parent can return.
 #     Net: the watcher never leaves a dangling follower and never blocks this
 #     script on clean completion — for EVERY cell in the sequence.
 # ---------------------------------------------------------------------------
@@ -460,8 +484,8 @@ EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_p
 #
 #    : launch the training in the BACKGROUND, capture its PID, start the
 #    early-stop watcher bound to that PID, then `wait` on training explicitly.
-#    The watcher self-terminates when training exits (guard 1), and the EXIT
-#    trap reaps the watcher's whole process group (guard 2).
+#    The watcher self-terminates when training exits (guard 1), and the verified
+#    cleanup path reaps its private process group exactly once (guard 2).
 # ---------------------------------------------------------------------------
 bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKEN_LEN_PER_GPU" \
@@ -503,10 +527,18 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
   actor_rollout_ref.actor.comm_eff.anchor.owns_q="$COMM_EFF_ANCHOR_OWNS_Q" \
   actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch="$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH" \
+  actor_rollout_ref.actor.comm_eff.anchor.batch_scope="$COMM_EFF_ANCHOR_BATCH_SCOPE" \
   actor_rollout_ref.actor.comm_eff.anchor.snapshot_device="$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor="$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_mode="$COMM_EFF_ANCHOR_LOOKAHEAD_MODE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_strength="$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_rollout_source="$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_window_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.anchor.warmup_mode="$COMM_EFF_ANCHOR_WARMUP_MODE" \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.spectral.target_scope="$COMM_EFF_SPECTRAL_TARGET_SCOPE" \
+  actor_rollout_ref.actor.comm_eff.spectral.diagnostics="$COMM_EFF_SPECTRAL_DIAGNOSTICS" \
   actor_rollout_ref.actor.comm_eff.spectral.beta_anc="$COMM_EFF_SPECTRAL_BETA_ANC" \
   actor_rollout_ref.actor.comm_eff.spectral.ema_device="$COMM_EFF_SPECTRAL_EMA_DEVICE" \
   actor_rollout_ref.actor.comm_eff.spectral.max_targets="$COMM_EFF_SPECTRAL_MAX_TARGETS" \
@@ -523,6 +555,7 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.powersgd.warm_start="$COMM_EFF_POWERSGD_WARM_START" \
   actor_rollout_ref.actor.comm_eff.powersgd.compress_recompute="$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE" \
   actor_rollout_ref.actor.comm_eff.powersgd.sync_basis="$COMM_EFF_POWERSGD_SYNC_BASIS" \
+  actor_rollout_ref.actor.comm_eff.powersgd.fast_q_bootstrap="$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP" \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   actor_rollout_ref.actor.comm_eff.powersgd.q_basis="$COMM_EFF_POWERSGD_Q_BASIS" \
@@ -554,6 +587,10 @@ bash examples/grpo_trainer/run_qwen3_4b_fsdp.sh \
   actor_rollout_ref.actor.comm_eff.capture.dump_dtype="$COMM_EFF_CAPTURE_DUMP_DTYPE" \
   actor_rollout_ref.actor.comm_eff.capture.min_tick="$COMM_EFF_CAPTURE_MIN_TICK" \
   actor_rollout_ref.actor.comm_eff.capture.rank0_only="$COMM_EFF_CAPTURE_RANK0_ONLY" \
+  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_enabled="$COMM_EFF_RANK1_PROJECTION_PROBE_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.probe.rank1_projection_samples="$COMM_EFF_RANK1_PROJECTION_PROBE_SAMPLES" \
+  actor_rollout_ref.actor.comm_eff.probe.out_dir="$COMM_EFF_PROBE_OUT_DIR" \
+  actor_rollout_ref.actor.comm_eff.probe.rank0_only="$COMM_EFF_PROBE_RANK0_ONLY" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
@@ -562,9 +599,10 @@ TRAIN_PID=$!
 #  early-stop watcher — bound to TRAIN_PID + its own process group.
 # Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or
 # crash), so grep hits EOF and the watcher subshell returns. Guard 2: setsid
-# puts the watcher in its own pgroup; the EXIT trap kills the whole group so
-# nothing dangles. The watcher only SIGNALS (sentinel + log line); the
-# monitor/runner owns teardown.
+# puts the watcher in its own pgroup. Cleanup verifies that the recorded group
+# is private before signalling it, reaps the launcher exactly once, and clears
+# the EXIT trap before final W&B sync. The watcher only SIGNALS (sentinel + log
+# line); the monitor/runner owns teardown.
 setsid bash -c '
   LOG="$1"; RE="$2"; EXP="$3"; SENT="$4"; TPID="$5"
   for _ in $(seq 1 120); do [[ -f "$LOG" ]] && break; sleep 1; done
@@ -578,29 +616,51 @@ setsid bash -c '
   fi
 ' _ "$LOG" "$EARLY_STOP_RE" "$EXPERIMENT_NAME" "$EARLY_STOP_SENTINEL" "$TRAIN_PID" &
 EARLY_STOP_WATCHER_PID=$!
-# Reap the watcher's WHOLE process group on exit (guard 2). setsid makes the
-# watcher a group leader, so its PGID == its PID; kill -- -PGID reaps tail+grep
-# too. `|| true` so a self-terminated watcher (guard 1 already fired) is fine.
-trap '[[ -n "${EARLY_STOP_WATCHER_PID:-}" ]] && kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null; true' EXIT
+EARLY_STOP_WATCHER_PGID="$(ps -o pgid= -p "$EARLY_STOP_WATCHER_PID" 2>/dev/null | tr -d '[:space:]')"
+EARLY_STOP_OWNER_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')"
+
+cleanup_early_stop_watcher() {
+  local pid="${EARLY_STOP_WATCHER_PID:-}"
+  local pgid="${EARLY_STOP_WATCHER_PGID:-}"
+  local owner_pgid="${EARLY_STOP_OWNER_PGID:-}"
+  [[ -n "$pid" ]] || return 0
+
+  # A negative PID signals a whole process group. Do that only when `setsid`
+  # demonstrably created the private group we requested. Falling back to the
+  # launcher PID is safer than ever signalling the training/sweep group; the
+  # watcher's `tail --pid=$TRAIN_PID` remains the independent self-exit guard.
+  if [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$pgid" == "$pid" && "$pgid" != "$owner_pgid" ]]; then
+    kill -- -"$pgid" 2>/dev/null || true
+  elif [[ "$pid" =~ ^[0-9]+$ ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  EARLY_STOP_WATCHER_PID=""
+  EARLY_STOP_WATCHER_PGID=""
+}
+
+trap cleanup_early_stop_watcher EXIT
 
 # Block on TRAINING ONLY (not the watcher) — when main_ppo finishes, we proceed
-# to done.flag immediately; the EXIT trap then reaps the watcher. `wait $PID`
+# to done.flag immediately; watcher cleanup is explicit before final sync. `wait $PID`
 # returns the child's exit status; capture it WITHOUT tripping `set -e` (the
 # `|| TRAIN_RC=$?` keeps a non-zero training exit from aborting before we can
 # clean up the watcher + write done.flag + propagate the status).
 TRAIN_RC=0
 wait "$TRAIN_PID" || TRAIN_RC=$?
 
-# Proactively stop the watcher now that training is done (belt-and-braces with
-# the EXIT trap + guard 1), so back-to-back cells never accumulate watchers.
-kill -- -"$EARLY_STOP_WATCHER_PID" 2>/dev/null || true
+# Stop and reap the watcher once, then remove the EXIT trap. The old path sent
+# an unchecked group kill here and repeated it from EXIT after final sync; in a
+# nested multi-arm launcher that could terminate the sweep shell between arms.
+cleanup_early_stop_watcher
+trap - EXIT
 
 # ---------------------------------------------------------------------------
 # WandB final-flush. Ray teardown can race WandB's async uploader, so resync the
 # local run directory after training and before done.flag. Best-effort only; the
 # local train.log remains authoritative.
 if command -v wandb >/dev/null 2>&1; then
-  WANDB_RUN_DIR=$(ls -dt /workspace/verl/wandb/run-* /workspace/verl/wandb/offline-run-* 2>/dev/null | head -1 || true)
+  WANDB_RUN_DIR=$(ls -dt "$VERL_ROOT"/wandb/run-* "$VERL_ROOT"/wandb/offline-run-* 2>/dev/null | head -1 || true)
   if [[ -n "${WANDB_RUN_DIR:-}" ]]; then
     echo "=== wandb sync $WANDB_RUN_DIR (flush final history before teardown) ==="
     timeout 240 wandb sync "$WANDB_RUN_DIR" 2>&1 | tail -8 \
@@ -608,7 +668,7 @@ if command -v wandb >/dev/null 2>&1; then
   fi
 fi
 
-touch "/workspace/verl/runs/${EXPERIMENT_NAME}/done.flag"
+touch "$VERL_ROOT/runs/${EXPERIMENT_NAME}/done.flag"
 echo "=== done at $(date -u +%FT%TZ) (train_rc=$TRAIN_RC) ==="
 # Propagate the training exit status so the  launch.sh `run_step` sees a
 # real failure (set -e / `|| true` semantics in the driver still apply).

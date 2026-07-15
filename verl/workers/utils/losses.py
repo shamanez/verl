@@ -57,16 +57,13 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data.
 
-    Anchor reuse guard: the comm_eff anchor circuit reuses THIS exact
-    GRPO actor-loss over the rollout-expanded batch (``response_mask``,
-    ``old_log_probs``, ``advantages``, optional ``ref_log_prob``) for its
-    unmasked K-stale forward/backward — it is NOT a supervised next-token loss.
-    The anchor passes the same ``loss_function`` the fast path uses
-    (``partial(ppo_loss, config=actor_config)``), differing ONLY in that the
-    activation masker is disabled around the anchor pass
-    (``FSDPEngine._maybe_comm_eff_anchor_refresh`` sets ``mask_active=False``).
-    Using the identical entry point is the strongest guarantee the anchor loss
-    matches the fast path's; do not fork a parallel "anchor loss".
+    The comm_eff anchor deliberately does NOT call this function. Its stale,
+    unmasked forward cannot form a meaningful PPO ratio against
+    ``old_log_probs`` produced by the compressed fast policy. Instead it calls
+    ``anchor_pg_loss`` with ratio fixed at one, while retaining this path's
+    rollout fields, aggregation/normalization, and configured reference-policy
+    KL regularizer. The live fast update remains the only caller that applies
+    the PPO ratio and clipping objective.
     """
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)

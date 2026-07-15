@@ -18,13 +18,17 @@ The anchor circuit produces a CLEAN per-target gradient ``G_anchor`` that the
 spectral filter consumes into its anchor-gradient EMA ``M_anchor``. "Clean"
 means four things:
 
-* **Same loss as the fast path, UNMASKED.** The anchor reuses the GRPO
-  actor-loss over the rollout-expanded batch (``responses``, ``response_mask``,
-  ``old_log_probs``, ``advantages``, optional ``ref_log_prob``) — exactly the
-  fast path's ``ppo_loss`` — but with the activation masker DISABLED even though
-  it runs on the actor-train path (``mask_active=False`` ⇒
-  ``anchor_mask_applications == 0``). It is NOT a supervised next-token loss; it
-  does NOT generate rollouts; it does NOT recompute rewards.
+* **Same objective data, weighting, regularizers, and normalization, UNMASKED.** The anchor reuses
+  the rollout-expanded GRPO batch (``responses``, ``response_mask``,
+  ``advantages``) and the fast path's aggregation/normalization, but deliberately
+  computes the clean unclipped policy gradient with importance ratio fixed at
+  one. Rollout importance weights, entropy regularization, and the configured
+  reference-policy KL term are mirrored exactly. It does not reuse ``ppo_loss``
+  or its masked-policy ``old_log_probs``; unsupported policy-loss modes fail
+  closed rather than silently defining a different ``M`` objective.
+  The activation masker is DISABLED even though the pass runs on the actor-train
+  path (``mask_active=False`` ⇒ ``anchor_mask_applications == 0``). It is NOT a
+  supervised next-token loss; it does NOT generate rollouts or recompute rewards.
 
 * **K-stale snapshot, no optimizer step.** The anchor forwards from a
   ``delay_K``-stale weight snapshot taken OFF the optimizer's parameter group
@@ -88,6 +92,7 @@ __all__ = [
     "assert_anchor_module_isolated",
     "capture_anchor_tensors",
     "clone_batch_for_replay",
+    "select_anchor_batch_for_scope",
     "maybe_build_replay_ring",
     "replay_relevance_stats",
     "snapshot_canary",
@@ -146,7 +151,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     PPO clip then mangles the per-token loss, and the resulting ``G_anchor`` is
     NOT the clean unmasked policy gradient that ``M_anchor`` should represent.
 
-    **What this computes instead — the clean true gradient at θ_{t-K}.**
+    **What this computes instead — the clean ratio-one objective at θ_{t-K}.**
     With ratio ≡ 1 (no ``old_log_probs``, no clip), ``compute_policy_loss_vanilla``
     provably reduces to the per-token loss ``-advantages · logπ`` aggregated by
     ``agg_loss``; its gradient is ``-(A · ∇logπ_unmasked)`` — exactly "the clean
@@ -156,7 +161,13 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     so ``M_anchor`` lands at the identical scale as the fast-path clean gradient
     (under the default ``token-mean`` this equals the spec's
     ``-(A·logπ·mask).sum()/mask.sum()``; for other agg modes it stays faithful
-    to the fast path).
+    to the fast path). Rollout importance weights, entropy regularization, and
+    reference-policy KL are mirrored from the same resolved actor config. This
+    is the objective-parity contract: every additive term that steers the fast
+    actor also steers ``M``. The only intentional differences are the
+    compressed-policy ``old_log_probs`` / PPO importance ratio and clipping,
+    which are invalid for this stale or projected uncompressed forward and are
+    therefore replaced by ratio one with no clipping.
 
     Signature mirrors ``verl.workers.utils.losses.ppo_loss`` so it can be bound
     with ``functools.partial(anchor_pg_loss, config=actor_config)`` and dropped
@@ -168,9 +179,12 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
         config: the actor ``ActorConfig`` (carries ``loss_agg_mode``,
             ``loss_scale_factor``, ``global_batch_info``). Bound via ``partial``.
         model_output: dict with ``log_probs`` (per-token log-probs of the
-            response, possibly nested) exactly as ``ppo_loss`` consumes.
+            response, possibly nested) exactly as ``ppo_loss`` consumes, plus
+            ``entropy`` whenever ``entropy_coeff`` is nonzero.
         data: the rollout-expanded ``TensorDict`` (carries ``response_mask`` and
-            ``advantages``; ``old_log_probs`` is deliberately IGNORED).
+            ``advantages``, optional ``rollout_is_weights``, and
+            ``ref_log_prob`` when KL loss is enabled; ``old_log_probs`` is
+            deliberately IGNORED).
         dp_group: data-parallel process group (unused here; kept for signature
             parity with ``ppo_loss``).
 
@@ -181,9 +195,31 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     """
     # Lazy imports: keep module import cheap + CPU-testable; the engine path and
     # the CPU tests both have these available.
-    from verl.trainer.ppo.core_algos import agg_loss
+    from verl.trainer.ppo.core_algos import agg_loss, kl_penalty
     from verl.utils.metric import AggregationType, Metric
     from verl.workers.utils.padding import no_padding_2_padding
+
+    policy_loss = getattr(config, "policy_loss", None)
+    if policy_loss is None:
+        loss_mode = "vanilla"
+    elif hasattr(policy_loss, "get"):
+        loss_mode = policy_loss.get("loss_mode", "vanilla")
+    else:
+        loss_mode = getattr(policy_loss, "loss_mode", "vanilla")
+    if loss_mode != "vanilla":
+        raise ValueError(
+            "comm_eff anchor objective parity currently supports "
+            "actor.policy_loss.loss_mode='vanilla' only; "
+            f"got {loss_mode!r}. Implement and test an explicit ratio-one "
+            "anchor mapping before enabling this policy loss."
+        )
+
+    entropy_coeff = float(getattr(config, "entropy_coeff", 0.0))
+    if entropy_coeff != 0.0 and model_output.get("entropy") is None:
+        raise KeyError(
+            "entropy: comm_eff anchor objective parity requires model_output['entropy'] "
+            f"when actor.entropy_coeff={entropy_coeff}"
+        )
 
     # Per-token log-probs of the response, padded to (bsz, max_response_len) —
     # IDENTICAL extraction to ppo_loss.
@@ -198,11 +234,40 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
 
     metric_aggregation = AggregationType.SUM
 
-    # Select ONLY the fields the clean PG needs — NOT old_log_probs. This is the
-    # whole point: no importance ratio, so old_log_probs never enters.
-    selected = data.select("response_mask", "advantages").to_padded_tensor()
+    # Select the ratio-one objective fields — never old_log_probs. The optional
+    # rollout importance weights and reference log-probability mirror ppo_loss.
+    # Missing ref_log_prob fails closed through TensorDict.select whenever the
+    # configured fast objective enables KL loss.
+    fields = ["response_mask", "advantages"]
+    if "rollout_is_weights" in data:
+        fields.append("rollout_is_weights")
+    if config.use_kl_loss:
+        fields.append("ref_log_prob")
+    selected = data.select(*fields).to_padded_tensor()
     response_mask = selected["response_mask"].to(bool)
     advantages = selected["advantages"]
+
+    # One resolved contract line per actor-config object makes objective drift
+    # visible in paid-run logs. Emit PASS only after every required objective
+    # input has been selected successfully; a missing KL/entropy input must not
+    # leave a misleading success marker behind. The private marker lives on the
+    # config so multiple actors in one process remain independent.
+    if not getattr(config, "_comm_eff_anchor_objective_contract_logged", False):
+        print(
+            "[comm_eff][anchor-objective] parity=PASS "
+            f"fast_policy_loss={loss_mode} anchor_surrogate=ratio_one_pg "
+            f"use_kl_loss={str(bool(config.use_kl_loss)).lower()} "
+            f"kl_type={getattr(config, 'kl_loss_type', 'n/a')} "
+            f"kl_coef={float(getattr(config, 'kl_loss_coef', 0.0)):.12g} "
+            f"entropy_coef={entropy_coeff:.12g} "
+            f"rollout_is_weights={str('rollout_is_weights' in selected).lower()} "
+            f"loss_agg={config.loss_agg_mode} "
+            "exceptions=old_log_probs,ppo_ratio,ppo_clip",
+            flush=True,
+        )
+        # BaseConfig is frozen after construction. This telemetry-only marker is
+        # private and cannot alter any scientific setting.
+        object.__setattr__(config, "_comm_eff_anchor_objective_contract_logged", True)
 
     loss_agg_mode = config.loss_agg_mode
 
@@ -210,6 +275,8 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     # gradient is the clean unmasked policy gradient -(A·∇logπ). agg_loss applies
     # the response_mask and the same normalization the fast path uses.
     per_token_pg = -advantages * log_prob
+    if "rollout_is_weights" in selected:
+        per_token_pg = per_token_pg * selected["rollout_is_weights"]
     pg_loss = agg_loss(
         loss_mat=per_token_pg,
         loss_mask=response_mask,
@@ -217,12 +284,39 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
         **config.global_batch_info,
     )
 
+    objective_loss = pg_loss
     metrics = {
         "actor/anchor_pg_loss": Metric(value=pg_loss, aggregation=metric_aggregation),
         # ratio is identically 1 here (no old_log_probs / no clip).
         "actor/anchor_ratio_mean": Metric(value=1.0, aggregation=AggregationType.MEAN),
     }
-    return pg_loss, metrics
+    entropy = model_output.get("entropy")
+    if entropy is not None:
+        entropy = no_padding_2_padding(entropy, data)
+        entropy_loss = agg_loss(
+            loss_mat=entropy,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
+        objective_loss = objective_loss - entropy_coeff * entropy_loss
+        metrics["actor/anchor_entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
+        metrics["actor/anchor_entropy_coef"] = entropy_coeff
+    if config.use_kl_loss:
+        ref_log_prob = selected["ref_log_prob"]
+        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+        kl_loss = agg_loss(
+            loss_mat=kld,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
+        objective_loss = objective_loss + kl_loss * config.kl_loss_coef
+        metrics["actor/anchor_kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        metrics["actor/anchor_kl_coef"] = config.kl_loss_coef
+
+    metrics["actor/anchor_total_loss"] = Metric(value=objective_loss, aggregation=metric_aggregation)
+    return objective_loss, metrics
 
 
 class AnchorStalenessQueue:
@@ -331,6 +425,26 @@ def clone_batch_for_replay(data, device=None):
         if isinstance(val, torch.Tensor):
             out[key] = _clone_tensor_for_replay(val, device=device)
     return out
+
+
+def select_anchor_batch_for_scope(batch_scope: str, current_batch, rollout_batch=None):
+    """Resolve the anchor's current data source without a silent fallback.
+
+    ``rollout_batch`` is the complete worker-local actor update captured before
+    PPO splitting. Requesting it outside that context is a correctness error;
+    falling back to ``current_batch`` would silently turn a 512-prompt request
+    back into the historical 256-prompt scope.
+    """
+    if batch_scope == "ppo_minibatch":
+        return current_batch
+    if batch_scope == "rollout_batch":
+        if rollout_batch is None:
+            raise RuntimeError(
+                "comm_eff anchor batch_scope=rollout_batch requires the pre-split "
+                "train_mini_batch context, but no full update batch is available"
+            )
+        return rollout_batch
+    raise RuntimeError(f"unsupported comm_eff anchor batch_scope={batch_scope!r}")
 
 
 def snapshot_canary(snapshot: dict, target_substrs=None, n: int = 2) -> dict:
@@ -644,13 +758,14 @@ def extract_target_grads(
     target_substrs,
     max_targets: int,
     full_grad_of: Callable,
+    target_scope: str = "decoder_matrices",
 ) -> dict:
-    """Extract the RAW per-target 2D gradient ``G_anchor`` for each target matrix.
+    """Extract the RAW gradient ``G_anchor`` for each configured target tensor.
 
     This mirrors the iteration/selection of the spectral hook's
-    ``apply_spectral_correction_to_params`` — same target substrings, same 2D
-    filter, same ``max_targets`` cap — but applies NO correction: it returns the
-    raw full 2D gradients exactly as backward produced them. The engine feeds
+    ``apply_spectral_correction_to_params`` — same scope, substrings, and
+    ``max_targets`` cap — but applies NO correction: it returns the raw full
+    gradients exactly as backward produced them. The engine feeds
     these straight into ``SpectralFilter.update_anchor``
     (the EMA) before any fast-path corrector is ever called.
 
@@ -658,7 +773,9 @@ def extract_target_grads(
         named_params: iterator of ``(name, param)`` whose ``.grad`` is the
             anchor backward's gradient (full logical 2D after FSDP unshard, via
             ``full_grad_of``).
-        target_substrs: substrings selecting the targeted 2D matrices.
+        target_substrs: substrings used by ``decoder_matrices``.
+        target_scope: ``decoder_matrices`` (substring-matched 2-D tensors) or
+            ``all_floating`` (every unique floating parameter with a gradient).
         max_targets: cap on the number of targets (``-1`` ⇒ no cap).
         full_grad_of: ``grad -> (full_2d_tensor, meta)`` — the FSDP unshard
             callable (identity for plain CPU/non-FSDP tensors). Same contract as
@@ -669,16 +786,21 @@ def extract_target_grads(
         live grads afterwards without disturbing the EMA inputs).
     """
     grads = {}
+    # Deferred import keeps anchor.py's light-weight utility import path free of
+    # spectral-filter construction and, critically, shares one selector with the
+    # fast merger so anchor coverage cannot drift from writeback coverage.
+    from verl.workers.comm_eff.spectral_filter import is_spectral_target
+
     for name, p in named_params:
         grad = getattr(p, "grad", None)
         if grad is None:
             continue
-        if not any(s in name for s in target_substrs):
+        if not is_spectral_target(name, p, target_substrs=target_substrs, target_scope=target_scope):
             continue
         if max_targets >= 0 and len(grads) >= max_targets:
             break
         full, _meta = full_grad_of(grad)
-        if full.dim() != 2:
+        if not full.is_floating_point():
             continue
         # Detached clone so a later optimizer_zero_grad on the live grads does not
         # alias/mutate what we already fed to the EMA.
