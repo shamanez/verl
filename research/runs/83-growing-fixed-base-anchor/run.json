@@ -1,0 +1,96 @@
+{
+  "issue": 83,
+  "run_id": "83-growing-fixed-base-anchor",
+  "slug": "growing-fixed-base-anchor",
+  "title": "Test growing_fixed_base rank1_relex anchor mode (2xH200, rollout_batch)",
+  "kind": "experiment",
+  "tier": "fast",
+  "branch": "exp/83-growing-fixed-base-anchor",
+  "commit": "40a302708aea984179f4739ed3fbf4166ff4aee8",
+  "base_branch": "autonomous-harness-v1",
+  "code_change": true,
+  "target_modules": [
+    "examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh",
+    "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh"
+  ],
+  "milestone": "none",
+  "promote_launcher_as": "none",
+  "baseline_run": "sliding-window-rollout-batch",
+  "depends_on": [],
+  "iterations": 2,
+  "step_target": 100,
+  "canonical_launcher": "examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh",
+  "cells": [
+    {
+      "name": "rollout-batch-mem-probe",
+      "wandb_name": "83-rollout-batch-mem-probe",
+      "gate": true,
+      "step_target": 24,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/rollout-batch-mem-probe/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "growing_fixed_base",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS": "-1",
+        "VAL_BEFORE_TRAIN": "False",
+        "TEST_FREQ": "1000",
+        "TOTAL_TRAINING_STEPS": "24"
+      }
+    },
+    {
+      "name": "growing-fixed-base-rollout-batch",
+      "wandb_name": "83-growing-fixed-base-rollout-batch",
+      "gate": false,
+      "step_target": 100,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/growing-fixed-base-rollout-batch/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "growing_fixed_base",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS": "-1",
+        "VAL_BEFORE_TRAIN": "True"
+      }
+    },
+    {
+      "name": "sliding-window-rollout-batch",
+      "wandb_name": "83-sliding-window-rollout-batch",
+      "gate": false,
+      "step_target": 100,
+      "log": "/workspace/runs/83-growing-fixed-base-anchor/sliding-window-rollout-batch/train.log",
+      "overrides": {
+        "COMM_EFF_ANCHOR_BATCH_SCOPE": "rollout_batch",
+        "COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE": "sliding_window",
+        "VAL_BEFORE_TRAIN": "False"
+      }
+    }
+  ],
+  "success_criteria": [
+    "probe reaches step 24 on 2xH200 with no OOM; peak GPU mem + s/step recorded in `runs/83-growing-fixed-base-anchor/`",
+    "probe step-20 per-fire log line reads `history_mode=growing_fixed_base` (code touch effective)",
+    "both full arms reach step 100 with no NaN / non-finite grads",
+    "growing arm `train.log` shows `history_mode=growing_fixed_base` with per-fire `checkpoints` growing 2→~10; control shows `history_mode=sliding_window` capped at 4",
+    "`val-core/DigitalLearningGmbH/MATH-lighteval/{acc|reward}/mean@N` at step 100 (read from the on-box `train.log` capture, not WandB alone — see Notes): growing ≥ control − 1.0 point (primary bar; step 75 corroborates; step 25/50 expected ~identical)",
+    "secondary (directional, not a hard gate): growing arm compressed-vs-dense mismatch and per-fire `evr_mean`/`r2_mean` ≤/≥ control (equal-or-better projection quality); `actor/anchor_kl_loss` not worse"
+  ],
+  "hypothesis": "With batch_scope=rollout_batch held equal on both arms, growing_fixed_base is non-inferior to the paired sliding_window control on MATH val accuracy at step 100 (within 1.0 absolute point) with no divergence AND equal-or-lower compressed-vs-dense mismatch. Clean negative: growing landing >=1.0 point below control at step 100, or NaN/divergent, or raising mismatch.",
+  "wandb": {
+    "project": "verl_compression_research",
+    "entity": "shamanework-pl",
+    "group": "83-growing-fixed-base-anchor"
+  },
+  "tmux_session": "run-83",
+  "remote_log": "/workspace/runs/83-growing-fixed-base-anchor/train.log",
+  "compute": {
+    "gpu_mode": "default",
+    "dispatch_compute": "prepare-only",
+    "gpu_filter_chain": [
+      "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true",
+      "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true",
+      "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
+    ],
+    "gpu_requirement_note": "workload NEEDS 2xH200; single-GPU rungs are expected to OOM on the doubled 4096-seq anchor replay. The probe is the GO/NO-GO gate before the matrix spends.",
+    "max_dph": 24.0,
+    "max_gpu_hr": 40,
+    "max_parallel": 1,
+    "vast_account": "private",
+    "attach_box": "none"
+  }
+}
