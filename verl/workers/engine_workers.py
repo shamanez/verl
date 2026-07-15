@@ -233,6 +233,71 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": final_metrics})
         return final_output
 
+    @contextmanager
+    def _comm_eff_anchor_batch_context(self, data: TensorDict, batch_size_per_dp: int):
+        """Expose one immutable pre-split actor batch to an opt-in full anchor.
+
+        ``train_mini_batch`` owns the only point at which the complete
+        worker-local update batch still exists.  The FSDP anchor normally sees
+        only one iterator-produced PPO mini-batch.  Under
+        ``anchor.batch_scope=rollout_batch`` we deep-clone the complete batch to
+        CPU before that split and lend it to the engine for this update only.
+        Paired replay/rank1 warmup retain independent deep clones of this
+        private full-update source, so no later mini-batch metadata mutation or
+        transient-context cleanup can break the retained checkpoint/batch
+        association.
+
+        The scope is shared by the anchor-owned Q observation and dense M
+        backward.  Cleanup is fail-closed and exception-safe: a stale context
+        may never leak into the next actor update.
+        """
+        state = getattr(self.engine, "_comm_eff_state", None)
+        anchor_cfg = getattr(getattr(state, "config", None), "anchor", None)
+        if state is None or anchor_cfg is None or not bool(getattr(anchor_cfg, "enabled", False)):
+            yield
+            return
+
+        dp_size = int(self.engine.get_data_parallel_size())
+        update_sequences_global = int(batch_size_per_dp) * dp_size
+        # These stamps ride mini-batch clones into delayed replay.  In
+        # particular, they let telemetry report the honest fraction of the
+        # complete update even after the source batch has become stale.
+        tu.assign_non_tensor(
+            data,
+            comm_eff_update_sequences_local=int(batch_size_per_dp),
+            comm_eff_update_sequences_global=update_sequences_global,
+        )
+
+        scope = str(getattr(anchor_cfg, "batch_scope", "ppo_minibatch"))
+        if scope == "ppo_minibatch":
+            yield
+            return
+        if scope != "rollout_batch":  # validated earlier; retain a local fail-closed guard
+            raise RuntimeError(f"unsupported comm_eff anchor batch_scope={scope!r}")
+
+        attr = "_comm_eff_rollout_batch"
+        if hasattr(self.engine, attr):
+            raise RuntimeError("comm_eff rollout-batch anchor context leaked across actor updates")
+
+        from verl.workers.comm_eff.anchor import clone_batch_for_replay
+
+        full_batch = clone_batch_for_replay(data, device=torch.device("cpu"))
+        # The trainer's inherited global_batch_size is the PPO mini-batch size.
+        # Replace it on the private full clone so every aggregation mode (not
+        # only the locked token-mean mode) normalizes over this complete batch.
+        tu.assign_non_tensor(full_batch, global_batch_size=update_sequences_global)
+        if int(full_batch.shape[0]) != int(batch_size_per_dp):
+            raise RuntimeError(
+                "comm_eff rollout-batch clone changed the worker-local row count: "
+                f"expected={batch_size_per_dp} got={full_batch.shape[0]}"
+            )
+        object.__setattr__(self.engine, attr, full_batch)
+        try:
+            yield
+        finally:
+            if hasattr(self.engine, attr):
+                delattr(self.engine, attr)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
         """Split a batch into N mini-batches run for multiple epochs
@@ -273,6 +338,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         )
 
         with (
+            self._comm_eff_anchor_batch_context(data, batch_size_per_dp),
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):
@@ -572,6 +638,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
             if self.distillation_enabled:
+                comm_eff = actor_config.comm_eff
+                anchor = getattr(comm_eff, "anchor", None)
+                if bool(getattr(comm_eff, "enabled", False)) and bool(getattr(anchor, "enabled", False)):
+                    raise ValueError(
+                        "comm_eff anchor objective parity does not yet support "
+                        "distillation_ppo_loss. Disable the anchor or implement and test "
+                        "an explicit ratio-one mapping for every distillation term."
+                    )
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
@@ -1042,7 +1116,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/anchor_rollouts_generated": 0,
                     "comm_eff/anchor_rewards_recomputed": 0,
                     "comm_eff/anchor_optimizer_steps": 0,
-                    "comm_eff/anchor_batch_fraction": 1.0,
+                    "comm_eff/anchor_batch_fraction": 0.0,
+                    "comm_eff/anchor_batch_sequences_global": 0,
+                    "comm_eff/anchor_update_sequences_global": 0,
+                    "comm_eff/anchor_batch_prompt_equivalents_global": 0,
+                    "comm_eff/anchor_update_prompt_equivalents_global": 0,
+                    "comm_eff/anchor_rollout_n": 0,
+                    "comm_eff/anchor_batch_scope_rollout": 0,
                     # Explicit zero on the disabled path.
                     "comm_eff/clean_steps": 0,
                     # Explicit zeros on the disabled path for PowerSGD counters.

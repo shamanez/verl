@@ -123,6 +123,14 @@ class CommEffAnchorConfig(BaseConfig):
             the fast circuit's rollout. This makes the anchor gradient comparable
             to the retained fast gradient at the same batch/weight point. When
             ``false``, the anchor uses the current batch with stale weights.
+        batch_scope (str): Data scope consumed by the shared anchor forward.
+            ``"ppo_minibatch"`` (default) preserves the historical behavior:
+            one complete PPO mini-batch (including every rollout in each GRPO
+            group) supplies both the dense anchor gradient ``M`` and the
+            anchor-owned PowerSGD activation sketch ``Q``. ``"rollout_batch"``
+            consumes the complete pre-split actor update batch instead. The
+            latter is a combined anchor-signal knob, not a pure-M ablation,
+            because Q and M deliberately share the same anchor forward.
         snapshot_device (str): Where the anchor weight snapshots live between
             ticks — ``"gpu"`` (default, faithful: detached clones stay on each
             param's device, today's exact behaviour) or ``"cpu"`` (memory-lean:
@@ -209,6 +217,7 @@ class CommEffAnchorConfig(BaseConfig):
     delay_K: int = 20
     owns_q: bool = False
     replay_paired_batch: bool = False
+    batch_scope: str = "ppo_minibatch"
     snapshot_device: str = "gpu"
     lookahead_anchor: bool = False
     lookahead_mode: str = "disabled"
@@ -961,6 +970,11 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.anchor.replay_paired_batch must be a bool; got "
                 f"{type(self.anchor.replay_paired_batch).__name__} ({self.anchor.replay_paired_batch!r})"
+            )
+        if self.anchor.batch_scope not in ("ppo_minibatch", "rollout_batch"):
+            raise ValueError(
+                "comm_eff.anchor.batch_scope must be one of (ppo_minibatch, rollout_batch); "
+                f"got {self.anchor.batch_scope!r}"
             )
         # Snapshot storage enum (mirrors spectral.ema_device). "gpu" keeps the
         # snapshots on device; "cpu" moves the delay_K+1 full snapshots off HBM.

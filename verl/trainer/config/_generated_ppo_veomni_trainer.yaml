@@ -154,6 +154,7 @@ actor_rollout_ref:
         delay_K: 1
         owns_q: false
         replay_paired_batch: false
+        batch_scope: ppo_minibatch
         snapshot_device: gpu
         lookahead_anchor: false
         lookahead_mode: disabled

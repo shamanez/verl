@@ -27,9 +27,13 @@ B. **``old_log_probs`` is IGNORED.** The loss + gradient are byte-identical for
    the fast-path ``compute_policy_loss_vanilla`` produces a DIFFERENT gradient
    once ``old_log_probs != logπ`` (ratio != 1), proving the anchor and fast path
    intentionally differ here.
-C. **Configured KL is retained.** With ``use_kl_loss=true``, the anchor adds the
-   same reference-policy KL penalty, coefficient, mask, and normalization as
-   the locked fast objective without reintroducing the PPO ratio.
+C. **Configured additive terms are retained.** Rollout importance weights,
+   entropy regularization, and reference-policy KL use the same coefficients,
+   masks, and normalization as the fast objective without reintroducing the
+   PPO ratio.
+D. **Unsupported objective modes fail closed.** The ratio-one mapping is
+   currently defined for vanilla PPO only; an active comm_eff anchor rejects
+   any other policy loss before training.
 
 Unlike the file-path-isolated harness in ``test_anchor_queue.py``, these tests
 import through the real ``verl`` package (the runner's env / the box both have
@@ -57,6 +61,8 @@ class _Cfg:
         use_kl_loss=False,
         kl_loss_coef=0.001,
         kl_loss_type="low_var_kl",
+        entropy_coeff=0.0,
+        policy_loss_mode="vanilla",
     ):
         self.loss_agg_mode = loss_agg_mode
         self.loss_scale_factor = None
@@ -64,9 +70,27 @@ class _Cfg:
         self.use_kl_loss = use_kl_loss
         self.kl_loss_coef = kl_loss_coef
         self.kl_loss_type = kl_loss_type
+        self.entropy_coeff = entropy_coeff
+        self.policy_loss = {"loss_mode": policy_loss_mode}
+        self.clip_ratio = 0.2
+        self.clip_ratio_low = 0.2
+        self.clip_ratio_high = 0.2
+        self.clip_ratio_c = 3.0
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
 
-def _make_batch(logits_param, advantages, response_mask, old_log_probs, ref_log_prob=None):
+def _make_batch(
+    logits_param,
+    advantages,
+    response_mask,
+    old_log_probs,
+    ref_log_prob=None,
+    *,
+    entropy=None,
+    rollout_is_weights=None,
+):
     """Build (model_output, data) for a 1-sequence, 2-token toy.
 
     ``logits_param`` is the single learnable scalar/tensor whose gradient we
@@ -78,6 +102,8 @@ def _make_batch(logits_param, advantages, response_mask, old_log_probs, ref_log_
 
     bsz, resp_len = response_mask.shape
     model_output = {"log_probs": logits_param}
+    if entropy is not None:
+        model_output["entropy"] = entropy
     tensors = {
         "response_mask": response_mask,
         "advantages": advantages,
@@ -85,6 +111,8 @@ def _make_batch(logits_param, advantages, response_mask, old_log_probs, ref_log_
     }
     if ref_log_prob is not None:
         tensors["ref_log_prob"] = ref_log_prob
+    if rollout_is_weights is not None:
+        tensors["rollout_is_weights"] = rollout_is_weights
     data = TensorDict(tensors, batch_size=[bsz])
     # Non-tensor scalars anchor_pg_loss / agg_loss read off the batch (set via
     # the same util the engine uses, so they are stored as non-tensor metadata
@@ -103,9 +131,11 @@ def _identity_extract(monkeypatch):
     the engine path; here we isolate the C4 reduction. Patch it in BOTH the
     defining module and the anchor module's lazily-imported reference.
     """
+    import verl.workers.utils.losses as losses_mod
     import verl.workers.utils.padding as padding_mod
 
     monkeypatch.setattr(padding_mod, "no_padding_2_padding", lambda tensor, data: tensor)
+    monkeypatch.setattr(losses_mod, "no_padding_2_padding", lambda tensor, data: tensor)
     yield
 
 
@@ -252,7 +282,7 @@ def test_anchor_pg_loss_kl_depends_on_reference_not_old_policy(_identity_extract
     assert not torch.allclose(grad_a, grad_c, rtol=1e-6, atol=1e-7)
 
 
-def test_anchor_pg_loss_kl_requires_reference_log_probs(_identity_extract):
+def test_anchor_pg_loss_kl_requires_reference_log_probs(_identity_extract, capsys):
     """KL-enabled anchor fails closed when its reference-policy term is absent."""
     from verl.workers.comm_eff.anchor import anchor_pg_loss
 
@@ -266,6 +296,226 @@ def test_anchor_pg_loss_kl_requires_reference_log_probs(_identity_extract):
 
     with pytest.raises(KeyError, match="ref_log_prob"):
         anchor_pg_loss(_Cfg(use_kl_loss=True), model_output, data)
+    assert "parity=PASS" not in capsys.readouterr().out
+
+
+def test_anchor_pg_loss_mirrors_rollout_importance_weights(_identity_extract):
+    """Fast-path rollout importance weights scale the anchor PG identically."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    log_probs = torch.tensor([[0.3, -0.7]], requires_grad=True)
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    rollout_is_weights = torch.tensor([[0.25, 1.75]])
+    model_output, data = _make_batch(
+        log_probs,
+        advantages,
+        response_mask,
+        torch.tensor([[9.0, -9.0]]),
+        rollout_is_weights=rollout_is_weights,
+    )
+
+    loss, _ = anchor_pg_loss(_Cfg(), model_output, data)
+    loss.backward()
+
+    n_tokens = response_mask.sum()
+    expected_loss = (-(advantages * log_probs.detach() * rollout_is_weights) * response_mask).sum() / n_tokens
+    expected_grad = -(advantages * rollout_is_weights * response_mask) / n_tokens
+    torch.testing.assert_close(loss.detach(), expected_loss, rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(log_probs.grad, expected_grad, rtol=1e-6, atol=1e-7)
+
+
+def test_anchor_gradient_matches_fast_objective_at_ratio_one(_identity_extract):
+    """All supported fast-objective terms produce the same ratio-one gradient."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+    from verl.workers.utils.losses import ppo_loss
+
+    values = torch.tensor([[0.3, -0.7]])
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    old_log_probs = values.detach().clone()
+    ref_log_prob = torch.tensor([[0.1, -0.4]])
+    rollout_is_weights = torch.tensor([[0.25, 1.75]])
+
+    fast_log_probs = values.clone().requires_grad_(True)
+    fast_output, fast_data = _make_batch(
+        fast_log_probs,
+        advantages,
+        response_mask,
+        old_log_probs,
+        ref_log_prob,
+        entropy=fast_log_probs.square(),
+        rollout_is_weights=rollout_is_weights,
+    )
+    fast_loss, _ = ppo_loss(
+        _Cfg(use_kl_loss=True, entropy_coeff=0.07),
+        fast_output,
+        fast_data,
+    )
+    fast_loss.backward()
+
+    anchor_log_probs = values.clone().requires_grad_(True)
+    anchor_output, anchor_data = _make_batch(
+        anchor_log_probs,
+        advantages,
+        response_mask,
+        torch.tensor([[9.0, -9.0]]),
+        ref_log_prob,
+        entropy=anchor_log_probs.square(),
+        rollout_is_weights=rollout_is_weights,
+    )
+    anchor_loss, _ = anchor_pg_loss(
+        _Cfg(use_kl_loss=True, entropy_coeff=0.07),
+        anchor_output,
+        anchor_data,
+    )
+    anchor_loss.backward()
+
+    # The scalar PG values differ by construction (-A*r versus -A*logpi), but
+    # at r=1 their gradients match. Entropy, rollout weighting, and reference
+    # KL must preserve that equality exactly up to floating-point reduction.
+    torch.testing.assert_close(anchor_log_probs.grad, fast_log_probs.grad, rtol=1e-6, atol=1e-7)
+
+
+def test_anchor_pg_loss_retains_configured_entropy(_identity_extract):
+    """Entropy contributes with the same sign, coefficient, mask, and normalization."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    entropy_coeff = 0.07
+    log_probs = torch.tensor([[0.3, -0.7]], requires_grad=True)
+    entropy = log_probs.square()
+    advantages = torch.tensor([[1.5, -2.0]])
+    response_mask = torch.ones(1, 2)
+    model_output, data = _make_batch(
+        log_probs,
+        advantages,
+        response_mask,
+        torch.tensor([[9.0, -9.0]]),
+        entropy=entropy,
+    )
+
+    loss, metrics = anchor_pg_loss(_Cfg(entropy_coeff=entropy_coeff), model_output, data)
+    loss.backward()
+
+    manual_log_probs = torch.tensor([[0.3, -0.7]], requires_grad=True)
+    manual_entropy = manual_log_probs.square()
+    n_tokens = response_mask.sum()
+    expected_loss = (
+        ((-advantages * manual_log_probs) - entropy_coeff * manual_entropy) * response_mask
+    ).sum() / n_tokens
+    expected_loss.backward()
+
+    torch.testing.assert_close(loss.detach(), expected_loss.detach(), rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(log_probs.grad, manual_log_probs.grad, rtol=1e-6, atol=1e-7)
+    assert metrics["actor/anchor_entropy_loss"].values[0] == pytest.approx(
+        float((manual_entropy.detach() * response_mask).sum() / n_tokens), rel=1e-6, abs=1e-7
+    )
+    assert metrics["actor/anchor_entropy_coef"] == entropy_coeff
+
+
+def test_anchor_pg_loss_entropy_requires_model_output(_identity_extract, capsys):
+    """A nonzero fast entropy coefficient cannot silently disappear from M."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    model_output, data = _make_batch(
+        torch.tensor([[0.3, -0.7]], requires_grad=True),
+        torch.tensor([[1.5, -2.0]]),
+        torch.ones(1, 2),
+        torch.tensor([[9.0, -9.0]]),
+    )
+
+    with pytest.raises(KeyError, match="entropy"):
+        anchor_pg_loss(_Cfg(entropy_coeff=0.01), model_output, data)
+    assert "parity=PASS" not in capsys.readouterr().out
+
+
+def test_anchor_pg_loss_rejects_unsupported_policy_loss(_identity_extract):
+    """Runtime defense rejects configs that bypass ActorConfig validation."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    model_output, data = _make_batch(
+        torch.tensor([[0.3, -0.7]], requires_grad=True),
+        torch.tensor([[1.5, -2.0]]),
+        torch.ones(1, 2),
+        torch.tensor([[9.0, -9.0]]),
+    )
+
+    with pytest.raises(ValueError, match="supports.*vanilla.*only"):
+        anchor_pg_loss(_Cfg(policy_loss_mode="gspo"), model_output, data)
+
+
+def test_actor_config_rejects_unsupported_anchor_policy_loss():
+    """Active anchors fail during ActorConfig construction, before a paid tick."""
+    from verl.workers.config import (
+        ActorConfig,
+        CommEffAnchorConfig,
+        CommEffConfig,
+        OptimizerConfig,
+        PolicyLossConfig,
+    )
+
+    with pytest.raises(ValueError, match="supports.*vanilla.*only"):
+        ActorConfig(
+            strategy="fsdp",
+            use_dynamic_bsz=True,
+            rollout_n=1,
+            optim=OptimizerConfig(lr=0.1),
+            policy_loss=PolicyLossConfig(loss_mode="gspo"),
+            comm_eff=CommEffConfig(enabled=True, anchor=CommEffAnchorConfig(enabled=True)),
+        )
+
+
+def test_anchor_loss_binder_rejects_non_ppo_fast_objective():
+    """A config-bearing distillation/wrapped loss must not be called parity-complete."""
+    from functools import partial
+
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+    from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
+    from verl.workers.utils.losses import ppo_loss
+
+    cfg = _Cfg()
+    bound = FSDPEngine._build_anchor_pg_loss(None, partial(ppo_loss, config=cfg), anchor_pg_loss)
+    assert bound.func is anchor_pg_loss
+    assert bound.keywords["config"] is cfg
+
+    def distillation_like_loss(config, model_output, data):
+        raise AssertionError("must never be bound")
+
+    with pytest.raises(RuntimeError, match="plain.*ppo_loss.*only"):
+        FSDPEngine._build_anchor_pg_loss(
+            None,
+            partial(distillation_like_loss, config=cfg),
+            anchor_pg_loss,
+        )
+
+
+def test_anchor_objective_contract_logs_once(_identity_extract, capsys):
+    """The resolved objective contract is visible once per actor config."""
+    from verl.workers.comm_eff.anchor import anchor_pg_loss
+
+    cfg = _Cfg(use_kl_loss=True, entropy_coeff=0.02)
+    log_probs = torch.tensor([[0.3, -0.7]], requires_grad=True)
+    model_output, data = _make_batch(
+        log_probs,
+        torch.tensor([[1.5, -2.0]]),
+        torch.ones(1, 2),
+        torch.tensor([[9.0, -9.0]]),
+        torch.tensor([[0.1, -0.4]]),
+        entropy=log_probs.square(),
+        rollout_is_weights=torch.ones(1, 2),
+    )
+
+    anchor_pg_loss(cfg, model_output, data)
+    anchor_pg_loss(cfg, model_output, data)
+    stdout = capsys.readouterr().out
+    assert stdout.count("[comm_eff][anchor-objective]") == 1
+    assert "parity=PASS" in stdout
+    assert "use_kl_loss=true" in stdout
+    assert "kl_type=low_var_kl" in stdout
+    assert "kl_coef=0.001" in stdout
+    assert "entropy_coef=0.02" in stdout
+    assert "rollout_is_weights=true" in stdout
+    assert "exceptions=old_log_probs,ppo_ratio,ppo_clip" in stdout
 
 
 def test_fast_path_ppo_loss_DOES_depend_on_old_log_probs():

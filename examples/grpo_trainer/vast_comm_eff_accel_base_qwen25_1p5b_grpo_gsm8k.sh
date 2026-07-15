@@ -32,6 +32,7 @@ export COMM_EFF_ANCHOR_OWNS_Q=true          # the anchor is the ONLY thing that 
 export COMM_EFF_ANCHOR_CADENCE=20           # HIGH latency — the k-collapse regime (Priority 1)
 export COMM_EFF_ANCHOR_DELAY_K=20           # HIGH latency — the k-collapse regime (Priority 1)
 export COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH=true   # paired replay for generator-consistent M
+export COMM_EFF_ANCHOR_BATCH_SCOPE=ppo_minibatch  # historical half-update Q+M scope
 export COMM_EFF_ANCHOR_SNAPSHOT_DEVICE=cpu        # OOM guard
 # Weight projection is not part of this locked control, even if the caller's
 # environment exported rank1/fixed lookahead knobs for another experiment.

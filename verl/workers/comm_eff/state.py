@@ -322,16 +322,23 @@ class CommEffState:
         #   anchor_optimizer_steps    — optimizer.step() calls on the anchor pass.
         #                               MUST stay 0 (snapshot off the optimizer's
         #                               param group; the anchor only reads grads).
-        #   anchor_batch_fraction     — fraction of the rollout-expanded batch the
-        #                               anchor backward consumed (1.0 = whole
-        #                               batch; <1.0 ⇒ an OOM-bounded subset, which
-        #                               the engine logs with a reason).
+        #   anchor_batch_fraction     — fraction of the complete rollout-expanded
+        #                               actor update batch consumed by the latest
+        #                               anchor Q/M pass. Historical PPO-minibatch
+        #                               scope is therefore <1 when an update has
+        #                               multiple PPO mini-batches.
         self.anchor_mask_applications = 0
         self.anchor_grad_corrected = 0
         self.anchor_rollouts_generated = 0
         self.anchor_rewards_recomputed = 0
         self.anchor_optimizer_steps = 0
-        self.anchor_batch_fraction = 1.0
+        self.anchor_batch_fraction = 0.0
+        self.anchor_batch_sequences_global = 0
+        self.anchor_update_sequences_global = 0
+        self.anchor_batch_prompt_equivalents_global = 0
+        self.anchor_update_prompt_equivalents_global = 0
+        self.anchor_rollout_n = 0
+        self.anchor_batch_scope_rollout = int(getattr(config.anchor, "batch_scope", "ppo_minibatch") == "rollout_batch")
         # Monotonic trainer-step counter the anchor cadence is keyed on (advanced
         # once per actor train_batch).
         self.anchor_step = 0
@@ -792,6 +799,15 @@ class CommEffState:
         self.anchor_step = 0
         self.spectral_step = 0
         self.anchor_backwards = 0
+        self.anchor_batch_fraction = 0.0
+        self.anchor_batch_sequences_global = 0
+        self.anchor_update_sequences_global = 0
+        self.anchor_batch_prompt_equivalents_global = 0
+        self.anchor_update_prompt_equivalents_global = 0
+        self.anchor_rollout_n = 0
+        self.anchor_batch_scope_rollout = int(
+            getattr(self.config.anchor, "batch_scope", "ppo_minibatch") == "rollout_batch"
+        )
         self.spectral_corrections = 0
         self.reset_anchor_q_runtime()
         self.powersgd_basis_updates = 0
@@ -1135,6 +1151,12 @@ class CommEffState:
             "comm_eff/anchor_rewards_recomputed": self.anchor_rewards_recomputed,
             "comm_eff/anchor_optimizer_steps": self.anchor_optimizer_steps,
             "comm_eff/anchor_batch_fraction": self.anchor_batch_fraction,
+            "comm_eff/anchor_batch_sequences_global": self.anchor_batch_sequences_global,
+            "comm_eff/anchor_update_sequences_global": self.anchor_update_sequences_global,
+            "comm_eff/anchor_batch_prompt_equivalents_global": self.anchor_batch_prompt_equivalents_global,
+            "comm_eff/anchor_update_prompt_equivalents_global": self.anchor_update_prompt_equivalents_global,
+            "comm_eff/anchor_rollout_n": self.anchor_rollout_n,
+            "comm_eff/anchor_batch_scope_rollout": self.anchor_batch_scope_rollout,
             # Cumulative count of clean (unmasked) optimizer steps fired.
             # Monotonic; increments at exactly steps clean_cadence, 2*clean_cadence,
             # ... so logs can confirm that the clean cadence fired correctly.

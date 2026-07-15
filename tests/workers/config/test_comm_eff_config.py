@@ -125,11 +125,13 @@ class TestCommEffConfigDefaults(unittest.TestCase):
                     "strategy=fsdp",
                     "ppo_micro_batch_size_per_gpu=128",
                     "comm_eff.anchor.replay_paired_batch=true",
+                    "comm_eff.anchor.batch_scope=rollout_batch",
                     "comm_eff.anchor.snapshot_device=cpu",
                 ],
             )
         config = omega_conf_to_dataclass(cfg)
         self.assertTrue(config.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config.comm_eff.anchor.batch_scope, "rollout_batch")
         self.assertEqual(config.comm_eff.anchor.snapshot_device, "cpu")
         # And the YAML defaults still mirror the dataclass defaults (off path).
         with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/actor")):
@@ -138,6 +140,7 @@ class TestCommEffConfigDefaults(unittest.TestCase):
             )
         config_default = omega_conf_to_dataclass(cfg_default)
         self.assertFalse(config_default.comm_eff.anchor.replay_paired_batch)
+        self.assertEqual(config_default.comm_eff.anchor.batch_scope, "ppo_minibatch")
         self.assertEqual(config_default.comm_eff.anchor.snapshot_device, "gpu")
 
 

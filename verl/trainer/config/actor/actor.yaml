@@ -376,6 +376,13 @@ comm_eff:
     # weights. Uses the paired replay ring when enabled.
     replay_paired_batch: false
 
+    # Data scope shared by the dense anchor gradient M and anchor-owned Q
+    # observation. "ppo_minibatch" preserves the historical one-mini-batch
+    # behavior; "rollout_batch" uses the complete pre-split actor update batch.
+    # This is intentionally a combined Q+M anchor-signal knob, not a pure-M
+    # ablation, because both signals come from the same anchor forward.
+    batch_scope: ppo_minibatch
+
     # Where anchor weight snapshots live between ticks: "gpu" or "cpu".
     snapshot_device: gpu
 

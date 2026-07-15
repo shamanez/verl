@@ -1291,11 +1291,13 @@ def compute_policy_loss_vanilla(
     Adapted from
     https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
 
-    Anchor reuse guard: this vanilla GRPO policy objective is the loss
-    the comm_eff anchor circuit reuses (via ``ppo_loss`` -> ``get_policy_loss_fn(
-    "vanilla")``) for its unmasked K-stale forward/backward over the
-    rollout-expanded batch — NOT a supervised next-token loss. The anchor differs
-    from the fast path only in that masking is disabled around its pass.
+    The comm_eff anchor does not call this clipped loss directly. It uses the
+    corresponding ratio-one vanilla surrogate for its unmasked K-stale or
+    projected forward, while mirroring rollout importance weights and every
+    additive regularizer from the resolved actor objective. The deliberate
+    exceptions are ``old_log_prob``, PPO importance ratio, and clipping, which
+    are not valid between the compressed fast policy and the uncompressed
+    anchor policy.
 
     Args:
         old_log_prob (torch.Tensor):

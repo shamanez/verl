@@ -93,6 +93,7 @@ reference `M` and, when `anchor.owns_q=true`, refreshes the PowerSGD basis `Q`.
 | `COMM_EFF_ANCHOR_DELAY_K` | `anchor.delay_K` | `20`* | Weight-snapshot delay in optimizer ticks. |
 | `COMM_EFF_ANCHOR_OWNS_Q` | `anchor.owns_q` | `true` | Let the anchor be the only writer of the live PowerSGD basis. |
 | `COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH` | `anchor.replay_paired_batch` | `true` | Replay the same batch/weights seen by the fast circuit. |
+| `COMM_EFF_ANCHOR_BATCH_SCOPE` | `anchor.batch_scope` | `ppo_minibatch` | `ppo_minibatch` uses one complete PPO mini-batch; `rollout_batch` uses the complete pre-split actor update. The selected scope is shared by Q and M. |
 | `COMM_EFF_ANCHOR_SNAPSHOT_DEVICE` | `anchor.snapshot_device` | `cpu` | Store delayed snapshots on CPU or GPU. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR` | `anchor.lookahead_anchor` | `false` | Enable an opt-in anchor weight projector. |
 | `COMM_EFF_ANCHOR_LOOKAHEAD_MODE` | `anchor.lookahead_mode` | `disabled` | `disabled`, unchanged `fixed_linear`, or sliding `rank1_relex`. |
@@ -105,13 +106,91 @@ reference `M` and, when `anchor.owns_q=true`, refreshes the PowerSGD basis `Q`.
 \* The baseline launcher pins `cadence`/`delay_K` = 20/20 (the k-collapse regime).
 The generic engine's bare default is 5/5; the baseline wrapper overrides it.
 
+### Anchor batch scope
+
+`anchor.batch_scope` is an explicit signal-quality/cost knob:
+
+- `ppo_minibatch` is the historical default. On the locked MATH surface, one
+  anchor fire consumes 256 prompt groups × 8 responses = 2,048 response
+  sequences, or exactly half of the 512-prompt actor update.
+- `rollout_batch` consumes all 512 prompt groups × 8 responses = 4,096 response
+  sequences. The private full batch is still processed through dynamic
+  microbatches, and `token-mean` is normalized once by the DP-global valid-token
+  count rather than averaging two separately normalized halves.
+
+The scope is shared by the anchor-owned Q observation and dense M backward
+because both are harvested from one anchor forward. It is therefore a combined
+Q+M experiment, not a pure larger-M ablation. A pure `M512/Q256` comparison
+would require a separate forward or separately gated Q harvest. Moving from 256
+to 512 prompt groups should roughly halve prompt-sampling variance and reduce
+standard error by `1/sqrt(2)` (about 29%), but it does not increase the expected
+gradient magnitude and is not guaranteed to improve optimization. Anchor
+compute and CPU replay storage are approximately doubled per retained/fire
+batch; peak activation memory remains microbatch-bounded, and Q/M communication
+volume is unchanged.
+
+For that reason, `rollout_batch` is opt-in until a matched multi-seed ablation
+justifies promotion:
+
+```bash
+COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
+  bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
+```
+
+Runtime telemetry reports response sequences, response-count/`rollout_n`
+prompt-equivalents, `rollout_n`, the actual Q/M signal role, and
+`anchor_batch_fraction` relative to the complete actor update. A shuffled PPO
+mini-batch can split groups even when its row count is divisible by `rollout_n`,
+so only `rollout_batch` intrinsically guarantees complete groups. The locked
+surface uses `actor.shuffle=false`, making its historical 256-prompt count
+group-preserving; its expected fractions are 0.5 and 1.0 respectively. Older
+runs logged `anchor_batch_fraction=1.0` as “100% of the selected PPO
+mini-batch.” The corrected metric denominator is the complete actor update, so
+those legacy values must not be interpreted as 512-prompt anchor passes.
+
 The anchor backward is dense and uncompressed, but it is intentionally not the
 fast path's clipped PPO loss: compressed-policy `old_log_probs` are not a valid
 importance-ratio denominator for a stale or projected uncompressed anchor. It
 therefore uses a ratio-one advantage policy gradient and retains the fast
-configuration's reference-policy KL penalty, type, coefficient, mask, and loss
-normalization. On the locked MATH surface this is `low_var_kl` with coefficient
-`0.001`. A KL-enabled anchor fails closed when `ref_log_prob` is absent.
+configuration's rollout importance weights, entropy regularizer,
+reference-policy KL penalty, mask, and loss normalization. On the locked MATH
+surface this is vanilla policy loss, `low_var_kl` with coefficient `0.001`,
+entropy coefficient `0`, no rollout importance weights, and `token-mean`
+aggregation. A KL-enabled anchor fails closed when `ref_log_prob` is absent; a
+nonzero entropy coefficient fails closed when the forward did not return
+entropy.
+
+### Objective-parity contract
+
+`M_anchor` controls the sign of the fast update, so “dense and uncompressed” is
+not sufficient: it must also differentiate the same configured objective. A
+silently omitted loss term changes the vector used as the correction signal.
+The permanent invariant is:
+
+> `M_anchor` is the dense, uncompressed gradient of the same resolved actor
+> objective as the fast circuit, evaluated under the anchor's explicitly
+> declared ratio-one surrogate. Unsupported terms fail closed; they are never
+> silently dropped.
+
+| Objective component | Fast actor | Dense anchor M |
+|---|---|---|
+| Advantage policy gradient | Vanilla PPO ratio and clipping against compressed-policy `old_log_probs` | Same advantages, response mask, and normalization, but ratio is fixed to one and clipping is removed |
+| Rollout importance weights | Multiply the per-token policy-gradient term when `rollout_is_weights` is present | The identical weights multiply the ratio-one policy-gradient term |
+| Entropy | Subtract `entropy_coeff * entropy_loss` | Same entropy tensor, coefficient, mask, and aggregation; missing entropy with a nonzero coefficient is an error |
+| Reference-policy KL | Add configured `kl_loss_coef * KL(logpi, logpi_ref)` | Same `ref_log_prob`, KL type, coefficient, mask, and aggregation; missing reference log-probabilities are an error |
+| Reward-side KL | Already folded into rewards and therefore advantages | Inherited through the exact same advantages |
+
+The only standard exceptions are `old_log_probs`, PPO importance ratio, and PPO
+clipping: they compare different compressed/uncompressed policies and are not a
+valid anchor denominator. Active comm-eff anchors currently accept
+`actor.policy_loss.loss_mode=vanilla` only; another loss mode requires an
+explicitly implemented and tested ratio-one mapping before it can run.
+`distillation_ppo_loss` is also rejected before training because its additional
+terms do not yet have an anchor mapping; the runtime loss binder independently
+rejects any fast callable other than plain `ppo_loss`. On the
+first anchor loss each worker prints a resolved contract line containing the
+loss mode, KL type/coefficient, entropy coefficient, rollout-weight presence,
+aggregation, the intentional exceptions, and `parity=PASS`.
 
 ### Strict versus progressive W4 readiness
 

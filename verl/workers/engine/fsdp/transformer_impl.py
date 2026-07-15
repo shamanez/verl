@@ -1533,6 +1533,18 @@ class FSDPEngine(BaseEngine):
         """
         from functools import partial
 
+        from verl.workers.utils.losses import ppo_loss
+
+        fast_callable = getattr(fast_path_loss_function, "func", None)
+        if fast_callable is not ppo_loss:
+            callable_name = getattr(fast_callable, "__qualname__", repr(fast_callable))
+            raise RuntimeError(
+                "comm_eff anchor objective parity currently supports the plain "
+                "verl.workers.utils.losses.ppo_loss fast objective only; "
+                f"got {callable_name}. Distillation or another wrapped/additive "
+                "objective needs an explicit ratio-one anchor mapping before it can run."
+            )
+
         config = None
         kw = getattr(fast_path_loss_function, "keywords", None)
         if kw is not None:
@@ -1641,6 +1653,7 @@ class FSDPEngine(BaseEngine):
             extract_target_grads,
             feed_anchor_grads_into_ema,
             maybe_build_replay_ring,
+            select_anchor_batch_for_scope,
             snapshot_canary,
             snapshot_named_params,
             verify_canary_on_module,
@@ -1688,6 +1701,21 @@ class FSDPEngine(BaseEngine):
         # bf16 snapshots off HBM in BOTH modes (numerics-neutral: the clone load
         # casts back via .to(p.device, p.dtype), a byte-preserving round trip).
         replay_mode = bool(getattr(anchor_cfg, "replay_paired_batch", False))
+        anchor_batch_scope = str(getattr(anchor_cfg, "batch_scope", "ppo_minibatch"))
+        _current_anchor_batch = select_anchor_batch_for_scope(
+            anchor_batch_scope,
+            current_batch=data,
+            rollout_batch=getattr(self, "_comm_eff_rollout_batch", None),
+        )
+
+        def _retain_current_anchor_batch():
+            # Give every long-lived replay/base entry its own CPU deep clone.
+            # rollout_batch is already a private pre-split CPU clone, but a
+            # second clone here prevents the transient update context, rank1
+            # base, and replay ring from aliasing tensor storage across their
+            # different lifetimes. Retention happens only on replayable ticks.
+            return clone_batch_for_replay(_current_anchor_batch, device=torch.device("cpu"))
+
         _snap_device_str = str(getattr(anchor_cfg, "snapshot_device", "gpu"))
         _snap_dev = torch.device("cpu") if _snap_device_str == "cpu" else None
         # Spectral DIAGNOSTIC gate. When False, skip the per-step diagnostic
@@ -1816,7 +1844,7 @@ class FSDPEngine(BaseEngine):
                         # matching first batch only so the first Q-only fire can
                         # use the tick-1 base pair rather than replay warmup's
                         # too-fresh current fallback.
-                        state._rank1_base_batch = clone_batch_for_replay(data, device=torch.device("cpu"))
+                        state._rank1_base_batch = _retain_current_anchor_batch()
                         state._rank1_base_canary = _push_canary
                         state.rank1_history_checkpoints = 1
                         state.rank1_history_deltas = 0
@@ -1838,7 +1866,7 @@ class FSDPEngine(BaseEngine):
             # Fire-aware retention: only ticks a future fire can request
             # (tick ≡ −delay_K mod cadence) are cloned + stored at all.
             if ring.tick_retained(step):
-                ring.push_batch(step, clone_batch_for_replay(data, device=torch.device("cpu")), _gs_now)
+                ring.push_batch(step, _retain_current_anchor_batch(), _gs_now)
         else:
             with _summon_ctx():
                 cur_snapshot = snapshot_named_params(
@@ -2268,19 +2296,93 @@ class FSDPEngine(BaseEngine):
             _batch_choice = "rank1_exact_warm_pair"
         elif replay_mode:
             if _la_active and _rollout_source == "current_step":
-                anchor_data = data.copy() if hasattr(data, "copy") else data
+                anchor_data = (
+                    _current_anchor_batch.copy() if hasattr(_current_anchor_batch, "copy") else _current_anchor_batch
+                )
                 _batch_choice = "current_step"
             else:
                 anchor_data = _replay_batch.copy() if hasattr(_replay_batch, "copy") else _replay_batch
                 _batch_choice = "stale_paired"
         else:
-            anchor_data = data.copy() if hasattr(data, "copy") else data
+            anchor_data = (
+                _current_anchor_batch.copy() if hasattr(_current_anchor_batch, "copy") else _current_anchor_batch
+            )
             _batch_choice = "current_step"
         if _la_active:
             print(
                 f"[comm_eff][lookahead] step={step} fire pairing: weights=projected(t={_la_target_tick}) "
                 f"batch={_batch_choice}"
                 + (f"(tick={_used_step})" if _batch_choice == "stale_paired" else f"(tick={step})"),
+                flush=True,
+            )
+
+        # Validate the requested scope before the clone forward can mutate Q or
+        # M. Full-scope clones carry corrected global_batch_size metadata; the
+        # inner loop below independently recomputes the global valid-token count
+        # used by token-mean normalization.
+        _anchor_sequences_global = int(
+            tu.get(
+                anchor_data,
+                key="global_batch_size",
+                default=int(anchor_data.shape[0]) * self.get_data_parallel_size(),
+            )
+        )
+        _update_sequences_global = int(
+            tu.get(
+                anchor_data,
+                key="comm_eff_update_sequences_global",
+                default=_anchor_sequences_global,
+            )
+        )
+        if _anchor_sequences_global <= 0 or _update_sequences_global <= 0:
+            raise RuntimeError(
+                "comm_eff anchor batch telemetry received a non-positive batch size: "
+                f"anchor={_anchor_sequences_global} update={_update_sequences_global}"
+            )
+        if _anchor_sequences_global > _update_sequences_global:
+            raise RuntimeError(
+                "comm_eff anchor batch exceeds its source rollout batch: "
+                f"anchor={_anchor_sequences_global} update={_update_sequences_global}"
+            )
+        if anchor_batch_scope == "rollout_batch" and _anchor_sequences_global != _update_sequences_global:
+            raise RuntimeError(
+                "comm_eff rollout_batch anchor did not consume the complete update: "
+                f"anchor={_anchor_sequences_global} update={_update_sequences_global}"
+            )
+        _fast_loss_keywords = getattr(loss_function, "keywords", None) or {}
+        _fast_actor_config = _fast_loss_keywords.get("config")
+        _rollout_n = int(getattr(_fast_actor_config, "rollout_n", 1))
+        if _rollout_n < 1:
+            raise RuntimeError(f"comm_eff anchor received invalid actor rollout_n={_rollout_n}")
+        if _anchor_sequences_global % _rollout_n or _update_sequences_global % _rollout_n:
+            raise RuntimeError(
+                "comm_eff anchor batch does not contain an integral number of rollout_n response blocks: "
+                f"anchor_sequences={_anchor_sequences_global} "
+                f"update_sequences={_update_sequences_global} rollout_n={_rollout_n}"
+            )
+        # These are prompt-equivalent row counts (responses / rollout_n), not a
+        # claim that a shuffled PPO mini-batch preserved every prompt group.
+        # rollout_batch contains the complete update and therefore does preserve
+        # all groups regardless of PPO iterator ordering.
+        _anchor_prompt_equivalents_global = _anchor_sequences_global // _rollout_n
+        _update_prompt_equivalents_global = _update_sequences_global // _rollout_n
+
+        def _record_anchor_batch_telemetry(signal_role: str):
+            state.anchor_batch_sequences_global = _anchor_sequences_global
+            state.anchor_update_sequences_global = _update_sequences_global
+            state.anchor_batch_prompt_equivalents_global = _anchor_prompt_equivalents_global
+            state.anchor_update_prompt_equivalents_global = _update_prompt_equivalents_global
+            state.anchor_rollout_n = _rollout_n
+            state.anchor_batch_fraction = _anchor_sequences_global / _update_sequences_global
+            state.anchor_batch_scope_rollout = int(anchor_batch_scope == "rollout_batch")
+            print(
+                f"[comm_eff][anchor-batch] scope={anchor_batch_scope} "
+                f"sequences_global={_anchor_sequences_global} "
+                f"update_sequences_global={_update_sequences_global} "
+                f"prompt_equivalents_global={_anchor_prompt_equivalents_global} "
+                f"update_prompt_equivalents_global={_update_prompt_equivalents_global} "
+                f"rollout_n={_rollout_n} "
+                f"fraction={state.anchor_batch_fraction:.6f} signal={signal_role}",
                 flush=True,
             )
 
@@ -2604,6 +2706,7 @@ class FSDPEngine(BaseEngine):
                 )
             finally:
                 powersgd.clear_family_harvest()
+            _record_anchor_batch_telemetry("Q")
             return
 
         # Relevance diagnostic for this fire: loaded-weights re-score vs the
@@ -2683,8 +2786,11 @@ class FSDPEngine(BaseEngine):
         if spectral is not None:
             deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
-        # anchor_batch_fraction: this implementation consumes the WHOLE batch.
-        state.anchor_batch_fraction = 1.0
+        if do_anchor_q:
+            _signal_role = "Q+M" if spectral is not None else "Q"
+        else:
+            _signal_role = "M"
+        _record_anchor_batch_telemetry(_signal_role)
 
         # geometry probe: at every fire, run the SECOND telemetry
         # backward (G_anc_old = clean PG on the CURRENT batch at the SAME stale
@@ -2709,7 +2815,7 @@ class FSDPEngine(BaseEngine):
             }
             self._comm_eff_geometry_probe_fire_stash(
                 state=state,
-                data=data,
+                data=_current_anchor_batch,
                 loss_function=loss_function,
                 step=step,
                 anchor_grads=_probe_anchor_grads,
