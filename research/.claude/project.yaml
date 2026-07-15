@@ -256,7 +256,7 @@ compression_defaults:                                        # Surface-scoped pr
       data_source: DigitalLearningGmbH/MATH-lighteval
       prompt_template: examples/grpo_trainer/relex_qwen_chat_template.jinja
       training_rollouts: 'temperature=1.0; sampling enabled; n=8'
-      evaluation: '4096-token context; greedy; temperature=0.0'
+      evaluation: 'prompt<=1024 plus response<=3072 (4096 total configured context); greedy; temperature=0.0; this is not the paper evaluator''s 4096 generated-token cap'
       reward: 'last \boxed{} + is_equiv'
       training: 'GRPO; train_batch=512; mini_batch=256; rollout_n=8; prompt=1024; response=3072; lr=0.000001; kl=0.001; steps=100; eval_every=25'
       shared_compressed_substrate: 'PowerSGD rank=77; anchor cadence=20; delay_K=20; anchor owns Q; signed_ema alpha=0.25 beta_anc=0.50; corrected transactional Q staging'
@@ -269,6 +269,10 @@ compression_defaults:                                        # Surface-scoped pr
       w2_rank1:
         run: relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b
         difference: 'rank1_relex; W=2 two-checkpoint all-tensor secant; strength=1.0; q_only warmup; causal projection probe enabled'
+        status: valid_complete
+        final_math: 0.6788715486194478
+        evidence: 'provisional diagnostic winner by step-100 MATH; Q update/broadcast/activation=10/10/10; zero overwrites/disagreement; aggregate causal projection skill positive; final comm ratio=0.0501356; final mismatch KL=8.1250'
+        wandb: https://wandb.ai/shamanework-pl/verl_compression_research/runs/vqe9554z
         eligibility: pre_anchor_kl_fix_diagnostic
       w4_rank1:
         run: relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b
@@ -286,9 +290,11 @@ compression_defaults:                                        # Surface-scoped pr
       qboot_v2_composite:
         run: relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b
         difference: 'qboot-v2 composite; initial fast-Q bootstrap; stale_correct first-fire all_floating M; W2 at global step 20, W3 at 30, sliding W4 from 40; strength=1.0 per-tensor projection; auto/current trajectories on projected fires; causal projection probe enabled'
-        status: active
-        initial_math: 0.44677871148459386
-        initial_evidence: 'fast-Q bootstrap observation/update/activation=1/1/1 before the first real PPO pair; zero bootstrap cross-rank disagreement'
+        status: valid_complete
+        final_math: 0.6684673869547819
+        trajectory: 'step0=0.4467787115; step25=0.6350540216; step50=0.6542617047; step75=0.6746698679; step100=0.6684673870'
+        evidence: 'done.flag at 100/100 and train_rc=0; fast-Q observation/update/activation=1/1/1; anchor Q update/broadcast/activation=10/10/10; zero Q overwrites/disagreement; M=338 tensors; W2/W3/W4 readiness at global 20/30/40; 8 resolved probes, 3 wins, aggregate skill=-0.05797; final comm ratio=0.05013569; final mismatch KL=10.72999'
+        wandb: https://wandb.ai/shamanework-pl/verl_compression_research/runs/v9sfxnaz
         eligibility: pre_anchor_kl_fix_diagnostic
     controls:
       dense:
@@ -306,6 +312,7 @@ compression_defaults:                                        # Surface-scoped pr
       primary: 'Highest observed step-100 MATH-test accuracy among eligible compressed arms.'
       tie_breakers: ['lower rollout-to-train sampled KL', 'lower communication ratio', 'simpler method']
       disclosure: 'Publish the full trajectory, mismatch, communication, Q counters, and projection probes; validity overrides score. A one-seed winner is a benchmark champion, not a statistically established or external SOTA claim.'
+      provisional_diagnostic_winner: 'w2_rank1 at 0.6788715486; leads qboot_v2_composite by 0.0104041617 absolute MATH accuracy; requires one KL-complete rerun before eligibility or promotion'
     selected:
       arm: pending
       run: pending
@@ -318,7 +325,7 @@ compression_defaults:                                        # Surface-scoped pr
     runtime:
       implicit_arm: pending
       neutral_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_comm_eff_default_fsdp.sh
-      pending_rule: 'The pre-anchor-KL W2/W4/control results and active composite remain diagnostics. After the composite finishes, rerun at least the would-be promoted compressed arm with the KL-complete anchor objective and pass every validity gate before selection. Current launcher values are provisional, not a selected default.'
+      pending_rule: 'All pre-anchor-KL W2/W4/qboot results remain diagnostics. W2 won that matrix provisionally and must finish one 100-step rerun with the KL-complete anchor objective before selection. Current launcher values are provisional, not a selected default.'
       promotion_rule: 'After every eligible arm finishes, a bare invocation of a neutral Qwen2.5-Math/MATH comm-eff launcher uses the selected arm; explicit method overrides remain allowed.'
       scope: 'This exact MATH benchmark launcher only; do not change generic actor/Hydra all-off defaults.'
       surfaces_to_update: ['neutral MATH launcher', 'project.yaml selected fields', 'COMM_EFF_CONFIG.md', 'RELEX HTML report', 'draft PR #25']

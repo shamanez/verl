@@ -25,9 +25,11 @@ All knobs are env overrides read by the launcher and forwarded to
 The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
 surface-scoped benchmark from the GSM8K operating baseline below. Its default
 selection is intentionally pending. Corrected W2, corrected strict-readiness
-W4, and the qboot-v2 no-projected-weight-increment control are complete. The
-control was valid but destabilized late (67.31% at step 75 to 61.90% at step
-100); the matched qboot-v2 projection system is now active. The old progressive-W4,
+W4, and both qboot-v2 arms are complete as pre-anchor-KL diagnostics. The
+no-increment control was valid but destabilized late (67.31% at step 75 to
+61.90% at step 100); the matched projection/current-trajectory composite ended
+at 66.85%. Corrected W2 won the diagnostic primary at 67.89%, 1.04 points above
+the composite, and is the provisional arm for one KL-complete validation. The old progressive-W4,
 W2-no-increment, and `fixed_linear` placeholders are superseded/not queued;
 `fixed_linear` remains an optional legacy follow-up. The authoritative
 placeholder and preregistered selection rule live at
@@ -35,7 +37,7 @@ placeholder and preregistered selection rule live at
 
 The current W=4 values in
 `run_qwen25_math_1p5b_rank1_relex_fsdp.sh` are provisional experiment values,
-not a selected champion. After the matrix closes, the best valid compressed arm
+not a selected champion. After the corrected W2 validation closes, the best valid compressed arm
 will be promoted to the neutral
 `run_qwen25_math_1p5b_comm_eff_default_fsdp.sh` launcher so omitting method
 knobs selects it; explicit overrides will remain available. The claim will be

@@ -149,14 +149,14 @@
     <h1>Sliding RELEX two-circuit experiment report</h1>
     <p class="lede">
       A living report for the fast learner, projected delayed anchor, training–inference mismatch,
-      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. Corrected W=2, strict W=4,
-      and the qboot-v2 no-weight-increment control are complete; the matched qboot-v2 composite is live.
+      cadence/delay behavior, and the corrected W=2/W=4 comparison queue. The complete pre-anchor-KL
+      diagnostic matrix selects W=2 as the provisional winner; one KL-complete W=2 validation remains.
     </p>
     <div class="status-row">
-      <span class="pill"><span class="dot"></span> Corrected GPU queue running</span>
-      <span class="pill">Updated 15 July 2026, 05:30 AEST</span>
+      <span class="pill"><span class="dot"></span> KL-complete W=2 validation pending</span>
+      <span class="pill">Updated 15 July 2026, 10:18 AEST</span>
       <span class="pill">Branch <span class="mono">exp/rank1-relax</span></span>
-      <span class="pill">Active training commit <span class="mono">8bad0656</span></span>
+      <span class="pill">KL-complete code commit <span class="mono">30164149</span></span>
     </div>
   </header>
 
@@ -197,24 +197,25 @@
         <article class="card">
           <div class="label">qboot-v2, no weight increment</div>
           <div class="metric warn">61.90%</div>
-          <p>Valid 100/100 control. It peaked at 67.31% at step 75, then destabilized late; the matched composite is now live.</p>
+          <p>Valid 100/100 control. It peaked at 67.31% at step 75, then destabilized late.</p>
           <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/xcu56scj">Open W&amp;B</a>
         </article>
         <article class="card">
-          <div class="label">Active qboot-v2 composite</div>
-          <div class="metric accent">44.68% @ 0</div>
-          <p>Initial evaluation and the one-time fast-Q 1/1/1 transaction passed with zero cross-rank disagreement.</p>
+          <div class="label">qboot-v2 composite</div>
+          <div class="metric good">66.85%</div>
+          <p>Valid 100/100 diagnostic with every Q/M transaction invariant satisfied.</p>
+          <a href="https://wandb.ai/shamanework-pl/verl_compression_research/runs/v9sfxnaz">Open W&amp;B</a>
         </article>
       </div>
       <p class="muted">Measured training times were 4 h 26 min dense, 4 h 47 min corrected W=2, and 5 h 00 min corrected strict W=4. Dense is unaffected by the Q correction and is reused; rerunning it would add no information.</p>
-      <div class="progress" aria-label="Dense control, corrected W2, corrected W4, and qboot-v2 no-weight-increment complete; qboot-v2 composite active"><span style="width: 80%"></span></div>
+      <div class="progress" aria-label="Pre-anchor-KL diagnostic matrix complete; one KL-complete W2 validation remains"><span style="width: 83%"></span></div>
     </section>
 
     <section id="answer">
       <h2>What is the anchor signal helping?</h2>
       <p>
         Corrected W=2, corrected strict W=4, and the dense control are complete. The earlier W=4 result remains a
-        <strong>legacy pre-fix diagnostic</strong>; the qboot-v2 no-weight-increment control is complete and its matched composite is running. Every two-circuit arm uses
+        <strong>legacy pre-fix diagnostic</strong>; both qboot-v2 arms are now complete. Every two-circuit arm uses
         a live fast learner and an isolated delayed anchor. The anchor never optimizer-steps and never reads
         immediate fast weights.
       </p>
@@ -243,7 +244,7 @@
         <article class="card"><div class="label">Full anchor fires</div><div class="metric">9</div><p>Corrected W=2 fired at global steps 20 through 100 after one Q-only fire.</p></article>
         <article class="card"><div class="label">Matrix corrections</div><div class="metric">31,556</div><p>Zero cold-M fallbacks; the corrected path was materially active.</p></article>
       </div>
-      <div class="callout"><strong>Interpretation limit.</strong> The valid qboot-v2 strength-zero control ended at 61.90% after reaching 67.31% at step 75. It isolates zero applied weight extrapolation while retaining Q, all-floating M, signed correction, and stale-paired trajectories; it is not anchor-off or no-sign-correction. The matched composite must finish before attributing the late instability to the missing weight increment, and a separate PowerSGD anchor-off arm would still be required for a causal “anchor helps” claim.</div>
+      <div class="callout"><strong>Interpretation limit.</strong> The valid qboot-v2 strength-zero control ended at 61.90% after reaching 67.31% at step 75; the matched composite ended at 66.85%. This shows that the complete projection/current-trajectory package avoided the control's severe late decline in this seed. It does not isolate weight extrapolation alone because the control also uses stale-paired rather than current trajectories, and neither arm is anchor-off or no-sign-correction. A dedicated factorial control would be required for a causal “projection alone helps” or “anchor helps” claim.</div>
       <div class="callout"><strong>Anchor-objective audit (merge gate).</strong> The locked fast GRPO objective includes a reference-policy KL loss with coefficient 0.001. The runs on the immutable pre-fix commits used that KL in the fast PPO update, but their dense anchor M contained only the ratio-one advantage-policy gradient. The implementation now retains the same configured KL term in the uncompressed anchor backward while still excluding compressed-policy old log-probabilities and PPO clipping. Existing runs remain valid diagnostics of the advantage-only anchor proxy, but none can validate or promote the KL-complete implementation; at least the eventual default candidate must be rerun before this PR is ready.</div>
     </section>
 
@@ -265,6 +266,7 @@
             <tr><td>Corrected W=2 secant, α=1</td><td class="right bad">0.69027</td><td class="right bad">0.13979</td><td class="right bad">8.1250</td><td class="right good">67.89%</td></tr>
             <tr><td>Corrected strict W=4 rank-1, α=1</td><td class="right bad">0.74378</td><td class="right bad">0.10813</td><td class="right bad">12.1203</td><td class="right">66.91%</td></tr>
             <tr><td>qboot-v2, no projected weight increment</td><td class="right bad">0.80726</td><td class="right bad">0.10653</td><td class="right bad">13.7708</td><td class="right warn">61.90%</td></tr>
+            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right bad">0.73836</td><td class="right bad">0.13963</td><td class="right bad">10.7300</td><td class="right">66.85%</td></tr>
             <tr><td>Legacy W=4, pre-Q fix</td><td class="right bad">0.73544</td><td class="right bad">0.13981</td><td class="right bad">8.2676</td><td class="right">65.37%</td></tr>
             <tr><td>Aborted W=2 diagnostic</td><td class="right warn">≈0.815</td><td class="right warn">≈0.036</td><td class="right warn">≈12.38</td><td class="right muted">Preserved, not comparable</td></tr>
           </tbody>
@@ -411,6 +413,14 @@
         correctly and had sampled causal predictive value, but its advantage was materially smaller and less
         uniform than W=2's in this single run.
       </p>
+      <p>
+        The qboot-v2 composite resolved eight horizons and won three. Its mean projected RMSE was
+        <strong>1.2485e−5</strong> versus stale RMSE <strong>1.2246e−5</strong>, mean skill was
+        <strong>−0.0580</strong>, and mean direction cosine was <strong>0.3982</strong>. All 338 tensors were
+        projected and transaction invariants passed, so this is evidence that the mechanism ran—not that the
+        W2→W3→W4 predictor beat the newest exact checkpoint on the sampled coordinates. One terminal prediction
+        correctly remains pending because its delayed exact target would arrive at global step 110.
+      </p>
       <div class="callout"><strong>Scope.</strong> Every full tensor is projected independently, while the causal score observes only four tensors and 16 deterministic coordinates per tensor per horizon. W=2's two-checkpoint secant is algebraically exact on its one delta; strict W=4 supplies the non-trivial rank-1 OLS comparison. One final W=4 prediction remains pending because its matching future checkpoint lies beyond step 100.</div>
     </section>
 
@@ -425,17 +435,17 @@
             <tr><td>Corrected W=2 secant, α=1</td><td class="right">44.56%</td><td class="right">60.86%</td><td class="right">65.07%</td><td class="right">66.99%</td><td class="right good">67.89%</td><td class="good">Complete</td></tr>
             <tr><td>Corrected W=4 rank-1, α=1</td><td class="right">44.64%</td><td class="right">48.04%</td><td class="right">63.61%</td><td class="right">65.79%</td><td class="right">66.91%</td><td class="good">Complete</td></tr>
             <tr><td>qboot-v2, no projected weight increment</td><td class="right">44.60%</td><td class="right">63.69%</td><td class="right">65.91%</td><td class="right good">67.31%</td><td class="right warn">61.90%</td><td class="good">Valid; late instability</td></tr>
-            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right">44.68%</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="accent">Running; fast-Q gate passed</td></tr>
+            <tr><td>qboot-v2 composite W2→W3→W4</td><td class="right">44.68%</td><td class="right">63.51%</td><td class="right">65.43%</td><td class="right good">67.47%</td><td class="right">66.85%</td><td class="good">Valid pre-anchor-KL diagnostic</td></tr>
             <tr><td>Legacy decoder-only fixed-linear</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td class="right muted">—</td><td>Optional; not queued</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run. Corrected strict W=4 finished 0.50 points below dense and 0.98 points below corrected W=2. The valid qboot-v2 control tracked dense through step 75, then fell 5.40 points to 61.90% by step 100. Its final grad norm was 67.07, PowerSGD reconstruction error 0.534, and rollout→train KL 13.77. Q update/broadcast/activation was 10/10/10 with zero overwrites or cross-rank disagreement, all 338 M targets were active, and every zero-strength probe returned projected RMSE exactly equal to stale RMSE. The late collapse is therefore a measured optimization outcome, not evidence that a projected increment accidentally leaked into the control. These are single-seed differences; causal attribution to weight projection waits for the matched composite.</p>
+      <p class="muted">Corrected W=2 finished 0.48 points above the single dense run and 1.04 points above the qboot-v2 composite, so it wins the registered diagnostic primary without invoking tie-breakers. The qboot-v2 control tracked dense through step 75, then fell 5.40 points to 61.90% by step 100; the composite fell only 0.62 points from its step-75 peak and ended at 66.85%. Both qboot-v2 arms passed Q/M transaction and tensor-coverage invariants. The zero-strength probes were bit-identical to the newest exact checkpoint, while the composite's nonzero probes had negative mean skill. This supports the full projection/current-trajectory package over the control in this seed, but does not isolate projection from trajectory-source differences. All these arms used the pre-anchor-KL objective and remain diagnostics only.</p>
     </section>
 
     <section id="default-selection">
       <h2>Compression default and exact arm differences</h2>
-      <div class="callout"><strong>Placeholder—no eligible winner yet.</strong> Pre-anchor-KL W=2 currently leads the completed diagnostic arms. Promotion waits for the active matched composite to finish as a diagnostic and for at least the would-be winner to be rerun with the KL-complete anchor objective.</div>
+      <div class="callout"><strong>Placeholder—no eligible winner yet.</strong> Pre-anchor-KL W=2 won the completed diagnostic matrix at 67.89%, 1.04 points above the qboot-v2 composite. It is therefore the provisional arm for the single KL-complete validation. Promotion still waits for that corrected run to reach a valid 100/100 completion.</div>
       <p>Every compressed arm uses the same Qwen2.5-Math/MATH protocol, PowerSGD rank 77, cadence/delay 20/20, anchor-owned Q, signed-EMA gradient correction, and the corrected post-PPO Q activation transaction. The qstagefix-v1 W2/W4 arms use Q-only warmup and M on 196 decoder matrices. Both qboot-v2 arms add the same one-time dense fast-Q bootstrap, first-fire stale-correct M, progressive W2/W3/W4 readiness, and all-floating M; their applied weight increment and trajectory source differ as disclosed below.</p>
       <p class="muted">On this model, all-floating M covers 338 unique tensors (196 decoder weights, 84 q/k/v biases, 57 norms, and one tied embedding/LM-head tensor). The fp32 CPU EMA occupies 5.751 GiB per rank, 0.870 GiB more than the 196-target path; the added tensors also contribute about 0.87 GiB of logical fp32 payload to each anchor-gradient reduction and M broadcast. Both qboot-v2 arms disable per-target diagnostics while retaining coverage, consensus, and correction counters.</p>
       <div class="table-wrap">
@@ -446,7 +456,7 @@
             <tr><td>Corrected W=2 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w2_alltensor_secant_alpha1_math_qwen25_math_1p5b</span></td><td>Two-checkpoint per-tensor secant across all floating model tensors; strength 1.0</td><td>One Q-only fire; decoder-matrix M ready at optimizer tick 40/global step 20</td><td>Anchor owns Q and supplies dense M to 196 decoder matrices; causal sampled-weight probe enabled</td><td>Pre-anchor-KL diagnostic; requires corrected validation before promotion</td></tr>
             <tr><td>Corrected W=4 α=1<br><span class="mono">relex_cmp_qstagefix_v1_w4_alltensor_rank1_alpha1_math_qwen25_math_1p5b</span></td><td>Rank-1 OLS over three checkpoint deltas, independently across all floating model tensors; strength 1.0</td><td>Three Q-only fires; decoder-matrix M ready at tick 80/global step 40</td><td>Anchor owns Q and supplies dense M to 196 decoder matrices; causal sampled-weight probe enabled</td><td>RELEX-style adaptation diagnostic; requires corrected validation before promotion</td></tr>
             <tr><td>qboot-v2 no increment<br><span class="mono">relex_cmp_qboot_v2_w4min2_allfloatm_alpha0_stalepaired_math_qwen25_math_1p5b</span></td><td>W2/W3/W4 projector runs for telemetry; strength 0.0 means applied weights stay at the newest exact checkpoint</td><td>Fast-Q bootstrap at step 1 after rollouts but before PPO; first all-floating M at global step 10; W2/W3/W4 readiness at 20/30/40; stale-paired trajectories</td><td>Anchor owns Q; every unique floating gradient-bearing parameter receives M; causal probe enabled</td><td>Pre-anchor-KL two-circuit control diagnostic; not anchor-off</td></tr>
-            <tr><td>qboot-v2 composite<br><span class="mono">relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b</span></td><td>W2 secant, W3/W4 rank-1 OLS per floating tensor; strength 1.0</td><td>Same fast-Q bootstrap, first-fire all-floating M, and 20/30/40 readiness; current trajectories on projected fires</td><td>Anchor owns Q; every unique floating gradient-bearing parameter receives M; causal probe enabled</td><td>Active pre-anchor-KL composite diagnostic; corrected validation required</td></tr>
+            <tr><td>qboot-v2 composite<br><span class="mono">relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b</span></td><td>W2 secant, W3/W4 rank-1 OLS per floating tensor; strength 1.0</td><td>Same fast-Q bootstrap, first-fire all-floating M, and 20/30/40 readiness; current trajectories on projected fires</td><td>Anchor owns Q; every unique floating gradient-bearing parameter receives M; causal probe enabled</td><td>Complete pre-anchor-KL diagnostic; 66.85%, corrected validation still required</td></tr>
             <tr><td>Legacy fixed-linear<br><span class="mono">relex_cmp_qstagefix_v1_fixed_linear_decoder_alpha1_math_qwen25_math_1p5b</span></td><td>Legacy two-source fixed-linear extrapolation; strength 1.0</td><td>Stale-correct warmup; decoder matrices only, other parameters stay at the newest stale checkpoint</td><td>Anchor-owned Q and dense M correction; rank-1 causal probe disabled</td><td>Optional legacy comparator; not queued and not eligible unless completed later</td></tr>
           </tbody>
         </table>
@@ -464,7 +474,7 @@
       <h2>Fixed experimental surface</h2>
       <div class="grid">
         <article class="card"><h3>Model and data</h3><p>Qwen/Qwen2.5-Math-1.5B<br>MATH train / MATH test<br>last <span class="mono">\boxed{}</span> + <span class="mono">is_equiv</span></p></article>
-        <article class="card"><h3>Generation</h3><p>1024 prompt + 3072 response<br>4096-token greedy evaluation<br>rollout group size 8</p></article>
+        <article class="card"><h3>Generation</h3><p>1024 prompt + 3072 response<br>4096 total configured context<br>rollout group size 8</p></article>
         <article class="card"><h3>Optimization</h3><p>GRPO mini-batch 256<br>learning rate 1e-6<br>KL coefficient 0.001</p></article>
         <article class="card"><h3>Reproducibility</h3><p>100 training steps<br>evaluation every 25<br>2× NVIDIA H200</p></article>
       </div>
@@ -472,13 +482,14 @@
         Training and evaluation use the same Qwen chat-template framing as the RELEX evaluator: helpful-assistant
         system text, the MATH problem in the user turn, the instruction to reason step by step and place the final
         answer in <span class="mono">\boxed{}</span>, followed by the assistant prefix. Generation settings differ
-        only where the protocol requires them (training rollouts versus 4096-token greedy evaluation).
+        only where the protocol requires them. Evaluation is greedy with a maximum 3072 generated tokens; the
+        configured prompt-plus-response budget is 4096, unlike the paper evaluator's 4096 generated-token cap.
       </p>
       <p>
         Code and discussion live in <a href="https://github.com/shamanez/verl/pull/25">draft PR #25</a>.
         The preregistered post-W4 order and exact overrides live in the
         <a href="../../examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh">qboot-v2 matrix launcher</a>.
-        The report remains provisional until all queued runs, causal weight samples, and mismatch summaries are complete.
+        The report remains provisional until the KL-complete W=2 validation and default-promotion audit are complete.
       </p>
     </section>
   </main>
