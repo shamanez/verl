@@ -20,29 +20,64 @@ vLLM policy. The Hydra dataclass defaults remain all-off, so
 All knobs are env overrides read by the launcher and forwarded to
 `actor_rollout_ref.actor.comm_eff.*`.
 
-## Qwen2.5-Math/MATH compression default (pending)
+## Qwen2.5-Math/MATH compression default (not selected)
 
 The exact `Qwen/Qwen2.5-Math-1.5B` + MATH train/test comparison is a separate,
-surface-scoped benchmark from the GSM8K operating baseline below. Its default
-selection is intentionally pending. Corrected W2, corrected strict-readiness
-W4, and both qboot-v2 arms are complete as pre-anchor-KL diagnostics. The
-no-increment control was valid but destabilized late (67.31% at step 75 to
-61.90% at step 100); the matched projection/current-trajectory composite ended
-at 66.85%. Corrected W2 won the diagnostic primary at 67.89%, 1.04 points above
-the composite, and is the provisional arm for one KL-complete validation. The old progressive-W4,
-W2-no-increment, and `fixed_linear` placeholders are superseded/not queued;
-`fixed_linear` remains an optional legacy follow-up. The authoritative
-placeholder and preregistered selection rule live at
-`research/.claude/project.yaml` → `compression_defaults.math_qwen25_math_1p5b`.
+surface-scoped benchmark from the GSM8K operating baseline below. Corrected W2,
+corrected strict-readiness W4, and both qboot-v2 arms are complete as
+pre-anchor-KL diagnostics. The no-increment control was valid but destabilized
+late (67.31% at step 75 to 61.90% at step 100); the matched
+projection/current-trajectory composite ended at 66.85%. Corrected W2 won the
+diagnostic primary at 67.89%, 1.04 points above the composite.
 
-The current W=4 values in
-`run_qwen25_math_1p5b_rank1_relex_fsdp.sh` are provisional experiment values,
-not a selected champion. After the corrected W2 validation closes, the best valid compressed arm
-will be promoted to the neutral
-`run_qwen25_math_1p5b_comm_eff_default_fsdp.sh` launcher so omitting method
-knobs selects it; explicit overrides will remain available. The claim will be
-“best observed on the locked single-seed matrix,” not literature/global SOTA
-without broader replication and comparison.
+The objective-parity-complete W2 validation was stopped by the operator at
+global step 12, after its first transactional Q-only fire but before the first
+dense anchor backward at global step 20. It therefore supplies no GPU evidence
+for the corrected M path. No neutral implicit-default launcher is created by
+this experiment handoff. The generic Hydra switch remains all-off, and a future
+promotion requires a completed objective-parity validation plus broader
+replication. The evidence supports continued investigation of the combined
+projection/current-trajectory package, not a causal claim for projection alone
+or a literature/global SOTA claim. The old progressive-W4, W2-no-increment, and
+`fixed_linear` placeholders are superseded/not queued; `fixed_linear` remains an
+optional legacy follow-up.
+
+### Operator knobs and the v9sfxnaz reference run
+
+Treat these controls as a coupled experimental contract:
+
+| Question | Knob / invariant | Operational caution |
+|---|---|---|
+| How many prompts feed Q and M? | `COMM_EFF_ANCHOR_BATCH_SCOPE=ppo_minibatch` selects 256 prompts/2,048 responses on this surface; `rollout_batch` selects all 512 prompts/4,096 responses. | This is a shared Q+M scope. Full scope roughly doubles anchor compute/replay payload and is not yet GPU-validated. |
+| Does anchor M match the fast objective? | Fast and anchor must share policy-loss mode, rollout weights, entropy, reference-KL type/coefficient, response mask, and aggregation. | The anchor intentionally uses ratio one and no PPO clipping. Unsupported or missing objective inputs fail closed. Never change fast KL without verifying the resolved anchor contract and `parity=PASS`. |
+| When does projection become ready? | `COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS=W`; `COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS=-1` is strict readiness, while `2` is progressive. | W=2 is a per-tensor secant. W>=3 uses rank-1 OLS. Window size does not change `cadence` or `delay_K`; record all three. |
+| How far is the anchor behind? | `COMM_EFF_ANCHOR_CADENCE` and `COMM_EFF_ANCHOR_DELAY_K`, expressed in optimizer ticks. | With two optimizer ticks per trainer step, the locked 20/20 values fire every 10 global steps. Do not describe them as 20 trainer steps. |
+
+The completed [W&B `v9sfxnaz`](https://wandb.ai/shamanework-pl/verl_compression_research/runs/v9sfxnaz)
+reference used commit `8bad0656`, 2x H200 NVL,
+`Qwen/Qwen2.5-Math-1.5B`, MATH train/test, train batch 512, PPO mini-batch
+256, micro-batch 1/GPU with dynamic batching, `shuffle=false`, rollout `n=8`,
+prompt/response 1024/3072, train temperature 1, greedy validation, AdamW
+`lr=1e-6`, weight decay 0.01, gradient clip 1, 100 steps, and validation at
+0/25/50/75/100. Its fast objective used GRPO reference KL
+(`low_var_kl`, coefficient 0.001), no reward-side KL, and entropy coefficient 0.
+
+Its communication path used PowerSGD rank 77 with synchronized warm-started
+activation Q, one-time fast-Q bootstrap, anchor cadence/delay 20/20, paired CPU
+replay, `stale_correct`, progressive W2/W3/W4 readiness (`window=4`,
+`min_snapshots=2`), strength 1, auto/current trajectories, and all-floating
+signed-EMA M over 338 tensors (`alpha=0.25`, `beta_anc=0.5`). Because the
+explicit batch-scope knob did not yet exist, its effective anchor scope was one
+256-prompt PPO mini-batch; its legacy `anchor_batch_fraction=1` did not mean all
+512 prompts.
+
+The run scored 44.678/63.505/65.426/67.467/66.847% at steps
+0/25/50/75/100, with communication ratio 0.05013569, final sampled mismatch KL
+10.73, and aggregate projection-probe skill -0.058 (3/8 wins). Its Q and M
+transaction counters were valid. However, the fast PPO included reference KL
+while dense anchor M omitted it on that historical commit. `v9sfxnaz` is
+therefore a useful pre-anchor-KL diagnostic, never evidence that the current
+objective-parity implementation is GPU-validated.
 
 ## Current baseline (the problem state)
 

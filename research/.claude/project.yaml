@@ -248,7 +248,7 @@ fixed_control_surface:                                        # LOCKED training 
 
 compression_defaults:                                        # Surface-scoped promoted defaults; do not replace the global GSM8K baseline or generic Hydra all-off compatibility.
   math_qwen25_math_1p5b:
-    status: pending_results                                   # pending_results | selected | no_eligible_champion
+    status: no_eligible_champion                              # pending_results | selected | no_eligible_champion
     claim_scope: 'Best observed compressed arm on this exact controlled matrix; not literature/global SOTA while the evidence is single-seed and internal.'
     protocol:
       model: Qwen/Qwen2.5-Math-1.5B
@@ -318,19 +318,20 @@ compression_defaults:                                        # Surface-scoped pr
       tie_breakers: ['lower rollout-to-train sampled KL', 'lower communication ratio', 'simpler method']
       disclosure: 'Publish the full trajectory, mismatch, communication, Q counters, and projection probes; validity overrides score. A one-seed winner is a benchmark champion, not a statistically established or external SOTA claim.'
       provisional_diagnostic_winner: 'w2_rank1 at 0.6788715486; leads qboot_v2_composite by 0.0104041617 absolute MATH accuracy; requires one KL-complete rerun before eligibility or promotion'
+      kl_complete_validation_disposition: 'The W2 rerun from commit 30164149 was intentionally stopped by the operator at global step 12. Its global-step-10 Q-only transaction passed with Q update/broadcast/activation=1/1/1, zero overwrites/disagreement, and post-update_actor activation. It stopped before the first dense objective-parity anchor backward at global step 20, so it is incomplete and supplies no GPU validation of corrected M.'
     selected:
-      arm: pending
-      run: pending
-      final_math: pending
-      delta_vs_dense: pending
-      communication_ratio: pending
-      mismatch: pending
-      wandb: pending
-      evidence_commit: pending
+      arm: null
+      run: null
+      final_math: null
+      delta_vs_dense: null
+      communication_ratio: null
+      mismatch: null
+      wandb: null
+      evidence_commit: null
     runtime:
-      implicit_arm: pending
-      neutral_launcher: examples/grpo_trainer/run_qwen25_math_1p5b_comm_eff_default_fsdp.sh
-      pending_rule: 'All pre-anchor-KL W2/W4/qboot results remain diagnostics. W2 won that matrix provisionally and must finish one 100-step rerun with the KL-complete anchor objective before selection. Current launcher values are provisional, not a selected default.'
+      implicit_arm: null
+      neutral_launcher: null
+      pending_rule: 'All completed W2/W4/qboot results remain pre-anchor-KL diagnostics. The only KL-complete W2 attempt stopped at global step 12 before its first dense anchor backward. No compressed arm is eligible, no neutral implicit default is created, and current launcher values remain explicit experimental settings.'
       promotion_rule: 'After every eligible arm finishes, a bare invocation of a neutral Qwen2.5-Math/MATH comm-eff launcher uses the selected arm; explicit method overrides remain allowed.'
       scope: 'This exact MATH benchmark launcher only; do not change generic actor/Hydra all-off defaults.'
       surfaces_to_update: ['neutral MATH launcher', 'project.yaml selected fields', 'COMM_EFF_CONFIG.md', 'RELEX HTML report', 'draft PR #25']
