@@ -70,7 +70,7 @@ close comment + the published report page (project.yaml `reports:`).
 
 | id | date | verdict | headline | issue | PR |
 |---|---|---|---|---|---|
-| baseline | — | reference | Dense GRPO, Qwen2.5-1.5B-Instruct on GSM8K — verl unmodified (the permanent control) | — | — |
+| baseline | — | reference | Dense GRPO, Qwen/Qwen2.5-Math-1.5B on MATH train/test — comm-eff off | — | — |
 HDR
 fi
 

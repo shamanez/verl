@@ -1,6 +1,6 @@
 ---
 name: vast-provision
-description: Provision the cheapest vast.ai instance(s) matching a compute requirement, wait for SSH-routable state, write a handle JSON the experiment-runner consumes, and emit a one-line summary. Companion to vast-teardown.
+description: Provision the cheapest vast.ai instance(s) matching a compute requirement, wait for SSH-routable state, write a handle JSON the experiment-runner consumes, and emit a one-line summary. Also registers an already-running bring-your-own box (attach mode, sibling `vast-attach/run.sh`). Companion to vast-teardown.
 allowed-tools: Bash
 ---
 
@@ -142,6 +142,43 @@ Downstream parses `grep '^VAST_HANDLE: '` + `jq` — keep prefixes verbatim.
   poll → destroy + advance, instead of blocking the full timeout.
 - `--cancel-unavail` on every create — the scheduler can never leave a stopped-but-billing
   orphan; and `VAST_API_KEY` (or any laptop env) is never forwarded onto the instance.
+
+## Attach mode — bring-your-own-box (sibling `vast-attach/run.sh`)
+
+Instead of creating a box, register one you already have (skip the ~1–3 min
+provision + ~5–8 min warm-up). Same end state as provisioning: an SSH-probed box
+with a provision-schema handle + a ledger row, secrets seeded via
+`_seed_secrets.sh` (HF + WandB + R2 only; Vast keys withheld). Reached through
+`/launch --attach` / `/execute --attach`, and called directly by the
+experiment-runner; the engine is `vast-attach/run.sh` (was its own skill until the
+2026-07-15 fold — same script, no longer a separate skill entry).
+
+```bash
+# Harness-driven training run on your own box (reaped like any provisioned box):
+bash .claude/skills/vast-attach/run.sh --exp-id 63-anchor-ema-sweep --instance-id 41680420 --account team
+
+# From a raw SSH login string (host/port/key parsed; Vast id reverse-resolved for teardown):
+bash .claude/skills/vast-attach/run.sh --exp-id 64-middle-block-freeze --issue 64 \
+  --ssh-login "ssh -i ~/.ssh/vast_ai -p 15338 root@ssh8.vast.ai"
+
+# Operator-managed analysis/download box (NEVER auto-reaped — you own teardown):
+bash .claude/skills/vast-attach/run.sh --instance-id 41680420 --manual
+```
+
+Key flags: `--instance-id` (or `--ssh-login`), `--exp-id <N>-<slug>`,
+`--account team|private`, `--ssh-identity <key>`, `--manual` (EXTERNAL, never
+reaped), `--need-r2` (R2 write preflight), `--no-probe`, `--no-register`. Full
+flag table, secret-seeding, and synthetic-id details live in the header of
+`vast-attach/run.sh`.
+
+**Lifecycle:** default → `status:RUNNING external:true` (all reaper triggers
+apply; `--max-gpu-hr` cap, default 24). `--manual` → `status:EXTERNAL` (the reaper
+never touches it; the burn/leak check still counts it as tracked; you run
+`vast-teardown` when done). On env-failure the harness tears an attached box down
+but never auto-provisions a replacement (you hand-picked it). `--ssh-login` with an
+unresolvable Vast id gets a synthetic `ATTACH-<host>-<port>` id and **auto-teardown
+disabled** (reaper + `vast-teardown` skip non-numeric ids) — re-attach with the
+numeric `--instance-id` to restore it.
 
 ## Not this skill's job
 

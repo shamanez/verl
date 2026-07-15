@@ -1,122 +1,125 @@
-# Project north-star — the big goal
+# Project north-star — communication-efficient GRPO
 
-> The single authoritative statement of what this project is trying to achieve
-> and what "done" means. Every plan, verdict, and PR is checked against it.
-> Agents may read it freely; the operator keeps it current.
+> The authoritative statement of what this project is trying to achieve and what
+> “done” means. Agents may read it freely; the operator keeps it current.
 
 ## The goal
 
-**A communication-efficient, pipeline-parallel verl GRPO trainer.**
+Build a communication-efficient, pipeline-parallel verl GRPO trainer on the
+current fixed surface:
 
-Train Qwen2.5-1.5B-Instruct on GSM8K where the **training** path (the
-forward/backward activation + gradient traffic across pipeline-parallel stage
-boundaries) runs under a communication-efficient method: per-element (per-token,
-per-dimension) activation masking at the stage boundaries, with optional anchor +
-spectral correction. Communication
-efficiency is about the **inter-stage traffic during training** — **rollouts
-(generation) may come from ordinary, non-pipeline-parallel verl + vLLM**, that
-is fine and out of scope for compression.
+- **Model** — `Qwen/Qwen2.5-Math-1.5B`.
+- **Data** — native MATH train/test from `EleutherAI/hendrycks_math`, with
+  `DigitalLearningGmbH/MATH-lighteval` reward routing (last `\boxed{}` answer plus
+  `is_equiv`).
+- **Training traffic** — project activations at logical pipeline boundaries and
+  use a delayed dense anchor to stabilize the fast compressed circuit. Rollout
+  generation may remain ordinary non-pipeline-parallel verl + vLLM.
 
-With the method switched off, training is byte-identical to unmodified verl.
+With communication efficiency disabled, the actor path remains the dense verl
+control.
 
-## "Done" means
+## “Done” means
 
-1. **Stable** — the method ENABLED trains end-to-end with no grad_norm
-   explosion, NaN, or divergence.
-2. **Parity** — final GSM8K reward/accuracy ≥ the dense control (= method OFF),
-   within noise.
-3. **Savings** — inter-stage communication volume is measured and is materially
-   lower than dense, reported as a concrete number.
-4. **Reproducible** — one canonical launcher under `examples/grpo_trainer/`
-   reproduces it.
+1. **Stable** — the enabled method trains end to end without NaN, divergence, or
+   transaction-integrity failures.
+2. **Parity** — final MATH-test accuracy matches the dense control within noise on
+   the exact fixed surface.
+3. **Savings** — inter-stage communication is measured and materially below
+   dense, with the ratio reported.
+4. **Objective-correct** — the dense anchor differentiates the same resolved actor
+   objective as the fast circuit under its declared ratio-one surrogate.
+5. **Reproducible** — a single-arm launcher reproduces the selected method; no arm
+   is promoted from incomplete or diagnostic-only evidence.
 
-## Where we are
+## Current default answer/reference surface
 
-The comm-eff base is **settled and realistic**: the **anchor circuit on a PowerSGD
-codec**. The full result + why + what's next live in `research/runs/SUMMARY.md`
-(the single source of truth — not restated here). In brief:
+When asked for “the default setting,” answer from this surface rather than the
+historical Qwen-Instruct/GSM8K proof runs:
 
-- **Dense control (method OFF)** — proven, byte-identical to verl; the bar to match.
-- **Settled substrate** — PowerSGD r=77 + a mandatory **anchor**: a
-  continuously-maintained, stale, full-coverage, DP-reduced gradient `M` that is
-  **the only thing that updates the projection basis `Q`** (`anchor.owns_q`; the
-  fast compressed circuit is a read-only `Q` consumer). This **replaces** the old
-  unrealistic `clean_cadence` periodic-dense-step. The substrate is mechanically
-  **proven by the paired-replay path**. Judge on **val/score, not grad_norm**. Do
-  not relitigate the substrate.
-- **The merger is the EMA family** — `signed_ema` (α=0.25, β_anc=0.50). At LOW
-  anchor latency (cadence/delay_K = 5/5) the comm-eff run reaches **parity with
-  dense at ~5% gradient-comm cost** ⇒ Goals 1–3 (stable / parity / savings) are
-  met at low latency. Goal 4 (one canonical launcher) is open.
-- **The baseline is the PROBLEM STATE.** It runs at HIGH anchor latency
-  (cadence/delay_K = 20/20), where the method **collapses** (the k-collapse). That
-  is intentional: the baseline sits in the regime the two priorities must fix.
-- **Async-realism constraint (drives the levers)** — the real target is a single
-  **SLOW** anchor node serving a fast **SWARM** over the network ⇒ the anchor is
-  **always lagging, never leads**. Admissible levers use it as a *lagging*
-  reference, tolerate **variable staleness**, and stay **cross-rank-identical**.
-  (⇒ no delay-compensation / anchor-lead.) The **two-circuit** structure is
-  mandatory — it is the practical-future-use point.
+- GRPO train batch 512, PPO mini-batch 256, rollout `n=8`, dynamic micro-batch
+  1/GPU, actor shuffle off, prompt/response 1024/3072.
+- AdamW learning rate `1e-6`, weight decay `0.01`, gradient clip `1`, one PPO
+  epoch, token-mean loss aggregation.
+- Actor reference KL enabled (`low_var_kl`, coefficient `0.001`); reward-side KL
+  off; entropy coefficient `0`.
+- 100 trainer steps; greedy validation at 0/25/50/75/100; the completed reference
+  ran on 2×H200 NVL.
 
-### Current priorities (2026-06-25) — the only things in active scope
+The exact machine-readable values and evidence gate are in
+`.claude/project.yaml` under `compression_defaults.math_qwen25_math_1p5b`.
 
-The base is a working comm-eff trainer at parity; the two open fronts are both about the
-**anchor ↔ fast-circuit coupling**:
+## Communication-efficient method
 
-1. **Solve the anchor-staleness failure at high latency** (milestone M4). At high anchor
-   latency the method loses parity with dense (the observed "k-collapse"). *Why* the stale
-   anchor degrades the update, and *what* restores parity, are open questions to settle
-   empirically — this north-star does **not** prescribe a mechanism or a fix. Weight projection
-   is the current candidate direction under investigation, gated by a GPU-free offline test on
-   the shared dense weight trajectory before any GPU commitment. Summary published on the
-   cloud-fare site (`github.com/shamanez/cloud-fare`): `anchor-delay/`.
-2. **Reduce the compression-induced train–inference mismatch** (milestone M6). The codec's
-   forward-pass distortion ("Gap A") is a bounded ~0.04 tax GRPO absorbs; shrink it (the truncated-IS
-   corrector is available but unused). Summary published on the cloud-fare site
-   (`github.com/shamanez/cloud-fare`): `train-inference-mis-match/`.
+### Activation projection
 
-**Basic setup / operating base for both:** the **EMA merger** — `signed_ema` (α=0.25, β_anc=0.50) —
-on the **fast 1K surface** (resp 1024, dynamic-bsz, rollout TP=1, gpu_mem 0.55, 50 steps) at HIGH
-anchor latency (cadence/delay_K = 20/20, the k-collapse regime), on the locked PowerSGD r=77 anchor
-substrate. Exact values: `examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh` (the launcher is the authoritative value sheet; the old `runs/FIXED_CONTROL_SURFACE.md` was pruned).
+Boundary activation matrices are projected with PowerSGD rank 77 using an
+activation-derived basis `Q`: conceptually `X_hat = (X Q) Q^T`. The basis is
+synchronized across data-parallel ranks and warm-started. On Qwen2.5-Math-1.5B
+(`hidden_size=1536`), rank 77 is a 77/1536 = 5.013% sketch; the completed
+reference measured communication ratio `0.05013569`.
 
-## Why the anchor (the motivating logic)
+The anchor owns `Q`. The fast circuit is a read-only consumer, so it cannot drift
+the basis independently. qboot-v2 installs one consensus fast-Q observation
+before the first compressed old/current-policy pair.
 
-A compressed/masked gradient is **biased + noisy**; the decisive earlier finding was
-that **periodically passing a full dense gradient re-anchors training and recovers
-dense-comparable results** — so the signal is recoverable, not lost. But a periodic
-full-rank clean step is **not communication-efficient** (full-H transfer) and, on a
-real decentralized-PP link, would itself be stale. The anchor circuit is the realistic
-realization of that idea: a **low-frequency, stale, full-gradient reference**
-maintained continuously and folded into the fast compressed gradient — and it also
-owns the projection basis `Q`. The operating merger is the EMA-family `signed_ema`.
-The open questions are now the **two priorities above**: correcting for the stale
-anchor to restore parity at high latency, and reducing the compression-induced mismatch.
-See `SUMMARY.md`.
+### Anchor signal
 
-## Why code changes are in scope
+The anchor performs paired dense replay on a delayed exact checkpoint and builds
+the full, DP-reduced gradient signal `M`. It runs at cadence/delay 20/20 optimizer
+ticks; with two optimizer ticks per trainer step, an anchor transaction occurs
+every 10 global steps. The reference scope is one 256-prompt PPO mini-batch
+(2,048 response sequences at `n=8`). Replay state and signed-EMA state live on
+CPU.
 
-The method lives **in the verl source of this fork** (mask / anchor / spectral /
-FSDP integration — see `CODE_WALKTHROUGH.md`). Reaching a stable run requires
-patching that source, so code-change experiments on `exp/<N>-<slug>` branches
-are expected; diagnostic-only issues stay `code_change:false`.
+`M` both refreshes anchor-owned `Q` and corrects the fast gradient through
+`signed_ema` (`alpha=0.25`, `beta_anc=0.50`). qboot-v2 uses `all_floating`
+coverage: 338 unique tensors, diagnostics off, `max_targets=-1`.
 
-## Fixed control variables (do not change without separate justification)
+The anchor objective uses a ratio-one, unclipped advantage policy gradient while
+matching the fast actor’s advantages, masks, normalization, rollout weights,
+entropy term, and reference-KL type/coefficient. Compressed-policy
+`old_log_probs`, PPO ratio, and PPO clipping are the intentional exceptions;
+unsupported or missing terms fail closed.
 
-- **Model** — Qwen2.5-1.5B-Instruct.
-- **RL loss** — vanilla GRPO (not DAPO / GSPO), no-KL no-entropy.
-- **Dataset** — EASY = GSM8K (the default); HARD = Big-Math
-  (`gshasiri/Big-Math-RL-Verified-filtered`) at `MAX_RESPONSE_LENGTH=4096`.
-  Registry: `.claude/project.yaml` `datasets:`.
-- **Hardware** — default 1×H200 (ladder 1×H200 → 1×B200 → 2×H200, machine
-  reliability >0.99) on Vast.ai via the locked `verl-research-vllm020`
-  template; 1–8 GPUs supported. See `.claude/project.yaml` `default_compute`.
+### RELEX weight projection
+
+RELEX is separate from activation projection: it forecasts the delayed anchor’s
+weights per tensor. The latest completed qboot-v2 composite retains four exact
+checkpoints with `min_snapshots=2`, applies a W2 secant at step 20, W3 rank-1 fit
+at step 30, and sliding W4 rank-1 OLS from step 40. It uses strength 1,
+`stale_correct` first-fire behavior, and current trajectories on projected fires.
+
+## Scientific status
+
+The qboot-v2 composite (`v9sfxnaz`, commit `8bad0656`) is the **latest completed
+reference**, ending at 66.85% MATH with ~5.01% communication. It predates the
+anchor-KL objective-parity fix and is diagnostic evidence, not a promoted
+champion.
+
+Corrected W2 is the provisional diagnostic score winner at 67.89%, but it also
+predates the KL fix. The objective-parity-complete W2 rerun stopped at global
+step 12, before its first dense anchor backward/M update at step 20. Therefore:
+
+- the default **model/data/run surface** is Qwen2.5-Math-1.5B + MATH train/test;
+- the latest completed **method reference** is qboot-v2 composite;
+- the selected compressed arm remains **none** until a corrected run completes.
+
+Do not manufacture a hybrid “default” from W2’s score and qboot-v2’s features;
+that would be a new, untested arm. Generic actor/Hydra communication defaults
+remain all-off for dense compatibility.
+
+## Current priority
+
+Complete an objective-parity run through all anchor/RELEX phases, then compare it
+with the dense control and replicate before promotion. Score, full trajectory,
+mismatch KL, communication ratio, Q transaction counters, M coverage, and causal
+projection probes all belong in the verdict.
 
 ## Pointers
 
-- Durable run record + result + why → `research/runs/SUMMARY.md`
-- Engineering map of the method → `CODE_WALKTHROUGH.md`
-- Authoritative operating config → `.claude/project.yaml`
-- Comm-eff launcher (dense control = run it with `COMM_EFF_ENABLED=false`) →
-  `examples/grpo_trainer/vast_comm_eff_baseline_qwen25_1p5b_grpo_gsm8k.sh`
-- Dense control launcher → `examples/grpo_trainer/vast_baseline_qwen25_1p5b_grpo_gsm8k.sh`
+- Current report and evidence: `docs/experiments/relex_rank1_report.html`
+- Operating configuration: `.claude/project.yaml`
+- Engineering map: `CODE_WALKTHROUGH.md`
+- Latest completed reference: `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite`
+- Dense MATH control: `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense`

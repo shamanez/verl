@@ -19,7 +19,7 @@
 
 project:
   name: verl-compression-research
-  description: Communication-efficient pipeline-adaptation research on verl GRPO + GSM8K.
+  description: Communication-efficient GRPO on Qwen2.5-Math-1.5B + MATH with PowerSGD, a delayed dense anchor, and RELEX.
   north_star_doc: .claude/GOAL.md       # the project north-star — what "done" means (agent-readable, operator-approved); THE single source of project intent
 
 workspace:
@@ -168,13 +168,13 @@ vast_ssh:                                                     # SSH identity the
   pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
   # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.
 
-default_compute:                                              # planner emits these defaults unless the issue overrides. Before sizing compute for a NON-default surface (model/response-length/rollout-n differ from the locked GSM8K surface), CHECK perf_profiles: below — a matching measured profile overrides the ladder pick; the ladder itself stays the default.
+default_compute:                                              # cost-aware provisioning fallback; the current report reference used 2×H200 NVL. Before sizing any surface, CHECK perf_profiles: below — a matching measured profile overrides this ladder.
   gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
                                                               #   auto = hands-off: once the runner's PREPARE phase (implementation + CPU gates, laptop-only) is green it walks gpu_filter_chain and provisions by itself.
                                                               #   ask  = prepare everything, then PAUSE: needs:human "READY FOR GPU" comment on the issue; the operator hands over a box (`--attach <id>` → vast-attach registers it) or authorizes auto-provision (re-run with `--gpu auto`).
   gpu_count: 1
   gpu_filter_chain:                                           # DEFAULT ladder (2026-07-03): 1×H200 → 1×B200 → 2×H200 — runner tries each rung in order; first rung with ≥1 offer ≤ max_dph wins. Machine reliability strictly >0.99 on EVERY rung.
-    - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default — proven for both datasets (GSM8K fast surface; Big-Math @ resp 4096, EXP-58)
+    - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default cost-aware provisioning rung; not a claim about the exact report hardware
     - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # more HBM, still single-GPU
     - "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
   max_dph: 24.0
@@ -183,14 +183,25 @@ default_compute:                                              # planner emits th
   wall_clock_hr: 12
   iterations: 3
 
-datasets:                                                     # EASY/HARD dataset registry — SINGLE SOURCE OF TRUTH; other docs reference this block, never restate values
-  default: easy
+datasets:                                                     # Dataset registry — this block is the SINGLE SOURCE OF TRUTH for the active run surface.
+  default: math
+  math:
+    name: MATH
+    hf_id: EleutherAI/hendrycks_math
+    splits: "native train / native test (7 subject configs concatenated)"
+    prep: "python3 research/scripts/prepare_rlvr_math.py --dataset math --local_save_dir /workspace/data/math"
+    data_dir: /workspace/data/math
+    data_source: DigitalLearningGmbH/MATH-lighteval
+    reward: "last \\boxed{} extraction + is_equiv"
+    max_response_length: 3072
   easy:
     name: GSM8K
+    status: historical-proof-surface
     prep: "launcher-managed — examples/data_preprocess/gsm8k.py runs automatically when DATA_DIR is absent"
     max_response_length: "per launcher surface (accel base = 1024; full control launcher = 16384)"
   hard:
     name: Big-Math
+    status: historical-alternate-surface
     hf_id: gshasiri/Big-Math-RL-Verified-filtered             # 123,602 train / 6,506 val
     prep: "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42; then launch with DATA_DIR=/root/data/bigmath (skips the launcher's gsm8k prep)"
     data_source: DigitalLearningGmbH/MATH-lighteval           # reward-fn routing key set by bigmath_dapo.py — do NOT use math_bigmath (pred:None crashes val agg) or math_dapo (ignores \boxed{}); see plan 58
@@ -205,7 +216,8 @@ datasets:                                                     # EASY/HARD datase
       - {slug: skywork-or1, hf_id: Skywork/Skywork-OR1-RL-Data,      data_dir: skywork_or1, splits: "split=math -> test carved from train",         answer: "json.loads(reward_model.ground_truth)[0]"}
       - {slug: dapo-math,   hf_id: BytedTsinghua-SIA/DAPO-Math-17k,  data_dir: dapo_math,   splits: "train-only -> test carved from train",       answer: "reward_model.ground_truth (plain str); native Answer-format boilerplate stripped before boxed instruction appended"}
 
-models:                                                       # RLVR-paper model registry (issue #62) — override ONLY MODEL_PATH on the canonical comm-eff launcher; NEVER fork the algorithm path. Qwen2.5-1.5B-Instruct stays the fixed dense control (CLAUDE.md §1) and is NOT listed here.
+models:                                                       # Model registry; override only MODEL_PATH on an experiment launcher, never fork the algorithm path.
+  default: Qwen/Qwen2.5-Math-1.5B
   # role=test → GPU-smoked on 1×H200 (fits); role=integrate-only → registry + CPU tokenizer/chat-template load ONLY (too big for 1×H200, never GPU-smoked).
   # chat_template_ok / boxed_survives verified on the laptop 2026-07-07 (Stage-1 registry-tokenizer-load): all 8 load a chat template that preserves the \boxed{} instruction — no generic fallback needed.
   test:
@@ -234,31 +246,33 @@ perf_profiles:                                                # MEASURED workloa
       - "checkpoint→R2 (CKPT_R2_ENABLED) needs aws CLI + R2 creds ON THE BOX — preflight at attach/provision time, never discover at the final save"
       - "resp 4096 on this model: clip_ratio 0.73 (73% truncated) vs 0.03 at 16K — reasoning evals need the 16K surface"
 
-default_baseline:                                             # the reference a new experiment compares against when its issue body omits `baseline_run:`
-  run: baseline                                               # the dense control = comm-eff OFF (byte-identical to unmodified verl)
-  launcher: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh   # the canonical accelerated comm-eff base (signed_ema 0.25/0.50 + accel surface + diagnostics=false); dense ref = same accel surface with COMM_EFF_ENABLED=false
-  dense_control: baseline                                     # the verl-unmodified dense reference; name it explicitly with `baseline_run: baseline`
+default_baseline:                                             # Dense control used when an issue omits `baseline_run:`; same Qwen-Math/MATH surface, comm-eff off.
+  run: relex_cmp_dense_grpo_math_qwen25_math_1p5b
+  command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
+  model: Qwen/Qwen2.5-Math-1.5B
+  data: MATH train / MATH test
+  comm_eff_enabled: false
 
-fixed_control_surface:                                        # LOCKED training hyperparameters — operator directive 2026-06-04; comm-eff substrate locked 2026-06-09; accelerated base 2026-06-18. Extends CLAUDE.md §1 model/loss/hardware controls.
-  doc: examples/grpo_trainer/vast_comm_eff_accel_base_qwen25_1p5b_grpo_gsm8k.sh   # the launcher IS the authoritative value sheet (the old runs/FIXED_CONTROL_SURFACE.md sheet was pruned; values live in the launcher, per the rule below)
-  rule: "every GSM8K comm-eff experiment runs the accelerated comm-eff base (launcher vast_comm_eff_accel_base_*.sh): accel surface (use_dynamic_bsz=True, resp 1024, rollout TP=1, gpu_mem_util 0.55, ppo_max_token 24576, 50 steps, test_freq 25, val_before_train=False) + signed_ema(α=0.25, β_anc=0.50) core + diagnostics=false speed knob, on the locked PowerSGD r=77 anchor substrate (anchor owns Q, cadence/delay_K=20, clean=0, replay_paired_batch, disable_custom_all_reduce). The ONLY axis that may vary is the merger (how the stale anchor gradient is USED). Dense (enabled=false on the same accel surface) is the reference (≈0.7657; comm-eff signed_ema(0.25,0.50) ≈0.7362). Values live in the launcher, NOT duplicated here."
-  variable_axis: merger                                       # how M/δ is folded into the fast update; accel base default = signed_ema(α=0.25, β_anc=0.50). Substrate (powersgd r77, anchor owns_q) + accel surface are LOCKED.
-  measurement_knobs: [test_freq, val_before_train]            # NOT control variables (validation is read-only) — canonical test_freq=25
-  val_before_train_policy: "True ONLY for the FIRST cell on a NEW surface (it smoke-tests the val plumbing — parquet/reward-route/metric keys — before paid training; caught the #63 val-dataset correction). Every later cell shares the SAME base checkpoint ⇒ step-0 val is arm-invariant and already known ⇒ set False (saves ~5min/arm ≈ 1.5 USD at 16K/n16). Measured base R1-Distill-1.5B AIME avg@8 ≈ 0.19 (30 problems, std ~0.09)."
-
-compression_defaults:                                        # Surface-scoped promoted defaults; do not replace the global GSM8K baseline or generic Hydra all-off compatibility.
+compression_defaults:                                        # Active default answer/reference surface. Generic actor/Hydra defaults remain all-off for dense compatibility.
   math_qwen25_math_1p5b:
+    default_answer_surface: true
     status: no_eligible_champion                              # pending_results | selected | no_eligible_champion
+    report: docs/experiments/relex_rank1_report.html
+    latest_completed_reference: qboot_v2_composite
+    latest_reference_command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
+    dense_control_command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
     claim_scope: 'Best observed compressed arm on this exact controlled matrix; not literature/global SOTA while the evidence is single-seed and internal.'
     protocol:
       model: Qwen/Qwen2.5-Math-1.5B
       data: 'MATH train split; MATH test split'
+      hf_dataset: EleutherAI/hendrycks_math
       data_source: DigitalLearningGmbH/MATH-lighteval
       prompt_template: examples/grpo_trainer/relex_qwen_chat_template.jinja
       training_rollouts: 'temperature=1.0; sampling enabled; n=8'
       evaluation: 'prompt<=1024 plus response<=3072 (4096 total configured context); greedy; temperature=0.0; this is not the paper evaluator''s 4096 generated-token cap'
       reward: 'last \boxed{} + is_equiv'
-      training: 'GRPO; train_batch=512; mini_batch=256; rollout_n=8; prompt=1024; response=3072; lr=0.000001; kl=0.001; steps=100; eval_every=25'
+      training: 'GRPO; train_batch=512; mini_batch=256; micro_batch=1/GPU dynamic; shuffle=false; rollout_n=8; prompt=1024; response=3072; AdamW lr=0.000001 weight_decay=0.01 grad_clip=1; policy_loss=vanilla; reference low_var_kl=0.001; reward_KL=false; entropy=0; steps=100; eval_at=0/25/50/75/100'
+      observed_hardware: '2x H200 NVL'
       shared_compressed_substrate: 'PowerSGD rank=77; anchor cadence=20; delay_K=20; anchor owns Q; signed_ema alpha=0.25 beta_anc=0.50; corrected transactional Q staging'
       anchor_objective: 'Ratio-one unclipped advantage policy gradient with the fast actor''s rollout importance weights (when present), entropy regularizer, and reference-policy KL loss; no compressed-policy old_log_probs or PPO clipping in the anchor pass'
       objective_parity_invariant: 'M_anchor must be the dense uncompressed gradient of the same resolved actor objective as the fast circuit, evaluated under the explicitly declared ratio-one surrogate. Advantages, rollout importance weights, response mask, aggregation/normalization, entropy coefficient, and reference-KL type/coefficient must match. The only intentional exceptions are compressed-policy old_log_probs, PPO importance ratio, and clipping. Unsupported objective terms or missing required tensors fail closed and may never be silently omitted.'

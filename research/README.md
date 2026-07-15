@@ -8,7 +8,8 @@ command per stage, surfaced as three phase windows: `/build` → `/plan <N>` →
 
 ## Project in one line
 
-A **communication-efficient, pipeline-parallel GRPO trainer** — Qwen2.5-1.5B-Instruct + GSM8K.
+A **communication-efficient, pipeline-parallel GRPO trainer** —
+`Qwen/Qwen2.5-Math-1.5B` on MATH train/test.
 What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
 
 ## Canonical docs (single source each; link, don't duplicate)
@@ -18,6 +19,7 @@ What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
 | What "done" means (north-star) | [`.claude/GOAL.md`](.claude/GOAL.md) |
 | **The commands** — phases, stages, human-only skills | [`researcher_steps.md`](researcher_steps.md) |
 | Operating config — repos, labels, naming, budget, verification policy, compute | [`.claude/project.yaml`](.claude/project.yaml) |
+| Current MATH/RELEX experiment and selection status | [`../docs/experiments/relex_rank1_report.html`](../docs/experiments/relex_rank1_report.html) |
 | **The operator manual** (workflow, compute, money, design rationale — human-only, hosted) | [manual](https://claude.ai/code/artifact/33a69614-404b-42fe-9fea-029f1c73d874) |
 | Engineering map of the method | [`../CODE_WALKTHROUGH.md`](../CODE_WALKTHROUGH.md) |
 
