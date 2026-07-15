@@ -1,12 +1,8 @@
 """Preprocess the 5 RLVR-paper math datasets (issue #62) to verl parquet format.
 
-Additive companion to research/scripts/bigmath_dapo.py: same row schema, same
-routing key. Every dataset emits data_source="DigitalLearningGmbH/MATH-lighteval"
-so the reward routes to math_reward.compute_score (last \\boxed{} over the full
-response + is_equiv normalized comparison, plain float 0.0/1.0). This is the ONLY
-route proven safe here — do NOT use "math_bigmath" (returns {"pred": None} ->
-np.mean crash in process_validation_metrics) or "math_dapo" ("Answer:" regex
-ignores \\boxed{}, scored all -1 on 2026-06-01). See reward_score/__init__.py.
+Every dataset emits data_source="DigitalLearningGmbH/MATH-lighteval" so the
+reward routes to math_reward.compute_score (last \\boxed{} over the full response
++ is_equiv normalized comparison, plain float 0.0/1.0).
 
 The prompt always ends with the boxed instruction so the model is told to emit
 \\boxed{}, which is what the reward verifier extracts. For datasets whose native

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-worker state for the retained communication-efficient GRPO pipeline.
+"""Per-worker state for the communication-efficient GRPO pipeline.
 
 The factory returns ``None`` while the master switch is off. This preserves the
 dense path's RNG, allocation, hook, and collective behavior. An enabled state

@@ -740,9 +740,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         Disabled is the strict no-op path: ``maybe_build_comm_eff_state`` returns
         ``None`` without drawing RNG, allocating buffers or registering hooks, so
-        a dense GRPO run with the scaffolding merged is numerically identical to
-        one without it. The result is cached so repeated ``update_actor`` calls
-        do not re-read the config each time.
+        dense GRPO remains unaffected. The result is cached so repeated
+        ``update_actor`` calls do not re-read the config each time.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None and not getattr(self, "_comm_eff_state_built", False):
@@ -756,14 +755,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 logger.info("comm_eff: disabled (no-op) — dense GRPO path unchanged")
                 object.__setattr__(self, "_comm_eff_marker_logged", True)
             if state is not None:
-                # Build the retained circuits and attach their shared state to
+                # Build the circuits and attach their shared state to
                 # the actor engine. The worker scopes compression_active around
                 # paired forwards; the engine owns hook and correction lifetimes.
                 engine = getattr(getattr(self, "actor", None), "engine", None)
                 if engine is not None:
                     state.build(getattr(engine, "module", None))
                     object.__setattr__(engine, "_comm_eff_state", state)
-                    logger.info("comm_eff: enabled — retained pipeline attached to actor train engine")
+                    logger.info("comm_eff: enabled — pipeline attached to actor train engine")
                     # Bind the actor DP group so the PowerSGD basis all-reduce
                     # pools sketches over exactly the data-parallel ranks.
                     powersgd = getattr(state, "powersgd", None)
@@ -852,7 +851,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def update_actor(self, data: TensorDict) -> TensorDict:
         # comm_eff guard. When disabled (default) this resolves to None with zero
         # side effects (no hook, no buffer, no RNG) and the dense GRPO update runs
-        # exactly as upstream. The compressed circuits are entered only when
+        # without modification. The compressed circuits are entered only when
         # comm_eff.enabled=true; the disabled path never touches the gradient, so
         # the no-op parity holds.
         #
@@ -869,7 +868,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # The anchor cadence (comm_eff.anchor.cadence) gates per-step firing.
         comm_eff_state = self._maybe_comm_eff_state()
 
-        # Thread the real trainer step into the retained circuits.
+        # Thread the trainer step into the communication-efficient circuits.
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
 
         # Scope projection hooks to the actor-train forward/backward. Other paths
@@ -966,9 +965,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 _ps.last_elems_dense_equiv = float(getattr(_ps, "tick_elems_dense_equiv", 0.0))
 
         # Surface the comm_eff operation counters into training metrics. When
-        # disabled we emit explicit zeros for the retained circuits so the no-op
-        # is machine-checkable; emitting a
-        # constant metric is not a numerical side effect on training. `output` is
+        # disabled we emit explicit zeros for the communication-efficient circuits
+        # so the no-op is machine-checkable; emitting a constant metric is not a
+        # numerical side effect on training. `output` is
         # None on non-output ranks (train_mini_batch only populates metrics on the
         # mp-src rank), in which case there is nothing to annotate.
         if output is not None:
@@ -1005,8 +1004,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/fast_q_bootstrap_sync_elements": 0.0,
                     "comm_eff/merger_coldM_fallbacks": 0,
                     "comm_eff/anchor_replay_fires": 0,
-                    # Explicit zero on the disabled path for the family screen.
-                    "comm_eff/family_screen_builds": 0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)

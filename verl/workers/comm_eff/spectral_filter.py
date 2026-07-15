@@ -15,7 +15,7 @@
 """Signed-EMA correction for PowerSGD-compressed actor gradients.
 
 The dense anchor supplies a per-parameter gradient EMA ``M``. Before the
-optimizer step, the retained merger keeps the compressed gradient's magnitude
+optimizer step, the merger keeps the compressed gradient's magnitude
 and blends its sign with ``sign(M)``::
 
     G_corr = alpha * G_comp + (1 - alpha) * abs(G_comp) * sign(M)

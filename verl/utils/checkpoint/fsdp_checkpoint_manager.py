@@ -40,8 +40,8 @@ from .checkpoint_manager import BaseCheckpointManager
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
-# Substrings that indicate retained communication-efficient runtime state leaked
-# into a saved/synced actor state_dict. The current PowerSGD, anchor, and
+# Substrings that indicate communication-efficient runtime state leaked into a
+# saved or synchronized actor state_dict. PowerSGD, anchor, and
 # signed-EMA state lives outside the model's parameters and buffers.
 _COMM_EFF_STATE_KEY_MARKERS = ("comm_eff", "powersgd", "anchor_state", "signed_ema")
 

@@ -113,13 +113,12 @@ class BaseEngine:
         """comm_eff spectral gradient-correction hook point (strict no-op when disabled).
 
         Sits between the backward pass and the optimizer step — the point at
-        which the retained pipeline applies signed-EMA correction to compressed
+        which the pipeline applies signed-EMA correction to compressed
         gradients before ``optimizer_step``. When comm_eff is disabled (the
         default: no ``_comm_eff_state`` is attached to the engine, or it is
         ``None``) this returns immediately, touching neither the gradients nor
-        any collective op, so the dense GRPO update is byte-identical to
-        upstream. The compressed branch is reached only when a future caller
-        attaches an enabled ``CommEffState`` to the engine.
+        any collective op. The compressed branch is reached only when an enabled
+        ``CommEffState`` is attached to the engine.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
@@ -143,7 +142,7 @@ class BaseEngine:
         Backend engines that implement the anchor circuit override this method
         (see FSDPEngine._maybe_comm_eff_anchor_refresh); the base
         implementation is a no-op even when a state is attached so a backend
-        without an anchor override leaves the train path byte-identical.
+        without an anchor override leaves the train path unchanged.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):

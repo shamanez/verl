@@ -655,7 +655,7 @@ class FSDPEngine(BaseEngine):
             raise NotImplementedError(
                 "comm_eff powersgd does not support "
                 f"ulysses_sequence_parallel_size>1 (got {self.ulysses_sequence_parallel_size}); "
-                "the launcher runs with SP=1."
+                "set ulysses_sequence_parallel_size=1 for this codec."
             )
         state = self._comm_eff_state
         compressor = state.powersgd
@@ -676,8 +676,8 @@ class FSDPEngine(BaseEngine):
         basis sketch ``V`` would silently fold PAD tokens into ``M`` and into the
         codebook — corrupting both the reconstruction metric and the learned
         basis. Refuse it loudly here rather than produce a quietly-wrong codec.
-        The launcher runs rmpad + SP=1, so this never fires in the sanctioned
-        config; it only catches a future mis-launch.
+        This guard prevents padded inputs from silently changing the projected
+        token population.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None:
@@ -689,8 +689,7 @@ class FSDPEngine(BaseEngine):
             raise NotImplementedError(
                 "comm_eff powersgd requires rmpad (nested / no-padding) inputs "
                 "(use_remove_padding=True); padded forwards would fold PAD tokens "
-                "into the projected activation M and the basis sketch V. The "
-                "launcher runs rmpad + SP=1."
+                "into the projected activation M and the basis sketch V."
             )
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
 
@@ -1199,7 +1198,7 @@ class FSDPEngine(BaseEngine):
         # Lazily build the staleness queue on the state (survives across steps).
         # CommEffState is a plain class with a __dict__, so a direct setattr is
         # correct; it is the single object shared with the worker. In replay
-        # mode the legacy per-tick queue is never built (the per-global-step
+        # mode the per-tick queue is never built (the per-global-step
         # generator ring replaces it — maybe_build_replay_ring below).
         queue = getattr(state, "_anchor_queue", None)
         if queue is None and not replay_mode:
@@ -1313,10 +1312,9 @@ class FSDPEngine(BaseEngine):
                     _inner_named_params(), target_substrs=None, device=_snap_dev, detach=True
                 )
             queue.push(step, cur_snapshot)
-            # Legacy mode with CPU-resident snapshots: record the push-time
+            # Queue mode with CPU-resident snapshots: record the push-time
             # canary so the fire-time load is value-verified (bounded dict,
-            # same retention as the queue). The default gpu path records
-            # nothing — byte-identical to today.
+            # same retention as the queue).
             if _snap_dev is not None:
                 from collections import OrderedDict as _ODict
 
@@ -1355,7 +1353,7 @@ class FSDPEngine(BaseEngine):
                 flush=True,
             )
             # 1-based ticks: the t-delay_K batch only exists for step > delay_K
-            # (same off-by-one as the legacy queue's id-0 hotfix).
+            # because tick numbering starts at one.
             if int(step) > int(delay_K):
                 assert (not _warm_fb) and _used_step == int(step) - int(delay_K), (
                     f"comm_eff stale-replay: post-warmup step={step} must replay the exact "
@@ -1379,7 +1377,7 @@ class FSDPEngine(BaseEngine):
             if stale is None:  # pragma: no cover - queue always has >=1 after push
                 return
 
-            # (point 3): log the ACTUAL stale snapshot step used + realized delay.
+            # Log the actual stale snapshot step used and realized delay.
             # get_stale() falls back to the OLDEST retained snapshot while warming up
             # (step < delay_K — the t-delay_K snapshot has not been taken yet), so the
             # first refresh can be near-current; that is finite/expected. Post-warmup
@@ -1399,10 +1397,8 @@ class FSDPEngine(BaseEngine):
             )
             # 1-based steps (no step 0): the t-delay_K snapshot only becomes available
             # at step == delay_K + 1 (at step == delay_K the request is step 0, which
-            # never existed). So the post-warmup guarantee holds for step > delay_K,
-            # NOT step >= delay_K — the latter hard-asserts one step too early and
-            # crashes the FIRST eligible step (delay_K=1 -> step 1; delay_K=5 -> step
-            # 5). (id-0 hotfix.)
+            # never existed). Therefore the post-warmup guarantee holds for
+            # step > delay_K, not step >= delay_K.
             if int(step) > int(delay_K):
                 assert _used_step == _req_step, (
                     f"comm_eff anchor staleness: post-warmup step={step} requested the t-delay_K "
@@ -1411,7 +1407,7 @@ class FSDPEngine(BaseEngine):
                     f"delay_K+1 snapshots, so t-delay_K MUST be available once step>=delay_K; a "
                     f"mismatch means the snapshot was evicted or the push cadence changed."
                 )
-            # CPU-resident legacy snapshots: pull the push-time canary recorded
+            # CPU-resident snapshots: pull the push-time canary recorded
             # for the snapshot tick actually used (verified off the clone below).
             if _snap_dev is not None:
                 _fire_canary = getattr(state, "_anchor_canary_by_tick", {}).get(_used_step)
@@ -1708,10 +1704,9 @@ class FSDPEngine(BaseEngine):
         try:
             with _summon_ctx():
                 inner = getattr(self.module, "_fsdp_wrapped_module", self.module)
-                # Cache anchor clone across refreshes so we do NOT
-                # allocate a fresh Qwen2ForCausalLM (~3 GB) every step — that was
-                # tripping vLLM v1's sleep_replicas memory assertion at step 2.
-                # The K-stale snapshot is loaded INTO the cached clone below.
+                # Cache the anchor clone across refreshes to avoid repeated
+                # full-model allocation. The K-stale snapshot is loaded into the
+                # cached clone below.
                 cached_anchor = getattr(self, "_anchor_module_cache", None)
                 if cached_anchor is None:
                     anchor_module = build_anchor_module(inner)
@@ -1735,11 +1730,9 @@ class FSDPEngine(BaseEngine):
 
             # Load the K-stale snapshot weights into the clone (NOT into the
             # live module — the live optimizer's params remain untouched).
-            # With the look-ahead projector active, `load_weights` is the
-            # PROJECTED theta_hat (same key set as the stale snapshot — fixed
-            # linear extrapolates only decoder targets, while rank1_relex
-            # extrapolates every unique named parameter tensor);
-            # otherwise it IS the raw stale snapshot, byte-identical to today.
+            # With rank-1 RELEX active, `load_weights` is projected theta_hat for
+            # every unique named parameter tensor. Otherwise it is the raw stale
+            # snapshot.
             # The snapshot is keyed by the live module's
             # (FSDP per-layer-wrapped) names — those carry the
             # `._fsdp_wrapped_module.` infix — while the clone (when the deepcopy
@@ -1768,13 +1761,13 @@ class FSDPEngine(BaseEngine):
             assert loaded == total, (
                 f"comm_eff anchor clone load INCOMPLETE: loaded {loaded}/{total} stale "
                 f"params (canon-matched). A partial load leaves the clone on RANDOM init "
-                f"for the unmatched params ⇒ G_anchor/M are garbage (the bug). The "
+                f"for the unmatched params ⇒ G_anchor/M are invalid. The "
                 f"snapshot covers ALL params (target_substrs=None), so this MUST be full; a "
                 f"mismatch means the _canon key normalization regressed."
             )
 
-            # value-level staleness canary: the clone must now hold
-            # EXACTLY the historical weights recorded at PUSH time. Both record
+            # Value-level staleness canary: the clone must now hold exactly the
+            # weights recorded at push time. Both record
             # and verify reduce in fp32 ON CPU (bf16->cpu->device is a
             # byte-preserving round trip), so the match is bitwise. Scalar-only
             # and always-on in replay / cpu-snapshot modes. A mismatch means the loaded clone is
@@ -1844,9 +1837,9 @@ class FSDPEngine(BaseEngine):
             # policy-gradient loss (ratio ≡ 1, no clip, no old_log_probs) instead
             # of the fast-path PPO loss. Reusing the batch's old_log_probs against
             # this stale-weight forward makes
-            # the GRPO importance ratio ≠ 1 → the PPO clip mangles G_anchor →
-            # M_anchor was never the clean true gradient. anchor_pg_loss fixes
-            # that: its ratio-one advantage gradient is evaluated at the stale
+            # the GRPO importance ratio ≠ 1, so PPO clipping would distort
+            # G_anchor. anchor_pg_loss instead evaluates the ratio-one advantage
+            # gradient at the stale
             # weights, and the configured reference-policy KL term is retained.
             # The fast-path loss_function (real ratio/clip) is UNTOUCHED — this
             # swap is anchor-pass-only. We bind the SAME actor config the fast
@@ -2058,10 +2051,10 @@ class FSDPEngine(BaseEngine):
             )
             q_updated = powersgd.anchor_update_basis(staged=True)
             q_receipts = powersgd.broadcast_basis(src=0, staged=True)
-            # The M broadcast only applies when a merger
-            # reads sign(M) — i.e. spectral is on. The A1 plain-PowerSGD arm
-            # (spectral None) has no M; only Q is broadcast. Q-update/broadcast
-            # above are UNCONDITIONAL (the anchor owns Q regardless of the merger).
+            # The M broadcast applies only when a merger reads sign(M). When the
+            # merger is disabled there is no M, so only Q is broadcast. The Q
+            # update and broadcast above are unconditional because the anchor owns
+            # Q regardless of the merger.
             m_receipts = self._broadcast_anchor_M(spectral, anchor_grads, src=0) if spectral is not None else None
             # Fail-closed must-fire invariant: the anchor is the sole Q/M writer, so each of
             # these MUST do real work every refresh. q_updated False = orth(V) produced
@@ -2099,7 +2092,7 @@ class FSDPEngine(BaseEngine):
                     "comm_eff anchor-owns-Q: _broadcast_anchor_M() returned NO receipts on a "
                     "multi-rank DP group — the anchor M broadcast did not fire; sign(M) the "
                     "merger reads could be stale/cold on other ranks. "
-                    "(Skipped when spectral is None: the plain-PowerSGD arm has no M to broadcast.)"
+                    "This check is skipped when the merger is disabled because no M exists."
                 )
             # Cross-rank consensus guard (must not raise): the anchor-owned Q must
             # be identical on every DP rank + both boundary sides.
@@ -2134,7 +2127,7 @@ class FSDPEngine(BaseEngine):
         # assert the max cross-rank deviation is ~0 (the all-reduce(MEAN) of
         # G_anchor made M identical on every rank). A non-zero deviation means the
         # DP-reduce did not happen or used the wrong group.
-        # Only when a merger consumes M (spectral on); plain PowerSGD has no M.
+        # Only run this when a merger consumes M.
         if spectral is not None:
             self._verify_anchor_M_dp_identical(spectral, anchor_grads, step=step)
 
@@ -2142,7 +2135,7 @@ class FSDPEngine(BaseEngine):
         # `deltas` is the MERGER's per-target EMA delta dict — populated ONLY when
         # `spectral is not None` (the merger maintains M); see the `if spectral is
         # not None: deltas = feed_anchor_grads_into_ema(...)` feed above. On a
-        # spectral-OFF arm has no merger, so `deltas` is always empty. The
+        # disabled-merger path has no M, so `deltas` is always empty. The
         # anchor's own success is logged elsewhere, so gate this merger-EMA log
         # block on `spectral is not None`. With a real merger present, an empty
         # `deltas` is a genuine coverage bug and still surfaces the warning.

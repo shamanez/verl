@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configuration for the retained communication-efficient GRPO pipeline.
+"""Configuration for the communication-efficient GRPO pipeline.
 
 The method has one activation codec and one anchor-gradient merger:
 
@@ -21,9 +21,9 @@ The method has one activation codec and one anchor-gradient merger:
 * ``signed_ema`` combines the compressed fast gradient with the sign of M.
 * ``rank1_relex`` projects delayed anchor weights to the current optimizer tick.
 
-The top-level switch remains disabled by default, so ordinary verl GRPO is a
-strict no-op path. The nested defaults describe the latest Qwen2.5-Math/MATH
-reference arm and become active only when ``comm_eff.enabled=true``.
+The top-level switch remains disabled by default, so dense GRPO is a strict
+no-op path. The nested settings become active only when
+``comm_eff.enabled=true``.
 """
 
 from dataclasses import dataclass, field
@@ -46,7 +46,7 @@ class CommEffAnchorConfig(BaseConfig):
 
     ``rank1_relex`` keeps a sliding window of exact checkpoints. With two
     checkpoints it is the ordinary per-tensor secant; with three or more it
-    fits the retained rank-1 trajectory using the checkpoints' actual ticks.
+    fits the rank-1 trajectory using the checkpoints' actual ticks.
     """
 
     enabled: bool = True
@@ -95,8 +95,8 @@ class CommEffPowerSGDConfig(BaseConfig):
     """PowerSGD boundary-activation projection configuration.
 
     For a boundary activation ``A`` and detached orthonormal basis ``Q``, the
-    live forward uses ``A_hat = (A @ Q) @ Q.T``. Rank 77 is the approximately
-    five-percent-width setting for Qwen2.5-Math-1.5B (hidden size 1536).
+    live forward uses ``A_hat = (A @ Q) @ Q.T``. The rank controls the width of
+    the transmitted representation.
     """
 
     enabled: bool = True

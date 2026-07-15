@@ -99,7 +99,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     extraction (``no_padding_2_padding``), the SAME field selection/padding, and
     the SAME ``agg_loss`` + ``global_batch_info`` normalization as ``ppo_loss``
     so ``M_anchor`` lands at the identical scale as the fast-path clean gradient
-    (under the default ``token-mean`` this equals the spec's
+    (under ``token-mean`` this equals the declared ratio-one objective
     ``-(A·logπ·mask).sum()/mask.sum()``; for other agg modes it stays faithful
     to the fast path). Rollout importance weights, entropy regularization, and
     reference-policy KL are mirrored from the same resolved actor config. This
@@ -188,7 +188,7 @@ def anchor_pg_loss(config, model_output, data, dp_group=None):
     advantages = selected["advantages"]
 
     # One resolved contract line per actor-config object makes objective drift
-    # visible in paid-run logs. Emit PASS only after every required objective
+    # visible in runtime logs. Emit PASS only after every required objective
     # input has been selected successfully; a missing KL/entropy input must not
     # leave a misleading success marker behind. The private marker lives on the
     # config so multiple actors in one process remain independent.
@@ -372,8 +372,8 @@ def select_anchor_batch_for_scope(batch_scope: str, current_batch, rollout_batch
 
     ``rollout_batch`` is the complete worker-local actor update retained before
     PPO splitting. Requesting it outside that context is a correctness error;
-    falling back to ``current_batch`` would silently turn a 512-prompt request
-    back into the historical 256-prompt scope.
+    falling back to ``current_batch`` would silently reduce a full-rollout
+    request to the current PPO minibatch.
     """
     if batch_scope == "ppo_minibatch":
         return current_batch
@@ -880,8 +880,8 @@ def assert_anchor_module_isolated(
         intersect = clone_ids & opt_ids
         assert not intersect, (
             f"anchor clone shares {len(intersect)} param object(s) with the live "
-            "optimizer's param_groups — criterion 7 at risk "
-            "(snapshot MUST be OFF the optimizer's parameter group)."
+            "optimizer's param_groups; the snapshot must remain outside the "
+            "optimizer's parameter groups."
         )
 
     if fsdp_module is not None:
@@ -889,8 +889,7 @@ def assert_anchor_module_isolated(
         intersect = clone_ids & live_ids
         assert not intersect, (
             f"anchor clone shares {len(intersect)} param object(s) with the live "
-            "FSDP module — criterion 13 at risk (clone must be a fresh deep-copy, "
-            "not an alias)."
+            "FSDP module; the clone must be an independent copy, not an alias."
         )
 
 

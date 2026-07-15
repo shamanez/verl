@@ -45,11 +45,15 @@ def default_compute_score(
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500", "math-ai/aime24"]:
-        # math-ai/aime24 (issue #63): AIME-2024 val rows keep their HONEST name so
-        # WandB val-core keys read as AIME. It must live HERE (last-\boxed{} + is_equiv):
-        # the `data_source.startswith("aime")` branch below routes to math_dapo's
-        # "Answer:"-regex extractor, which ignores \boxed{} entirely.
+    elif data_source in [
+        "lighteval/MATH",
+        "DigitalLearningGmbH/MATH-lighteval",
+        "HuggingFaceH4/MATH-500",
+        "math-ai/aime24",
+    ]:
+        # math-ai/aime24 uses the last-\boxed{} + is_equiv scorer. The generic
+        # `data_source.startswith("aime")` branch below uses math_dapo's
+        # "Answer:" regex, which does not parse boxed output.
         from . import math_reward
 
         res = math_reward.compute_score(solution_str, ground_truth)
@@ -60,18 +64,6 @@ def default_compute_score(
 
         # from . import math_verify
         # res = math_verify.compute_score(solution_str, ground_truth)
-    elif data_source == "math_bigmath":
-        # Big-Math-RL-Verified-filtered reward: extracts the last \boxed{} from the model
-        # output and checks it against the ground_truth using the Hendrycks MATH normaliser
-        # (math_reward.compute_score). Returns a dict with score in {-1.0, +1.0} and acc in
-        # {True, False} to keep WandB metric shapes consistent with the GSM8K / math_dapo runs.
-        # Do NOT route Big-Math through math_dapo: math_dapo's default path uses an
-        # "Answer: ..." regex that never fires when the prompt instructs \boxed{} output.
-        from . import math_reward
-
-        raw = math_reward.compute_score(solution_str, ground_truth)   # 0.0 or 1.0
-        correct = raw == 1.0
-        res = {"score": 1.0 if correct else -1.0, "acc": correct, "pred": None}
     elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
         from . import math_dapo
 

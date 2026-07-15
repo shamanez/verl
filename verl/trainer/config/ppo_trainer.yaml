@@ -201,7 +201,7 @@ trainer:
   max_critic_ckpt_to_keep: null
 
   # ---------------------------------------------------------------------------
-  # Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58; comm-eff fork extension).
+  # Checkpoint -> Cloudflare R2 on-the-go mirror (comm-eff extension).
   # Flag-gated, strict no-op when false (default): _save_checkpoint is then
   # byte-identical to upstream verl (no R2 threads, no r2_sink import on the save
   # path). When true, the rank-0 driver mirrors every global_step_<N>/ file to R2

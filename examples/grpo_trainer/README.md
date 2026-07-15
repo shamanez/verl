@@ -7,7 +7,7 @@ GRPO baseline. The fixed surface is **`Qwen/Qwen2.5-Math-1.5B` on MATH**
 
 > This is not the upstream verl example set. The project-level source of truth is
 > [`research/.claude/project.yaml`](../../research/.claude/project.yaml)
-> (`compression_defaults.math_qwen25_math_1p5b`); what "done" means lives in
+> (`current_default`); what "done" means lives in
 > [`research/.claude/GOAL.md`](../../research/.claude/GOAL.md).
 
 ## What GRPO is (in one paragraph)
@@ -25,7 +25,6 @@ method path. Reference: [DeepSeekMath](https://arxiv.org/pdf/2402.03300).
 |---|---|
 | `vast_comm_eff_engine_grpo.sh` | The shared, **model/dataset-agnostic** comm-eff engine. Every launcher below `exec`s it; `MODEL_PATH` / `DATA_DIR` / `EXPERIMENT_NAME` are supplied by the caller. Dense control = run it with `COMM_EFF_ENABLED=false`. |
 | `run_qwen25_math_1p5b_rank1_relex_fsdp.sh` | The MATH **method/base launcher**: pins the Qwen2.5-Math-1.5B / MATH surface (prompt/response 1024/3072, batch 512, mini 256, `n=8`, AdamW `1e-6`, `kl=0.001`) and the RELEX chat template, then execs the engine. |
-| `run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh` | Runs the qboot-v2 rank-1 RELEX comparisons; `composite` is the current reference arm. |
 | `run_qwen25_math_1p5b_relex_comparison_fsdp.sh` | The **dense control** and focused RELEX rank-1 comparison launcher. |
 | `relex_qwen_chat_template.jinja` | RELEX Qwen chat template, loaded by the base launcher for rollout + validation parity. |
 | `COMM_EFF_CONFIG.md` | Compact run command and current defaults. |
@@ -45,8 +44,6 @@ bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
 # Dense control (comm-eff OFF, same surface, the parity bar):
 bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
 
-# Latest completed comm-eff reference (explicit arm required):
-bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
 ```
 
 Common knobs are exposed as environment variables at the top of each launcher

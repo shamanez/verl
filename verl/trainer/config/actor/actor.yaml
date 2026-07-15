@@ -286,9 +286,8 @@ router_replay:
   # Required when mode is 'replay'
   replay_file: null
 
-# Communication-efficient GRPO pipeline. The master switch stays off for
-# ordinary verl runs; the nested defaults reproduce the latest qboot-v2
-# Qwen2.5-Math/MATH method when explicitly enabled.
+# Communication-efficient GRPO pipeline. The master switch stays off for dense
+# verl runs; the nested settings activate only when explicitly enabled.
 comm_eff:
 
   _target_: verl.workers.config.CommEffConfig
@@ -296,7 +295,7 @@ comm_eff:
   # Dense compatibility is the strict enabled=false path.
   enabled: false
 
-  # The only retained lossy activation codec is PowerSGD.
+  # The supported lossy activation codec is PowerSGD.
   compression_type: powersgd
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.

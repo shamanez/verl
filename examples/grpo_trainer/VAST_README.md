@@ -1,10 +1,10 @@
 # Vast.ai communication-efficient GRPO launchers
 
-These launchers run the current qboot-v2 pipeline on the
-`Qwen/Qwen2.5-Math-1.5B` + MATH train/test surface. The reference command is:
+These launchers run the two-circuit communication-efficient pipeline on the
+`Qwen/Qwen2.5-Math-1.5B` + MATH train/test surface. The method command is:
 
 ```bash
-bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
+bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
 ```
 
 The explicit launcher enables communication efficiency. Generic Hydra
@@ -15,7 +15,6 @@ outside this launch path remains dense by default.
 
 | Launcher | Purpose |
 | --- | --- |
-| `run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite` | Latest completed qboot-v2 reference arm |
 | `run_qwen25_math_1p5b_rank1_relex_fsdp.sh` | Direct Qwen-Math/MATH method launcher |
 | `vast_comm_eff_engine_grpo.sh` | Shared FSDP + vLLM engine used by the MATH wrappers |
 | `run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense` | Dense control on the same model, data, and GRPO surface |
@@ -60,10 +59,10 @@ For a bare instance:
    credentials needed on the box and set mode `600`.
 4. Prepare MATH train/test parquet files under `/workspace/data/math`, or set
    `DATA_DIR` to another prepared directory.
-5. Run the explicit reference launcher above from `/workspace/verl`.
+5. Run the explicit method launcher above from `/workspace/verl`.
 
 The shared engine can prepare MATH when its `DATA_DIR` lacks `train.parquet`
-and `test.parquet`. Reference experiments should pre-prepare those files using
+and `test.parquet`. Runs should pre-prepare those files using
 the canonical project data path so their inputs are deliberate and auditable.
 
 ## What the launcher pins
@@ -95,11 +94,11 @@ under shell tracing, so the fully expanded Hydra command is present in
 
 An experiment should call the existing launcher and override only the variable
 being tested. For example, to test the larger anchor data scope while retaining
-the current reference everywhere else:
+the current defaults everywhere else:
 
 ```bash
 COMM_EFF_ANCHOR_BATCH_SCOPE=rollout_batch \
-  EXPERIMENT_NAME=qboot_v2_rollout_scope \
+  EXPERIMENT_NAME=comm_eff_rollout_scope \
   bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
 ```
 

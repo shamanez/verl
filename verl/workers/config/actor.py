@@ -227,7 +227,7 @@ class ActorConfig(BaseConfig):
         # changing its objective is unsafe. anchor_pg_loss implements an explicit
         # ratio-one mapping for vanilla PPO and mirrors every additive objective
         # term; other policy-loss modes need their own reviewed, tested mapping.
-        # Reject them before the first paid actor tick instead of discovering a
+        # Reject them before the first actor update instead of discovering a
         # mismatch at the first anchor cadence boundary.
         comm_eff = self.comm_eff
         anchor = getattr(comm_eff, "anchor", None)

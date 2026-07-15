@@ -65,9 +65,8 @@ cp -> verify -> manifest -> delete-local sequence completes. When
   checkpoint staging tree never overflows the box disk even if uploads fall
   behind compute.
 
-When ``async_mode=False`` (the default) the sink is byte-identical to before: no
-threads are started and ``upload`` runs ``_do_upload`` inline, raising on failure
-and keeping the local file, exactly as today.
+When ``async_mode=False`` (the default), no threads are started and ``upload``
+runs ``_do_upload`` inline, raising on failure and keeping the local file.
 """
 
 from __future__ import annotations
@@ -386,18 +385,10 @@ class R2ArtifactSink:
             # single artifact larger than the cap can still make progress).
             while (self._staged_bytes + nbytes) > self.max_staged_bytes and self._staged_bytes > 0:
                 self._staged_cond.wait(timeout=1.0)
-            # ATOMICITY (R2SINK-001): the staged-bytes increment and the queue
-            # ``put`` MUST be inseparable. Previously the increment ran under the
-            # lock and the ``put`` ran AFTER releasing it — an interrupt/exception
-            # (KeyboardInterrupt, SystemExit, a signal) in that window left
-            # ``_staged_bytes`` inflated for a job that was never enqueued, so the
-            # counter could never be reconciled (workers only decrement jobs they
-            # actually dequeue) and every future producer would block forever on
-            # backpressure against a near-empty queue — a deadlock-by-accounting.
-            # We now ``put`` INSIDE the lock (``queue.Queue.put`` on an unbounded
-            # queue never blocks, so holding the condition across it is safe), and
-            # increment ONLY after a successful put so a put failure cannot leak the
-            # counter either.
+            # The staged-bytes increment and queue insertion are one transaction.
+            # Put inside the lock; Queue.put on this unbounded queue cannot block.
+            # Increment only after a successful put so interrupts or exceptions
+            # cannot leave unaccounted staged bytes and deadlock backpressure.
             self._jobs.put((local_path, key_suffix, meta, nbytes))
             self._staged_bytes += nbytes
 
@@ -555,13 +546,12 @@ def build_r2_sink_from_env(
     where ``<experiment>``/``<regime>`` come from ``R2_EXPERIMENT`` / ``R2_REGIME``
     (set by the launcher). Everything for a run lives under the one per-run home
     ``autonomous-harness-rlvr-compression/<run_id>/`` alongside its report
-    artifacts (#63 2026-07-10 operator directive — the old ``verl-research/``
-    prefix is retired). The path relative to the local checkpoint root is
-    appended by the caller as ``key_suffix`` at upload time.
+    artifacts. The path relative to the local checkpoint root is appended by
+    the caller as ``key_suffix`` at upload time.
 
     ``async_mode`` / ``upload_workers`` / ``max_staged_gb`` configure the opt-in
-    background-upload pool (see :class:`R2ArtifactSink`). Defaults keep the sink
-    synchronous + byte-identical to the original behaviour.
+    background-upload pool (see :class:`R2ArtifactSink`). By default the sink is
+    synchronous.
     """
     bucket = os.environ.get("R2_BUCKET", "")
     endpoint = os.environ.get("R2_ENDPOINT", "")

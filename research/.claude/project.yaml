@@ -175,11 +175,4 @@ datasets:
       train_split: train
       validation_split: held out from train
       data_dir: $HOME/data/dapo_math
-    big-math:
-      hf_id: gshasiri/Big-Math-RL-Verified-filtered
-      train_split: train
-      validation_split: prepared validation sample
-      data_dir: $HOME/data/bigmath
-      prep_script: research/scripts/bigmath_dapo.py
-
 perf_profiles: {}

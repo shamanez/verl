@@ -1023,9 +1023,9 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
-        # --- checkpoint -> R2 on-the-go mirror (EXP-58; strict no-op when the flag
-        # is unset/false). Mirrors the WHOLE just-written global_step_<N>/ tree to
-        # R2 (all rank shards + data.pt + actor/huggingface + actor/fsdp_config.json)
+        # Optional checkpoint -> R2 mirror. When enabled, it mirrors the complete
+        # just-written global_step_<N>/ tree (all rank shards + data.pt +
+        # actor/huggingface + actor/fsdp_config.json) to R2
         # so a resume can be reconstructed from R2 alone, and deletes each local file
         # after a verified upload so peak local disk stays bounded. Rank-0 driver
         # only + single-node guarded. Placed BEFORE the async_save early-return so
@@ -1033,14 +1033,9 @@ class RayPPOTrainer:
         # is uploaded separately below (it is only WRITTEN below on the
         # async_save=false path, which is GRPO's default). When the flag is false,
         # NO r2_sink import happens and NO upload thread is spawned — byte-identical
-        # to upstream verl. ---
-        # #63 B5 (2026-07-10): the R2 mirror is BEST-EFFORT — a failed upload
-        # (wrong bucket / missing aws CLI / creds / transient net) must NEVER crash
-        # training. Before this guard, a bucket-guard RuntimeError propagated out of
-        # _save_checkpoint and killed the cell at step SAVE_FREQ after a full clean
-        # run (issue #63 signed-ema-b50 died at step 100). The local checkpoint is
-        # kept on any failure (the sink deletes local only AFTER a verified upload),
-        # so it can be hand-mirrored later. Log loud, then continue.
+        # to the dense save path. Immediate upload or enqueue failures keep the
+        # local checkpoint because deletion happens only after verification. Async
+        # verification failures are surfaced by the run-end close barrier.
         try:
             self._maybe_upload_checkpoint_to_r2(local_global_step_folder)
         except Exception as _r2_exc:  # noqa: BLE001 — best-effort mirror, never fatal
@@ -1076,10 +1071,10 @@ class RayPPOTrainer:
         self._maybe_upload_ckpt_tracker_to_r2(local_latest_checkpointed_iteration)
 
     # ------------------------------------------------------------------ #
-    # checkpoint -> R2 on-the-go mirror (EXP-58). All three helpers below are a
+    # Checkpoint -> R2 mirror. All three helpers below are a
     # STRICT no-op (return immediately, import nothing from r2_sink, spawn no
-    # thread) when trainer.checkpoint_r2_enabled is unset/false — so with the flag
-    # off _save_checkpoint is byte-identical to upstream verl.
+    # thread) when trainer.checkpoint_r2_enabled is unset/false, leaving the dense
+    # checkpoint path unchanged.
     # ------------------------------------------------------------------ #
     def _get_ckpt_r2_sink(self):
         """Lazily build (once) + cache the ``checkpoints`` R2 sink; ``None`` if disabled.
@@ -1939,7 +1934,7 @@ class RayPPOTrainer:
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                    # checkpoint->R2 run-end drain barrier (EXP-58): flush the async
+                    # Checkpoint->R2 run-end drain barrier: flush the async
                     # checkpoint upload queue + fail-loud on any unverified upload, so
                     # the final in-flight checkpoint completes and a partial mirror is
                     # never reported as success. Strict no-op if the flag is off / no
@@ -1959,7 +1954,7 @@ class RayPPOTrainer:
                     self.train_dataset.on_batch_end(batch=batch)
 
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
-        # checkpoint->R2 run-end drain barrier (EXP-58) on this fallthrough too, so the
+        # Checkpoint->R2 run-end drain barrier on this fallthrough too, so the
         # async checkpoint upload pool is drained + fails loud regardless of how the
         # loop terminates. Strict no-op without the feature.
         self._close_ckpt_r2_sink()

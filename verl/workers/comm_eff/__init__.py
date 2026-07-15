@@ -14,7 +14,7 @@
 
 """Communication-efficient GRPO worker package.
 
-The retained pipeline combines rank-77 PowerSGD activation projection, a
+The pipeline combines PowerSGD activation projection, a
 delayed paired dense anchor, signed-EMA gradient correction, and rank-1 RELEX
 weight projection. It is disabled by default; see
 ``verl.workers.config.comm_eff.CommEffConfig``.

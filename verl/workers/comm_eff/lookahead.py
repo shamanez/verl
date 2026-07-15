@@ -516,8 +516,8 @@ def project_rank1_tensor(
         #   latest + alpha * horizon/gap * (latest - base),
         #
         # i.e. the explicit per-tensor two-checkpoint secant. Keep this case local
-        # to W=2: adding the zero-base point to W>=3 would change the established
-        # RELEX/W4 fit and invalidate the completed reference run.
+        # to W=2 because adding the zero-base point to larger windows would change
+        # the multi-checkpoint estimator.
         zero = torch.zeros(1, dtype=coefficients.dtype, device=coefficients.device)
         fit_coefficients = torch.cat((zero, coefficients))
         fit_ticks = clean_ticks

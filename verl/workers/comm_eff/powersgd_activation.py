@@ -34,7 +34,8 @@ Three properties make this correct:
 * **Optional pre-pair fast calibration.** With ``fast_q_bootstrap=true``, one
   discarded dense no-grad actor prepass on the first trajectory batch builds a
   DP-pooled activation ``Q1`` and atomically publishes it before any compressed
-  old/current PPO forward. Existing runs keep the seeded basis by default.
+  old/current PPO forward. When calibration is disabled, the deterministic
+  seeded basis remains active.
 * **Block power iteration, off-graph.** On compressed *train* forwards we
   accumulate ``V += Mᵀ (M Q)`` under ``torch.no_grad()`` (one sketch per boundary
   forward, deduplicated against gradient-checkpoint recompute), then once at
@@ -882,7 +883,8 @@ class PowerSGDActivationCompressor:
     def set_anchor_sketch_mode(self, on: bool) -> None:
         """Toggle activation-sketch collection during the dense anchor pass.
 
-        The anchor owns ``Q`` in the retained pipeline. While this flag is true,
+        The anchor owns ``Q`` in the communication-efficient pipeline. While
+        this flag is true,
         boundary hooks return raw activations and accumulate the activation
         second-moment sketch used by :meth:`anchor_update_basis`.
         """
@@ -896,8 +898,8 @@ class PowerSGDActivationCompressor:
         but driven by the anchor refresh (cadence already gated by the engine —
         called only when the anchor fires) instead of the fast end-of-step hook,
         and consuming V built from the slow-net stale-weight forward activations.
-        Clears the sketch after. By default the result replaces live ``Q`` for
-        backwards-compatible standalone callers. With ``staged=True`` it is
+        Clears the sketch after. With ``staged=False`` the result replaces live
+        ``Q``. With ``staged=True`` it is
         written to ``_pending_anchor_basis`` and the live basis is unchanged;
         :meth:`activate_staged_anchor_basis` publishes it after all PPO
         minibatches finish. Returns True iff any Q candidate was built.
@@ -1138,24 +1140,17 @@ class PowerSGDActivationCompressor:
     def _dp_group(self):
         """The process group the basis is synchronized over.
 
-        For THIS actor — FSDP, Ulysses SP=1, and NO tensor/pipeline-parallel dim
-        in the *training* mesh (the launcher's TP=2 is rollout-only, a separate
-        vLLM mesh) — the world process group is the DP group: world_size ==
-        data_parallel_size == 4. So the default (world) group is correct here and
-        the basis is pooled over exactly the ranks whose data shards we want to
-        consensus over. The engine may inject a narrower group via
-        ``set_dp_group`` if a future config adds a TP/PP dim to the training mesh
-        (in which case the all-reduce MUST reduce over the DP subgroup only, not
-        the world). When unset we use the default group.
+        The engine binds the actor's data-parallel group with ``set_dp_group``.
+        If no group is bound, distributed collectives use the default process
+        group, which is valid only when the world group is also the DP group.
         """
         return getattr(self, "_dp_process_group", None)
 
     def set_dp_group(self, group) -> None:
         """Bind the DP process group the basis consensus all-reduces over.
 
-        Called by the engine with its data-parallel group. ``None`` (default)
-        ⇒ the world group, which is correct when world == DP (SP=1, no TP/PP in
-        the training mesh). Pure setter; no collective."""
+        Called by the engine with its data-parallel group. ``None`` selects the
+        default process group. Pure setter; no collective."""
         self._dp_process_group = group
 
     def basis_checksums(self, *, staged: bool = False) -> dict:

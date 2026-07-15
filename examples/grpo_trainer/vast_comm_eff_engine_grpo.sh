@@ -2,8 +2,8 @@
 # vast_comm_eff_engine_grpo.sh
 #
 # COMMUNICATION-EFFICIENT GRPO engine: model/dataset-agnostic, driven by env
-# (default surface: Qwen2.5-Math-1.5B on MATH, 1..8 GPUs; the completed
-# reference used 2×H200 NVL), FSDP + vLLM rollout. This is the shared engine every MATH launcher
+# (default surface: Qwen2.5-Math-1.5B on MATH, 1..8 GPUs), FSDP + vLLM rollout.
+# This is the shared engine every MATH launcher
 # `exec`s (MODEL_PATH / DATA_DIR / EXPERIMENT_NAME are overridden by the caller);
 # the dense control is the same surface with `COMM_EFF_ENABLED=false`. The ONLY
 # differences from dense are the communication-efficient method's Hydra knobs.
@@ -47,9 +47,9 @@
 #   2. verl pip-installed --no-deps -e .
 #   3. ~/.config/verl-research/secrets.env present (ONLY HF_TOKEN + WANDB_API_KEY).
 #
-# Hardware: 1..8 GPUs; the completed reference used 2×H200 NVL. The project
-# provisioning ladder may select another compatible shape. The anchor allocates a ~3 GB
-# no-hook clone/rank for its stale forward-backward, so the default actor token
+# Hardware: 1..8 GPUs. The project provisioning ladder selects a compatible
+# shape. The anchor keeps a no-hook clone per rank for its stale
+# forward-backward, so the default actor token
 # budget is already bounded (PPO_MAX_TOKEN_LEN_PER_GPU=18432) for the 1024/3072
 # prompt/response surface.
 #
@@ -95,8 +95,8 @@ export HF_TOKEN \
        WANDB_API_KEY
 
 # ---------------------------------------------------------------------------
-# 2. GPU count — 1..8. The completed reference used 2×H200 NVL; the same
-#    fixed model/data/method surface can run on another compatible shape.
+# 2. GPU count — 1..8. The fixed model/data/method surface can run on any
+#    compatible shape.
 #    REQUIRE_MULTI_GPU=1 optionally enforces the existing 4-GPU gate.
 # ---------------------------------------------------------------------------
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
@@ -167,7 +167,7 @@ fi
 export ROLLOUT_N="${ROLLOUT_N:-8}"
 export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.55}"
 
-# Batch sizes — qboot-v2 reference surface.
+# Batch sizes for the current default surface.
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
 export PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-256}"
 export PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
@@ -203,7 +203,7 @@ export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 
 # ---------------------------------------------------------------------------
-# Checkpoint -> Cloudflare R2 on-the-go mirror (EXP-58). When
+# Checkpoint -> Cloudflare R2 on-the-go mirror. When
 # CKPT_R2_ENABLED=false (DEFAULT) the trainer's
 # _save_checkpoint is byte-identical to upstream verl (no R2 threads, no r2_sink
 # import on the save path) — the whole feature is a strict no-op. Set true to
@@ -255,9 +255,9 @@ COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
 # correction tracks codec error rather than batch mismatch.
 COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
 # Shared data scope for the anchor-owned Q observation and dense M backward.
-# ppo_minibatch preserves the historical half-update behavior; rollout_batch
-# consumes the complete pre-split actor update while dynamic microbatching still
-# bounds peak activation memory.
+# ppo_minibatch consumes one PPO mini-batch; rollout_batch consumes the complete
+# pre-split actor update while dynamic microbatching still bounds peak activation
+# memory.
 COMM_EFF_ANCHOR_BATCH_SCOPE="${COMM_EFF_ANCHOR_BATCH_SCOPE:-ppo_minibatch}"
 COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"
 # Rank1-RELEX projects each floating weight tensor independently.

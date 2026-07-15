@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Current qboot-v2 rank1_relex run on Qwen2.5-Math-1.5B and MATH.
+# Current communication-efficient GRPO run on Qwen2.5-Math-1.5B and MATH.
 # The 1024-token prompt plus 3072-token response is the 4096-token protocol.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export VERL_ROOT="$(cd "$HERE/../.." && pwd)"
 
-# Bare invocation reproduces the latest qboot-v2 composite surface.
+# Bare invocation uses the current project default.
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Math-1.5B}"
 export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
@@ -79,7 +79,7 @@ export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 export TEST_FREQ="${TEST_FREQ:-25}"
 export SAVE_FREQ="${SAVE_FREQ:--1}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-relex_qboot_v2_w4min2_allfloatm_math_qwen25_math_1p5b}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-comm_eff_grpo_math_qwen25_math_1p5b}"
 export LOG="${LOG:-$VERL_ROOT/runs/$EXPERIMENT_NAME/train.log}"
 
 exec bash "$HERE/vast_comm_eff_engine_grpo.sh" \
