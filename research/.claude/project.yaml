@@ -32,6 +32,14 @@ budget:
 
 verification:
   gpu_idle_rule: Finish implementation and CPU checks before provisioning or attaching a GPU.
+  gpu_occupancy_rule: >-
+    Once a box is live, idle GPUs are the top-priority interrupt (operator
+    directive 2026-07-15): fix-classify-relaunch cycles preempt all laptop-side
+    work that could happen after the relaunch; target under 30 minutes of box
+    idle per incident. Surfacing issues on the box and fixing them fast beats
+    perfecting on the laptop while paid GPUs sit at 0 percent. Never relaunch a
+    known-broken config just to occupy GPUs, and never trade correctness gates
+    for occupancy.
   monitoring: Use the machine monitor for routine health checks and the training-log monitor only for anomalies.
 
 source_tree:

@@ -57,5 +57,10 @@ or a `needs:human` pause.
   refusal, GPU never sits unwatched.
 - GPU-idle rule (project.yaml `verification.gpu_idle_rule`): implementation
   finishes on the laptop BEFORE any box exists — in both gpu modes.
+- GPU-occupancy rule (project.yaml `verification.gpu_occupancy_rule`): the
+  moment a box exists, getting/keeping training running IS the priority —
+  fix→relaunch cycles preempt all deferrable laptop work (target < 30 min
+  box-idle per incident); it is fine for issues to surface on the box, fix
+  them fast and iterate. Never pad occupancy with a known-broken config.
 - One issue per window. Parallel issues = parallel windows, each in its own
   worktree (`claude --worktree <N>-<slug>`).

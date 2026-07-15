@@ -105,6 +105,12 @@ under `/bg /goal … /go <N>`):
 
 ## Hard rules
 
+- GPU-occupancy rule (project.yaml `verification.gpu_occupancy_rule`): while
+  the box is live, idle GPUs are the TOP-priority interrupt — a
+  classify→fix→relaunch cycle preempts every laptop-side task that could run
+  after the relaunch (target < 30 min box-idle per incident). Fixing issues
+  fast on a running surface beats perfecting offline while paid GPUs sit at
+  0%. Never relaunch a known-broken config just to occupy GPUs.
 - NO adversarial verification, judge panels, or exploratory workflows during a
   run. If something genuinely warrants heavy verification mid-run, run
   `flag_human <N> "<what/why>"` (durable `needs:human` label + issue comment +
