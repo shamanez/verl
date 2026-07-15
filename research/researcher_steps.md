@@ -86,23 +86,3 @@ One-time prerequisites: `~/.config/verl-research/secrets.env` (`-rw-------`),
 CURRENT checkout — agents/hooks/backstops register from there), and after any
 checkout move: `bash .claude/hooks/install-reaper-cron.sh` (re-stamps the cron
 on the new path; `--status` warns on drift).
-
-## Deferred design work (documented, not yet built — #63 findings)
-
-- `/migrate <N> --attach <new-id>`: re-point a RUNNING issue to a new box
-  (retire row → new handle → re-sync → relaunch). Both #63 box swaps were
-  fully manual (B15).
-- vastai CLI `show instances` is deprecated upstream (→ `instances-v1`):
-  sweep vast-* skills + hooks before the CLI removes it (I5).
-- Monitor-cadence economics: the per-cycle Sonnet watcher costs ~140k tokens
-  per 40-min cycle; a threshold SCRIPT emitting to a file + on-anomaly-only
-  agent dispatch would cut a multi-day run's watch cost ~50-100× (I8).
-- Auto-manage CPU offload per box shape (1 GPU ⇒ offload to fit; ≥2 GPUs ⇒
-  offload OFF) instead of leaving it to the operator (B16) — perf_profiles
-  covers known surfaces; unknown surfaces still guess.
-- SessionStart hook registration for check-workspace.sh (today it is manual).
-- `ledger_update <id> <filter>` rewrites EVERY row sharing `<id>` (intentional
-  for attempt counters, but WRONG for status flips when an id has multiple rows
-  from relaunch/migration — a TORN_DOWN old-box row got silently reverted to
-  EXTERNAL in #63). Add a `ledger_update_latest`/handle-targeted variant and
-  route status transitions through it.

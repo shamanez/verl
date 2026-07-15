@@ -8,16 +8,11 @@ command per stage, surfaced as three phase windows: `/build` → `/plan <N>` →
 
 ## Project in one line
 
-A **communication-efficient, pipeline-parallel GRPO trainer** —
-`Qwen/Qwen2.5-Math-1.5B` on MATH train/test.
-What "done" means and where we are: [`.claude/GOAL.md`](.claude/GOAL.md).
-
-The active method surface is qboot-v2: PowerSGD activation projection at rank
-77 with an activation-derived, anchor-owned `Q`; paired dense anchor replay at
-cadence/delay 20/20; progressive rank-1 RELEX weight projection (W2→W3→W4,
-window 4, minimum 2); and signed-EMA gradient correction (`alpha=0.25`,
-`beta_anc=0.50`) over all floating parameters on CPU. The dense control uses the
-same model, data, and GRPO settings with communication efficiency disabled.
+A two-circuit, communication-efficient GRPO trainer: a pipeline-parallel fast
+circuit with compressed boundaries and a periodic dense slow circuit on a
+separate device. The starting model/data surface and current settings are in
+[`.claude/project.yaml`](.claude/project.yaml); the research objective is in
+[`.claude/GOAL.md`](.claude/GOAL.md).
 
 ## Canonical docs (single source each; link, don't duplicate)
 

@@ -1,392 +1,185 @@
-# Project config — single source of truth for the values that agents need to operate.
-# Update this file when porting the harness to a different research project; the
-# operating-context blocks in agents/skills mirror these values inline as a
-# token-cost optimization (so fresh-context agents don't need an extra read), but
-# project.yaml is authoritative. If the two diverge, this file wins.
-#
-# Porting checklist — change these, the harness machinery comes along for free:
-#   1. project.name + research_repo
-#   2. source_tree.path + protect/exception paths (if you fork a different upstream)
-#   3. vast_template.* (only if you maintain a different Vast.ai template)
-#   4. default_compute.gpu_filter_chain (only if the new project needs a different shape)
-#   5. .claude/GOAL.md (the project north-star — what "done" means)
-#   6. REINSTALL the reaper cron from the new checkout (bash .claude/hooks/install-reaper-cron.sh)
-#      and verify: crontab -l | grep verl-research-reaper points AT the new checkout (#63 B3)
-#   7. verify the Vast template's onstart branch pin (templates.json) matches source_tree.base_branch —
-#      a restricted fetch refspec on the box silently keeps the pinned branch (#63 B7)
-#   8. sweep CLAUDE.md + this file for stale absolute paths; run .claude/hooks/check-workspace.sh
-#      from the new checkout's research/ dir (#63 B4/B6)
+# Machine-readable project and harness configuration.
 
 project:
   name: verl-compression-research
-  description: Communication-efficient GRPO on Qwen2.5-Math-1.5B + MATH with PowerSGD, a delayed dense anchor, and RELEX.
-  north_star_doc: .claude/GOAL.md       # the project north-star — what "done" means (agent-readable, operator-approved); THE single source of project intent
-
-workspace:
-  # PATHS ARE DERIVED AT RUNTIME (#63 B6): every consumer self-locates (hooks from
-  # their own file path; _lib.sh via `git worktree list`). The values here are
-  # DOCUMENTATION of the current checkout — refreshed 2026-07-08 — and fallbacks
-  # only; a moved checkout must keep working without editing this file.
-  working_dir: /Users/shamane/Documents/new-harness/verl/research/
-  secrets_file: $HOME/.config/verl-research/secrets.env
-  secrets_required:
-    - HF_TOKEN
-    - WANDB_API_KEY
-    - VAST_API_KEY                # personal Vast.ai account (default; account=private)
-  secrets_optional:
-    - VAST_API_KEY_TEAM           # shared "Pluralis Research" team Vast.ai account; used when VAST_ACCOUNT=team
-  secrets_file_perms: "600"
-  # VAST_ACCOUNT=team|private → VAST_API_KEY_TEAM|VAST_API_KEY (resolved by .claude/skills/_vast_account.sh).
-  # Provision stamps the account on the handle/ledger as `vast_account`; both teardown paths read it back,
-  # so a box is always destroyed with the account that created it. Picked per issue via
-  # `/launch <N> --account team|private` or the plan's `vast_account:` key.
+  description: Two-circuit communication-efficient GRPO research.
+  north_star_doc: .claude/GOAL.md
 
 github:
-  research_repo: shamanez/verl-compression-research          # gh-default — issues only (research:claim, status:*, verdict comments). NO PRs go here.
-  research_repo_visibility: private
-  code_repo: shamanez/verl                                    # PRs from exp/<N>-<slug> branches land HERE with base=code_pr_base_branch below
-  code_pr_base_branch: autonomous-harness-v1                  # THE harness base branch (self-hosting: this harness line forks exp/* from and PRs back to ITSELF). NEVER `main` (tracks upstream).
-  labels:                                                     # labels are the DURABLE state machine; ONLY stage commands write them (the human never hand-flips)
-    research_claim: research:claim                            # applied by /new-issue
-    status_prefix: "status:"                                  # planned(/plan) → approved(/approve, human decision) → running(/launch) → pass|revise|stop(/analyze) → done(/close)
-    milestone_prefix: "milestone:"                            # M0, M1, M2, ... (user-defined semantics)
-    kind_prefix: "kind:"                                      # experiment, ablation, implementation, brainstorm, literature, analysis
-    pause: ["needs:human", "awaiting:approval"]               # the DURABLE pause signals (set via _lib.sh flag_human / flag_awaiting_approval; cleared by the resuming stage). PROGRESS.md lines are only a local capped echo.
-  plan_home: issue-body                                       # the plan's SSOT is the ISSUE BODY between <!-- plan:start --> / <!-- plan:end --> markers (_lib.sh plan_publish/plan_fetch). Local .claude/state/plan-cache/<N>.md is a gitignored derived cache; .claude/plans/ holds ONLY the two plan templates. Human edits to the plan block ON GitHub are authoritative — every gating stage re-fetches.
+  research_repo: shamanez/verl-compression-research
+  code_repo: shamanez/verl
+  code_pr_base_branch: autonomous-harness-v1
 
-commands:                                                     # the per-issue stage commands (skills in .claude/skills/) — each invokable as /<name> <issue>
-  phases: [build, plan, execute]                              # the three ENTRY POINTS, one FRESH WINDOW each (context control): /build files → /plan plans + ends at the human gate → /execute runs launch→close. A UX layer over the stages below — never a replacement for them.
-  lifecycle: [new-issue, plan, approve, launch, monitor, analyze, close]
-  driver: go                                                  # /go <N> — resume from labels+ledger and run remaining stages; the fallback/resume path (and the optional unattended entry point)
-  overview: status                                            # /status — read-only fleet view printed to stdout (no STATUS.md file exists)
-  human_only: [de-bloat, codex-verify]                        # disable-model-invocation; deleting science / external review are operator acts
-  degradation_rule: "every command derives state labels+ledger FIRST, files second; a deleted plan or runs/<id>/ yields a named refusal or terminal derivation — never a retry loop"
-  run_dir_invariant: "a TERMINAL issue's preconditions never require its runs/<id>/ dir — run dirs are evidence, not state, and are freely deletable: /close's final cleanup sweep (scripts/close_cleanup.sh) deletes them AUTOMATICALLY once the verdict is durably published (close comment + report page), and the human-only de-bloat (incl. --all-terminal batch) remains the manual fallback for leftover dirs. Tested by scripts/test_debloat_invariant.sh; keep it green when touching _lib.sh, close_cleanup.sh, or de-bloat."
+local_state:
+  durable_index: runs/SUMMARY.md
 
-local_state:                                                  # the ONE-FILE policy (operator directive 2026-07-08): nothing about a FINISHED run lives in the harness checkout
-  session_file: PROGRESS.md                                   # THE single local mutable file — capped tick echo + the end-of-session checklist an agent reads to double-check everything is done before ending its window. Standing operator notes live in its header. LOG.md is RETIRED (its index rows were folded into runs/SUMMARY.md).
-  durable_index: runs/SUMMARY.md                              # one append-only row per issue — the offline fallback when GitHub is unreachable; everything richer lives in the close comment + the published report page
-  durable_record: "issue close comment (verdict SSOT) + reports.site runs page + WandB + git history — NEVER local files"
-  cleanup_rule: "/close's LAST step runs scripts/close_cleanup.sh <N> <id>: verifies status:done + ledger TORN_DOWN/absent + report published, then deletes runs/<id>/, plan-cache/<N>.md, torn-down vast-handles, compacts the issue's ledger rows to one terminal row, and sweeps the issue's PROGRESS.md ticks. After /close, the checkout carries NOTHING about the finished run except its SUMMARY row."
-
-naming:                                                       # ONE readable name everywhere — derived by skills/_lib.sh names_for(), never by convention
-  run_id: "<issue>-<slug>"                                    # e.g. 63-anchor-ema-sweep = runs/ dir name = ledger id = Vast label = WandB group; branch exp/<run_id>
-  wandb_run: "<issue>-<cell>"                                 # e.g. 63-adaptive-ls-k10; WANDB_RUN_GROUP = run_id
-  cells: "self-describing kebab slugs naming method+knob (adaptive-ls-k10, dense-control); BANNED: c1/c2/armA-* opacity (lint_cell_name enforces)"
-  tmux: "run-<issue>"
-
-wandb:                                                        # single source of truth (was hardcoded in the monitor agent)
-  # PER-ISSUE PROJECTS (operator directive 2026-07-08): every issue gets its OWN
-  # WandB project named <issue>-<slug> (= run_id, e.g. 63-deepscaler-r1d-signed-ema-k20).
-  # The PLANNER emits `wandb_project: <run_id>` in every plan's yaml block (template
-  # carries the key); the runner exports PROJECT_NAME="$RUN_ID" in launch payloads and
-  # snapshots it into run.json (monitor/analyst read the snapshot, never this file).
-  # The shared name below is ONLY the legacy fallback for pre-#63 runs — never use it
-  # for new issues.
-  project_rule: "<issue>-<slug> (= run_id) — derived automatically at /plan time"
-  project: verl_compression_research                          # LEGACY fallback (pre-#63 runs) — do not use for new issues
+wandb:
+  project: verl_compression_research
   entity: shamanework-pl
-  tail_rule: "the async uploader drops the last 1-2 steps — /analyze backfills them from train.log (scripts/backfill_wandb.py)"
 
-reports:                                                      # publishing surface for finished runs (operator directive 2026-07-08) — verdicts live OUTSIDE the harness
-  repo_dir: /Users/shamane/Documents/com-eff-RLVR             # local checkout of the Cloudflare Pages repo (auto-deploys on push)
+reports:
+  repo_dir: /Users/shamane/Documents/com-eff-RLVR
   site_url: https://com-eff-rlvr.pages.dev
-  runs_dir: runs                                              # one self-contained HTML page per closed issue: runs/<N>-<slug>.html, linked to the GitHub issue; runs/index.html is the machine-maintained list (marker: <!-- runs:insert -->). The curated reports/ + weekly/ tabs stay HUMAN-curated — the pipeline NEVER writes there.
-  artifacts_dir: artifacts                                    # gitignored in the report repo — small per-run downloads the operator wants locally (artifacts/<run_id>/); NEVER committed to Pages
-  publish_script: research/scripts/publish_run_report.py      # /close runs it at step 5c, AFTER the close comment exists (the page renders it): generates the run page, updates runs/index.html, copies small artifacts, uploads big ones to R2, commits (and pushes unless --no-push) the report repo. Nonzero exit = REPORT_PUBLISH_PARTIAL → /close flags a human and SKIPS the cleanup sweep.
-  push_on_publish: true                                       # a push IS the deploy (Cloudflare Pages auto-builds) — that is the point
-  r2:                                                         # big artifacts (checkpoints, weight dumps, full metrics) — NEVER into git
-    # BUCKET = `shamane-pluralis` (RESOLVED #63 B5, 2026-07-10). Earlier docs/secrets
-    #   set R2_BUCKET=`autonomous-harness-rlvr-compression`, which is NOT a bucket —
-    #   it is a top-level PREFIX inside shamane-pluralis (the R2 dashboard confirms;
-    #   the prefix carries a README). The verl ckpt-sink hard-guards the bucket to
-    #   `shamane-pluralis` (verl/workers/comm_eff/r2_sink.py:111), so the mislabelled
-    #   R2_BUCKET made the sink REFUSE + crash _save_checkpoint at the first save
-    #   (#63 b50 died at step 100; never surfaced before because no prior run reached
-    #   an R2-on checkpoint save). FIX: R2_BUCKET=shamane-pluralis in secrets. The
-    #   crash is now ALSO non-fatal in code (ray_trainer.py wraps the mirror in
-    #   try/except — a failed upload keeps the local ckpt + continues; commit 77c1b308).
-    # REQUIREMENTS (#63 B5): the box MUST have the `aws` CLI (the sink shells out to
-    #   `aws s3 cp`; #63's box had none despite the "aws already on box" claim —
-    #   pip install awscli). vast-attach --need-r2 now does a REAL write test to the
-    #   code-guard bucket (ce241d4e), not just `command -v aws`.
-    # ONE PER-RUN HOME, ONE BUCKET (shamane-pluralis; #63 B5 2026-07-10 operator directive —
-    # EVERYTHING for a run lives under autonomous-harness-rlvr-compression/<run_id>/; the old
-    # verl-research/ checkpoint prefix is RETIRED):
-    #   - REPORT artifacts (publish_run_report.py at /close): autonomous-harness-rlvr-compression/<run_id>/…
-    #   - TRAINING checkpoints (verl ckpt_r2 sink, during the run): autonomous-harness-rlvr-compression/<run_id>/<cell>/checkpoints/… (R2_EXPERIMENT=run_id, R2_REGIME=cell)
-    bucket_env: R2_BUCKET                                     # from secrets.env = shamane-pluralis (aws CLI with --endpoint-url $R2_ENDPOINT; keys R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)
-    endpoint_env: R2_ENDPOINT
-    prefix: autonomous-harness-rlvr-compression               # report-artifact prefix used by publish_run_report.py. RECONCILED 2026-07-10: everything for a run lives under autonomous-harness-rlvr-compression/<run_id>/ (operator directive above), so reports co-locate with the ckpt sink's checkpoints — NOT the old top-level `runs/` prefix.
+  runs_dir: runs
+  artifacts_dir: artifacts
+  push_on_publish: true
+  r2:
+    prefix: autonomous-harness-rlvr-compression
     console: https://dash.cloudflare.com/c0b687e3982c3fbcee1fc04607cd2683/r2/default/buckets/shamane-pluralis
 
-budget:                                                       # money caps (absorbed budget.json; scripts/check_budget.py reads THIS block)
+budget:
   monthly_cap_usd: 1500
-  weekly_cap_usd: 500
-  notes: "per-run caps live in each plan's max_gpu_hr/max_dph; the ladder is default_compute.gpu_filter_chain (1×H200 → 1×B200 → 2×H200)"
 
-verification:                                                 # WHERE heavy verification is allowed — the anti-hang doctrine (operator directive 2026-07-03 + harness-v1)
-  planning: "unbounded: /plan deep may run judge-panel workflows, brainstorming, operator Q&A; /approve may invoke codex-verify. All uncertainty is spent BEFORE approval."
-  execution: "NONE autonomous. /launch → /close run without adversarial review, verdict re-verification, or exploratory workflows. If a stage believes heavy verification is warranted mid-run, it appends 'MANUAL_REVIEW_NEEDED: <why> — #<N>' to PROGRESS.md and STOPS for an explicit human go/no-go."
-  cpu_vs_gpu: "CPU checks (import/shape/off-path-parity) run ONCE per gate with ONE bounded fix attempt — never a loop. Numerics-under-training are validated by the on-box probe cell (1-2 steps); on-box fixes are bounded by ledger fix_attempts<=3, then MANUAL_REVIEW_NEEDED."
-  gpu_idle_rule: "implementation FINISHES on the laptop before any box exists (operator directive 2026-07-08): the runner's PREPARE phase (branch/patch/launch payload/one CPU sanity pass) always completes BEFORE provision/attach, in both gpu_mode=auto and ask — a GPU is never up while code is being authored. On-box work is launch + the bounded probe-fix loop only. CPU tests are ONE bounded pass, never a loop — real on-policy numerics are only ever tested on the GPU."
-  monitoring: "the default watch loop is the CHEAP machine-monitor (Sonnet health poller: ssh/tmux/GPU-util/step-advance/disk/wandb-liveness). The Opus training-log-monitor is dispatched ONCE per ANOMALY report, mode=classify (env vs experiment vs probe failure vs stall vs unclear) — never every cycle; a clean done/healthy-timeout report needs no classification. See agent_models."
-  bounded_retry_rule: "every retry is counted in the ledger (launch_attempts<=3, fix_attempts<=3, revise_depth<=plan iterations, monitor cycles<=12); exhaustion stops with a named flag, never spins"
+verification:
+  gpu_idle_rule: Finish implementation and CPU checks before provisioning or attaching a GPU.
+  monitoring: Use the machine monitor for routine health checks and the training-log monitor only for anomalies.
 
-source_tree:                                                  # the upstream code the experiments operate on
-  # path/protect/allowed values are DOCUMENTATION + fallback (#63 B6): the
-  # protect-upstream hook self-locates from its own file; do not rely on these
-  # absolutes surviving a checkout move.
-  path: /Users/shamane/Documents/new-harness/verl/
-  remote: shamanez/verl                                       # the fork — pushes/PRs for verl code go HERE (NOT verl-project/verl)
-  upstream_branch: main                                       # tracks verl-project/verl — READ-ONLY, never edit, never PR to it
-  base_branch: autonomous-harness-v1                          # primary working branch of THIS harness line — experiment-runner forks exp/<N>-<slug> from here, log-writer PRs back here.
-  protect_paths:                                              # protect-upstream PreToolUse hook refuses writes here
-    - /Users/shamane/Documents/new-harness/verl/              # everything UNDER the checkout (hook self-locates; this line is documentation)
-  allowed_paths:                                              # except these subtrees
-    - /Users/shamane/Documents/new-harness/verl/research/     # always writable (hook self-locates; documentation)
-  exception_branches:                                         # plus any path is writable when on these branches
-    - exp/*                                                   # per-issue branches (every issue gets one; code_change patches happen here)
-    - autonomous-harness-*                                    # harness-engineering branches
+source_tree:
+  base_branch: autonomous-harness-v1
 
-vast_template:                                                # the locked Vast.ai docker template the runner provisions
-  name: verl-research-vllm020
-  hash: 3b0f8b726ac3036d6c007bfa13b6d75f
-  id: 447527
-  image: verlai/verl:vllm020.dev1
-  bundled_torch: 2.11.0+cu130
-  bundled_vllm: 0.20.2
-  recommended_disk_gb: 200
-  registry_file: .claude/skills/vast-provision/templates.json
+vast_ssh:
+  identity_file: ~/.ssh/vast_ai_name
 
-vast_ssh:                                                     # SSH identity the laptop uses to reach Vast.ai instances
-  # PER-HANDLE ssh_login IS AUTHORITATIVE for any given box (#63 I7/B14): operator
-  # boxes arrive on arbitrary keys (e.g. ~/.ssh/vast_ai). This identity is only the
-  # PROVISION-TIME default; vast-attach --ssh-identity / VAST_SSH_IDENTITY override,
-  # and every consumer must use the handle's embedded ssh_login, never re-derive.
-  identity_file: ~/.ssh/vast_ai_name                          # private key — matching .pub registered on Vast (id 890294, name "vast_ai_name"). Override at runtime with VAST_SSH_IDENTITY.
-  pubkey_file: ~/.ssh/vast_ai_name.pub                        # the registered public key (passed to `vastai attach ssh` for newly-provisioned boxes if needed)
-  # Every ssh/rsync (sync-metrics.sh, experiment-runner, on-box helpers) MUST pass `-i $(eval echo "$identity_file")` — bare `ssh root@host` silently offers id_rsa/id_ed25519 and fails publickey.
-
-default_compute:                                              # cost-aware provisioning fallback; the completed qboot-v2 reference used 2×H200 NVL. Before sizing any surface, CHECK perf_profiles below — a matching measured profile overrides this ladder.
-  gpu_mode: auto                                              # auto | ask — HOW the box appears at /launch time. Resolution order: CLI (`/execute <N> --gpu auto|ask`) > plan `gpu_mode:` key > this default.
-                                                              #   auto = hands-off: once the runner's PREPARE phase (implementation + CPU gates, laptop-only) is green it walks gpu_filter_chain and provisions by itself.
-                                                              #   ask  = prepare everything, then PAUSE: needs:human "READY FOR GPU" comment on the issue; the operator hands over a box (`--attach <id>` → vast-attach registers it) or authorizes auto-provision (re-run with `--gpu auto`).
-  gpu_count: 1
-  gpu_filter_chain:                                           # DEFAULT ladder (2026-07-03): 1×H200 → 1×B200 → 2×H200 — runner tries each rung in order; first rung with ≥1 offer ≤ max_dph wins. Machine reliability strictly >0.99 on EVERY rung.
-    - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # default cost-aware provisioning rung; not a claim about the exact report hardware
-    - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"   # more HBM, still single-GPU
+default_compute:
+  gpu_mode: auto
+  gpu_filter_chain:
+    - "num_gpus=1 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
+    - "num_gpus=1 gpu_name=B200 gpu_ram>=180 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
     - "num_gpus=2 gpu_name=H200 gpu_ram>=140 cuda_max_good>=13.0 reliability>0.99 rentable=true verified=true"
   max_dph: 24.0
   max_gpu_hr: 96
   max_parallel: 1
-  wall_clock_hr: 12
   iterations: 3
 
-datasets:                                                     # Dataset registry — this block is the SINGLE SOURCE OF TRUTH for the active run surface.
-  default: math
-  math:
-    name: MATH
-    hf_id: EleutherAI/hendrycks_math
-    splits: "native train / native test (7 subject configs concatenated)"
-    prep: "python3 research/scripts/prepare_rlvr_math.py --dataset math --local_save_dir /workspace/data/math"
-    data_dir: /workspace/data/math
-    data_source: DigitalLearningGmbH/MATH-lighteval
-    reward: "last \\boxed{} extraction + is_equiv"
+current_default:
+  model: qwen25-math-1p5b
+  train_dataset: math
+  validation_dataset: math
+  method_launcher: bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
+  dense_control_launcher: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
+  grpo:
+    train_batch_size: 512
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_epochs: 1
+    actor_shuffle: false
+    rollout_n: 8
+    max_prompt_length: 1024
     max_response_length: 3072
-  hard:
-    name: Big-Math
-    status: historical-alternate-surface
-    hf_id: gshasiri/Big-Math-RL-Verified-filtered             # 123,602 train / 6,506 val
-    prep: "python3 research/scripts/bigmath_dapo.py --local_save_dir /root/data/bigmath --train-cap 0 --val-size 500 --seed 42; then launch with DATA_DIR=/root/data/bigmath (uses the prepared parquet files instead of the MATH fallback prep)"
-    data_source: DigitalLearningGmbH/MATH-lighteval           # reward-fn routing key set by bigmath_dapo.py — do NOT use math_bigmath (pred:None crashes val agg) or math_dapo (ignores \boxed{}); see plan 58
-    max_response_length: 4096                                 # hard-dataset default — carried from EXP-58 (1000 clean steps on 1×H200)
-  rlvr:                                                       # 5 RLVR-paper math datasets (issue #62). ALL route through data_source=DigitalLearningGmbH/MATH-lighteval (math_reward, \boxed{}+is_equiv). Prep: research/scripts/prepare_rlvr_math.py --dataset <slug> --local_save_dir <DATA_DIR>. Field mappings probed 2026-07-07 and baked into the prep SPECS table (mappings SSOT = the script; this block is the id/route index).
-    data_source: DigitalLearningGmbH/MATH-lighteval           # shared routing key for all 5 (never math_bigmath / math_dapo)
-    prep_script: research/scripts/prepare_rlvr_math.py
-    entries:
-      - {slug: math,        hf_id: EleutherAI/hendrycks_math,        data_dir: math,        splits: "train/test (7 subject configs concatenated)", answer: "boxed span of `solution`"}
-      - {slug: numina-cot,  hf_id: AI-MO/NuminaMath-CoT,             data_dir: numina_cot,  splits: "train/test",                                 answer: "boxed span of `solution`"}
-      - {slug: deepscaler,  hf_id: qingy2024/DeepScaleR-40k,         data_dir: deepscaler,  splits: "train-only -> test carved from train",       answer: "`solution` (bare short answer)"}
-      - {slug: skywork-or1, hf_id: Skywork/Skywork-OR1-RL-Data,      data_dir: skywork_or1, splits: "split=math -> test carved from train",         answer: "json.loads(reward_model.ground_truth)[0]"}
-      - {slug: dapo-math,   hf_id: BytedTsinghua-SIA/DAPO-Math-17k,  data_dir: dapo_math,   splits: "train-only -> test carved from train",       answer: "reward_model.ground_truth (plain str); native Answer-format boilerplate stripped before boxed instruction appended"}
+    optimizer: AdamW
+    learning_rate: 0.000001
+    weight_decay: 0.01
+    gradient_clip: 1
+    loss_aggregation: token-mean
+    reference_kl_type: low_var_kl
+    reference_kl_coefficient: 0.001
+    reward_kl_enabled: false
+    entropy_coefficient: 0
+    trainer_steps: 100
+    validation_steps:
+      - 0
+      - 25
+      - 50
+      - 75
+      - 100
+  fast_circuit:
+    pipeline_parallelism: required
+    pipeline_stages: 8
+    activation_projection: powersgd
+    powersgd_rank: 77
+    activation_derived_q: true
+    synchronized_q: true
+    warm_start_q: true
+    fast_q_bootstrap: true
+  slow_circuit:
+    device: separate
+    role: periodic_dense_gradient_anchor
+    paired_replay: true
+    batch_scope: ppo_minibatch
+    cadence_optimizer_ticks: 20
+    delay_optimizer_ticks: 20
+    state_device: cpu
+    owns_q: true
+    weight_projection: rank1_relex
+    weight_window: 4
+    minimum_snapshots: 2
+    projection_strength: 1.0
+    gradient_correction: signed_ema
+    signed_ema_alpha: 0.25
+    anchor_ema_beta: 0.50
 
-models:                                                       # Model registry; override only MODEL_PATH on an experiment launcher, never fork the algorithm path.
-  default: Qwen/Qwen2.5-Math-1.5B
-  # role=test → GPU-smoked on 1×H200 (fits); role=integrate-only → registry + CPU tokenizer/chat-template load ONLY (too big for 1×H200, never GPU-smoked).
-  # chat_template_ok / boxed_survives verified on the laptop 2026-07-07 (Stage-1 registry-tokenizer-load): all 8 load a chat template that preserves the \boxed{} instruction — no generic fallback needed.
-  test:
-    - {slug: qwen25-math-1p5b,     hf_id: Qwen/Qwen2.5-Math-1.5B,                    chat_template: native, paper: minimal-rlvr}
-    - {slug: qwen3-1p7b-base,      hf_id: Qwen/Qwen3-1.7B-Base,                      chat_template: native, paper: one-layer-enough}
-    - {slug: r1-distill-qwen-1p5b, hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, chat_template: native, paper: rlvr-linearity, note: "MEASURED #63: at resp 4096 truncation clip_ratio=0.73 — near-useless for reasoning evals; the real surface is 16K (clip 3%). Before sizing compute for it READ perf_profiles.r1distill-1p5b-16k-n16 below — single-GPU is proven too slow"}
-    - {slug: open-nemotron-1p5b,   hf_id: nvidia/OpenReasoning-Nemotron-1.5B,        chat_template: native, paper: minimal-rlvr, note: "id resolved from spec (no explicit id given); loads on laptop. If it OOMs at smoke → recorded negative, dropped."}
-    - {slug: qwen3-4b-base,        hf_id: Qwen/Qwen3-4B-Base,                        chat_template: native, paper: one-layer-enough}
-  integrate-only:                                             # 7B/8B — registry + CPU load check only; NOT GPU-smoked (too big for 1×H200)
-    - {slug: r1-distill-qwen-7b,   hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B,   chat_template: native, paper: rlvr-linearity}
-    - {slug: r1-distill-llama-8b,  hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B,  chat_template: native, paper: rlvr-linearity}
-    - {slug: qwen3-8b-base,        hf_id: Qwen/Qwen3-8B-Base,                        chat_template: native, paper: one-layer-enough}
+models:
+  default: qwen25-math-1p5b
+  entries:
+    qwen25-math-1p5b:
+      hf_id: Qwen/Qwen2.5-Math-1.5B
+      chat_template: native
+      integration_level: gpu
+    qwen3-1p7b-base:
+      hf_id: Qwen/Qwen3-1.7B-Base
+      chat_template: native
+      integration_level: gpu
+    r1-distill-qwen-1p5b:
+      hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      chat_template: native
+      integration_level: gpu
+    open-nemotron-1p5b:
+      hf_id: nvidia/OpenReasoning-Nemotron-1.5B
+      chat_template: native
+      integration_level: gpu
+    qwen3-4b-base:
+      hf_id: Qwen/Qwen3-4B-Base
+      chat_template: native
+      integration_level: gpu
+    r1-distill-qwen-7b:
+      hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      chat_template: native
+      integration_level: integration_only
+    r1-distill-llama-8b:
+      hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      chat_template: native
+      integration_level: integration_only
+    qwen3-8b-base:
+      hf_id: Qwen/Qwen3-8B-Base
+      chat_template: native
+      integration_level: integration_only
 
-perf_profiles:                                                # MEASURED workload profiles (never guess/re-probe a known surface) — planner + experiment-runner MUST consult this before sizing compute for a matching surface. Values are EMPIRICAL (issue #63, 2026-07-08), not theoretical. The default_compute ladder is unchanged; a matching profile OVERRIDES the ladder choice.
-  r1distill-1p5b-16k-n16:                                     # ~1.5B reasoning model on the RLVR-Linearity repro surface
-    surface: {prompt: 2048, response: 16384, rollout_n: 16, train_batch: 128, algo: grpo}
-    single_gpu_h200: "FITS but DO NOT USE — no OOM (rollout gen peaks 138/143GB @ gpu_mem_util 0.85; training phase ~22GB with CPU offload ON), but step-1 = 1677s (~28 min) ⇒ 200 steps ≈ 90+ GPU-hr/arm. param+optimizer CPU offload is REQUIRED to fit 1 GPU and is itself a major slowdown."
-    quad_h200_dense: "DENSE / comm-eff-OFF ONLY. USE THIS SHAPE — step-1 = 489s incl. one-time compile (gen 240s of it); steady-state ~400-450s ⇒ ≤27h/arm @ 200 steps. CPU offload OFF (FSDP shards across ranks; launcher hardcoded False is correct on multi-GPU for a NO-anchor run); NGPUS_PER_NODE auto-detect works; ROLLOUT_TP=1 ⇒ 4 independent vLLM engines (right call for 1.5B — never TP>1 at this size); gpu_memory_utilization=0.85; ppo_max_token_len_per_gpu=30000; max_num_batched_tokens=35840; training-phase mem ~50GB/GPU; free_cache_engine=True absorbs the 130GB↔50GB rollout↔train swing."
-    quad_h200_comm_eff: "COMM-EFF ARMS (comm_eff.enabled=true) — DIFFERENT memory config, do NOT inherit the dense one. MEASURED #63 2026-07-09: with offload OFF / token-len 30000 the arms OOM at the FIRST anchor refresh (step = anchor.cadence/2, i.e. step 10 at cadence 20). Root cause: _maybe_comm_eff_anchor_refresh builds an UN-CHECKPOINTED full-model clone and runs an extra fwd+bwd → ~75-80GB activation surcharge stacked on the ~50GB train baseline (NOT the PowerSGD Q, which is ~6.6MB; snapshot+EMA already on CPU). WORKING CONFIG: param_offload=True + optimizer_offload=True (trailing Hydra override — launcher hardcodes False, $@ wins) AND ppo_max_token_len_per_gpu=20000 (cuts the token-linear surcharge ~22GB). Verified: b50 cleared the anchor at peak 124/143GB, 0 OOM. Cost: slower steps (offload transfer + more micro-batches) ⇒ ~550-600s/step. FLOOR: ppo_max_token_len_per_gpu MUST be ≥ max_prompt+max_response = 18432 (a sequence can't split across micro-batches; 16000 threw AssertionError max_token_len<max_seq_len). Definitive fix pending (exp branch): gradient checkpointing on the anchor clone (build_anchor_module in verl/workers/comm_eff/anchor.py) would remove the surcharge and restore offload-OFF/token-30000 speed."
-    rules:
-      - "DENSE vs COMM-EFF differ in memory at this surface: dense fits offload-OFF/token-30000; comm-eff arms need offload-ON + token-len 20000 (the anchor refresh's un-checkpointed clone is the difference — see quad_h200_comm_eff)"
-      - "CPU offload ON only when single-GPU fit OR a comm-eff anchor refresh demands it; OFF for a dense/no-anchor run on ≥2 GPUs (FSDP sharding beats CPU offload)"
-      - "ppo_max_token_len_per_gpu HARD FLOOR = max_prompt+max_response (one sequence can't split across micro-batches); it is the strongest non-code lever for the comm-eff anchor-refresh peak but cannot go below that floor"
-      - "comm-eff feasibility probe MUST run a comm_eff-ON cell PAST the first anchor fire (≥ anchor.delay_K+1 steps) — the anchor refresh is the peak-memory event; a dense-only or <first-fire probe cannot see the ceiling (#63: dense probe fit, comm-eff arms OOM'd at step 10)"
-      - "generation dominates the step: prefer N independent TP=1 vLLM engines over tensor-parallel for small models"
-      - "checkpoint→R2 (CKPT_R2_ENABLED) needs aws CLI + R2 creds ON THE BOX — preflight at attach/provision time, never discover at the final save"
-      - "resp 4096 on this model: clip_ratio 0.73 (73% truncated) vs 0.03 at 16K — reasoning evals need the 16K surface"
+datasets:
+  default: math
+  data_source: DigitalLearningGmbH/MATH-lighteval
+  reward: last boxed answer with is_equiv
+  prep_script: research/scripts/prepare_rlvr_math.py
+  entries:
+    math:
+      hf_id: EleutherAI/hendrycks_math
+      train_split: native train
+      validation_split: native test
+      data_dir: $HOME/data/math
+    numina-cot:
+      hf_id: AI-MO/NuminaMath-CoT
+      train_split: train
+      validation_split: test
+      data_dir: $HOME/data/numina_cot
+    deepscaler:
+      hf_id: qingy2024/DeepScaleR-40k
+      train_split: train
+      validation_split: held out from train
+      data_dir: $HOME/data/deepscaler
+    skywork-or1:
+      hf_id: Skywork/Skywork-OR1-RL-Data
+      train_split: math subset
+      validation_split: held out from math subset
+      data_dir: $HOME/data/skywork_or1
+    dapo-math:
+      hf_id: BytedTsinghua-SIA/DAPO-Math-17k
+      train_split: train
+      validation_split: held out from train
+      data_dir: $HOME/data/dapo_math
+    big-math:
+      hf_id: gshasiri/Big-Math-RL-Verified-filtered
+      train_split: train
+      validation_split: prepared validation sample
+      data_dir: $HOME/data/bigmath
+      prep_script: research/scripts/bigmath_dapo.py
 
-default_baseline:                                             # Dense control used when an issue omits `baseline_run:`; same Qwen-Math/MATH surface, comm-eff off.
-  run: relex_cmp_dense_grpo_math_qwen25_math_1p5b
-  command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
-  model: Qwen/Qwen2.5-Math-1.5B
-  data: MATH train / MATH test
-  comm_eff_enabled: false
-
-compression_defaults:                                        # Active qboot-v2 answer/reference surface. Generic actor/Hydra defaults remain all-off for dense compatibility.
-  math_qwen25_math_1p5b:
-    default_answer_surface: true
-    reference_status: latest_completed_pre_anchor_kl_diagnostic
-    method_command: bash examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh
-    evidence_command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite
-    dense_control_command: bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
-    protocol:
-      model: Qwen/Qwen2.5-Math-1.5B
-      data: 'MATH train split; MATH test split'
-      hf_dataset: EleutherAI/hendrycks_math
-      data_source: DigitalLearningGmbH/MATH-lighteval
-      prompt_template: examples/grpo_trainer/relex_qwen_chat_template.jinja
-      reward: 'last \boxed{} + is_equiv'
-      training: 'GRPO; train_batch=512; mini_batch=256; dynamic micro_batch=1/GPU; shuffle=false; rollout_n=8; prompt=1024; response=3072; AdamW lr=0.000001 weight_decay=0.01 grad_clip=1; policy_loss=vanilla; reference low_var_kl=0.001; reward_KL=false; entropy=0; steps=100; eval_at=0/25/50/75/100'
-      activation_projection: 'PowerSGD rank=77 with activation-derived Q; synchronized across data-parallel ranks; warm-started; one consensus fast-Q bootstrap before the first compressed old/current-policy pair'
-      anchor_signal: 'Paired dense replay at cadence=20 and delay_K=20 optimizer ticks; anchor owns Q; batch_scope=ppo_minibatch; exact checkpoint snapshots, replay state, and signed-EMA state live on CPU'
-      anchor_objective: 'Ratio-one unclipped advantage policy gradient matching the fast actor advantages, masks, normalization, rollout importance weights, entropy term, and reference low_var_kl=0.001; compressed-policy old_log_probs, PPO ratio, and clipping are intentionally excluded'
-      weight_projection: 'rank1_relex only; progressive W2 secant, W3 rank-1 fit, and sliding W4 rank-1 OLS; window=4; min_snapshots=2; strength=1.0; rollout_source=auto/current; first-fire behavior=stale_correct'
-      gradient_correction: 'Signed EMA over all floating gradient-bearing parameters; alpha=0.25; beta_anc=0.50; state_device=cpu; max_targets=-1; diagnostics=false'
-      observed_hardware: '2x H200 NVL'
-    latest_completed_reference:
-      name: qboot_v2_composite
-      run: relex_cmp_qboot_v2_w4min2_allfloatm_alpha1_math_qwen25_math_1p5b
-      wandb: https://wandb.ai/shamanework-pl/verl_compression_research/runs/v9sfxnaz
-      evidence_commit: 8bad0656
-      final_math: 0.6684673869547819
-      communication_ratio: 0.05013569
-      status: 'Complete historical reference. It predates the anchor-KL objective-parity fix, so it remains diagnostic evidence rather than a promoted champion.'
-    dense_control:
-      run: relex_cmp_dense_grpo_math_qwen25_math_1p5b
-      comm_eff_enabled: false
-      role: 'Same model, data, and GRPO surface with communication efficiency disabled.'
-
-launchers:                                                    # launch-script stability contract — full text in examples/grpo_trainer/VAST_README.md §"Stability contract"
-  dir: examples/grpo_trainer/                                 # canonical, committed launchers live here (vast_*.sh, on source_tree.base_branch). NB: the LOCKED Vast template's onstart clones a PINNED branch (registry: .claude/skills/vast-provision/templates.json) — so every launch.sh FIRST checks out source_tree.base_branch on the box (runner contract; editable install ⇒ no reinstall). exp/* code_change runs replace the clone by cloning exp/<id> straight from origin/GitHub (bundle = offline crash-survival fallback, not uploaded).
-  naming: "vast_<scenario>_<model>_<algo>_<dataset>.sh"
-  override_model: canonical-launcher + CLI/env overrides      # a run calls the canonical launcher and overrides only the knobs it varies (${VAR:-default} env vars + Hydra "$@" passthrough) — never re-types the baseline
-  sandbox: research/runs/<N>-<slug>/                          # per-run config.yaml / launch.sh / patches are VOLATILE — never the source of truth
-  promotion: auto-land-on-close                               # /close's log-writer bakes the proven values (from resolved_params.txt) into the canonical launcher on the issue branch and merges its PR; the human gate for this spend already happened at /approve
-  provenance:                                                 # "what settings actually ran" must never be lost to drift
-    capture_script: research/scripts/capture_resolved_config.py
-    artifact: resolved_params.txt                             # Hydra last-wins key=value, extracted from train.log set -x trace; ground truth, NOT the plan or a manifest
-    rule: "promotion + manifests derive from resolved_params.txt, never from prose"
-
-agent_models:
-  # DOCUMENTATION ONLY — and the one block where the "project.yaml wins" rule at the
-  # top of this file is INVERTED. The authoritative control for an agent's model and
-  # reasoning effort is its own frontmatter (`model:` + `effort:` in
-  # .claude/agents/<name>.md), which is what Claude Code actually reads at spawn time.
-  # project.yaml cannot re-point an agent. This block records the policy + rationale so
-  # the whole spread is reviewable in one place; if you change an agent's frontmatter,
-  # update the matching row here by hand (and vice versa).
-  #
-  # Policy (operator directive 2026-06-29, AMENDED 2026-07-08): STRICT best model for
-  # every REASONING agent — Opus 4.8 (claude-opus-4-8), effort floor `high`, tiered
-  # within {high, xhigh, max}. The 2026-07-08 amendment carves out ONE exception:
-  # machine-monitor, the mechanical box-health poller, runs on SONNET — its checks are
-  # numeric threshold reads (ssh alive? tmux alive? GPU util? step advanced?) with an
-  # escalation path to the Opus classifier, and it is the highest-frequency agent in the
-  # harness, so per-poll cost/latency compounds hardest there. Anything that requires
-  # JUDGMENT (classification, verdicts, plans, patches) stays Opus 4.8.
-  #   • max  — the two agents that AUTHOR load-bearing artifacts: research-planner
-  #            (designs the plan) and experiment-runner (writes/patches verl code +
-  #            launch payload). A wrong plan/patch burns GPU money, so they get the ceiling.
-  #   • xhigh — analyst: deep verdict reasoning, one notch below max.
-  #   • high  — training-log-monitor + log-writer (the floor for Opus agents).
-  #   • sonnet/high — machine-monitor (the 2026-07-08 exception above): dispatched
-  #            EVERY watch cycle; escalates anomalies to training-log-monitor, which is
-  #            now dispatched ON DEMAND (once per anomaly/terminal), not every cycle.
-  # "ultracode" (xhigh + dynamic-workflow orchestration) is a MECHANISM, not a per-agent
-  # effort: it is launched at the SESSION level, PLANNING-TIME ONLY (/plan deep judge
-  # panels, operator analysis of closed results) — see `verification:` + `workflows:`.
-  # The /goal evaluator runs on Opus 4.8: Claude Code's
-  # small-fast-model slot (env ANTHROPIC_DEFAULT_HAIKU_MODEL, default Haiku) is OVERRIDDEN to
-  # claude-opus-4-8 in settings.json, so NO Haiku model ever runs (see `goal_command:`).
-  #
-  # Reasoning-effort rule: research-planner + experiment-runner @ max; analyst @ xhigh;
-  # training-log-monitor + log-writer @ high (the floor). Model = Opus 4.8 for all
-  # reasoning agents; machine-monitor = Sonnet @ high (mechanical exception, 2026-07-08).
-  reasoning_effort_rule: "Opus 4.8 for ALL reasoning agents (strict best-model policy); effort floor=high; research-planner+experiment-runner @ max, analyst @ xhigh, training-log-monitor+log-writer @ high; machine-monitor = Sonnet @ high (mechanical health poller — the ONE sanctioned non-Opus agent, operator directive 2026-07-08); ultracode/workflows = session-level mechanism for the hard lanes"
-  context_window_rule: "every agent requests the 1M context window via the [1m] model suffix (e.g. claude-opus-4-8[1m]); keep the suffix on every agent. CLAUDE_CODE_SUBAGENT_MODEL is intentionally NOT set — it would flatten the per-agent reasoning-effort tiers below (all agents are Opus 4.8; only effort varies)."
-  agents:
-    analyst:
-      model: "claude-opus-4-8[1m]"
-      effort: xhigh
-      why: writes PASS/REVISE/STOP verdicts that gate expensive compute — deep judgment, but not a plan/code author, so xhigh (max is reserved for research-planner + experiment-runner)
-    research-planner:
-      model: "claude-opus-4-8[1m]"
-      effort: max
-      why: designs falsifiable experiment plans — heaviest reasoning load in the harness; the plan author, one of the two max agents
-    experiment-runner:
-      model: "claude-opus-4-8[1m]"
-      effort: max
-      why: writes/patches verl code on exp/* branches + authors launch.sh/config/provisioning payload — the code author, one of the two max agents. Operator directive — max (not Anthropic's xhigh coding-default) because a wrong patch or mis-provision burns real GPU money and corrupts the run.
-    machine-monitor:
-      model: "claude-sonnet-5[1m]"
-      effort: high
-      why: >-
-        the DEFAULT per-cycle watcher — mechanical numeric health checks only
-        (ssh/tmux liveness, per-GPU util, global_step advance, disk, done flags,
-        wandb heartbeat). Zero judgment calls by design: anything anomalous is
-        returned as evidence and escalated. Sonnet because it is the
-        highest-frequency agent (30s cadence, ~80 polls/run) and speed/cost
-        compound; the 2026-07-08 operator exception to the strict-Opus policy.
-    training-log-monitor:
-      model: "claude-opus-4-8[1m]"
-      effort: high
-      why: traceback classification is load-bearing (Ray dedup-wraps tracebacks, FSDP1 multi-frame grad chains). Since 2026-07-08 dispatched ON DEMAND — once per machine-monitor ANOMALY report, in classify mode — not as the every-cycle watcher, so the Opus cost is paid only when judgment is actually needed. May be a worker inside a session-launched deep-diagnostics workflow.
-    log-writer:
-      model: "claude-opus-4-8[1m]"
-      effort: high
-      why: mechanical append/copy/rewrite + draft PR (genuinely not reasoning-heavy). Opus 4.8 per the strict best-model policy; effort held at `high` (the floor). Never launches a workflow — its durable git/GitHub mutations stay single-shot.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Feature policy (/goal, workflows, teams) — harness-v1. Design + rationale:
-# the hosted operator manual (link in researcher_steps.md). The `verification:`
-# block above is the gating rule these features live under.
-# ─────────────────────────────────────────────────────────────────────────────
-
-goal_command:                                                 # Claude Code /goal — the OPTIONAL unattended wrapper around /go <N>
-  status: optional-appendix                                   # NOT the default path (P6): default = one-issue-per-window with a human nearby (/plan window, /execute window). Reach for /bg /goal only for a genuinely unattended multi-day run.
-  role: "days-long unattended execution = `/bg /goal Issue <N> is terminal (status:done, box TORN_DOWN) or the issue gained a needs:human/awaiting:approval label. Each turn run /go <N> once and print status+evidence. Stop after 120 turns.`"
-  evaluator_model: claude-opus-4-8                            # the /goal done-judge runs on Opus 4.8. NO Haiku model runs anywhere in this harness.
-  evaluator_model_env: ANTHROPIC_DEFAULT_HAIKU_MODEL          # Claude Code's small-fast-model slot (default Haiku); settings.json OVERRIDES it to claude-opus-4-8 so NO Haiku ever runs. Do NOT delete the override.
-  transcript_evidence_rule: "the /goal evaluator is transcript-only — /go prints the issue's stage + evidence (labels, ledger status, verdict line) each turn so the judge can see 'done'."
-  escape_hatch: "every /goal condition MUST include an escape ('… or the issue gained a needs:human/awaiting:approval label') + a turn bound, so an impossible criterion cannot burn money forever."
-  stop_hook_interaction: "/goal blocks the Stop event, so /monitor runs the teardown sweep in-foreground when acting on reports; the Stop hook remains the backstop for plain sessions."
-  must_not_replace: [human /approve gate, teardown backstop, GOAL.md north-star]
-
-workflows:                                                    # dynamic workflows / `ultracode` — PLANNING-TIME ONLY (see verification: above)
-  status: enabled-planning-only
-  sanctioned_lanes:
-    - "hard planning (/plan deep): judge-panel — draft N approaches -> score -> synthesize -> research-planner writes the winner"
-    - "operator interactive analysis of ALREADY-CLOSED results (post-teardown, GPU-free)"
-  forbidden_lanes: "mid-run adversarial verify, live in-training diagnostics fan-out, autonomous verdict re-verification — these were the harness's main hang cause; execution stages use single-shot subagents only"
-  read_only_auto_approve_rule: "workflow workers stay READ-ONLY (runs/ only). Anything that spends money or mutates durable state (vast-provision, git, PRs, runs.jsonl, labels) is a gated single-shot dispatch — never a workflow worker."
-  saved_workflows_dir: .claude/workflows/
-
-agent_teams:                                                  # CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 is set
-  status: enabled-opt-in
-  rule: "never part of the unattended loop (in-process teammates don't survive /resume). Opt-in, GPU-free, planning-time or post-close only — e.g. an operator-run plan-design panel. Parallel ISSUES use parallel sessions in worktrees, not teams."
+perf_profiles: {}
