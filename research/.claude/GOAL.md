@@ -34,8 +34,7 @@ control.
 
 ## Current default answer/reference surface
 
-When asked for “the default setting,” answer from this surface rather than the
-historical Qwen-Instruct/GSM8K proof runs:
+When asked for “the default setting,” answer with this qboot-v2 surface:
 
 - GRPO train batch 512, PPO mini-batch 256, rollout `n=8`, dynamic micro-batch
   1/GPU, actor shuffle off, prompt/response 1024/3072.
@@ -95,31 +94,26 @@ at step 30, and sliding W4 rank-1 OLS from step 40. It uses strength 1,
 The qboot-v2 composite (`v9sfxnaz`, commit `8bad0656`) is the **latest completed
 reference**, ending at 66.85% MATH with ~5.01% communication. It predates the
 anchor-KL objective-parity fix and is diagnostic evidence, not a promoted
-champion.
-
-Corrected W2 is the provisional diagnostic score winner at 67.89%, but it also
-predates the KL fix. The objective-parity-complete W2 rerun stopped at global
-step 12, before its first dense anchor backward/M update at step 20. Therefore:
+champion. The current status is:
 
 - the default **model/data/run surface** is Qwen2.5-Math-1.5B + MATH train/test;
 - the latest completed **method reference** is qboot-v2 composite;
-- the selected compressed arm remains **none** until a corrected run completes.
+- the qboot-v2 settings above are the active single-arm launcher defaults;
+- the reference remains diagnostic until an objective-parity-complete run
+  finishes, so it must not be described as a statistically established champion.
 
-Do not manufacture a hybrid “default” from W2’s score and qboot-v2’s features;
-that would be a new, untested arm. Generic actor/Hydra communication defaults
-remain all-off for dense compatibility.
+Generic actor/Hydra communication defaults remain all-off for dense
+compatibility; the MATH method launcher enables the qboot-v2 surface explicitly.
 
 ## Current priority
 
 Complete an objective-parity run through all anchor/RELEX phases, then compare it
 with the dense control and replicate before promotion. Score, full trajectory,
-mismatch KL, communication ratio, Q transaction counters, M coverage, and causal
-projection probes all belong in the verdict.
+mismatch KL, communication ratio, Q transaction counters, M coverage, and RELEX
+readiness/correction metrics all belong in the verdict.
 
 ## Pointers
 
-- Current report and evidence: `docs/experiments/relex_rank1_report.html`
 - Operating configuration: `.claude/project.yaml`
-- Engineering map: `CODE_WALKTHROUGH.md`
 - Latest completed reference: `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_qboot_v2_comparison_fsdp.sh composite`
 - Dense MATH control: `bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense`

@@ -1,5 +1,9 @@
-import os, re, sys, wandb
+import os
+import re
+import sys
 from pathlib import Path
+
+import wandb
 
 # args: <train_log> <run_id> <target_step>
 # Relog the final training step (WandB's async uploader drops the last 1-2 steps,
@@ -13,7 +17,8 @@ with open(log_path, errors="ignore") as f:
             line = ln
             break
 if line is None:
-    print(f"NO LINE for global_step:{target}"); sys.exit(2)
+    print(f"NO LINE for global_step:{target}")
+    sys.exit(2)
 
 line = re.sub(r"\x1b\[[0-9;]*m", "", line)
 i = line.find("global_seqlen")
@@ -25,7 +30,8 @@ for tok in line.split(" - "):
     if ":" not in tok:
         continue
     k, v = tok.split(":", 1)
-    k = k.strip(); v = v.strip()
+    k = k.strip()
+    v = v.strip()
     if " " in k or "(" in k or k == "":
         continue
     try:
@@ -33,9 +39,10 @@ for tok in line.split(" - "):
     except ValueError:
         pass
 print(f"parsed {len(metrics)} keys for step {target}")
-for key in ("training/global_step", "val-core/openai/gsm8k/acc/mean@1",
-            "val-aux/openai/gsm8k/reward/mean@1", "critic/score/mean",
-            "actor/comm_eff/anchor_align_cos", "response_length/mean"):
+preview_keys = ["training/global_step"]
+preview_keys.extend(sorted(key for key in metrics if key.startswith("val-core/")))
+preview_keys.extend(("critic/score/mean", "actor/comm_eff/anchor_align_cos", "response_length/mean"))
+for key in dict.fromkeys(preview_keys):
     print(f"  {key} = {metrics.get(key)}")
 
 # Keep wandb's local staging dir UNDER the run dir so close_cleanup (which

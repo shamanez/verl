@@ -17,14 +17,17 @@ conflict.
 Ground-truth per dataset (probed 2026-07-07):
   math        EleutherAI/hendrycks_math      answer = \\boxed{} span of `solution`  (7 subject configs, concat)
   numina-cot  AI-MO/NuminaMath-CoT           answer = \\boxed{} span of `solution`
-  deepscaler  qingy2024/DeepScaleR-40k       answer = `solution` (already the bare short answer; train-only -> carve test)
-  skywork-or1 Skywork/Skywork-OR1-RL-Data    answer = json.loads(reward_model.ground_truth)[0]  (split "math"; carve test)
+  deepscaler  qingy2024/DeepScaleR-40k       answer = `solution`
+                                               (bare short answer; carve test from train)
+  skywork-or1 Skywork/Skywork-OR1-RL-Data    answer = json.loads(reward_model.ground_truth)[0]
+                                               (split "math"; carve test from train)
   dapo-math   BytedTsinghua-SIA/DAPO-Math-17k answer = reward_model.ground_truth (plain str; train-only -> carve test)
 
 Output: <save_dir>/train.parquet + <save_dir>/test.parquet, consumed by the
-canonical comm-eff launcher via DATA_DIR (it skips its gsm8k auto-prep when both
-files exist). On-box DATA_DIR dirs: math, numina_cot, deepscaler, skywork_or1,
-dapo_math (slug with '-' -> '_').
+canonical comm-eff launcher via DATA_DIR. MATH is the default surface; when both
+files exist the launcher consumes them instead of invoking its MATH fallback
+prep. On-box DATA_DIR dirs: math, numina_cot, deepscaler, skywork_or1, dapo_math
+(slug with '-' -> '_').
 
 Usage (on the box, one dir per dataset):
   python3 research/scripts/prepare_rlvr_math.py --dataset math \
