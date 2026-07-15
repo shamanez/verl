@@ -258,6 +258,19 @@ EXPERIMENT_NAME=<N>-<cell> WANDB_RUN_GROUP=<id> <VAR=value …> \
 echo "$(date -Iseconds) done" > /workspace/runs/<id>/done.flag
 ```
 
+**Cell success is judged by TRAINING PROGRESS, not exit code alone (2026-07-15
+#83).** verl's wandb `atexit` teardown + the DataLoader `__del__` frequently
+raise AFTER a fully successful run (`BrokenPipeError`, `worker … killed`), so the
+process exits `rc=1` on a cell that actually reached its target step, ran val,
+and synced WandB. A naive `&& done_flag` / `set -e` gate reads that as a failure
+— and on a GATE cell it writes `halt.flag` and idles a paid box (this exact race
+halted #83's probe after 24/24 steps + val + sync). A multi-cell payload's
+`run_cell` MUST therefore treat `reached TOTAL_TRAINING_STEPS (count
+'global_seqlen/mean' lines) AND no config/OOM signature` as SUCCESS even when
+`rc != 0`, e.g.:
+`steps=$(grep -ac global_seqlen/mean "$clog"); if (( rc==0 )) || { (( target>0 && steps>=target )) && ! grep -qiE "$CONFIG_LEVEL_RE" "$clog"; }; then done; fi`
+(parse `target` from the cell's `TOTAL_TRAINING_STEPS` env).
+
 **Cell-failure policy (payload contract; #63 2026-07-09).** The shape above is
 stop-on-first-failure (`set -e`). A payload MAY instead continue past a failed
 cell (`fail_<cell>.flag` + keep going, so one arm's NaN doesn't strand the
