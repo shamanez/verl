@@ -31,8 +31,16 @@ echo "=== [83] launch.sh start $(date -Iseconds) ==="
 #    a stale checkout that would run the growing arm silently as sliding_window).
 # ---------------------------------------------------------------------------
 cd /workspace
-[[ -e verl ]] && mv verl "verl.upstream.$(date +%s)"
-if git clone -b "exp/$ID" https://github.com/shamanez/verl.git verl; then
+rm -rf /workspace/verl.upstream.* /workspace/verl.stale.* 2>/dev/null || true   # stale-clone hygiene (1.3G each)
+# FAST PATH first (relaunches, seconds): reuse the checkout via fetch + hard
+# reset; a full re-clone costs minutes and piles 1.3G verl.upstream.* dirs.
+if [[ -d verl/.git ]] \
+   && (cd verl && git remote set-url origin https://github.com/shamanez/verl.git \
+       && git fetch origin "exp/$ID" && git checkout -B "exp/$ID" FETCH_HEAD \
+       && git reset --hard FETCH_HEAD); then
+  echo "=== code_change: reused checkout, reset to origin/exp/$ID ==="
+elif { [[ -e verl ]] && mv verl "verl.stale.$(date +%s)"; true; } \
+     && git clone -b "exp/$ID" https://github.com/shamanez/verl.git verl; then
   echo "=== code_change: cloned exp/$ID from GitHub ==="
 elif [[ -f "$RUN_DIR/exp.bundle" ]]; then
   echo "=== GitHub unreachable — falling back to exp.bundle ==="
@@ -44,7 +52,7 @@ else
 fi
 cd /workspace/verl
 git remote set-url origin https://github.com/shamanez/verl.git 2>/dev/null || true
-echo "=== verl HEAD: $(git rev-parse HEAD) (want 91ecbdd4) ==="
+echo "=== verl HEAD: $(git rev-parse HEAD) ==="
 # uv is absent on some operator-attach boxes (and refuses system-python without a
 # venv); prefer uv when usable, else fall back to system pip. All heavy deps are
 # already installed, so this --no-deps editable install only re-points the `verl`
