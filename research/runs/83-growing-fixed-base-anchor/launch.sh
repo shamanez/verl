@@ -36,12 +36,12 @@ rm -rf /workspace/verl.upstream.* /workspace/verl.stale.* 2>/dev/null || true   
 # reset; a full re-clone costs minutes and piles 1.3G verl.upstream.* dirs.
 if [[ -d verl/.git ]] \
    && (cd verl && git remote set-url origin https://github.com/shamanez/verl.git \
-       && git fetch origin "exp/$ID" && git checkout -B "exp/$ID" FETCH_HEAD \
+       && git fetch --depth 1 origin "exp/$ID" && git checkout -B "exp/$ID" FETCH_HEAD \
        && git reset --hard FETCH_HEAD); then
   echo "=== code_change: reused checkout, reset to origin/exp/$ID ==="
 elif { [[ -e verl ]] && mv verl "verl.stale.$(date +%s)"; true; } \
-     && git clone -b "exp/$ID" https://github.com/shamanez/verl.git verl; then
-  echo "=== code_change: cloned exp/$ID from GitHub ==="
+     && git clone --depth 1 --single-branch -b "exp/$ID" https://github.com/shamanez/verl.git verl; then
+  echo "=== code_change: shallow single-branch clone of exp/$ID from GitHub ==="
 elif [[ -f "$RUN_DIR/exp.bundle" ]]; then
   echo "=== GitHub unreachable — falling back to exp.bundle ==="
   git clone -b "exp/$ID" "$RUN_DIR/exp.bundle" verl
