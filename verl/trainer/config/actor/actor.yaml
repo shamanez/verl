@@ -352,6 +352,7 @@ comm_eff:
     update_cadence: 1
     warm_start: true
     compress_recompute: true
+    compress_reference: true
     sync_basis: true
     qr_dtype: fp32
     reortho_eps: 1e-6

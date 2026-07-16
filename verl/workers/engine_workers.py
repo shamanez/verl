@@ -705,8 +705,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
         # Reference-policy log-prob is an RL-measurement path. The path tag keeps
         # actor-train compression confined even if this path shares the engine.
+        # With compress_reference enabled, the frozen reference forward runs through
+        # the SAME compressed PowerSGD circuit and the SAME live anchor-owned Q_t as
+        # this step's paired old/current policy forwards, so KL(current||ref) is
+        # measured on one shared basis. The forward is forward_only (grad disabled):
+        # the engine's ref_logprob branch (gated on Q readiness) registers the hooks
+        # on the reference module, and the read-only forward never folds the sketch
+        # or advances Q. Mirrors compute_log_prob's compression_active stamping.
         with self._comm_eff_path("ref_logprob"):
-            output = self.ref.infer_batch(data=data)
+            comm_eff_state = self._maybe_comm_eff_state()
+            self._comm_eff_thread_global_step(data, comm_eff_state)
+            stamped_compression_active = False
+            prev_compression_active = False
+            if comm_eff_state is not None:
+                ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
+                ps_reference = bool(getattr(ps_cfg, "compress_reference", False)) if ps_cfg is not None else False
+                if getattr(comm_eff_state, "powersgd", None) is not None and ps_reference:
+                    prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
+                    comm_eff_state.compression_active = True
+                    stamped_compression_active = True
+            try:
+                output = self.ref.infer_batch(data=data)
+            finally:
+                if stamped_compression_active and comm_eff_state is not None:
+                    comm_eff_state.compression_active = prev_compression_active
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -791,6 +813,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                 pass
                         except Exception as e:  # pragma: no cover - defensive
                             logger.warning("comm_eff.powersgd: could not bind DP group (%s); using world group", e)
+                # Reference-policy engine. When the ref is fused into this worker
+                # (the non-LoRA default: role=actor_rollout_ref, self.ref present),
+                # attach the SAME shared state so the reference forward can run the
+                # same compressed PowerSGD circuit with the same anchor-owned Q. This
+                # is a strict no-op unless compute_ref_log_prob stamps
+                # compression_active with the ref_logprob tag AND compress_reference
+                # is on; the ref forward is forward_only so it never advances Q.
+                ref_engine = getattr(getattr(self, "ref", None), "engine", None)
+                if ref_engine is not None and ref_engine is not engine:
+                    object.__setattr__(ref_engine, "_comm_eff_state", state)
+                    logger.info("comm_eff: enabled — pipeline attached to reference engine (compress_reference path)")
         return getattr(self, "_comm_eff_state", None)
 
     def _comm_eff_thread_global_step(self, data: TensorDict, state) -> Optional[int]:
