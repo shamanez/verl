@@ -182,6 +182,7 @@ actor_rollout_ref:
         update_cadence: 1
         warm_start: true
         compress_recompute: true
+        compress_reference: true
         sync_basis: true
         qr_dtype: fp32
         reortho_eps: 1.0e-06

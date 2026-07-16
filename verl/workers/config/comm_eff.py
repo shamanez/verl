@@ -119,6 +119,13 @@ class CommEffPowerSGDConfig(BaseConfig):
     update_cadence: int = 1
     warm_start: bool = True
     compress_recompute: bool = True
+    # Run the frozen reference-policy forward (reference-KL loss) through the same
+    # compressed PowerSGD circuit as the paired actor forwards, so KL(current||ref)
+    # is measured on one shared basis. The reference forward is read-only
+    # (forward_only, grad disabled): it consumes the current anchor-owned Q and
+    # never folds the sketch or advances Q. Default true (faithful deployment).
+    # Set false for a dense-reference control arm.
+    compress_reference: bool = True
     sync_basis: bool = True
     qr_dtype: str = "fp32"
     reortho_eps: float = 1e-6
@@ -282,7 +289,14 @@ class CommEffConfig(BaseConfig):
             )
 
     def _validate_powersgd(self) -> None:
-        for name in ("enabled", "warm_start", "compress_recompute", "sync_basis", "fast_q_bootstrap"):
+        for name in (
+            "enabled",
+            "warm_start",
+            "compress_recompute",
+            "compress_reference",
+            "sync_basis",
+            "fast_q_bootstrap",
+        ):
             value = getattr(self.powersgd, name)
             if not isinstance(value, bool):
                 raise ValueError(f"comm_eff.powersgd.{name} must be a bool; got {value!r}")

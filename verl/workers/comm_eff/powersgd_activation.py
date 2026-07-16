@@ -704,6 +704,22 @@ class PowerSGDActivationCompressor:
 
         return bool(self.fast_q_bootstrap) and not self._fast_q_bootstrap_done
 
+    def reference_basis_ready(self) -> bool:
+        """True iff an established Q exists to compress a read-only reference forward.
+
+        The reference-KL forward must never compress against a not-yet-calibrated or
+        empty basis. When ``fast_q_bootstrap`` is on this requires the one-time
+        calibration to have committed; in every mode it also requires at least one
+        boundary basis to be established (a real Q, not a random/empty one). The
+        reference forward is ``forward_only`` (grad disabled), so it consumes this Q
+        read-only and never advances it. When this returns False the caller falls
+        back to a dense reference forward rather than compressing with a random Q.
+        """
+
+        if self.fast_q_bootstrap_needed():
+            return False
+        return bool(self._basis)
+
     def begin_fast_q_bootstrap_observation(self) -> None:
         """Open the discarded dense observation transaction.
 

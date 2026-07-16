@@ -37,11 +37,13 @@ __all__ = [
     "PATH_TAGS",
     "TRAIN_TAG",
     "OLD_LOGPROB_TAG",
+    "REF_LOGPROB_TAG",
 ]
 
 TRAIN_TAG = "train"
 OLD_LOGPROB_TAG = "old_logprob"
-PATH_TAGS = (TRAIN_TAG, OLD_LOGPROB_TAG, "ref_logprob", "ckpt")
+REF_LOGPROB_TAG = "ref_logprob"
+PATH_TAGS = (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG, "ckpt")
 
 
 def _is_enabled(config: Any) -> bool:

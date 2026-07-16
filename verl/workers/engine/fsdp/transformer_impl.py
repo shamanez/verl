@@ -611,14 +611,17 @@ class FSDPEngine(BaseEngine):
 
         The projector is confined to the actor-train forward/backward
         (``path_tag == "train"``,
-        ``forward_only=False``) and, when ``powersgd.compress_recompute=true``, to
+        ``forward_only=False``); when ``powersgd.compress_recompute=true``, to
         the old-policy log-prob recompute (``path_tag == "old_logprob"``,
-        ``forward_only=True``). Both paired forwards see the same frozen ``Q_t``;
-        the basis only advances after the gradient-bearing work. Returns
-        False (strict no-op) unless an enabled state with the powersgd codec and a
-        live ``compression_active`` flag is attached.
+        ``forward_only=True``); and when ``powersgd.compress_reference=true``, to
+        the frozen reference-policy log-prob forward (``path_tag == "ref_logprob"``,
+        ``forward_only=True``). All of a step's forwards see the same
+        anchor-owned ``Q_t``; the basis only advances after the gradient-bearing
+        work (the anchor stages ``Q_{t+1}`` during update_actor and it is activated
+        afterward). Returns False (strict no-op) unless an enabled state with the
+        powersgd codec and a live ``compression_active`` flag is attached.
         """
-        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, TRAIN_TAG
+        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, REF_LOGPROB_TAG, TRAIN_TAG
 
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
@@ -640,7 +643,37 @@ class FSDPEngine(BaseEngine):
         if tag == OLD_LOGPROB_TAG:
             # The worker stamps this path only when recompute compression is on.
             return forward_only
+        if tag == REF_LOGPROB_TAG:
+            # Reference-KL forward. Compress it through the SAME live anchor-owned
+            # Q_t as this step's paired old/current policy forwards so KL(current||
+            # ref) is measured on one shared basis. forward_only keeps grad
+            # disabled, so the hook returns M_hat but never folds the sketch or
+            # advances Q. Gated on compress_reference AND on Q being established:
+            # before the fast-Q bootstrap commits there is no calibrated Q, so fall
+            # back to a DENSE reference rather than compress against a random basis.
+            # Unlike the train path this NEVER raises (it is a measurement path).
+            if not forward_only:
+                return False
+            ps_cfg = getattr(getattr(state, "config", None), "powersgd", None)
+            if not bool(getattr(ps_cfg, "compress_reference", False)):
+                return False
+            compressor = state.powersgd
+            if not (hasattr(compressor, "reference_basis_ready") and compressor.reference_basis_ready()):
+                self._comm_eff_note_ref_dense_once()
+                return False
+            return True
         return False
+
+    def _comm_eff_note_ref_dense_once(self) -> None:
+        """Emit a one-time note that the reference forward ran dense (Q not ready)."""
+        if getattr(self, "_comm_eff_ref_dense_logged", False):
+            return
+        object.__setattr__(self, "_comm_eff_ref_dense_logged", True)
+        print(
+            "[comm_eff] ref forward dense (Q not yet bootstrapped); "
+            "reference-KL will compress once the anchor-owned Q is established",
+            flush=True,
+        )
 
     def _comm_eff_register_powersgd_hooks(self) -> bool:
         """Register the PowerSGD projection hooks on the boundary blocks.
