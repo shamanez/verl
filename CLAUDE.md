@@ -13,11 +13,13 @@ dataset, and launcher defaults from unrelated upstream examples.
 - Activations: PowerSGD rank 77 with synchronized, warm-started,
   activation-derived `Q` and fast-Q bootstrap.
 - Anchor: paired dense replay, cadence/delay 20/20 optimizer ticks,
-  `ppo_minibatch`, CPU replay/snapshots, anchor-owned `Q`.
-- Weights: rank-1 RELEX, progressive W2 → W3 → W4, window 4, minimum 2,
-  strength 1, `auto`, `stale_correct`.
+  `rollout_batch` (full 512p/4096s replay; `ppo_minibatch` halves it at ~no
+  accuracy cost per #84), CPU replay/snapshots, anchor-owned `Q`.
+- Weights: rank-1 RELEX, fixed W2 (window 2, two-checkpoint secant; #83 val@60
+  winner over progressive/W4), strength 1, `auto`, `stale_correct`.
 - Gradient signal: signed-EMA `M` over all floating parameters,
-  `beta_anc=0.50`, `alpha=0.25`, CPU state.
+  `beta_anc=0.25` (#84 best; `alpha=0.5` hurt + destabilised), `alpha=0.25`,
+  CPU state.
 
 Run it with:
 

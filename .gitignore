@@ -170,3 +170,6 @@ research/.claude/state/plan-cache/
 research/runs/**/*.npz
 research/runs/**/panel_cache*
 research/runs/**/scorecard.jsonl
+
+# run outputs are local-only (keep the repo fresh; prevents autosave re-tracking)
+research/runs/
