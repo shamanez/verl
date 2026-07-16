@@ -319,6 +319,11 @@ comm_eff:
     # Progressive W2 -> W3 -> W4 readiness, retaining a sliding W4 history.
     lookahead_min_snapshots: 2
     lookahead_window_snapshots: 4
+    # Delta-base history: sliding_window (default, base slides over the last
+    # window) or growing_fixed_base (pin the first snapshot, append exact
+    # checkpoints). lookahead_max_snapshots caps retained snapshots (-1 = unbounded).
+    lookahead_history_mode: sliding_window
+    lookahead_max_snapshots: -1
 
   # Dense-anchor EMA M and the retained signed-EMA merger.
   spectral:

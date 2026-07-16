@@ -222,8 +222,12 @@ export CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-true}"
 export CKPT_R2_MAX_STAGED_GB="${CKPT_R2_MAX_STAGED_GB:-50}"
 export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-4}"
 
-# WandB project + experiment.
-export PROJECT_NAME="${PROJECT_NAME:-verl_compression_research}"
+# WandB project + experiment. Harness runs set WANDB_RUN_GROUP to the per-issue
+# run_id (e.g. 83-growing-fixed-base-anchor); default the project to it so each
+# issue gets its own issue-prefixed WandB project automatically. An explicit
+# PROJECT_NAME still wins; standalone engine runs (no group) keep the shared
+# verl_compression_research fallback.
+export PROJECT_NAME="${PROJECT_NAME:-${WANDB_RUN_GROUP:-verl_compression_research}}"
 export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25_math_1p5b_grpo_math_comm_eff}"
 
 # Token budget per micro-batch for dynamic batching. The actor budget is 18432
@@ -273,6 +277,13 @@ COMM_EFF_ANCHOR_WARMUP_MODE="${COMM_EFF_ANCHOR_WARMUP_MODE:-stale_correct}"
 # Min ring snapshots before the projector engages. Two starts from the earliest
 # legal fire; -1 waits for the full retained window.
 COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS:-2}"
+# rank1_relex delta-base history mode: sliding_window (default) keeps the last
+# `window` checkpoints (base advances); growing_fixed_base pins the seeded base
+# and grows the base-relative delta history. max_snapshots caps growing_fixed_base
+# retention (-1 unbounded; must stay -1 with sliding_window). Defaults reproduce
+# prior behavior byte-for-byte.
+COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE:-sliding_window}"
+COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS:--1}"
 # --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
 COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-all_floating}"
@@ -333,7 +344,7 @@ cat <<EOF
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|powersgd)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
-  lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS
+  lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED target_scope=$COMM_EFF_SPECTRAL_TARGET_SCOPE diagnostics=$COMM_EFF_SPECTRAL_DIAGNOSTICS beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   signed EMA:           alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
@@ -467,6 +478,8 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_window_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.anchor.warmup_mode="$COMM_EFF_ANCHOR_WARMUP_MODE" \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_history_mode="$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE" \
+  actor_rollout_ref.actor.comm_eff.anchor.lookahead_max_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.spectral.target_scope="$COMM_EFF_SPECTRAL_TARGET_SCOPE" \
   actor_rollout_ref.actor.comm_eff.spectral.diagnostics="$COMM_EFF_SPECTRAL_DIAGNOSTICS" \
