@@ -310,6 +310,7 @@ comm_eff:
     seed: 0
     pp_size: 8
     mask_recompute: false
+    mask_reference: false
     rescale: false
     rescale_mode: auto
 

@@ -256,6 +256,7 @@ COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"              # per-codec
 COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"                           # masked (zeroed) fraction in [0,1]
 COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-false}"             # inverted-dropout 1/(1-p) rescale (needs p<1)
 COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-false}"         # also mask the old-logprob recompute
+COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-false}"         # also mask the reference-KL forward (codec-vs-codec KL)
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                        # base seed folded into the mask PRF key
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                  # logical pipeline-shard count (boundary blocks)
 # --- anchor circuit ---
@@ -354,7 +355,7 @@ cat <<EOF
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd)
-  prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE mask_recompute=$COMM_EFF_MASK_RECOMPUTE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
+  prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
@@ -481,6 +482,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.p="$COMM_EFF_MASK_P" \
   actor_rollout_ref.actor.comm_eff.mask.rescale="$COMM_EFF_MASK_RESCALE" \
   actor_rollout_ref.actor.comm_eff.mask.mask_recompute="$COMM_EFF_MASK_RECOMPUTE" \
+  actor_rollout_ref.actor.comm_eff.mask.mask_reference="$COMM_EFF_MASK_REFERENCE" \
   actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \

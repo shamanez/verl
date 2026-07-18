@@ -729,18 +729,20 @@ class FSDPEngine(BaseEngine):
     def _comm_eff_mask_active(self, forward_only: bool) -> bool:
         """True iff the activation-mask (prf_mask codec) hooks should be live.
 
-        Masking is confined to the actor-train forward/backward by default, and
+        Masking is confined to the actor-train forward/backward by default,
         additionally to the old-policy log-prob recompute when
-        ``comm_eff.mask.mask_recompute=true``. Returns False (strict no-op)
-        unless an enabled state with the prf_mask codec (``masker`` built), a
-        live ``compression_active`` flag, and an eligible ``path_tag`` is
-        attached. The gate mirrors ``_comm_eff_powersgd_active``; because the
-        masker and the PowerSGD compressor are mutually exclusive (state.build
-        constructs exactly one), only one of the two ``*_active`` gates can be
-        positive for any forward. The anchor pass (``path_tag=None``) never
-        matches an eligible tag, so anchors stay unmasked.
+        ``comm_eff.mask.mask_recompute=true``, and additionally to the frozen
+        reference-policy forward when ``comm_eff.mask.mask_reference=true``.
+        Returns False (strict no-op) unless an enabled state with the prf_mask
+        codec (``masker`` built), a live ``compression_active`` flag, and an
+        eligible ``path_tag`` is attached. The gate mirrors
+        ``_comm_eff_powersgd_active``; because the masker and the PowerSGD
+        compressor are mutually exclusive (state.build constructs exactly one),
+        only one of the two ``*_active`` gates can be positive for any forward.
+        The anchor pass (``path_tag=None``) never matches an eligible tag, so
+        anchors stay unmasked.
         """
-        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
+        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, REF_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
 
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
@@ -759,6 +761,15 @@ class FSDPEngine(BaseEngine):
         if tag == OLD_LOGPROB_TAG:
             # old_logprob recompute is forward-only by construction
             # (compute_log_prob -> infer_batch -> forward_only=True).
+            return forward_only
+        if tag == REF_LOGPROB_TAG:
+            # Reference-KL forward. Masked with the SAME within-step
+            # (sample_id, position_id) key as the paired policy forwards so
+            # KL(current || ref) is measured codec-vs-codec (masked-current vs
+            # masked-reference). Eligibility above already gated on
+            # mask.mask_reference. The reference forward is forward_only by
+            # construction (compute_ref_log_prob -> infer_batch), and grad stays
+            # disabled, so this is a pure measurement path.
             return forward_only
         return False
 
@@ -793,6 +804,18 @@ class FSDPEngine(BaseEngine):
         tokens) and ``position_ids`` (position within each sequence, from the
         rmpad offsets). Keying on these stable ids makes the mask
         packing-invariant across the differently-packed forwards.
+
+        The within-step ``global_step`` folded into the PRF key is read from the
+        SHARED comm_eff state, not the per-engine ``_comm_eff_global_step``
+        attribute. The worker stamps that attribute only on the actor engine; a
+        fused ``actor_rollout_ref`` worker runs the reference forward on a
+        DISTINCT engine object that shares the same state, so
+        ``state.global_step`` is the only value guaranteed to equal the step the
+        paired train / old-logprob forwards used. This keeps the masked
+        reference forward (mask_reference) bit-identical to the policy mask so
+        KL(current || ref) is a true codec-vs-codec quantity. It is
+        byte-identical for the train / old-logprob paths, where the shared
+        ``state.global_step`` already equals the actor-engine attribute.
         """
         state = getattr(self, "_comm_eff_state", None)
         if state is None:
@@ -810,7 +833,8 @@ class FSDPEngine(BaseEngine):
             raise RuntimeError(
                 "comm_eff_sample_id missing from the micro-batch while mask hooks "
                 "are live; the worker must stamp a stable per-row id on the batch "
-                "before micro-batching (engine_workers.update_actor / compute_log_prob)."
+                "before micro-batching (engine_workers.update_actor / compute_log_prob "
+                "/ compute_ref_log_prob when mask_reference)."
             )
         device = input_ids.values().device
         offsets = input_ids.offsets().to(device=device)  # (nseq+1,)
@@ -823,8 +847,14 @@ class FSDPEngine(BaseEngine):
         flat = torch.arange(total, device=device)
         starts = torch.repeat_interleave(offsets[:-1], seqlens)
         position_ids = flat - starts  # (total_nnz,)
+        # Prefer the shared-state step (authoritative on every engine sharing the
+        # state, including the reference engine); fall back to the per-engine
+        # attribute only if the state has no valid step yet.
+        gstep = getattr(state, "global_step", None)
+        if gstep is None or int(gstep) < 0:
+            gstep = getattr(self, "_comm_eff_global_step", 0)
         masker.set_context(
-            global_step=int(getattr(self, "_comm_eff_global_step", 0)),
+            global_step=int(gstep),
             sample_ids=sample_ids,
             position_ids=position_ids,
         )

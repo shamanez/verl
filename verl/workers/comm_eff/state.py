@@ -49,9 +49,10 @@ PATH_TAGS = (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG, "ckpt")
 
 # The set of execution-path tags the activation mask (prf_mask codec) is allowed
 # to fire on by default: only ``train``. ``mask_eligible_tags(state)`` widens
-# this to ``{train, old_logprob}`` only when ``state.config.mask.mask_recompute``
-# is truthy. ``None`` (the anchor pass) is never eligible, so anchors stay
-# unmasked unconditionally.
+# this to include ``old_logprob`` when ``state.config.mask.mask_recompute`` is
+# truthy and ``ref_logprob`` when ``state.config.mask.mask_reference`` is truthy.
+# ``None`` (the anchor pass) is never eligible, so anchors stay unmasked
+# unconditionally.
 MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
 
 
@@ -59,12 +60,16 @@ def mask_eligible_tags(state: Any) -> frozenset:
     """Return the path tags the activation mask may fire on for ``state``.
 
     Pure read (no side effects, no allocation). The default eligibility
-    (``{TRAIN_TAG}``) is widened to ``{TRAIN_TAG, OLD_LOGPROB_TAG}`` only when
-    both ``state.config.mask.enabled`` and ``state.config.mask.mask_recompute``
-    are truthy. Anything else (disabled state, missing mask sub-config,
-    ``mask_recompute`` unset / falsy) returns the singleton default. ``None``
-    (the anchor pass) is intentionally in neither set: the anchor circuit runs
-    unmasked regardless of this flag.
+    (``{TRAIN_TAG}``) is widened, only when ``state.config.mask.enabled`` is
+    truthy, by:
+
+    * ``OLD_LOGPROB_TAG`` when ``state.config.mask.mask_recompute`` is truthy;
+    * ``REF_LOGPROB_TAG`` when ``state.config.mask.mask_reference`` is truthy.
+
+    Both widenings are independent and additive. Anything else (disabled state,
+    missing mask sub-config, both flags unset / falsy) returns the singleton
+    default. ``None`` (the anchor pass) is intentionally in none of the sets:
+    the anchor circuit runs unmasked regardless of these flags.
     """
     if state is None:
         return MASK_ELIGIBLE_TAGS
@@ -73,9 +78,14 @@ def mask_eligible_tags(state: Any) -> frozenset:
         return MASK_ELIGIBLE_TAGS
     if not bool(getattr(mask_cfg, "enabled", False)):
         return MASK_ELIGIBLE_TAGS
-    if not bool(getattr(mask_cfg, "mask_recompute", False)):
+    tags = {TRAIN_TAG}
+    if bool(getattr(mask_cfg, "mask_recompute", False)):
+        tags.add(OLD_LOGPROB_TAG)
+    if bool(getattr(mask_cfg, "mask_reference", False)):
+        tags.add(REF_LOGPROB_TAG)
+    if tags == {TRAIN_TAG}:
         return MASK_ELIGIBLE_TAGS
-    return frozenset({TRAIN_TAG, OLD_LOGPROB_TAG})
+    return frozenset(tags)
 
 
 def _is_enabled(config: Any) -> bool:

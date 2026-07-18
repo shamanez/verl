@@ -76,6 +76,13 @@ class CommEffMaskConfig(BaseConfig):
             with the identical per-token mask (keeps the PPO importance ratio
             ~1 at the first inner step). ``False`` (default) masks only the
             train forward.
+        mask_reference (bool): When ``True`` the mask also fires on the frozen
+            reference-policy forward (reference-KL loss), keyed on the SAME
+            within-step ``(sample_id, position_id)`` as the policy forwards, so
+            KL(current || ref) is a codec-vs-codec quantity (masked-current vs
+            masked-reference), directly comparable to the PowerSGD codec's
+            ``compress_reference`` circuit. ``False`` (default) leaves the
+            reference forward dense (masked-current vs dense-reference).
         rescale (bool): ``False`` (default) writes the raw product ``h * mask``;
             ``True`` applies inverted-dropout ``h * mask / (1 - p)`` so
             ``E[h_tilde] = h`` (requires ``p < 1``). Honored only when
@@ -91,6 +98,7 @@ class CommEffMaskConfig(BaseConfig):
     seed: int = 0
     pp_size: int = 8
     mask_recompute: bool = False
+    mask_reference: bool = False
     rescale: bool = False
     rescale_mode: str = "auto"
 
@@ -230,6 +238,8 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
         if not isinstance(self.mask.mask_recompute, bool):
             raise ValueError(f"comm_eff.mask.mask_recompute must be a bool; got {self.mask.mask_recompute!r}")
+        if not isinstance(self.mask.mask_reference, bool):
+            raise ValueError(f"comm_eff.mask.mask_reference must be a bool; got {self.mask.mask_reference!r}")
         if not isinstance(self.mask.rescale, bool):
             raise ValueError(f"comm_eff.mask.rescale must be a bool; got {self.mask.rescale!r}")
         if str(self.mask.rescale_mode).lower() not in ("none", "constant", "rms_match", "auto"):

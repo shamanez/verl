@@ -335,6 +335,7 @@ from verl.workers.comm_eff.state import (  # noqa: E402
     MASK_ELIGIBLE_TAGS,
     OLD_LOGPROB_TAG,
     PATH_TAGS,
+    REF_LOGPROB_TAG,
     TRAIN_TAG,
     CommEffState,
     comm_eff_metrics,
@@ -343,10 +344,17 @@ from verl.workers.comm_eff.state import (  # noqa: E402
 )
 
 
-def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False):
+def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False, mask_reference=False):
     cfg = SimpleNamespace(
         enabled=True,
-        mask=SimpleNamespace(enabled=True, p=p, seed=seed, pp_size=pp_size, mask_recompute=mask_recompute),
+        mask=SimpleNamespace(
+            enabled=True,
+            p=p,
+            seed=seed,
+            pp_size=pp_size,
+            mask_recompute=mask_recompute,
+            mask_reference=mask_reference,
+        ),
     )
     state = maybe_build_comm_eff_state(cfg)
     assert isinstance(state, CommEffState)
@@ -446,6 +454,38 @@ def test_mask_eligible_tags_widens_only_when_recompute_true():
     assert mask_eligible_tags(s_default) == frozenset({TRAIN_TAG})
     assert mask_eligible_tags(s_recomp) == frozenset({TRAIN_TAG, OLD_LOGPROB_TAG})
     assert mask_eligible_tags(None) == frozenset({TRAIN_TAG})
+
+
+def test_mask_eligible_tags_widens_for_reference_only_when_mask_reference_true():
+    """ref_logprob is eligible iff mask_reference; independent of mask_recompute."""
+    s_noref, _ = _make_enabled_state(mask_reference=False)
+    s_ref, _ = _make_enabled_state(mask_reference=True)
+    assert REF_LOGPROB_TAG not in mask_eligible_tags(s_noref)
+    assert mask_eligible_tags(s_ref) == frozenset({TRAIN_TAG, REF_LOGPROB_TAG})
+
+    # The two widenings compose independently.
+    s_both, _ = _make_enabled_state(mask_recompute=True, mask_reference=True)
+    assert mask_eligible_tags(s_both) == frozenset({TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG})
+
+
+def test_mask_hook_fires_on_ref_logprob_only_when_mask_reference():
+    """The hook accepts ref_logprob iff mask_reference is set; otherwise it asserts."""
+    # mask_reference=True: ref_logprob is accepted and counted.
+    state, _ = _make_enabled_state(mask_reference=True)
+    hook = state.masker._make_hook(3)
+    _set_ctx(state.masker, 2, 4)
+    state.set_path_tag(REF_LOGPROB_TAG)
+    assert torch.is_tensor(hook(nn.Identity(), (), torch.randn(2, 4, 32)))
+    assert state.mask_applications_by_path[REF_LOGPROB_TAG] == 1
+
+    # mask_reference=False: ref_logprob is rejected (confinement guard).
+    state2, _ = _make_enabled_state(mask_reference=False)
+    hook2 = state2.masker._make_hook(3)
+    _set_ctx(state2.masker, 2, 4)
+    state2.set_path_tag(REF_LOGPROB_TAG)
+    with pytest.raises(AssertionError):
+        hook2(nn.Identity(), (), torch.randn(2, 4, 32))
+    assert state2.mask_applications_by_path[REF_LOGPROB_TAG] == 0
 
 
 def test_mask_recompute_path_tag_eligibility():
