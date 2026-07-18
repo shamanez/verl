@@ -18,10 +18,12 @@
 #   BASE_MODEL     untrained reference model    (default Qwen/Qwen2.5-Math-1.5B)
 #   PAIRS_CSV      GPU-pair pool                (default "0,1|2,3|4,5|6,7")
 #   R2_PREFIX      key prefix under the bucket  (default autonomous-harness-rlvr-compression/quick-test)
+#   R2_CKPT_BUCKET bucket holding the checkpoints (required for R2 pulls; no default)
 # R2 pull (only for checkpoints not present locally) reads credentials from the
 # off-repo secrets file ~/.config/verl-research/secrets.env, which must define
-# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT, R2_BUCKET. No credential is
-# ever stored in this script.
+# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT, and R2_CKPT_BUCKET (the
+# bucket your training checkpoints are synced to). No credential is ever stored in
+# this script. If all checkpoints are already merged locally, no R2 access is used.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_DIR="${VERL_DIR:-/workspace/verl}"
@@ -41,7 +43,8 @@ merge() {
   if [[ ! -f "$ck/fsdp_config.json" ]]; then
     set -a; source ~/.config/verl-research/secrets.env; set +a
     export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
-    local r2="s3://$R2_BUCKET/$R2_PREFIX/$run/checkpoints/global_step_$step/actor/"
+    : "${R2_CKPT_BUCKET:?set R2_CKPT_BUCKET (in secrets.env) to the bucket holding your checkpoints}"
+    local r2="s3://$R2_CKPT_BUCKET/$R2_PREFIX/$run/checkpoints/global_step_$step/actor/"
     echo "=== R2 pull $run s$step -> $ck ===" | tee -a "$OOD_EVAL_ROOT/eval.log"
     mkdir -p "$ck"
     aws s3 cp "$r2" "$ck/" --recursive --exclude "optim*" --only-show-errors \

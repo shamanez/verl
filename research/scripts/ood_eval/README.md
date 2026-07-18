@@ -62,7 +62,7 @@ credential is stored in these scripts.** They `source ~/.config/verl-research/se
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-R2_BUCKET=<bucket-name>
+R2_CKPT_BUCKET=<bucket-holding-your-checkpoints>
 ```
 
 The key prefix under the bucket is `R2_PREFIX` (default matches the reference
