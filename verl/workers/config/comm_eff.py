@@ -31,13 +31,68 @@ from dataclasses import dataclass, field
 from verl.base_config import BaseConfig
 
 __all__ = [
+    "CommEffMaskConfig",
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
     "CommEffConfig",
 ]
 
-COMPRESSION_TYPES = ("dense", "powersgd")
+# The compression codecs ``comm_eff.compression_type`` may select. Exactly one
+# codec is active per run (mutually exclusive). ``dense`` leaves the activation
+# path uncompressed; ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask;
+# ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``.
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd")
+
+
+@dataclass
+class CommEffMaskConfig(BaseConfig):
+    """Per-(token, dimension) pipeline-boundary activation masking (inert while disabled).
+
+    A deterministic PRF Bernoulli mask applied in-graph (``h_tilde = h * mask``)
+    to the boundary decoder blocks, only on the actor-train forward (and the
+    old-logprob recompute when ``mask_recompute``). Each token independently
+    keeps ``round((1-p)*H)`` dims; the mask is keyed on each token's stable
+    ``(sample_id, position_id)`` so it is packing-invariant across the
+    differently-packed forwards. See ``verl.workers.comm_eff.activation_mask``.
+
+    This codec is selected by ``comm_eff.compression_type='prf_mask'`` (or, for
+    back-compat, by ``mask.enabled=true`` with ``p>0`` while
+    ``compression_type`` is left at its ``powersgd``/``dense`` default and the
+    resolver falls through). It is mutually exclusive with the PowerSGD codec and
+    anchor-independent (the anchor pass is never masked; it cannot own ``Q``).
+
+    Args:
+        enabled (bool): Whether masking runs (still gated by ``comm_eff.enabled``
+            and by the codec resolving to ``prf_mask``).
+        p (float): Masked (zeroed) fraction in ``[0, 1]``; ``comm_eff/mask_ratio``
+            tracks it. ``0.0`` means no masking.
+        seed (int): Base seed folded into the mask PRF key.
+        pp_size (int): Logical pipeline-shard count; the last block of every
+            shard except the final one is masked. ``L=16, pp_size=8`` ->
+            ``[1, 3, 5, 7, 9, 11, 13]``.
+        mask_recompute (bool): When ``True`` the mask also fires on the
+            old-logprob recompute so both gradient-feeding forwards are masked
+            with the identical per-token mask (keeps the PPO importance ratio
+            ~1 at the first inner step). ``False`` (default) masks only the
+            train forward.
+        rescale (bool): ``False`` (default) writes the raw product ``h * mask``;
+            ``True`` applies inverted-dropout ``h * mask / (1 - p)`` so
+            ``E[h_tilde] = h`` (requires ``p < 1``). Honored only when
+            ``rescale_mode == "auto"``.
+        rescale_mode (str): Magnitude-restoration scheme applied to ``h*mask``:
+            ``none`` (raw product), ``constant`` (``1/(1-p)`` inverted dropout),
+            ``rms_match`` (per-token exact RMS match), or ``auto`` (``constant``
+            if ``rescale`` else ``none``).
+    """
+
+    enabled: bool = False
+    p: float = 0.95
+    seed: int = 0
+    pp_size: int = 8
+    mask_recompute: bool = False
+    rescale: bool = False
+    rescale_mode: str = "auto"
 
 
 @dataclass
@@ -143,6 +198,7 @@ class CommEffConfig(BaseConfig):
 
     enabled: bool = False
     compression_type: str = "powersgd"
+    mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
@@ -157,10 +213,35 @@ class CommEffConfig(BaseConfig):
                 f"comm_eff.compression_type must be one of {COMPRESSION_TYPES}; got {self.compression_type!r}"
             )
 
+        self._validate_mask()
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
         self._validate_cross_circuit_contract()
+
+    def _validate_mask(self) -> None:
+        """Validate the PRF activation-mask sub-config (no allocation, no RNG)."""
+
+        if not isinstance(self.mask.enabled, bool):
+            raise ValueError(f"comm_eff.mask.enabled must be a bool; got {self.mask.enabled!r}")
+        if not 0.0 <= self.mask.p <= 1.0:
+            raise ValueError(f"comm_eff.mask.p must be in [0, 1]; got {self.mask.p}")
+        if self.mask.pp_size < 1:
+            raise ValueError(f"comm_eff.mask.pp_size must be >= 1; got {self.mask.pp_size}")
+        if not isinstance(self.mask.mask_recompute, bool):
+            raise ValueError(f"comm_eff.mask.mask_recompute must be a bool; got {self.mask.mask_recompute!r}")
+        if not isinstance(self.mask.rescale, bool):
+            raise ValueError(f"comm_eff.mask.rescale must be a bool; got {self.mask.rescale!r}")
+        if str(self.mask.rescale_mode).lower() not in ("none", "constant", "rms_match", "auto"):
+            raise ValueError(
+                "comm_eff.mask.rescale_mode must be one of (none, constant, rms_match, auto); "
+                f"got {self.mask.rescale_mode!r}"
+            )
+        if self.mask.rescale and self.mask.p >= 1.0:
+            raise ValueError(
+                "comm_eff.mask.rescale=true requires comm_eff.mask.p < 1.0 (the 1/(1-p) "
+                f"magnitude-preservation factor is undefined at p>=1); got p={self.mask.p}"
+            )
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
@@ -316,6 +397,13 @@ class CommEffConfig(BaseConfig):
 
         if not self.enabled:
             return
+        # The PRF activation mask is anchor-independent and carries no PowerSGD
+        # basis, so the anchor cannot own a Q under this codec.
+        if self.compression_type == "prf_mask" and self.anchor.owns_q:
+            raise ValueError(
+                "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false: the PRF "
+                "activation mask has no PowerSGD basis Q for the anchor to own."
+            )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")
         if self.compression_type == "powersgd" and self.anchor.owns_q and not self.anchor.enabled:
@@ -345,7 +433,11 @@ class CommEffConfig(BaseConfig):
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires PowerSGD")
             if not self.anchor.owns_q:
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
-        if self.powersgd.fast_q_bootstrap:
+        # fast_q_bootstrap is a PowerSGD-only feature. It is inert for the
+        # prf_mask codec (no PowerSGD compressor is built), so leaving the
+        # launcher default fast_q_bootstrap=true on a prf_mask arm must not error;
+        # the powersgd path validation below is unchanged.
+        if self.powersgd.fast_q_bootstrap and self.compression_type != "prf_mask":
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
             if not self.anchor.owns_q:
