@@ -298,6 +298,21 @@ comm_eff:
   # The supported lossy activation codec is PowerSGD.
   compression_type: powersgd
 
+  # PRF per-(token, dimension) pipeline-boundary activation mask. Inert while
+  # disabled; active only when compression_type=prf_mask. Fields mirror
+  # verl.workers.config.CommEffMaskConfig exactly.
+  mask:
+
+    _target_: verl.workers.config.CommEffMaskConfig
+
+    enabled: false
+    p: 0.95
+    seed: 0
+    pp_size: 8
+    mask_recompute: false
+    rescale: false
+    rescale_mode: auto
+
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:
 
