@@ -720,10 +720,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if comm_eff_state is not None:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_reference = bool(getattr(ps_cfg, "compress_reference", False)) if ps_cfg is not None else False
-                if getattr(comm_eff_state, "powersgd", None) is not None and ps_reference:
+                mask_cfg = getattr(comm_eff_state.config, "mask", None)
+                mask_reference = bool(getattr(mask_cfg, "mask_reference", False)) if mask_cfg is not None else False
+                powersgd_reference = getattr(comm_eff_state, "powersgd", None) is not None and ps_reference
+                # The prf_mask codec masks the reference forward only when
+                # mask.mask_reference is set; the mask hook's eligibility check
+                # (mask_eligible_tags) gates it identically. This makes the
+                # reference-KL a codec-vs-codec quantity (masked-current vs
+                # masked-reference), comparable to PowerSGD's compress_reference.
+                masker_reference = getattr(comm_eff_state, "masker", None) is not None and mask_reference
+                if powersgd_reference or masker_reference:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
                     stamped_compression_active = True
+                # Stamp the stable per-row id the prf_mask codec keys on so the
+                # reference forward masks the identical (token, dim) entries as
+                # the paired train / old-logprob forwards. The reference receives
+                # the SAME rollout batch in the SAME row order (and the same
+                # comm_eff_global_step threaded above), so the arange sample ids
+                # line up row-for-row and the within-step mask key is identical.
+                # No-op unless the mask codec is live (no masker built).
+                self._comm_eff_stamp_sample_ids(data, comm_eff_state)
             try:
                 output = self.ref.infer_batch(data=data)
             finally:
@@ -745,10 +762,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if comm_eff_state is not None:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
-                if getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute:
+                mask_cfg = getattr(comm_eff_state.config, "mask", None)
+                mask_recompute = bool(getattr(mask_cfg, "mask_recompute", False)) if mask_cfg is not None else False
+                powersgd_recompute = getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute
+                # The prf_mask codec masks the old-logprob recompute only when
+                # mask.mask_recompute is set; the mask hook's eligibility check
+                # (mask_eligible_tags) gates it identically.
+                masker_recompute = getattr(comm_eff_state, "masker", None) is not None and mask_recompute
+                if powersgd_recompute or masker_recompute:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
                     stamped_compression_active = True
+                # Stamp the stable per-row id the prf_mask codec keys on so the
+                # recompute forward masks the identical (token, dim) entries as
+                # the paired train forward (no-op unless the mask codec is live).
+                self._comm_eff_stamp_sample_ids(data, comm_eff_state)
             try:
                 output = self.actor.infer_batch(data)
             finally:
@@ -858,6 +886,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             object.__setattr__(engine, "_comm_eff_global_step", gs)
         return gs
 
+    def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
+        """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
+
+        The prf_mask codec keys each token's mask on ``(sample_id, position_id)``;
+        ``sample_id`` is the row's index in this rank's batch. compute_log_prob
+        and update_actor receive that batch in identical row order, so the id is
+        consistent across both forwards and rides each row through PPO mini-batch
+        splitting / dynamic-bsz repacking. No-op when the mask codec is off (no
+        masker built); the PowerSGD and dense paths never see the extra column.
+        """
+        if state is None or getattr(state, "masker", None) is None:
+            return
+        if "comm_eff_sample_id" in data.keys():
+            return
+        bsz = data.batch_size[0]
+        data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
+
     @contextmanager
     def _comm_eff_path(self, tag: str):
         """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
@@ -909,6 +954,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if comm_eff_state is not None:
             comm_eff_state.compression_active = True
             comm_eff_state.set_path_tag("train")
+            # Stamp the stable per-row id the prf_mask codec keys on (no-op unless
+            # the mask codec is live). Must happen before train_mini_batch splits
+            # the batch into micro-batches so the id rides each row.
+            self._comm_eff_stamp_sample_ids(data, comm_eff_state)
         actor_update_succeeded = False
         try:
             output = self.actor.train_mini_batch(data=data)

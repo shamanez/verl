@@ -134,6 +134,16 @@ actor_rollout_ref:
       _target_: verl.workers.config.CommEffConfig
       enabled: false
       compression_type: powersgd
+      mask:
+        _target_: verl.workers.config.CommEffMaskConfig
+        enabled: false
+        p: 0.95
+        seed: 0
+        pp_size: 8
+        mask_recompute: false
+        mask_reference: false
+        rescale: false
+        rescale_mode: auto
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

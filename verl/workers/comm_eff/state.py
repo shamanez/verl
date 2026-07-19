@@ -38,12 +38,54 @@ __all__ = [
     "TRAIN_TAG",
     "OLD_LOGPROB_TAG",
     "REF_LOGPROB_TAG",
+    "MASK_ELIGIBLE_TAGS",
+    "mask_eligible_tags",
 ]
 
 TRAIN_TAG = "train"
 OLD_LOGPROB_TAG = "old_logprob"
 REF_LOGPROB_TAG = "ref_logprob"
 PATH_TAGS = (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG, "ckpt")
+
+# The set of execution-path tags the activation mask (prf_mask codec) is allowed
+# to fire on by default: only ``train``. ``mask_eligible_tags(state)`` widens
+# this to include ``old_logprob`` when ``state.config.mask.mask_recompute`` is
+# truthy and ``ref_logprob`` when ``state.config.mask.mask_reference`` is truthy.
+# ``None`` (the anchor pass) is never eligible, so anchors stay unmasked
+# unconditionally.
+MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
+
+
+def mask_eligible_tags(state: Any) -> frozenset:
+    """Return the path tags the activation mask may fire on for ``state``.
+
+    Pure read (no side effects, no allocation). The default eligibility
+    (``{TRAIN_TAG}``) is widened, only when ``state.config.mask.enabled`` is
+    truthy, by:
+
+    * ``OLD_LOGPROB_TAG`` when ``state.config.mask.mask_recompute`` is truthy;
+    * ``REF_LOGPROB_TAG`` when ``state.config.mask.mask_reference`` is truthy.
+
+    Both widenings are independent and additive. Anything else (disabled state,
+    missing mask sub-config, both flags unset / falsy) returns the singleton
+    default. ``None`` (the anchor pass) is intentionally in none of the sets:
+    the anchor circuit runs unmasked regardless of these flags.
+    """
+    if state is None:
+        return MASK_ELIGIBLE_TAGS
+    mask_cfg = getattr(getattr(state, "config", None), "mask", None)
+    if mask_cfg is None:
+        return MASK_ELIGIBLE_TAGS
+    if not bool(getattr(mask_cfg, "enabled", False)):
+        return MASK_ELIGIBLE_TAGS
+    tags = {TRAIN_TAG}
+    if bool(getattr(mask_cfg, "mask_recompute", False)):
+        tags.add(OLD_LOGPROB_TAG)
+    if bool(getattr(mask_cfg, "mask_reference", False)):
+        tags.add(REF_LOGPROB_TAG)
+    if tags == {TRAIN_TAG}:
+        return MASK_ELIGIBLE_TAGS
+    return frozenset(tags)
 
 
 def _is_enabled(config: Any) -> bool:
@@ -55,9 +97,31 @@ def _is_enabled(config: Any) -> bool:
 
 
 def resolve_compression_type(config: Any) -> str:
-    """Return the explicitly configured ``dense`` or ``powersgd`` codec."""
+    """Resolve the effective boundary codec: ``dense``, ``prf_mask`` or ``powersgd``.
 
-    return str(getattr(config, "compression_type", "powersgd")) if config is not None else "dense"
+    Pure read (no side effects, no allocation). The resolution is
+    back-compatible:
+
+    * an explicit ``compression_type`` of ``prf_mask`` or ``powersgd`` wins;
+    * ``dense`` (the fall-through) honors the mask selector: a mask sub-config
+      enabled with ``p > 0`` resolves to ``prf_mask``, otherwise ``dense``.
+
+    Real ``CommEffConfig`` objects always carry an explicit ``compression_type``
+    (defaulting to ``powersgd``), so this only reaches the mask-selector branch
+    for lightweight configs that omit the field.
+    """
+
+    if config is None:
+        return "dense"
+    ctype = str(getattr(config, "compression_type", "dense"))
+    if ctype in ("prf_mask", "powersgd"):
+        return ctype
+    # ctype == "dense": honor the mask selector for back-compat.
+    mask_cfg = getattr(config, "mask", None)
+    mask_enabled = bool(getattr(mask_cfg, "enabled", False)) if mask_cfg is not None else False
+    if mask_enabled and float(getattr(mask_cfg, "p", 0.0)) > 0.0:
+        return "prf_mask"
+    return "dense"
 
 
 class CommEffState:
@@ -78,10 +142,23 @@ class CommEffState:
         self.path_tag: Optional[str] = None
 
         # Runtime circuits.
+        # The activation masker (prf_mask codec). Constructed in build() only
+        # when compression_type resolves to prf_mask; None otherwise (the
+        # disabled path, the dense codec, and the powersgd codec never touch it).
+        # Mutually exclusive with self.powersgd: a run is either the mask codec
+        # or the powersgd codec, never both.
+        self.masker = None
         self.powersgd = None
         self.spectral = None
         self.fsdp_grad_repr: dict = {}
         self.spectral_rel_change: dict = {}
+
+        # Activation-mask counters. Cumulative. mask_applications is the
+        # aggregate hook-fire count; mask_applications_by_path breaks it down per
+        # execution-path tag (only .../train should be nonzero; any other
+        # nonzero key is a confinement leak).
+        self.mask_applications = 0
+        self.mask_applications_by_path = {tag: 0 for tag in PATH_TAGS}
 
         # PowerSGD and Q-transaction counters.
         self.powersgd_applications = 0
@@ -108,7 +185,11 @@ class CommEffState:
         self.anchor_batch_prompt_equivalents_global = 0
         self.anchor_update_prompt_equivalents_global = 0
         self.anchor_rollout_n = 0
-        self.anchor_batch_scope_rollout = int(config.anchor.batch_scope == "rollout_batch")
+        # getattr with the real-config default keeps this byte-identical for a
+        # full CommEffConfig (anchor.batch_scope defaults to "ppo_minibatch")
+        # while tolerating the lightweight prf_mask configs that omit `anchor`.
+        _anchor_cfg = getattr(config, "anchor", None)
+        self.anchor_batch_scope_rollout = int(getattr(_anchor_cfg, "batch_scope", "ppo_minibatch") == "rollout_batch")
 
         # Rank-1 RELEX state and scientific counters.
         self.rank1_m_ready = False
@@ -131,6 +212,28 @@ class CommEffState:
         if self._built:
             return
         self.compression_type = resolve_compression_type(self.config)
+
+        if self.compression_type == "prf_mask":
+            # Imported lazily so the disabled / dense / powersgd paths never pay
+            # the import cost. Mutually exclusive with the powersgd branch below.
+            from verl.workers.comm_eff.activation_mask import ActivationMasker
+
+            mask_cfg = getattr(self.config, "mask", None)
+            self.masker = ActivationMasker(
+                p=float(getattr(mask_cfg, "p", 0.0)),
+                base_seed=int(getattr(mask_cfg, "seed", 0)),
+                pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                rescale=bool(getattr(mask_cfg, "rescale", False)),
+                rescale_mode=str(getattr(mask_cfg, "rescale_mode", "auto")),
+                state=self,
+            )
+            logger.info(
+                "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s",
+                getattr(mask_cfg, "p", 0.0),
+                getattr(mask_cfg, "pp_size", 8),
+                getattr(mask_cfg, "rescale", False),
+                getattr(mask_cfg, "rescale_mode", "auto"),
+            )
 
         if self.compression_type == "powersgd":
             from verl.workers.comm_eff.powersgd_activation import PowerSGDActivationCompressor
@@ -160,10 +263,11 @@ class CommEffState:
                 cfg.fast_q_bootstrap,
             )
 
-        if self.config.spectral.enabled:
+        _spectral_cfg = getattr(self.config, "spectral", None)
+        if _spectral_cfg is not None and getattr(_spectral_cfg, "enabled", False):
             from verl.workers.comm_eff.spectral_filter import SpectralFilter
 
-            cfg = self.config.spectral
+            cfg = _spectral_cfg
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
                 ema_device=str(cfg.ema_device),
@@ -181,8 +285,14 @@ class CommEffState:
         self._built = True
 
     def rank1_relex_active(self) -> bool:
-        anchor = self.config.anchor
-        return bool(anchor.lookahead_anchor) and anchor.lookahead_mode == "rank1_relex"
+        # getattr defaults keep this byte-identical for a full CommEffConfig
+        # while returning False for the lightweight prf_mask configs that omit
+        # `anchor` (no rank1_relex without an anchor sub-config).
+        anchor = getattr(self.config, "anchor", None)
+        return (
+            bool(getattr(anchor, "lookahead_anchor", False))
+            and getattr(anchor, "lookahead_mode", None) == "rank1_relex"
+        )
 
     def reset_anchor_q_runtime(self) -> None:
         """Reset non-checkpointed Q transaction state after a weight load."""
@@ -256,6 +366,52 @@ class CommEffState:
         current = self.spectral_step
         return current > 0 and current % cadence == 0
 
+    def note_mask_application(self) -> None:
+        """Record one activation-mask hook fire against the current path tag.
+
+        Called by the activation masker from inside a hook. Increments both the
+        aggregate counter (``mask_applications``) and the per-path counter for
+        ``self.path_tag``. A fire while the tag is anything other than ``train``
+        (or ``old_logprob`` under mask_recompute) is a contamination event; the
+        masker asserts against it before calling this, but if the assert is ever
+        disabled (``python -O``) the per-path counter still records the leak.
+        """
+        self.mask_applications += 1
+        tag = self.path_tag if self.path_tag in self.mask_applications_by_path else TRAIN_TAG
+        self.mask_applications_by_path[tag] += 1
+
+    def path_metrics(self) -> dict:
+        """Per-path mask-application counters under a stable key prefix.
+
+        Emits ``comm_eff/mask_applications/<tag>`` for every tag; the only
+        nonzero key should be ``.../train`` (plus ``.../old_logprob`` under
+        mask_recompute). Any other nonzero key is the confinement falsifier.
+        """
+        if self.masker is None:
+            return {}
+        return {f"comm_eff/mask_applications/{tag}": count for tag, count in self.mask_applications_by_path.items()}
+
+    def mask_ratio_metrics(self) -> dict:
+        """Most-recently-measured masked fraction per boundary layer.
+
+        Surfaced as ``comm_eff/mask_ratio`` (mean across boundaries) plus a
+        per-boundary breakdown and the matched-budget kept-coords/token metric.
+        Empty when no mask fired this step.
+        """
+        if self.masker is None or not getattr(self.masker, "last_mask_ratio", None):
+            return {}
+        ratios = self.masker.last_mask_ratio
+        out = {"comm_eff/mask_ratio": sum(ratios.values()) / len(ratios)}
+        for idx, r in sorted(ratios.items()):
+            out[f"comm_eff/mask_ratio/layer_{idx}"] = r
+        # Matched-budget metric: PRF kept coords per token = (1-p)*H. Compare
+        # against PowerSGD's rank for an identical logical PP byte budget.
+        hidden_size = getattr(self.masker, "hidden_size", None)
+        p = float(getattr(self.masker, "p", 0.0))
+        if hidden_size is not None:
+            out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - p) * float(hidden_size))
+        return out
+
     def note_powersgd_application(self) -> None:
         self.powersgd_applications += 1
 
@@ -326,6 +482,7 @@ class CommEffState:
 
     def metrics(self) -> dict:
         output = {
+            "comm_eff/mask_applications": self.mask_applications,
             "comm_eff/anchor_backwards": self.anchor_backwards,
             "comm_eff/spectral_corrections": self.spectral_corrections,
             "comm_eff/anchor_grad_corrected": self.anchor_grad_corrected,
@@ -384,4 +541,6 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     output = state.metrics()
     output.update(state.spectral_metrics())
     output.update(state.powersgd_metrics())
+    output.update(state.path_metrics())
+    output.update(state.mask_ratio_metrics())
     return output

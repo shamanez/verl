@@ -726,12 +726,151 @@ class FSDPEngine(BaseEngine):
             )
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
 
+    def _comm_eff_mask_active(self, forward_only: bool) -> bool:
+        """True iff the activation-mask (prf_mask codec) hooks should be live.
+
+        Masking is confined to the actor-train forward/backward by default,
+        additionally to the old-policy log-prob recompute when
+        ``comm_eff.mask.mask_recompute=true``, and additionally to the frozen
+        reference-policy forward when ``comm_eff.mask.mask_reference=true``.
+        Returns False (strict no-op) unless an enabled state with the prf_mask
+        codec (``masker`` built), a live ``compression_active`` flag, and an
+        eligible ``path_tag`` is attached. The gate mirrors
+        ``_comm_eff_powersgd_active``; because the masker and the PowerSGD
+        compressor are mutually exclusive (state.build constructs exactly one),
+        only one of the two ``*_active`` gates can be positive for any forward.
+        The anchor pass (``path_tag=None``) never matches an eligible tag, so
+        anchors stay unmasked.
+        """
+        from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, REF_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
+
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return False
+        if getattr(state, "masker", None) is None:
+            return False
+        if not getattr(state, "compression_active", False):
+            return False
+        tag = getattr(state, "path_tag", None)
+        eligible = mask_eligible_tags(state)
+        if tag not in eligible:
+            return False
+        if tag == TRAIN_TAG:
+            # Train forward MUST be the backward-bearing pass.
+            return not forward_only
+        if tag == OLD_LOGPROB_TAG:
+            # old_logprob recompute is forward-only by construction
+            # (compute_log_prob -> infer_batch -> forward_only=True).
+            return forward_only
+        if tag == REF_LOGPROB_TAG:
+            # Reference-KL forward. Masked with the SAME within-step
+            # (sample_id, position_id) key as the paired policy forwards so
+            # KL(current || ref) is measured codec-vs-codec (masked-current vs
+            # masked-reference). Eligibility above already gated on
+            # mask.mask_reference. The reference forward is forward_only by
+            # construction (compute_ref_log_prob -> infer_batch), and grad stays
+            # disabled, so this is a pure measurement path.
+            return forward_only
+        return False
+
+    def _comm_eff_register_mask_hooks(self) -> bool:
+        """Register the per-element mask hooks on the boundary decoder blocks.
+
+        The per-token PRF context (``global_step`` + token-aligned
+        ``sample_ids`` / ``position_ids``) is set per micro-batch in
+        ``prepare_model_inputs``, since the stable ids are only known once the
+        micro-batch is packed. SP guard mirrors the PowerSGD path: the key is
+        aligned to the rmpad token axis, which Ulysses SP>1 slices/pads across
+        ranks (out of scope); refuse it loudly. Returns True if hooks were
+        registered.
+        """
+        if getattr(self, "ulysses_sequence_parallel_size", 1) and self.ulysses_sequence_parallel_size > 1:
+            raise NotImplementedError(
+                "comm_eff per-element masking does not support "
+                f"ulysses_sequence_parallel_size>1 (got {self.ulysses_sequence_parallel_size}); "
+                "set ulysses_sequence_parallel_size=1 for this codec."
+            )
+        state = self._comm_eff_state
+        masker = state.masker
+        masker.register(self.module)
+        return masker.is_registered
+
+    def _comm_eff_maybe_set_mask_context(self, micro_batch: TensorDict, input_ids) -> None:
+        """Set the per-token PRF context for this micro-batch's masked forward.
+
+        No-op unless mask hooks are live. Builds, in the packed order of
+        ``input_ids.values()`` (the activation token axis under SP=1):
+        ``sample_ids`` (each row's ``comm_eff_sample_id`` repeated across its
+        tokens) and ``position_ids`` (position within each sequence, from the
+        rmpad offsets). Keying on these stable ids makes the mask
+        packing-invariant across the differently-packed forwards.
+
+        The within-step ``global_step`` folded into the PRF key is read from the
+        SHARED comm_eff state, not the per-engine ``_comm_eff_global_step``
+        attribute. The worker stamps that attribute only on the actor engine; a
+        fused ``actor_rollout_ref`` worker runs the reference forward on a
+        DISTINCT engine object that shares the same state, so
+        ``state.global_step`` is the only value guaranteed to equal the step the
+        paired train / old-logprob forwards used. This keeps the masked
+        reference forward (mask_reference) bit-identical to the policy mask so
+        KL(current || ref) is a true codec-vs-codec quantity. It is
+        byte-identical for the train / old-logprob paths, where the shared
+        ``state.global_step`` already equals the actor-engine attribute.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None:
+            return
+        masker = getattr(state, "masker", None)
+        if masker is None or not masker.is_registered:
+            return
+        if not getattr(input_ids, "is_nested", False):
+            raise NotImplementedError(
+                "comm_eff per-element masking requires rmpad (nested / no-padding) "
+                "inputs; padded forwards are out of scope for the per-element mask."
+            )
+        sample_id_per_row = micro_batch.get("comm_eff_sample_id", None)
+        if sample_id_per_row is None:
+            raise RuntimeError(
+                "comm_eff_sample_id missing from the micro-batch while mask hooks "
+                "are live; the worker must stamp a stable per-row id on the batch "
+                "before micro-batching (engine_workers.update_actor / compute_log_prob "
+                "/ compute_ref_log_prob when mask_reference)."
+            )
+        device = input_ids.values().device
+        offsets = input_ids.offsets().to(device=device)  # (nseq+1,)
+        seqlens = offsets.diff()  # (nseq,)
+        sample_id_per_row = sample_id_per_row.reshape(-1).to(device=device, dtype=torch.int64)
+        # per-token stable sample id: repeat each row's id across its tokens.
+        sample_ids = torch.repeat_interleave(sample_id_per_row, seqlens)  # (total_nnz,)
+        # per-token position within its sequence: flat_index - sequence_start.
+        total = int(offsets[-1].item())
+        flat = torch.arange(total, device=device)
+        starts = torch.repeat_interleave(offsets[:-1], seqlens)
+        position_ids = flat - starts  # (total_nnz,)
+        # Prefer the shared-state step (authoritative on every engine sharing the
+        # state, including the reference engine); fall back to the per-engine
+        # attribute only if the state has no valid step yet.
+        gstep = getattr(state, "global_step", None)
+        if gstep is None or int(gstep) < 0:
+            gstep = getattr(self, "_comm_eff_global_step", 0)
+        masker.set_context(
+            global_step=int(gstep),
+            sample_ids=sample_ids,
+            position_ids=position_ids,
+        )
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # Register PowerSGD only around the paired old/current actor forwards;
         # later inference, reference, validation, and anchor passes stay dense.
         _powersgd_hooks_live = self._comm_eff_powersgd_active(forward_only=forward_only)
         if _powersgd_hooks_live:
             _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
+        # Register the prf_mask codec around the same eligible forwards. The mask
+        # and PowerSGD compressors are mutually exclusive, so at most one of these
+        # two is live per forward.
+        _mask_hooks_live = self._comm_eff_mask_active(forward_only=forward_only)
+        if _mask_hooks_live:
+            _mask_hooks_live = self._comm_eff_register_mask_hooks()
         _ce_state = getattr(self, "_comm_eff_state", None)
         # Reset the per-tick comm-volume accumulators before the real
         # fast-train forward so the powersgd hook accumulates THIS tick's Y/dense
@@ -801,6 +940,8 @@ class FSDPEngine(BaseEngine):
         finally:
             if _powersgd_hooks_live:
                 self._comm_eff_state.powersgd.unregister()
+            if _mask_hooks_live:
+                self._comm_eff_state.masker.unregister()
 
     def _forward_backward_batch_inner(
         self,
@@ -2740,6 +2881,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # Bump the PowerSGD forward generation and stamp the step before the
             # boundary projection hooks fire (no-op unless powersgd is live).
             self._comm_eff_maybe_set_powersgd_context(micro_batch, input_ids)
+            # Set the per-token PRF mask context before the boundary mask hooks
+            # fire (no-op unless the prf_mask codec is live).
+            self._comm_eff_maybe_set_mask_context(micro_batch, input_ids)
             # support per sample temperature
             # temperature (bsz,)
             # input_ids (bsz, j1)

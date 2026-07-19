@@ -46,6 +46,17 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # overrides let the comparison launcher print the same values Hydra receives.
 export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
 export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
+# prf_mask codec (active iff COMM_EFF_COMPRESSION_TYPE=prf_mask). Anchor-independent
+# PRF activation mask; mutually exclusive with PowerSGD and cannot anchor-own-Q, so a
+# prf_mask arm also sets COMM_EFF_ANCHOR_OWNS_Q=false COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP=false.
+# Defaults keep the powersgd path byte-for-byte unchanged (mask disabled).
+export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
+export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+export COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-false}"
+export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-false}"
+export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-false}"
+export COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"
+export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
