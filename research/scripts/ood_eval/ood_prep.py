@@ -25,6 +25,7 @@ verl's math_reward boxed verifier -- byte-identical to training-time eval.
 train.parquet is a symlink to the real MATH train only to satisfy the launcher's
 existence guard; it is never read under trainer.val_only=True.
 """
+
 import argparse
 import os
 
@@ -61,8 +62,9 @@ def mc_row(problem, gold_letter, bench, idx):
 
 def gsm8k():
     d = datasets.load_dataset("openai/gsm8k", "main", split="test")
-    return [row(r["question"], r["answer"].split("####")[-1].strip().replace(",", ""), "gsm8k", i)
-            for i, r in enumerate(d)]
+    return [
+        row(r["question"], r["answer"].split("####")[-1].strip().replace(",", ""), "gsm8k", i) for i, r in enumerate(d)
+    ]
 
 
 def math500():
@@ -80,7 +82,7 @@ def olympiad():
     out = []
     for i, r in enumerate(d):
         fa = r["final_answer"]
-        gold = fa[0] if isinstance(fa, (list, tuple)) and fa else str(fa)
+        gold = fa[0] if isinstance(fa, list | tuple) and fa else str(fa)
         out.append(row(r["question"], gold, "olympiad", i))
     return out
 
@@ -111,11 +113,27 @@ def hmmt25():
     return [row(r["problem"], r["answer"], "hmmt25", i) for i, r in enumerate(d)]
 
 
-STEM = ["abstract_algebra", "anatomy", "astronomy", "college_biology", "college_chemistry",
-        "college_computer_science", "college_mathematics", "college_physics", "computer_security",
-        "conceptual_physics", "electrical_engineering", "elementary_mathematics", "high_school_biology",
-        "high_school_chemistry", "high_school_computer_science", "high_school_mathematics",
-        "high_school_physics", "high_school_statistics", "machine_learning"]
+STEM = [
+    "abstract_algebra",
+    "anatomy",
+    "astronomy",
+    "college_biology",
+    "college_chemistry",
+    "college_computer_science",
+    "college_mathematics",
+    "college_physics",
+    "computer_security",
+    "conceptual_physics",
+    "electrical_engineering",
+    "elementary_mathematics",
+    "high_school_biology",
+    "high_school_chemistry",
+    "high_school_computer_science",
+    "high_school_mathematics",
+    "high_school_physics",
+    "high_school_statistics",
+    "machine_learning",
+]
 
 
 def mmlu_stem(cap=40):
@@ -131,9 +149,18 @@ def mmlu_stem(cap=40):
     return out
 
 
-BENCHES = {"gsm8k": gsm8k, "math500": math500, "minerva": minerva, "olympiad": olympiad,
-           "aime24": aime24, "amc23": amc23, "mmlu_stem": mmlu_stem,
-           "aime25": aime25, "aime26": aime26, "hmmt25": hmmt25}
+BENCHES = {
+    "gsm8k": gsm8k,
+    "math500": math500,
+    "minerva": minerva,
+    "olympiad": olympiad,
+    "aime24": aime24,
+    "amc23": amc23,
+    "mmlu_stem": mmlu_stem,
+    "aime25": aime25,
+    "aime26": aime26,
+    "hmmt25": hmmt25,
+}
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
