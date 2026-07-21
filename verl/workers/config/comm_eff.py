@@ -91,6 +91,18 @@ class CommEffMaskConfig(BaseConfig):
             ``none`` (raw product), ``constant`` (``1/(1-p)`` inverted dropout),
             ``rms_match`` (per-token exact RMS match), or ``auto`` (``constant``
             if ``rescale`` else ``none``).
+        exact_k (bool): Issue #89 lever 2 (default off). Keep EXACTLY
+            ``round((1-p)*H)`` channels per token via the per-token PRF hash
+            order statistic (random, not a value top-k), so ``mask_ratio`` equals
+            ``1-k/H`` exactly with no per-token Bernoulli variance.
+        antithetic (bool): Issue #89 lever 5 (default off). Step ``t+1`` keeps
+            the antithetic complement of step ``t`` (shared draw flipped
+            ``u->1-u`` across the pair); only the cross-step draw changes, the
+            within-step mask is identical across the old/train/reference forwards.
+        p_by_boundary (list): Issue #89 lever 4 (default empty = off). A
+            per-boundary vector of masked fractions (each in ``[0, 1]``); its
+            length must equal the masked-boundary count. Empty means the scalar
+            ``p`` applies to every boundary.
     """
 
     enabled: bool = False
@@ -101,6 +113,9 @@ class CommEffMaskConfig(BaseConfig):
     mask_reference: bool = False
     rescale: bool = False
     rescale_mode: str = "auto"
+    exact_k: bool = False
+    antithetic: bool = False
+    p_by_boundary: list = field(default_factory=list)
 
 
 @dataclass
@@ -252,6 +267,22 @@ class CommEffConfig(BaseConfig):
                 "comm_eff.mask.rescale=true requires comm_eff.mask.p < 1.0 (the 1/(1-p) "
                 f"magnitude-preservation factor is undefined at p>=1); got p={self.mask.p}"
             )
+        if not isinstance(self.mask.exact_k, bool):
+            raise ValueError(f"comm_eff.mask.exact_k must be a bool; got {self.mask.exact_k!r}")
+        if not isinstance(self.mask.antithetic, bool):
+            raise ValueError(f"comm_eff.mask.antithetic must be a bool; got {self.mask.antithetic!r}")
+        pbb = self.mask.p_by_boundary if self.mask.p_by_boundary is not None else []
+        try:
+            pbb_vals = list(pbb)
+        except TypeError:
+            raise ValueError(
+                f"comm_eff.mask.p_by_boundary must be a list of floats in [0, 1]; got {self.mask.p_by_boundary!r}"
+            ) from None
+        for v in pbb_vals:
+            if isinstance(v, bool) or not isinstance(v, int | float):
+                raise ValueError(f"comm_eff.mask.p_by_boundary entries must be numbers in [0, 1]; got {v!r}")
+            if not 0.0 <= float(v) <= 1.0:
+                raise ValueError(f"comm_eff.mask.p_by_boundary entries must be in [0, 1]; got {v}")
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (

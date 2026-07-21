@@ -344,7 +344,16 @@ from verl.workers.comm_eff.state import (  # noqa: E402
 )
 
 
-def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False, mask_reference=False):
+def _make_enabled_state(
+    p=0.95,
+    pp_size=8,
+    seed=0,
+    mask_recompute=False,
+    mask_reference=False,
+    exact_k=False,
+    antithetic=False,
+    p_by_boundary=None,
+):
     cfg = SimpleNamespace(
         enabled=True,
         mask=SimpleNamespace(
@@ -354,6 +363,9 @@ def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False, mask_re
             pp_size=pp_size,
             mask_recompute=mask_recompute,
             mask_reference=mask_reference,
+            exact_k=exact_k,
+            antithetic=antithetic,
+            p_by_boundary=p_by_boundary if p_by_boundary is not None else [],
         ),
     )
     state = maybe_build_comm_eff_state(cfg)
@@ -580,3 +592,158 @@ def test_masker_is_hooks_only_no_params_or_buffers():
     keys_after = set(model.state_dict().keys())
     masker.unregister()
     assert keys_before == keys_after
+
+
+# =========================================================================== #
+# issue #89 codec levers: off-path parity, exact-k, antithetic, per-boundary p
+# =========================================================================== #
+def test_offpath_parity_prf_token_mask_byte_identical():
+    """All new lever flags OFF => prf_token_mask is byte-identical to baseline."""
+    sid, pos = _ids_for(6, 12)
+    kw = dict(layer_idx=3, global_step=7, base_seed=5, hidden_size=64, p=0.95, device=CPU, dtype=torch.float32)
+    baseline = prf_token_mask(sid, pos, **kw)
+    flags_off = prf_token_mask(sid, pos, exact_k=False, antithetic=False, **kw)
+    assert torch.equal(baseline, flags_off)
+    # and the default-off path still matches the documented scalar reference.
+    sid2, pos2 = torch.tensor([5, 9, 0]), torch.tensor([0, 3, 7])
+    m = prf_token_mask(
+        sid2,
+        pos2,
+        layer_idx=2,
+        global_step=4,
+        base_seed=1,
+        hidden_size=6,
+        p=0.6,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=False,
+        antithetic=False,
+    )
+    for t in range(3):
+        for ch in range(6):
+            assert float(m[t, ch]) == _scalar_keep(int(sid2[t]), int(pos2[t]), ch, layer=2, step=4, seed=1, p=0.6)
+
+
+def test_offpath_parity_hook_htilde_constant_rescale():
+    """All levers OFF, rescale_mode=constant => h_tilde is exactly h*mask/(1-p)."""
+    p = 0.95
+    masker = ActivationMasker(p=p, base_seed=0, pp_size=8, rescale_mode="constant")
+    _set_ctx(masker, 2, 8)
+    h = torch.randn(2, 8, 64)
+    out = masker._make_hook(3)(nn.Identity(), (), h)
+    sid, pos = _ids_for(2, 8)
+    mask = prf_token_mask(
+        sid, pos, layer_idx=3, global_step=0, base_seed=0, hidden_size=64, p=p, device=CPU, dtype=torch.float32
+    ).view(h.shape)
+    assert torch.equal(out, h * mask * (1.0 / (1.0 - p)))
+
+
+def test_exact_k_conserves_rate_exactly():
+    """exact_k keeps EXACTLY round((1-p)*H) per token; mask_ratio == 1 - k/H."""
+    p, H = 0.95, 256
+    sid, pos = _ids_for(8, 16)  # 128 tokens
+    m = prf_token_mask(
+        sid,
+        pos,
+        layer_idx=1,
+        global_step=3,
+        base_seed=2,
+        hidden_size=H,
+        p=p,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=True,
+    )
+    keep = round((1.0 - p) * H)  # 13
+    assert torch.all(m.sum(dim=-1) == keep)
+    assert set(m.unique().tolist()).issubset({0.0, 1.0})
+    measured_zero_fraction = float(1.0 - m.mean().item())
+    assert measured_zero_fraction == pytest.approx(1.0 - keep / H, abs=1e-6)
+    assert abs(measured_zero_fraction - p) <= 0.5 / H + 1e-9  # exact up to k rounding
+
+
+def test_exact_k_is_random_not_value_topk():
+    """exact_k selection is by PRF hash (value-independent), never a value top-k."""
+    masker = ActivationMasker(p=0.9, base_seed=7, pp_size=8, exact_k=True)  # rescale_mode auto->none
+    hook = masker._make_hook(3)
+    shape = (2, 8, 32)
+    _set_ctx(masker, 2, 8)
+    out_ones = hook(nn.Identity(), (), torch.ones(shape))
+    _set_ctx(masker, 2, 8)
+    out_rand = hook(nn.Identity(), (), torch.randn(shape))
+    # the kept positions (nonzero) are identical regardless of activation values
+    assert torch.equal(out_ones != 0, out_rand != 0)
+    # exactly round((1-p)*H)=3 kept per token
+    assert torch.all((out_ones != 0).sum(dim=-1) == round(0.1 * 32))
+
+
+def test_antithetic_within_step_identity_and_cross_step_complement():
+    """antithetic: identical within a step; exact bitwise complement across the pair at p=0.5."""
+    sid, pos = _ids_for(8, 16)
+    kw = dict(layer_idx=2, base_seed=3, hidden_size=64, p=0.5, device=CPU, dtype=torch.float32, antithetic=True)
+    m0a = prf_token_mask(sid, pos, global_step=0, **kw)
+    m0b = prf_token_mask(sid, pos, global_step=0, **kw)
+    assert torch.equal(m0a, m0b)  # within-step identity (key has no forward tag)
+    m1 = prf_token_mask(sid, pos, global_step=1, **kw)
+    assert torch.equal(m1, 1.0 - m0a)  # antithetic complement across the pair
+    m2 = prf_token_mask(sid, pos, global_step=2, **kw)
+    assert not torch.equal(m2, m0a)  # next pair draws fresh
+
+
+def test_antithetic_preserves_mask_ratio_and_disjoint_tails_at_p095():
+    """antithetic keeps ~5% each step at p=0.95 (NOT a set complement flipping to 95%)."""
+    sid, pos = _ids_for(8, 64)
+    kw = dict(layer_idx=5, base_seed=1, hidden_size=256, p=0.95, device=CPU, dtype=torch.float32, antithetic=True)
+    for step in (0, 1, 2, 3):
+        m = prf_token_mask(sid, pos, global_step=step, **kw)
+        assert abs(float(1.0 - m.mean().item()) - 0.95) <= 0.02
+    m0 = prf_token_mask(sid, pos, global_step=0, **kw)
+    m1 = prf_token_mask(sid, pos, global_step=1, **kw)
+    assert float((m0 * m1).sum().item()) == 0.0  # antithetic tails are disjoint
+
+
+def test_antithetic_within_step_identity_across_path_tags():
+    """The antithetic mask is identical across the old / train / reference forwards in one step."""
+    state, _ = _make_enabled_state(p=0.5, mask_recompute=True, mask_reference=True, antithetic=True)
+    hook = state.masker._make_hook(3)
+    h = torch.ones(2, 8, 32)
+    outs = {}
+    for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+        _set_ctx(state.masker, 2, 8, step=6)
+        state.set_path_tag(tag)
+        outs[tag] = hook(nn.Identity(), (), h.clone())
+    assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+    assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+
+
+def test_p_by_boundary_average_mask_ratio_in_band():
+    """A 7-vector averaging 0.95 => aggregate comm_eff/mask_ratio in [0.94, 0.96]."""
+    pbb = [0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98]  # mean exactly 0.95
+    assert sum(pbb) / len(pbb) == pytest.approx(0.95)
+    model = _ToyDecoder(num_layers=16, d=512)
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=pbb)
+    masker.register(model)
+    assert masker.boundary_indices == [1, 3, 5, 7, 9, 11, 13]
+    b, s = 8, 64  # 512 tokens x 512 channels per boundary
+    _set_ctx(masker, b, s)
+    model(torch.randn(b, s, 512))
+    masker.unregister()
+    ratios = masker.last_mask_ratio
+    assert len(ratios) == 7
+    aggregate = sum(ratios.values()) / len(ratios)
+    assert 0.94 <= aggregate <= 0.96
+    for i, idx in enumerate(masker.boundary_indices):
+        assert abs(ratios[idx] - pbb[i]) <= 0.02  # each boundary tracks its own p
+
+
+def test_p_by_boundary_length_mismatch_raises():
+    """A p_by_boundary vector whose length != boundary count fails loudly at register()."""
+    model = _ToyDecoder(num_layers=16, d=32)  # 7 boundaries
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=[0.95, 0.95])
+    with pytest.raises(ValueError):
+        masker.register(model)
+
+
+def test_p_by_boundary_out_of_range_raises_at_construction():
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=[0.95, 1.5])

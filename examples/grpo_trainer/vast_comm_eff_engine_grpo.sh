@@ -259,6 +259,11 @@ COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-false}"         # also mask 
 COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-false}"         # also mask the reference-KL forward (codec-vs-codec KL)
 COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"                        # base seed folded into the mask PRF key
 COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                  # logical pipeline-shard count (boundary blocks)
+# issue #89 codec levers — default-off so the baseline PRF stays bit-identical.
+COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-auto}"     # none|constant|rms_match|auto magnitude restoration (lever 1)
+COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-false}"              # keep EXACTLY round((1-p)*H)/token via hash order stat (lever 2)
+COMM_EFF_MASK_ANTITHETIC="${COMM_EFF_MASK_ANTITHETIC:-false}"        # step t+1 keeps the antithetic complement of step t (lever 5)
+COMM_EFF_MASK_P_BY_BOUNDARY="${COMM_EFF_MASK_P_BY_BOUNDARY:-}"       # optional per-boundary p vector, e.g. [0.92,..] mean ~p (lever 4); empty=off
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -355,7 +360,8 @@ cat <<EOF
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd)
-  prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
+  prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
+  prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}]  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
@@ -365,6 +371,23 @@ cat <<EOF
   log:                 $LOG
 === launching ===
 EOF
+
+# ---------------------------------------------------------------------------
+# 6a. Resolved-codec boot gate (issue #89) — runs BEFORE any GPU spend. Fails
+#     fast on a mis-resolved prf_mask codec (the money gate: never pay to train
+#     a config that silently fell through to dense or would crash validation).
+# ---------------------------------------------------------------------------
+MASK_PBB_OVERRIDE=()
+if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_mask" ]]; then
+  [[ "${COMM_EFF_MASK_ENABLED}" == "true" ]] || { echo "FATAL: compression_type=prf_mask but COMM_EFF_MASK_ENABLED != true — codec would resolve to dense." >&2; exit 1; }
+  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: prf_mask requires COMM_EFF_ANCHOR_OWNS_Q=false (mask has no PowerSGD basis Q)." >&2; exit 1; }
+  case "${COMM_EFF_MASK_RESCALE_MODE}" in none|constant|rms_match|auto) ;; *) echo "FATAL: bad COMM_EFF_MASK_RESCALE_MODE='${COMM_EFF_MASK_RESCALE_MODE}' (none|constant|rms_match|auto)." >&2; exit 1;; esac
+  echo "=== resolved codec OK (before GPU): prf_mask p=$COMM_EFF_MASK_P rescale_mode=$COMM_EFF_MASK_RESCALE_MODE exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY}] ==="
+fi
+# p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
+if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
+  MASK_PBB_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.mask.p_by_boundary=${COMM_EFF_MASK_P_BY_BOUNDARY}")
+fi
 
 # ---------------------------------------------------------------------------
 # 6b.  early-stop instrumentation (greppable). A lightweight background
@@ -412,6 +435,10 @@ EARLY_STOP_RE='([Nn]a[Nn] detected|RuntimeError: .*use_orig_params|summon_full_p
 #    The watcher self-terminates when training exits (guard 1), and the verified
 #    cleanup path reaps its private process group exactly once (guard 2).
 # ---------------------------------------------------------------------------
+# set -x so train.log carries the fully-resolved main_ppo command line for
+# capture_resolved_config.py. Secrets were sourced+exported far above, so they
+# are never traced here (only the safe Hydra args expand under xtrace).
+set -x
 python3 -m verl.trainer.main_ppo \
   algorithm.adv_estimator=grpo \
   data.train_files="$TRAIN_FILE" \
@@ -485,6 +512,9 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.mask_reference="$COMM_EFF_MASK_REFERENCE" \
   actor_rollout_ref.actor.comm_eff.mask.seed="$COMM_EFF_MASK_SEED" \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
+  actor_rollout_ref.actor.comm_eff.mask.rescale_mode="$COMM_EFF_MASK_RESCALE_MODE" \
+  actor_rollout_ref.actor.comm_eff.mask.exact_k="$COMM_EFF_MASK_EXACT_K" \
+  actor_rollout_ref.actor.comm_eff.mask.antithetic="$COMM_EFF_MASK_ANTITHETIC" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
@@ -521,9 +551,11 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype="$COMM_EFF_POWERSGD_QR_DTYPE" \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
+  "${MASK_PBB_OVERRIDE[@]+"${MASK_PBB_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!
+{ set +x; } 2>/dev/null   # stop tracing once the resolved command is in the log
 
 #  early-stop watcher — bound to TRAIN_PID + its own process group.
 # Guard 1: `tail --pid="$TRAIN_PID" -F` dies when training exits (clean or

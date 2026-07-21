@@ -225,14 +225,21 @@ class CommEffState:
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 rescale=bool(getattr(mask_cfg, "rescale", False)),
                 rescale_mode=str(getattr(mask_cfg, "rescale_mode", "auto")),
+                exact_k=bool(getattr(mask_cfg, "exact_k", False)),
+                antithetic=bool(getattr(mask_cfg, "antithetic", False)),
+                p_by_boundary=list(getattr(mask_cfg, "p_by_boundary", []) or []),
                 state=self,
             )
             logger.info(
-                "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s",
+                "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
+                "exact_k=%s antithetic=%s p_by_boundary=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
                 getattr(mask_cfg, "rescale_mode", "auto"),
+                getattr(mask_cfg, "exact_k", False),
+                getattr(mask_cfg, "antithetic", False),
+                list(getattr(mask_cfg, "p_by_boundary", []) or []),
             )
 
         if self.compression_type == "powersgd":

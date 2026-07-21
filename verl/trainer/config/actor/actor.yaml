@@ -313,6 +313,9 @@ comm_eff:
     mask_reference: false
     rescale: false
     rescale_mode: auto
+    exact_k: false
+    antithetic: false
+    p_by_boundary: []
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:

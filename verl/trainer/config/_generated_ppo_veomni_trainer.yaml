@@ -147,6 +147,9 @@ actor_rollout_ref:
         mask_reference: false
         rescale: false
         rescale_mode: auto
+        exact_k: false
+        antithetic: false
+        p_by_boundary: []
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true
