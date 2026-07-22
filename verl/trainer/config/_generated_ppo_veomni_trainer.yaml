@@ -150,6 +150,10 @@ actor_rollout_ref:
         exact_k: false
         antithetic: false
         p_by_boundary: []
+        frlr: false
+        frlr_rank: 32
+        frlr_k: 44
+        frlr_unbiased: false
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

@@ -37,7 +37,9 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from verl.workers.comm_eff.powersgd_activation import init_basis, orthonormalize
 from verl.workers.comm_eff.state import (
+    TRAIN_TAG,
     mask_eligible_tags,
 )
 
@@ -57,6 +59,8 @@ _PRF_MIX2 = 0x94D049BB133111EB
 _U64 = (1 << 64) - 1
 # Uniform is the top 53 bits of the hash (exact in a float64 mantissa / int64).
 _PRF_2POW53 = 1 << 53
+# FRLR residual-norm matching floor: gamma = ||res|| / max(||scatter_J(res_J)||, eps).
+_FRLR_NORM_EPS = 1e-8
 
 
 def decoder_boundary_indices(num_layers: int, pp_size: int) -> list[int]:
@@ -174,6 +178,7 @@ def prf_token_mask(
     dtype: torch.dtype,
     exact_k: bool = False,
     antithetic: bool = False,
+    exact_keep: Optional[int] = None,
 ) -> torch.Tensor:
     """Deterministic per-(token, dim) Bernoulli keep/zero mask.
 
@@ -200,15 +205,25 @@ def prf_token_mask(
             set complement, which would flip the mask ratio to ``1-p``). The
             within-step mask is unchanged across the old/train/reference forwards
             because only ``global_step`` (never the forward tag) enters the key.
+        exact_keep: Optional explicit keep count for the exact-k order statistic
+            (requires ``exact_k=True``). Used by the FRLR codec to draw its
+            PRF-fresh residual subset ``J`` of exactly ``frlr_k`` channels with
+            the SAME key as the baseline mask (``p`` then plays no role in the
+            count). ``None`` (default) keeps ``round((1-p)*H)``.
 
-    With ``exact_k=False`` and ``antithetic=False`` (the defaults) the output is
-    byte-identical to the frozen baseline PRF codec.
+    With ``exact_k=False``, ``antithetic=False`` and ``exact_keep=None`` (the
+    defaults) the output is byte-identical to the frozen baseline PRF codec.
 
     Returns:
         ``(N, hidden_size)`` mask of ``{0, 1}`` in ``dtype`` on ``device``.
     """
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"mask p must be in [0, 1]; got {p}")
+    if exact_keep is not None:
+        if not exact_k:
+            raise ValueError("mask exact_keep requires exact_k=True (it overrides the order-statistic keep count)")
+        if not 0 <= int(exact_keep) <= int(hidden_size):
+            raise ValueError(f"mask exact_keep must be in [0, hidden_size={hidden_size}]; got {exact_keep}")
     sid = sample_ids.reshape(-1).to(device=device, dtype=torch.int64)
     pos = position_ids.reshape(-1).to(device=device, dtype=torch.int64)
     if sid.numel() != pos.numel():
@@ -245,8 +260,9 @@ def prf_token_mask(
     if exact_k:
         # Keep EXACTLY round((1-p)*H) channels per token by the hash order
         # statistic (random, not value top-k). scatter is exactly-k safe even
-        # under (astronomically unlikely) 53-bit ties.
-        keep = int(round((1.0 - p) * hidden_size))
+        # under (astronomically unlikely) 53-bit ties. exact_keep (FRLR's J)
+        # overrides the count without touching the key.
+        keep = int(exact_keep) if exact_keep is not None else int(round((1.0 - p) * hidden_size))
         if keep <= 0:
             return torch.zeros((n_tokens, hidden_size), device=device, dtype=dtype)
         if keep >= hidden_size:
@@ -282,6 +298,10 @@ class ActivationMasker:
         exact_k: bool = False,
         antithetic: bool = False,
         p_by_boundary: Optional[list] = None,
+        frlr: bool = False,
+        frlr_rank: int = 32,
+        frlr_k: int = 44,
+        frlr_unbiased: bool = False,
         state: Any = None,
     ):
         self.p = float(p)
@@ -317,6 +337,49 @@ class ActivationMasker:
             raise ValueError(f"mask rescale_mode must be one of none|constant|rms_match|auto; got {rescale_mode!r}")
         self.rescale_mode = mode
         self._rescale_gain = (1.0 / (1.0 - self.p)) if (mode == "constant" and self.p < 1.0) else 1.0
+        # FRLR (issue #89, "32+44+1"): fresh-residual low-rank codec, default
+        # off. When on, the boundary transform becomes
+        #   h_hat = l + gamma * scatter_J(res_J)      (l = (h@Q)@Q^T, res = h-l)
+        # with a step-frozen activation-derived Q (H x frlr_rank), a per-token
+        # PRF-fresh EXACT-k residual subset J (frlr_k channels, keyed like the
+        # baseline mask INCLUDING global_step), and a DETACHED per-token
+        # residual-norm-matching gamma capped at H/k (frlr_unbiased instead
+        # uses the constant H/k gain, E[h_hat | h, Q] = h). Payload per token:
+        # frlr_rank + frlr_k + 1 values (the +1 is the norm scalar).
+        self.frlr = bool(frlr)
+        self.frlr_rank = int(frlr_rank)
+        self.frlr_k = int(frlr_k)
+        self.frlr_unbiased = bool(frlr_unbiased)
+        if self.frlr_rank < 1:
+            raise ValueError(f"mask frlr_rank must be >= 1; got {frlr_rank}")
+        if self.frlr_k < 1:
+            raise ValueError(f"mask frlr_k must be >= 1; got {frlr_k}")
+        if self.frlr:
+            if self.exact_k or self.antithetic or self.p_by_boundary:
+                raise ValueError(
+                    "mask frlr=true is mutually exclusive with exact_k/antithetic/p_by_boundary; "
+                    "FRLR draws its own PRF-fresh exact-k residual subset J."
+                )
+            if self.rescale_mode != "none":
+                raise ValueError(
+                    "mask frlr=true requires the plain-mask rescale path OFF "
+                    "(rescale=false, rescale_mode none|auto); FRLR applies its own "
+                    f"detached residual-norm matching. Got rescale_mode={self.rescale_mode!r}."
+                )
+        # FRLR runtime state. The per-boundary fp32 basis Q is FROZEN within a
+        # global step and refreshed at the first fire of a new step from the
+        # previous step's activation sketch V = sum h^T (h Q) (warm-started
+        # block power iteration, mirroring the PowerSGD projector, whose
+        # Q_{t+1} is likewise built from step t's activations). All of this
+        # persists across register/unregister cycles, like the PowerSGD basis.
+        self._frlr_basis: dict[int, torch.Tensor] = {}
+        self._frlr_q_step: dict[int, int] = {}
+        self._frlr_sketch: dict[int, torch.Tensor] = {}
+        self._frlr_sketched_this_gen: dict[int, int] = {}
+        self._frlr_fwd_generation = 0
+        self.frlr_q_refreshes = 0
+        # Most recent FRLR kept-coords/token (rank + k + 1), for metrics.
+        self.frlr_payload_per_token: Optional[float] = None
         self._state = state  # CommEffState, for the mask_applications counter
         self._handles: list[Any] = []
         self._boundary_set: set[int] = set()
@@ -343,6 +406,131 @@ class ActivationMasker:
         self._global_step = int(global_step)
         self._sample_ids = None if sample_ids is None else sample_ids.reshape(-1)
         self._position_ids = None if position_ids is None else position_ids.reshape(-1)
+        if self.frlr:
+            # One generation per micro-batch: dedupes the FRLR Q sketch against
+            # gradient-checkpoint recompute (the recompute re-runs the boundary
+            # forward with the SAME context; same pattern as PowerSGD).
+            self._frlr_fwd_generation += 1
+
+    # ------------------------------------------------------------------ #
+    # FRLR (issue #89): fresh-residual low-rank codec
+    # ------------------------------------------------------------------ #
+    def _frlr_ensure_basis(self, layer_idx: int, *, hidden_size: int, device: torch.device) -> torch.Tensor:
+        """Return the step-frozen fp32 FRLR basis ``Q`` for ``layer_idx``.
+
+        Bootstrap: the deterministic seeded orthonormal frame (same
+        construction as the PowerSGD projector's ``init_basis``). Refresh: at
+        the FIRST fire of a NEW ``global_step`` the previous step's activation
+        sketch ``V = sum h^T (h Q)`` is orthonormalized into the new ``Q``
+        (warm-started block power iteration; PowerSGD likewise builds
+        ``Q_{t+1}`` from step ``t``'s activations at end-of-step). Within one
+        ``global_step`` the basis is never touched, so the old/train/reference
+        forwards and any gradient-checkpoint recompute of the same step see
+        the identical ``Q``.
+        """
+        step = int(self._global_step)
+        q = self._frlr_basis.get(layer_idx)
+        if q is None:
+            q = init_basis(
+                hidden_size=hidden_size,
+                rank=self.frlr_rank,
+                base_seed=self.base_seed,
+                layer_idx=layer_idx,
+            ).to(device=device, dtype=torch.float32)
+            self._frlr_basis[layer_idx] = q
+            self._frlr_q_step[layer_idx] = step
+        elif self._frlr_q_step.get(layer_idx, step) != step:
+            # Step boundary: refresh Q from the previous step's sketch (keep
+            # the warm-started Q unchanged if no sketch was accumulated).
+            v = self._frlr_sketch.pop(layer_idx, None)
+            if v is not None:
+                q = orthonormalize(v).to(device=device, dtype=torch.float32)
+                self._frlr_basis[layer_idx] = q
+                self.frlr_q_refreshes += 1
+            self._frlr_q_step[layer_idx] = step
+        if q.device != device:
+            q = q.to(device=device)
+            self._frlr_basis[layer_idx] = q
+        return q
+
+    def _frlr_transform(self, h: torch.Tensor, *, layer_idx: int) -> torch.Tensor:
+        """Apply the FRLR ``rank + k + 1`` reconstruction to a boundary activation.
+
+        ``y = h @ Q`` (rank core coords/token), ``l = y @ Q^T``,
+        ``res = h - l``. ``J`` is a per-token PRF-fresh EXACT-``k`` channel
+        subset keyed exactly like the baseline mask (INCLUDING
+        ``global_step``: fresh across steps, identical within a step and
+        across the old/train/reference forwards). Default mode sends one
+        residual-norm scalar per token (the ``+1``) and rescales the scattered
+        kept residual by the DETACHED
+        ``gamma = ||res|| / max(||scatter_J(res_J)||, eps)`` capped at ``H/k``
+        (no blow-up on adversarial tokens). ``frlr_unbiased`` instead applies
+        the constant ``H/k`` gain, making ``E[h_hat | h, Q] = h``. The whole
+        transform is in-graph through ``h`` (``Q``, ``J`` and ``gamma`` are
+        constants to autograd), so backward is the exact adjoint, and the same
+        PRF key makes the gradient-checkpoint recompute bit-deterministic.
+        """
+        grad_enabled = torch.is_grad_enabled()
+        hidden_size = int(h.shape[-1])
+        k = int(self.frlr_k)
+        if k > hidden_size:
+            raise ValueError(f"comm_eff mask.frlr_k={k} exceeds the hidden size H={hidden_size}")
+        orig_shape = h.shape
+        m = h.reshape(-1, hidden_size)
+        q_fp32 = self._frlr_ensure_basis(layer_idx, hidden_size=hidden_size, device=m.device)
+        q_act = q_fp32.to(dtype=m.dtype)
+        y = m @ q_act  # (N, r) core payload; Q is a detached buffer, m stays in-graph
+        low = y @ q_act.t()  # (N, H) rank-r reconstruction
+        res = m - low
+        mask_j = prf_token_mask(
+            self._sample_ids,
+            self._position_ids,
+            layer_idx=layer_idx,
+            global_step=self._global_step,
+            base_seed=self.base_seed,
+            hidden_size=hidden_size,
+            p=self.p,
+            device=m.device,
+            dtype=m.dtype,
+            exact_k=True,
+            exact_keep=k,
+        )
+        res_j = res * mask_j  # scatter_J(res_J): kept residual channels, zero elsewhere
+        cap = float(hidden_size) / float(k)  # 1/q_r with q_r = k/H
+        if self.frlr_unbiased:
+            m_hat = low + cap * res_j
+        else:
+            res32 = res.detach().to(torch.float32)
+            res_norm = res32.norm(dim=-1, keepdim=True)  # the +1 norm scalar per token
+            kept_norm = (res32 * mask_j.to(torch.float32)).norm(dim=-1, keepdim=True)
+            gamma = (res_norm / kept_norm.clamp_min(_FRLR_NORM_EPS)).clamp_(max=cap)
+            m_hat = low + gamma.to(dtype=m.dtype) * res_j
+        with torch.no_grad():
+            # Cross-step Q refresh sketch V += h^T (h Q): the gradient-bearing
+            # train forward only, at most once per forward generation (dedupe
+            # against gradient-checkpoint recompute), mirroring PowerSGD.
+            tag = getattr(self._state, "path_tag", None) if self._state is not None else TRAIN_TAG
+            if (
+                grad_enabled
+                and tag == TRAIN_TAG
+                and self._frlr_sketched_this_gen.get(layer_idx, -1) != self._frlr_fwd_generation
+            ):
+                m32 = m.detach().to(torch.float32)
+                contrib = m32.t() @ (m32 @ q_fp32)  # (H, r)
+                cur = self._frlr_sketch.get(layer_idx)
+                if cur is None:
+                    self._frlr_sketch[layer_idx] = contrib
+                else:
+                    cur.add_(contrib)
+                self._frlr_sketched_this_gen[layer_idx] = self._frlr_fwd_generation
+            # Payload accounting: rank + k + 1 kept coords/token (the +1 norm
+            # scalar is not sent in unbiased mode). 32 + 44 + 1 = 77 of 1536
+            # => mask_ratio ~ 0.9499.
+            r_eff = int(q_fp32.shape[1])
+            kept = r_eff + k + (0 if self.frlr_unbiased else 1)
+            self.frlr_payload_per_token = float(kept)
+            self.last_mask_ratio[layer_idx] = max(0.0, 1.0 - float(kept) / float(hidden_size))
+        return m_hat.reshape(orig_shape)
 
     def _make_hook(self, layer_idx: int):
         masker = self
@@ -385,6 +573,20 @@ class ActivationMasker:
                     f"tokens but got {sample_ids.numel()} sample_ids / "
                     f"{position_ids.numel()} position_ids (SP>1 / non-rmpad is out of scope)."
                 )
+
+            if masker.frlr:
+                # FRLR (issue #89): fresh-residual low-rank reconstruction
+                # replaces the plain mask transform. Sets last_mask_ratio and
+                # frlr_payload_per_token internally.
+                h_tilde = masker._frlr_transform(h, layer_idx=layer_idx)
+                if state is not None:
+                    if hasattr(state, "note_mask_application"):
+                        state.note_mask_application()
+                    else:
+                        state.mask_applications += 1
+                if isinstance(output, tuple):
+                    return (h_tilde,) + tuple(output[1:])
+                return h_tilde
 
             # Per-boundary p (lever 4) when configured, else the scalar p.
             p_layer = masker._p_for_layer.get(layer_idx, masker.p) if masker._p_for_layer else masker.p

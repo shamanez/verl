@@ -103,6 +103,26 @@ class CommEffMaskConfig(BaseConfig):
             per-boundary vector of masked fractions (each in ``[0, 1]``); its
             length must equal the masked-boundary count. Empty means the scalar
             ``p`` applies to every boundary.
+        frlr (bool): Issue #89 FRLR lever (default off). Fresh-Residual
+            Low-Rank codec ("32+44+1"): each boundary activation ``h`` is
+            reconstructed as ``h_hat = l + gamma * scatter_J(res_J)`` where
+            ``l = (h @ Q) @ Q^T`` uses a step-frozen activation-derived
+            orthonormal ``Q`` (H x frlr_rank, warm-started like the PowerSGD
+            projector and refreshed at step boundaries from the previous
+            step's activation sketch), ``J`` is a per-token PRF-fresh EXACT-k
+            residual channel subset (keyed like the baseline mask INCLUDING
+            ``global_step``), and ``gamma`` is a DETACHED per-token
+            residual-norm-matching gain capped at ``H/frlr_k``. Payload:
+            ``frlr_rank + frlr_k + 1`` values/token (32+44+1 = 77 of 1536,
+            mask_ratio ~ 0.9499). Mutually exclusive with
+            ``exact_k``/``antithetic``/``p_by_boundary`` and requires the
+            plain rescale path off (``rescale=false``, ``rescale_mode``
+            ``none``/``auto``).
+        frlr_rank (int): FRLR core rank r (columns of ``Q``); default 32.
+        frlr_k (int): FRLR per-token residual subset size k; default 44.
+        frlr_unbiased (bool): FRLR unbiased mode (default off): apply the
+            constant ``H/frlr_k`` gain with no norm matching, so
+            ``E[h_hat | h, Q] = h``.
     """
 
     enabled: bool = False
@@ -116,6 +136,10 @@ class CommEffMaskConfig(BaseConfig):
     exact_k: bool = False
     antithetic: bool = False
     p_by_boundary: list = field(default_factory=list)
+    frlr: bool = False
+    frlr_rank: int = 32
+    frlr_k: int = 44
+    frlr_unbiased: bool = False
 
 
 @dataclass
@@ -283,6 +307,29 @@ class CommEffConfig(BaseConfig):
                 raise ValueError(f"comm_eff.mask.p_by_boundary entries must be numbers in [0, 1]; got {v!r}")
             if not 0.0 <= float(v) <= 1.0:
                 raise ValueError(f"comm_eff.mask.p_by_boundary entries must be in [0, 1]; got {v}")
+        # FRLR (issue #89) lever.
+        for name in ("frlr", "frlr_unbiased"):
+            value = getattr(self.mask, name)
+            if not isinstance(value, bool):
+                raise ValueError(f"comm_eff.mask.{name} must be a bool; got {value!r}")
+        for name in ("frlr_rank", "frlr_k"):
+            value = getattr(self.mask, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"comm_eff.mask.{name} must be an integer >= 1; got {value!r}")
+        if self.mask.frlr:
+            if self.mask.exact_k or self.mask.antithetic or pbb_vals:
+                raise ValueError(
+                    "comm_eff.mask.frlr=true is mutually exclusive with "
+                    "exact_k/antithetic/p_by_boundary; FRLR draws its own PRF-fresh "
+                    "exact-k residual subset J."
+                )
+            if self.mask.rescale or str(self.mask.rescale_mode).lower() not in ("none", "auto"):
+                raise ValueError(
+                    "comm_eff.mask.frlr=true requires the plain-mask rescale path OFF "
+                    "(rescale=false, rescale_mode none|auto); FRLR applies its own detached "
+                    f"residual-norm matching. Got rescale={self.mask.rescale}, "
+                    f"rescale_mode={self.mask.rescale_mode!r}."
+                )
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
