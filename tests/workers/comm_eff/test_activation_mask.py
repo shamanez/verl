@@ -357,6 +357,7 @@ def _make_enabled_state(
     frlr_rank=32,
     frlr_k=44,
     frlr_unbiased=False,
+    frlr_q_cadence=1,
 ):
     cfg = SimpleNamespace(
         enabled=True,
@@ -374,6 +375,7 @@ def _make_enabled_state(
             frlr_rank=frlr_rank,
             frlr_k=frlr_k,
             frlr_unbiased=frlr_unbiased,
+            frlr_q_cadence=frlr_q_cadence,
         ),
     )
     state = maybe_build_comm_eff_state(cfg)
@@ -760,10 +762,10 @@ def test_p_by_boundary_out_of_range_raises_at_construction():
 # =========================================================================== #
 # issue #89 FRLR codec: fresh-residual low-rank ("32+44+1")
 # =========================================================================== #
-from verl.workers.comm_eff.powersgd_activation import init_basis  # noqa: E402
+from verl.workers.comm_eff.powersgd_activation import init_basis, orthonormalize  # noqa: E402
 
 
-def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None):
+def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None, q_cadence=1):
     return ActivationMasker(
         p=0.95,
         base_seed=seed,
@@ -772,6 +774,7 @@ def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None):
         frlr_rank=r,
         frlr_k=k,
         frlr_unbiased=unbiased,
+        frlr_q_cadence=q_cadence,
         state=state,
     )
 
@@ -1034,3 +1037,129 @@ def test_frlr_config_validation():
         CommEffConfig(mask=CommEffMaskConfig(frlr_rank=0))
     with pytest.raises(ValueError):
         CommEffConfig(mask=CommEffMaskConfig(frlr_k=0))
+
+
+# =========================================================================== #
+# issue #89 FRLR slow-Q lever: frlr_q_cadence (frozen Q between refreshes)
+# =========================================================================== #
+def test_frlr_q_cadence_1_bit_identical_to_every_step_refresh():
+    """frlr_q_cadence=1 (the default) reproduces the original every-step refresh bitwise."""
+    torch.manual_seed(0)
+    H = 32
+    default = _frlr_masker(r=4, k=8)  # no q_cadence kwarg: pre-lever construction
+    explicit = _frlr_masker(r=4, k=8, q_cadence=1)  # the new lever at its default
+    hs = [torch.randn(2, 4, H) for _ in range(4)]
+    for step, h in enumerate(hs):
+        _set_ctx(default, 2, 4, step=step)
+        out_d = default._make_hook(3)(nn.Identity(), (), h)
+        _set_ctx(explicit, 2, 4, step=step)
+        out_e = explicit._make_hook(3)(nn.Identity(), (), h)
+        assert torch.equal(out_d, out_e)
+        assert torch.equal(default._frlr_basis[3], explicit._frlr_basis[3])
+    # Every step boundary refreshed Q, exactly as before the lever existed.
+    assert default.frlr_q_refreshes == 3
+    assert explicit.frlr_q_refreshes == 3
+    # A cadence below 1 fails loud, in the masker and in the config dataclass.
+    with pytest.raises(ValueError):
+        _frlr_masker(r=4, k=8, q_cadence=0)
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffMaskConfig
+
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr_q_cadence=0))
+
+
+def test_frlr_q_cadence_frozen_window_then_refresh():
+    """cadence=5: Q is bitwise identical across steps t..t+4 and refreshes at t+5."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, q_cadence=5)
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 4, step=0)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    q0 = masker._frlr_basis[3].clone()
+    for step in range(1, 5):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, H))
+        assert torch.equal(masker._frlr_basis[3], q0)  # bitwise frozen window
+        assert masker.frlr_q_refreshes == 0
+    _set_ctx(masker, 2, 4, step=5)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    assert masker.frlr_q_refreshes == 1
+    assert not torch.equal(masker._frlr_basis[3], q0)
+    # The next window is frozen again until step 10.
+    q5 = masker._frlr_basis[3].clone()
+    for step in range(6, 10):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, H))
+        assert torch.equal(masker._frlr_basis[3], q5)
+        assert masker.frlr_q_refreshes == 1
+    _set_ctx(masker, 2, 4, step=10)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    assert masker.frlr_q_refreshes == 2
+
+
+def test_frlr_q_cadence_within_step_identity_across_path_tags():
+    """cadence>1 keeps h_hat identical across the old/train/reference forwards.
+
+    Holds on the bootstrap step, inside the frozen window, AND on the refresh
+    step itself (the refresh happens once, at the first fire of that step).
+    """
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(
+        mask_recompute=True, mask_reference=True, frlr=True, frlr_rank=8, frlr_k=12, frlr_q_cadence=3
+    )
+    hook = state.masker._make_hook(3)
+    h = torch.randn(2, 8, 32)
+    for step in (0, 1, 2, 3):  # 0 bootstrap, 1-2 frozen window, 3 refresh step
+        outs = {}
+        for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+            _set_ctx(state.masker, 2, 8, step=step)
+            state.set_path_tag(tag)
+            outs[tag] = hook(nn.Identity(), (), h.clone())
+        assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+        assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+    assert state.masker.frlr_q_refreshes == 1  # exactly the step-3 refresh
+
+
+def test_frlr_q_cadence_sketch_accumulates_over_window():
+    """The refresh consumes the FULL frozen window's sketch, not just one step's.
+
+    With Q frozen at Q0 for steps 0..4 the sketch must equal
+    sum_s h_s^T (h_s Q0), and the step-5 refresh must orthonormalize THAT
+    accumulation (differing from what a refresh from step 0's contribution
+    alone, i.e. an every-step refresh at t+1, would have produced).
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, q_cadence=5)
+    hook = masker._make_hook(3)
+    q0 = init_basis(hidden_size=H, rank=r, base_seed=0, layer_idx=3)
+    hs = [torch.randn(2, 4, H) for _ in range(5)]
+    expected = torch.zeros(H, r)
+    for step, h in enumerate(hs):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), h)
+        m32 = h.reshape(-1, H)
+        expected += m32.t() @ (m32 @ q0)  # Q frozen at Q0 over the whole window
+    assert torch.allclose(masker._frlr_sketch[3], expected, rtol=1e-5, atol=1e-5)
+    _set_ctx(masker, 2, 4, step=5)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    q_window = orthonormalize(expected)
+    m0 = hs[0].reshape(-1, H)
+    q_one_step = orthonormalize(m0.t() @ (m0 @ q0))
+    assert torch.allclose(masker._frlr_basis[3], q_window, rtol=1e-4, atol=1e-5)
+    assert not torch.allclose(masker._frlr_basis[3], q_one_step, rtol=1e-4, atol=1e-5)
+
+
+def test_frlr_q_refreshes_metric_counts_only_actual_refreshes():
+    """comm_eff/frlr_q_refreshes reflects the slow cadence, not step boundaries."""
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(frlr=True, frlr_rank=4, frlr_k=8, frlr_q_cadence=3)
+    hook = state.masker._make_hook(3)
+    state.set_path_tag(TRAIN_TAG)
+    for step in range(8):  # bootstrap at 0; refreshes fire at steps 3 and 6 only
+        _set_ctx(state.masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    metrics = comm_eff_metrics(state)
+    assert metrics["comm_eff/frlr_q_refreshes"] == 2
+    assert state.masker.frlr_q_refreshes == 2  # cadence=1 would have logged 7

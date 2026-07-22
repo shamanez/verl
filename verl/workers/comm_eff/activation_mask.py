@@ -302,6 +302,7 @@ class ActivationMasker:
         frlr_rank: int = 32,
         frlr_k: int = 44,
         frlr_unbiased: bool = False,
+        frlr_q_cadence: int = 1,
         state: Any = None,
     ):
         self.p = float(p)
@@ -350,10 +351,22 @@ class ActivationMasker:
         self.frlr_rank = int(frlr_rank)
         self.frlr_k = int(frlr_k)
         self.frlr_unbiased = bool(frlr_unbiased)
+        # Slow-Q lever (issue #89): refresh Q only when at least frlr_q_cadence
+        # global steps elapsed since the last refresh; 1 = the original
+        # every-step refresh (bit-identical). Between refreshes Q stays frozen
+        # while the activation sketch keeps accumulating over the full window.
+        # Motivation: the first FRLR GPU trial cut codec-view entropy 63% but
+        # its reference-KL accelerated (0.005@9 -> 0.33@30) because the
+        # per-step activation-refit Q chases the drifting policy; a slow
+        # cadence keeps the core stable between refreshes while the fresh
+        # per-step PRF residual keeps repairing the stale-Q nullspace.
+        self.frlr_q_cadence = int(frlr_q_cadence)
         if self.frlr_rank < 1:
             raise ValueError(f"mask frlr_rank must be >= 1; got {frlr_rank}")
         if self.frlr_k < 1:
             raise ValueError(f"mask frlr_k must be >= 1; got {frlr_k}")
+        if self.frlr_q_cadence < 1:
+            raise ValueError(f"mask frlr_q_cadence must be >= 1; got {frlr_q_cadence}")
         if self.frlr:
             if self.exact_k or self.antithetic or self.p_by_boundary:
                 raise ValueError(
@@ -367,11 +380,14 @@ class ActivationMasker:
                     f"detached residual-norm matching. Got rescale_mode={self.rescale_mode!r}."
                 )
         # FRLR runtime state. The per-boundary fp32 basis Q is FROZEN within a
-        # global step and refreshed at the first fire of a new step from the
-        # previous step's activation sketch V = sum h^T (h Q) (warm-started
-        # block power iteration, mirroring the PowerSGD projector, whose
-        # Q_{t+1} is likewise built from step t's activations). All of this
-        # persists across register/unregister cycles, like the PowerSGD basis.
+        # global step and refreshed lazily at the first fire of a step that is
+        # >= frlr_q_cadence steps past the last refresh, from the activation
+        # sketch V = sum h^T (h Q) accumulated over the whole frozen window
+        # (warm-started block power iteration, mirroring the PowerSGD
+        # projector, whose Q_{t+1} is likewise built from step t's
+        # activations). All of this persists across register/unregister
+        # cycles, like the PowerSGD basis. _frlr_q_step is the step of the
+        # last refresh attempt (bootstrap counts), which anchors the cadence.
         self._frlr_basis: dict[int, torch.Tensor] = {}
         self._frlr_q_step: dict[int, int] = {}
         self._frlr_sketch: dict[int, torch.Tensor] = {}
@@ -420,16 +436,22 @@ class ActivationMasker:
 
         Bootstrap: the deterministic seeded orthonormal frame (same
         construction as the PowerSGD projector's ``init_basis``). Refresh: at
-        the FIRST fire of a NEW ``global_step`` the previous step's activation
-        sketch ``V = sum h^T (h Q)`` is orthonormalized into the new ``Q``
-        (warm-started block power iteration; PowerSGD likewise builds
-        ``Q_{t+1}`` from step ``t``'s activations at end-of-step). Within one
+        the FIRST fire of a ``global_step`` at least ``frlr_q_cadence`` steps
+        past the last refresh, the activation sketch ``V = sum h^T (h Q)``
+        accumulated over the WHOLE frozen window is orthonormalized into the
+        new ``Q`` (warm-started block power iteration; PowerSGD likewise
+        builds ``Q_{t+1}`` from step ``t``'s activations at end-of-step).
+        ``frlr_q_cadence=1`` reproduces the original every-step refresh
+        bit-identically; a larger cadence keeps ``Q`` bitwise FROZEN across
+        the intermediate steps while the sketch keeps accumulating, so the
+        codec view stays stationary between refreshes. Within one
         ``global_step`` the basis is never touched, so the old/train/reference
         forwards and any gradient-checkpoint recompute of the same step see
         the identical ``Q``.
         """
         step = int(self._global_step)
         q = self._frlr_basis.get(layer_idx)
+        last_refresh = self._frlr_q_step.get(layer_idx, step)
         if q is None:
             q = init_basis(
                 hidden_size=hidden_size,
@@ -439,9 +461,12 @@ class ActivationMasker:
             ).to(device=device, dtype=torch.float32)
             self._frlr_basis[layer_idx] = q
             self._frlr_q_step[layer_idx] = step
-        elif self._frlr_q_step.get(layer_idx, step) != step:
-            # Step boundary: refresh Q from the previous step's sketch (keep
-            # the warm-started Q unchanged if no sketch was accumulated).
+        elif step != last_refresh and (step - last_refresh) >= self.frlr_q_cadence:
+            # Lazy refresh point: >= frlr_q_cadence steps since the last
+            # refresh. Consume the sketch accumulated over the whole frozen
+            # window (keep the warm-started Q unchanged if no sketch was
+            # accumulated). Intermediate step boundaries fall through, leaving
+            # Q bitwise frozen and the sketch growing.
             v = self._frlr_sketch.pop(layer_idx, None)
             if v is not None:
                 q = orthonormalize(v).to(device=device, dtype=torch.float32)

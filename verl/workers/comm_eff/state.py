@@ -232,12 +232,13 @@ class CommEffState:
                 frlr_rank=int(getattr(mask_cfg, "frlr_rank", 32)),
                 frlr_k=int(getattr(mask_cfg, "frlr_k", 44)),
                 frlr_unbiased=bool(getattr(mask_cfg, "frlr_unbiased", False)),
+                frlr_q_cadence=int(getattr(mask_cfg, "frlr_q_cadence", 1)),
                 state=self,
             )
             logger.info(
                 "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
                 "exact_k=%s antithetic=%s p_by_boundary=%s "
-                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s",
+                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
@@ -249,6 +250,7 @@ class CommEffState:
                 getattr(mask_cfg, "frlr_rank", 32),
                 getattr(mask_cfg, "frlr_k", 44),
                 getattr(mask_cfg, "frlr_unbiased", False),
+                getattr(mask_cfg, "frlr_q_cadence", 1),
             )
 
         if self.compression_type == "powersgd":

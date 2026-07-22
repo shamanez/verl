@@ -123,6 +123,18 @@ class CommEffMaskConfig(BaseConfig):
         frlr_unbiased (bool): FRLR unbiased mode (default off): apply the
             constant ``H/frlr_k`` gain with no norm matching, so
             ``E[h_hat | h, Q] = h``.
+        frlr_q_cadence (int): Issue #89 slow-Q lever (default 1 = the original
+            every-step refresh, bit-identical). Refresh the FRLR core ``Q``
+            only when ``global_step - last_refresh_step >= frlr_q_cadence`` at
+            the lazy refresh point (first hook fire of a new step); between
+            refreshes ``Q`` stays FROZEN (bitwise) while the activation sketch
+            keeps accumulating, so each refresh consumes the FULL window's
+            sketch. Motivation: the first FRLR GPU trial cut codec-view
+            entropy 63% but its reference-KL accelerated (0.005@9 -> 0.33@30)
+            because the per-step activation-refit ``Q`` chases the drifting
+            policy (a non-stationary codec view); a slow cadence keeps the
+            core stable between refreshes while the fresh per-step PRF
+            residual keeps repairing the stale-Q nullspace.
     """
 
     enabled: bool = False
@@ -140,6 +152,7 @@ class CommEffMaskConfig(BaseConfig):
     frlr_rank: int = 32
     frlr_k: int = 44
     frlr_unbiased: bool = False
+    frlr_q_cadence: int = 1
 
 
 @dataclass
@@ -312,7 +325,7 @@ class CommEffConfig(BaseConfig):
             value = getattr(self.mask, name)
             if not isinstance(value, bool):
                 raise ValueError(f"comm_eff.mask.{name} must be a bool; got {value!r}")
-        for name in ("frlr_rank", "frlr_k"):
+        for name in ("frlr_rank", "frlr_k", "frlr_q_cadence"):
             value = getattr(self.mask, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"comm_eff.mask.{name} must be an integer >= 1; got {value!r}")

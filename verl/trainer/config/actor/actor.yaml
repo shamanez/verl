@@ -320,6 +320,7 @@ comm_eff:
     frlr_rank: 32
     frlr_k: 44
     frlr_unbiased: false
+    frlr_q_cadence: 1
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:

@@ -268,6 +268,7 @@ COMM_EFF_MASK_FRLR="${COMM_EFF_MASK_FRLR:-false}"                    # FRLR "32+
 COMM_EFF_MASK_FRLR_RANK="${COMM_EFF_MASK_FRLR_RANK:-32}"             # FRLR core rank r (step-frozen activation-derived Q, H x r)
 COMM_EFF_MASK_FRLR_K="${COMM_EFF_MASK_FRLR_K:-44}"                   # FRLR per-token PRF-fresh exact-k residual subset size
 COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"  # H/k constant gain (E[h_hat|h,Q]=h) instead of capped norm matching
+COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"    # refresh FRLR Q every N global steps (1=every step); frozen between refreshes, sketch accumulates
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -365,7 +366,7 @@ cat <<EOF
   comm_eff master:     $COMM_EFF_ENABLED
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
-  prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED  (issue #89; all off => baseline PRF)
+  prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
@@ -394,8 +395,9 @@ if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_
     [[ "${COMM_EFF_MASK_EXACT_K}" == "false" && "${COMM_EFF_MASK_ANTITHETIC}" == "false" && -z "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]] || { echo "FATAL: frlr=true requires exact_k=false, antithetic=false, p_by_boundary unset." >&2; exit 1; }
     [[ "${COMM_EFF_MASK_RESCALE}" == "false" ]] || { echo "FATAL: frlr=true requires COMM_EFF_MASK_RESCALE=false (FRLR does its own norm matching)." >&2; exit 1; }
     case "${COMM_EFF_MASK_RESCALE_MODE}" in none|auto) ;; *) echo "FATAL: frlr=true requires COMM_EFF_MASK_RESCALE_MODE=none|auto." >&2; exit 1;; esac
+    [[ "${COMM_EFF_MASK_FRLR_Q_CADENCE}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_MASK_FRLR_Q_CADENCE='${COMM_EFF_MASK_FRLR_Q_CADENCE}' must be an integer >= 1 (1 = every-step Q refresh)." >&2; exit 1; }
   fi
-  echo "=== resolved codec OK (before GPU): prf_mask p=$COMM_EFF_MASK_P rescale_mode=$COMM_EFF_MASK_RESCALE_MODE exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY}] frlr=$COMM_EFF_MASK_FRLR rank=$COMM_EFF_MASK_FRLR_RANK k=$COMM_EFF_MASK_FRLR_K unbiased=$COMM_EFF_MASK_FRLR_UNBIASED ==="
+  echo "=== resolved codec OK (before GPU): prf_mask p=$COMM_EFF_MASK_P rescale_mode=$COMM_EFF_MASK_RESCALE_MODE exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY}] frlr=$COMM_EFF_MASK_FRLR rank=$COMM_EFF_MASK_FRLR_RANK k=$COMM_EFF_MASK_FRLR_K unbiased=$COMM_EFF_MASK_FRLR_UNBIASED q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE ==="
 fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
@@ -532,6 +534,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.frlr_rank="$COMM_EFF_MASK_FRLR_RANK" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_k="$COMM_EFF_MASK_FRLR_K" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased="$COMM_EFF_MASK_FRLR_UNBIASED" \
+  actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence="$COMM_EFF_MASK_FRLR_Q_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \

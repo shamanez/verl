@@ -154,6 +154,7 @@ actor_rollout_ref:
         frlr_rank: 32
         frlr_k: 44
         frlr_unbiased: false
+        frlr_q_cadence: 1
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

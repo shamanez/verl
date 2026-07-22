@@ -67,6 +67,10 @@ export COMM_EFF_MASK_FRLR="${COMM_EFF_MASK_FRLR:-false}"
 export COMM_EFF_MASK_FRLR_RANK="${COMM_EFF_MASK_FRLR_RANK:-32}"
 export COMM_EFF_MASK_FRLR_K="${COMM_EFF_MASK_FRLR_K:-44}"
 export COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"
+# Slow-Q lever: refresh the FRLR core Q every N global steps (1 = every step,
+# the original behavior); Q stays frozen between refreshes while the
+# activation sketch accumulates over the full window.
+export COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
