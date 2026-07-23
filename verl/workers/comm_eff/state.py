@@ -225,14 +225,32 @@ class CommEffState:
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 rescale=bool(getattr(mask_cfg, "rescale", False)),
                 rescale_mode=str(getattr(mask_cfg, "rescale_mode", "auto")),
+                exact_k=bool(getattr(mask_cfg, "exact_k", False)),
+                antithetic=bool(getattr(mask_cfg, "antithetic", False)),
+                p_by_boundary=list(getattr(mask_cfg, "p_by_boundary", []) or []),
+                frlr=bool(getattr(mask_cfg, "frlr", False)),
+                frlr_rank=int(getattr(mask_cfg, "frlr_rank", 32)),
+                frlr_k=int(getattr(mask_cfg, "frlr_k", 44)),
+                frlr_unbiased=bool(getattr(mask_cfg, "frlr_unbiased", False)),
+                frlr_q_cadence=int(getattr(mask_cfg, "frlr_q_cadence", 1)),
                 state=self,
             )
             logger.info(
-                "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s",
+                "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
+                "exact_k=%s antithetic=%s p_by_boundary=%s "
+                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
                 getattr(mask_cfg, "rescale_mode", "auto"),
+                getattr(mask_cfg, "exact_k", False),
+                getattr(mask_cfg, "antithetic", False),
+                list(getattr(mask_cfg, "p_by_boundary", []) or []),
+                getattr(mask_cfg, "frlr", False),
+                getattr(mask_cfg, "frlr_rank", 32),
+                getattr(mask_cfg, "frlr_k", 44),
+                getattr(mask_cfg, "frlr_unbiased", False),
+                getattr(mask_cfg, "frlr_q_cadence", 1),
             )
 
         if self.compression_type == "powersgd":
@@ -406,9 +424,16 @@ class CommEffState:
             out[f"comm_eff/mask_ratio/layer_{idx}"] = r
         # Matched-budget metric: PRF kept coords per token = (1-p)*H. Compare
         # against PowerSGD's rank for an identical logical PP byte budget.
+        # FRLR (issue #89) instead carries rank + k + 1 coords/token (core y,
+        # kept residual subset J, one norm scalar), e.g. 32 + 44 + 1 = 77.
         hidden_size = getattr(self.masker, "hidden_size", None)
         p = float(getattr(self.masker, "p", 0.0))
-        if hidden_size is not None:
+        if bool(getattr(self.masker, "frlr", False)):
+            payload = getattr(self.masker, "frlr_payload_per_token", None)
+            if payload is not None:
+                out["comm_eff/logical_pp_bytes_prf"] = float(payload)
+            out["comm_eff/frlr_q_refreshes"] = int(getattr(self.masker, "frlr_q_refreshes", 0))
+        elif hidden_size is not None:
             out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - p) * float(hidden_size))
         return out
 

@@ -57,6 +57,20 @@ export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-false}"
 export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-false}"
 export COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"
 export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+# issue #89 codec levers — default-off; baseline PRF stays bit-identical.
+export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-auto}"
+export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-false}"
+export COMM_EFF_MASK_ANTITHETIC="${COMM_EFF_MASK_ANTITHETIC:-false}"
+export COMM_EFF_MASK_P_BY_BOUNDARY="${COMM_EFF_MASK_P_BY_BOUNDARY:-}"
+# FRLR (issue #89, "32+44+1"): fresh-residual low-rank codec; default off.
+export COMM_EFF_MASK_FRLR="${COMM_EFF_MASK_FRLR:-false}"
+export COMM_EFF_MASK_FRLR_RANK="${COMM_EFF_MASK_FRLR_RANK:-32}"
+export COMM_EFF_MASK_FRLR_K="${COMM_EFF_MASK_FRLR_K:-44}"
+export COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"
+# Slow-Q lever: refresh the FRLR core Q every N global steps (1 = every step,
+# the original behavior); Q stays frozen between refreshes while the
+# activation sketch accumulates over the full window.
+export COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"

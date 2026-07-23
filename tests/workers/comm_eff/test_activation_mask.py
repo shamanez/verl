@@ -344,7 +344,21 @@ from verl.workers.comm_eff.state import (  # noqa: E402
 )
 
 
-def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False, mask_reference=False):
+def _make_enabled_state(
+    p=0.95,
+    pp_size=8,
+    seed=0,
+    mask_recompute=False,
+    mask_reference=False,
+    exact_k=False,
+    antithetic=False,
+    p_by_boundary=None,
+    frlr=False,
+    frlr_rank=32,
+    frlr_k=44,
+    frlr_unbiased=False,
+    frlr_q_cadence=1,
+):
     cfg = SimpleNamespace(
         enabled=True,
         mask=SimpleNamespace(
@@ -354,6 +368,14 @@ def _make_enabled_state(p=0.95, pp_size=8, seed=0, mask_recompute=False, mask_re
             pp_size=pp_size,
             mask_recompute=mask_recompute,
             mask_reference=mask_reference,
+            exact_k=exact_k,
+            antithetic=antithetic,
+            p_by_boundary=p_by_boundary if p_by_boundary is not None else [],
+            frlr=frlr,
+            frlr_rank=frlr_rank,
+            frlr_k=frlr_k,
+            frlr_unbiased=frlr_unbiased,
+            frlr_q_cadence=frlr_q_cadence,
         ),
     )
     state = maybe_build_comm_eff_state(cfg)
@@ -580,3 +602,564 @@ def test_masker_is_hooks_only_no_params_or_buffers():
     keys_after = set(model.state_dict().keys())
     masker.unregister()
     assert keys_before == keys_after
+
+
+# =========================================================================== #
+# issue #89 codec levers: off-path parity, exact-k, antithetic, per-boundary p
+# =========================================================================== #
+def test_offpath_parity_prf_token_mask_byte_identical():
+    """All new lever flags OFF => prf_token_mask is byte-identical to baseline."""
+    sid, pos = _ids_for(6, 12)
+    kw = dict(layer_idx=3, global_step=7, base_seed=5, hidden_size=64, p=0.95, device=CPU, dtype=torch.float32)
+    baseline = prf_token_mask(sid, pos, **kw)
+    flags_off = prf_token_mask(sid, pos, exact_k=False, antithetic=False, **kw)
+    assert torch.equal(baseline, flags_off)
+    # and the default-off path still matches the documented scalar reference.
+    sid2, pos2 = torch.tensor([5, 9, 0]), torch.tensor([0, 3, 7])
+    m = prf_token_mask(
+        sid2,
+        pos2,
+        layer_idx=2,
+        global_step=4,
+        base_seed=1,
+        hidden_size=6,
+        p=0.6,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=False,
+        antithetic=False,
+    )
+    for t in range(3):
+        for ch in range(6):
+            assert float(m[t, ch]) == _scalar_keep(int(sid2[t]), int(pos2[t]), ch, layer=2, step=4, seed=1, p=0.6)
+
+
+def test_offpath_parity_hook_htilde_constant_rescale():
+    """All levers OFF, rescale_mode=constant => h_tilde is exactly h*mask/(1-p)."""
+    p = 0.95
+    masker = ActivationMasker(p=p, base_seed=0, pp_size=8, rescale_mode="constant")
+    _set_ctx(masker, 2, 8)
+    h = torch.randn(2, 8, 64)
+    out = masker._make_hook(3)(nn.Identity(), (), h)
+    sid, pos = _ids_for(2, 8)
+    mask = prf_token_mask(
+        sid, pos, layer_idx=3, global_step=0, base_seed=0, hidden_size=64, p=p, device=CPU, dtype=torch.float32
+    ).view(h.shape)
+    assert torch.equal(out, h * mask * (1.0 / (1.0 - p)))
+
+
+def test_exact_k_conserves_rate_exactly():
+    """exact_k keeps EXACTLY round((1-p)*H) per token; mask_ratio == 1 - k/H."""
+    p, H = 0.95, 256
+    sid, pos = _ids_for(8, 16)  # 128 tokens
+    m = prf_token_mask(
+        sid,
+        pos,
+        layer_idx=1,
+        global_step=3,
+        base_seed=2,
+        hidden_size=H,
+        p=p,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=True,
+    )
+    keep = round((1.0 - p) * H)  # 13
+    assert torch.all(m.sum(dim=-1) == keep)
+    assert set(m.unique().tolist()).issubset({0.0, 1.0})
+    measured_zero_fraction = float(1.0 - m.mean().item())
+    assert measured_zero_fraction == pytest.approx(1.0 - keep / H, abs=1e-6)
+    assert abs(measured_zero_fraction - p) <= 0.5 / H + 1e-9  # exact up to k rounding
+
+
+def test_exact_k_is_random_not_value_topk():
+    """exact_k selection is by PRF hash (value-independent), never a value top-k."""
+    masker = ActivationMasker(p=0.9, base_seed=7, pp_size=8, exact_k=True)  # rescale_mode auto->none
+    hook = masker._make_hook(3)
+    shape = (2, 8, 32)
+    _set_ctx(masker, 2, 8)
+    out_ones = hook(nn.Identity(), (), torch.ones(shape))
+    _set_ctx(masker, 2, 8)
+    out_rand = hook(nn.Identity(), (), torch.randn(shape))
+    # the kept positions (nonzero) are identical regardless of activation values
+    assert torch.equal(out_ones != 0, out_rand != 0)
+    # exactly round((1-p)*H)=3 kept per token
+    assert torch.all((out_ones != 0).sum(dim=-1) == round(0.1 * 32))
+
+
+def test_antithetic_within_step_identity_and_cross_step_complement():
+    """antithetic: identical within a step; exact bitwise complement across the pair at p=0.5."""
+    sid, pos = _ids_for(8, 16)
+    kw = dict(layer_idx=2, base_seed=3, hidden_size=64, p=0.5, device=CPU, dtype=torch.float32, antithetic=True)
+    m0a = prf_token_mask(sid, pos, global_step=0, **kw)
+    m0b = prf_token_mask(sid, pos, global_step=0, **kw)
+    assert torch.equal(m0a, m0b)  # within-step identity (key has no forward tag)
+    m1 = prf_token_mask(sid, pos, global_step=1, **kw)
+    assert torch.equal(m1, 1.0 - m0a)  # antithetic complement across the pair
+    m2 = prf_token_mask(sid, pos, global_step=2, **kw)
+    assert not torch.equal(m2, m0a)  # next pair draws fresh
+
+
+def test_antithetic_preserves_mask_ratio_and_disjoint_tails_at_p095():
+    """antithetic keeps ~5% each step at p=0.95 (NOT a set complement flipping to 95%)."""
+    sid, pos = _ids_for(8, 64)
+    kw = dict(layer_idx=5, base_seed=1, hidden_size=256, p=0.95, device=CPU, dtype=torch.float32, antithetic=True)
+    for step in (0, 1, 2, 3):
+        m = prf_token_mask(sid, pos, global_step=step, **kw)
+        assert abs(float(1.0 - m.mean().item()) - 0.95) <= 0.02
+    m0 = prf_token_mask(sid, pos, global_step=0, **kw)
+    m1 = prf_token_mask(sid, pos, global_step=1, **kw)
+    assert float((m0 * m1).sum().item()) == 0.0  # antithetic tails are disjoint
+
+
+def test_antithetic_within_step_identity_across_path_tags():
+    """The antithetic mask is identical across the old / train / reference forwards in one step."""
+    state, _ = _make_enabled_state(p=0.5, mask_recompute=True, mask_reference=True, antithetic=True)
+    hook = state.masker._make_hook(3)
+    h = torch.ones(2, 8, 32)
+    outs = {}
+    for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+        _set_ctx(state.masker, 2, 8, step=6)
+        state.set_path_tag(tag)
+        outs[tag] = hook(nn.Identity(), (), h.clone())
+    assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+    assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+
+
+def test_p_by_boundary_average_mask_ratio_in_band():
+    """A 7-vector averaging 0.95 => aggregate comm_eff/mask_ratio in [0.94, 0.96]."""
+    pbb = [0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98]  # mean exactly 0.95
+    assert sum(pbb) / len(pbb) == pytest.approx(0.95)
+    model = _ToyDecoder(num_layers=16, d=512)
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=pbb)
+    masker.register(model)
+    assert masker.boundary_indices == [1, 3, 5, 7, 9, 11, 13]
+    b, s = 8, 64  # 512 tokens x 512 channels per boundary
+    _set_ctx(masker, b, s)
+    model(torch.randn(b, s, 512))
+    masker.unregister()
+    ratios = masker.last_mask_ratio
+    assert len(ratios) == 7
+    aggregate = sum(ratios.values()) / len(ratios)
+    assert 0.94 <= aggregate <= 0.96
+    for i, idx in enumerate(masker.boundary_indices):
+        assert abs(ratios[idx] - pbb[i]) <= 0.02  # each boundary tracks its own p
+
+
+def test_p_by_boundary_length_mismatch_raises():
+    """A p_by_boundary vector whose length != boundary count fails loudly at register()."""
+    model = _ToyDecoder(num_layers=16, d=32)  # 7 boundaries
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=[0.95, 0.95])
+    with pytest.raises(ValueError):
+        masker.register(model)
+
+
+def test_p_by_boundary_out_of_range_raises_at_construction():
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, p_by_boundary=[0.95, 1.5])
+
+
+# =========================================================================== #
+# issue #89 FRLR codec: fresh-residual low-rank ("32+44+1")
+# =========================================================================== #
+from verl.workers.comm_eff.powersgd_activation import init_basis, orthonormalize  # noqa: E402
+
+
+def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None, q_cadence=1):
+    return ActivationMasker(
+        p=0.95,
+        base_seed=seed,
+        pp_size=8,
+        frlr=True,
+        frlr_rank=r,
+        frlr_k=k,
+        frlr_unbiased=unbiased,
+        frlr_q_cadence=q_cadence,
+        state=state,
+    )
+
+
+def _frlr_j_mask(b, s, *, layer, step, seed, H, k):
+    """The FRLR residual subset J as the masker draws it (PRF-fresh exact-k)."""
+    sid, pos = _ids_for(b, s)
+    return prf_token_mask(
+        sid,
+        pos,
+        layer_idx=layer,
+        global_step=step,
+        base_seed=seed,
+        hidden_size=H,
+        p=0.95,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=True,
+        exact_keep=k,
+    )
+
+
+def test_frlr_offpath_parity_byte_identical():
+    """frlr=false (new defaults present) leaves the baseline PRF byte-identical."""
+    torch.manual_seed(0)
+    h = torch.randn(2, 8, 64)
+    base = ActivationMasker(p=0.95, base_seed=3, pp_size=8)
+    _set_ctx(base, 2, 8, step=5)
+    out_base = base._make_hook(3)(nn.Identity(), (), h)
+    off = ActivationMasker(p=0.95, base_seed=3, pp_size=8, frlr=False, frlr_rank=32, frlr_k=44, frlr_unbiased=False)
+    _set_ctx(off, 2, 8, step=5)
+    out_off = off._make_hook(3)(nn.Identity(), (), h)
+    assert torch.equal(out_base, out_off)
+    # exact_keep=None keeps prf_token_mask byte-identical too.
+    sid, pos = _ids_for(2, 8)
+    kw = dict(layer_idx=3, global_step=5, base_seed=3, hidden_size=64, p=0.95, device=CPU, dtype=torch.float32)
+    assert torch.equal(prf_token_mask(sid, pos, **kw), prf_token_mask(sid, pos, exact_keep=None, **kw))
+
+
+def test_frlr_payload_exactness_77_of_1536():
+    """J has exactly k=44 kept channels per token; total kept accounting is 77."""
+    torch.manual_seed(0)
+    H, r, k = 1536, 32, 44
+    masker = _frlr_masker(r=r, k=k)
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 4, step=1)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    mj = _frlr_j_mask(2, 4, layer=3, step=1, seed=0, H=H, k=k)
+    assert torch.all(mj.sum(dim=-1) == k)
+    assert set(mj.unique().tolist()).issubset({0.0, 1.0})
+    # 32 (core y) + 44 (res_J) + 1 (norm scalar) = 77 values/token.
+    assert masker.frlr_payload_per_token == float(r + k + 1)
+    assert masker.last_mask_ratio[3] == pytest.approx(1.0 - (r + k + 1) / H, abs=1e-9)
+
+
+def test_frlr_within_step_identity_across_path_tags():
+    """h_hat is identical across the old/train/reference forwards at a fixed step."""
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(mask_recompute=True, mask_reference=True, frlr=True, frlr_rank=8, frlr_k=12)
+    hook = state.masker._make_hook(3)
+    h = torch.randn(2, 8, 32)
+    outs = {}
+    for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+        _set_ctx(state.masker, 2, 8, step=6)
+        state.set_path_tag(tag)
+        outs[tag] = hook(nn.Identity(), (), h.clone())
+    # Same step => same frozen Q, same J, same gamma: bitwise identical.
+    assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+    assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+
+
+def test_frlr_recompute_replay_deterministic_and_sketch_deduped():
+    """Same context (grad-ckpt recompute) => bitwise identical h_hat, one sketch fold."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 4, H)
+    _set_ctx(masker, 2, 4, step=0)
+    out_a = hook(nn.Identity(), (), h)  # original forward
+    sketch_after_first = masker._frlr_sketch[3].clone()
+    out_b = hook(nn.Identity(), (), h)  # recompute: same context, no set_context
+    assert torch.equal(out_a, out_b)
+    assert torch.equal(masker._frlr_sketch[3], sketch_after_first)
+
+
+def test_frlr_cross_step_fresh_j_and_q_refresh():
+    """J is fresh across steps; Q refreshes at the step boundary from the sketch."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 8, H)
+    _set_ctx(masker, 2, 8, step=0)
+    out0 = hook(nn.Identity(), (), h)
+    q0 = masker._frlr_basis[3].clone()
+    assert masker.frlr_q_refreshes == 0
+    _set_ctx(masker, 2, 8, step=1)
+    out1 = hook(nn.Identity(), (), h)
+    j0 = _frlr_j_mask(2, 8, layer=3, step=0, seed=0, H=H, k=k)
+    j1 = _frlr_j_mask(2, 8, layer=3, step=1, seed=0, H=H, k=k)
+    assert not torch.equal(j0, j1)
+    assert not torch.equal(out0, out1)
+    # Q refreshed once, from step 0's activation sketch (warm start).
+    assert masker.frlr_q_refreshes == 1
+    assert not torch.allclose(masker._frlr_basis[3], q0)
+
+
+def test_frlr_gamma_norm_match_capped_and_detached():
+    """gamma == ||res||/max(||res_J||,eps) clamped to H/k, and carries NO grad."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 4, H, requires_grad=True)
+    _set_ctx(masker, 2, 4, step=2)
+    out = hook(nn.Identity(), (), h)
+    # Reference reconstruction with gamma as an explicit constant.
+    q = masker._frlr_basis[3]
+    m = h.detach().reshape(-1, H)
+    low = (m @ q) @ q.t()
+    res = m - low
+    mj = _frlr_j_mask(2, 4, layer=3, step=2, seed=0, H=H, k=k)
+    res_j = res * mj
+    cap = float(H) / float(k)
+    gamma = (res.norm(dim=-1, keepdim=True) / res_j.norm(dim=-1, keepdim=True).clamp_min(1e-8)).clamp(max=cap)
+    assert torch.all(gamma <= cap + 1e-6)
+    expected = (low + gamma * res_j).reshape(2, 4, H)
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-6)
+    # Detachment: backward equals the adjoint of the gamma-CONSTANT linear map.
+    out.sum().backward()
+    h2 = h.detach().clone().requires_grad_(True)
+    m2 = h2.reshape(-1, H)
+    low2 = (m2 @ q) @ q.t()
+    res2 = m2 - low2
+    (low2 + gamma * (res2 * mj)).sum().backward()
+    assert torch.allclose(h.grad, h2.grad.reshape(2, 4, H), rtol=1e-5, atol=1e-6)
+
+
+def test_frlr_gamma_cap_engages_on_adversarial_token():
+    """A token whose residual avoids J would blow up unbounded; the H/k cap holds it."""
+    torch.manual_seed(1)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k)
+    # Q0 (deterministic seeded bootstrap) and J (pure PRF) are computable up front.
+    q = init_basis(hidden_size=H, rank=r, base_seed=0, layer_idx=3)
+    mj = _frlr_j_mask(1, 1, layer=3, step=0, seed=0, H=H, k=k)  # token (sid=0, pos=0)
+    nonj = mj[0] == 0
+    E = torch.eye(H)[:, nonj]  # off-J coordinate subspace (H, H-k)
+    # v: supported off J AND orthogonal to span(Q) => res == v with res_J == 0.
+    _, _, Vh = torch.linalg.svd(q.t() @ E)
+    v = E @ Vh[-1]
+    j_idx = int(torch.nonzero(mj[0]).reshape(-1)[0])
+    h = (v + 1e-3 * torch.eye(H)[j_idx]).reshape(1, 1, H)
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 1, 1, step=0)
+    out = hook(nn.Identity(), (), h)
+    m = h.reshape(-1, H)
+    low = (m @ q) @ q.t()
+    res = m - low
+    res_j = res * mj
+    cap = float(H) / float(k)
+    gamma_uncapped = float(res.norm() / res_j.norm().clamp_min(1e-8))
+    assert gamma_uncapped > cap  # the crafted token genuinely exceeds the cap
+    expected = (low + cap * res_j).reshape(1, 1, H)
+    assert torch.allclose(out, expected, rtol=1e-4, atol=1e-6)
+    assert torch.isfinite(out).all()
+
+
+def test_frlr_full_rank_recovers_h():
+    """frlr_rank=H => res ~ 0 and h_hat == h within float tolerance."""
+    torch.manual_seed(2)
+    H = 64
+    masker = _frlr_masker(r=H, k=8)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 4, H)
+    _set_ctx(masker, 2, 4, step=0)
+    out = hook(nn.Identity(), (), h)
+    assert torch.allclose(out, h, rtol=1e-4, atol=1e-4)
+
+
+def test_frlr_unbiased_mean_reconstruction_approaches_h():
+    """Unbiased mode: E over PRF key draws of h_hat approaches h (fixed h, fixed Q)."""
+    torch.manual_seed(3)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, unbiased=True)
+    hook = masker._make_hook(3)
+    h = torch.randn(1, 6, H)
+    total = torch.zeros_like(h)
+    n_steps = 2000
+    with torch.no_grad():  # no sketch under no_grad => Q stays frozen at Q0
+        for step in range(n_steps):
+            _set_ctx(masker, 1, 6, step=step)
+            total += hook(nn.Identity(), (), h)
+    assert masker.frlr_q_refreshes == 0
+    mean = total / n_steps
+    rel_err = float((mean - h).norm() / h.norm())
+    assert rel_err < 0.10
+
+
+def test_frlr_mask_ratio_reports_0949_at_real_geometry():
+    """comm_eff/mask_ratio ~ 0.9499 for the 32+44+1 payload over H=1536."""
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(frlr=True, frlr_rank=32, frlr_k=44)
+    hook = state.masker._make_hook(3)
+    state.set_path_tag(TRAIN_TAG)
+    _set_ctx(state.masker, 2, 4, step=1)
+    hook(nn.Identity(), (), torch.randn(2, 4, 1536))
+    metrics = comm_eff_metrics(state)
+    ratio = metrics["comm_eff/mask_ratio"]
+    assert ratio == pytest.approx(1.0 - 77.0 / 1536.0, abs=1e-6)  # ~0.9499
+    assert 0.94 <= ratio <= 0.96
+    assert metrics["comm_eff/logical_pp_bytes_prf"] == 77.0
+    assert "comm_eff/frlr_q_refreshes" in metrics
+
+
+def test_frlr_mutually_exclusive_and_bounds_raise():
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, exact_k=True)
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, antithetic=True)
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, p_by_boundary=[0.95] * 7)
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, rescale_mode="constant")
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, frlr_rank=0)
+    with pytest.raises(ValueError):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, frlr=True, frlr_k=0)
+    # exact_keep misuse fails loud.
+    sid, pos = _ids_for(2, 4)
+    with pytest.raises(ValueError):
+        prf_token_mask(
+            sid,
+            pos,
+            layer_idx=0,
+            global_step=0,
+            base_seed=0,
+            hidden_size=16,
+            p=0.5,
+            device=CPU,
+            dtype=torch.float32,
+            exact_keep=4,
+        )
+
+
+def test_frlr_config_validation():
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffMaskConfig
+
+    CommEffConfig(mask=CommEffMaskConfig(frlr=True))  # defaults compose
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr=True, exact_k=True))
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr=True, antithetic=True))
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr=True, rescale=True))
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr=True, rescale_mode="rms_match"))
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr_rank=0))
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr_k=0))
+
+
+# =========================================================================== #
+# issue #89 FRLR slow-Q lever: frlr_q_cadence (frozen Q between refreshes)
+# =========================================================================== #
+def test_frlr_q_cadence_1_bit_identical_to_every_step_refresh():
+    """frlr_q_cadence=1 (the default) reproduces the original every-step refresh bitwise."""
+    torch.manual_seed(0)
+    H = 32
+    default = _frlr_masker(r=4, k=8)  # no q_cadence kwarg: pre-lever construction
+    explicit = _frlr_masker(r=4, k=8, q_cadence=1)  # the new lever at its default
+    hs = [torch.randn(2, 4, H) for _ in range(4)]
+    for step, h in enumerate(hs):
+        _set_ctx(default, 2, 4, step=step)
+        out_d = default._make_hook(3)(nn.Identity(), (), h)
+        _set_ctx(explicit, 2, 4, step=step)
+        out_e = explicit._make_hook(3)(nn.Identity(), (), h)
+        assert torch.equal(out_d, out_e)
+        assert torch.equal(default._frlr_basis[3], explicit._frlr_basis[3])
+    # Every step boundary refreshed Q, exactly as before the lever existed.
+    assert default.frlr_q_refreshes == 3
+    assert explicit.frlr_q_refreshes == 3
+    # A cadence below 1 fails loud, in the masker and in the config dataclass.
+    with pytest.raises(ValueError):
+        _frlr_masker(r=4, k=8, q_cadence=0)
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffMaskConfig
+
+    with pytest.raises(ValueError):
+        CommEffConfig(mask=CommEffMaskConfig(frlr_q_cadence=0))
+
+
+def test_frlr_q_cadence_frozen_window_then_refresh():
+    """cadence=5: Q is bitwise identical across steps t..t+4 and refreshes at t+5."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, q_cadence=5)
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 4, step=0)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    q0 = masker._frlr_basis[3].clone()
+    for step in range(1, 5):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, H))
+        assert torch.equal(masker._frlr_basis[3], q0)  # bitwise frozen window
+        assert masker.frlr_q_refreshes == 0
+    _set_ctx(masker, 2, 4, step=5)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    assert masker.frlr_q_refreshes == 1
+    assert not torch.equal(masker._frlr_basis[3], q0)
+    # The next window is frozen again until step 10.
+    q5 = masker._frlr_basis[3].clone()
+    for step in range(6, 10):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, H))
+        assert torch.equal(masker._frlr_basis[3], q5)
+        assert masker.frlr_q_refreshes == 1
+    _set_ctx(masker, 2, 4, step=10)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    assert masker.frlr_q_refreshes == 2
+
+
+def test_frlr_q_cadence_within_step_identity_across_path_tags():
+    """cadence>1 keeps h_hat identical across the old/train/reference forwards.
+
+    Holds on the bootstrap step, inside the frozen window, AND on the refresh
+    step itself (the refresh happens once, at the first fire of that step).
+    """
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(
+        mask_recompute=True, mask_reference=True, frlr=True, frlr_rank=8, frlr_k=12, frlr_q_cadence=3
+    )
+    hook = state.masker._make_hook(3)
+    h = torch.randn(2, 8, 32)
+    for step in (0, 1, 2, 3):  # 0 bootstrap, 1-2 frozen window, 3 refresh step
+        outs = {}
+        for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+            _set_ctx(state.masker, 2, 8, step=step)
+            state.set_path_tag(tag)
+            outs[tag] = hook(nn.Identity(), (), h.clone())
+        assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+        assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+    assert state.masker.frlr_q_refreshes == 1  # exactly the step-3 refresh
+
+
+def test_frlr_q_cadence_sketch_accumulates_over_window():
+    """The refresh consumes the FULL frozen window's sketch, not just one step's.
+
+    With Q frozen at Q0 for steps 0..4 the sketch must equal
+    sum_s h_s^T (h_s Q0), and the step-5 refresh must orthonormalize THAT
+    accumulation (differing from what a refresh from step 0's contribution
+    alone, i.e. an every-step refresh at t+1, would have produced).
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, q_cadence=5)
+    hook = masker._make_hook(3)
+    q0 = init_basis(hidden_size=H, rank=r, base_seed=0, layer_idx=3)
+    hs = [torch.randn(2, 4, H) for _ in range(5)]
+    expected = torch.zeros(H, r)
+    for step, h in enumerate(hs):
+        _set_ctx(masker, 2, 4, step=step)
+        hook(nn.Identity(), (), h)
+        m32 = h.reshape(-1, H)
+        expected += m32.t() @ (m32 @ q0)  # Q frozen at Q0 over the whole window
+    assert torch.allclose(masker._frlr_sketch[3], expected, rtol=1e-5, atol=1e-5)
+    _set_ctx(masker, 2, 4, step=5)
+    hook(nn.Identity(), (), torch.randn(2, 4, H))
+    q_window = orthonormalize(expected)
+    m0 = hs[0].reshape(-1, H)
+    q_one_step = orthonormalize(m0.t() @ (m0 @ q0))
+    assert torch.allclose(masker._frlr_basis[3], q_window, rtol=1e-4, atol=1e-5)
+    assert not torch.allclose(masker._frlr_basis[3], q_one_step, rtol=1e-4, atol=1e-5)
+
+
+def test_frlr_q_refreshes_metric_counts_only_actual_refreshes():
+    """comm_eff/frlr_q_refreshes reflects the slow cadence, not step boundaries."""
+    torch.manual_seed(0)
+    state, _ = _make_enabled_state(frlr=True, frlr_rank=4, frlr_k=8, frlr_q_cadence=3)
+    hook = state.masker._make_hook(3)
+    state.set_path_tag(TRAIN_TAG)
+    for step in range(8):  # bootstrap at 0; refreshes fire at steps 3 and 6 only
+        _set_ctx(state.masker, 2, 4, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 4, 32))
+    metrics = comm_eff_metrics(state)
+    assert metrics["comm_eff/frlr_q_refreshes"] == 2
+    assert state.masker.frlr_q_refreshes == 2  # cadence=1 would have logged 7
