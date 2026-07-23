@@ -1,0 +1,53 @@
+# Resolved parameters for 89-prf-codec-autoresearch-benign-kl
+# SOURCE: capture_resolved_config.py could NOT run -- the synced per-cell logs
+# (metrics/train_<cell>.log) are the on-box METRIC TAIL only; the launcher
+# `set -x` `python3 -m verl.trainer.main_ppo <args>` trace was NOT synced.
+# => RESOLVED_CONFIG_MISSING (flagged in verdict Notes; no resolved_cmd.txt).
+# The values below are GROUND TRUTH extracted from each cell's own Hydra
+# config-echo (CommEffMaskConfig dump) inside metrics/train_<cell>.log, plus
+# run.json cell overrides. Greppable per cell via:
+#   grep "'rescale_mode'\|'exact_k'\|'antithetic'\|'frlr" metrics/train_<cell>.log
+
+## Non-codec surface (identical across ALL cells; incumbent echo)
+train_batch_size=512
+ppo_mini_batch_size=256
+rollout.n=8
+max_prompt_length=1024
+max_response_length=3072
+actor.optim.lr=1e-06
+actor.kl_loss_coef=0.001
+ref.low_var_kl=0.001
+anchor.cadence=20
+anchor.delay=20
+anchor.lookahead_anchor=true   # held true on every cell; projection-off pair CANCELLED
+total_training_steps=40 (controls+incumbent) / 30 (trials, step_target_fallback)
+VAL_BEFORE_TRAIN=False ; TEST_FREQ=-1   # per-trial val OFF (operator amendment)
+model=Qwen/Qwen2.5-Math-1.5B ; data=$HOME/data/math (MATH parquet)
+
+## Canonical PRF codec (incumbent echo: prf-constant-incumbent)
+comm_eff.enabled=true
+comm_eff.compression_type=prf_mask
+comm_eff.mask.enabled=true
+comm_eff.mask.p=0.95
+comm_eff.mask.rescale_mode=constant
+comm_eff.mask.exact_k=false
+comm_eff.mask.antithetic=false
+comm_eff.mask.p_by_boundary=[]
+comm_eff.mask.mask_recompute=true
+comm_eff.mask.mask_reference=true
+comm_eff.mask.pp_size=8
+comm_eff.anchor_owns_q=false
+comm_eff.powersgd.fast_q_bootstrap=false
+
+## Per-cell codec lever DELTA vs canonical (from each cell's config-echo)
+dense-control            : comm_eff.enabled=false (dropout 0)
+dropout-p10-control      : comm_eff.enabled=false ; model.override_config.attention_dropout=0.1
+prf-constant-incumbent   : (canonical, rescale_mode=constant)
+prf-rms-match            : rescale_mode=rms_match
+prf-exact-k              : rescale_mode=constant ; exact_k=true
+prf-nonuniform-p         : rescale_mode=constant ; p_by_boundary=<7-vec mean 0.95>
+prf-antithetic           : rescale_mode=constant ; antithetic=true
+prf-frlr (r32k44)        : rescale_mode=none ; frlr=true frlr_rank=32 frlr_k=44 frlr_unbiased=false
+prf-frlr-r16k60          : rescale_mode=none ; frlr=true frlr_rank=16 frlr_k=60 frlr_unbiased=false
+prf-frlr-slowq           : rescale_mode=none ; frlr=true frlr_rank=32 frlr_k=44 (slow Q: 14 refreshes vs 203)
+prf-frlr-r48k28 (@21)    : rescale_mode=none ; frlr=true frlr_rank=48 frlr_k=28 (config from monitor-detail.log; on-box log lost with instance)

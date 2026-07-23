@@ -1,0 +1,127 @@
+{
+  "issue": 89,
+  "run_id": "89-prf-codec-autoresearch-benign-kl",
+  "title": "Autoresearch: drive PRF codec to dropout-benign KL at fixed 95% compression",
+  "branch": "exp/89-prf-codec-autoresearch-benign-kl",
+  "code_change": true,
+  "kind": "experiment",
+  "tier": "deep",
+  "tmux_session": "run-89",
+  "remote_log": "/workspace/runs/89-prf-codec-autoresearch-benign-kl/train.log",
+  "launcher": "examples/grpo_trainer/run_qwen25_math_1p5b_rank1_relex_fsdp.sh",
+  "step_target": 40,
+  "step_target_fallback": 30,
+  "step_target_note": "Stage-2 prf-constant-incumbent measures s/step + peak mem; if a 40-step trial costs materially > ~3.5 GPU-hr, /monitor drops the horizon to 30 (every quantity of interest established by step 25-30).",
+  "milestone": "none",
+  "baseline_run": "quick-test/njtjxsht",
+  "iterations": 3,
+  "max_gpu_hr": 40,
+  "max_dph": 24.0,
+  "vast_account": "team",
+  "money_gate": "Stage-3 spend HALTS when remaining budget == ~8 GPU-hr Stage-4 reserve (winner-final-eval + winner-projection-off). At the gate: flag operator with the full trajectory + proposed next tranche, then proceed to Stage 4 on the reserve. Rejections NEVER end the loop (diagnose-and-propose).",
+  "wandb": {
+    "project": "89-prf-codec-autoresearch-benign-kl",
+    "entity": "shamanework-pl",
+    "group": "89-prf-codec-autoresearch-benign-kl",
+    "run_name_scheme": "<cell> (per-issue project scopes them; NOT <N>-<cell>)"
+  },
+  "cells": [
+    {
+      "name": "dense-control",
+      "stage": 2,
+      "wandb_name": "dense-control",
+      "overrides": {
+        "COMM_EFF_ENABLED": "false",
+        "TOTAL_TRAINING_STEPS": "40",
+        "TEST_FREQ": "-1",
+        "VAL_BEFORE_TRAIN": "False"
+      },
+      "role": "capability ceiling (critic/score/mean slope)"
+    },
+    {
+      "name": "dropout-p10-control",
+      "stage": 2,
+      "wandb_name": "dropout-p10-control",
+      "overrides": {
+        "COMM_EFF_ENABLED": "false",
+        "TOTAL_TRAINING_STEPS": "40",
+        "TEST_FREQ": "-1",
+        "VAL_BEFORE_TRAIN": "False",
+        "hydra:+actor_rollout_ref.model.override_config.attention_dropout": "0.1"
+      },
+      "role": "benign target (actor/kl_loss ~0.11 flat + actor/entropy ~0.13)"
+    },
+    {
+      "name": "prf-constant-incumbent",
+      "stage": 2,
+      "wandb_name": "prf-constant-incumbent",
+      "overrides": {
+        "COMM_EFF_ENABLED": "true",
+        "COMM_EFF_COMPRESSION_TYPE": "prf_mask",
+        "COMM_EFF_MASK_ENABLED": "true",
+        "COMM_EFF_MASK_P": "0.95",
+        "COMM_EFF_MASK_RESCALE_MODE": "constant",
+        "COMM_EFF_MASK_RECOMPUTE": "true",
+        "COMM_EFF_MASK_REFERENCE": "true",
+        "COMM_EFF_MASK_PP_SIZE": "8",
+        "COMM_EFF_ANCHOR_OWNS_Q": "false",
+        "COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP": "false",
+        "TOTAL_TRAINING_STEPS": "40",
+        "TEST_FREQ": "-1",
+        "VAL_BEFORE_TRAIN": "False"
+      },
+      "role": "incumbent to beat + peak-memory event (two-circuit anchor clone past first refresh ~step 10; peak GPU mem < ~110GB)"
+    }
+  ],
+  "stage3_seed_queue": [
+    {
+      "name": "prf-rms-match",
+      "lever": "COMM_EFF_MASK_RESCALE_MODE=rms_match"
+    },
+    {
+      "name": "prf-exact-k",
+      "lever": "COMM_EFF_MASK_EXACT_K=true"
+    },
+    {
+      "name": "prf-nonuniform-p",
+      "lever": "COMM_EFF_MASK_P_BY_BOUNDARY=<7-vec mean 0.95>"
+    },
+    {
+      "name": "prf-antithetic",
+      "lever": "COMM_EFF_MASK_ANTITHETIC=true"
+    }
+  ],
+  "stage3_note": "OPEN-ENDED greedy loop, incumbent starts = prf-constant. Each candidate vs CURRENT incumbent at matched 40-step horizon. ACCEPT iff: actor/entropy reduced AND actor/kl_loss no higher AND actor/ppo_kl < ~1e-2 AND comm_eff/mask_ratio in [0.94,0.96] AND critic/score/mean early slope not degraded. KEEP=>new incumbent+stack; else discard+diagnose+propose next (seed queue first, then NEW flag-gated lever w/ off-path parity + test_activation_mask.py case + lint-clean prf-<lever> name BEFORE launch). Loop exits ONLY at the money gate. Levers wired: COMM_EFF_MASK_{RESCALE_MODE,EXACT_K,ANTITHETIC,P_BY_BOUNDARY}. Lever 3 (global keys) NOTE-ONLY (single-GPU no-op).",
+  "stage4_cells": [
+    {
+      "name": "winner-final-eval",
+      "lever": "winning flags + TEST_FREQ=<one pass> VAL_BEFORE_TRAIN=True",
+      "metric": "val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1 vs dense-control"
+    },
+    {
+      "name": "winner-projection-off",
+      "lever": "winning flags + anchor.lookahead_anchor=false (COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR=false)",
+      "note": "matched Stage-4 PAIR outside the greedy loop; full metric vector vs winner"
+    }
+  ],
+  "metrics_of_record": [
+    "actor/entropy",
+    "actor/kl_loss",
+    "actor/ppo_kl",
+    "comm_eff/mask_ratio",
+    "critic/score/mean",
+    "rollout_probs_diff_mean"
+  ],
+  "expected_not_failure": "rollout_probs_diff_mean ~0.95 on all PRF cells is EXPECTED (rollout uncompressed); never a stop trigger.",
+  "non_codec_surface": "Qwen2.5-Math-1.5B; MATH parquet $HOME/data/math; train_batch 512; ppo_mini 256; n=8; prompt/response 1024/3072; lr 1e-6; kl_loss_coef 0.001; clip 0.2/0.2; anchor cadence/delay 20/20; beta_anc 0.25; signed_ema_alpha 0.25; anchor.lookahead_anchor=true throughout (ONLY exception: Stage-4 winner-projection-off).",
+  "success_criteria": [
+    "all 4 stage gates evaluated (marked yes or no, none skipped)",
+    "incumbent trajectory emitted: accepted codec levers IN ORDER with justifying deltas per accepted lever vs prior incumbent",
+    "every candidate judged by the amended 5-part gate at matched 40-step horizon; comm_eff/mask_ratio in [0.94,0.96] on every ACCEPTED cell",
+    "final recommended PRF config shipped + ONE confirmation val (val-core/DigitalLearningGmbH/MATH-lighteval/acc/mean@1) vs dense-control",
+    "matched projection pair on the winner reported (lookahead_anchor true vs false) on the full metric vector; recommended config states which projection setting is favored",
+    "search loop exited ONLY at the money gate (or operator stop); every rejection has a recorded diagnose-and-propose entry",
+    "rollout_probs_diff_mean ~0.95 on all PRF cells recorded as EXPECTED",
+    "non-codec surface identical across all cells (the projection-off pair is the sole exception)"
+  ]
+}
