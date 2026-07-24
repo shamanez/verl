@@ -1,0 +1,71 @@
+# resolved params for cell a1-srq-b1-sr (issue 93, round A)
+# STATUS: PARTIAL. capture_resolved_config.py could not run:
+#   $ python3 research/scripts/capture_resolved_config.py runs/93-long-horizon-stability
+#   capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+#   $ python3 research/scripts/capture_resolved_config.py runs/93-long-horizon-stability/metrics/incoming.log
+#   capture_resolved_config: no 'python3 -m verl.trainer.main_ppo' invocation found
+# The synced log carries no launcher `set -x` trace, so there is no expanded
+# main_ppo command line to recover. Flag: RESOLVED_CONFIG_MISSING.
+# Everything below is recovered from the hydra config echo that IS present in
+# runs/93-long-horizon-stability/metrics/incoming.log (verbatim substrings; see
+# the "RESOLVED CONFIG" block at the end of analysis-a1.log).
+
+# --- verified from the log's own config echo ---
+trainer.experiment_name=a1-srq-b1-sr
+trainer.project_name=93-long-horizon-stability
+trainer.total_training_steps=120
+trainer.save_freq=-1
+trainer.test_freq=-1
+trainer.val_before_train=False
+trainer.val_only=False
+trainer.n_gpus_per_node=1
+trainer.nnodes=1
+trainer.device=cuda
+trainer.logger=['console', 'wandb']
+actor_rollout_ref.rollout.name=vllm
+actor_rollout_ref.rollout.prompt_length=1024
+actor_rollout_ref.rollout.response_length=2048
+actor_rollout_ref.rollout.max_num_batched_tokens=8192
+actor_rollout_ref.rollout.gpu_memory_utilization=0.5
+actor_rollout_ref.rollout.free_cache_engine=True
+actor_rollout_ref.rollout.enforce_eager=True
+
+# --- verified from the run's own logged metrics (analysis-a1.log) ---
+observed.total_steps_logged=120
+observed.actor/kl_coef=0.001            # constant at all 120 steps, controller OFF
+observed.comm_eff.logical_pp_bits_sr_quant=2304   # = 288 bytes/token/boundary
+observed.comm_eff.logical_pp_bits_ratio_vs_incumbent_1232=1.8701
+observed.comm_eff.anchor_replay_fires=6            # cadence 20 over 120 optimizer ticks
+observed.comm_eff.rank1_prediction_horizon=20
+observed.comm_eff.rank1_window_span=20
+observed.comm_eff.rank1_fires=5
+observed.comm_eff.rank1_m_ready=1
+observed.comm_eff.merger_coldM_fallbacks=0
+
+# --- NOT verifiable from runs/93-long-horizon-stability/ ---
+# The comm_eff and data blocks are outside the synced tail of incoming.log.
+# The following are taken from the dispatch + PROGRAM_STATE.md + run.json cells[0]
+# and were NOT independently confirmed against a resolved command line:
+unverified.comm_eff.compression_type=sr_quant
+unverified.comm_eff.sr_quant.bits=1
+unverified.comm_eff.sr_quant.block=32
+unverified.comm_eff.sr_quant.rounding=sr
+unverified.comm_eff.pp_size=8
+unverified.data.train_batch_size=128
+unverified.actor.ppo_mini_batch_size=128
+unverified.anchor.cadence=20
+unverified.anchor.delay=20
+unverified.signed_ema.beta_anc=0.25
+unverified.signed_ema.alpha=0.25
+unverified.weights.mode=rank1_relex_W2
+unverified.optim.lr=1e-06
+
+# Circumstantial support for the unverified block, from logged metrics:
+#  - anchor_replay_fires=6 is exactly floor(120/20), which requires BOTH
+#    cadence=20 AND one optimizer tick per global step, i.e. train_batch_size
+#    equal to ppo_mini_batch_size. Consistent with 128/128.
+#  - actor/ppo_kl and actor/pg_clipfrac are exactly 0.0 at all 120 steps, which
+#    is the same one-inner-update signature.
+#  - logical_pp_bits_sr_quant=2304 = 1536 payload bits + 48 bf16 block scales,
+#    which is exactly 1-bit sr_quant at block=32 over H=1536.
+# No plan-vs-ran divergence was found in anything that IS verifiable.

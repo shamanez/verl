@@ -142,6 +142,55 @@ so the **threshold is 0.005414/step**. Using a1's full-run slope would give
 confident acquittal below 0.0045, and inside the band decide on reward-slope and
 gap corroboration rather than the point estimate.
 
+## The box is NOT durable storage for branch work (learned the hard way)
+
+`run_93_cell.sh` bring-up does, at EVERY cell launch (line 211):
+
+```
+git fetch --depth 1 origin "$BRANCH" && git checkout -B "$BRANCH" FETCH_HEAD && git reset --hard FETCH_HEAD
+```
+
+So **any commit made only on the box is wiped off HEAD the next time a cell
+launches.** This happened: three commits (val cadence, analysis docs, plan)
+were made on the box during a1 and were reset away when a2 launched. They were
+recovered from the reflog, cherry-picked onto the origin tip, and pushed.
+
+Consequences to remember:
+- The box has NO git push credentials (HTTPS asks for a username and fails).
+  Push from the laptop, which has them.
+- Working pattern: `git format-patch` on the box, scp the patches to the laptop,
+  `git worktree add --detach <path> <origin-tip>`, `git am` the patches, then
+  `git push origin HEAD:93-mismatch-control-kit`. The laptop's primary checkout
+  is on `autonomous-harness-v1` and diverges, so use a worktree, never the
+  primary HEAD.
+- **Anything that must affect a future cell has to be on origin before that
+  cell launches.** The val-cadence fix is the live example: unpushed, round C
+  would have silently reverted to val at 0/150/300/450/600.
+- origin tip as of this writing: `223e4b1d`. The other session also pushes to
+  this branch (`952d7a0` was theirs), so always rebase onto the current tip.
+
+## a1 final result (120/120 completed, WandB state=finished, all 120 steps present)
+
+Gate window steps 100 to 120, 21 rows:
+
+| quantity | a1 | baseline | flag |
+|---|---|---|---|
+| reference KL absolute | 2.2518 | 0.156 to 0.203 | not meaningful (SR view offset about 1.86) |
+| reference KL slope | +0.00435/step | about +0.0015/step | FAIL, 2.9x |
+| train-inference gap | 13.751 nats | 14.24 | FAIL vs the < 10 gate (3.4 percent better than incumbent) |
+| gap slope | +0.00658/step | +0.00047/step training-view | widening |
+| E[rho] | 0.0055 | 0.0014 | 3.9x baseline, still about 180x below 1.0 |
+| reward slope, full run | +0.00324/step | 0.0032, bar 0.00288 | PASS, but only 1.01x baseline |
+| reward slope, gate window | **-0.00107/step** | - | CAUTION, reward stopped improving |
+| `actor/ppo_kl` | exactly 0 | about 0 | PASS by construction (mini equals batch) |
+| entropy | 7.935, +0.00036/step | - | no collapse |
+| grad_norm max | 0.898 | - | no collapse |
+| confinement counters | 78358 / 34138 / 6 / 19 | - | clean, non-degenerate |
+
+Runtime 3h58m39s at 119.33 s/step average. Terminated with 5 error markers, ALL
+benign shutdown-path noise: a DataLoader worker killed during teardown and a
+WandB `teardown_atexit` BrokenPipeError. Training itself completed all 120 steps.
+
 ## Standing operating rules for this program
 
 - GPU busy outranks everything. On a non-STOP verdict launch the next cell
