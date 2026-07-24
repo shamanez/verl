@@ -207,6 +207,17 @@ actor_rollout_ref:
         qr_dtype: fp32
         reortho_eps: 1.0e-06
         fast_q_bootstrap: true
+      probe:
+        _target_: verl.workers.config.CommEffProbeConfig
+        probe_every: 0
+        ctrl_enabled: false
+        kl_target_table: ''
+        kl_target_floor: 0.005
+        kl_target_gain: 2.0
+        ctrl_ki: 0.3
+        ctrl_kp: 0.1
+        ctrl_beta_min: 0.0002
+        ctrl_beta_max: 0.05
     qat:
       enable: false
       mode: w4a16

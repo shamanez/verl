@@ -91,6 +91,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     metrics = {}
 
+    # Adaptive reference-KL coefficient (comm_eff I3 controller, issue #93).
+    # The trainer stamps comm_eff_kl_coef on the batch once per step while the
+    # controller is enabled; absent (the default), the static config
+    # coefficient applies unchanged. Read before the select below drops the
+    # batch's non-tensor entries.
+    kl_loss_coef = tu.get_non_tensor_data(data=data, key="comm_eff_kl_coef", default=None)
+    kl_loss_coef = config.kl_loss_coef if kl_loss_coef is None else float(kl_loss_coef)
+
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
     if "rollout_is_weights" in data:
@@ -146,9 +154,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
         )
 
-        policy_loss += kl_loss * config.kl_loss_coef
+        policy_loss += kl_loss * kl_loss_coef
+        # kl_coef reflects the coefficient actually applied (controller beta
+        # when stamped, the static config value otherwise).
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
-        metrics["kl_coef"] = config.kl_loss_coef
+        metrics["kl_coef"] = kl_loss_coef
 
     return policy_loss, metrics
 

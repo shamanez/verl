@@ -279,6 +279,23 @@ COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"    # refresh F
 COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"                      # bits/channel; 2**bits uniform levels in [-s,+s]
 COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"         # channels per fp16 absmax-scale block (0 = whole-token scale)
 COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"             # sr = unbiased PRF stochastic rounding | rn = round-to-nearest (biased ablation control)
+# --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---
+# Every PROBE_EVERY trainer steps the trainer reruns the step's actor +
+# reference logprob passes once with the codec silent (measurement only, no
+# backward) and logs probe/kl_dense, probe/kl_gain, probe/gap_dense. The
+# controller (CTRL_ENABLED) retunes kl_loss_coef by projected dual ascent in
+# log space toward max(FLOOR, GAIN x dense_table(step)); the LR brake only
+# DETECTS and logs (probe/lr_brake_triggered), it never mutates the LR.
+# Defaults off: every existing config is bit-identical unchanged.
+COMM_EFF_PROBE_EVERY="${COMM_EFF_PROBE_EVERY:-0}"                    # probe cadence in trainer steps (0 = off)
+COMM_EFF_PROBE_CTRL_ENABLED="${COMM_EFF_PROBE_CTRL_ENABLED:-false}"  # adaptive KL coefficient controller (requires PROBE_EVERY >= 1)
+COMM_EFF_PROBE_KL_TARGET_TABLE="${COMM_EFF_PROBE_KL_TARGET_TABLE:-}" # "step:value,step:value" dense-control reference-KL curve; empty = floor only
+COMM_EFF_PROBE_KL_TARGET_FLOOR="${COMM_EFF_PROBE_KL_TARGET_FLOOR:-0.005}"  # setpoint floor c_floor (nats)
+COMM_EFF_PROBE_KL_TARGET_GAIN="${COMM_EFF_PROBE_KL_TARGET_GAIN:-2.0}"      # setpoint multiplier on the interpolated dense KL
+COMM_EFF_PROBE_CTRL_KI="${COMM_EFF_PROBE_CTRL_KI:-0.3}"              # integral (dual-ascent) gain
+COMM_EFF_PROBE_CTRL_KP="${COMM_EFF_PROBE_CTRL_KP:-0.1}"              # proportional damping gain
+COMM_EFF_PROBE_CTRL_BETA_MIN="${COMM_EFF_PROBE_CTRL_BETA_MIN:-2e-4}" # beta projection lower bound
+COMM_EFF_PROBE_CTRL_BETA_MAX="${COMM_EFF_PROBE_CTRL_BETA_MAX:-0.05}" # beta projection upper bound
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -377,6 +394,7 @@ cat <<EOF
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
   sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
+  probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
@@ -422,6 +440,27 @@ fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
   MASK_PBB_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.mask.p_by_boundary=${COMM_EFF_MASK_P_BY_BOUNDARY}")
+fi
+# Probe/controller boot gate (issue #93 I3): fail before any GPU spend,
+# matching the CommEffProbeConfig validation that would reject it on the box.
+[[ "${COMM_EFF_PROBE_EVERY}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_PROBE_EVERY='${COMM_EFF_PROBE_EVERY}' must be an integer >= 0 (0 = off)." >&2; exit 1; }
+case "${COMM_EFF_PROBE_CTRL_ENABLED}" in true|false) ;; *) echo "FATAL: bad COMM_EFF_PROBE_CTRL_ENABLED='${COMM_EFF_PROBE_CTRL_ENABLED}' (true|false)." >&2; exit 1;; esac
+if [[ "${COMM_EFF_PROBE_CTRL_ENABLED}" == "true" ]]; then
+  [[ "${COMM_EFF_PROBE_EVERY}" -ge 1 ]] || { echo "FATAL: COMM_EFF_PROBE_CTRL_ENABLED=true requires COMM_EFF_PROBE_EVERY >= 1 (the controller only updates at probes)." >&2; exit 1; }
+fi
+if [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE}" ]]; then
+  # "step:value,step:value": integer steps, plain/scientific float values.
+  TABLE_ENTRY_RE='[0-9]+:[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?'
+  [[ "${COMM_EFF_PROBE_KL_TARGET_TABLE}" =~ ^${TABLE_ENTRY_RE}(,${TABLE_ENTRY_RE})*$ ]] || { echo "FATAL: COMM_EFF_PROBE_KL_TARGET_TABLE='${COMM_EFF_PROBE_KL_TARGET_TABLE}' must be 'step:value,step:value'." >&2; exit 1; }
+fi
+if [[ "${COMM_EFF_PROBE_EVERY}" -ge 1 ]]; then
+  echo "=== resolved probe OK (before GPU): every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX] ==="
+fi
+# The table rides Hydra as a quoted string (commas would otherwise parse as a
+# choice sweep); only override when set (empty = default "").
+PROBE_TABLE_OVERRIDE=()
+if [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE}" ]]; then
+  PROBE_TABLE_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.probe.kl_target_table='${COMM_EFF_PROBE_KL_TARGET_TABLE}'")
 fi
 
 # ---------------------------------------------------------------------------
@@ -558,6 +597,14 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.quant.bits="$COMM_EFF_QUANT_BITS" \
   actor_rollout_ref.actor.comm_eff.quant.block_size="$COMM_EFF_QUANT_BLOCK_SIZE" \
   actor_rollout_ref.actor.comm_eff.quant.rounding="$COMM_EFF_QUANT_ROUNDING" \
+  actor_rollout_ref.actor.comm_eff.probe.probe_every="$COMM_EFF_PROBE_EVERY" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled="$COMM_EFF_PROBE_CTRL_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.probe.kl_target_floor="$COMM_EFF_PROBE_KL_TARGET_FLOOR" \
+  actor_rollout_ref.actor.comm_eff.probe.kl_target_gain="$COMM_EFF_PROBE_KL_TARGET_GAIN" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_ki="$COMM_EFF_PROBE_CTRL_KI" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_kp="$COMM_EFF_PROBE_CTRL_KP" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_min="$COMM_EFF_PROBE_CTRL_BETA_MIN" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_max="$COMM_EFF_PROBE_CTRL_BETA_MAX" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
@@ -595,6 +642,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "${MASK_PBB_OVERRIDE[@]+"${MASK_PBB_OVERRIDE[@]}"}" \
+  "${PROBE_TABLE_OVERRIDE[@]+"${PROBE_TABLE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!

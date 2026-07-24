@@ -396,6 +396,24 @@ comm_eff:
     reortho_eps: 1e-6
     fast_q_bootstrap: true
 
+  # Dense-view probe + adaptive reference-KL coefficient (issue #93 I3).
+  # probe_every=0 keeps the trainer path bit-identical; ctrl_enabled=false
+  # keeps the loss on the static kl_loss_coef. Fields mirror
+  # verl.workers.config.CommEffProbeConfig exactly.
+  probe:
+
+    _target_: verl.workers.config.CommEffProbeConfig
+
+    probe_every: 0
+    ctrl_enabled: false
+    kl_target_table: ""
+    kl_target_floor: 0.005
+    kl_target_gain: 2.0
+    ctrl_ki: 0.3
+    ctrl_kp: 0.1
+    ctrl_beta_min: 2.0e-4
+    ctrl_beta_max: 0.05
+
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training

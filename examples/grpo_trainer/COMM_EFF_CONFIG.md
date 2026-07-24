@@ -120,6 +120,59 @@ Budget math per token per boundary (H = 1536, bf16 wire = 16-bit values):
 `H*bits + n_blocks*16` at runtime, the sr_quant analogue of
 `comm_eff/logical_pp_bytes_prf`.
 
+## Dense-view probe + adaptive KL coefficient (`comm_eff.probe`, issue #93 I3)
+
+Every `probe.probe_every` trainer steps the trainer reruns the current step's
+actor and reference log-prob computations ONCE with every codec silent (the
+worker stamps path tag `None`, the anchor's dense precedent; no codec
+eligibility set contains `None`): measurement only, no backward, no weight
+change. Cost: two extra forward passes per probe (~1 percent overhead at
+`probe_every=25`). The probe runs after the step's actor update, so its
+reading is one step offset from the `actor/kl_loss` it is compared to.
+
+Logged each probe step:
+
+- `probe/kl_dense`: token-mean `kl_loss_type` (default low_var_kl / k3)
+  estimate of KL(pi_theta_dense || pi_ref_dense) on response tokens, same
+  estimator + aggregation as `actor/kl_loss`.
+- `probe/kl_gain`: `actor/kl_loss / probe/kl_dense`, the measured G(t)
+  (how much of the codec-view KL is real dense drift).
+- `probe/gap_dense`: token-mean `rollout_log_probs - dense actor log probs`,
+  the dense-view train-inference gap (needs `calculate_log_probs=true`).
+- `probe/lr_brake_triggered`: 1.0 when the dormant LR brake WOULD fire
+  (kl_dense doubled across consecutive probes while beta is pinned at
+  `ctrl_beta_max`, or the gap_dense slope over the last 4 probes exceeds 3x
+  the previous 4). Detection only; this build never mutates the LR.
+- `probe/kl_setpoint`, `probe/kl_coef` (controller on): the setpoint `c_k`
+  and the post-update beta.
+
+Controller (`probe.ctrl_enabled`): projected dual ascent in log space with
+proportional damping, updated once per probe:
+`beta <- clip(beta * exp(ki*e + kp*(e - e_prev)), beta_min, beta_max)` with
+`e = (kl_dense - c)/c` and
+`c = max(kl_target_floor, kl_target_gain * table(step))`; anti-windup by
+conditional integration (integral term freezes while pinned at a bound).
+`beta_0` = the actor's `kl_loss_coef`; the trainer stamps the live beta onto
+every `update_actor` batch and `ppo_loss` applies it (`actor/kl_coef` reflects
+the value actually used). The anchor's replay loss keeps the static
+coefficient (the anchor is unchanged in phase 1 per #93 4.8).
+
+Knobs (defaults off / bit-identical):
+
+- `probe.probe_every` (`COMM_EFF_PROBE_EVERY`, default 0 = off): probe
+  cadence in trainer global steps.
+- `probe.ctrl_enabled` (`COMM_EFF_PROBE_CTRL_ENABLED`, default false):
+  requires `probe_every >= 1`.
+- `probe.kl_target_table` (`COMM_EFF_PROBE_KL_TARGET_TABLE`, default empty):
+  `"step:value,step:value"` dense-control reference-KL curve, linear
+  interpolation with edge clamping; empty = the floor alone.
+- `probe.kl_target_floor` (`COMM_EFF_PROBE_KL_TARGET_FLOOR`, default 0.005).
+- `probe.kl_target_gain` (`COMM_EFF_PROBE_KL_TARGET_GAIN`, default 2.0).
+- `probe.ctrl_ki` / `probe.ctrl_kp` (`COMM_EFF_PROBE_CTRL_KI/KP`, defaults
+  0.3 / 0.1).
+- `probe.ctrl_beta_min` / `probe.ctrl_beta_max`
+  (`COMM_EFF_PROBE_CTRL_BETA_MIN/MAX`, defaults 2e-4 / 0.05).
+
 ## Anchor batch scope (`anchor.batch_scope`)
 
 - `ppo_minibatch` (default): anchor replays one PPO mini-batch, 256 prompts

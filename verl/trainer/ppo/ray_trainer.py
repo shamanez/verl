@@ -1456,6 +1456,123 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
+    def _comm_eff_probe_cfg(self):
+        """Return the comm_eff.probe sub-config, or None when absent (probe off)."""
+        comm_eff = self.config.actor_rollout_ref.actor.get("comm_eff", None)
+        if comm_eff is None:
+            return None
+        return comm_eff.get("probe", None)
+
+    def _comm_eff_probe_runtime(self):
+        """Lazily build the probe's controller + LR-brake detector (once).
+
+        Returns ``(controller_or_None, brake)``. The controller exists only
+        when comm_eff.probe.ctrl_enabled; its beta_0 is the actor's static
+        kl_loss_coef (the value the loss falls back to when no coefficient is
+        stamped on the batch).
+        """
+        if not getattr(self, "_comm_eff_probe_runtime_built", False):
+            from verl.trainer.ppo.comm_eff_control import (
+                DenseKLCoefController,
+                LRBrakeDetector,
+                parse_kl_target_table,
+            )
+
+            probe_cfg = self._comm_eff_probe_cfg()
+            controller = None
+            if probe_cfg is not None and bool(probe_cfg.get("ctrl_enabled", False)):
+                controller = DenseKLCoefController(
+                    beta0=float(self.config.actor_rollout_ref.actor.kl_loss_coef),
+                    ki=float(probe_cfg.get("ctrl_ki", 0.3)),
+                    kp=float(probe_cfg.get("ctrl_kp", 0.1)),
+                    beta_min=float(probe_cfg.get("ctrl_beta_min", 2.0e-4)),
+                    beta_max=float(probe_cfg.get("ctrl_beta_max", 0.05)),
+                    c_floor=float(probe_cfg.get("kl_target_floor", 0.005)),
+                    gain=float(probe_cfg.get("kl_target_gain", 2.0)),
+                    table=parse_kl_target_table(str(probe_cfg.get("kl_target_table", "") or "")),
+                )
+            self._comm_eff_probe_controller = controller
+            self._comm_eff_probe_brake = LRBrakeDetector()
+            self._comm_eff_probe_runtime_built = True
+        return self._comm_eff_probe_controller, self._comm_eff_probe_brake
+
+    def _compute_probe_dense_log_probs(self, batch: DataProto):
+        """One dense-view rerun of this step's actor + reference log probs.
+
+        Measurement only: forward passes with the comm_eff codec silent
+        (comm_eff_probe_dense rides the TensorDict and the worker stamps path
+        tag None, the anchor's dense precedent), no backward, no weight
+        change. Returns padded float ``(dense_log_probs,
+        dense_ref_log_probs)``; the reference entry is None without a
+        reference policy.
+        """
+        batch.meta_info["comm_eff_global_step"] = self.global_steps
+        batch.meta_info["comm_eff_probe_dense"] = True
+        try:
+            batch_td = batch.to_tensordict()
+            batch_td = left_right_2_no_padding(batch_td)
+            tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            dense_log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
+
+            dense_ref_log_probs = None
+            if self.use_reference_policy:
+                ref_td = batch.to_tensordict()
+                ref_td = left_right_2_no_padding(ref_td)
+                metadata = {"calculate_entropy": False, "compute_loss": False}
+                if self.ref_in_actor:
+                    metadata["no_lora_adapter"] = True
+                tu.assign_non_tensor(ref_td, **metadata)
+                if self.ref_in_actor:
+                    ref_output = self.actor_rollout_wg.compute_log_prob(ref_td)
+                else:
+                    ref_output = self.ref_policy_wg.compute_ref_log_prob(ref_td)
+                dense_ref_log_probs = no_padding_2_padding(tu.get(ref_output, "log_probs"), ref_td).float()
+        finally:
+            # The flag must not leak into any later pass on this batch.
+            batch.meta_info.pop("comm_eff_probe_dense", None)
+        return dense_log_probs, dense_ref_log_probs
+
+    def _maybe_comm_eff_dense_probe(self, batch: DataProto, metrics: dict, timing_raw: dict) -> None:
+        """I3 dense-view probe + controller tick (issue #93 sections 4.5-4.6).
+
+        Runs every comm_eff.probe.probe_every trainer steps (0 = off, the
+        bit-identical default). NOTE the one-step offset: this runs AFTER
+        update_actor, so probe/kl_dense measures theta after this step's
+        update while actor/kl_loss (the kl_gain numerator) was measured
+        during it.
+        """
+        from verl.trainer.ppo.comm_eff_control import compute_probe_metrics, should_probe
+
+        probe_cfg = self._comm_eff_probe_cfg()
+        probe_every = int(probe_cfg.get("probe_every", 0) or 0) if probe_cfg is not None else 0
+        if not should_probe(probe_every, self.global_steps):
+            return
+
+        with marked_timer("comm_eff_probe", timing_raw, color="magenta"):
+            dense_log_probs, dense_ref_log_probs = self._compute_probe_dense_log_probs(batch)
+            actor_config = self.config.actor_rollout_ref.actor
+            probe_metrics = compute_probe_metrics(
+                dense_log_probs=dense_log_probs,
+                dense_ref_log_probs=dense_ref_log_probs,
+                rollout_log_probs=batch.batch.get("rollout_log_probs", None),
+                response_mask=batch.batch["response_mask"],
+                kl_loss_last=metrics.get("actor/kl_loss", None),
+                kl_loss_type=actor_config.kl_loss_type,
+                loss_agg_mode=actor_config.loss_agg_mode,
+                loss_scale_factor=actor_config.loss_scale_factor,
+            )
+
+            controller, brake = self._comm_eff_probe_runtime()
+            kl_dense = probe_metrics["probe/kl_dense"]
+            if controller is not None:
+                probe_metrics["probe/kl_setpoint"] = controller.setpoint(self.global_steps)
+                probe_metrics["probe/kl_coef"] = controller.update(kl_dense, self.global_steps)
+            beta_at_max = controller is not None and controller.at_max
+            triggered = brake.observe(kl_dense, probe_metrics["probe/gap_dense"], beta_at_max)
+            probe_metrics["probe/lr_brake_triggered"] = 1.0 if triggered else 0.0
+        metrics.update(probe_metrics)
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         # Anchor data flow: the rollout-expanded GRPO batch assembled here
         # (mini_batch_size = ppo_mini_batch_size * rollout.n, carrying responses /
@@ -1472,6 +1589,13 @@ class RayPPOTrainer:
         batch.meta_info["temperature"] = rollout_config.temperature
         # Thread the same private PowerSGD/anchor clock into the actor update.
         batch.meta_info["comm_eff_global_step"] = self.global_steps
+        # Adaptive reference-KL coefficient (issue #93 I3): once the controller
+        # is enabled, stamp its current beta every step so ppo_loss applies it
+        # instead of the static kl_loss_coef (the loss falls back to config
+        # when the key is absent). The stamped value only changes at probes.
+        controller, _ = self._comm_eff_probe_runtime()
+        if controller is not None:
+            batch.meta_info["comm_eff_kl_coef"] = float(controller.beta)
         # update actor
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -1855,6 +1979,11 @@ class RayPPOTrainer:
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+
+                        # I3 dense-view probe (issue #93): measurement-only
+                        # codec-silent logprob rerun + adaptive-KL controller
+                        # tick; strict no-op at the probe_every=0 default.
+                        self._maybe_comm_eff_dense_probe(batch, metrics, timing_raw)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

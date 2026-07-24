@@ -712,12 +712,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # the engine's ref_logprob branch (gated on Q readiness) registers the hooks
         # on the reference module, and the read-only forward never folds the sketch
         # or advances Q. Mirrors compute_log_prob's compression_active stamping.
-        with self._comm_eff_path("ref_logprob"):
+        #
+        # Dense-view probe (issue #93 I3): when the trainer stamped
+        # comm_eff_probe_dense, this is a measurement-only rerun that must see
+        # every codec silent. Tag None is the anchor's dense precedent: no codec
+        # eligibility set contains None and compression_active stays False, so
+        # mask/quant/powersgd hooks all stay quiet for this forward.
+        probe_dense = bool(tu.get(data, key="comm_eff_probe_dense", default=False))
+        with self._comm_eff_path(None if probe_dense else "ref_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
             self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_compression_active = False
             prev_compression_active = False
-            if comm_eff_state is not None:
+            if comm_eff_state is not None and not probe_dense:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_reference = bool(getattr(ps_cfg, "compress_reference", False)) if ps_cfg is not None else False
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
@@ -760,12 +767,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         # With compress_recompute enabled, old-policy log-prob uses the same
         # frozen PowerSGD basis as the paired actor-train forward.
-        with self._comm_eff_path("old_logprob"):
+        #
+        # Dense-view probe (issue #93 I3): the trainer-stamped
+        # comm_eff_probe_dense flag reruns this pass measurement-only with tag
+        # None (the anchor's dense precedent), so every codec stays silent; see
+        # compute_ref_log_prob.
+        probe_dense = bool(tu.get(data, key="comm_eff_probe_dense", default=False))
+        with self._comm_eff_path(None if probe_dense else "old_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
             self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_compression_active = False
             prev_compression_active = False
-            if comm_eff_state is not None:
+            if comm_eff_state is not None and not probe_dense:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
@@ -916,13 +929,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
 
     @contextmanager
-    def _comm_eff_path(self, tag: str):
+    def _comm_eff_path(self, tag: Optional[str]):
         """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
 
         PowerSGD is allowed only on the actor-train path and, when explicitly
         configured, the paired old-logprob recompute. The prior tag is restored
         on exit so nested operations cannot leak compression into inference,
-        validation, reference-policy, or checkpoint paths.
+        validation, reference-policy, or checkpoint paths. ``None`` stamps the
+        dense measurement view (no codec eligibility set contains ``None``);
+        the trainer's probe passes use it.
         """
         state = self._maybe_comm_eff_state()
         if state is None:

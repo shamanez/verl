@@ -36,6 +36,7 @@ __all__ = [
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
+    "CommEffProbeConfig",
     "CommEffConfig",
 ]
 
@@ -291,6 +292,60 @@ class CommEffPowerSGDConfig(BaseConfig):
 
 
 @dataclass
+class CommEffProbeConfig(BaseConfig):
+    """Dense-view probe + adaptive reference-KL coefficient (issue #93, I3).
+
+    Every ``probe_every`` trainer steps the trainer reruns the current batch's
+    actor and reference log-prob computations once with every comm_eff codec
+    silent (path tag ``None``, ``compression_active`` untouched): a pure
+    measurement pass, no backward, no weight change. It logs
+    ``probe/kl_dense`` (token-mean ``kl_loss_type`` estimate of
+    KL(pi_theta_dense || pi_ref_dense), the same estimator + aggregation as
+    ``actor/kl_loss``), ``probe/kl_gain`` (actor/kl_loss / probe/kl_dense, the
+    measured G(t)), and ``probe/gap_dense`` (token-mean
+    ``rollout_log_probs - dense actor log probs``, the dense-view
+    train-inference gap).
+
+    ``ctrl_enabled`` closes the loop: projected dual ascent in log space with
+    proportional damping retunes the reference-KL coefficient once per probe,
+    ``beta <- clip(beta * exp(ki*e + kp*(e - e_prev)), beta_min, beta_max)``
+    with ``e = (kl_dense - c)/c`` and setpoint
+    ``c = max(kl_target_floor, kl_target_gain * table(step))``; anti-windup is
+    conditional integration (the integral term freezes while pinned at a
+    bound). ``beta_0`` is the actor's static ``kl_loss_coef``. See
+    ``verl.trainer.ppo.comm_eff_control``.
+
+    Args:
+        probe_every (int): Probe cadence in trainer global steps; 0 (default)
+            disables the probe entirely (bit-identical trainer path).
+        ctrl_enabled (bool): Enable the adaptive KL coefficient controller
+            (requires ``probe_every >= 1``). Off (default) leaves the loss on
+            the static ``kl_loss_coef``.
+        kl_target_table (str): ``"step:value,step:value"`` dense-control
+            reference-KL curve (baked from the finished dense run at matched
+            steps); linear interpolation with edge clamping. Empty (default)
+            means the floor alone sets the target.
+        kl_target_floor (float): Setpoint floor ``c_floor`` in nats.
+        kl_target_gain (float): Multiplier on the interpolated dense KL
+            (``2.0`` = "hold compressed dense-view KL <= 2x dense control").
+        ctrl_ki (float): Integral (dual-ascent) gain on ``e_k``.
+        ctrl_kp (float): Proportional damping gain on ``e_k - e_{k-1}``.
+        ctrl_beta_min (float): Lower projection bound for beta.
+        ctrl_beta_max (float): Upper projection bound for beta.
+    """
+
+    probe_every: int = 0
+    ctrl_enabled: bool = False
+    kl_target_table: str = ""
+    kl_target_floor: float = 0.005
+    kl_target_gain: float = 2.0
+    ctrl_ki: float = 0.3
+    ctrl_kp: float = 0.1
+    ctrl_beta_min: float = 2.0e-4
+    ctrl_beta_max: float = 0.05
+
+
+@dataclass
 class CommEffConfig(BaseConfig):
     """Top-level communication-efficient method configuration.
 
@@ -306,6 +361,7 @@ class CommEffConfig(BaseConfig):
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
+    probe: CommEffProbeConfig = field(default_factory=CommEffProbeConfig)
 
     def __post_init__(self):
         """Validate without allocating tensors, communicating, or drawing RNG."""
@@ -322,6 +378,7 @@ class CommEffConfig(BaseConfig):
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
+        self._validate_probe()
         self._validate_cross_circuit_contract()
 
     def _validate_mask(self) -> None:
@@ -551,6 +608,48 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.powersgd.qr_dtype must be 'fp32'; got {self.powersgd.qr_dtype!r}")
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
+
+    def _validate_probe(self) -> None:
+        """Validate the dense-view probe / controller sub-config (no allocation)."""
+
+        probe = self.probe
+        if isinstance(probe.probe_every, bool) or not isinstance(probe.probe_every, int) or probe.probe_every < 0:
+            raise ValueError(f"comm_eff.probe.probe_every must be an integer >= 0 (0 = off); got {probe.probe_every!r}")
+        if not isinstance(probe.ctrl_enabled, bool):
+            raise ValueError(f"comm_eff.probe.ctrl_enabled must be a bool; got {probe.ctrl_enabled!r}")
+        if probe.ctrl_enabled and probe.probe_every < 1:
+            raise ValueError(
+                "comm_eff.probe.ctrl_enabled=true requires probe_every >= 1: the controller "
+                "only updates at probes, so without a probe cadence it would never act."
+            )
+        if not isinstance(probe.kl_target_table, str):
+            raise ValueError(
+                f"comm_eff.probe.kl_target_table must be a 'step:value,...' string; got {probe.kl_target_table!r}"
+            )
+        # Import-light parser shared with the runtime controller; fails here so
+        # a malformed table dies at config time, not at the first probe.
+        from verl.trainer.ppo.comm_eff_control import parse_kl_target_table
+
+        try:
+            parse_kl_target_table(probe.kl_target_table)
+        except ValueError as e:
+            raise ValueError(f"comm_eff.probe.kl_target_table invalid: {e}") from None
+        if probe.kl_target_floor <= 0.0:
+            raise ValueError(
+                f"comm_eff.probe.kl_target_floor must be > 0 (the setpoint divides the error); "
+                f"got {probe.kl_target_floor}"
+            )
+        if probe.kl_target_gain <= 0.0:
+            raise ValueError(f"comm_eff.probe.kl_target_gain must be > 0; got {probe.kl_target_gain}")
+        for name in ("ctrl_ki", "ctrl_kp"):
+            value = getattr(probe, name)
+            if value < 0.0:
+                raise ValueError(f"comm_eff.probe.{name} must be >= 0; got {value}")
+        if not 0.0 < probe.ctrl_beta_min <= probe.ctrl_beta_max:
+            raise ValueError(
+                "comm_eff.probe requires 0 < ctrl_beta_min <= ctrl_beta_max; "
+                f"got [{probe.ctrl_beta_min}, {probe.ctrl_beta_max}]"
+            )
 
     def _validate_cross_circuit_contract(self) -> None:
         from verl.workers.comm_eff.lookahead import rank1_relex_enabled
