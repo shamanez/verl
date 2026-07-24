@@ -26,6 +26,7 @@ no-op path. The nested settings become active only when
 ``comm_eff.enabled=true``.
 """
 
+import math
 from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
@@ -37,6 +38,7 @@ __all__ = [
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
     "CommEffProbeConfig",
+    "CommEffDCConfig",
     "CommEffConfig",
 ]
 
@@ -346,6 +348,41 @@ class CommEffProbeConfig(BaseConfig):
 
 
 @dataclass
+class CommEffDCConfig(BaseConfig):
+    """DC-GRPO advantage shaping (issue #93 4.7b, arXiv 2606.08779).
+
+    Once per trainer step, after advantages exist and before ``update_actor``,
+    the driver computes the per-response-token probability discrepancy
+    ``delta_t = |exp(old_log_probs) - exp(rollout_log_probs)|`` (the codec-view
+    trainer probability vs the sampler's; bounded, ratio-free, so it stays
+    numerically alive where importance ratios die) and shapes
+    ``A_t <- A_t - lambda * delta_t`` on response tokens only. The dual
+    variable then takes one projected ascent step,
+    ``lambda <- clip(lambda + eta * (delta_bar - target), 0, lambda_max)``
+    with ``delta_bar`` the response-masked mean of ``delta_t``: lambda grows
+    while the gap exceeds the target and decays toward 0 below it, regulating
+    the GROWTH of the gap without fighting its static part. Zero extra forward
+    passes, zero wire cost; logs ``dc/lambda`` (applied) and ``dc/delta_bar``.
+
+    Args:
+        enabled (bool): Enable DC advantage shaping. Off (default) is a strict
+            trainer no-op (advantages untouched, no metrics).
+        eta (float): Dual ascent step size on ``delta_bar - target``.
+        target (float): Per-token discrepancy setpoint ``c_gap`` = the measured
+            step-1 static floor plus slack. Deliberately NO default magic:
+            the -1.0 sentinel is rejected when enabled; measure, then set.
+        lambda0 (float): Initial shaping strength lambda.
+        lambda_max (float): Upper projection bound for lambda.
+    """
+
+    enabled: bool = False
+    eta: float = 1.0
+    target: float = -1.0
+    lambda0: float = 0.05
+    lambda_max: float = 1.0
+
+
+@dataclass
 class CommEffConfig(BaseConfig):
     """Top-level communication-efficient method configuration.
 
@@ -362,6 +399,7 @@ class CommEffConfig(BaseConfig):
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
     probe: CommEffProbeConfig = field(default_factory=CommEffProbeConfig)
+    dc: CommEffDCConfig = field(default_factory=CommEffDCConfig)
 
     def __post_init__(self):
         """Validate without allocating tensors, communicating, or drawing RNG."""
@@ -379,6 +417,7 @@ class CommEffConfig(BaseConfig):
         self._validate_spectral()
         self._validate_powersgd()
         self._validate_probe()
+        self._validate_dc()
         self._validate_cross_circuit_contract()
 
     def _validate_mask(self) -> None:
@@ -649,6 +688,30 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 "comm_eff.probe requires 0 < ctrl_beta_min <= ctrl_beta_max; "
                 f"got [{probe.ctrl_beta_min}, {probe.ctrl_beta_max}]"
+            )
+
+    def _validate_dc(self) -> None:
+        """Validate the DC-GRPO advantage-shaping sub-config (no allocation)."""
+
+        dc = self.dc
+        if not isinstance(dc.enabled, bool):
+            raise ValueError(f"comm_eff.dc.enabled must be a bool; got {dc.enabled!r}")
+        if not math.isfinite(dc.eta) or dc.eta < 0.0:
+            raise ValueError(f"comm_eff.dc.eta must be finite and >= 0; got {dc.eta}")
+        if not math.isfinite(dc.lambda_max) or dc.lambda_max <= 0.0:
+            raise ValueError(f"comm_eff.dc.lambda_max must be finite and > 0; got {dc.lambda_max}")
+        if not math.isfinite(dc.lambda0) or not 0.0 <= dc.lambda0 <= dc.lambda_max:
+            raise ValueError(f"comm_eff.dc.lambda0 must be in [0, lambda_max={dc.lambda_max}]; got {dc.lambda0}")
+        if not math.isfinite(dc.target):
+            raise ValueError(f"comm_eff.dc.target must be finite; got {dc.target}")
+        # target has no default magic on purpose: it is the measured step-1
+        # static per-token discrepancy floor plus slack. Reject the sentinel at
+        # config time instead of silently pinning lambda at lambda_max.
+        if dc.enabled and dc.target < 0.0:
+            raise ValueError(
+                "comm_eff.dc.enabled=true requires an explicit comm_eff.dc.target >= 0 "
+                "(the measured step-1 static per-token discrepancy floor plus slack); "
+                f"got {dc.target}"
             )
 
     def _validate_cross_circuit_contract(self) -> None:

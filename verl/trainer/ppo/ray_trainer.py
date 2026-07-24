@@ -1463,6 +1463,56 @@ class RayPPOTrainer:
             return None
         return comm_eff.get("probe", None)
 
+    def _comm_eff_dc_cfg(self):
+        """Return the comm_eff.dc sub-config, or None when absent (DC off)."""
+        comm_eff = self.config.actor_rollout_ref.actor.get("comm_eff", None)
+        if comm_eff is None:
+            return None
+        return comm_eff.get("dc", None)
+
+    def _maybe_comm_eff_dc_shape(self, batch: DataProto, metrics: dict) -> None:
+        """I4 DC-mode advantage shaping + dual update (issue #93 section 4.7b).
+
+        Runs once per step, driver-side, after advantages exist and before
+        update_actor: shape A_t <- A_t - lambda * delta_t on response tokens
+        only (delta_t = |exp(old_log_probs) - exp(rollout_log_probs)|, the
+        codec-view trainer probability vs the sampler's under
+        mask_recompute=true), then one projected dual ascent step on lambda.
+        Strict no-op at the enabled=false default.
+        """
+        from verl.trainer.ppo.comm_eff_control import dc_dual_update, dc_shape_advantages
+
+        dc_cfg = self._comm_eff_dc_cfg()
+        if dc_cfg is None or not bool(dc_cfg.get("enabled", False)):
+            return
+        if "rollout_log_probs" not in batch.batch:
+            raise ValueError(
+                "comm_eff.dc.enabled=true requires rollout_log_probs in the batch: "
+                "delta_t compares the trainer's codec view against the sampler "
+                "(set actor_rollout_ref.rollout.calculate_log_probs=true)."
+            )
+        if not hasattr(self, "_comm_eff_dc_lambda"):
+            self._comm_eff_dc_lambda = float(dc_cfg.get("lambda0", 0.05))
+        dc_lambda = self._comm_eff_dc_lambda
+        batch.batch["advantages"], delta_bar = dc_shape_advantages(
+            advantages=batch.batch["advantages"],
+            old_log_probs=batch.batch["old_log_probs"],
+            rollout_log_probs=batch.batch["rollout_log_probs"],
+            response_mask=batch.batch["response_mask"],
+            dc_lambda=dc_lambda,
+        )
+        self._comm_eff_dc_lambda = dc_dual_update(
+            dc_lambda,
+            delta_bar,
+            eta=float(dc_cfg.get("eta", 1.0)),
+            target=float(dc_cfg.get("target", -1.0)),
+            lambda_max=float(dc_cfg.get("lambda_max", 1.0)),
+        )
+        # dc/lambda logs the strength applied to THIS step's advantages; the
+        # post-update value first acts (and is logged) next step.
+        metrics["dc/lambda"] = dc_lambda
+        metrics["dc/delta_bar"] = delta_bar
+
     def _comm_eff_probe_runtime(self):
         """Lazily build the probe's controller + LR-brake detector (once).
 
@@ -1934,6 +1984,11 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                        # I4 DC-mode advantage shaping (issue #93): ratio-free
+                        # per-token discrepancy penalty + dual update; strict
+                        # no-op at the dc.enabled=false default.
+                        self._maybe_comm_eff_dc_shape(batch, metrics)
 
                     # update critic
                     if self.use_critic:

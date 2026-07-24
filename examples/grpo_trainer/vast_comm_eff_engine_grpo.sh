@@ -296,6 +296,21 @@ COMM_EFF_PROBE_CTRL_KI="${COMM_EFF_PROBE_CTRL_KI:-0.3}"              # integral 
 COMM_EFF_PROBE_CTRL_KP="${COMM_EFF_PROBE_CTRL_KP:-0.1}"              # proportional damping gain
 COMM_EFF_PROBE_CTRL_BETA_MIN="${COMM_EFF_PROBE_CTRL_BETA_MIN:-2e-4}" # beta projection lower bound
 COMM_EFF_PROBE_CTRL_BETA_MAX="${COMM_EFF_PROBE_CTRL_BETA_MAX:-0.05}" # beta projection upper bound
+# --- CVC: train the train-inference disagreement down (issue #93 I4) ---
+# CE mode: loss += lambda_eff * (-mean log pi_theta(a_t)) on response tokens
+# (the codec view under an active codec); lambda_eff ramps linearly over
+# CVC_WARMUP_STEPS trainer steps. DC mode (DC-GRPO, arXiv 2606.08779):
+# advantage shaping A_t -= lambda * |p_train - p_inf| with a once-per-step
+# projected dual update of lambda toward DC_TARGET (the measured step-1 static
+# per-token discrepancy floor plus slack; REQUIRED when DC is enabled, no
+# default magic). Both default off (bit-identical), zero extra forward passes.
+COMM_EFF_CVC_LAMBDA="${COMM_EFF_CVC_LAMBDA:-0.0}"                # CE-mode weight (0 = off)
+COMM_EFF_CVC_WARMUP_STEPS="${COMM_EFF_CVC_WARMUP_STEPS:-20}"     # linear lambda ramp in trainer steps
+COMM_EFF_DC_ENABLED="${COMM_EFF_DC_ENABLED:-false}"              # DC-GRPO advantage shaping
+COMM_EFF_DC_ETA="${COMM_EFF_DC_ETA:-1.0}"                        # dual ascent step size
+COMM_EFF_DC_TARGET="${COMM_EFF_DC_TARGET:--1.0}"                 # per-token discrepancy setpoint; -1.0 = unset sentinel
+COMM_EFF_DC_LAMBDA0="${COMM_EFF_DC_LAMBDA0:-0.05}"               # initial shaping strength
+COMM_EFF_DC_LAMBDA_MAX="${COMM_EFF_DC_LAMBDA_MAX:-1.0}"          # lambda projection upper bound
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -395,6 +410,7 @@ cat <<EOF
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
   sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
   probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
+  cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
@@ -461,6 +477,18 @@ fi
 PROBE_TABLE_OVERRIDE=()
 if [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE}" ]]; then
   PROBE_TABLE_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.probe.kl_target_table='${COMM_EFF_PROBE_KL_TARGET_TABLE}'")
+fi
+# CVC/DC boot gate (issue #93 I4): fail before any GPU spend, matching the
+# ActorConfig / CommEffDCConfig validation that would reject it on the box.
+FLOAT_RE='-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?'
+[[ "${COMM_EFF_CVC_LAMBDA}" =~ ^${FLOAT_RE}$ && ! "${COMM_EFF_CVC_LAMBDA}" =~ ^- ]] || { echo "FATAL: COMM_EFF_CVC_LAMBDA='${COMM_EFF_CVC_LAMBDA}' must be a float >= 0 (0 = off)." >&2; exit 1; }
+[[ "${COMM_EFF_CVC_WARMUP_STEPS}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_CVC_WARMUP_STEPS='${COMM_EFF_CVC_WARMUP_STEPS}' must be an integer >= 0." >&2; exit 1; }
+case "${COMM_EFF_DC_ENABLED}" in true|false) ;; *) echo "FATAL: bad COMM_EFF_DC_ENABLED='${COMM_EFF_DC_ENABLED}' (true|false)." >&2; exit 1;; esac
+if [[ "${COMM_EFF_DC_ENABLED}" == "true" ]]; then
+  # target has no default magic: it is the measured step-1 static per-token
+  # discrepancy floor plus slack; the -1.0 sentinel must be replaced.
+  [[ "${COMM_EFF_DC_TARGET}" =~ ^${FLOAT_RE}$ && ! "${COMM_EFF_DC_TARGET}" =~ ^- ]] || { echo "FATAL: COMM_EFF_DC_ENABLED=true requires an explicit COMM_EFF_DC_TARGET >= 0 (measured step-1 static floor + slack); got '${COMM_EFF_DC_TARGET}'." >&2; exit 1; }
+  echo "=== resolved cvc/dc OK (before GPU): ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=true eta=$COMM_EFF_DC_ETA target=$COMM_EFF_DC_TARGET lambda0=$COMM_EFF_DC_LAMBDA0 lambda_max=$COMM_EFF_DC_LAMBDA_MAX ==="
 fi
 
 # ---------------------------------------------------------------------------
@@ -605,6 +633,13 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_kp="$COMM_EFF_PROBE_CTRL_KP" \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_min="$COMM_EFF_PROBE_CTRL_BETA_MIN" \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_max="$COMM_EFF_PROBE_CTRL_BETA_MAX" \
+  actor_rollout_ref.actor.cvc_lambda="$COMM_EFF_CVC_LAMBDA" \
+  actor_rollout_ref.actor.cvc_warmup_steps="$COMM_EFF_CVC_WARMUP_STEPS" \
+  actor_rollout_ref.actor.comm_eff.dc.enabled="$COMM_EFF_DC_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.dc.eta="$COMM_EFF_DC_ETA" \
+  actor_rollout_ref.actor.comm_eff.dc.target="$COMM_EFF_DC_TARGET" \
+  actor_rollout_ref.actor.comm_eff.dc.lambda0="$COMM_EFF_DC_LAMBDA0" \
+  actor_rollout_ref.actor.comm_eff.dc.lambda_max="$COMM_EFF_DC_LAMBDA_MAX" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \

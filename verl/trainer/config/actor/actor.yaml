@@ -111,6 +111,15 @@ kl_loss_coef: 0.001
 # Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
 kl_loss_type: low_var_kl
 
+# CVC CE mode (issue #93 I4a): weight on the training-view cross entropy
+# -log pi(a_t) over response tokens (the codec view under an active comm_eff
+# codec, so the term trains the train-inference disagreement down).
+# 0.0 (default) keeps the loss graph bit-identical.
+cvc_lambda: 0.0
+
+# Trainer steps over which the effective CVC lambda ramps linearly 0 -> cvc_lambda
+cvc_warmup_steps: 20
+
 # Number of PPO epochs per batch
 ppo_epochs: 1
 
@@ -413,6 +422,21 @@ comm_eff:
     ctrl_kp: 0.1
     ctrl_beta_min: 2.0e-4
     ctrl_beta_max: 0.05
+
+  # DC-GRPO advantage shaping (issue #93 I4b, arXiv 2606.08779). enabled=false
+  # keeps the trainer path bit-identical. target carries NO default magic: it
+  # is the measured step-1 static per-token discrepancy floor plus slack and
+  # must be set explicitly when enabled (-1.0 = unset sentinel, rejected at
+  # config time). Fields mirror verl.workers.config.CommEffDCConfig exactly.
+  dc:
+
+    _target_: verl.workers.config.CommEffDCConfig
+
+    enabled: false
+    eta: 1.0
+    target: -1.0
+    lambda0: 0.05
+    lambda_max: 1.0
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

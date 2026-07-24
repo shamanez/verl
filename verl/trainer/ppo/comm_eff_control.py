@@ -35,6 +35,8 @@ __all__ = [
     "DenseKLCoefController",
     "LRBrakeDetector",
     "compute_probe_metrics",
+    "dc_shape_advantages",
+    "dc_dual_update",
 ]
 
 
@@ -316,3 +318,45 @@ def compute_probe_metrics(
         "probe/kl_gain": kl_gain,
         "probe/gap_dense": gap_dense,
     }
+
+
+def dc_shape_advantages(
+    *,
+    advantages,
+    old_log_probs,
+    rollout_log_probs,
+    response_mask,
+    dc_lambda: float,
+):
+    """DC-GRPO per-token advantage shaping (issue #93 4.7b, arXiv 2606.08779).
+
+    All tensors are padded ``(bsz, response_length)`` driver-side tensors.
+    Computes ``delta_t = |exp(old_log_probs) - exp(rollout_log_probs)|`` (the
+    codec-view trainer probability of the sampled token vs the sampler's;
+    bounded in [0, 1], never a ratio) and returns
+    ``(advantages - dc_lambda * delta_t on response tokens only, delta_bar)``
+    with ``delta_bar`` the response-masked mean of ``delta_t`` for the dual
+    update. Padded positions are left untouched.
+    """
+    import torch
+
+    from verl.utils.torch_functional import masked_mean
+
+    with torch.no_grad():
+        response_mask = response_mask.to(bool)
+        delta = (old_log_probs.float().exp() - rollout_log_probs.float().exp()).abs()
+        delta_bar = float(masked_mean(delta, response_mask).item())
+        shaping = (dc_lambda * delta * response_mask.to(delta.dtype)).to(advantages.dtype)
+        return advantages - shaping, delta_bar
+
+
+def dc_dual_update(dc_lambda: float, delta_bar: float, *, eta: float, target: float, lambda_max: float) -> float:
+    """One projected dual ascent step on the DC shaping strength.
+
+    ``lambda <- clip(lambda + eta * (delta_bar - target), 0, lambda_max)``:
+    lambda grows while the measured gap exceeds the target and decays toward 0
+    below it. A non-finite ``delta_bar`` (empty mask) skips the update.
+    """
+    if not math.isfinite(delta_bar):
+        return dc_lambda
+    return min(max(dc_lambda + eta * (delta_bar - target), 0.0), lambda_max)

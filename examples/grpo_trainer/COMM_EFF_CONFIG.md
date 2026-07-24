@@ -173,6 +173,50 @@ Knobs (defaults off / bit-identical):
 - `probe.ctrl_beta_min` / `probe.ctrl_beta_max`
   (`COMM_EFF_PROBE_CTRL_BETA_MIN/MAX`, defaults 2e-4 / 0.05).
 
+## CVC: train the disagreement down (`actor.cvc_*`, `comm_eff.dc`, issue #93 I4)
+
+Two independent modes, both default off (bit-identical paths), both zero
+extra forward passes and zero wire cost:
+
+CE mode (`actor.cvc_lambda`, `COMM_EFF_CVC_LAMBDA`, default 0.0 = off): adds
+`lambda_eff * CE_codec` to the actor loss, where
+`CE_codec = -mean_t log pi_theta(a_t)` over response tokens. Under an active
+codec that log-prob IS the codec view, so the term is the training-view gap
+and its gradient pulls the codec view toward the sampler's choices.
+`lambda_eff` ramps linearly from 0 over `actor.cvc_warmup_steps`
+(`COMM_EFF_CVC_WARMUP_STEPS`, default 20) trainer steps because the codec
+view starts below uniform (the earliest CE gradient points toward
+uniformizing). Kill-guard is observational: kill the arm if rollout ppl,
+reward slope, or the val proxy degrade. Logs `actor/cvc_ce` and
+`actor/cvc_lambda` (the coefficient actually applied at this step's warmup
+clock). The anchor's replay loss does not mirror this term: its dense forward
+has no codec disagreement to train down (#93 4.8, anchor unchanged in
+phase 1).
+
+DC mode (`comm_eff.dc`, DC-GRPO, arXiv 2606.08779): driver-side advantage
+shaping once per step, after advantages exist and before `update_actor`:
+`A_t <- A_t - lambda * delta_t` on response tokens only, with
+`delta_t = |exp(old_log_probs) - exp(rollout_log_probs)|` (the codec-view
+trainer probability vs the sampler's; bounded, ratio-free, so it stays alive
+at E[rho] ~ 1e-3 where importance sampling dies). Then one projected dual
+ascent step: `lambda <- clip(lambda + eta * (delta_bar - target), 0,
+lambda_max)` with `delta_bar` the response-masked mean of `delta_t`, so
+lambda regulates the GROWTH of the gap without fighting its static part.
+Requires `rollout.calculate_log_probs=true`. Logs `dc/lambda` (applied this
+step) and `dc/delta_bar`.
+
+Knobs:
+
+- `actor.cvc_lambda` (`COMM_EFF_CVC_LAMBDA`, default 0.0 = off).
+- `actor.cvc_warmup_steps` (`COMM_EFF_CVC_WARMUP_STEPS`, default 20).
+- `comm_eff.dc.enabled` (`COMM_EFF_DC_ENABLED`, default false).
+- `comm_eff.dc.eta` (`COMM_EFF_DC_ETA`, default 1.0).
+- `comm_eff.dc.target` (`COMM_EFF_DC_TARGET`, NO default: the measured
+  step-1 static per-token discrepancy floor plus slack; the -1.0 sentinel is
+  rejected at config time when DC is enabled).
+- `comm_eff.dc.lambda0` (`COMM_EFF_DC_LAMBDA0`, default 0.05).
+- `comm_eff.dc.lambda_max` (`COMM_EFF_DC_LAMBDA_MAX`, default 1.0).
+
 ## Anchor batch scope (`anchor.batch_scope`)
 
 - `ppo_minibatch` (default): anchor replays one PPO mini-batch, 256 prompts

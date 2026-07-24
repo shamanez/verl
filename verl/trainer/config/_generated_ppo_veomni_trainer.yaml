@@ -83,6 +83,8 @@ actor_rollout_ref:
     use_torch_compile: true
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
+    cvc_lambda: 0.0
+    cvc_warmup_steps: 20
     ppo_epochs: 1
     shuffle: false
     data_loader_seed: 42
@@ -221,6 +223,13 @@ actor_rollout_ref:
         ctrl_kp: 0.1
         ctrl_beta_min: 0.0002
         ctrl_beta_max: 0.05
+      dc:
+        _target_: verl.workers.config.CommEffDCConfig
+        enabled: false
+        eta: 1.0
+        target: -1.0
+        lambda0: 0.05
+        lambda_max: 1.0
     qat:
       enable: false
       mode: w4a16

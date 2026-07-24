@@ -91,6 +91,17 @@ export COMM_EFF_PROBE_CTRL_KI="${COMM_EFF_PROBE_CTRL_KI:-0.3}"
 export COMM_EFF_PROBE_CTRL_KP="${COMM_EFF_PROBE_CTRL_KP:-0.1}"
 export COMM_EFF_PROBE_CTRL_BETA_MIN="${COMM_EFF_PROBE_CTRL_BETA_MIN:-2e-4}"
 export COMM_EFF_PROBE_CTRL_BETA_MAX="${COMM_EFF_PROBE_CTRL_BETA_MAX:-0.05}"
+# CVC: train the train-inference disagreement down (issue #93 I4). Defaults
+# off (bit-identical): CVC_LAMBDA=0 disables the CE term, DC_ENABLED=false
+# disables the DC-GRPO advantage shaping. When enabling DC, COMM_EFF_DC_TARGET
+# must be set explicitly (measured step-1 static per-token floor plus slack).
+export COMM_EFF_CVC_LAMBDA="${COMM_EFF_CVC_LAMBDA:-0.0}"
+export COMM_EFF_CVC_WARMUP_STEPS="${COMM_EFF_CVC_WARMUP_STEPS:-20}"
+export COMM_EFF_DC_ENABLED="${COMM_EFF_DC_ENABLED:-false}"
+export COMM_EFF_DC_ETA="${COMM_EFF_DC_ETA:-1.0}"
+export COMM_EFF_DC_TARGET="${COMM_EFF_DC_TARGET:--1.0}"
+export COMM_EFF_DC_LAMBDA0="${COMM_EFF_DC_LAMBDA0:-0.05}"
+export COMM_EFF_DC_LAMBDA_MAX="${COMM_EFF_DC_LAMBDA_MAX:-1.0}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
