@@ -148,7 +148,7 @@ case "$ARM" in
     apply_codec_arm "$CODEC_ARM"
     apply_control_plane
     TOTAL_STEPS="${TOTAL_STEPS:-600}"
-    TEST_FREQ=150                         # val at 0/150/300/450/600
+    TEST_FREQ="${TEST_FREQ:-300}"        # val at 0/300/600 (operator, 2026-07-25); override via TEST_FREQ
     VAL_BEFORE_TRAIN=True
     SAVE_FREQ=100
     # R2 checkpoint sink, the #90 contract: CKPT_R2_ENABLED gates the trainer
