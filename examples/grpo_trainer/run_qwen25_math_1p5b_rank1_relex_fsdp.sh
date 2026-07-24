@@ -71,6 +71,14 @@ export COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"
 # the original behavior); Q stays frozen between refreshes while the
 # activation sketch accumulates over the full window.
 export COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"
+# sr_quant codec (active iff COMM_EFF_COMPRESSION_TYPE=sr_quant). Dense low-bit
+# stochastic-rounding boundary quantization; reuses COMM_EFF_MASK_RECOMPUTE /
+# COMM_EFF_MASK_REFERENCE / COMM_EFF_MASK_SEED / COMM_EFF_MASK_PP_SIZE for
+# eligibility and keying. Like prf_mask it cannot anchor-own-Q, so an sr_quant
+# arm also sets COMM_EFF_ANCHOR_OWNS_Q=false.
+export COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"
+export COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"
+export COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
 export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"

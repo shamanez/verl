@@ -269,6 +269,16 @@ COMM_EFF_MASK_FRLR_RANK="${COMM_EFF_MASK_FRLR_RANK:-32}"             # FRLR core
 COMM_EFF_MASK_FRLR_K="${COMM_EFF_MASK_FRLR_K:-44}"                   # FRLR per-token PRF-fresh exact-k residual subset size
 COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"  # H/k constant gain (E[h_hat|h,Q]=h) instead of capped norm matching
 COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"    # refresh FRLR Q every N global steps (1=every step); frozen between refreshes, sketch accumulates
+# --- sr_quant codec (active iff COMM_EFF_COMPRESSION_TYPE=sr_quant) ---
+# Dense low-bit stochastic-rounding quantization of the boundary activations
+# (and of the boundary backward gradient). Reuses COMM_EFF_MASK_RECOMPUTE /
+# COMM_EFF_MASK_REFERENCE / COMM_EFF_MASK_SEED / COMM_EFF_MASK_PP_SIZE for
+# eligibility and keying (MASK_P / RESCALE / EXACT_K etc. are ignored). Like
+# prf_mask it cannot anchor-own-Q: an sr_quant arm must set
+# COMM_EFF_ANCHOR_OWNS_Q=false (COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP is inert).
+COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"                      # bits/channel; 2**bits uniform levels in [-s,+s]
+COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"         # channels per fp16 absmax-scale block (0 = whole-token scale)
+COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"             # sr = unbiased PRF stochastic rounding | rn = round-to-nearest (biased ablation control)
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -364,8 +374,9 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
+  sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
@@ -398,6 +409,15 @@ if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_
     [[ "${COMM_EFF_MASK_FRLR_Q_CADENCE}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_MASK_FRLR_Q_CADENCE='${COMM_EFF_MASK_FRLR_Q_CADENCE}' must be an integer >= 1 (1 = every-step Q refresh)." >&2; exit 1; }
   fi
   echo "=== resolved codec OK (before GPU): prf_mask p=$COMM_EFF_MASK_P rescale_mode=$COMM_EFF_MASK_RESCALE_MODE exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY}] frlr=$COMM_EFF_MASK_FRLR rank=$COMM_EFF_MASK_FRLR_RANK k=$COMM_EFF_MASK_FRLR_K unbiased=$COMM_EFF_MASK_FRLR_UNBIASED q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE ==="
+fi
+if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "sr_quant" ]]; then
+  # Mirror the prf_mask gate: sr_quant carries no PowerSGD basis Q, so the
+  # anchor cannot own it; fail before any GPU spend, matching CommEffConfig.
+  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: sr_quant requires COMM_EFF_ANCHOR_OWNS_Q=false (quantizer has no PowerSGD basis Q)." >&2; exit 1; }
+  [[ "${COMM_EFF_QUANT_BITS}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_QUANT_BITS='${COMM_EFF_QUANT_BITS}' must be an integer >= 1." >&2; exit 1; }
+  [[ "${COMM_EFF_QUANT_BLOCK_SIZE}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_QUANT_BLOCK_SIZE='${COMM_EFF_QUANT_BLOCK_SIZE}' must be an integer >= 0 (0 = whole-token scale)." >&2; exit 1; }
+  case "${COMM_EFF_QUANT_ROUNDING}" in sr|rn) ;; *) echo "FATAL: bad COMM_EFF_QUANT_ROUNDING='${COMM_EFF_QUANT_ROUNDING}' (sr|rn)." >&2; exit 1;; esac
+  echo "=== resolved codec OK (before GPU): sr_quant bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
 fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
@@ -535,6 +555,9 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.frlr_k="$COMM_EFF_MASK_FRLR_K" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased="$COMM_EFF_MASK_FRLR_UNBIASED" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence="$COMM_EFF_MASK_FRLR_Q_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.quant.bits="$COMM_EFF_QUANT_BITS" \
+  actor_rollout_ref.actor.comm_eff.quant.block_size="$COMM_EFF_QUANT_BLOCK_SIZE" \
+  actor_rollout_ref.actor.comm_eff.quant.rounding="$COMM_EFF_QUANT_ROUNDING" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
