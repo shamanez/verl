@@ -99,6 +99,15 @@ Knobs:
 - `quant.rounding` (`COMM_EFF_QUANT_ROUNDING`, default `sr`): `sr` = unbiased
   PRF stochastic rounding; `rn` = deterministic round-to-nearest on the same
   grid (biased; the ablation control).
+- `quant.subset_k` (`COMM_EFF_QUANT_SUBSET_K`, default 0 = full width): the
+  issue #93 I5 byte-parity hybrid. `> 0`: per token quantize only a PRF-fresh
+  EXACT-`subset_k` channel subset J (drawn with the mask codec's exact-k order
+  statistic, keyed identically, so J is bit-identical across the
+  old/train/ref passes of one step and shared by the backward wire), zero
+  elsewhere, rescale by `H/subset_k`. Unbiased through BOTH the subset draw
+  and the stochastic rounding: `E[q] = h`. Blocks then span `subset_k`
+  consecutive KEPT channels; J costs no index bits (PRF-derivable at the
+  receiver).
 - Reused mask knobs: `mask.mask_recompute` / `mask.mask_reference` widen the
   eligible forwards exactly as for prf_mask; `mask.seed` / `mask.pp_size` key
   and place the codec. `mask.p` / `rescale*` / `exact_k` / `antithetic` /
@@ -115,10 +124,15 @@ Budget math per token per boundary (H = 1536, bf16 wire = 16-bit values):
 | prf_mask p=0.95 | 77 kept ch x 16 b | 1232 | 154 B |
 | sr_quant bits=1, block 32 (default) | 1536x1 + 48 fp16 scales | 2304 | 288 B |
 | sr_quant bits=1, whole-token scale | 1536x1 + 1 fp16 scale | 1552 | 194 B |
+| sr_quant bits=2, block 32, subset_k=493 | 493x2 + 493/32 fp16 scales | 1232.5 (ceil 1233) | 154.1 B |
+
+The subset row is the #93 4.3 byte-parity arm: 1233 bits vs the prf exact-k
+incumbent's 1232 (77 kept x fp16), the same-budget fair fight. The ragged
+final scale block is counted pro-rata (16/block bits per kept channel).
 
 `comm_eff/logical_pp_bits_sr_quant` (and the `_bytes_` variant) reports
-`H*bits + n_blocks*16` at runtime, the sr_quant analogue of
-`comm_eff/logical_pp_bytes_prf`.
+`H*bits + n_blocks*16` at runtime (`subset_k*bits + subset_k*16/block` in
+subset mode), the sr_quant analogue of `comm_eff/logical_pp_bytes_prf`.
 
 ## Dense-view probe + adaptive KL coefficient (`comm_eff.probe`, issue #93 I3)
 
@@ -216,6 +230,35 @@ Knobs:
   rejected at config time when DC is enabled).
 - `comm_eff.dc.lambda0` (`COMM_EFF_DC_LAMBDA0`, default 0.05).
 - `comm_eff.dc.lambda_max` (`COMM_EFF_DC_LAMBDA_MAX`, default 1.0).
+
+## Issue #93 run matrix (`run_93_cell.sh`)
+
+One launcher covers the whole #93 long-horizon stability matrix on the #90
+protocol (batch 128 / mini 128, 1024/2048, pp 8, LR 1e-6, one H200). It
+resolves the arm and echoes the full config BEFORE any bring-up, fails loud on
+an unknown `ARM`, and `DRY_RUN=1` stops right after the echo:
+
+```bash
+ARM=a1 bash examples/grpo_trainer/run_93_cell.sh   # sr_quant b1/32 sr, 120 steps
+ARM=a2 bash examples/grpo_trainer/run_93_cell.sh   # rounding=rn bias control
+ARM=a3 bash examples/grpo_trainer/run_93_cell.sh   # byte-parity subset_k=493
+ARM=a4 bash examples/grpo_trainer/run_93_cell.sh   # prf exact-k + CVC CE 0.003
+ARM=a5 bash examples/grpo_trainer/run_93_cell.sh   # frlr r48 k28 + token-IS 2.0
+# rounds B/C reuse a codec arm and add the control plane (table REQUIRED):
+ARM=b1 CODEC_ARM=a3 COMM_EFF_PROBE_KL_TARGET_TABLE="0:5e-4,..." bash examples/grpo_trainer/run_93_cell.sh
+ARM=c  CODEC_ARM=a3 COMM_EFF_PROBE_KL_TARGET_TABLE="0:5e-4,..." bash examples/grpo_trainer/run_93_cell.sh
+```
+
+Rounds A (120 steps) and B (200 steps) run validation OFF
+(`VAL_BEFORE_TRAIN=False`, `TEST_FREQ=-1`) and save nothing (`SAVE_FREQ=-1`);
+cell `c` runs 600 steps with val at 0/150/300/450/600, `SAVE_FREQ=100` and the
+R2 checkpoint sink on (`CKPT_R2_ENABLED=true`; `R2_BUCKET` stays hard-guarded
+to `shamane-pluralis`). `b1`/`c` turn on `COMM_EFF_PROBE_EVERY=25` +
+`COMM_EFF_PROBE_CTRL_ENABLED=true` and REQUIRE the setpoint table from the
+env. WandB: project `93-long-horizon-stability` (via `WANDB_RUN_GROUP`), run
+`<arm>-<slug>`. Arm a5 enables decoupled token importance weighting via the
+engine's `ROLLOUT_IS=token` / `ROLLOUT_IS_THRESHOLD=2.0` knobs (default
+`null` = correction strictly off, unchanged behavior).
 
 ## Anchor batch scope (`anchor.batch_scope`)
 

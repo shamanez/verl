@@ -279,14 +279,16 @@ class CommEffState:
                 pp_size=int(getattr(mask_cfg, "pp_size", 8)),
                 block_size=int(getattr(quant_cfg, "block_size", 32)),
                 rounding=str(getattr(quant_cfg, "rounding", "sr")),
+                subset_k=int(getattr(quant_cfg, "subset_k", 0)),
                 state=self,
             )
             logger.info(
-                "comm_eff: sr_quant bits=%s block_size=%s rounding=%s pp_size=%s seed=%s "
+                "comm_eff: sr_quant bits=%s block_size=%s rounding=%s subset_k=%s pp_size=%s seed=%s "
                 "mask_recompute=%s mask_reference=%s",
                 getattr(quant_cfg, "bits", 1),
                 getattr(quant_cfg, "block_size", 32),
                 getattr(quant_cfg, "rounding", "sr"),
+                getattr(quant_cfg, "subset_k", 0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "seed", 0),
                 getattr(mask_cfg, "mask_recompute", False),
@@ -483,7 +485,8 @@ class CommEffState:
         """sr_quant codec metrics: logical PP bit budget per token per boundary.
 
         ``comm_eff/logical_pp_bits_sr_quant`` is ``H*bits + n_blocks*16``
-        (payload plus one fp16 scale per block), the sr_quant analogue of the
+        (payload plus one fp16 scale per block; in subset mode
+        ``subset_k*bits + subset_k*16/block``), the sr_quant analogue of the
         PRF codec's ``comm_eff/logical_pp_bytes_prf``; the ``_bytes_`` variant
         is the same number divided by 8 for direct budget comparison. Empty
         until the first quant hook fire records the hidden size.

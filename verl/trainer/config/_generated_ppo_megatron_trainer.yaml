@@ -189,6 +189,7 @@ actor_rollout_ref:
         bits: 1
         block_size: 32
         rounding: sr
+        subset_k: 0
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

@@ -344,6 +344,10 @@ comm_eff:
     bits: 1
     block_size: 32
     rounding: sr
+    # 0 = full-width. > 0 (issue #93 I5 byte-parity hybrid): quantize only a
+    # PRF-fresh exact-subset_k channel subset J per token (mask-keyed, pass
+    # identical within a step), zero elsewhere, rescale by H/subset_k.
+    subset_k: 0
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:

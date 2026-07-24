@@ -79,6 +79,7 @@ export COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"
 export COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"
 export COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"
 export COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"
+export COMM_EFF_QUANT_SUBSET_K="${COMM_EFF_QUANT_SUBSET_K:-0}"
 # Dense-view probe + adaptive KL coefficient (issue #93 I3). Defaults off:
 # probe_every=0 keeps the trainer path bit-identical and ctrl_enabled=false
 # keeps the loss on the static kl_loss_coef; the LR brake is log-only.

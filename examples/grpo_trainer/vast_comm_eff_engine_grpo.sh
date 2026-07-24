@@ -180,9 +180,14 @@ export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
 # calculate_log_probs=True makes vLLM return its rollout log-probs so the trainer
 # logs training/rollout_probs_diff_* and rollout_corr/* (vLLM rollout vs the
 # train-engine-recomputed old_log_prob). Rollout CORRECTION stays STRICTLY OFF
-# (rollout_is/rollout_rs=null, bypass_mode=false): old_log_prob is always
-# recomputed by the train engine and vLLM log-probs are never used in the loss.
+# by default (rollout_is=null, rollout_rs=null, bypass_mode=false): old_log_prob
+# is always recomputed by the train engine and vLLM log-probs are never used in
+# the loss. ROLLOUT_IS=token|sequence turns on decoupled importance weighting
+# (issue #93 arm A5, FRLR only: token-IS is measured dead on PRF/sr_quant views).
 export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
+export ROLLOUT_IS="${ROLLOUT_IS:-null}"
+export ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-2.0}"
+case "${ROLLOUT_IS}" in null|token|sequence) ;; *) echo "FATAL: bad ROLLOUT_IS='${ROLLOUT_IS}' (null|token|sequence)." >&2; exit 1;; esac
 
 # Context window — 4096 total tokens in the reference protocol.
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
@@ -279,6 +284,7 @@ COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"    # refresh F
 COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"                      # bits/channel; 2**bits uniform levels in [-s,+s]
 COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"         # channels per fp16 absmax-scale block (0 = whole-token scale)
 COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"             # sr = unbiased PRF stochastic rounding | rn = round-to-nearest (biased ablation control)
+COMM_EFF_QUANT_SUBSET_K="${COMM_EFF_QUANT_SUBSET_K:-0}"              # issue #93 I5 byte-parity hybrid: quantize only a PRF-fresh exact-k channel subset J/token, rescale H/k; 0 = full width
 # --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---
 # Every PROBE_EVERY trainer steps the trainer reruns the step's actor +
 # reference logprob passes once with the codec silent (measurement only, no
@@ -404,11 +410,11 @@ cat <<EOF
   epochs:              $TOTAL_EPOCHS  (save $SAVE_FREQ, validate $TEST_FREQ, total steps $TOTAL_TRAINING_STEPS)
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
-  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
+  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout_is=$ROLLOUT_IS threshold=$ROLLOUT_IS_THRESHOLD (null = correction OFF, recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
   compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
-  sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
+  sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
   probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
   cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
@@ -451,7 +457,25 @@ if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "sr_q
   [[ "${COMM_EFF_QUANT_BITS}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_QUANT_BITS='${COMM_EFF_QUANT_BITS}' must be an integer >= 1." >&2; exit 1; }
   [[ "${COMM_EFF_QUANT_BLOCK_SIZE}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_QUANT_BLOCK_SIZE='${COMM_EFF_QUANT_BLOCK_SIZE}' must be an integer >= 0 (0 = whole-token scale)." >&2; exit 1; }
   case "${COMM_EFF_QUANT_ROUNDING}" in sr|rn) ;; *) echo "FATAL: bad COMM_EFF_QUANT_ROUNDING='${COMM_EFF_QUANT_ROUNDING}' (sr|rn)." >&2; exit 1;; esac
-  echo "=== resolved codec OK (before GPU): sr_quant bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
+  [[ "${COMM_EFF_QUANT_SUBSET_K}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_QUANT_SUBSET_K='${COMM_EFF_QUANT_SUBSET_K}' must be an integer >= 0 (0 = full width)." >&2; exit 1; }
+  if (( COMM_EFF_QUANT_SUBSET_K > 0 )); then
+    # Exact wire accounting for the subset arm (issue #93 4.3): payload
+    # k*bits + one fp16 scale per block of KEPT channels, ragged tail
+    # pro-rata; J costs no index bits (PRF-derivable at the receiver).
+    # Target parity arm k=493 bits=2 block=32 -> 1233 bits vs incumbent 1232.
+    SUBSET_BITS_LINE="$(python3 -c "
+import math
+k = ${COMM_EFF_QUANT_SUBSET_K}; b = ${COMM_EFF_QUANT_BITS}; blk = ${COMM_EFF_QUANT_BLOCK_SIZE}
+eff = k if (blk <= 0 or blk >= k) else blk
+payload = k * b
+scales = k * 16 / eff
+total = payload + scales
+print(f'payload {payload} + fp16 scales {scales:g} = {total:g} bits/token/boundary'
+      f' (ceil {math.ceil(total)}; incumbent prf exact-k 77x16 = 1232)')
+")" || { echo "FATAL: subset bit-accounting computation failed." >&2; exit 1; }
+    echo "=== sr_quant subset accounting (before GPU): k=$COMM_EFF_QUANT_SUBSET_K bits=$COMM_EFF_QUANT_BITS block=$COMM_EFF_QUANT_BLOCK_SIZE -> $SUBSET_BITS_LINE ==="
+  fi
+  echo "=== resolved codec OK (before GPU): sr_quant bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
 fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
@@ -590,7 +614,8 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.rollout.calculate_log_probs="$ROLLOUT_CALC_LOGPROBS" \
-  algorithm.rollout_correction.rollout_is=null \
+  algorithm.rollout_correction.rollout_is="$ROLLOUT_IS" \
+  algorithm.rollout_correction.rollout_is_threshold="$ROLLOUT_IS_THRESHOLD" \
   algorithm.rollout_correction.rollout_rs=null \
   algorithm.rollout_correction.bypass_mode=false \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -625,6 +650,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.quant.bits="$COMM_EFF_QUANT_BITS" \
   actor_rollout_ref.actor.comm_eff.quant.block_size="$COMM_EFF_QUANT_BLOCK_SIZE" \
   actor_rollout_ref.actor.comm_eff.quant.rounding="$COMM_EFF_QUANT_ROUNDING" \
+  actor_rollout_ref.actor.comm_eff.quant.subset_k="$COMM_EFF_QUANT_SUBSET_K" \
   actor_rollout_ref.actor.comm_eff.probe.probe_every="$COMM_EFF_PROBE_EVERY" \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled="$COMM_EFF_PROBE_CTRL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.probe.kl_target_floor="$COMM_EFF_PROBE_KL_TARGET_FLOOR" \

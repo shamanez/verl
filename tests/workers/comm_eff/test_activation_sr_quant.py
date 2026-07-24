@@ -504,6 +504,7 @@ def _make_quant_state(
     mask_recompute=False,
     mask_reference=False,
     d=32,
+    subset_k=0,
 ):
     cfg = SimpleNamespace(
         enabled=True,
@@ -516,7 +517,7 @@ def _make_quant_state(
             mask_recompute=mask_recompute,
             mask_reference=mask_reference,
         ),
-        quant=SimpleNamespace(bits=bits, block_size=block_size, rounding=rounding),
+        quant=SimpleNamespace(bits=bits, block_size=block_size, rounding=rounding, subset_k=subset_k),
     )
     state = maybe_build_comm_eff_state(cfg)
     assert isinstance(state, CommEffState)
@@ -699,3 +700,183 @@ def test_resolve_compression_type_sr_quant_wins():
         resolve_compression_type(SimpleNamespace(compression_type="dense", mask=SimpleNamespace(enabled=True, p=0.5)))
         == "prf_mask"
     )
+
+
+# =========================================================================== #
+# subset mode (issue #93 I5): the byte-parity hybrid
+# =========================================================================== #
+def _subset_keep_mask(sid, pos, *, layer, step, seed, hidden_size, k):
+    """The subset J exactly as the mask codec's order statistic draws it."""
+    from verl.workers.comm_eff.activation_mask import prf_token_mask
+
+    return prf_token_mask(
+        sid,
+        pos,
+        layer_idx=layer,
+        global_step=step,
+        base_seed=seed,
+        hidden_size=hidden_size,
+        p=0.0,
+        device=CPU,
+        dtype=torch.float32,
+        exact_k=True,
+        exact_keep=k,
+    ).bool()
+
+
+def test_subset_zero_is_full_width_regression():
+    """subset_k=0 (and the omitted default) is byte-identical to full width."""
+    torch.manual_seed(0)
+    h = torch.randn(4, 8, 16)
+    sid, pos = _ids_for(4, 8)
+    for rounding in ("sr", "rn"):
+        for block_size in (0, 8):
+            kw = _sr_kwargs(step=3, bits=1, block_size=block_size)
+            kw["rounding"] = rounding
+            base = sr_quantize(h, sid, pos, **kw)
+            assert torch.equal(base, sr_quantize(h, sid, pos, **kw, subset_k=0))
+
+
+def test_subset_keeps_exactly_k_zero_elsewhere_mask_keyed():
+    """Support of q is EXACTLY the mask codec's exact-k order-statistic J."""
+    torch.manual_seed(0)
+    H, k = 32, 7
+    h = torch.randn(6, H)
+    sid, pos = _ids_for(6, 1)
+    q = sr_quantize(h, sid, pos, **_sr_kwargs(step=5, bits=2, block_size=4), subset_k=k).reshape(-1, H)
+    keep = _subset_keep_mask(sid, pos, layer=3, step=5, seed=0, hidden_size=H, k=k)
+    # bits=2 levels exclude 0 on a clamped-positive scale, so support == J.
+    assert torch.equal(q != 0, keep)
+    assert int((q != 0).sum(dim=-1).unique()) == k
+
+
+def test_subset_unbiased_through_subset_and_rounding():
+    """E[q] = h over BOTH randomness sources: average over many PRF base seeds
+    (each seed refreshes the subset J and the SR uniforms) and bound the error
+    by the empirical CLT standard error per element."""
+    torch.manual_seed(0)
+    H, k, n_seeds = 32, 8, 3000
+    h = torch.randn(8, H)
+    sid, pos = _ids_for(8, 1)
+    total = torch.zeros((8, H), dtype=torch.float64)
+    total_sq = torch.zeros((8, H), dtype=torch.float64)
+    for seed in range(n_seeds):
+        q = (
+            sr_quantize(h, sid, pos, **_sr_kwargs(step=0, seed=seed, bits=2, block_size=8), subset_k=k)
+            .reshape(-1, H)
+            .double()
+        )
+        total += q
+        total_sq += q * q
+    mean_q = total / n_seeds
+    var_q = (total_sq / n_seeds - mean_q * mean_q).clamp_min(0.0)
+    se = (var_q / n_seeds).sqrt()
+    err = (mean_q - h.double()).abs()
+    tol = 5.0 * se + 1e-6
+    assert torch.all(err <= tol), f"max unbiasedness violation {(err - tol).max().item():.3e}"
+
+
+def test_subset_pass_identity_and_step_freshness():
+    """Same (step, sample): bit-identical (J and SR shared); new step: fresh."""
+    torch.manual_seed(0)
+    h = torch.randn(4, 8, 32)
+    sid, pos = _ids_for(4, 8)
+    a = sr_quantize(h, sid, pos, **_sr_kwargs(step=7, bits=2, block_size=8), subset_k=9)
+    b = sr_quantize(h, sid, pos, **_sr_kwargs(step=7, bits=2, block_size=8), subset_k=9)
+    c = sr_quantize(h, sid, pos, **_sr_kwargs(step=8, bits=2, block_size=8), subset_k=9)
+    assert torch.equal(a, b)
+    assert not torch.equal(a, c)
+
+
+def test_subset_forward_backward_share_j_fresh_sr_subkey():
+    """The wires share ONE J (no direction in the subset key) while the SR
+    draw itself uses the fresh backward subkey."""
+    torch.manual_seed(0)
+    H, k = 32, 9
+    h = torch.randn(24, H)
+    sid, pos = _ids_for(24, 1)
+    kw = dict(bits=2, block_size=8)
+    q_fwd = sr_quantize(h, sid, pos, **_sr_kwargs(step=2, direction=FORWARD_DIRECTION, **kw), subset_k=k)
+    q_bwd = sr_quantize(h, sid, pos, **_sr_kwargs(step=2, direction=BACKWARD_DIRECTION, **kw), subset_k=k)
+    assert torch.equal(q_fwd != 0, q_bwd != 0)  # same J
+    assert not torch.equal(q_fwd, q_bwd)  # fresh SR subkey
+
+
+def test_subset_boundary_function_backward_subsets_gradient():
+    """BoundarySRQuant threads subset_k to the backward wire: h.grad is the
+    subset-quantized upstream gradient (same J as the forward, BACKWARD SR
+    subkey, H/k rescale: the exact adjoint of the forward's subset map plus
+    the quantized backward wire)."""
+    torch.manual_seed(0)
+    H, k = 32, 9
+    h = torch.randn(2, 8, H, requires_grad=True)
+    sid, pos = _ids_for(2, 8)
+    out = BoundarySRQuant.apply(h, sid, pos, 3, 4, 0, 2, 8, "sr", k)
+    g = torch.randn_like(out)
+    out.backward(g)
+    expect = sr_quantize(
+        g, sid, pos, **_sr_kwargs(step=4, direction=BACKWARD_DIRECTION, bits=2, block_size=8), subset_k=k
+    )
+    assert torch.equal(h.grad, expect)
+    assert torch.equal(out != 0, h.grad != 0)  # shared J across the wires
+
+
+def test_subset_cross_pass_identity_through_state():
+    """old/train/reference forwards of one step stay bit-identical with the
+    subset lever on (the PPO ratio identity survives I5)."""
+    torch.manual_seed(0)
+    state, _ = _make_quant_state(bits=2, block_size=8, mask_recompute=True, mask_reference=True, subset_k=9)
+    assert state.quantizer.subset_k == 9  # build() plumbs quant.subset_k
+    hook = state.quantizer._make_hook(3)
+    h = torch.randn(2, 8, 32)
+    outs = {}
+    for tag in (TRAIN_TAG, OLD_LOGPROB_TAG, REF_LOGPROB_TAG):
+        _set_ctx(state.quantizer, 2, 8, step=6)
+        state.set_path_tag(tag)
+        outs[tag] = hook(nn.Identity(), (), h.clone())
+    assert torch.equal(outs[TRAIN_TAG], outs[OLD_LOGPROB_TAG])
+    assert torch.equal(outs[TRAIN_TAG], outs[REF_LOGPROB_TAG])
+
+
+def test_subset_byte_accounting_parity_arm():
+    """The #93 4.3 parity arm: k=493, bits=2, block=32 on H=1536 =>
+    493*2 + 493*16/32 = 1232.5 logical bits/token/boundary (ceil 1233, vs the
+    prf exact-k incumbent's 77*16 = 1232); block_size=0 => k*bits + 16."""
+    q = ActivationQuantizer(bits=2, base_seed=0, pp_size=8, block_size=32, subset_k=493)
+    sid = torch.zeros(2, dtype=torch.int64)
+    pos = torch.arange(2)
+    q.set_context(global_step=0, sample_ids=sid, position_ids=pos)
+    q._make_hook(1)(nn.Identity(), (), torch.randn(1, 2, 1536))
+    assert q.logical_pp_bits_sr_quant == 493 * 2 + 493 * 16 / 32  # 1232.5
+    q0 = ActivationQuantizer(bits=2, base_seed=0, pp_size=8, block_size=0, subset_k=493)
+    q0.set_context(global_step=0, sample_ids=sid, position_ids=pos)
+    q0._make_hook(1)(nn.Identity(), (), torch.randn(1, 2, 1536))
+    assert q0.logical_pp_bits_sr_quant == 493 * 2 + 16
+    # And through comm_eff_metrics on the toy state.
+    state, model = _make_quant_state(bits=2, block_size=8, subset_k=16)
+    state.set_path_tag(TRAIN_TAG)
+    state.quantizer.register(model)
+    _set_ctx(state.quantizer, 2, 4, step=1)
+    model(torch.randn(2, 4, 32))
+    state.quantizer.unregister()
+    metrics = comm_eff_metrics(state)
+    assert metrics["comm_eff/logical_pp_bits_sr_quant"] == 16 * 2 + 16 * 16 / 8
+
+
+def test_subset_validation():
+    with pytest.raises(ValueError):
+        sr_quantize(torch.randn(2, 8), *_ids_for(2, 1), **_sr_kwargs(), subset_k=-1)
+    with pytest.raises(ValueError, match="exceeds the hidden size"):
+        sr_quantize(torch.randn(2, 8), *_ids_for(2, 1), **_sr_kwargs(), subset_k=9)
+    # The subset draw needs per-token identity even under rn (J is PRF-keyed).
+    kw = _sr_kwargs()
+    kw["rounding"] = "rn"
+    with pytest.raises(RuntimeError, match="identity"):
+        sr_quantize(torch.randn(2, 8), None, None, **kw, subset_k=4)
+    with pytest.raises(ValueError):
+        ActivationQuantizer(bits=1, base_seed=0, pp_size=8, subset_k=-1)
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffQuantConfig
+
+    with pytest.raises(ValueError, match="subset_k"):
+        CommEffConfig(quant=CommEffQuantConfig(subset_k=-1))
+    assert CommEffConfig(quant=CommEffQuantConfig(subset_k=493)).quant.subset_k == 493

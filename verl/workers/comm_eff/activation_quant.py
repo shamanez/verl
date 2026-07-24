@@ -35,6 +35,19 @@ draw; biased, an ablation control). Backward quantizes the upstream gradient
 onto its own grid (own blockwise absmax scales, fresh PRF ``direction`` subkey)
 and returns it, so ``E[g_hat] = g``.
 
+Subset mode (``subset_k > 0``, issue #93 I5, the byte-parity hybrid): per token
+draw a PRF-fresh EXACT-``subset_k`` channel subset ``J`` with the mask codec's
+order-statistic machinery (:func:`~verl.workers.comm_eff.activation_mask.\
+prf_token_mask` with ``exact_k=True``/``exact_keep``, keyed identically to the
+mask, so ``J`` is bit-identical across the old/train/ref passes of one step),
+apply the blockwise SR quantization to the ``J`` values only (blocks of
+``block_size`` CONSECUTIVE KEPT channels in ascending channel order), zero
+elsewhere, and rescale by ``H/|J|``. Unbiased through BOTH randomness sources:
+``P(j in J) = |J|/H`` by hash symmetry and ``E[SR(h_j) | J] = h_j``, so
+``E[q] = h``. The backward wire applies the SAME ``J`` (the exact adjoint of
+the subset+rescale map) with the backward SR subkey, so ``E[g_hat] = g``.
+``subset_k = 0`` (default) is the full-width codec, byte-identical to before.
+
 The PRF draw is keyed on ``(base_seed, layer_idx, global_step, sample_id,
 position_id, channel, direction)``: the mask PRF key plus a trailing
 ``direction`` component (0 forward / 1 backward). There is NO path-dependent
@@ -62,6 +75,7 @@ from verl.workers.comm_eff.activation_mask import (
     _u64_to_i64,
     decoder_boundary_indices,
     find_decoder_layers,
+    prf_token_mask,
 )
 from verl.workers.comm_eff.state import mask_eligible_tags
 
@@ -157,6 +171,39 @@ def _block_scales(m: torch.Tensor, *, hidden_size: int, block_size: int) -> tupl
     return s.contiguous(), n_blocks
 
 
+def _grid_round(
+    m: torch.Tensor, *, bits: int, block_size: int, rounding: str, u: Optional[torch.Tensor]
+) -> torch.Tensor:
+    """Round a ``(N, W)`` fp32 matrix onto its blockwise ``L = 2**bits`` grid.
+
+    Shared kernel for the full-width and gathered-subset paths. Blockwise scale
+    ``s`` = absmax over each contiguous ``block_size``-dim block of the width
+    axis (detached, fp32, ``clamp_min 1e-8``; ``block_size=0`` means one
+    whole-row scale); levels span ``[-s, +s]`` with spacing ``D = 2s/(L-1)``.
+    ``rounding="sr"``: ``k = floor((m+s)/D)`` clamped to ``[0, L-2]``,
+    ``lo = -s + k*D``, ``frac = (m - lo)/D`` in ``[0, 1]``,
+    ``q = lo + D * 1{u < frac}`` with the caller-supplied ``(N, W)`` float64
+    PRF uniform ``u``: ``E[q] = m`` exactly since ``|m| <= s`` within each
+    block. ``rounding="rn"``: deterministic round-to-nearest to the same grid
+    (``u`` ignored; biased, idempotent: the ablation control).
+    """
+    width = int(m.shape[-1])
+    n_levels = 2 ** int(bits)
+    s, _ = _block_scales(m, hidden_size=width, block_size=int(block_size))  # (N, W) fp32
+    spacing = (2.0 * s) / float(n_levels - 1)
+
+    if rounding == "rn":
+        # Deterministic round-to-nearest onto the same grid: no PRF draw, so
+        # cross-pass identity is trivial. Biased in general (E[q] != m).
+        idx = torch.round((m + s) / spacing).clamp_(0.0, float(n_levels - 1))
+        return -s + idx * spacing
+
+    k = torch.floor((m + s) / spacing).clamp_(0.0, float(n_levels - 2))
+    lo = -s + k * spacing
+    frac = ((m - lo) / spacing).clamp_(0.0, 1.0)
+    return lo + spacing * (u < frac.to(torch.float64)).to(torch.float32)
+
+
 def sr_quantize(
     x: torch.Tensor,
     sample_ids: Optional[torch.Tensor],
@@ -169,20 +216,25 @@ def sr_quantize(
     direction: int = FORWARD_DIRECTION,
     block_size: int = 0,
     rounding: str = "sr",
+    subset_k: int = 0,
 ) -> torch.Tensor:
     """Quantize ``x`` onto ``L = 2**bits`` uniform levels per (token, block).
 
-    Blockwise scale ``s`` = absmax over each contiguous ``block_size``-dim block
-    of the hidden dim (detached, fp32, ``clamp_min 1e-8``; ``block_size=0``
-    means one whole-token scale); levels span ``[-s, +s]`` with spacing
-    ``D = 2s/(L-1)``. ``rounding="sr"``: ``k = floor((x+s)/D)`` clamped to
-    ``[0, L-2]``, ``lo = -s + k*D``, ``frac = (x - lo)/D`` in ``[0, 1]``,
-    ``q = lo + D * 1{u < frac}`` with the PRF uniform ``u`` keyed per
-    ``(token, channel, direction)``: ``E[q] = x`` exactly since ``|x| <= s``
-    within each block. ``rounding="rn"``: deterministic round-to-nearest to the
-    same level grid (no PRF draw; biased, idempotent: the ablation control).
-    Arithmetic runs in fp32; the result is cast back to ``x.dtype``. An
-    all-zero token (``s`` clamped) yields ``|q| <= 1e-8`` and no NaN.
+    Full-width mode (``subset_k=0``, default): every channel is rounded onto
+    its blockwise grid (see :func:`_grid_round`). Arithmetic runs in fp32; the
+    result is cast back to ``x.dtype``. An all-zero token (``s`` clamped)
+    yields ``|q| <= 1e-8`` and no NaN.
+
+    Subset mode (``subset_k > 0``, issue #93 I5): draw the per-token PRF-fresh
+    EXACT-``subset_k`` channel subset ``J`` via ``prf_token_mask(exact_k=True,
+    exact_keep=subset_k)`` (keyed exactly like the mask codec: no ``direction``
+    component, so forward and backward share ``J`` and every pass of one step
+    sees the same ``J``), gather the kept values in ascending channel order,
+    round them on THEIR OWN blockwise grid (blocks of ``block_size``
+    consecutive kept channels; the SR uniform is still keyed by the ORIGINAL
+    channel index), scatter back, zero elsewhere, and rescale by
+    ``H/subset_k``. Unbiased through both the subset draw and the stochastic
+    rounding: ``E[q] = (H/k) * P(j in J) * E[SR(h_j) | J] = h``.
     """
     if bits < 1:
         raise ValueError(f"quant bits must be >= 1; got {bits}")
@@ -190,40 +242,67 @@ def sr_quantize(
         raise ValueError(f"quant block_size must be >= 0; got {block_size}")
     if rounding not in ROUNDING_MODES:
         raise ValueError(f"quant rounding must be one of {ROUNDING_MODES}; got {rounding!r}")
+    if subset_k < 0:
+        raise ValueError(f"quant subset_k must be >= 0 (0 = full-width); got {subset_k}")
     hidden_size = int(x.shape[-1])
     orig_shape = x.shape
     orig_dtype = x.dtype
     m = x.detach().reshape(-1, hidden_size).to(torch.float32)
-    n_levels = 2 ** int(bits)
-    s, _ = _block_scales(m, hidden_size=hidden_size, block_size=int(block_size))  # (N, H) fp32
-    spacing = (2.0 * s) / float(n_levels - 1)
 
-    if rounding == "rn":
-        # Deterministic round-to-nearest onto the same grid: no PRF draw, so
-        # cross-pass identity is trivial. Biased in general (E[q] != x).
-        idx = torch.round((m + s) / spacing).clamp_(0.0, float(n_levels - 1))
-        q = -s + idx * spacing
+    # The subset draw needs per-token identity even under rn (J is PRF-keyed).
+    if (rounding == "sr" or subset_k > 0) and (sample_ids is None or position_ids is None):
+        raise RuntimeError(
+            "sr_quantize requires per-token identity for the PRF draw: pass "
+            "sample_ids/position_ids (rounding='sr' and/or subset_k > 0; the "
+            "PRF has no positional fallback)."
+        )
+
+    def _uniform() -> torch.Tensor:
+        return prf_token_uniform(
+            sample_ids,
+            position_ids,
+            layer_idx=layer_idx,
+            global_step=global_step,
+            base_seed=base_seed,
+            hidden_size=hidden_size,
+            direction=direction,
+            device=m.device,
+        )
+
+    if subset_k == 0:
+        u = _uniform() if rounding == "sr" else None
+        q = _grid_round(m, bits=bits, block_size=int(block_size), rounding=rounding, u=u)
         return q.reshape(orig_shape).to(orig_dtype)
 
-    if sample_ids is None or position_ids is None:
-        raise RuntimeError(
-            "sr_quantize(rounding='sr') requires per-token identity: pass "
-            "sample_ids/position_ids (the PRF draw has no positional fallback)."
-        )
-    k = torch.floor((m + s) / spacing).clamp_(0.0, float(n_levels - 2))
-    lo = -s + k * spacing
-    frac = ((m - lo) / spacing).clamp_(0.0, 1.0)
-    u = prf_token_uniform(
+    if subset_k > hidden_size:
+        raise ValueError(f"quant subset_k={subset_k} exceeds the hidden size H={hidden_size}")
+    keep = prf_token_mask(
         sample_ids,
         position_ids,
         layer_idx=layer_idx,
         global_step=global_step,
         base_seed=base_seed,
         hidden_size=hidden_size,
-        direction=direction,
+        p=0.0,  # exact_keep overrides the keep count; p never enters the key
         device=m.device,
-    )
-    q = lo + spacing * (u < frac.to(torch.float64)).to(torch.float32)
+        dtype=torch.float32,
+        exact_k=True,
+        exact_keep=int(subset_k),
+    ).bool()
+    n_tokens = m.shape[0]
+    # Row-major boolean gather => exactly subset_k kept channels per token, in
+    # ascending channel order (the wire's packing order).
+    channel = torch.arange(hidden_size, device=m.device).expand(n_tokens, hidden_size)
+    kept_idx = channel[keep].reshape(n_tokens, int(subset_k))
+    m_kept = m[keep].reshape(n_tokens, int(subset_k))
+    u_kept = None
+    if rounding == "sr":
+        # Keyed by the ORIGINAL channel index: gather-order-independent, and
+        # bit-identical to the full-width draw at the same (token, channel).
+        u_kept = _uniform()[keep].reshape(n_tokens, int(subset_k))
+    q_kept = _grid_round(m_kept, bits=bits, block_size=int(block_size), rounding=rounding, u=u_kept)
+    q = torch.zeros_like(m)
+    q.scatter_(1, kept_idx, q_kept * (float(hidden_size) / float(subset_k)))
     return q.reshape(orig_shape).to(orig_dtype)
 
 
@@ -238,7 +317,10 @@ class BoundarySRQuant(torch.autograd.Function):
     ``global_step`` the old-logprob / train / reference forwards and any
     gradient-checkpoint recompute are bit-identical (the PPO ratio identity is
     preserved), while every new ``global_step`` draws fresh. ``rounding="rn"``
-    applies deterministic round-to-nearest on both wires instead.
+    applies deterministic round-to-nearest on both wires instead. Subset mode
+    (``subset_k > 0``) shares one PRF subset ``J`` between the wires (its key
+    has no direction component), so the backward's subset+rescale is the exact
+    adjoint of the forward's and only the SR draw uses the backward subkey.
     """
 
     @staticmethod
@@ -253,9 +335,18 @@ class BoundarySRQuant(torch.autograd.Function):
         bits: int,
         block_size: int = 0,
         rounding: str = "sr",
+        subset_k: int = 0,
     ) -> torch.Tensor:
         ctx.save_for_backward(sample_ids, position_ids)
-        ctx.quant_key = (int(layer_idx), int(global_step), int(base_seed), int(bits), int(block_size), str(rounding))
+        ctx.quant_key = (
+            int(layer_idx),
+            int(global_step),
+            int(base_seed),
+            int(bits),
+            int(block_size),
+            str(rounding),
+            int(subset_k),
+        )
         return sr_quantize(
             h,
             sample_ids,
@@ -267,12 +358,13 @@ class BoundarySRQuant(torch.autograd.Function):
             direction=FORWARD_DIRECTION,
             block_size=block_size,
             rounding=rounding,
+            subset_k=subset_k,
         )
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         sample_ids, position_ids = ctx.saved_tensors
-        layer_idx, global_step, base_seed, bits, block_size, rounding = ctx.quant_key
+        layer_idx, global_step, base_seed, bits, block_size, rounding, subset_k = ctx.quant_key
         g_hat = sr_quantize(
             grad_output,
             sample_ids,
@@ -284,8 +376,9 @@ class BoundarySRQuant(torch.autograd.Function):
             direction=BACKWARD_DIRECTION,
             block_size=block_size,
             rounding=rounding,
+            subset_k=subset_k,
         )
-        return g_hat, None, None, None, None, None, None, None, None
+        return g_hat, None, None, None, None, None, None, None, None, None
 
 
 class ActivationQuantizer:
@@ -314,6 +407,7 @@ class ActivationQuantizer:
         pp_size: int = 8,
         block_size: int = 32,
         rounding: str = "sr",
+        subset_k: int = 0,
         state: Any = None,
     ):
         if isinstance(bits, bool) or int(bits) < 1:
@@ -322,11 +416,14 @@ class ActivationQuantizer:
             raise ValueError(f"quant block_size must be an integer >= 0; got {block_size!r}")
         if str(rounding) not in ROUNDING_MODES:
             raise ValueError(f"quant rounding must be one of {ROUNDING_MODES}; got {rounding!r}")
+        if isinstance(subset_k, bool) or int(subset_k) < 0:
+            raise ValueError(f"quant subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
         self.bits = int(bits)
         self.base_seed = int(base_seed)
         self.pp_size = int(pp_size)
         self.block_size = int(block_size)
         self.rounding = str(rounding)
+        self.subset_k = int(subset_k)
         self._state = state  # CommEffState, for the applications counter
         self._handles: list[Any] = []
         self._boundary_set: set[int] = set()
@@ -336,8 +433,10 @@ class ActivationQuantizer:
         self._sample_ids: Optional[torch.Tensor] = None
         self._position_ids: Optional[torch.Tensor] = None
         # Hidden size H, recorded on first fire. Used to surface the logical PP
-        # bit budget H*bits + n_blocks*16 (payload + fp16 blockwise scales) per
-        # token per boundary, the sr_quant analogue of logical_pp_bytes_prf.
+        # bit budget per token per boundary, the sr_quant analogue of
+        # logical_pp_bytes_prf: H*bits + n_blocks*16 full-width (payload + fp16
+        # blockwise scales), k*bits + k*16/block in subset mode (kept payload +
+        # pro-rata scales; J costs no index bits, it is PRF-derivable).
         self.hidden_size: Optional[int] = None
         self.logical_pp_bits_sr_quant: Optional[float] = None
 
@@ -379,13 +478,24 @@ class ActivationQuantizer:
             hidden_size = h.shape[-1]
             if quantizer.hidden_size is None:
                 quantizer.hidden_size = int(hidden_size)
-            eff_block = (
-                int(hidden_size)
-                if (quantizer.block_size <= 0 or quantizer.block_size >= int(hidden_size))
-                else quantizer.block_size
-            )
-            n_blocks = (int(hidden_size) + eff_block - 1) // eff_block
-            quantizer.logical_pp_bits_sr_quant = float(int(hidden_size) * quantizer.bits + n_blocks * _SCALE_BITS)
+            if quantizer.subset_k > 0:
+                # Subset wire: only the subset_k kept values cross, packed
+                # contiguously with one fp16 scale per block_size KEPT channels.
+                # The ragged tail block is counted pro-rata (16/block bits per
+                # kept channel), the #93 4.3 parity accounting: k=493, bits=2,
+                # block=32 -> 493*2 + 493*16/32 = 1232.5 (vs incumbent 1232).
+                # J itself is PRF-derivable at the receiver: zero index bits.
+                k = quantizer.subset_k
+                eff_block = k if (quantizer.block_size <= 0 or quantizer.block_size >= k) else quantizer.block_size
+                quantizer.logical_pp_bits_sr_quant = float(k * quantizer.bits + k * _SCALE_BITS / eff_block)
+            else:
+                eff_block = (
+                    int(hidden_size)
+                    if (quantizer.block_size <= 0 or quantizer.block_size >= int(hidden_size))
+                    else quantizer.block_size
+                )
+                n_blocks = (int(hidden_size) + eff_block - 1) // eff_block
+                quantizer.logical_pp_bits_sr_quant = float(int(hidden_size) * quantizer.bits + n_blocks * _SCALE_BITS)
             n_tokens = h.numel() // hidden_size
             sample_ids = quantizer._sample_ids
             position_ids = quantizer._position_ids
@@ -412,6 +522,7 @@ class ActivationQuantizer:
                 quantizer.bits,
                 quantizer.block_size,
                 quantizer.rounding,
+                quantizer.subset_k,
             )
             if state is not None:
                 if hasattr(state, "note_mask_application"):
@@ -448,13 +559,14 @@ class ActivationQuantizer:
             self._handles.append(layers[idx].register_forward_hook(self._make_hook(idx)))
         logger.info(
             "comm_eff.activation_quant: registered hooks on boundaries %s "
-            "(L=%d, pp_size=%d, bits=%d, block_size=%d, rounding=%s)",
+            "(L=%d, pp_size=%d, bits=%d, block_size=%d, rounding=%s, subset_k=%d)",
             self.boundary_indices,
             len(layers),
             self.pp_size,
             self.bits,
             self.block_size,
             self.rounding,
+            self.subset_k,
         )
 
     def unregister(self) -> None:

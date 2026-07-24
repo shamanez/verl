@@ -194,11 +194,22 @@ class CommEffQuantConfig(BaseConfig):
             rounding; ``rn`` = deterministic round-to-nearest to the same level
             grid (no PRF draw, trivially pass-identical, biased: the required
             ablation control).
+        subset_k (int): ``0`` (default) = full-width quantization of all ``H``
+            channels. ``> 0`` (issue #93 I5, the byte-parity hybrid): per token
+            quantize only a PRF-fresh EXACT-``subset_k`` channel subset ``J``
+            (drawn with the mask codec's order-statistic machinery, keyed
+            identically, so ``J`` is bit-identical across the old/train/ref
+            passes of one step), zero elsewhere, rescale by ``H/subset_k``
+            (``E[q] = h`` through both the subset draw and the rounding).
+            Blocks then span ``subset_k`` consecutive KEPT channels; logical PP
+            bits per token per boundary become
+            ``subset_k*bits + subset_k*16/block_size`` (pro-rata tail).
     """
 
     bits: int = 1
     block_size: int = 32
     rounding: str = "sr"
+    subset_k: int = 0
 
 
 @dataclass
@@ -498,6 +509,9 @@ class CommEffConfig(BaseConfig):
             )
         if str(self.quant.rounding) not in ("sr", "rn"):
             raise ValueError(f"comm_eff.quant.rounding must be one of (sr, rn); got {self.quant.rounding!r}")
+        subset_k = self.quant.subset_k
+        if isinstance(subset_k, bool) or not isinstance(subset_k, int) or subset_k < 0:
+            raise ValueError(f"comm_eff.quant.subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
