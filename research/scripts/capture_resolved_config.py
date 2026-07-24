@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Extract the GROUND-TRUTH resolved parameters of a training run from its log.
 
 After many experiments it is easy to lose track of what settings an agent
@@ -19,6 +33,7 @@ Usage:
   python research/scripts/capture_resolved_config.py runs/<run-id>
   python research/scripts/capture_resolved_config.py runs/<run-id>/train.log
 """
+
 import shlex
 import sys
 from pathlib import Path
@@ -52,7 +67,7 @@ def find_commands(log_text: str):
         # Drop the `set -x` prefix ("+ ", "++ ") and any Ray "(TaskRunner …) "
         # banner by slicing from "python3" onward.
         py = line.find("python3", 0, idx + len("python3"))
-        cmds.append(line[py if py != -1 else idx:].rstrip())
+        cmds.append(line[py if py != -1 else idx :].rstrip())
     return cmds
 
 
@@ -90,8 +105,7 @@ def main(argv):
     cmds = find_commands(log.read_text(errors="replace"))
     if not cmds:
         print(
-            f"capture_resolved_config: no '{MARKER}' invocation found in {log} "
-            "(was the launcher run under `set -x`?)",
+            f"capture_resolved_config: no '{MARKER}' invocation found in {log} (was the launcher run under `set -x`?)",
             file=sys.stderr,
         )
         return 1
@@ -112,17 +126,14 @@ def main(argv):
             f"# NOTE: {len(cmds)} main_ppo invocations in this run; this file reflects "
             "the LAST. See resolved_cmd.txt for all."
         )
-    (run_dir / "resolved_params.txt").write_text(
-        "\n".join(header) + "\n" + "\n".join(lines) + "\n"
-    )
+    (run_dir / "resolved_params.txt").write_text("\n".join(header) + "\n" + "\n".join(lines) + "\n")
 
     # Human summary to stdout.
-    print(f"captured {len(params)} resolved params from {log} "
-          f"({len(cmds)} main_ppo invocation(s)) -> {run_dir}/resolved_params.txt")
-    headline = [
-        (k, params[k]) for k in sorted(params)
-        if any(k.startswith(p) for p in HEADLINE_PREFIXES)
-    ]
+    print(
+        f"captured {len(params)} resolved params from {log} "
+        f"({len(cmds)} main_ppo invocation(s)) -> {run_dir}/resolved_params.txt"
+    )
+    headline = [(k, params[k]) for k in sorted(params) if any(k.startswith(p) for p in HEADLINE_PREFIXES)]
     if headline:
         print("headline knobs (the ones that drift):")
         for k, v in headline:

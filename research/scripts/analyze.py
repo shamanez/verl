@@ -1,3 +1,17 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Analyse a finished experiment and emit a verdict.md skeleton.
 
 Called by the analyst subagent as:
@@ -13,6 +27,7 @@ Default behaviour (sufficient for M0 smoke):
 This script is intentionally a scaffold. Per-experiment plans wire their own
 predicates by passing extra flags or by the analyst editing the emitted file.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,12 +57,12 @@ def _load_jsonl(p: Path) -> list[dict]:
 def _summarise(rows: list[dict]) -> dict:
     if not rows:
         return {"n_rows": 0}
-    keys = sorted({k for r in rows for k in r.keys()})
+    keys = sorted({k for r in rows for k in r.keys()})  # noqa: F841  (kept: documents the row schema)
     out: dict = {"n_rows": len(rows), "first": rows[0], "last": rows[-1]}
     nums = defaultdict(list)
     for r in rows:
         for k, v in r.items():
-            if isinstance(v, (int, float)) and v == v:  # filter NaN
+            if isinstance(v, int | float) and v == v:  # filter NaN
                 nums[k].append(v)
     out["min"] = {k: min(v) for k, v in nums.items()}
     out["max"] = {k: max(v) for k, v in nums.items()}
@@ -78,8 +93,7 @@ def _is_m0_smoke(run_dir: Path) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--emit", default="verdict.md",
-                    help="filename (inside run_dir) to write the verdict to")
+    ap.add_argument("--emit", default="verdict.md", help="filename (inside run_dir) to write the verdict to")
     args = ap.parse_args()
 
     run_dir: Path = args.run_dir.resolve()
@@ -116,8 +130,10 @@ def main() -> int:
         note = "done.flag not yet present; analyst should re-run after completion"
     else:
         verdict = "PENDING"
-        note = ("real experiment: analyst must fill success-criteria checkboxes by "
-                "applying the plan's predicate to the metrics summary below")
+        note = (
+            "real experiment: analyst must fill success-criteria checkboxes by "
+            "applying the plan's predicate to the metrics summary below"
+        )
 
     out = run_dir / args.emit
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
