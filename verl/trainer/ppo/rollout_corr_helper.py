@@ -1000,6 +1000,20 @@ def compute_offpolicy_metrics(
         chi2_seq = rho_squared_seq.mean() - 1.0
         metrics["chi2_seq"] = chi2_seq.detach().item()
 
+        # 2g. Log-ratio distribution over valid tokens.
+        # d = log(π_rollout) - log(π_training) per token; the quantiles/std
+        # characterize the SHAPE of the sampler/trainer mismatch (a heavy
+        # one-sided tail vs a symmetric wedge), which the mean KL alone hides.
+        # agree_frac_1nat is the fraction of tokens whose two policies agree
+        # within one nat (|d| < 1).
+        d = (rollout_log_prob - old_log_prob)[response_mask.bool()].to(torch.float32)
+        quantiles = torch.quantile(d, torch.tensor([0.10, 0.50, 0.90], device=d.device, dtype=d.dtype))
+        metrics["logratio_p10"] = quantiles[0].detach().item()
+        metrics["logratio_p50"] = quantiles[1].detach().item()
+        metrics["logratio_p90"] = quantiles[2].detach().item()
+        metrics["logratio_std"] = d.std().detach().item() if d.numel() > 1 else 0.0
+        metrics["agree_frac_1nat"] = (d.abs() < 1.0).float().mean().detach().item()
+
     return metrics
 
 
