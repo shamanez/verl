@@ -462,6 +462,30 @@ def test_logratio_distribution_metrics():
     assert "agree_frac_1nat" not in metrics_no_rollout
 
 
+def test_logratio_quantiles_above_torch_quantile_limit(monkeypatch):
+    """The quantile path must survive batches beyond torch.quantile's 2^24-element cap.
+
+    torch.quantile raises 'input tensor is too large' above 2^24 elements, which a
+    long-context train batch can exceed. Force the fallback by shrinking the module
+    limit and check the kthvalue nearest-rank path returns exact order statistics.
+    """
+    from verl.trainer.ppo import rollout_corr_helper as rch
+
+    monkeypatch.setattr(rch, "_QUANTILE_NUMEL_LIMIT", 3)
+
+    d = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])
+    p10, p50, p90 = rch._tensor_quantiles(d, (0.10, 0.50, 0.90))
+    # nearest-rank on sorted [0..4]: round(q*(n-1)) -> ranks 0, 2, 4.
+    assert p10 == pytest.approx(0.0)
+    assert p50 == pytest.approx(2.0)
+    assert p90 == pytest.approx(4.0)
+
+    # Below the (patched) limit the interpolating torch.quantile path is used.
+    small = torch.tensor([0.0, 1.0, 2.0])
+    q = rch._tensor_quantiles(small, (0.50,))
+    assert q[0] == pytest.approx(1.0)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Rollout Correction Test Suite")

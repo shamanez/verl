@@ -894,6 +894,25 @@ def compute_rollout_correction_and_rejection_mask(
     return rollout_is_weights_proto, modified_response_mask, metrics_scalar
 
 
+# torch.quantile rejects inputs above 2^24 elements; large train batches
+# (e.g. long-context arms) can exceed that in the pooled per-token tensor.
+_QUANTILE_NUMEL_LIMIT = 1 << 24
+
+
+def _tensor_quantiles(d: torch.Tensor, qs: tuple[float, ...]) -> list[float]:
+    """Quantiles of a 1-D tensor without torch.quantile's 2^24-element limit.
+
+    Uses torch.quantile (linear interpolation) when the input is small enough;
+    above the limit falls back to exact nearest-rank order statistics via
+    torch.kthvalue, which has no input-size limit.
+    """
+    n = d.numel()
+    if n <= _QUANTILE_NUMEL_LIMIT:
+        q = torch.quantile(d, torch.tensor(qs, device=d.device, dtype=d.dtype))
+        return [q[i].detach().item() for i in range(len(qs))]
+    return [d.kthvalue(min(n, max(1, round(q * (n - 1)) + 1))).values.detach().item() for q in qs]
+
+
 def compute_offpolicy_metrics(
     old_log_prob: torch.Tensor,
     rollout_log_prob: Optional[torch.Tensor],
@@ -1007,10 +1026,10 @@ def compute_offpolicy_metrics(
         # agree_frac_1nat is the fraction of tokens whose two policies agree
         # within one nat (|d| < 1).
         d = (rollout_log_prob - old_log_prob)[response_mask.bool()].to(torch.float32)
-        quantiles = torch.quantile(d, torch.tensor([0.10, 0.50, 0.90], device=d.device, dtype=d.dtype))
-        metrics["logratio_p10"] = quantiles[0].detach().item()
-        metrics["logratio_p50"] = quantiles[1].detach().item()
-        metrics["logratio_p90"] = quantiles[2].detach().item()
+        quantiles = _tensor_quantiles(d, (0.10, 0.50, 0.90))
+        metrics["logratio_p10"] = quantiles[0]
+        metrics["logratio_p50"] = quantiles[1]
+        metrics["logratio_p90"] = quantiles[2]
         metrics["logratio_std"] = d.std().detach().item() if d.numel() > 1 else 0.0
         metrics["agree_frac_1nat"] = (d.abs() < 1.0).float().mean().detach().item()
 
