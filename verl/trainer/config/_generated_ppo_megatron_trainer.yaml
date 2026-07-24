@@ -182,6 +182,11 @@ actor_rollout_ref:
         frlr_k: 44
         frlr_unbiased: false
         frlr_q_cadence: 1
+      quant:
+        _target_: verl.workers.config.CommEffQuantConfig
+        bits: 1
+        block_size: 32
+        rounding: sr
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

@@ -727,27 +727,29 @@ class FSDPEngine(BaseEngine):
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
 
     def _comm_eff_mask_active(self, forward_only: bool) -> bool:
-        """True iff the activation-mask (prf_mask codec) hooks should be live.
+        """True iff the boundary-codec (prf_mask / sr_quant) hooks should be live.
 
-        Masking is confined to the actor-train forward/backward by default,
+        The prf_mask masker and the sr_quant quantizer share one lifecycle:
+        both are confined to the actor-train forward/backward by default,
         additionally to the old-policy log-prob recompute when
         ``comm_eff.mask.mask_recompute=true``, and additionally to the frozen
-        reference-policy forward when ``comm_eff.mask.mask_reference=true``.
-        Returns False (strict no-op) unless an enabled state with the prf_mask
-        codec (``masker`` built), a live ``compression_active`` flag, and an
-        eligible ``path_tag`` is attached. The gate mirrors
-        ``_comm_eff_powersgd_active``; because the masker and the PowerSGD
-        compressor are mutually exclusive (state.build constructs exactly one),
-        only one of the two ``*_active`` gates can be positive for any forward.
-        The anchor pass (``path_tag=None``) never matches an eligible tag, so
-        anchors stay unmasked.
+        reference-policy forward when ``comm_eff.mask.mask_reference=true``
+        (sr_quant reuses the mask eligibility knobs). Returns False (strict
+        no-op) unless an enabled state with a built boundary codec (``masker``
+        or ``quantizer``), a live ``compression_active`` flag, and an eligible
+        ``path_tag`` is attached. The gate mirrors
+        ``_comm_eff_powersgd_active``; because the masker, the quantizer and
+        the PowerSGD compressor are mutually exclusive (state.build constructs
+        exactly one), only one of the ``*_active`` gates can be positive for
+        any forward. The anchor pass (``path_tag=None``) never matches an
+        eligible tag, so anchors stay uncompressed.
         """
         from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, REF_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
 
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
             return False
-        if getattr(state, "masker", None) is None:
+        if getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None:
             return False
         if not getattr(state, "compression_active", False):
             return False
@@ -774,7 +776,7 @@ class FSDPEngine(BaseEngine):
         return False
 
     def _comm_eff_register_mask_hooks(self) -> bool:
-        """Register the per-element mask hooks on the boundary decoder blocks.
+        """Register the boundary-codec (mask or quant) hooks on the boundary blocks.
 
         The per-token PRF context (``global_step`` + token-aligned
         ``sample_ids`` / ``position_ids``) is set per micro-batch in
@@ -782,7 +784,9 @@ class FSDPEngine(BaseEngine):
         micro-batch is packed. SP guard mirrors the PowerSGD path: the key is
         aligned to the rmpad token axis, which Ulysses SP>1 slices/pads across
         ranks (out of scope); refuse it loudly. Returns True if hooks were
-        registered.
+        registered. The prf_mask masker and the sr_quant quantizer expose the
+        identical register/set_context/unregister surface, so one call site
+        serves both codecs.
         """
         if getattr(self, "ulysses_sequence_parallel_size", 1) and self.ulysses_sequence_parallel_size > 1:
             raise NotImplementedError(
@@ -791,7 +795,7 @@ class FSDPEngine(BaseEngine):
                 "set ulysses_sequence_parallel_size=1 for this codec."
             )
         state = self._comm_eff_state
-        masker = state.masker
+        masker = state.masker if state.masker is not None else state.quantizer
         masker.register(self.module)
         return masker.is_registered
 
@@ -821,6 +825,10 @@ class FSDPEngine(BaseEngine):
         if state is None:
             return
         masker = getattr(state, "masker", None)
+        if masker is None:
+            # The sr_quant quantizer shares the masker's context surface
+            # (set_context keyed on the same stable per-token ids).
+            masker = getattr(state, "quantizer", None)
         if masker is None or not masker.is_registered:
             return
         if not getattr(input_ids, "is_nested", False):
@@ -865,9 +873,9 @@ class FSDPEngine(BaseEngine):
         _powersgd_hooks_live = self._comm_eff_powersgd_active(forward_only=forward_only)
         if _powersgd_hooks_live:
             _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
-        # Register the prf_mask codec around the same eligible forwards. The mask
-        # and PowerSGD compressors are mutually exclusive, so at most one of these
-        # two is live per forward.
+        # Register the prf_mask / sr_quant boundary codec around the same eligible
+        # forwards. The mask, quantizer and PowerSGD compressors are mutually
+        # exclusive, so at most one codec is live per forward.
         _mask_hooks_live = self._comm_eff_mask_active(forward_only=forward_only)
         if _mask_hooks_live:
             _mask_hooks_live = self._comm_eff_register_mask_hooks()
@@ -941,7 +949,10 @@ class FSDPEngine(BaseEngine):
             if _powersgd_hooks_live:
                 self._comm_eff_state.powersgd.unregister()
             if _mask_hooks_live:
-                self._comm_eff_state.masker.unregister()
+                _codec = self._comm_eff_state.masker
+                if _codec is None:
+                    _codec = self._comm_eff_state.quantizer
+                _codec.unregister()
 
     def _forward_backward_batch_inner(
         self,
@@ -2881,8 +2892,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # Bump the PowerSGD forward generation and stamp the step before the
             # boundary projection hooks fire (no-op unless powersgd is live).
             self._comm_eff_maybe_set_powersgd_context(micro_batch, input_ids)
-            # Set the per-token PRF mask context before the boundary mask hooks
-            # fire (no-op unless the prf_mask codec is live).
+            # Set the per-token PRF context before the boundary mask/quant hooks
+            # fire (no-op unless the prf_mask or sr_quant codec is live).
             self._comm_eff_maybe_set_mask_context(micro_batch, input_ids)
             # support per sample temperature
             # temperature (bsz,)

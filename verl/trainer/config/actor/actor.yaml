@@ -295,7 +295,7 @@ comm_eff:
   # Dense compatibility is the strict enabled=false path.
   enabled: false
 
-  # The supported lossy activation codec is PowerSGD.
+  # Boundary activation codec: dense | prf_mask | powersgd | sr_quant.
   compression_type: powersgd
 
   # PRF per-(token, dimension) pipeline-boundary activation mask. Inert while
@@ -321,6 +321,20 @@ comm_eff:
     frlr_k: 44
     frlr_unbiased: false
     frlr_q_cadence: 1
+
+  # Dense low-bit stochastic-rounding quantization of pipeline-boundary
+  # activations (and of the boundary backward gradient). Active only when
+  # compression_type=sr_quant; reuses mask.{seed,pp_size,mask_recompute,
+  # mask_reference} for keying and eligibility (mask.p / rescale / exact_k /
+  # antithetic / frlr are ignored). Fields mirror
+  # verl.workers.config.CommEffQuantConfig exactly.
+  quant:
+
+    _target_: verl.workers.config.CommEffQuantConfig
+
+    bits: 1
+    block_size: 32
+    rounding: sr
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:

@@ -728,7 +728,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # (mask_eligible_tags) gates it identically. This makes the
                 # reference-KL a codec-vs-codec quantity (masked-current vs
                 # masked-reference), comparable to PowerSGD's compress_reference.
-                masker_reference = getattr(comm_eff_state, "masker", None) is not None and mask_reference
+                # The sr_quant codec reuses the same mask_reference knob for its
+                # reference-forward eligibility (quantized-current vs
+                # quantized-reference).
+                boundary_codec = getattr(comm_eff_state, "masker", None)
+                if boundary_codec is None:
+                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                masker_reference = boundary_codec is not None and mask_reference
                 if powersgd_reference or masker_reference:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
@@ -767,8 +773,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 powersgd_recompute = getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute
                 # The prf_mask codec masks the old-logprob recompute only when
                 # mask.mask_recompute is set; the mask hook's eligibility check
-                # (mask_eligible_tags) gates it identically.
-                masker_recompute = getattr(comm_eff_state, "masker", None) is not None and mask_recompute
+                # (mask_eligible_tags) gates it identically. The sr_quant codec
+                # reuses the same mask_recompute knob.
+                boundary_codec = getattr(comm_eff_state, "masker", None)
+                if boundary_codec is None:
+                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                masker_recompute = boundary_codec is not None and mask_recompute
                 if powersgd_recompute or masker_recompute:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
@@ -889,14 +899,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
         """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
 
-        The prf_mask codec keys each token's mask on ``(sample_id, position_id)``;
-        ``sample_id`` is the row's index in this rank's batch. compute_log_prob
-        and update_actor receive that batch in identical row order, so the id is
-        consistent across both forwards and rides each row through PPO mini-batch
-        splitting / dynamic-bsz repacking. No-op when the mask codec is off (no
-        masker built); the PowerSGD and dense paths never see the extra column.
+        The prf_mask and sr_quant codecs key each token's draw on
+        ``(sample_id, position_id)``; ``sample_id`` is the row's index in this
+        rank's batch. compute_log_prob and update_actor receive that batch in
+        identical row order, so the id is consistent across both forwards and
+        rides each row through PPO mini-batch splitting / dynamic-bsz
+        repacking. No-op when neither per-token codec is live (no masker or
+        quantizer built); the PowerSGD and dense paths never see the extra
+        column.
         """
-        if state is None or getattr(state, "masker", None) is None:
+        if state is None or (getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None):
             return
         if "comm_eff_sample_id" in data.keys():
             return

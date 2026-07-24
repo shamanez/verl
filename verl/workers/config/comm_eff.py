@@ -32,6 +32,7 @@ from verl.base_config import BaseConfig
 
 __all__ = [
     "CommEffMaskConfig",
+    "CommEffQuantConfig",
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
@@ -41,8 +42,9 @@ __all__ = [
 # The compression codecs ``comm_eff.compression_type`` may select. Exactly one
 # codec is active per run (mutually exclusive). ``dense`` leaves the activation
 # path uncompressed; ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask;
-# ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``.
-COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd")
+# ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``;
+# ``sr_quant`` is the dense low-bit stochastic-rounding boundary quantizer.
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant")
 
 
 @dataclass
@@ -156,6 +158,47 @@ class CommEffMaskConfig(BaseConfig):
 
 
 @dataclass
+class CommEffQuantConfig(BaseConfig):
+    """Dense stochastic-rounding boundary-activation quantization (inert while disabled).
+
+    The sr_quant codec, selected by ``comm_eff.compression_type='sr_quant'``:
+    every pipeline-boundary hidden-state channel is quantized in-graph to
+    ``bits`` bits per value with blockwise absmax scales and unbiased stochastic
+    rounding (``E[q] = h``), and the upstream gradient at the same boundary is
+    quantized the same way on backward (``E[g_hat] = g``, fresh PRF
+    ``direction`` subkey). ``rounding='rn'`` swaps in deterministic
+    round-to-nearest (biased; the ablation control). See
+    ``verl.workers.comm_eff.activation_quant``.
+
+    Knob reuse: sr_quant reuses the ``mask`` sub-config for eligibility and
+    keying: ``mask.mask_recompute`` / ``mask.mask_reference`` widen the
+    eligible path tags exactly as for prf_mask, and ``mask.seed`` /
+    ``mask.pp_size`` provide the PRF base seed and the boundary placement.
+    ``mask.p`` / ``rescale*`` / ``exact_k`` / ``antithetic`` / ``frlr*`` are
+    IGNORED by sr_quant. Like prf_mask, sr_quant carries no PowerSGD basis, so
+    the anchor cannot own ``Q`` under this codec (``anchor.owns_q=false``).
+
+    Args:
+        bits (int): Quantization width per channel; ``L = 2**bits`` uniform
+            levels span ``[-s, +s]`` per (token, block). Default 1 (sign-like:
+            ``q in {-s, +s}`` with ``P(+s) = (h/s + 1)/2``).
+        block_size (int): Channels per absmax-scale block within a token
+            (QSGD-style bucketing). ``0`` (or ``>= hidden_size``) means one
+            whole-token scale. Default 32. Logical PP bits per token per
+            boundary: ``hidden_size*bits + ceil(hidden_size/block_size)*16``
+            (one fp16 scale per block).
+        rounding (str): ``sr`` (default) = unbiased PRF-keyed stochastic
+            rounding; ``rn`` = deterministic round-to-nearest to the same level
+            grid (no PRF draw, trivially pass-identical, biased: the required
+            ablation control).
+    """
+
+    bits: int = 1
+    block_size: int = 32
+    rounding: str = "sr"
+
+
+@dataclass
 class CommEffAnchorConfig(BaseConfig):
     """Delayed dense anchor and RELEX weight-projection configuration.
 
@@ -259,6 +302,7 @@ class CommEffConfig(BaseConfig):
     enabled: bool = False
     compression_type: str = "powersgd"
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
+    quant: CommEffQuantConfig = field(default_factory=CommEffQuantConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
@@ -274,6 +318,7 @@ class CommEffConfig(BaseConfig):
             )
 
         self._validate_mask()
+        self._validate_quant()
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
@@ -343,6 +388,20 @@ class CommEffConfig(BaseConfig):
                     f"residual-norm matching. Got rescale={self.mask.rescale}, "
                     f"rescale_mode={self.mask.rescale_mode!r}."
                 )
+
+    def _validate_quant(self) -> None:
+        """Validate the sr_quant sub-config (no allocation, no RNG)."""
+
+        bits = self.quant.bits
+        if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 16:
+            raise ValueError(f"comm_eff.quant.bits must be an integer in [1, 16]; got {bits!r}")
+        block_size = self.quant.block_size
+        if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 0:
+            raise ValueError(
+                f"comm_eff.quant.block_size must be an integer >= 0 (0 = whole-token scale); got {block_size!r}"
+            )
+        if str(self.quant.rounding) not in ("sr", "rn"):
+            raise ValueError(f"comm_eff.quant.rounding must be one of (sr, rn); got {self.quant.rounding!r}")
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
@@ -505,6 +564,13 @@ class CommEffConfig(BaseConfig):
                 "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false: the PRF "
                 "activation mask has no PowerSGD basis Q for the anchor to own."
             )
+        # The SR boundary quantizer is likewise anchor-independent and carries
+        # no PowerSGD basis, so the anchor cannot own a Q under this codec.
+        if self.compression_type == "sr_quant" and self.anchor.owns_q:
+            raise ValueError(
+                "comm_eff.compression_type='sr_quant' requires anchor.owns_q=false: the SR "
+                "boundary quantizer has no PowerSGD basis Q for the anchor to own."
+            )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")
         if self.compression_type == "powersgd" and self.anchor.owns_q and not self.anchor.enabled:
@@ -535,10 +601,10 @@ class CommEffConfig(BaseConfig):
             if not self.anchor.owns_q:
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
         # fast_q_bootstrap is a PowerSGD-only feature. It is inert for the
-        # prf_mask codec (no PowerSGD compressor is built), so leaving the
-        # launcher default fast_q_bootstrap=true on a prf_mask arm must not error;
-        # the powersgd path validation below is unchanged.
-        if self.powersgd.fast_q_bootstrap and self.compression_type != "prf_mask":
+        # prf_mask and sr_quant codecs (no PowerSGD compressor is built), so
+        # leaving the launcher default fast_q_bootstrap=true on such an arm must
+        # not error; the powersgd path validation below is unchanged.
+        if self.powersgd.fast_q_bootstrap and self.compression_type not in ("prf_mask", "sr_quant"):
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
             if not self.anchor.owns_q:
