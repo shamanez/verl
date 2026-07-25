@@ -1,0 +1,382 @@
+############################################################
+# analysis-a4.log  -  issue #93 round-A cell a4-prf-exactk-cvc-ce
+# WandB 8rux5ea6  project 93-long-horizon-stability  entity shamanework-pl
+# generated 2026-07-25T08:16:44Z on the laptop; NO box access (a5 is training)
+############################################################
+
+== SECTION 1: plan verification command, gate93.py, verbatim stdout ==
+$ python3 scripts/gate93.py --run 8rux5ea6 --gate-lo 100 --gate-hi 120 --json runs/93-long-horizon-stability/metrics/a4_gate.json
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== gate93: a4-prf-exactk-cvc-ce (8rux5ea6) state=finished max_step=120 ===
+gate window: steps 100-120  (21 rows)
+
+  reference KL (actor/kl_loss)   gate=0.1810   slope=+0.00152/step   [baseline 0.156-0.203]
+  train-inference gap (rc/kl)    gate=14.247    slope=+0.00513/step   [baseline 14.24; beat<10.0 target<3.0]
+  E[rho]=k3-kl+1                 gate=0.0032   [baseline 0.0014]
+  reward slope (full)            +0.00321/step   gate-win -0.00024/step   [baseline 0.0032; 90%=0.00288]
+  actor/ppo_kl max|.|            0.00e+00   (within-step identity; want ~0)
+  entropy                        gate=7.816   slope=+0.00009/step
+  grad_norm max                  3.622
+  confinement counters (last)    {'mask_applications': 78274.0, 'spectral_corrections': 34138.0, 'anchor_replay_fires': 6.0, 'rank1_bypass_ticks': 19.0}
+
+  section-1 gate flags (informational):
+    ref_kl_le_baseline         True
+    gap_lt_10                  False
+    gap_lt_3_target            False
+    reward_slope_parity        True
+    ppo_kl_zero                True
+    e_rho_gt_0p05              False
+
+  NOTE: for sr_quant arms actor/kl_loss carries an SR view-noise floor
+        (~1.9 for a1); judge those on ref_kl_slope, not the absolute gate value.
+
+  wrote runs/93-long-horizon-stability/metrics/a4_gate.json
+rc=0
+
+== SECTION 2: provenance capture (contract item 3) ==
+$ python3 scripts/capture_resolved_config.py runs/93-long-horizon-stability
+capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+rc=1
+No train.log and no expanded "python3 -m verl.trainer.main_ppo" line in
+metrics/incoming.log (grep count 0), and no launcher "=== resolved #93 cell config ==="
+banner (grep count 0). Flag RESOLVED_CONFIG_MISSING for the set -x path.
+MITIGATION (new for a4, stronger than the set -x trace): the WandB run config for
+8rux5ea6 IS the fully resolved Hydra config the trainer instantiated. Dumped to
+runs/93-long-horizon-stability/resolved_params-a4.txt.
+
+== SECTION 3: matched-window OLS + Newey-West HAC fits, a4 and the incumbent ==
+Identical code path and identical step windows for both runs, so every ratio below is
+method-matched as well as window-matched. Source: WandB scan_history, full unsampled
+history. a4 = 8rux5ea6 (project 93-long-horizon-stability), incumbent = woqs8zra
+(project 90-prf-exactk-600). JSON: metrics/a4_windows_wandb.json
+a4 rows = 120 steps 1-120, missing steps: none; state = finished
+
+  -- actor/kl_loss --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19     0.031629   +0.000073  0.000029  -0.34     0.030524   +0.000121  0.000062    0.602x
+     21-40      20     0.033375   +0.000241  0.000098  +0.71     0.032897   +0.000185  0.000025    1.305x
+     41-60      20     0.044700   +0.001062  0.000135  +0.75     0.045233   +0.000969  0.000106    1.095x
+     61-80      20     0.083129   +0.002205  0.000054  -0.14     0.086025   +0.002848  0.000074    0.774x
+     81-100     20     0.118919   +0.001860  0.000202  +0.01     0.133153   +0.002065  0.000100    0.901x
+     101-120    20     0.182710   +0.004054  0.000099  -0.21     0.179726   +0.002158  0.000163    1.879x
+     61-75      15     0.077669   +0.002221  0.000092  -0.21     0.078637   +0.002675  0.000037    0.830x
+     61-120     60     0.128253   +0.002514  0.000128  +0.87     0.132968   +0.002344  0.000037    1.072x
+     100-120    21     0.181047   +0.003955  0.000096  -0.28     0.178583   +0.002176  0.000146    1.818x
+     21-120    100     0.092567   +0.001865  0.000128  +0.96     0.095407   +0.001897  0.000089    0.983x
+     2-120     119     0.082837   +0.001519  0.000128  +0.98     0.085048   +0.001565  0.000100    0.971x
+
+  -- rollout_corr/kl --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19    13.774694   -0.000113  0.001487  -0.23    13.749500   -0.003168  0.001034    0.036x
+     21-40      20    13.846773   +0.011553  0.000655  +0.01    13.845017   +0.010529  0.001026    1.097x
+     41-60      20    14.073465   +0.008981  0.000511  -0.22    14.062349   +0.009324  0.000415    0.963x
+     61-80      20    14.183996   +0.003384  0.000189  -0.37    14.174429   +0.003752  0.000531    0.902x
+     81-100     20    14.223473   +0.002101  0.000403  -0.14    14.217623   +0.002830  0.000286    0.742x
+     101-120    20    14.248172   +0.001508  0.000208  -0.29    14.245940   +0.000922  0.000221    1.635x
+     61-75      15    14.174163   +0.002809  0.000410  -0.39    14.165646   +0.004194  0.000818    0.670x
+     61-120     60    14.218547   +0.001685  0.000112  +0.03    14.212664   +0.001867  0.000167    0.903x
+     100-120    21    14.247296   +0.001542  0.000186  -0.25    14.245787   +0.000838  0.000206    1.839x
+     21-120    100    14.115176   +0.004794  0.000498  +0.90    14.109071   +0.004813  0.000461    0.996x
+     2-120     119    14.060813   +0.005148  0.000311  +0.79    14.051661   +0.005276  0.000319    0.976x
+
+  -- critic/score/mean --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19     0.352488   -0.000757  0.001250  +0.03     0.360249   -0.000338  0.000940    2.244x
+     21-40      20     0.385400   +0.005951  0.000873  +0.02     0.392041   +0.005259  0.001009    1.132x
+     41-60      20     0.530420   +0.007765  0.001361  +0.41     0.524561   +0.007236  0.001012    1.073x
+     61-80      20     0.605859   +0.002762  0.000678  -0.59     0.606836   +0.003063  0.000700    0.902x
+     81-100     20     0.619287   +0.000875  0.001108  +0.15     0.624023   +0.000793  0.000951    1.103x
+     101-120    20     0.648438   -0.000072  0.000668  +0.17     0.656836   -0.001376  0.000668    0.052x
+     61-75      15     0.594857   +0.000736  0.000961  -0.72     0.595182   +0.001290  0.000982    0.570x
+     61-120     60     0.624528   +0.001078  0.000169  -0.09     0.629232   +0.001203  0.000208    0.896x
+     100-120    21     0.649089   -0.000240  0.000561  +0.16     0.657692   -0.001422  0.000544    0.169x
+     21-120    100     0.557881   +0.003090  0.000315  +0.65     0.560859   +0.003139  0.000290    0.984x
+     2-120     119     0.525087   +0.003220  0.000197  +0.63     0.528829   +0.003219  0.000185    1.000x
+
+  -- actor/entropy --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19     7.807052   +0.000126  0.000024  -0.34     7.806982   +0.000131  0.000027    0.962x
+     21-40      20     7.808853   +0.000065  0.000052  +0.24     7.808700   +0.000168  0.000045    0.388x
+     41-60      20     7.810431   +0.000025  0.000031  -0.06     7.810223   +0.000137  0.000052    0.186x
+     61-80      20     7.813261   +0.000085  0.000022  -0.32     7.813124   +0.000026  0.000046    3.285x
+     81-100     20     7.814503   +0.000095  0.000047  -0.05     7.814457   +0.000074  0.000056    1.273x
+     101-120    20     7.816171   +0.000113  0.000031  +0.22     7.816232   +0.000081  0.000027    1.394x
+     61-75      15     7.813089   +0.000105  0.000028  -0.51     7.813125   +0.000043  0.000071    2.459x
+     61-120     60     7.814645   +0.000076  0.000007  -0.02     7.814604   +0.000076  0.000010    0.996x
+     100-120    21     7.816086   +0.000121  0.000027  +0.21     7.816045   +0.000121  0.000034    0.997x
+     21-120    100     7.812644   +0.000093  0.000004  +0.11     7.812547   +0.000097  0.000004    0.962x
+     2-120     119     7.811751   +0.000093  0.000003  +0.07     7.811659   +0.000095  0.000003    0.979x
+
+  -- actor/grad_norm --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19     2.021669   -0.018639  0.005097  -0.47     2.139179   -0.012773  0.008049    1.459x
+     21-40      20     1.721370   +0.003398  0.004700  -0.35     1.845112   +0.004298  0.013800    0.791x
+     41-60      20     1.851461   -0.014648  0.007433  +0.01     1.919213   +0.010575  0.012285   -1.385x
+     61-80      20     1.864904   +0.019002  0.015153  -0.26     1.742640   +0.009425  0.005168    2.016x
+     81-100     20     1.753490   +0.010346  0.007626  -0.19     2.065668   +0.005720  0.024945    1.809x
+     101-120    20     1.895426   -0.016441  0.013089  -0.30     1.801898   +0.005522  0.005902   -2.977x
+     61-75      15     1.772051   -0.009665  0.011579  -0.55     1.694783   +0.000429  0.007298  -22.526x
+     61-120     60     1.837940   +0.001155  0.002287  -0.20     1.870069   +0.002081  0.002068    0.555x
+     100-120    21     1.901353   -0.015816  0.011149  -0.29     1.808137   +0.003068  0.004379   -5.156x
+     21-120    100     1.817330   +0.001214  0.000996  -0.17     1.874906   +0.000572  0.001798    2.123x
+     2-120     119     1.849956   -0.000738  0.000975  -0.12     1.917101   -0.001500  0.001275    0.492x
+
+  -- response_length/mean --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19   762.647204   -0.679139  1.026687  -0.19   770.857833   -0.078636  1.157717    8.637x
+     21-40      20   768.001709   -1.094160  1.136823  +0.07   761.915771   -0.628305  1.263187    1.741x
+     41-60      20   721.849512   -4.139685  1.041662  -0.11   716.912061   -3.565404  1.325353    1.161x
+     61-80      20   694.748145   -3.132334  0.542580  -0.52   689.052734   -2.520881  0.575154    1.243x
+     81-100     20   678.190381   -1.180271  0.902896  -0.10   677.570898   -0.692591  0.880611    1.704x
+     101-120    20   669.780322   -0.487628  0.478501  -0.14   663.985840   -0.128269  0.524558    3.802x
+     61-75      15   704.542578   -2.047297  0.996741  -0.41   694.510156   -2.829112  0.805699    0.724x
+     61-120     60   680.906283   -0.732386  0.177433  -0.17   676.869824   -0.680690  0.164654    1.076x
+     100-120    21   667.687500   +0.149636  0.585142  -0.24   662.736886   +0.229846  0.550387    0.651x
+     21-120    100   706.514014   -1.232684  0.111967  +0.02   701.887461   -1.189217  0.122738    1.037x
+     2-120     119   715.476456   -1.113994  0.080710  +0.02   712.899537   -1.172612  0.087036    0.950x
+
+  -- actor/cvc_ce --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19    14.466934   +0.000058  0.000485  +0.08       absent           -         -        -
+     21-40      20    14.459925   -0.002734  0.000260  -0.41       absent           -         -        -
+     41-60      20    14.420397   -0.001224  0.000313  +0.22       absent           -         -        -
+     61-80      20    14.420328   +0.000088  0.000168  +0.14       absent           -         -        -
+     81-100     20    14.432648   +0.000834  0.000111  -0.47       absent           -         -        -
+     101-120    20    14.442702   +0.000927  0.000127  -0.09       absent           -         -        -
+     61-75      15    14.419885   +0.000065  0.000190  +0.17       absent           -         -        -
+     61-120     60    14.431893   +0.000566  0.000040  -0.00       absent           -         -        -
+     100-120    21    14.442352   +0.000896  0.000106  -0.11       absent           -         -        -
+     21-120    100    14.435200   -0.000123  0.000137  +0.79       absent           -         -        -
+     2-120     119    14.440267   -0.000288  0.000086  +0.78       absent           -         -        -
+
+  -- actor/ppo_kl --
+     window      n      a4 mean    a4 slope      hac3   lag1     inc mean   inc slope      hac3    ratio
+     2-20       19     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     21-40      20     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     41-60      20     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     61-80      20     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     81-100     20     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     101-120    20     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     61-75      15     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     61-120     60     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     100-120    21     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     21-120    100     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+     2-120     119     0.000000   +0.000000  0.000000   +nan     0.000000   +0.000000  0.000000      nanx
+
+  -- E[rho] = rollout_corr/k3_kl - rollout_corr/kl + 1 --
+     window      n    a4 mean     a4 med   inc mean    inc med
+     21-40      20   0.085077   0.068984   0.060877   0.049865
+     41-60      20   0.031953   0.024199   0.021631   0.021833
+     61-80      20   0.011120   0.005605   0.009464   0.006320
+     81-100     20   0.005632   0.004307   0.008295   0.002740
+     101-120    20   0.002999   0.002459   0.005200   0.002111
+     61-120     60   0.006584   0.003815   0.007653   0.003592
+     100-120    21   0.003167   0.002460   0.005028   0.002057
+     21-120    100   0.027356   0.007762   0.021094   0.008029
+
+  -- grad_norm (V2) --
+     a4-prf-exactk-cvc-ce           run_max=3.6216 at step 78; 61-120 max=3.6216 at step 78, mean=1.837940 (n=60)
+     incumbent-90-prf-exactk-600    run_max=4.6452 at step 32; 61-120 max=4.1418 at step 95, mean=1.870069 (n=60)
+
+== SECTION 4: the late drift reversal, characterised ==
+
+4a. Trailing 20-step OLS slope of actor/kl_loss, both runs, identical windows.
+    A window labelled hi=H covers steps H-19..H. HAC(4) SEs. z is on the difference.
+      hi    a4 slope      hac4   inc slope      hac4   ratio       z
+      40   +0.000241  0.000098   +0.000185  0.000025   1.305   +0.56
+      45   +0.000455  0.000038   +0.000424  0.000069   1.075   +0.40
+      50   +0.000551  0.000027   +0.000643  0.000042   0.857   -1.85
+      55   +0.000586  0.000068   +0.000725  0.000030   0.808   -1.87
+      60   +0.001062  0.000137   +0.000969  0.000109   1.095   +0.53
+      65   +0.001663  0.000173   +0.001544  0.000181   1.077   +0.47
+      70   +0.002232  0.000067   +0.002194  0.000102   1.017   +0.31
+      75   +0.002291  0.000060   +0.002552  0.000060   0.898   -3.07
+      80   +0.002205  0.000054   +0.002848  0.000075   0.774   -6.93
+      85   +0.001895  0.000099   +0.002746  0.000100   0.690   -6.05
+      90   +0.001580  0.000081   +0.002289  0.000169   0.690   -3.78
+      95   +0.001493  0.000083   +0.001930  0.000098   0.773   -3.41
+     100   +0.001860  0.000196   +0.002065  0.000095   0.901   -0.94
+     105   +0.002610  0.000183   +0.002376  0.000099   1.098   +1.13
+     110   +0.003520  0.000228   +0.002572  0.000075   1.369   +3.96
+     115   +0.004106  0.000104   +0.002494  0.000092   1.647  +11.59
+     120   +0.004054  0.000091   +0.002158  0.000153   1.879  +10.68
+
+4b. Same, for the objective series rollout_corr/kl.
+      hi    a4 slope      hac4   inc slope      hac4   ratio       z
+      40   +0.011553  0.000636   +0.010529  0.000957   1.097   +0.89
+      45   +0.012625  0.000794   +0.012528  0.000709   1.008   +0.09
+      50   +0.011703  0.000524   +0.011409  0.000872   1.026   +0.29
+      55   +0.010384  0.000714   +0.010129  0.000519   1.025   +0.29
+      60   +0.008981  0.000470   +0.009324  0.000451   0.963   -0.53
+      65   +0.006956  0.000735   +0.007733  0.001026   0.900   -0.62
+      70   +0.005954  0.000943   +0.005173  0.000510   1.151   +0.73
+      75   +0.003191  0.000488   +0.003797  0.000337   0.840   -1.02
+      80   +0.003384  0.000192   +0.003752  0.000533   0.902   -0.65
+      85   +0.001961  0.000400   +0.001753  0.000209   1.119   +0.46
+      90   +0.001812  0.000368   +0.001163  0.000418   1.559   +1.17
+      95   +0.001809  0.000601   +0.001759  0.000496   1.028   +0.06
+     100   +0.002101  0.000414   +0.002830  0.000276   0.742   -1.47
+     105   +0.001112  0.000262   +0.002439  0.000374   0.456   -2.91
+     110   +0.000550  0.000331   +0.000969  0.000163   0.567   -1.14
+     115   +0.001282  0.000136   +0.000712  0.000282   1.801   +1.82
+     120   +0.001508  0.000172   +0.000922  0.000184   1.635   +2.32
+
+4c. Continuous piecewise-linear (broken-stick) fit over steps 21-120, breakpoint tau
+    scanned on the integer grid 35..105, SSE-minimising tau reported with the SSE
+    profile so the sharpness of the minimum is visible rather than asserted.
+    a4-prf-exactk-cvc-ce / actor/kl_loss
+      tau*=91  slope_left=+0.001370  slope_right=+0.003732  delta=+0.002361
+      SSE 0.0054863 vs single-line SSE 0.0222102 (75.3% reduction); single-line slope +0.001865 r2=0.929
+      SSE profile: tau=40:0.00974  tau=45:0.00771  tau=50:0.00626  tau=55:0.00557  tau=60:0.00556  tau=65:0.00588  tau=70:0.00619  tau=75:0.00632  tau=80:0.00625  tau=85:0.00584  tau=90:0.00551  tau=95:0.00564  tau=100:0.00678  tau=105:0.00922
+    a4-prf-exactk-cvc-ce / rollout_corr/kl
+      tau*=59  slope_left=+0.011100  slope_right=+0.001680  delta=-0.009419
+      SSE 0.0434348 vs single-line SSE 0.436087 (90.0% reduction); single-line slope +0.004794 r2=0.814
+      SSE profile: tau=40:0.15429  tau=45:0.10076  tau=50:0.06862  tau=55:0.04867  tau=60:0.04437  tau=65:0.05656  tau=70:0.07802  tau=75:0.10609  tau=80:0.13941  tau=85:0.17604  tau=90:0.21247  tau=95:0.24946  tau=100:0.28992  tau=105:0.32839
+    incumbent-90-prf-exactk-600 / actor/kl_loss
+      tau*=53  slope_left=+0.000472  slope_right=+0.002368  delta=+0.001895
+      SSE 0.00101854 vs single-line SSE 0.0136644 (92.5% reduction); single-line slope +0.001897 r2=0.956
+      SSE profile: tau=40:0.00315  tau=45:0.00186  tau=50:0.00112  tau=55:0.00111  tau=60:0.00185  tau=65:0.00311  tau=70:0.00459  tau=75:0.00611  tau=80:0.00746  tau=85:0.00848  tau=90:0.00932  tau=95:0.01019  tau=100:0.01105  tau=105:0.01195
+    incumbent-90-prf-exactk-600 / rollout_corr/kl
+      tau*=59  slope_left=+0.010723  slope_right=+0.001895  delta=-0.008828
+      SSE 0.0555324 vs single-line SSE 0.400396 (86.1% reduction); single-line slope +0.004813 r2=0.828
+      SSE profile: tau=40:0.16575  tau=45:0.11872  tau=50:0.08461  tau=55:0.06070  tau=60:0.05584  tau=65:0.06284  tau=70:0.07944  tau=75:0.10400  tau=80:0.13373  tau=85:0.16622  tau=90:0.19808  tau=95:0.22777  tau=100:0.25919  tau=105:0.29368
+
+== SECTION 5: what CVC actually did (loss decomposition, all from logged series) ==
+
+5a. actor/loss - actor/pg_loss reconciles EXACTLY against the two added terms,
+    cvc_lambda_eff * cvc_ce and kl_coef * kl_loss (residual at fp64 rounding):
+     step       loss    pg_loss  lam_eff    cvc_ce   cvc term  kl_loss     kl term    loss-pg      resid
+        1  +0.137209  +0.135043  0.00015   14.4431  +0.002166   0.0000 +0.00000000  +0.002166  -3.48e-09
+        5  +0.128869  +0.117982  0.00075   14.4764  +0.010857   0.0294 +0.00002942  +0.010887  +4.42e-09
+       10  +0.132321  +0.110587  0.00150   14.4683  +0.021703   0.0321 +0.00003208  +0.021735  +1.41e-08
+       20  +0.140656  +0.097255  0.00300   14.4567  +0.043370   0.0306 +0.00003058  +0.043401  +8.89e-10
+       21  +0.168362  +0.124829  0.00300   14.4999  +0.043500   0.0330 +0.00003304  +0.043533  +5.16e-09
+       40  +0.158308  +0.114975  0.00300   14.4324  +0.043297   0.0363 +0.00003630  +0.043334  +6.20e-10
+       60  +0.167651  +0.124327  0.00300   14.4219  +0.043266   0.0584 +0.00005836  +0.043324  +5.62e-09
+       80  +0.130842  +0.087496  0.00300   14.4136  +0.043241   0.1059 +0.00010587  +0.043347  +2.55e-09
+      100  +0.187637  +0.144183  0.00300   14.4354  +0.043306   0.1478 +0.00014777  +0.043454  -4.73e-09
+      120  +0.140471  +0.096894  0.00300   14.4513  +0.043354   0.2235 +0.00022352  +0.043578  +5.28e-09
+
+5b. cvc_ce IS (to 0.06 percent) the training-view NLL term of the gap:
+    n=120  mean(actor/cvc_ce)=14.440291  mean(rollout_corr/training_log_ppl)=14.431725
+    mean|diff|=0.009230 nats  max|diff|=0.048163 nats  corr=0.8969
+    and rollout_corr/kl == training_log_ppl - rollout_log_ppl by construction, so the CVC
+    CE term is a direct descent direction on the gap's own dominant term.
+
+== SECTION 6: committed-criteria arithmetic, one line per clause ==
+
+  O slope   gap 61-120 = +0.001685 +- 0.000112 (HAC3, n=60); S-bar +0.000500 -> z=+10.60  FAIL (3.37x the bar)
+            same window incumbent = +0.001867 +- 0.000167 -> ratio 0.9025x, difference z=-0.90 (NOT significant)
+  O level   gap 100-120 mean = 14.247296 (n=21, sd 0.013538, se of mean 0.002954); bar <= 14.245800 -> exceeds by +0.001496 nats = 0.0105 percent  FAIL
+            incumbent same window = 14.245787 (sd 0.009875, se 0.002155); difference +0.001509 nats, se_diff 0.003657, z=+0.41 -> a statistical TIE
+  V1 drift  kl_loss 100-120 = +0.003955 +- 0.000096; incumbent +0.002176 +- 0.000146 -> 1.818x, difference z=+10.20
+            ceiling 1.5x = 0.003264 -> margin +0.000691, z=+2.90  FAIL
+  V1 (other committed window) kl_loss 61-120 = +0.002514 +- 0.000128; incumbent +0.002344 -> 1.072x; ceiling 0.003516 -> z=-7.17  PASS
+  V2 grad   run max 3.6216 (step 78) <= 10.0 PASS; 61-120 window mean 1.837940 <= 3.62 PASS (incumbent same window mean 1.870069)
+  V3 learn  critic/score/mean 100-120 level = 0.649089 +- 0.000561 >= 0.624800 PASS (z=+43.3); 61-120 slope +0.001078 +- 0.000169 significantly positive PASS
+  U1 entrop actor/entropy 21-120 slope = +0.000093 +- 0.000004 <= +0.001500 PASS by 16.2x (z=-335) -> guard did NOT fire
+  U2 valprx same as V3: 0.649089 >= 0.624800 PASS -> guard did NOT fire
+  U4 degen  response_length 100-120 = 667.6875 vs own 21-40 mean 768.0017 = 0.8694x >= 0.60x PASS -> guard did NOT fire
+  U3 signat gap slope did NOT reach S-bar, so the uniformization-signature row is vacuous
+  T tiebrk  E[rho] 100-120: a4 mean 0.003167 median 0.002460; incumbent mean 0.005028 median 0.002057
+            like-for-like: mean ratio 0.630x (a4 lower), median ratio 1.196x (a4 higher) -> tie-break not decisive either way;
+            both are far below the registered 0.05 bonus, which is never a veto.
+  E elig    reached step 120 (120/120 rows, no gaps); actor/ppo_kl == 0 at every step; wire 1232 bits = 1.0000x incumbent (WIRE_BUDGET.md); confinement counters non-degenerate
+
+
+== SECTION 7: horizon anchors (the incumbent's 600 steps are MEASURED, not extrapolated) ==
+
+   incumbent actor/kl_loss   step 120 = 0.203385   step 300 = 0.460520   step 600 = 0.928460 (run max 0.932200)
+   incumbent actor/kl_loss   slope 100-600 = +0.001571/step ; slope 580-600 = +0.000344/step
+     -> the incumbent's reference-KL drift DECELERATES over the long horizon; its terminal
+        rate is 0.22x its own 100-600 average.
+   a4 actor/kl_loss          step 120 = 0.223525 (1.0990x the incumbent at the same step)
+   a4 terminal rate          101-120 = +0.004054/step = 2.58x the incumbent's 100-600 average
+                             and 11.8x the incumbent's own 580-600 terminal rate.
+   IF a4's terminal rate persisted (it is an extrapolation, and the incumbent's own
+   trajectory shows such rates do NOT persist): kl_loss(600) ~ 2.17 nats vs the
+   incumbent's measured 0.928. This is a caution, not a measurement.
+
+   gap horizon, both from the identical 61-120 fits:
+     a4         gap(600) ~ 15.077  (intercept 14.0661, slope +0.001685)
+     incumbent  gap(600) ~ 15.164  (intercept 14.0437, slope +0.001867)
+     incumbent  gap(600) MEASURED  = 14.6583  -> both linear extrapolations overshoot the
+     measured value by ~0.5 nats, so gap(600) projections from a 60-step window are
+     conservative-biased and should not be quoted as predictions.
+
+   gap accumulation is ANCHOR-SENSITIVE and is therefore NOT used as a criterion here:
+     anchored on the 2-20 window mean: a4 14.247296-13.774694 = 0.472602 vs incumbent
+       14.245787-13.749500 = 0.496287  ->  a4 = 0.952x (a4 better)
+     anchored on the step-1 value:      a4 14.2654-13.7994 = 0.4660 vs incumbent
+       14.2394-13.8794 = 0.3600         ->  a4 = 1.294x (a4 worse)
+     The two anchorings disagree in SIGN of the conclusion, so no accumulation claim is made.
+
+== SECTION 8: completion evidence ==
+
+   No done.flag in the run dir (the tmux session run-93 is alive because a5 is training,
+   so the "tmux dead" limb of the completion test cannot be applied per-cell).
+   Completion is established from the cell's own record instead:
+     WandB 8rux5ea6 state = finished, max_step = 120, 120/120 history rows, missing steps: none
+     trainer.total_training_steps = 120 in the resolved config (resolved_params-a4.txt)
+     actor/comm_eff/spectral_step = 120 at the last row
+   Metrics are non-empty: metrics/a4_gate.json, metrics/a4_windows_wandb.json.
+
+== SECTION 9: the CVC counterfactual, its own objective against the no-CVC control ==
+
+a4's cvc_ce is not logged by the incumbent, but Section 5b establishes that a4's
+actor/cvc_ce equals rollout_corr/training_log_ppl to mean |diff| 0.0092 nats (max 0.048,
+n=120). rollout_corr/training_log_ppl IS logged by both runs, so it is the CVC-equivalent
+series and the comparison below is like-for-like. Same code path, same windows, HAC(3).
+
+  rollout_corr/training_log_ppl  (the term CVC descends)
+    window     a4 slope     hac3        inc slope    hac3        a4 mean      inc mean
+    21-40      -0.001912   0.000297     -0.001548   0.000288    14.444689    14.441550
+    41-60      -0.000794   0.000385     -0.000866   0.000218    14.412302    14.410532
+    61-80      +0.000341   0.000151     +0.000253   0.000131    14.416965    14.417634
+    81-100     +0.000809   0.000193     +0.000945   0.000321    14.429424    14.425457
+    101-120    +0.000774   0.000190     +0.000736   0.000208    14.440248    14.436889
+    21-120     +0.000033   0.000113     +0.000023   0.000108    14.428726    14.426413
+    step 21 -> step 120: a4 14.484823 -> 14.449771 (delta -0.035052)
+                        inc 14.449064 -> 14.430589 (delta -0.018476)
+
+  rollout_corr/rollout_log_ppl  (the other term of the gap; gap = training - rollout)
+    window     a4 slope     hac3        inc slope    hac3        a4 mean      inc mean
+    21-40      -0.021656   0.000990     -0.020808   0.001415     0.799059     0.790146
+    41-60      -0.014383   0.001309     -0.015119   0.000823     0.375912     0.385208
+    61-80      -0.002919   0.000247     -0.003313   0.000460     0.226948     0.237719
+    81-100     -0.001003   0.000211     -0.001542   0.000165     0.201376     0.202158
+    101-120    -0.000348   0.000174     +0.000005   0.000153     0.188011     0.187218
+    21-120     -0.007026   0.001017     -0.006993   0.000960     0.358261     0.360490
+    step 21 -> step 120: a4 0.978255 -> 0.179860 (delta -0.798395)
+                        inc 0.990992 -> 0.189564 (delta -0.801428)
+
+READINGS, both direct from the table above:
+  1. The series CVC exists to minimise moves in the SAME direction, with the same shape and
+     the same magnitude, in the run that has NO CVC. Every window agrees inside 1 HAC SE;
+     the 21-120 slopes are +0.000033 (a4) against +0.000023 (incumbent), and a4's LEVEL is
+     0.002313 nats HIGHER. There is no measurable CVC descent on the CVC objective.
+  2. Over steps 21-120 the gap's movement is carried almost entirely by the ROLLOUT term
+     (-0.80 nats in both runs), not by the training term (-0.035 a4, -0.018 incumbent).
+     CE-mode CVC is attached to the static term of the gap, and the moving term is the one
+     it does not touch.
+
+== SECTION 10: derived constants quoted in verdict-a4.md ==
+
+   uniform-policy NLL reference (used only to show the flattening route was AVAILABLE):
+     vocab_size = 151936, from laptop/ckpts/run90-prf-exactk-step600-hf/config.json
+     ln(151936) = 11.9312 nats  vs a4's measured actor/cvc_ce = 14.4513 at step 120
+     -> flattening toward uniform would have cut the CVC term by about 2.52 nats,
+        so the guard's predicted route was profitable in principle and was NOT taken
+        (entropy slope 21-120 is 0.96x the incumbent's, difference z = -0.7).
+   CVC term vs reference-KL term in the loss, at step 120 (both from Section 5a):
+     0.043354 / 0.00022352 = 194.0x
+   CVC share of total loss at step 120:
+     0.043354 / 0.140471 = 30.9 percent
+   coefficient ratio, from resolved_params-a4.txt:
+     cvc_lambda 0.003 / kl_loss_coef 0.001 = 3.0x
+   a4 reference KL at step 120 vs the incumbent at the same step:
+     0.223525 / 0.203385 = 1.0990x
+   resolved_params-a4.txt line accounting (so the count in the verdict is checkable):
+     821 keys written by the dumper; 831 non-comment non-blank lines; 815 of those match a
+     strict ^key=value regex; 16 continuation lines, from the few config values that
+     contain newlines.

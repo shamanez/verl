@@ -1,0 +1,46 @@
+{
+  "run": "a4-prf-exactk-cvc-ce",
+  "run_id": "8rux5ea6",
+  "state": "finished",
+  "max_step": 120,
+  "gate_window": [
+    100,
+    120
+  ],
+  "gate_window_rows": 21,
+  "metrics": {
+    "ref_kl_gate": 0.18104663273940483,
+    "ref_kl_slope_per_step": 0.0015159624673204094,
+    "gap_gate": 14.247295561290922,
+    "gap_slope_per_step": 0.005127954128690996,
+    "e_rho_gate": 0.003167061578659869,
+    "reward_slope_full": 0.003209502260356621,
+    "reward_slope_gate": -0.00023970170454545682,
+    "ppo_kl_max_abs": 0.0,
+    "entropy_gate": 7.81608620144072,
+    "entropy_slope_per_step": 9.276056067784756e-05,
+    "grad_norm_max": 3.6215577125549316
+  },
+  "confinement": {
+    "mask_applications": 78274.0,
+    "spectral_corrections": 34138.0,
+    "anchor_replay_fires": 6.0,
+    "rank1_bypass_ticks": 19.0
+  },
+  "baseline": {
+    "run": "90-prf-exactk-600",
+    "ref_kl_gate_lo": 0.156,
+    "ref_kl_gate_hi": 0.203,
+    "gap": 14.24,
+    "e_rho": 0.0014,
+    "reward_slope": 0.0032
+  },
+  "gate_flags": {
+    "ref_kl_le_baseline": true,
+    "gap_lt_10": false,
+    "gap_lt_3_target": false,
+    "reward_slope_parity": true,
+    "ppo_kl_zero": true,
+    "e_rho_gt_0p05": false
+  }
+}
