@@ -61,28 +61,61 @@ def _slope(x, y):
 
 
 def main() -> int:
+    import argparse
+
     import wandb
+
+    # There was NO argument parsing here. The script matched a module constant
+    # and never read sys.argv, so `--run <anything>` was silently discarded and
+    # every invocation reported on RUN below. That made it print a confident
+    # tripwire line about a finished, unrelated run while appearing to watch the
+    # cell it was asked about.
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", default=RUN)
+    ap.add_argument("--project", default=PROJECT)
+    ap.add_argument("--entity", default=ENTITY)
+    args = ap.parse_args()
 
     api = wandb.Api()
     run = None
-    for c in api.runs(f"{ENTITY}/{PROJECT}"):
-        if c.name == RUN:
-            run = c
-            break
+    try:
+        run = api.run(f"{args.entity}/{args.project}/{args.run}")
+    except Exception:
+        for c in api.runs(f"{args.entity}/{args.project}"):
+            if c.name == args.run:
+                run = c
+                break
     if run is None:
-        print("TRIPWIRE: run not found")
+        print(f"TRIPWIRE: run {args.run!r} not found in {args.entity}/{args.project}")
         return 0
+    print(f"TRIPWIRE target: {run.name} ({run.id}) state={run.state}")
 
-    d = {k: [] for k in KEYS}
-    d["step"] = []
-    for r in run.scan_history(keys=["training/global_step"] + KEYS):
-        s = r.get("training/global_step")
-        if s is None:
-            continue
-        d["step"].append(s)
-        for k in KEYS:
-            d[k].append(r.get(k))
-    arr = {k: np.array([np.nan if v is None else v for v in vv], float) for k, vv in d.items()}
+    # Pull each key SEPARATELY and merge on global_step. A single
+    # scan_history(keys=[...many...]) returns only rows where every requested key
+    # is present, and on a live run that intersection lags badly: with all six
+    # metrics requested together this returned rows only to step 120 while each
+    # key on its own reached 158. A tripwire that is 38 steps stale protects
+    # nothing, and it reports a confident-looking number while doing it.
+    per_key = {}
+    for k in KEYS:
+        m = {}
+        try:
+            for r in run.scan_history(keys=["training/global_step", k]):
+                s, v = r.get("training/global_step"), r.get(k)
+                if s is None or v is None:
+                    continue
+                m[float(s)] = float(v)
+        except Exception:
+            pass
+        per_key[k] = m
+
+    steps = sorted({s for m in per_key.values() for s in m})
+    if not steps:
+        print("TRIPWIRE: no history")
+        return 0
+    arr = {"step": np.array(steps, float)}
+    for k in KEYS:
+        arr[k] = np.array([per_key[k].get(s, np.nan) for s in steps], float)
     x = arr["step"]
     if len(x) == 0:
         print("TRIPWIRE: no history")
@@ -104,6 +137,13 @@ def main() -> int:
     rlp6 = float(np.nanmean(arr["rollout_corr/rollout_log_ppl"][w6]))
 
     t1 = (ent6 < 3.3) or (np.isfinite(ent_sl) and ent_sl < -0.05)
+    # CALIBRATION WARNING measured 2026-07-25 on a5b at step 160: the -0.004
+    # 10-step slope condition fires on 20 percent of 10-step windows in the
+    # incumbent's own healthy 600-step run, because step-to-step score sd is
+    # 0.0453 and a 10-step OLS slope of that size is ordinary noise. T2's slope
+    # arm therefore carries almost no information on its own. It is only safe
+    # because the kill rule is a CONJUNCTION, T1 AND (T2 OR T3); never promote T2
+    # to a standalone trigger, and never read a lone T2 flag as a collapse onset.
     t2 = (sc6 < 0.30) or (np.isfinite(sc_sl) and sc_sl < -0.004)
     t3 = not (600.0 <= rl6 <= 950.0)
     degen = er6 > 0.9

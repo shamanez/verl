@@ -275,3 +275,48 @@ sampler-versus-trainer policy disagreement, which sits at the bf16 kernel floor
 and does not move. Since `probe/gap_dense` measures the engine pair with the codec
 silent, the same floor should hold for any arm, though that is an inference and
 not a measurement: no other arm has the channel.
+
+## Tripwire defects found and fixed before a6, 2026-07-25T18:00Z
+
+Two more defects, in `a5_tripwire.py`, the script whose whole job is to catch a
+collapse. Both are worse in character than the scoring bugs, because a safety
+script that fails silently reports reassurance.
+
+4. **The `--run` argument was never parsed.** There was no `argparse` in the file
+   at all: it matched a module constant `RUN = "a5-frlr-r48k28-tis"` and never read
+   `sys.argv`. So `a5_tripwire.py --run a5b-frlr-bnorm-200` silently reported on
+   the **finished round-A a5 run**, printing a confident `TRIPWIRE OK step=120`
+   line while appearing to watch the live cell. Detected because two different
+   `--run` values returned byte-identical numbers. Now parses `--run`, `--project`
+   and `--entity`, echoes the resolved target and id, and errors on an unknown name
+   instead of succeeding.
+5. **The history pull truncated by 38 steps.** A single
+   `scan_history(keys=[step] + 6 metrics)` returns only rows where every key is
+   present, and on a live run that intersection lags: it returned rows to step 120
+   while each of the six keys individually reached 158. Now pulled per key and
+   merged on `global_step`, same fix as `gate93.py`.
+
+That is **five defects of the same family**: every one was a silent, plausible-
+looking wrong answer rather than an error. Four came from WandB's all-keys and
+sampling behaviour, one from an unparsed argument.
+
+### And a calibration finding, not a bug
+
+With the tripwire finally pointed at a5b it flagged **T2** at step 160 (10-step
+score slope -0.00674 against a -0.004 threshold). It is a false alarm:
+
+- a5b's step-to-step score sd after onset is **0.0453**, so a 10-step slope of that
+  size is ordinary noise (t = -2.59 on its own, but that ignores the base rate)
+- **20 percent of 10-step windows in the incumbent's own healthy 600-step run are
+  below -0.004**
+
+So T2's slope arm fires about one evaluation in five on a run that never collapsed
+and carries almost no information alone. It is only safe because the kill rule is a
+conjunction, T1 AND (T2 OR T3). A warning to that effect is now in the source, and
+T2 must never be promoted to a standalone trigger.
+
+Substantively: **a5b shows no collapse onset.** Score is flat and noisy around 0.66
+through step 160 with entropy stable (slope +0.0013), while drift accelerates past
+0.72 nats. That is the program's existing "damage is collapse-only" picture holding,
+and it is why the a5b verdict claims an unsaturating trajectory rather than realised
+harm.
