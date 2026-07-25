@@ -1,5 +1,12 @@
 # Pre-read: a5b at step 51 of 200. NOT a verdict.
 
+> **THE HEADLINE OF THIS DOCUMENT IS WRONG. See "CORRECTION at step 102" at the
+> bottom.** The section below titled "the knob worked and it changed nothing that
+> mattered" concluded that batch normalisation did not improve learning. It does.
+> a5b's learning simply starts later than the incumbent's, and I read a partial
+> window as a terminal state. The tooling findings and the ESS-falsifier
+> withdrawal in this document all stand; only the learning conclusion is retracted.
+
 Written 2026-07-25T15:10Z while the cell is still running, from matched-window
 pulls made to prove the scoring pipeline works before termination. The registered
 bar is scored at 100-120 and cannot be evaluated yet. Everything below is a
@@ -102,3 +109,75 @@ Zero error markers. `grad_norm` peaked at 204.386 but that is a step-2 transient
 (116.9, 204.4, 30.4 at steps 1-3, then under 1.2 from step 8 onward, median 0.64
 from step 20). Max at step >= 20 is 0.878. Not a stability concern.
 `actor/ppo_kl` is exactly 0, correct by construction.
+
+---
+
+# CORRECTION at step 102, 2026-07-25T17:05Z
+
+**a5b is learning, and batch normalisation did improve it. The conclusion at the
+top of this document is retracted.**
+
+Matched-window score, all three runs, same windows:
+
+| window | incumbent PRF | a5 FRLR+TIS | a5b, +bnorm |
+|---|---|---|---|
+| 2-20 | 0.3602 | 0.3611 | 0.3575 |
+| 21-40 | 0.3920 | 0.3652 | 0.3524 |
+| 41-60 | 0.5246 | 0.3920 | 0.3728 |
+| 61-80 | 0.6068 | 0.4684 | 0.4609 |
+| **81-100** (last COMPLETE window) | **0.6240** | **0.5312** | **0.5733** |
+
+a5b's per-step score climbs steadily from about 0.34 at step 45 to about 0.64 at
+step 102. It is not flat. It has a **delayed onset** of roughly 20 to 40 steps
+relative to the incumbent, and then it closes: 0.71x the incumbent at 41-60 rising
+to **0.92x at 81-100**.
+
+**Against a5, at the last complete matched window, a5b is ahead by +7.9 percent**
+(0.5733 against 0.5312). a5 was behind a5b at 41-60 and 61-80 and is now behind
+it, so the ordering flipped between 61-80 and 81-100. Batch normalisation moved
+learning in the direction it was designed to move it.
+
+**So my original diagnosis was right and my retraction of it was wrong.** The
+round-A correction memo argued a5 under-learned because the mean IS weight of
+0.166 shrank every gradient about 6x, and that removing the blanket shrinkage was
+the fix. It is: gradients came up 4.76x and then, once past the onset delay, score
+came up with them.
+
+## Why I got it wrong
+
+I read window 41-51, saw 0.3604 against the incumbent's 0.4964, and called it
+"flat, not slow". That is the same class of error this program has already
+corrected twice: **treating a partial window as a terminal state.** Learning had
+not started yet; it had not failed to start. The correct guard is the one the
+registered bar already encodes, which is to score at 100-120 and nowhere else, and
+I should have declined to characterise learning at all before then rather than
+publishing a headline off 50 steps.
+
+The specific tell I ignored: a5's own trajectory shows the same late onset
+(0.3652, 0.3920, 0.4684, 0.5312), so a slow first 60 steps is a property of the
+FRLR arm, not evidence of failure. I had that data.
+
+## What is NOT yet decided
+
+`score93_bar.py` currently reports G1 at 0.6309 against the 0.6248 bar, which
+looks like a pass, but **the 101-120 window contains only steps 101 and 102 so
+far**, so that figure is the mean of two points and is not the window value. The
+run needs step 120. On the partial evidence the call is going to be **marginal
+either way**: a5b would clear the bar by roughly 0.001 to 0.01, which is on the
+order of one standard error of the window mean, so G1 will need to be reported as
+a coin-flip pass rather than a win.
+
+The gap and drift slopes printed at 100-102 (+0.0552 and +0.0113) are three-point
+fits and are meaningless. The 61-120 secondary window currently gives gap slope
+**-0.011579** (falling) and drift slope **+0.004125** against a 3.264e-3 bar.
+
+## Unaffected by this correction
+
+- All three tooling defects and their fixes.
+- The withdrawal of the ESS falsifier as vacuous (ESS is scale-invariant by
+  construction, which is an algebraic fact and not a data claim).
+- The dense-channel findings: the codec inflates the drift reading 13.8x growing
+  to 49.3x, and the codec-free gap is about 0.00036 nats and flat against a
+  codec-view 4.5 nats, a factor of about 12,000.
+- The observation that a5b's drift LEVEL at 100-102 (0.2022) is now level with the
+  incumbent's (0.2034), where the FRLR arms had been well below it.
