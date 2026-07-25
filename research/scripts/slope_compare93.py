@@ -158,11 +158,16 @@ def main():
     ap.add_argument("--block", type=int, default=8, help="bootstrap block length")
     ap.add_argument("--draws", type=int, default=20000)
     ap.add_argument("--json", default="")
+    # The engine derives the WandB project from WANDB_RUN_GROUP, so the #90
+    # incumbent lives in project 90-prf-exactk-600 while the #93 cells live in
+    # 93-long-horizon-stability. A single --project cannot reach both, so allow
+    # a per-side override; each defaults to --project for same-project use.
+    ap.add_argument("--ref-project", default="")
+    ap.add_argument("--test-project", default="")
     args = ap.parse_args()
 
     kw = dict(
         entity=args.entity,
-        project=args.project,
         metric=args.metric,
         lo=args.lo,
         hi=args.hi,
@@ -170,8 +175,8 @@ def main():
         block=args.block,
         draws=args.draws,
     )
-    ref = _fit(name=args.ref, label="REF", **kw)
-    test = _fit(name=args.test, label="TEST", **kw)
+    ref = _fit(name=args.ref, label="REF", project=args.ref_project or args.project, **kw)
+    test = _fit(name=args.test, label="TEST", project=args.test_project or args.project, **kw)
 
     thresh = args.multiplier * ref["slope"]
     # Uncertainty on the threshold comparison: the test slope and the threshold

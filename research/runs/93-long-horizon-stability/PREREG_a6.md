@@ -140,3 +140,63 @@ proves `ARM=a6 DRY_RUN=1` resolves, with a copy staged at
 `/workspace/run_93_cell.a6.sh` as the fallback if the fetch cannot reach origin,
 and it tees its preflight into a6's `train.log` so a failure is visible to both
 the chain's bring-up watch and the laptop monitor.
+
+## AMENDMENT 1, logged 2026-07-25T15:10Z, BEFORE a6 has any data
+
+While proving the scoring pipeline end to end I found a provenance error in G3 of
+this document. It is amended here, openly, while a6 does not yet exist.
+
+**The error.** G3's threshold `3.264e-3` is 1.5x the incumbent's drift slope of
+`0.002176`. Searching the incumbent's actual history shows `0.002176` is its
+slope over window **100-120**, matching to six decimal places:
+
+| window | incumbent `actor/kl_loss` slope |
+|---|---|
+| 2-120 | +0.001565 |
+| 2-60 | +0.000383 |
+| 61-120 | +0.002344 |
+| **100-120** | **+0.002176** (the registered figure) |
+
+This document registered that threshold against the **61-120** window, where the
+incumbent's own slope is 0.002344 and a 1.5x bar would have been 3.516e-3. Round
+A applied the same V1 bar at the terminal 20-step window, so 100-120 is also the
+precedent.
+
+**The amendment.** The threshold value does **not** move: it stays `3.264e-3`,
+exactly as registered. The primary window for G3 and G2 is corrected to
+**100-120**, which is the window the threshold was derived from and the one round
+A used. The 61-120 figures will also be reported for both cells so nothing is
+concealed by the choice.
+
+**Why this is not bar-shopping.** For an arm whose drift is accelerating (a5's
+slope ran +0.00164, +0.00298, +0.00462 across 61-80, 81-100, 101-120) the
+terminal 20-step slope is LARGER than the 60-step slope, so testing at 100-120
+against a fixed threshold is **harder**, not easier. The correction moves the bar
+in the conservative direction, and both windows get reported either way.
+
+## Tooling defects found and fixed before scoring, 2026-07-25T15:10Z
+
+Three real defects, all of which would have corrupted the a5b and a6 reads. All
+were found by running the pipeline against live partial data rather than waiting
+for termination.
+
+1. **`gate93.py` fitted the reference-KL and gap slopes over the FULL RUN**, but
+   every registered bar is a windowed slope. These cells open with a large
+   step-1/2 codec transient, so the full-run fit measures that transient decaying
+   and can flip sign: on a5b at 20-45 the full-run fit is **-0.00649/step** while
+   the matched-window fit is **+0.000512/step**. Windowed slopes are now computed
+   and printed, labelled as the ones to use, with the full-run figures marked.
+2. **`gate93.py` used `run.history(keys=[...])`, which both samples AND drops any
+   row missing any key.** The sampling returned 13 rows for the incumbent's
+   21-step gate window, enough to move a slope against a fixed threshold. The
+   all-keys behaviour meant the script returned zero rows for the incumbent at
+   all, because a run with the rollout correction off logs no
+   `rollout_corr/rollout_is_*`. Now each key is pulled separately via
+   `scan_history` (unsampled) and merged on `global_step`; the incumbent's gate
+   window now yields the correct 21 rows and reproduces gap 14.246.
+3. **`slope_compare93.py` took a single `--project` for both runs**, but the
+   engine derives the WandB project from `WANDB_RUN_GROUP`, so the incumbent
+   lives in project `90-prf-exactk-600` while every #93 cell lives in
+   `93-long-horizon-stability`. Any incumbent-versus-cell comparison would have
+   failed with "run not found". Added `--ref-project` and `--test-project`, each
+   defaulting to `--project`.
