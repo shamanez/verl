@@ -61,7 +61,15 @@ export EXPERIMENT_NAME=a6-prf-exactk-tis-bnorm-200
 export TOTAL_STEPS=200
 export TEST_FREQ=200
 export SAVE_FREQ=100
-export COMM_EFF_PROBE_EVERY=25
+# 5, not a5b's 25. See PREREG_a6.md amendment 2. The dense probe is the ONLY
+# codec-free channel and neither the incumbent nor a5 has one, so a5b-vs-a6 is
+# the only codec-free codec comparison the program will ever have. 5 divides 25,
+# so a6's probe steps are a strict SUPERSET of a5b's and the exactly-matched
+# comparison is preserved. Cost is 40 probes x 24.8 s = 16.5 min against 3.3 min,
+# so +13 min on a 6.7 h run. Safe because the probe is forward-only with no
+# backward and no weight change (ray_trainer.py:1549), the controller is off, and
+# LRBrakeDetector is detection-only and "deliberately does NOT mutate the LR".
+export COMM_EFF_PROBE_EVERY=5
 export COMM_EFF_PROBE_CTRL_ENABLED=false
 export ROLLOUT_IS_BATCH_NORMALIZE=true
 exec bash "$CELL"

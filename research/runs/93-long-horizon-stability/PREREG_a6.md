@@ -200,3 +200,78 @@ for termination.
    `93-long-horizon-stability`. Any incumbent-versus-cell comparison would have
    failed with "run not found". Added `--ref-project` and `--test-project`, each
    defaulting to `--project`.
+
+## AMENDMENT 2, logged 2026-07-25T16:15Z, still BEFORE a6 has any data
+
+**`COMM_EFF_PROBE_EVERY` raised from 25 to 5 for a6.** This is the one place the
+"instrumentation matched to a5b exactly" claim above is now false, deliberately.
+
+**Why.** Checking the dense channel found that **neither the #90 incumbent nor a5
+has any `probe/*` keys at all.** a5b is the first run in this program with a
+codec-free channel, which means:
+
+- The V1 clause of the bar, "dense-channel drift <= 3.264e-3", compares a
+  **dense-channel** slope against a threshold derived from the incumbent's
+  **codec-view** slope. The codec inflates the drift reading by a measured 13.8x,
+  33.2x, 34.7x at steps 25, 50, 75 (`probe/kl_gain`), so the clause is satisfied
+  by a factor of 77 (dense slope +4.26e-5 against a 3.264e-3 bar) and carries no
+  information. It is retained for the record but must be reported as **not
+  discriminating**, not as a pass earned on the merits.
+- The only meaningful dense comparison the program can ever make is **a5b versus
+  a6**, because they are the only two runs that have the channel. That raises the
+  value of a6's dense series considerably.
+
+**Why it is safe.** Probe density cannot alter training. The probe is forward-only
+with no backward and no weight change (`ray_trainer.py:1549`),
+`COMM_EFF_PROBE_CTRL_ENABLED=false` so the controller never closes the loop, and
+`LRBrakeDetector` is documented as "DETECTION ONLY in this build ... deliberately
+does NOT mutate the LR", with its only consumer being the metric log
+(`ray_trainer.py:1623`).
+
+**Why matching is not actually lost.** 5 divides 25, so a6's probe steps are a
+strict **superset** of a5b's {25, 50, 75, ...}. The exactly-matched a5b-versus-a6
+dense comparison is unaffected; a6 simply also has points in between. The matched
+subsample is the **primary** read and the full 40-point series is secondary.
+
+**Cost.** 24.8 s per probe measured on a5b. 40 probes is 16.5 min against 3.3 min
+at cadence 25, so **+13 min on a 6.7 h run, about 3.3 percent**.
+
+**Bonus.** The `LRBrakeDetector` uses a 4-probe window, and this launcher's own
+comment already noted that cadence 25 over 200 steps yields 8 probes and "leaves
+the window=4 brake detector a single evaluable point". At cadence 5 the detector
+becomes properly measurable, which is exactly the round-B deliverable its
+docstring describes ("round B first measures how often the brake WOULD fire before
+any mutation is allowed"). a6 now delivers that for free.
+
+## Dense-channel finding that reframes the gap metric, 2026-07-25T16:15Z
+
+From a5b's first three probes:
+
+| step | `probe/kl_dense` (drift, codec-free) | `actor/kl_loss` (drift, codec-view) | inflation |
+|---|---|---|---|
+| 25 | 0.000252 | 0.003477 | 13.8x |
+| 50 | 0.000752 | 0.024989 | 33.2x |
+| 75 | 0.002383 | 0.082622 | 34.7x |
+
+| step | `probe/gap_dense` (codec-free) | `rollout_corr/kl` (codec-view) |
+|---|---|---|
+| 25 | 0.000362 | about 4.7 |
+| 50 | 0.000439 | about 4.7 |
+| 75 | 0.000355 | about 4.7 |
+
+Two things follow.
+
+1. **The drift inflation factor is TIME-VARYING and growing** (13.8 to 34.7). That
+   was the exact hypothesis behind adding the probe: FRLR refreshes its Q every
+   step (`frlr_q_cadence=1`), so its view offset cannot be constant, which breaks
+   the drift veto's constant-offset assumption. Confirmed, not assumed.
+2. **The codec-free train-inference gap is about 0.000385 nats and FLAT** (slope
+   -1.4e-7/step), against a codec-view reading of about 4.7 nats. The codec
+   accounts for a factor of roughly **12,000** in the measured gap.
+
+Point 2 reframes a5's headline result. "Gap 4.4842, the only arm whose gap FALLS"
+is a statement about how much the codec perturbs the trainer's own view, not about
+sampler-versus-trainer policy disagreement, which sits at the bf16 kernel floor
+and does not move. Since `probe/gap_dense` measures the engine pair with the codec
+silent, the same floor should hold for any arm, though that is an inference and
+not a measurement: no other arm has the channel.
