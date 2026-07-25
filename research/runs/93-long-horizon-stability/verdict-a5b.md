@@ -124,3 +124,85 @@ Either answer is publishable and neither is available without a6.
 - Checkpoint `global_step_100` exists on the box (19 G). It is **local only**, the
   R2 sink is off for this cell, so post-hoc geometry on a5b is available while the
   box lives and is lost at teardown. Flagged for the operator, not acted on.
+
+---
+
+## ADDENDUM at step 152: the acceleration does NOT saturate, and the drift is real in the codec-free channel
+
+The verdict above left one rider open: whether a5b's drift acceleration saturates
+the way the incumbent's did after step 80. It does not. Matched windows:
+
+| window | incumbent slope | a5b slope | a5b/inc drift LEVEL |
+|---|---|---|---|
+| 61-80 | **+0.002848** (its peak) | +0.003234 | 0.79x |
+| 81-100 | +0.002065 | +0.004583 | 1.12x |
+| 101-120 | +0.002158 | +0.008137 | 1.51x |
+| 121-140 | +0.001300 | +0.014008 | **2.34x** |
+| 141-152 | **+0.001348** | **+0.017768** | **3.11x** |
+
+The incumbent peaks at 61-80 and then **decays to less than half its peak**, which
+is the saturation the round-A correction memo described and the reason it reaches
+only 0.91 nats by step 600. a5b's slope rises monotonically through every window,
+**5.5x from 61-80 to 141-152**, with no inflection.
+
+In level terms a5b is at **0.727 nats by step 152** against the incumbent's 0.234.
+**a5b will exceed the incumbent's entire 600-step drift budget within roughly 10 to
+20 more steps.** Naive continuation at the current slope puts it near 1.7 nats by
+step 200, and the slope is still climbing, so that is a floor rather than an
+estimate.
+
+### The drift is not a measurement artifact, and that question is now closed
+
+This is what the dense probe was added for. Codec-free drift, `probe/kl_dense`:
+
+| step | 25 | 50 | 75 | 100 | 125 | 150 |
+|---|---|---|---|---|---|---|
+| dense drift | 0.000252 | 0.000752 | 0.002383 | 0.003857 | 0.006258 | 0.008710 |
+
+Monotone, and **itself accelerating**: the codec-free slope runs +6.8e-5/step over
+25-150 and +9.7e-5/step over 100-150. So the run really is moving away from the
+base model, and the G3 failure is not an artifact of a time-varying view offset.
+
+The offset **is** time-varying, dramatically so. `probe/kl_gain` runs 13.8x, 33.2x,
+34.7x, 49.3x, 66.1x, **92.6x** across those same probes, a **6.7x growth in the
+codec's own inflation factor** over 150 steps. Both things are true at once: the
+codec-view drift metric is badly and increasingly inflated, **and** the underlying
+drift is real and accelerating. Had only the first been true, the veto would have
+been contaminated and a5b would deserve acquittal. It is not.
+
+Meanwhile the codec-free **gap** stays flat and tiny across all six probes
+(0.000362, 0.000439, 0.000355, 0.000297, 0.000167, 0.000260) with no trend,
+confirming it as a constant engine-mismatch floor rather than a policy quantity.
+
+### The learning objection is now withdrawn, which makes the trade cleaner
+
+a5b's score converges on the incumbent: **0.760, 0.919, 0.955, 0.978, 0.980** of
+the incumbent across 61-80 to 141-152. By 141-152 a5b is at **98 percent** of the
+incumbent's score. The G1 coin flip at 100-120 was the tail of the onset delay,
+not a learning ceiling.
+
+So the trade is no longer "marginal learning plus a drift failure". It is:
+
+> **equal learning, at 3.1x the drift level and 13x the drift slope, on a
+> trajectory with no saturation while the incumbent's has already saturated.**
+
+That is a sharper and stronger reason to keep plain PRF, and it does not depend on
+the marginal G1 reading at all.
+
+### What is NOT claimed
+
+**Capability is not damaged yet.** Score is still rising at 141-152 (0.6514, up
+from 0.6270 at 101-120), so 0.727 nats of reference KL has not cost accuracy. That
+is consistent with this program's earlier OOD result, where a compressed arm matched
+dense on all 10 benchmarks despite roughly 1000x reference KL, with damage appearing
+only at collapse. The claim here is about a **trajectory with no saturation**, not
+about realised damage. Confirming damage would need validation and OOD, which this
+cell does not run.
+
+### Decision unchanged, and the run is not being truncated
+
+Verdict stays **FAIL**, now on stronger evidence. a5b runs to 200 as registered:
+the remaining 48 steps are the highest-value drift-trajectory data in the program
+and the step-200 checkpoint enables post-hoc geometry. Truncating would not save
+GPU time either, since the chain would simply start a6 earlier, and a6 gets its
+full 200 steps regardless.
