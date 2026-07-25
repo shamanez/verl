@@ -1,0 +1,180 @@
+# resolved_params-a5.txt  -  issue #93 round-A cell a5-frlr-r48k28-tis
+# GROUND TRUTH OF WHAT RAN. Sources, in order of authority:
+#   1. WandB run record kfrkehju config (821 flattened keys; the resolved Hydra tree)
+#   2. on-box runtime echoes in metrics/incoming.log (anchor-objective parity line, anchor refreshes)
+#   3. WandB summary counters (wire budget, mask ratio, IS clamp)
+# capture_resolved_config.py could not run: no runs/93-long-horizon-stability/train.log on the
+# laptop and no expanded "python3 -m verl.trainer.main_ppo" line in the synced log
+# => RESOLVED_CONFIG_MISSING for the shell set -x path only (same as a1-a4).
+
+## arm-defining knobs (the only ones that differ from the a-cell protocol)
+actor_rollout_ref.actor.comm_eff.mask.frlr = True
+actor_rollout_ref.actor.comm_eff.mask.frlr_rank = 48
+actor_rollout_ref.actor.comm_eff.mask.frlr_k = 28
+actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased = False
+actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence = 1
+algorithm.rollout_correction.rollout_is = token
+algorithm.rollout_correction.rollout_is_threshold = 2
+algorithm.rollout_correction.rollout_is_batch_normalize = False   # <-- OFF; the un-tried renormalisation knob
+
+## runtime confirmation of the arm-exclusive knob
+metrics/incoming.log:14892  [comm_eff][anchor-objective] parity=PASS fast_policy_loss=vanilla anchor_surrogate=ratio_one_pg use_kl_loss=true kl_type=low_var_kl kl_coef=0.001 entropy_coef=0 rollout_is_weights=true loss_agg=token-mean exceptions=old_log_probs,ppo_ratio,ppo_clip
+metrics/incoming.log:1625   same line with rollout_is_weights=false   (every earlier arm)
+
+## wire budget as it actually ran
+actor/comm_eff/logical_pp_bytes_prf = 77          # COORDINATES, not bytes (WIRE_BUDGET.md)
+77 coordinates x 16 bits = 1232 bits/token/boundary = 1.0000x incumbent
+actor/comm_eff/mask_ratio = 0.9498697916666666 = 1 - 77/1536
+source check: activation_mask.py:555  kept = r_eff + k + (0 if frlr_unbiased else 1) = 48 + 28 + 1 = 77
+
+## full selected config dump
+# a5 resolved config from WandB run kfrkehju (821 flattened keys, 149 selected)
+actor_rollout_ref.actor.comm_eff._target_ = verl.workers.config.CommEffConfig
+actor_rollout_ref.actor.comm_eff.anchor._target_ = verl.workers.config.CommEffAnchorConfig
+actor_rollout_ref.actor.comm_eff.anchor.batch_scope = rollout_batch
+actor_rollout_ref.actor.comm_eff.anchor.cadence = 20
+actor_rollout_ref.actor.comm_eff.anchor.delay_K = 20
+actor_rollout_ref.actor.comm_eff.anchor.enabled = True
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor = True
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_history_mode = sliding_window
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_max_snapshots = -1
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots = 2
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_mode = rank1_relex
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_rollout_source = auto
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_strength = 1
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_window_snapshots = 2
+actor_rollout_ref.actor.comm_eff.anchor.owns_q = False
+actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch = True
+actor_rollout_ref.actor.comm_eff.anchor.snapshot_device = cpu
+actor_rollout_ref.actor.comm_eff.anchor.warmup_mode = stale_correct
+actor_rollout_ref.actor.comm_eff.compression_type = prf_mask
+actor_rollout_ref.actor.comm_eff.dc._target_ = verl.workers.config.CommEffDCConfig
+actor_rollout_ref.actor.comm_eff.dc.enabled = False
+actor_rollout_ref.actor.comm_eff.dc.eta = 1
+actor_rollout_ref.actor.comm_eff.dc.lambda0 = 0.05
+actor_rollout_ref.actor.comm_eff.dc.lambda_max = 1
+actor_rollout_ref.actor.comm_eff.dc.target = -1
+actor_rollout_ref.actor.comm_eff.enabled = True
+actor_rollout_ref.actor.comm_eff.mask._target_ = verl.workers.config.CommEffMaskConfig
+actor_rollout_ref.actor.comm_eff.mask.antithetic = False
+actor_rollout_ref.actor.comm_eff.mask.enabled = True
+actor_rollout_ref.actor.comm_eff.mask.exact_k = False
+actor_rollout_ref.actor.comm_eff.mask.frlr = True
+actor_rollout_ref.actor.comm_eff.mask.frlr_k = 28
+actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence = 1
+actor_rollout_ref.actor.comm_eff.mask.frlr_rank = 48
+actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased = False
+actor_rollout_ref.actor.comm_eff.mask.mask_recompute = True
+actor_rollout_ref.actor.comm_eff.mask.mask_reference = True
+actor_rollout_ref.actor.comm_eff.mask.p = 0.95
+actor_rollout_ref.actor.comm_eff.mask.p_by_boundary = []
+actor_rollout_ref.actor.comm_eff.mask.pp_size = 8
+actor_rollout_ref.actor.comm_eff.mask.rescale = False
+actor_rollout_ref.actor.comm_eff.mask.rescale_mode = auto
+actor_rollout_ref.actor.comm_eff.mask.seed = 0
+actor_rollout_ref.actor.comm_eff.powersgd._target_ = verl.workers.config.CommEffPowerSGDConfig
+actor_rollout_ref.actor.comm_eff.powersgd.compress_recompute = True
+actor_rollout_ref.actor.comm_eff.powersgd.compress_reference = True
+actor_rollout_ref.actor.comm_eff.powersgd.enabled = True
+actor_rollout_ref.actor.comm_eff.powersgd.fast_q_bootstrap = False
+actor_rollout_ref.actor.comm_eff.powersgd.pp_size = 8
+actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype = fp32
+actor_rollout_ref.actor.comm_eff.powersgd.rank = 77
+actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps = 1e-06
+actor_rollout_ref.actor.comm_eff.powersgd.seed = 0
+actor_rollout_ref.actor.comm_eff.powersgd.sync_basis = True
+actor_rollout_ref.actor.comm_eff.powersgd.update_cadence = 1
+actor_rollout_ref.actor.comm_eff.powersgd.warm_start = True
+actor_rollout_ref.actor.comm_eff.probe._target_ = verl.workers.config.CommEffProbeConfig
+actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_max = 0.05
+actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_min = 0.0002
+actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled = False
+actor_rollout_ref.actor.comm_eff.probe.ctrl_ki = 0.3
+actor_rollout_ref.actor.comm_eff.probe.ctrl_kp = 0.1
+actor_rollout_ref.actor.comm_eff.probe.kl_target_floor = 0.005
+actor_rollout_ref.actor.comm_eff.probe.kl_target_gain = 2
+actor_rollout_ref.actor.comm_eff.probe.kl_target_table = 
+actor_rollout_ref.actor.comm_eff.probe.probe_every = 0
+actor_rollout_ref.actor.comm_eff.quant._target_ = verl.workers.config.CommEffQuantConfig
+actor_rollout_ref.actor.comm_eff.quant.bits = 1
+actor_rollout_ref.actor.comm_eff.quant.block_size = 32
+actor_rollout_ref.actor.comm_eff.quant.rounding = sr
+actor_rollout_ref.actor.comm_eff.quant.subset_k = 0
+actor_rollout_ref.actor.comm_eff.spectral._target_ = verl.workers.config.CommEffSpectralConfig
+actor_rollout_ref.actor.comm_eff.spectral.beta_anc = 0.25
+actor_rollout_ref.actor.comm_eff.spectral.cadence = 1
+actor_rollout_ref.actor.comm_eff.spectral.diagnostics = False
+actor_rollout_ref.actor.comm_eff.spectral.ema_device = cpu
+actor_rollout_ref.actor.comm_eff.spectral.enabled = True
+actor_rollout_ref.actor.comm_eff.spectral.max_targets = -1
+actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha = 0.25
+actor_rollout_ref.actor.comm_eff.spectral.target_scope = all_floating
+actor_rollout_ref.actor.comm_eff.spectral.target_substr = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+actor_rollout_ref.actor.fsdp_config.optimizer_offload = False
+actor_rollout_ref.actor.kl_loss_coef = 0.001
+actor_rollout_ref.actor.kl_loss_type = low_var_kl
+actor_rollout_ref.actor.optim._target_ = verl.workers.config.FSDPOptimizerConfig
+actor_rollout_ref.actor.optim.betas = [0.9, 0.999]
+actor_rollout_ref.actor.optim.clip_grad = 1
+actor_rollout_ref.actor.optim.lr = 1e-06
+actor_rollout_ref.actor.optim.lr_scheduler_type = constant
+actor_rollout_ref.actor.optim.lr_warmup_steps = -1
+actor_rollout_ref.actor.optim.lr_warmup_steps_ratio = 0
+actor_rollout_ref.actor.optim.min_lr_ratio = 0
+actor_rollout_ref.actor.optim.num_cycles = 0.5
+actor_rollout_ref.actor.optim.optimizer = AdamW
+actor_rollout_ref.actor.optim.optimizer_impl = torch.optim
+actor_rollout_ref.actor.optim.override_optimizer_config = None
+actor_rollout_ref.actor.optim.total_training_steps = 120
+actor_rollout_ref.actor.optim.warmup_style = None
+actor_rollout_ref.actor.optim.weight_decay = 0.01
+actor_rollout_ref.actor.optim.zero_indexed_step = True
+actor_rollout_ref.actor.ppo_micro_batch_size = None
+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu = 1
+actor_rollout_ref.actor.ppo_mini_batch_size = 128
+actor_rollout_ref.actor.use_kl_loss = True
+actor_rollout_ref.ref.fsdp_config.optimizer_offload = False
+actor_rollout_ref.rollout.n = 8
+actor_rollout_ref.rollout.pipeline_model_parallel_size = 1
+actor_rollout_ref.rollout.temperature = 1
+actor_rollout_ref.rollout.trace.experiment_name = a5-frlr-r48k28-tis
+actor_rollout_ref.rollout.val_kwargs.temperature = 0
+algorithm.kl_ctrl._target_ = verl.trainer.config.KLControlConfig
+algorithm.kl_ctrl.horizon = 10000
+algorithm.kl_ctrl.kl_coef = 0.001
+algorithm.kl_ctrl.target_kl = 0.1
+algorithm.kl_ctrl.type = fixed
+algorithm.rollout_correction.rollout_is = token
+algorithm.rollout_correction.rollout_is_batch_normalize = False
+algorithm.rollout_correction.rollout_is_threshold = 2
+critic.fsdp.optimizer_offload = False
+critic.optim._target_ = verl.workers.config.FSDPOptimizerConfig
+critic.optim.betas = [0.9, 0.999]
+critic.optim.clip_grad = 1
+critic.optim.lr = 1e-05
+critic.optim.lr_scheduler_type = constant
+critic.optim.lr_warmup_steps = -1
+critic.optim.lr_warmup_steps_ratio = 0
+critic.optim.min_lr_ratio = 0
+critic.optim.num_cycles = 0.5
+critic.optim.optimizer = AdamW
+critic.optim.optimizer_impl = torch.optim
+critic.optim.override_optimizer_config = None
+critic.optim.total_training_steps = 120
+critic.optim.warmup_style = None
+critic.optim.weight_decay = 0.01
+critic.optim.zero_indexed_step = True
+critic.ppo_micro_batch_size = None
+critic.ppo_micro_batch_size_per_gpu = None
+critic.ppo_mini_batch_size = 128
+data.max_prompt_length = 1024
+data.max_response_length = 2048
+data.train_batch_size = 128
+distillation.teacher_models.teacher_model.inference.temperature = 1
+reward.reward_model.rollout.n = 1
+reward.reward_model.rollout.pipeline_model_parallel_size = 1
+reward.reward_model.rollout.temperature = 1
+trainer.experiment_name = a5-frlr-r48k28-tis
+trainer.save_freq = -1
+trainer.test_freq = -1
+trainer.total_training_steps = 120
