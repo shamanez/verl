@@ -206,3 +206,88 @@ the remaining 48 steps are the highest-value drift-trajectory data in the progra
 and the step-200 checkpoint enables post-hoc geometry. Truncating would not save
 GPU time either, since the chain would simply start a6 earlier, and a6 gets its
 full 200 steps regardless.
+
+---
+
+## TERMINAL ADDENDUM at step 200: a5b validates at PARITY, and the decisive gate does not track capability
+
+a5b ran `TEST_FREQ=200`, so it produced a terminal validation. **This is the first
+val number for any cell in issue #93** (round A ran with validation off), and it
+speaks directly to the one thing the verdict above said it could not settle.
+
+| run | step | val, MATH acc mean@1 | drift `actor/kl_loss` |
+|---|---|---|---|
+| incumbent | 150 | 0.6613 | 0.2345 |
+| incumbent | 300 | 0.6633 | 0.4538 |
+| incumbent | 450 | 0.6733 | 0.6926 |
+| incumbent | 600 | 0.6613 | 0.9085 |
+| **a5b** | **200** | **0.6593** | **2.2262** |
+
+a5b's terminal drift is **2.2262 nats**: 9.5x the incumbent's at a comparable step
+and **2.45x the incumbent's entire 600-step endpoint**. Its validation accuracy is
+**0.6593**, which is 0.0020 below the incumbent's step-150 value and 0.0040 below
+its step-300 value.
+
+**That difference is smaller than the incumbent's own val-to-val variation.** The
+incumbent wobbles 0.6613, 0.6633, 0.6733, 0.6613 across its four checkpoints, a
+range of 0.0120, and it **ends exactly where it started**. a5b sits inside that
+band. No knowledge of the val set size is needed for this comparison: the
+incumbent's own series supplies the empirical noise floor and a5b is well within it.
+
+Training score agrees: 0.6660 at step 200 against the incumbent's 0.6568 at
+101-120.
+
+### What this does to the verdict
+
+**The FAIL stands as a bar-compliance fact.** G3 was pre-registered, a5b missed it
+by 2.48x, and pre-registered bars do not move after the data arrives. That is the
+whole point of registering them.
+
+**But the verdict's reasoning above is now contradicted by direct evidence.** It
+said the trade was "a bad trade under this program's cardinal rule, which is not to
+damage the base model." At 2.23 nats of reference KL there is **no measurable
+damage** to in-domain capability. The sentence was an inference from the drift
+metric, and the drift metric has just been shown not to carry it.
+
+So the honest position is: **G3 measured what it was defined to measure and failed
+to proxy what it was chosen for.** This is not a defence of a5b so much as an
+indictment of the gate.
+
+### Stated fairly, the case FOR a5b is now non-trivial
+
+Having argued against this cell, I should put its case at full strength:
+
+- **equal in-domain capability** at step 200, inside the incumbent's own val noise
+- **3.2x better train-inference gap** (4.45 against 14.25 nats)
+- **identical wire budget**, 1232 bits, no cost paid for the gap improvement
+- equal training score
+
+### And the case against it, which is now narrower but not empty
+
+- **The drift is still accelerating and did not saturate.** 0.727 nats at step 152
+  to 2.226 at step 200 is +0.031/step averaged, above the +0.0178 measured at
+  141-152, so it is still climbing. The incumbent's slope had already decayed to
+  +0.0013 by then. Naive continuation puts a5b far into the historical 3-8 nat
+  collapse band well before step 600.
+- **A val at 200 says nothing about 600.** This program has previously seen a
+  comm-eff arm crash at around 200 steps from drift, so the hazard is real and
+  merely unrealised here.
+- One benchmark, one checkpoint, `mean@1`, in-domain only. No OOD.
+
+### The consequence for the program, which is an operator-level decision
+
+**Rounds B and C should not gate primarily on reference-KL drift.** The evidence is
+now two-fold and consistent: this program's earlier OOD work found a compressed arm
+matching dense on all 10 benchmarks at roughly 1000x reference KL with damage only
+at collapse, and a5b now reproduces that in-domain with an actual val at 2.23 nats.
+A drift gate that fires 2.48x over threshold on a cell with intact capability is
+generating false positives, and round A killed arms on it.
+
+The criterion that survives this is **capability measured directly**, which is
+exactly what round C runs (val at 0/300/600 plus the OOD suite). The recommendation
+is to demote drift slope from a veto to a reported diagnostic, and to make val and
+OOD the promotion gate. **That changes the registered decision procedure and is
+therefore the operator's call, not mine.**
+
+Flagged for the operator rather than acted on. Nothing in this addendum changes
+a5b's recorded FAIL or a6's already-registered bar.
