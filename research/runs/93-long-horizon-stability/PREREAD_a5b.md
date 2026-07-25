@@ -133,9 +133,11 @@ relative to the incumbent, and then it closes: 0.71x the incumbent at 41-60 risi
 to **0.92x at 81-100**.
 
 **Against a5, at the last complete matched window, a5b is ahead by +7.9 percent**
-(0.5733 against 0.5312). a5 was behind a5b at 41-60 and 61-80 and is now behind
-it, so the ordering flipped between 61-80 and 81-100. Batch normalisation moved
-learning in the direction it was designed to move it.
+(0.5733 against 0.5312). Note the ordering **flipped**: a5 was AHEAD of a5b at
+41-60 (0.3920 against 0.3728) and at 61-80 (0.4684 against 0.4609), and is behind
+it from 81-100 onward. So batch normalisation costs a little during the onset
+phase and then pays, which is consistent with a larger effective step size taking
+longer to settle before it starts compounding.
 
 **So my original diagnosis was right and my retraction of it was wrong.** The
 round-A correction memo argued a5 under-learned because the mean IS weight of
