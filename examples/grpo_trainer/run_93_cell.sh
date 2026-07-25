@@ -120,7 +120,10 @@ apply_control_plane() {
   [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE:-}" ]] \
     || fatal "$ARM requires COMM_EFF_PROBE_KL_TARGET_TABLE in the env ('step:value,...' baked from the 90-dense-600 reference-KL curve)"
   export COMM_EFF_PROBE_KL_TARGET_TABLE
-  export COMM_EFF_PROBE_EVERY=25
+  # Parameterized 2026-07-25, default unchanged. At 200 steps a cadence of 25
+  # yields only 8 probes, which leaves the window=4 brake detector a single
+  # evaluable point; round B should pass COMM_EFF_PROBE_EVERY=5 for 40 probes.
+  export COMM_EFF_PROBE_EVERY="${COMM_EFF_PROBE_EVERY:-25}"
   export COMM_EFF_PROBE_CTRL_ENABLED=true
 }
 
@@ -128,7 +131,11 @@ case "$ARM" in
   a1|a2|a3|a4|a5)
     apply_codec_arm "$ARM"
     TOTAL_STEPS="${TOTAL_STEPS:-120}"
-    TEST_FREQ=-1
+    # Default -1 preserves the registered "validation OFF for all gate cells".
+    # Passing TEST_FREQ=$TOTAL_STEPS gives a terminal-step val that cannot
+    # perturb training, since no training step follows it. That is an operator
+    # decision (it amends the matrix and costs about 0.2 GPU-h), not a default.
+    TEST_FREQ="${TEST_FREQ:--1}"
     VAL_BEFORE_TRAIN=False
     SAVE_FREQ=-1
     EXPERIMENT_NAME="${ARM}-${CODEC_SLUG}"
