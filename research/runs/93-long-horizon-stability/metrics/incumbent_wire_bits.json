@@ -1,0 +1,7 @@
+{
+  "incumbent_run": "90-prf-exactk-600",
+  "wandb_id": "woqs8zra",
+  "bit_keys": {
+    "actor/comm_eff/logical_pp_bytes_prf": 76.80000000000007
+  }
+}

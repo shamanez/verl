@@ -1,0 +1,356 @@
+############################################################
+# analysis-a3.log  -  issue #93 round-A cell a3-srq-parity-k493
+# WandB k8dvru5l  project 93-long-horizon-stability  entity shamanework-pl
+# generated 2026-07-25T04:23:32Z on the laptop; NO box access (a4 is training)
+############################################################
+
+== SECTION 1: plan verification command, gate93.py, verbatim stdout ==
+$ python3 scripts/gate93.py --run k8dvru5l --gate-lo 100 --gate-hi 120 --json runs/93-long-horizon-stability/metrics/a3_gate.json
+=== gate93: a3-srq-parity-k493 (k8dvru5l) state=finished max_step=120 ===
+gate window: steps 100-120  (21 rows)
+
+  reference KL (actor/kl_loss)   gate=0.9111   slope=+0.00190/step   [baseline 0.156-0.203]
+  train-inference gap (rc/kl)    gate=14.992    slope=+0.00528/step   [baseline 14.24; beat<10.0 target<3.0]
+  E[rho]=k3-kl+1                 gate=0.0027   [baseline 0.0014]
+  reward slope (full)            +0.00322/step   gate-win -0.00010/step   [baseline 0.0032; 90%=0.00288]
+  actor/ppo_kl max|.|            0.00e+00   (within-step identity; want ~0)
+  entropy                        gate=7.789   slope=+0.00002/step
+  grad_norm max                  7.283
+  confinement counters (last)    {'mask_applications': 78176.0, 'spectral_corrections': 34138.0, 'anchor_replay_fires': 6.0, 'rank1_bypass_ticks': 19.0}
+
+  section-1 gate flags (informational):
+    ref_kl_le_baseline         False
+    gap_lt_10                  False
+    gap_lt_3_target            False
+    reward_slope_parity        True
+    ppo_kl_zero                True
+    e_rho_gt_0p05              False
+
+  NOTE: for sr_quant arms actor/kl_loss carries an SR view-noise floor
+        (~1.9 for a1); judge those on ref_kl_slope, not the absolute gate value.
+
+  wrote runs/93-long-horizon-stability/metrics/a3_gate.json
+rc=0
+
+== SECTION 2: matched-window OLS + Newey-West(3) fits, a3 and the incumbent ==
+Same code path for both runs so every ratio below is method-matched as well as
+window-matched. Source: WandB scan_history, full unsampled history.
+$ python3 <scratchpad>/a3_wandb_windows.py runs/93-long-horizon-stability/metrics/a3_windows_wandb.json
+
+### a3-srq-parity-k493 -> project=93-long-horizon-stability id=k8dvru5l name=a3-srq-parity-k493 state=finished
+
+=== a3-srq-parity-k493 : rows=120 min=1 max=120 ===
+    missing steps: none
+  -- window 100-120 --
+     actor/kl_loss          n= 21 mean=    0.911128 slope=+0.001616 se_iid=0.000167 se_hac=0.000132 r2=0.831 intercept=   0.7334
+     rollout_corr/kl        n= 21 mean=   14.992396 slope=+0.000101 se_iid=0.000244 se_hac=0.000207 r2=0.009 intercept=  14.9813
+     rollout_corr/k3_kl     n= 21 mean=   13.995056 slope=-0.000127 se_iid=0.000228 se_hac=0.000134 r2=0.016 intercept=  14.0091
+     critic/score/mean      n= 21 mean=    0.656855 slope=-0.000099 se_iid=0.000690 se_hac=0.000437 r2=0.001 intercept=   0.6677
+     actor/entropy          n= 21 mean=    7.788831 slope=+0.000004 se_iid=0.000043 se_hac=0.000034 r2=0.000 intercept=   7.7884
+     actor/grad_norm        n= 21 mean=    2.748124 slope=+0.007996 se_iid=0.017241 se_hac=0.011063 r2=0.011 intercept=   1.8686
+     actor/ppo_kl           n= 21 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n= 21 mean=  661.976795 slope=+1.392988 se_iid=0.998445 se_hac=0.650844 r2=0.093 intercept= 508.7481
+     E[rho]                 n= 21 mean=    0.002661 median=    0.001652 min=0.000597 max=0.015097
+  -- window 61-120 --
+     actor/kl_loss          n= 60 mean=    0.878062 slope=+0.001635 se_iid=0.000037 se_hac=0.000030 r2=0.972 intercept=   0.7301
+     rollout_corr/kl        n= 60 mean=   14.969013 slope=+0.001300 se_iid=0.000089 se_hac=0.000161 r2=0.785 intercept=  14.8514
+     rollout_corr/k3_kl     n= 60 mean=   13.986830 slope=+0.000723 se_iid=0.000813 se_hac=0.000555 r2=0.013 intercept=  13.9214
+     critic/score/mean      n= 60 mean=    0.631543 slope=+0.001236 se_iid=0.000232 se_hac=0.000184 r2=0.329 intercept=   0.5197
+     actor/entropy          n= 60 mean=    7.788743 slope=+0.000005 se_iid=0.000007 se_hac=0.000007 r2=0.008 intercept=   7.7883
+     actor/grad_norm        n= 60 mean=    2.891962 slope=-0.003001 se_iid=0.004069 se_hac=0.004124 r2=0.009 intercept=   3.1635
+     actor/ppo_kl           n= 60 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n= 60 mean=  678.276839 slope=-0.685360 se_iid=0.216084 se_hac=0.177811 r2=0.148 intercept= 740.3019
+     E[rho]                 n= 60 mean=    0.017817 median=    0.002738 min=0.000597 max=0.819358
+  -- window 21-120 --
+     actor/kl_loss          n=100 mean=    0.843959 slope=+0.001681 se_iid=0.000021 se_hac=0.000021 r2=0.984 intercept=   0.7254
+     rollout_corr/kl        n=100 mean=   14.863676 slope=+0.004911 se_iid=0.000293 se_hac=0.000640 r2=0.741 intercept=  14.5174
+     rollout_corr/k3_kl     n=100 mean=   13.941630 slope=+0.001502 se_iid=0.001728 se_hac=0.002303 r2=0.008 intercept=  13.8358
+     critic/score/mean      n=100 mean=    0.567012 slope=+0.003048 se_iid=0.000169 se_hac=0.000309 r2=0.768 intercept=   0.3521
+     actor/entropy          n=100 mean=    7.788333 slope=+0.000016 se_iid=0.000003 se_hac=0.000003 r2=0.188 intercept=   7.7872
+     actor/grad_norm        n=100 mean=    2.968955 slope=-0.003963 se_iid=0.001973 se_hac=0.001875 r2=0.040 intercept=   3.2483
+     actor/ppo_kl           n=100 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=100 mean=  704.808428 slope=-1.244216 se_iid=0.103846 se_hac=0.124223 r2=0.594 intercept= 792.5256
+     E[rho]                 n=100 mean=    0.077954 median=    0.005470 min=0.000597 max=5.084892
+  -- window 2-120 --
+     actor/kl_loss          n=119 mean=    0.829860 slope=+0.001595 se_iid=0.000021 se_hac=0.000037 r2=0.981 intercept=   0.7325
+     rollout_corr/kl        n=119 mean=   14.807674 slope=+0.005301 se_iid=0.000220 se_hac=0.000373 r2=0.833 intercept=  14.4843
+     rollout_corr/k3_kl     n=119 mean=   13.885329 slope=+0.003289 se_iid=0.001236 se_hac=0.001235 r2=0.057 intercept=  13.6847
+     critic/score/mean      n=119 mean=    0.533326 slope=+0.003228 se_iid=0.000128 se_hac=0.000200 r2=0.845 intercept=   0.3364
+     actor/entropy          n=119 mean=    7.788178 slope=+0.000016 se_iid=0.000002 se_hac=0.000002 r2=0.275 intercept=   7.7872
+     actor/grad_norm        n=119 mean=    3.139330 slope=-0.009508 se_iid=0.001854 se_hac=0.002430 r2=0.184 intercept=   3.7193
+     actor/ppo_kl           n=119 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=119 mean=  716.109268 slope=-1.212141 se_iid=0.081480 se_hac=0.098652 r2=0.654 intercept= 790.0499
+     E[rho]                 n=119 mean=    0.077655 median=    0.009536 min=0.000597 max=5.084892
+  -- window 1-120 --
+     actor/kl_loss          n=120 mean=    0.822944 slope=+0.001899 se_iid=0.000176 se_hac=0.000286 r2=0.496 intercept=   0.7081
+     rollout_corr/kl        n=120 mean=   14.805346 slope=+0.005285 se_iid=0.000216 se_hac=0.000364 r2=0.835 intercept=  14.4856
+     rollout_corr/k3_kl     n=120 mean=   13.882739 slope=+0.003336 se_iid=0.001216 se_hac=0.001192 r2=0.060 intercept=  13.6809
+     critic/score/mean      n=120 mean=    0.531934 slope=+0.003217 se_iid=0.000126 se_hac=0.000196 r2=0.847 intercept=   0.3373
+     actor/entropy          n=120 mean=    7.788173 slope=+0.000016 se_iid=0.000002 se_hac=0.000002 r2=0.277 intercept=   7.7872
+     actor/grad_norm        n=120 mean=    3.140774 slope=-0.009344 se_iid=0.001825 se_hac=0.002376 r2=0.182 intercept=   3.7061
+     actor/ppo_kl           n=120 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=120 mean=  716.471216 slope=-1.200036 se_iid=0.080426 se_hac=0.097696 r2=0.654 intercept= 789.0734
+     E[rho]                 n=120 mean=    0.077393 median=    0.009726 min=0.000597 max=5.084892
+  grad_norm: run max=7.282734 @step 14 ; 61+ max=5.251674 @step 71 mean=2.891962 n=60
+  actor/ppo_kl max|.| = 0 over n=120
+
+### incumbent-90-prf-exactk-600 -> project=90-prf-exactk-600 id=woqs8zra name=90-prf-exactk-600 state=finished
+
+=== incumbent-90-prf-exactk-600 : rows=600 min=1 max=600 ===
+    missing steps: none
+  -- window 100-120 --
+     actor/kl_loss          n= 21 mean=    0.178583 slope=+0.002176 se_iid=0.000142 se_hac=0.000146 r2=0.925 intercept=  -0.0608
+     rollout_corr/kl        n= 21 mean=   14.245787 slope=+0.000838 se_iid=0.000310 se_hac=0.000206 r2=0.278 intercept=  14.1536
+     rollout_corr/k3_kl     n= 21 mean=   13.250815 slope=+0.000677 se_iid=0.000491 se_hac=0.000382 r2=0.091 intercept=  13.1763
+     critic/score/mean      n= 21 mean=    0.657692 slope=-0.001422 se_iid=0.000872 se_hac=0.000544 r2=0.123 intercept=   0.8141
+     actor/entropy          n= 21 mean=    7.816045 slope=+0.000121 se_iid=0.000056 se_hac=0.000034 r2=0.197 intercept=   7.8027
+     actor/grad_norm        n= 21 mean=    1.808137 slope=+0.003068 se_iid=0.011051 se_hac=0.004379 r2=0.004 intercept=   1.4707
+     actor/ppo_kl           n= 21 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n= 21 mean=  662.736886 slope=+0.229846 se_iid=0.964575 se_hac=0.550387 r2=0.003 intercept= 637.4538
+     E[rho]                 n= 21 mean=    0.005028 median=    0.002057 min=0.000910 max=0.039847
+  -- window 61-120 --
+     actor/kl_loss          n= 60 mean=    0.132968 slope=+0.002344 se_iid=0.000028 se_hac=0.000037 r2=0.992 intercept=  -0.0792
+     rollout_corr/kl        n= 60 mean=   14.212664 slope=+0.001867 se_iid=0.000107 se_hac=0.000167 r2=0.840 intercept=  14.0437
+     rollout_corr/k3_kl     n= 60 mean=   13.220317 slope=+0.001745 se_iid=0.000142 se_hac=0.000189 r2=0.722 intercept=  13.0624
+     critic/score/mean      n= 60 mean=    0.629232 slope=+0.001203 se_iid=0.000219 se_hac=0.000208 r2=0.342 intercept=   0.5204
+     actor/entropy          n= 60 mean=    7.814604 slope=+0.000076 se_iid=0.000010 se_hac=0.000010 r2=0.521 intercept=   7.8077
+     actor/grad_norm        n= 60 mean=    1.870069 slope=+0.002081 se_iid=0.003627 se_hac=0.002068 r2=0.006 intercept=   1.6817
+     actor/ppo_kl           n= 60 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n= 60 mean=  676.869824 slope=-0.680690 se_iid=0.207092 se_hac=0.164654 r2=0.157 intercept= 738.4723
+     E[rho]                 n= 60 mean=    0.007653 median=    0.003592 min=0.000910 max=0.070409
+  -- window 21-120 --
+     actor/kl_loss          n=100 mean=    0.095407 slope=+0.001897 se_iid=0.000041 se_hac=0.000089 r2=0.956 intercept=  -0.0384
+     rollout_corr/kl        n=100 mean=   14.109071 slope=+0.004813 se_iid=0.000221 se_hac=0.000461 r2=0.828 intercept=  13.7698
+     rollout_corr/k3_kl     n=100 mean=   13.130165 slope=+0.004186 se_iid=0.000194 se_hac=0.000371 r2=0.826 intercept=  12.8351
+     critic/score/mean      n=100 mean=    0.560859 slope=+0.003139 se_iid=0.000162 se_hac=0.000290 r2=0.794 intercept=   0.3395
+     actor/entropy          n=100 mean=    7.812547 slope=+0.000097 se_iid=0.000004 se_hac=0.000004 r2=0.830 intercept=   7.8057
+     actor/grad_norm        n=100 mean=    1.874906 slope=+0.000572 se_iid=0.001810 se_hac=0.001798 r2=0.001 intercept=   1.8346
+     actor/ppo_kl           n=100 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=100 mean=  701.887461 slope=-1.189217 se_iid=0.107520 se_hac=0.122738 r2=0.555 intercept= 785.7272
+     E[rho]                 n=100 mean=    0.021094 median=    0.008029 min=0.000910 max=0.151389
+  -- window 2-120 --
+     actor/kl_loss          n=119 mean=    0.085048 slope=+0.001565 se_iid=0.000047 se_hac=0.000100 r2=0.903 intercept=  -0.0104
+     rollout_corr/kl        n=119 mean=   14.051661 slope=+0.005276 se_iid=0.000179 se_hac=0.000319 r2=0.882 intercept=  13.7298
+     rollout_corr/k3_kl     n=119 mean=   13.082863 slope=+0.004484 se_iid=0.000153 se_hac=0.000253 r2=0.881 intercept=  12.8093
+     critic/score/mean      n=119 mean=    0.528829 slope=+0.003219 se_iid=0.000119 se_hac=0.000185 r2=0.862 intercept=   0.3325
+     actor/entropy          n=119 mean=    7.811659 slope=+0.000095 se_iid=0.000003 se_hac=0.000003 r2=0.878 intercept=   7.8058
+     actor/grad_norm        n=119 mean=    1.917101 slope=-0.001500 se_iid=0.001330 se_hac=0.001275 r2=0.011 intercept=   2.0086
+     actor/ppo_kl           n=119 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=119 mean=  712.899537 slope=-1.172612 se_iid=0.081808 se_hac=0.087036 r2=0.637 intercept= 784.4289
+     E[rho]                 n=119 mean=    0.031202 median=    0.012578 min=0.000910 max=0.218842
+  -- window 1-120 --
+     actor/kl_loss          n=120 mean=    0.084339 slope=+0.001562 se_iid=0.000047 se_hac=0.000098 r2=0.905 intercept=  -0.0101
+     rollout_corr/kl        n=120 mean=   14.050226 slope=+0.005216 se_iid=0.000179 se_hac=0.000323 r2=0.878 intercept=  13.7346
+     rollout_corr/k3_kl     n=120 mean=   13.081602 slope=+0.004435 se_iid=0.000153 se_hac=0.000259 r2=0.877 intercept=  12.8133
+     critic/score/mean      n=120 mean=    0.527352 slope=+0.003212 se_iid=0.000117 se_hac=0.000181 r2=0.864 intercept=   0.3330
+     actor/entropy          n=120 mean=    7.811625 slope=+0.000095 se_iid=0.000003 se_hac=0.000003 r2=0.877 intercept=   7.8059
+     actor/grad_norm        n=120 mean=    1.917611 slope=-0.001489 se_iid=0.001308 se_hac=0.001245 r2=0.011 intercept=   2.0077
+     actor/ppo_kl           n=120 mean=    0.000000 slope=+0.000000 se_iid=0.000000 se_hac=0.000000 r2=nan intercept=   0.0000
+     response_length/mean   n=120 mean=  713.407332 slope=-1.168719 se_iid=0.080475 se_hac=0.085138 r2=0.641 intercept= 784.1148
+     E[rho]                 n=120 mean=    0.031376 median=    0.012720 min=0.000910 max=0.218842
+  grad_norm: run max=4.645212 @step 32 ; 61+ max=4.165805 @step 341 mean=1.652268 n=540
+  actor/ppo_kl max|.| = 0 over n=600
+
+=== MATCHED-WINDOW RATIOS (a3 / incumbent), same code path ===
+  actor/kl_loss      100-120  a3=+0.001616  incumbent=+0.002176  ratio=0.743x
+  actor/kl_loss      61-120   a3=+0.001635  incumbent=+0.002344  ratio=0.697x
+  rollout_corr/kl    61-120   a3=+0.001300  incumbent=+0.001867  ratio=0.696x
+  rollout_corr/kl    100-120  a3=+0.000101  incumbent=+0.000838  ratio=0.120x
+
+=== GAP HORIZON EXTRAPOLATION on measured 61-120 slope, from level@110 ===
+  a3         level(100-120)= 14.9924 slope(61-120)=+0.001300 (hac se 0.000161) -> gap(600)~ 15.6294  [95% CI 15.4751, 15.7837]
+  incumbent  level(100-120)= 14.2458 slope(61-120)=+0.001867 (hac se 0.000167) -> gap(600)~ 15.1606  [95% CI 14.9999, 15.3212]
+
+wrote /Users/shamane/Documents/new-harness/verl/research/runs/93-long-horizon-stability/metrics/a3_windows_wandb.json
+== SECTION 3: committed-criteria scoring, arithmetic shown ==
+
+V1 drift veto (actor/kl_loss slope, window 100-120, ceiling 3.264e-03)
+   a3        slope = +0.001616  hac_se = 0.000132  n = 21
+   incumbent slope = +0.002176  hac_se = 0.000146  n = 21
+   ratio = 0.7428x   ceiling headroom = 0.4951 of the ceiling
+   a3 vs incumbent difference z = -2.85 (a3 significantly LOWER)
+   VERDICT: PASS
+
+V2 gradient veto (run max <= 10.0, window mean <= 3.62)
+   a3 run max = 7.2827 at step 14 (72.8% of the kill bar); 61+ max = 5.2517 at step 71
+   a3 61-120 mean = 2.891962 (n=60) = 79.9% of the 3.62 bar
+   incumbent run max = 4.6452 at step 32; 61+ mean = 1.652268 (n=540, 600-step run)
+   a3 / incumbent window mean = 1.750x
+   VERDICT: PASS (both clauses), narrowest veto margin of the three
+
+V3 learning veto (critic/score/mean LEVEL at 100-120 >= 0.6248, plus significantly positive 61-120 slope)
+   a3 level = 0.656855 (n=21) = 0.9987x the incumbent's 0.657692; margin over bar = +0.032055
+   a3 61-120 slope = +0.001236  hac_se = 0.000184  t_vs_0 = +6.72  (significantly positive)
+   VERDICT: PASS (both clauses)
+
+O objective, primary: gap slope 61-120 vs S-bar 5.0e-04
+   a3        slope = +0.001300  hac_se = 0.000161  n = 60  ->  2.60x S-bar, +4.98 hac se above it
+   incumbent slope = +0.001867  hac_se = 0.000167  n = 60  ->  3.73x S-bar
+   ratio a3/incumbent = 0.6964x ; difference z = -2.44 (a3 significantly LOWER)
+   VERDICT: FAIL (decisively; 5 hac se clear of the pass line, not a noise call)
+
+O objective, secondary: gap level 100-120 <= 14.2458
+   a3 level = 14.992396  (n=21)  ->  exceeds the cap by +0.7466 nats (1.0524x)
+   VERDICT: FAIL
+
+T tie-break (higher E[rho], bonus only)
+   a3 mean = 0.002661 median = 0.001652 ; incumbent mean = 0.005028 median = 0.002057 -> a3 is 0.53x, LOSES the bonus
+
+== SECTION 4: reward power analysis, every window, HAC(3) se ==
+
+window    n    level      slope       hac_se     t_vs_0    t_vs_bar  MDS95     
+100-120   21   0.656855     -0.000099 0.000437       -0.23     -6.82 0.000856  
+61-120    60   0.631543     +0.001236 0.000184       +6.72     -8.94 0.000361  
+21-120    100  0.567012     +0.003048 0.000309       +9.88     +0.54 0.000605  
+2-120     119  0.533326     +0.003228 0.000200      +16.12     +1.74 0.000392  
+1-120     120  0.531934     +0.003217 0.000196      +16.38     +1.71 0.000385  
+
+incumbent, identical windows and identical code path:
+100-120   21   0.657692     -0.001422 0.000544       -2.61     -7.91 0.001066  
+61-120    60   0.629232     +0.001203 0.000208       +5.79     -8.07 0.000407  
+21-120    100  0.560859     +0.003139 0.000290      +10.82     +0.89 0.000569  
+1-120     120  0.527352     +0.003212 0.000181      +17.73     +1.83 0.000355  
+
+a3-minus-incumbent reward slope, per window (z on the difference):
+   100-120   a3 -0.000099  inc -0.001422  diff +0.001323  z = +1.90  ratio 0.070x
+   61-120    a3 +0.001236  inc +0.001203  diff +0.000033  z = +0.12  ratio 1.027x
+   21-120    a3 +0.003048  inc +0.003139  diff -0.000091  z = -0.22  ratio 0.971x
+   1-120     a3 +0.003217  inc +0.003212  diff +0.000004  z = +0.02  ratio 1.001x
+
+== SECTION 5: step-1 codec-view offsets (before any optimizer step) ==
+
+At step 1 the actor weights are still the base checkpoint, so actor/kl_loss is 0 in
+every arm and the whole of rollout_corr/kl is instrument: the uncompressed vLLM
+sampler view versus the codec-compressed training view. a1/a2/a3 share one launcher,
+one dataset and one seed, so their step-1 spread is exactly matched.
+
+arm                            step1 gap    step2 gap    step2 kl_loss
+a1-srq-b1-sr                   13.1822      13.1120      1.9096      
+a2-srq-b1-rn                   11.4964      11.4910      0.6394      
+a3-srq-parity-k493             14.5284      14.5190      0.7454      
+incumbent-90-prf-exactk-600    13.8794      13.8316      0.0316      
+
+step-1 gap spread across four codecs = 3.0319 nats (min 11.4964, max 14.5284) with ZERO training done
+
+offset-corrected accumulation over the run (level at 100-120 minus the step-1/step-2 offset):
+arm                            gap step1      gap 100-120    gap accum      vs incumbent  
+a1-srq-b1-sr                   13.1822        13.7511        0.5690         1.553x        
+a3-srq-parity-k493             14.5284        14.9924        0.4640         1.267x        
+incumbent-90-prf-exactk-600    13.8794        14.2458        0.3664         1.000x        
+
+same for actor/kl_loss, using the step-2 value as the offset (step 1 is 0 by construction):
+a1-srq-b1-sr                   off 1.9096    level 2.2518    accum 0.3423     2.328x incumbent
+a3-srq-parity-k493             off 0.7454    level 0.9111    accum 0.1657     1.127x incumbent
+incumbent-90-prf-exactk-600    off 0.0316    level 0.1786    accum 0.1470     1.000x incumbent
+
+fraction of a3's level excess over the incumbent that is already present at step 1:
+   excess at 100-120 = 0.7466 nats ; excess already at step 1 = 0.6489 nats = 86.9%
+
+== SECTION 6: horizon extrapolation on the measured 61-120 slopes ==
+
+   a3         gap(200) =  15.1094   [95% CI  15.0811,  15.1377]
+   a3         gap(400) =  15.3694   [95% CI  15.2781,  15.4607]
+   a3         gap(600) =  15.6294   [95% CI  15.4751,  15.7837]
+   incumbent  gap(200) =  14.4138   [95% CI  14.3843,  14.4433]
+   incumbent  gap(400) =  14.7872   [95% CI  14.6921,  14.8823]
+   incumbent  gap(600) =  15.1606   [95% CI  14.9999,  15.3212]
+
+   a3 level penalty = +0.7466 nats ; a3 slope credit = +0.000567 nats/step
+   crossover step where a3's gap first falls below the incumbent's = 1427
+   at the registered 600-step horizon a3 is still +0.4689 nats ABOVE the incumbent
+   S-bar's own horizon meaning (amendment section 2, anchor 4): bounds gap(600) at about 14.45
+   a3's projected gap(600) = 15.6294, i.e. +1.1794 nats outside that bound
+
+== SECTION 7: the falsified a1 elasticity prediction ==
+
+verdict-a1.md line 105 and 255: elasticity 0.494 nats of gap per e-fold of noise
+energy, fitted through two anchors (incumbent 19 ||h||^2 -> 14.24 nats; a1 7 ||h||^2
+-> 13.751 nats); it predicted 13.58 nats for a3 at 5 ||h||^2.
+   predicted 13.58   observed 14.9924   miss +1.4124 nats (pessimistic direction)
+   the entire gap range the model was fitted on is 0.4947 nats, so the miss is 2.86x
+   the fitted span. It also fails on SIGN: a3's noise energy (5) is 3.8x LOWER than the
+   incumbent's (19), so the model requires a3's gap to be BELOW the incumbent's; it is
+   +0.7466 nats ABOVE it.
+   And it was already falsified at step 1: a3's step-1 gap of 14.5284 is +0.9484 above the
+   prediction before a single optimizer step, and +1.3462 above a1's own step-1 gap.
+
+== SECTION 8: wire budget, exact accounting ==
+
+logged, greppable:  actor/comm_eff/logical_pp_bits_sr_quant
+   a1 = 2304.0   a2 = 2304.0   a3 = 1232.5   (metrics/incoming.log; a3 also in metrics/a3_local.json)
+source formula (verl/workers/comm_eff/activation_quant.py docstring line 101 and 38-49):
+   bits/token/boundary = subset_k*bits + subset_k*16/block_size   (one fp16 scale per block of kept channels)
+   a1 full-width 1-bit      1536*1 + 1536*16/32 =   2304.0 bits = 288.0000 bytes
+   a3 subset 2-bit k=493     493*2 +  493*16/32 =   1232.5 bits = 154.0625 bytes
+   a3 with k=492             492*2 +  492*16/32 =   1230.0 bits = 153.7500 bytes
+   incumbent prf exact-k    round((1-0.95)*1536) = 77 kept channels * 16 (bf16) =   1232.0 bits
+     (exact-k keep count is round((1-p)*H), activation_mask.py line 265; p=0.95 from
+      examples/grpo_trainer/run_prf_exactk_600.sh lines 84-87)
+
+   a3 / incumbent = 1.000406x  ->  a3 exceeds the committed <= 1232 bar by 0.5 bits (0.041%)
+   a1 / incumbent = 1.870130x
+
+INSTRUMENTATION HAZARD (verified in source, not inferred):
+   actor/comm_eff/logical_pp_bytes_prf = (1.0 - p) * hidden_size   [state.py line 481]
+   is a COORDINATE COUNT (0.05*1536 = 76.8), not bytes, and is 0.2 off the 77 the mask
+   actually keeps. actor/comm_eff/logical_pp_bytes_sr_quant = bits/8 [state.py line 501]
+   IS bytes. The incumbent's summary value is 76.8 (metrics/incumbent_wire_bits.json).
+   Comparing the two _bytes_ metrics naively gives 154.0625/76.8 = 2.0060x, which is wrong.
+   The bf16-corrected comparison is 1232.5/1232 = 1.0004x.
+
+== SECTION 9: local-log cross-check (independent of the WandB path) ==
+
+metrics/incoming.log carries 109 of 120 a3 steps (rsync tail gap at [75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85]).
+Windows that matter are unaffected in the 100-120 case (n=21 complete) and short by 11
+rows in the 61-120 case (n=49). Agreement with the WandB pull:
+   actor/kl_loss      100-120  local slope +0.001616 (n=21) vs wandb +0.001616 (n=21)
+   rollout_corr/kl    100-120  local slope +0.000101 (n=21) vs wandb +0.000101 (n=21)
+   critic/score/mean  100-120  local slope -0.000099 (n=21) vs wandb -0.000099 (n=21)
+   rollout_corr/kl    61-120   local slope +0.001374 (n=49) vs wandb +0.001300 (n=60)
+   local grad 61+ max 5.2517 mean 2.908772 (n=49) vs wandb max 5.2517 mean 2.891962 (n=60)
+   duplicate log lines that disagree at the same step: 0; NaN/Inf entries: 0
+   All 100-120 quantities agree to 6 decimals. The 61-120 slopes differ in the 4th
+   decimal only because of the 11 missing rows; the WandB n=60 fits are authoritative
+   and are the ones scored above.
+
+== SECTION 10: confinement counters at the last step ==
+
+   actor/comm_eff/anchor_backwards                            6.0
+   actor/comm_eff/anchor_batch_fraction                       1.0
+   actor/comm_eff/anchor_batch_prompt_equivalents_global      128.0
+   actor/comm_eff/anchor_batch_scope_rollout                  1.0
+   actor/comm_eff/anchor_batch_sequences_global               1024.0
+   actor/comm_eff/anchor_grad_corrected                       0.0
+   actor/comm_eff/anchor_optimizer_steps                      0.0
+   actor/comm_eff/anchor_q_activations                        0.0
+   actor/comm_eff/anchor_q_broadcasts                         0.0
+   actor/comm_eff/anchor_q_stage_overwrites                   0.0
+   actor/comm_eff/anchor_q_updates                            0.0
+   actor/comm_eff/anchor_replay_fires                         6.0
+   actor/comm_eff/anchor_rewards_recomputed                   0.0
+   actor/comm_eff/anchor_rollout_n                            8.0
+   actor/comm_eff/anchor_rollouts_generated                   0.0
+   actor/comm_eff/anchor_update_prompt_equivalents_global     128.0
+   actor/comm_eff/anchor_update_sequences_global              1024.0
+   actor/comm_eff/logical_pp_bits_sr_quant                    1232.5
+   actor/comm_eff/logical_pp_bytes_sr_quant                   154.0625
+   actor/comm_eff/mask_applications                           78176.0
+   actor/comm_eff/mask_applications/ckpt                      0.0
+   actor/comm_eff/mask_applications/old_logprob               19642.0
+   actor/comm_eff/mask_applications/ref_logprob               19642.0
+   actor/comm_eff/mask_applications/train                     38892.0
+   actor/comm_eff/merger_coldM_fallbacks                      0.0
+   actor/comm_eff/rank1_correction_bypass_ticks               19.0
+   actor/comm_eff/rank1_evr_mean                              1.0
+   actor/comm_eff/rank1_fires                                 5.0
+   actor/comm_eff/rank1_history_checkpoints                   2.0
+   actor/comm_eff/rank1_history_deltas                        1.0
+   actor/comm_eff/rank1_m_ready                               1.0
+   actor/comm_eff/rank1_prediction_horizon                    20.0
+   actor/comm_eff/rank1_q_only_fires                          0.0
+   actor/comm_eff/rank1_r2_mean                               1.0
+   actor/comm_eff/rank1_warmup_correction_fires               1.0
+   actor/comm_eff/rank1_window_span                           20.0
+   actor/comm_eff/rank1_zero_motion_tensors                   0.0
+   actor/comm_eff/spectral_corrections                        34138.0
+   actor/comm_eff/spectral_step                               120.0
