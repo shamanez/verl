@@ -141,7 +141,9 @@ case "$ARM" in
     # lesson. Round A saving nothing meant none of its five arms can ever be
     # re-analysed, so a probe cell that wants post-hoc geometry must opt in.
     SAVE_FREQ="${SAVE_FREQ:--1}"
-    EXPERIMENT_NAME="${ARM}-${CODEC_SLUG}"
+    # Overridable so a follow-up probe on the same codec gets its own WandB run and
+    # its own run dir instead of overwriting the original cell's train.log.
+    EXPERIMENT_NAME="${EXPERIMENT_NAME:-${ARM}-${CODEC_SLUG}}"
     ;;
   b1)
     [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=b1 requires CODEC_ARM=<a1|a2|a3|a4|a5> (the round-A winner codec)"
