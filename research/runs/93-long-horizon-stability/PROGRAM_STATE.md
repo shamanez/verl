@@ -255,3 +255,43 @@ evidence the knob is inert; `rollout_is_batch_norm_factor` is the proof it fired
 Checkpoints go to `checkpoints/93-long-horizon-stability/<run>` relative to
 `/workspace/verl`. Disk is 197 G free of 200 G, so a5b's and a6's two saves each
 have ample room. No checkpoint exists yet because a5b has not reached step 100.
+
+### Overnight verification, 2026-07-25T14:49Z (all green)
+
+| check | result |
+|---|---|
+| a5b progress | `global_step:39`, 0 error markers |
+| GPU | 39520 MiB held |
+| tmux | `run-93` (a5b) and `chain-93` (the chain) both live |
+| reaper heartbeat | symlink target written 27 s ago |
+| chain assets | `chain_a6.sh`, `launch_a6.sh`, staged `run_93_cell.a6.sh` all present, executable |
+| **network path** | `git fetch` from the box succeeds, `FETCH_HEAD=581ebaa`, and the a6 arm IS present in it |
+| working tree | still `800feef`, so the live run was not touched by the check |
+| disk | 197 G free of 200 G, ample for four checkpoints |
+
+The network check was deliberately done with `git fetch` alone, which updates
+`FETCH_HEAD` without touching the working tree, so proving the chain's fast path
+carried zero risk to the running cell. The staged fallback therefore exists for a
+network failure at 20:00Z only, not as the expected route.
+
+Pace: 39 steps by 14:49Z from a 13:26Z start is 118 s/step of training. a5b lands
+about **20:05Z**; a6 about **02:50Z** on Jul 26.
+
+### The watcher's independent idle detector
+
+`chain/watch93.sh` no longer trusts the chain to report its own death. If tmux
+shows nothing running AND a6 has no `global_step` for 5 consecutive 5-minute
+polls, it declares the GPU idle and exits non-zero regardless of what
+`chain-93.log` last said. The chain needs at most about 13 minutes from a5b's
+exit to `tmux new-session` (up to 12 of those waiting for the GPU to free), so 25
+minutes is a wide margin. Without this, a killed `chain-93` session would have
+produced a silent idle GPU: the watcher's only other exits are on chain-reported
+success or chain-reported failure, and a dead chain reports neither.
+
+### Nothing is chained after a6
+
+Rounds B and C are new spend and need operator approval, so the queue
+deliberately ends at a6. a6 lands about 02:50Z Jul 26, which is after the
+operator is expected to be awake, so this is a decision point rather than an
+idle-GPU risk. If a5b terminates early and a6 therefore finishes early, the
+watcher's idle detector is what surfaces it.
