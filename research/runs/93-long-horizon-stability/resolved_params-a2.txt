@@ -1,0 +1,92 @@
+# resolved params for cell a2-srq-b1-rn (issue 93, round A, WandB 3muohefm)
+# Written alongside resolved_params.txt (which belongs to cell a1) so neither
+# cell's provenance is clobbered. Regenerating with capture_resolved_config.py
+# would only rewrite the a1 file, and it still cannot run here:
+#   $ python3 scripts/capture_resolved_config.py runs/93-long-horizon-stability
+#   capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+#   rc=1   (see analysis-a2.log, section after the addenda)
+# There is no launcher `set -x` trace in the synced log, so no expanded
+# main_ppo command line exists to recover. Flag: RESOLVED_CONFIG_MISSING.
+# a2 is BETTER covered than a1 on the load-bearing knob, because the codec
+# branch is now pinned three independent ways (source, runtime bits, counters).
+
+# --- verified from the branch launcher SOURCE (read-only git) ---
+# origin/93-mismatch-control-kit:examples/grpo_trainer/run_93_cell.sh
+# The file is BYTE-IDENTICAL between 223e4b1d (origin tip when a2 launched, per
+# PROGRAM_STATE.md) and 3f5e1996 (current tip):
+#   $ git log --oneline 223e4b1d..3f5e1996 -- examples/grpo_trainer/run_93_cell.sh
+#   (empty)
+# a1 and a2 share ONE case arm (`a1|a2)`); the only divergence is the rounding
+# env var, i.e. the cell is byte-identical to a1 by construction, not by audit.
+launcher.COMM_EFF_ENABLED=true
+launcher.COMM_EFF_ANCHOR_OWNS_Q=false
+launcher.COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP=false
+launcher.COMM_EFF_MASK_RECOMPUTE=true
+launcher.COMM_EFF_MASK_REFERENCE=true
+launcher.COMM_EFF_MASK_PP_SIZE=8
+launcher.COMM_EFF_COMPRESSION_TYPE=sr_quant
+launcher.COMM_EFF_QUANT_BITS=1
+launcher.COMM_EFF_QUANT_BLOCK_SIZE=32
+launcher.COMM_EFF_QUANT_SUBSET_K=0
+launcher.COMM_EFF_QUANT_ROUNDING=rn        # THE ONLY DIFFERENCE VS a1 (which is sr)
+launcher.CODEC_SLUG=srq-b1-rn
+launcher.TOTAL_STEPS_default=120
+launcher.TEST_FREQ=-1
+launcher.VAL_BEFORE_TRAIN=False
+launcher.SAVE_FREQ=-1
+# hard-asserted by the launcher (fatal on miss, lines 251-259):
+launcher.TRAIN_BATCH_SIZE=128
+launcher.PPO_MINI_BATCH_SIZE=128
+launcher.MAX_RESPONSE_LENGTH=2048
+
+# --- verified from a2's own (partial) hydra config echo in metrics/incoming.log ---
+# Ray driver TaskRunner pid=93602. The sync caught only the tail of the dump.
+trainer.total_training_steps=120
+trainer.val_before_train=False
+trainer.val_only=False
+
+# --- verified from a2's own logged metrics (metrics/incoming.log, pid=93602) ---
+observed.steps_logged_in_run_dir=61            # steps 1-61, zero gaps
+observed.wandb_max_step=62                     # WandB history, state=finished
+observed.non_finite_metric_values=0            # zero NaN / Inf, all keys, all rows
+observed.actor/kl_coef=0.001                   # constant, controller OFF as designed
+observed.comm_eff.logical_pp_bits_sr_quant=2304 # IDENTICAL to a1: same wire budget
+observed.comm_eff.logical_pp_bits_ratio_vs_incumbent_1232=1.8701
+observed.actor/ppo_kl_max_abs=0.0              # exactly 0 at every step (mini == batch)
+# counters at MATCHED step 60, a1 versus a2 (analysis-a2.log section 9):
+observed.comm_eff.spectral_corrections@60=13858    # a1@60 = 13858, IDENTICAL
+observed.comm_eff.anchor_replay_fires@60=3         # a1@60 = 3, = floor(60/20)
+observed.comm_eff.rank1_correction_bypass_ticks@60=19  # a1@60 = 19, IDENTICAL
+observed.comm_eff.rank1_fires@60=2                 # a1@60 = 2, IDENTICAL
+observed.comm_eff.merger_coldM_fallbacks@60=0      # a1@60 = 0, IDENTICAL
+observed.comm_eff.rank1_m_ready@60=1               # a1@60 = 1, IDENTICAL
+observed.comm_eff.mask_applications@60=40376       # a1@60 = 40950, -1.4 percent
+# The -1.4 percent on mask_applications tracks a2's slightly longer responses
+# (779.6 tokens at step 1 versus a1's 748.4), i.e. microbatch count, not codec
+# behaviour. Every other confinement counter matches a1 EXACTLY at step 60.
+
+# --- NOT verifiable from runs/93-long-horizon-stability/ ---
+# Same gap as a1: the comm_eff/data/optim hydra blocks are outside the synced
+# tail. Values below are the intended protocol (run.json + issue section 6 +
+# launcher base), NOT confirmed against a resolved command line for this cell.
+unverified.comm_eff.pp_size=8
+unverified.data.train_batch_size=128
+unverified.actor.ppo_mini_batch_size=128
+unverified.data.max_prompt_length=1024
+unverified.anchor.cadence=20
+unverified.anchor.delay=20
+unverified.signed_ema.beta_anc=0.25
+unverified.signed_ema.alpha=0.25
+unverified.weights.mode=rank1_relex_W2
+unverified.optim.lr=1e-06
+unverified.box_checkout_sha_at_launch=223e4b1d
+
+# --- plan versus ran ---
+# NO divergence found in anything verifiable. The a1-versus-a2 "byte-identical
+# except rounding" premise is CONFIRMED from three independent directions:
+#   1. source: one shared launcher case arm, single env-var branch;
+#   2. runtime wire budget: logical_pp_bits_sr_quant = 2304 in both arms;
+#   3. runtime circuit behaviour: 6 of 7 confinement counters bit-identical at
+#      matched step 60, the seventh off by 1.4 percent on token count.
+# Only deviation from the CELL PLAN is the intended one: run.json cells[1] says
+# "early stop at 60 if kl slope >= 2x a1", and the cell stopped at step 62.
