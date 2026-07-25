@@ -14,8 +14,9 @@
 #   a3  sr_quant bits=2 block=32 subset_k=493          (byte-parity hybrid)
 #   a4  prf_mask exact-k + CVC CE mode lambda=0.003    (make-it-settle arm)
 #   a5  frlr rank=48 k=28 + decoupled token-IS 2.0     (coherent+corrected)
-#   b1  CODEC_ARM=<a1..a5> + dense-view probe(25) + KL controller (200 steps)
-#   c   CODEC_ARM=<a1..a5> + probe/controller + 600 steps, val 0/150/300/450/
+#   a6  prf_mask exact-k + decoupled token-IS 2.0      (weighting-only cell)
+#   b1  CODEC_ARM=<a1..a6> + dense-view probe(25) + KL controller (200 steps)
+#   c   CODEC_ARM=<a1..a6> + probe/controller + 600 steps, val 0/150/300/450/
 #       600, SAVE_FREQ=100, R2 checkpoint sink on
 #
 # b1 and c REQUIRE COMM_EFF_PROBE_KL_TARGET_TABLE in the env (the controller
@@ -38,7 +39,7 @@ GPU_MEM="${GPU_MEM:-0.72}"                      # the #90 rollout KV-cache setti
 RUN_GROUP="${WANDB_RUN_GROUP:-93-long-horizon-stability}"
 # ------------------------------------
 
-[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|b1|c> bash run_93_cell.sh"
+[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|b1|c> bash run_93_cell.sh"
 
 # ---------------------------------------------------------------------------
 # 1. Resolve the arm BEFORE any bring-up: fail loud on an unknown ARM, echo
@@ -94,8 +95,11 @@ apply_codec_arm() {
       CODEC_SLUG="prf-exactk-cvc-ce"
       ;;
     a5)
-      # FRLR r=48 k=28 + decoupled token-IS (issue #93 4.4); token-IS is
-      # exclusive to this arm (measured dead on the PRF/sr_quant views).
+      # FRLR r=48 k=28 + decoupled token-IS (issue #93 4.4). The note that used
+      # to sit here called token-IS "measured dead on the PRF/sr_quant views".
+      # That claim came from #88 and was REFUTED at #88's close (clvaf683 cut
+      # KL 40-78% and removed a collapse with token-IS on), and every earlier
+      # test ran with batch_normalize=false. Arm a6 is the isolated PRF cell.
       export COMM_EFF_COMPRESSION_TYPE=prf_mask
       export COMM_EFF_MASK_ENABLED=true
       export COMM_EFF_MASK_FRLR=true
@@ -107,8 +111,23 @@ apply_codec_arm() {
       export ROLLOUT_IS_THRESHOLD=2.0
       CODEC_SLUG="frlr-r48k28-tis"
       ;;
+    a6)
+      # The missing cell of the 2x2 (operator-requested 2026-07-26): the #90
+      # incumbent PRF exact-k codec, byte-identical env, plus decoupled
+      # token-IS. a5 moved TWO things at once (codec prf_mask -> frlr AND
+      # weighting off -> token-IS); this arm moves only the weighting, so a
+      # win is attributable. Pair with ROLLOUT_IS_BATCH_NORMALIZE=true.
+      export COMM_EFF_COMPRESSION_TYPE=prf_mask
+      export COMM_EFF_MASK_ENABLED=true
+      export COMM_EFF_MASK_P=0.95
+      export COMM_EFF_MASK_RESCALE_MODE=constant
+      export COMM_EFF_MASK_EXACT_K=true
+      export ROLLOUT_IS=token
+      export ROLLOUT_IS_THRESHOLD=2.0
+      CODEC_SLUG="prf-exactk-tis"
+      ;;
     *)
-      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5)"
+      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6)"
       ;;
   esac
 }
@@ -128,7 +147,7 @@ apply_control_plane() {
 }
 
 case "$ARM" in
-  a1|a2|a3|a4|a5)
+  a1|a2|a3|a4|a5|a6)
     apply_codec_arm "$ARM"
     TOTAL_STEPS="${TOTAL_STEPS:-120}"
     # Default -1 preserves the registered "validation OFF for all gate cells".
@@ -146,7 +165,7 @@ case "$ARM" in
     EXPERIMENT_NAME="${EXPERIMENT_NAME:-${ARM}-${CODEC_SLUG}}"
     ;;
   b1)
-    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=b1 requires CODEC_ARM=<a1|a2|a3|a4|a5> (the round-A winner codec)"
+    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=b1 requires CODEC_ARM=<a1|a2|a3|a4|a5|a6> (the round-A winner codec)"
     apply_codec_arm "$CODEC_ARM"
     apply_control_plane
     TOTAL_STEPS="${TOTAL_STEPS:-200}"
@@ -156,7 +175,7 @@ case "$ARM" in
     EXPERIMENT_NAME="b1-${CODEC_ARM}-${CODEC_SLUG}-ctrl"
     ;;
   c)
-    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=c requires CODEC_ARM=<a1|a2|a3|a4|a5> (the round-B winner codec)"
+    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=c requires CODEC_ARM=<a1|a2|a3|a4|a5|a6> (the round-B winner codec)"
     apply_codec_arm "$CODEC_ARM"
     apply_control_plane
     TOTAL_STEPS="${TOTAL_STEPS:-600}"
@@ -172,7 +191,7 @@ case "$ARM" in
     export R2_REGIME="${R2_REGIME:-$EXPERIMENT_NAME}"
     ;;
   *)
-    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|b1|c)"
+    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|b1|c)"
     ;;
 esac
 
