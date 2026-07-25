@@ -199,3 +199,59 @@ WandB `teardown_atexit` BrokenPipeError. Training itself completed all 120 steps
 - Nothing launches past a STOP. Ambiguous equals REVISE, amend only the next
   step, `needs:human` before any new spend.
 - Box teardown needs explicit operator authorization. There is NO standing grant.
+
+## Overnight state, 2026-07-25T14:30Z (box clock is the authority)
+
+Two cells are committed, back to back, with no human in the loop.
+
+| | cell | steps | starts | lands (UTC) |
+|---|---|---|---|---|
+| running | `a5b-frlr-bnorm-200` | 200 | 13:26Z Jul 25 | about **20:05Z** |
+| chained | `a6-prf-exactk-tis-bnorm-200` | 200 | on a5b's exit | about **02:50Z** Jul 26 |
+
+Ledger `93-long-horizon-stability` started 2026-07-24T17:30Z, so it reads about
+**21.0 h of 100** at the time of writing and lands near **33.5 h** when a6 ends.
+At $3.344/h the remaining committed work is about $41.
+
+### The handoff is automated on the box, not on the laptop
+
+`/workspace/chain_a6.sh` runs detached in tmux session `chain-93` and appends to
+`/workspace/chain-93.log`. It waits for tmux `run-93` to disappear (the only
+completion signal used: the pane runs the launcher directly and
+`remain-on-exit` is off, so the session dies exactly when the driver exits; a
+log-quiet heuristic is deliberately NOT used because relaunching onto a live
+run would put two trainers on one GPU), snapshots a5b's terminal metrics to
+`/workspace/runs/a5b-frlr-bnorm-200/final/` because WandB drops the final step,
+waits for the GPU to fall below 4 GB while killing residual workers by process
+NAME only (`pkill -x`, never `-f`, never a bare `ray stop`), re-points the
+`/workspace/train.log` reaper heartbeat symlink and seeds it so its mtime stays
+fresh through bring-up, then launches `/workspace/launch_a6.sh` in a fresh
+`run-93`. It then watches 40 minutes of bring-up and logs `ALERT` if a6 dies.
+
+Because the chain lives on the box it survives the laptop sleeping. It fires on
+ANY termination of a5b, clean or crashed, which is correct: a6 is a
+pre-registered cell, not a known-broken config, so occupying the GPU with it is
+right either way and a5b's log stays on disk for scoring.
+
+### Correction: earlier step readings in this program were durations, not steps
+
+`grep -o "step:[0-9]*"` also matches `timing_s/step:118.86`, the per-step wall
+time in seconds. Reported "step 118" and "step 121" for a5b were 118 s/step and
+121 s/step. **Always read `global_step:[0-9]+`.** At 14:25Z a5b was at
+`global_step:26`, one hour in, on pace.
+
+### Confirmed: `batch_normalize` is firing
+
+`rollout_is_batch_norm_factor:0.186` appears in a5b's log, so the weights are
+divided by 0.186 and the update is scaled back up **5.38x** (the pre-run
+estimate was about 6.03x). Note that every `rollout_corr/rollout_is_*` metric is
+computed at `rollout_corr_helper.py:604`, which is BEFORE the normalization
+block, so `rollout_is_mean:0.19` and `eff_sample_size:0.238` are the RAW
+distribution and are directly comparable to a5's 0.166 and 0.268. They are not
+evidence the knob is inert; `rollout_is_batch_norm_factor` is the proof it fired.
+
+### Also settled
+
+Checkpoints go to `checkpoints/93-long-horizon-stability/<run>` relative to
+`/workspace/verl`. Disk is 197 G free of 200 G, so a5b's and a6's two saves each
+have ample room. No checkpoint exists yet because a5b has not reached step 100.
