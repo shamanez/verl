@@ -105,3 +105,31 @@ health as well as codec, and that must be stated rather than papered over.
   without a sampler-side cross-check, and a6 vs `a5b` is exactly such a
   cross-codec comparison. Score, response length and the dense probe are the
   codec-free channels.
+
+## Naming note (both cells carry token-IS)
+
+`a5b-frlr-bnorm-200` and `a6-prf-exactk-tis-bnorm-200` **both** run
+`rollout_is=token`, `rollout_is_threshold=2.0` and
+`rollout_is_batch_normalize=true`. Only a6's run name says `tis`, because a5b's
+`EXPERIMENT_NAME` override dropped it from the a5 arm's own slug
+(`frlr-r48k28-tis`). The names are asymmetric; the configs are not. Verified in
+a5b's live config dump: `'rollout_is': 'token'`,
+`'rollout_is_batch_normalize': True`, `'rollout_is_threshold': 2.0`.
+
+The single difference between the two cells is therefore the **codec**, which is
+what makes the pair a clean single-knob comparison in both directions:
+
+- a6 vs the #90 incumbent isolates the **weighting** at fixed codec (PRF exact-k).
+- a5b vs a6 isolates the **codec** at fixed weighting (token-IS + normalize).
+
+## Chain preflight (fixed 2026-07-25T14:45Z)
+
+`run_93_cell.sh` resolves the ARM at line 41 but re-syncs the checkout only at
+line 243, so an arm that landed on the branch after the box last synced dies
+instantly, before the fetch that would have taught it. The box was at `800feef8`
+and a6 landed in `9546ae25`, so the original chain would have failed in under a
+second and idled the GPU. `launch_a6.sh` now fetches and resets first, then
+proves `ARM=a6 DRY_RUN=1` resolves, with a copy staged at
+`/workspace/run_93_cell.a6.sh` as the fallback if the fetch cannot reach origin,
+and it tees its preflight into a6's `train.log` so a failure is visible to both
+the chain's bring-up watch and the laptop monitor.
