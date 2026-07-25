@@ -137,7 +137,10 @@ case "$ARM" in
     # decision (it amends the matrix and costs about 0.2 GPU-h), not a default.
     TEST_FREQ="${TEST_FREQ:--1}"
     VAL_BEFORE_TRAIN=False
-    SAVE_FREQ=-1
+    # Default -1 preserves the registered "no checkpoints in rounds A/B" disk
+    # lesson. Round A saving nothing meant none of its five arms can ever be
+    # re-analysed, so a probe cell that wants post-hoc geometry must opt in.
+    SAVE_FREQ="${SAVE_FREQ:--1}"
     EXPERIMENT_NAME="${ARM}-${CODEC_SLUG}"
     ;;
   b1)

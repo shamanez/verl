@@ -187,6 +187,13 @@ export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
 export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
 export ROLLOUT_IS="${ROLLOUT_IS:-null}"
 export ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-2.0}"
+# Self-normalized IS: divide the weights by their batch mean so they average 1.0.
+# Default false preserves existing behaviour for every other issue. Turning it on
+# keeps the RELATIVE token reweighting (the correction you want) while removing the
+# blanket shrinkage: #93 cell a5 measured a mean IS weight of 0.166, which scaled
+# every gradient down about 6x and starved learning.
+export ROLLOUT_IS_BATCH_NORMALIZE="${ROLLOUT_IS_BATCH_NORMALIZE:-false}"
+case "${ROLLOUT_IS_BATCH_NORMALIZE}" in true|false) ;; *) echo "FATAL: bad ROLLOUT_IS_BATCH_NORMALIZE='${ROLLOUT_IS_BATCH_NORMALIZE}' (true|false)." >&2; exit 1;; esac
 case "${ROLLOUT_IS}" in null|token|sequence) ;; *) echo "FATAL: bad ROLLOUT_IS='${ROLLOUT_IS}' (null|token|sequence)." >&2; exit 1;; esac
 
 # Context window — 4096 total tokens in the reference protocol.
@@ -616,6 +623,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.calculate_log_probs="$ROLLOUT_CALC_LOGPROBS" \
   algorithm.rollout_correction.rollout_is="$ROLLOUT_IS" \
   algorithm.rollout_correction.rollout_is_threshold="$ROLLOUT_IS_THRESHOLD" \
+  algorithm.rollout_correction.rollout_is_batch_normalize="$ROLLOUT_IS_BATCH_NORMALIZE" \
   algorithm.rollout_correction.rollout_rs=null \
   algorithm.rollout_correction.bypass_mode=false \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
