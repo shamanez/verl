@@ -295,3 +295,43 @@ deliberately ends at a6. a6 lands about 02:50Z Jul 26, which is after the
 operator is expected to be awake, so this is a decision point rather than an
 idle-GPU risk. If a5b terminates early and a6 therefore finishes early, the
 watcher's idle detector is what surfaces it.
+
+## Handoff completed, a6 running, 2026-07-25T20:00Z
+
+a5b terminated cleanly at 200/200 at 19:51Z. **The chain worked: GPU idle was
+about 2 minutes** (free 19:51:17Z, a6 launched 19:53:17Z), against a 15 min
+target. `chain-93` then confirmed a6 training and exited on its own.
+
+a6 verified against the registered spec straight from WandB config, **12 of 12
+knobs correct**: `rollout_is=token`, threshold 2.0, `batch_normalize=true`,
+`prf_mask`, `frlr=false`, p=0.95, `exact_k=true`, `probe_every=5`,
+`ctrl_enabled=false`, 200 steps, save 100, test 200. Verified from WandB rather
+than the log because **the engine truncates `$LOG` on start**, so the launcher's
+resolved-config echo and my preflight lines do not survive into the log. That is
+not a problem for the preflight's purpose: if preflight FAILS, `launch_a6.sh`
+exits before the engine runs, so nothing truncates and the message survives
+exactly in the case it was written for.
+
+Probe cost confirmed at cadence 5: steps carrying a probe take 142.4 s against
+122.8 s without, so about **20 s per probe**, matching the 24.8 s measured on a5b
+and the +13 min total budgeted in amendment 2. a6 lands near **03:00Z**.
+Ledger about 26.4 h of 100.
+
+### Two watcher bugs, fixed by replacement
+
+`watch93.sh` is retired. It had two defects worth not repeating:
+
+1. **Its stall detector compared the PREVIOUS cell's step against the SHARED tmux
+   session name.** Once a6 took over `run-93` it read "session live, a5b step not
+   advancing" as a stall and fired a false alarm. A finished cell can never
+   advance. This is the hazard already recorded in memory as "retire each cell's
+   watcher when the cell ends"; the fix is that a watcher must key on the step of
+   the cell it is actually watching.
+2. **Its exit condition could never fire.** It grepped `tail -1` of
+   `chain-93.log` for "LAUNCHED", but the chain appends a bring-up line after
+   that, so the last line stopped matching and the watcher would have polled
+   forever while emitting false stalls.
+
+`chain/watch_a6.sh` replaces it, keyed on a6's own step, with a6's tmux session
+disappearing as the terminal condition. Nothing is chained after a6, so that
+condition cannot be spoofed by a later cell.
