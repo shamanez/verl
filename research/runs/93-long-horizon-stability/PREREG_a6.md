@@ -1,8 +1,15 @@
 # Pre-registration: cell a6, `a6-prf-exactk-tis-bnorm-200`
 
-Written and committed **before the cell exists**, on 2026-07-26, while
-`a5b-frlr-bnorm-200` is still training at step 118 of 200. None of the numbers
-below may be moved after the run starts.
+Written and committed **before the cell exists**, on 2026-07-25 (box clock),
+while `a5b-frlr-bnorm-200` is still training. None of the numbers below may be
+moved after the run starts.
+
+Corrected after the fact: the first version of this line said "step 118 of 200".
+That reading came from `grep -o "step:[0-9]*"`, which also matches
+`timing_s/step:118.86`, so 118 was the per-step wall time in seconds. a5b was at
+`global_step:26` at the time of writing. The correction changes no threshold in
+this document; it is recorded because the pre-registration record must be
+accurate about when it was written relative to the data.
 
 ## Why this cell exists
 
