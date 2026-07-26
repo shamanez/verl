@@ -5,14 +5,15 @@ that `Q` must move only inside the anchor is now implemented rather than
 described, and **the unbiased-FRLR test is reinstated** after the operator pushed
 back on my demotion of it. Three runs, each changing exactly one thing.
 
-`a8-frlr-qcad20-200` is still running (step 144/200 at 13:20Z, lands ~14:56Z).
-The chain `a8 -> a9 -> a10` is armed on the box in tmux `chain-93c`, one
-sequential process, so there is no idle GPU at either handoff and no possibility
-of two watchers firing on the same signal.
+**Status 15:05Z.** a8 finished 200/200 at 14:56Z (terminal val 0.6613, scored in
+`verdict-a8.md`) and the chain launched **a9 within the same minute**, so the
+handoff cost no measurable GPU time. a9 is training; `'owns_q': True` is confirmed
+in its resolved Hydra config with zero errors, so the validator relaxation and the
+engine wiring work end to end. a10 is chained behind it.
 
 ---
 
-## 1. `a9-frlr-anchorq-200` — anchor-owned FRLR. RUNNING NEXT, ~6.5 GPU-h.
+## 1. `a9-frlr-anchorq-200` — anchor-owned FRLR. RUNNING NOW since 14:56Z, ~6.5 GPU-h.
 
 **What moves.** a7's exact codec, with the fast path removed as a `Q` writer
 entirely. The basis is harvested from the anchor's clean stale-weight forward and
@@ -89,11 +90,19 @@ they saved twice (steps 100 and 200), and a8 is **19G** because it saved once. S
 a9 and a10 add ~19G each and the disk (132G of 200G now) would have finished around
 170G. **It was never going to overflow, and the back-fill is not urgent for space.**
 What it IS for is not losing the checkpoints with the box, which is pre-teardown
-step 1. The R2 back-fill is running now in tmux `r2-backfill`:
-per cell it syncs, verifies **byte-exact** against the remote listing, and only
-then deletes the local copy. A cell that fails verification is left on disk. a9
-and a10 run with the sink ON, so they upload as they save. That retires
-pre-teardown step 1 early instead of racing it at teardown.
+step 1.
+
+**The first back-fill attempt FAILED and the guard did its job.** `aws s3 sync`
+returned **InvalidPart** on `CompleteMultipartUpload` for exactly the four large
+files per cell (11.5G optimizer, 6.62G model); every small file landed. At
+aws-cli's default 8MB chunk an 11.5G file is ~1437 parts, and R2 rejects that many
+at the default concurrency of 10. The per-cell byte-exact check caught it and
+**kept the local copies**, which is precisely what it was for. Fix:
+`max_concurrent_requests 1` + `multipart_chunksize 256MB` (~46 parts), and per-file
+`aws s3 cp` (the `r2_sink.py` path #90 already proved) instead of `sync`.
+`chain/r2_backfill2.sh` retries with model files before optimizer state, so if it
+fails part-way the half that post-hoc geometry and OOD eval need is already safe.
+a9 and a10 run with the sink ON.
 
 ## Teardown
 
