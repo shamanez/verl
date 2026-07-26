@@ -36,11 +36,11 @@ while true; do
   out="$("${SSHC[@]}" "s=\$(grep -aoE 'global_step:[0-9]+' $LOG 2>/dev/null | tail -1 | cut -d: -f2)
 t=\$(tmux ls 2>/dev/null | wc -l | tr -d ' ')
 h=\$(readlink /workspace/train.log 2>/dev/null)
-v=\$(grep -ac 'val-core' $LOG 2>/dev/null || echo 0)
-e=\$(grep -acE 'Traceback|CUDA out of memory|FATAL:' $LOG 2>/dev/null || echo 0)
+v=\$(grep -ac 'val-core' $LOG 2>/dev/null | head -1)
+e=\$(grep -acE 'Traceback|CUDA out of memory|FATAL:' $LOG 2>/dev/null | head -1)
 g=\$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
-echo \"step=\${s:-0} sessions=\$t val=\$v err=\$e gpu=\${g:-NA}\"
-echo \"heartbeat=\$h\"" 2>/dev/null)"
+echo \"M step=\${s:-0} sessions=\${t:-0} val=\${v:-0} err=\${e:-0} gpu=\${g:-NA}\"
+echo \"H \${h:-none}\"" 2>/dev/null)"
 
   if [ -z "$out" ]; then
     fails=$((fails + 1))
@@ -50,12 +50,20 @@ echo \"heartbeat=\$h\"" 2>/dev/null)"
     sleep 180; continue
   fi
   fails=0
-  line1="$(printf '%s\n' "$out" | sed -n 1p)"
-  hb="$(printf '%s\n' "$out" | sed -n 2p)"
+  # prefix-tagged, NOT line-numbered: a stray newline anywhere in the remote
+  # output must not be able to shift a field into the wrong variable. That is
+  # exactly how the first version of this file fired a false TERMINAL.
+  line1="$(printf '%s\n' "$out" | grep '^M ' | head -1)"
+  hb="$(printf '%s\n' "$out" | grep '^H ' | head -1)"
   step="$(printf '%s' "$line1" | grep -oE 'step=[0-9]+' | cut -d= -f2)"; step="${step:-0}"
   sess="$(printf '%s' "$line1" | grep -oE 'sessions=[0-9]+' | cut -d= -f2)"; sess="${sess:-0}"
   val="$(printf '%s' "$line1" | grep -oE 'val=[0-9]+' | cut -d= -f2)"; val="${val:-0}"
   err="$(printf '%s' "$line1" | grep -oE 'err=[0-9]+' | cut -d= -f2)"; err="${err:-0}"
+
+  if [ -z "$line1" ] || [ -z "$hb" ]; then
+    echo "$CELL: MALFORMED poll, ignoring rather than concluding anything"
+    sleep 180; continue
+  fi
 
   # (c) nothing running at all
   if [ "$sess" -eq 0 ]; then

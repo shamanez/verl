@@ -375,3 +375,33 @@ poll, which is what turned bug 3 into repeated identical notifications.
 
 Validated against the real failure case before arming: pointed at the finished a6 it
 exits 0 with "heartbeat moved to a7", where the old watcher looped indefinitely.
+
+### Bug 4, in the replacement itself: a false TERMINAL on a live run
+
+`watch_cell.sh` v1 fired **TERMINAL at step 1** on the healthy, running a7 and
+exited, leaving the cell unwatched. Two compounding causes:
+
+1. **`grep -ac ... || echo 0` emits TWO lines.** `grep -c` already prints `0` when
+   it matches nothing **and** exits 1, so the `|| echo 0` appended a second `0`.
+   That put a newline inside a field.
+2. **The parsing was line-numbered.** `sed -n 2p` was supposed to read the
+   heartbeat line; the stray newline shifted it, so it read `0 err=0` instead, the
+   cell-name check failed, and the "succeeded by another cell" condition fired.
+
+The tell was visible an hour earlier and I did not chase it: the a6 progress
+notifications read `... err=0` then a bare `0` on its own line. A stray field in
+otherwise-fine output was the symptom of a defect that later caused a false
+terminal.
+
+Fixed three ways, because one would have been enough only until the next surprise:
+
+- the `|| echo 0` is gone, so no field can contain a newline
+- parsing is **prefix-tagged** (`^M ` for metrics, `^H ` for heartbeat) rather than
+  line-numbered, so a stray newline anywhere cannot shift a field into the wrong
+  variable
+- a malformed poll now **logs and continues** rather than being allowed to satisfy
+  any terminal condition, so the failure mode is a wasted poll instead of an
+  abandoned run
+
+Verified against both cases before re-arming: silent on the live a7, and still
+correctly terminal on the finished a6.
