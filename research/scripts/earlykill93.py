@@ -42,6 +42,19 @@ SCORE_FLOOR = 0.40  # score level over 41-60; a6's failure signature
 GAP_CEILING = 12.0  # gap level at step 60; above this it cannot beat PRF on level
 GAP_SLOPE_CEILING = 0.016  # gap slope over 61-80; a7's failing value
 
+# a10-ONLY, from PREREG_a10.md: "kill if the gap level at 41-60 exceeds 1.5x a9's at
+# the same window". a9 measured 5.8052 there, so the number is 8.7078. Registered as
+# a RATIO before a9 existed and resolved to an absolute the moment a9's window closed,
+# which is why it is pinned here rather than recomputed at read time: a threshold that
+# is recalculated after seeing the data is not a pre-registered threshold.
+#
+# Its purpose: P1 already CONCEDES that the unbiased constant H/k gain should give a
+# worse gap level than a9's norm matching, since it trades bias for variance. 1.5x is
+# the line past which "worse as predicted" becomes "simply a worse codec", and that is
+# answerable at step 60 rather than 200.
+A10_GAP_CEILING_41_60 = 8.7078  # 1.5 x a9's 5.8052
+A9_GAP_LEVEL_41_60 = 5.8052  # the reference, recorded so the ratio is auditable
+
 ENTITY = "shamanework-pl"
 PROJECT = "93-long-horizon-stability"
 # NOT "global_step": the run's step axis is logged under this key. Using the bare
@@ -126,6 +139,15 @@ def main():
     fired = []
     if a.lo == 41 and a.hi == 60 and score_level < SCORE_FLOOR:
         fired.append(f"score level {score_level:.4f} < {SCORE_FLOOR}")
+    # a10-only clause. Applies to the cell name, so running it against any other
+    # cell cannot accidentally impose a threshold that was never registered for it.
+    if "a10" in a.cell and a.lo == 41 and a.hi == 60:
+        print(
+            f"  a10 clause: gap level {gap_level:.4f}   "
+            f"ceiling {A10_GAP_CEILING_41_60} (1.5x a9's {A9_GAP_LEVEL_41_60})"
+        )
+        if gap_level > A10_GAP_CEILING_41_60:
+            fired.append(f"a10 gap level {gap_level:.4f} > 1.5x a9's ({A10_GAP_CEILING_41_60})")
     if gap_at_hi is not None and a.hi == 60 and gap_at_hi > GAP_CEILING:
         fired.append(f"gap at 60 {gap_at_hi:.4f} > {GAP_CEILING}")
     if gap_slope is not None and a.lo == 61 and a.hi == 80 and gap_slope > GAP_SLOPE_CEILING:
