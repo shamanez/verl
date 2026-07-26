@@ -102,3 +102,58 @@ a9's and a10's automatic step-200 uploads would have hit the same `InvalidPart`
 failure on their 6.62G model files. The checkpoint-tree upload is exception-guarded
 (WARN, keep local, continue), so it would not have crashed the run, but both cells'
 checkpoints would have silently stayed local while the log claimed a sink was on.
+
+---
+
+## Addendum, step 60: no early-kill trigger fires, and one observation worth a hypothesis
+
+Read with `research/scripts/earlykill93.py --cell a9-frlr-anchorq-200 --lo 41 --hi 60`
+at a **complete** 20-sample window. This is the early-kill question only; the
+registered bar is at 100-120.
+
+| trigger | measured | threshold | call |
+|---|---|---|---|
+| score level 41-60 | **0.5385** | >= 0.40 | pass |
+| gap at step 60 | **5.7190** | <= 12 | pass |
+| gap slope 41-60 | **-0.004384** | (61-80 clause, <= +0.016) | negative |
+
+**CONTINUE.** a9 runs to 200.
+
+### The observation: a9 fits Q from ~1/20th the data and gets a better gap than a8
+
+| at 41-60 | score | gap level | gap slope |
+|---|---|---|---|
+| a7, fast Q, cadence 1 | 0.483 (41-51) | 4.4602 | -0.00267 |
+| a8, fast Q, cadence 20 | 0.5361 | 9.5115 | +0.001988 |
+| **a9, anchor-owned Q** | **0.5385** | **5.8052** | **-0.004384** |
+
+The anchor's `batch_scope` is `ppo_minibatch`, so each anchor fire harvests **one
+minibatch** (128 prompts). a8's fast path accumulated its sketch over **20 steps**
+of the same size before each `orth`. So a9's basis is estimated from roughly
+**1/20th the activation data per refresh**, and its gap is nonetheless **1.6x
+better** than a8's at the identical window.
+
+**That cuts against the sketch-size reading of a8's result.** a8's verdict
+attributed its flatter slope to averaging over 20 batches instead of one, which is
+still a fair account of the *slope*. But if sample size were what set the *level*,
+a9 should be markedly worse than a8, and it is markedly better. The candidate
+explanation is alignment rather than sample count: a9 fits `Q` to the **stale-weight
+slow net**, and the frozen reference against which the gap is measured sits nearer
+that distribution than it does to the live policy a8's basis chases.
+
+### Why this is a hypothesis and not a result
+
+1. **41-60 is not the registered window.** P1 and P2 are scored at 100-120 and
+   nothing here anticipates them.
+2. **a8 was mid-convergence at this window.** Its gap ran 11.7151 to 9.5115 to
+   6.8293 across the run, converging from a random basis. Comparing at 41-60
+   catches it partway down, so the 1.6x is partly a convergence-rate difference
+   rather than a steady-state one. At 100-120 a8 had reached 6.8293, and whether
+   a9 beats *that* is the actual question.
+3. **The two arms differ in more than sketch size.** a9's basis is also frozen
+   against a different reference point and refreshed on a different clock, so the
+   comparison is not a clean one-variable contrast in either direction.
+
+Recorded now so that if a9 does beat a8 at the registered window, this reading was
+on the record beforehand rather than assembled afterwards, and if it does not, the
+hypothesis is visibly wrong rather than quietly dropped.
