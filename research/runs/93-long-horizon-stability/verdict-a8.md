@@ -112,3 +112,53 @@ what a8 validates, and it adds two things a cadence knob cannot: `Q` fitted to t
 broadcast on the **uncharged slow circuit**, restoring exact 1232-bit parity.
 `a9-frlr-anchorq-200` is pre-registered in `PREREG_a9.md` and chained to launch
 when a8 ends. `a10` follows with `frlr_unbiased=true`.
+
+---
+
+## TERMINAL ADDENDUM at step 200: the training window and the held-out val disagree, and the honest reading is a tie
+
+a8 finished 200/200. Terminal val, captured from the on-box log because WandB drops
+the final step: **0.6613**.
+
+| cell | score 100-120 (training) | terminal val (held-out MATH) |
+|---|---|---|
+| incumbent PRF | 0.6577 | 0.6613 @150, 0.6633 @300, 0.6733 @450, 0.6613 @600 |
+| a6 PRF + IS + bnorm | 0.4854 | 0.5391 |
+| a5b FRLR + IS + bnorm | 0.6277 | 0.6593 |
+| a7 FRLR, no IS | 0.6559 | **0.6713** |
+| **a8 FRLR, Q cadence 20** | **0.6602** | 0.6613 |
+
+**The two channels rank a7 and a8 oppositely.** a8 wins the training window by
+0.0043; a7 wins the held-out val by 0.0100. I am not going to pick whichever
+favours the arm I prefer, so:
+
+- The val set is MATH-lighteval at **499 problems**, so one problem is 0.20 percent.
+  a7's 0.6713 is **335/499** and a8's 0.6613 is **330/499**: a **five-problem**
+  difference.
+- The incumbent's own checkpoint-to-checkpoint spread is **0.0120**, larger than
+  the a7-a8 gap of 0.0100.
+- a8's 0.6613 is **exactly** the incumbent's value at both step 150 and step 600.
+
+**So a7 and a8 are tied on capability, inside the reference's own noise, and the
+earlier "best learning in the program" phrasing overstates it.** What survives is
+the weaker but sufficient claim: **slowing the Q refresh cost no measurable
+capability.** That was the open question a7's verdict left, and it is answered.
+
+### Which makes the gap trend the discriminator, and there a8 wins decisively
+
+| | gap @200 | gap slope @100-120 | gap slope 61-120 | direction |
+|---|---|---|---|---|
+| a7 | 8.1849 | +0.016351 | rising, accelerating | **wrong** |
+| **a8** | **~6.83** | **+0.001262** | **-0.026533** | **falling** |
+
+On the program's registered criterion, a settling gap, a7 fails clearly and a8
+nearly passes while falling over the longer window. With capability tied, that is
+the whole comparison, and it is why a9 (the limit case of a8's mechanism) is the
+right next cell rather than a7 at 600.
+
+### Instrument check for a9
+
+a8's harvested `anchor_q_refreshes.txt` snapshot is **empty, 0 lines**, exactly as
+it must be: a8 refreshes `Q` on the fast path, so no `[comm_eff][frlr-anchor-q]`
+line can exist. That makes the same file a positive control for a9, where it must
+be **non-empty** from the first anchor fire at step 20.
