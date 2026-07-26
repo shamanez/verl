@@ -1,4 +1,14 @@
-# Verdict: a9-frlr-anchorq-200. Anchor-owned Q is a genuine trade-off, not the strict improvement I framed it as. And Q governance does not touch real drift at all.
+# Verdict: a9-frlr-anchorq-200. Q governance does not touch real drift at all, and on the full trajectory a9 may simply be the best arm.
+
+> **Read the terminal addendum before acting on this section.** This body was
+> written at the registered window 100-120, where a8's gap slope beats a9's 7.3x,
+> and it concludes that anchor ownership is a trade-off carrying a measurable cost.
+> The step-200 trajectory shows **a8 was still falling until step 143**, so its
+> registered-window slope is a turning point rather than a settled trend. In the
+> late window a9 is the flattest of the three and it holds the lowest terminal gap
+> and the joint-best terminal val. The registered criterion still belongs to a8 and
+> is not rescored; what changes is that **the cost of the anchor-Q constraint is not
+> established and may be zero.** Corrected in the addendum rather than edited away.
 
 Scored 2026-07-26T19:00Z at the registered primary window **100-120**, complete at
 21 rows. Cell: a7's codec with `Q` harvested from the anchor's clean stale-weight
@@ -107,6 +117,10 @@ test, and it is the same observation a7's verdict raised about the incumbent run
 600 steps at 14.6 nats and finishing where it stood at step 150.
 
 ## Consequence: the run-3 selection rule was built on a false premise
+
+> **Partly SUPERSEDED by the terminal addendum.** The premise critique stands: the
+> rule's candidate set assumed a9 would dominate a8. The 7.3x cost figure below does
+> not, because it is measured at a8's turning point.
 
 `NEXT_RUNS.md` fixed the rule as "flattest gap slope at 100-120 among {a9, a10} at
 G1-passing capability". That candidate set presumed a9 would dominate a8. It does
