@@ -335,3 +335,43 @@ Ledger about 26.4 h of 100.
 `chain/watch_a6.sh` replaces it, keyed on a6's own step, with a6's tmux session
 disappearing as the terminal condition. Nothing is chained after a6, so that
 condition cannot be spoofed by a later cell.
+
+## Watcher post-mortem, 2026-07-26T02:20Z: three bugs, one mistake
+
+`watch93.sh` and `watch_a6.sh` are deleted and replaced by
+`chain/watch_cell.sh <cell> [total]`, which takes the cell as an argument so it
+cannot be aimed at the wrong run by editing a constant.
+
+Three bugs preceded it, and all three are the same mistake: **using SHARED state to
+reason about a SPECIFIC cell.**
+
+1. `watch93.sh` compared the **previous** cell's step against the **shared** tmux
+   session name, so when a6 took over `run-93` it read "session live, a5b not
+   advancing" as a stall. A finished cell can never advance.
+2. `watch93.sh`'s exit condition grepped `tail -1` of `chain-93.log` for
+   "LAUNCHED", but the chain appends a bring-up line after that, so the last line
+   stopped matching and the condition could never fire.
+3. `watch_a6.sh` fixed (1) by keying progress on a6's own step, but kept the
+   **shared** tmux session as its terminal condition, justified in its own header
+   comment with "nothing is chained after a6, so that condition cannot be spoofed
+   by a later cell". **a7 was then chained an hour later**, breaking that premise,
+   and the watcher ran on re-reporting a finished cell's error markers.
+
+Bug 3 is the instructive one. The code was correct given its stated assumption, the
+assumption was written down, and it was invalidated by a later decision in the same
+session without anyone revisiting the watcher. **An invariant that a future action
+can break is not an invariant.**
+
+`watch_cell.sh` therefore uses three independent terminal conditions, any one
+sufficient, none depending on another cell's absence:
+
+- the `/workspace/train.log` heartbeat symlink no longer points at **this** cell's
+  log, meaning it was succeeded
+- this cell reached its final step **and** logged a `val-core` line
+- there are **no** tmux sessions at all, meaning the GPU is genuinely idle
+
+It also reports an error count only when the count **increases**, rather than every
+poll, which is what turned bug 3 into repeated identical notifications.
+
+Validated against the real failure case before arming: pointed at the finished a6 it
+exits 0 with "heartbeat moved to a7", where the old watcher looped indefinitely.
