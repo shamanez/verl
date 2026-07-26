@@ -104,22 +104,29 @@ at the default concurrency of 10. The per-cell byte-exact check caught it and
 fails part-way the half that post-hoc geometry and OOD eval need is already safe.
 a9 and a10 run with the sink ON.
 
-**The measured ceiling changes the scope, so state it plainly.** The fix works
-(part size lands at exactly 268435456), but throughput is **~2.2 MB/s**, and
-concurrency is not the lever: 1 and 4 both gave ~0.5 parts/min, so **the box uplink
-is the ceiling**. All 130G is therefore ~16 h, longer than a9 and a10 combined
-(~13 h), so the back-fill **will not finish**. The model-first ordering is what
-makes that acceptable rather than a problem:
+**Throughput, corrected against a longer window.** The fix works (part size lands
+at exactly 268435456). I first projected **2.2 MB/s** from a 4-minute part count
+and wrote that the back-fill "will not finish". Measured over **20.6 minutes** with
+the first 6.62G model file complete and size-verified, the real rate is
+**5.78 MB/s**, so all 130G is about **6.7 h**, comfortably inside a9 plus a10
+(~13 h). **It will finish, optimizer states included.**
 
-| tier | size | time at 2.2 MB/s | needed for |
-|---|---|---|---|
-| model + config + tokenizer | ~46G | ~6 h | post-hoc geometry, OOD eval, weight diffs |
-| `optim_*.pt` optimizer state | ~84G | ~10 h more | RESUMING training only |
+That is the third time this session I extrapolated a rate or a trend from a window
+far too short to support it (the others: reading a9 as 1.7x slow from four step
+times, and comparing concurrency 1 against 4 on 4 minutes of part counts). The
+program already knew this about early windows and had written it down. Writing it
+down is evidently not the same as applying it, so the rule is now mechanical: **no
+rate or trend claim from under 15 minutes of wall clock, and none from fewer than
+about 10 samples.**
 
-So the model tier lands comfortably and the optimizer state is **explicitly
-best-effort**. Losing it costs the ability to resume a 200-step gate cell, which we
-would re-run rather than resume. Recorded now so that a partial upload at teardown
-reads as the planned outcome rather than a failure.
+Model-first ordering stays regardless, because it costs nothing and it means a
+network failure at hour 5 still leaves the tier that post-hoc geometry and OOD eval
+need:
+
+| tier | size | needed for |
+|---|---|---|
+| model + config + tokenizer | ~46G | post-hoc geometry, OOD eval, weight diffs |
+| `optim_*.pt` optimizer state | ~84G | RESUMING training only |
 
 ## Teardown
 
