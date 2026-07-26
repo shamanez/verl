@@ -303,6 +303,7 @@ class ActivationMasker:
         frlr_k: int = 44,
         frlr_unbiased: bool = False,
         frlr_q_cadence: int = 1,
+        anchor_owns_q: bool = False,
         state: Any = None,
     ):
         self.p = float(p)
@@ -379,6 +380,25 @@ class ActivationMasker:
                     "(rescale=false, rescale_mode none|auto); FRLR applies its own "
                     f"detached residual-norm matching. Got rescale_mode={self.rescale_mode!r}."
                 )
+        # Anchor-owned Q (issue #93). When true the FAST path never touches the
+        # FRLR basis: it neither folds activations into the sketch nor refreshes
+        # Q. Both happen exclusively inside the anchor's dense stale-weight
+        # forward, and the refresh fires only when the anchor fires, which is
+        # the same governance PowerSGD uses (anchor_owns_q). This puts the Q
+        # side channel on the slow circuit, so it stops being charged against
+        # the boundary wire budget, and it makes the codec view stationary
+        # between anchor fires instead of chasing the policy every step.
+        self.anchor_owns_q = bool(anchor_owns_q)
+        if self.anchor_owns_q and not self.frlr:
+            raise ValueError(
+                "mask anchor_owns_q=true requires frlr=true: the plain PRF mask has no "
+                "basis Q for the anchor to own (its mask is a PRF of seed/step/layer)."
+            )
+        # True only while the anchor's clean stale-weight forward is running on
+        # the no-hook clone. Routes the sketch gate (see
+        # _should_accumulate_frlr_sketch) and makes the boundary hook return the
+        # RAW activation so the anchor gradient stays uncompressed.
+        self._anchor_sketch_mode = False
         # FRLR runtime state. The per-boundary fp32 basis Q is FROZEN within a
         # global step and refreshed lazily at the first fire of a step that is
         # >= frlr_q_cadence steps past the last refresh, from the activation
@@ -461,6 +481,12 @@ class ActivationMasker:
             ).to(device=device, dtype=torch.float32)
             self._frlr_basis[layer_idx] = q
             self._frlr_q_step[layer_idx] = step
+        elif self.anchor_owns_q:
+            # Anchor owns Q: the fast path is NOT a Q writer. The cadence branch
+            # below is skipped entirely and anchor_update_basis() is the sole
+            # refresh, called by the engine only when the anchor fires. Q is
+            # therefore bitwise frozen across every fast step in between.
+            pass
         elif step != last_refresh and (step - last_refresh) >= self.frlr_q_cadence:
             # Lazy refresh point: >= frlr_q_cadence steps since the last
             # refresh. Consume the sketch accumulated over the whole frozen
@@ -477,6 +503,111 @@ class ActivationMasker:
             q = q.to(device=device)
             self._frlr_basis[layer_idx] = q
         return q
+
+    def _should_accumulate_frlr_sketch(self, layer_idx: int, *, grad_enabled: bool) -> bool:
+        """True iff this forward should fold ``h`` into the FRLR basis sketch ``V``.
+
+        Gated by (a) ``grad_enabled`` (a forward_only / old-logprob recompute
+        runs under ``torch.no_grad()``, so V is built from the gradient-bearing
+        forward only); (b) the path tag; and (c) one contribution per
+        forward-generation, which dedupes against gradient-checkpoint recompute.
+
+        **Anchor-owns-Q.** In that mode the fast path must NEVER fold into V, so
+        off the anchor pass (``_anchor_sketch_mode`` False) this returns False
+        unconditionally. Inside the anchor's stale-weight forward we DO
+        accumulate, and we bypass the ``path_tag == train`` gate because the
+        anchor pass deliberately runs with ``path_tag=None``. Mirrors
+        ``PowerSGDActivationCompressor._should_accumulate_sketch``.
+        """
+        if not grad_enabled:
+            return False
+        if self.anchor_owns_q:
+            if not self._anchor_sketch_mode:
+                return False
+            return self._frlr_sketched_this_gen.get(layer_idx, -1) != self._frlr_fwd_generation
+        tag = getattr(self._state, "path_tag", None) if self._state is not None else TRAIN_TAG
+        if tag != TRAIN_TAG:
+            return False
+        return self._frlr_sketched_this_gen.get(layer_idx, -1) != self._frlr_fwd_generation
+
+    # ------------------------------------------------------------------ #
+    # Anchor-owned Q: slow-circuit sketch harvest and refresh (issue #93)
+    # ------------------------------------------------------------------ #
+    def set_anchor_sketch_mode(self, on: bool) -> None:
+        """Toggle FRLR sketch harvesting during the dense anchor pass.
+
+        While true the boundary hooks return the RAW activation (so the anchor
+        gradient stays clean and uncompressed) and fold it into the sketch V
+        consumed by :meth:`anchor_update_basis`.
+        """
+        self._anchor_sketch_mode = bool(on)
+
+    def anchor_update_basis(self, *, dp_group: Any = None) -> bool:
+        """Build ``Q <- orth(V)`` from the anchor's harvested sketch.
+
+        The same warm-started block power iteration the fast path uses at
+        ``frlr_q_cadence``, but driven by the anchor refresh: the engine calls
+        this once per anchor fire, immediately after the clean stale-weight
+        forward has folded slow-net activations into V. Returns True iff at
+        least one boundary basis was refreshed.
+
+        **Collective safety.** When the DP group is genuinely multi-rank the raw
+        sketches are all-reduced BEFORE ``orth`` so every rank orthonormalizes
+        the same pooled V and ends on a bit-identical consensus Q. The reduction
+        walks the FIXED ``sorted(self.boundary_indices)`` (a model-geometry
+        property, identical on every rank) and zero-fills a boundary a rank
+        happens to lack, so all ranks issue the identical sequence of
+        collectives. Note that the FAST path has no such sync, so a multi-rank
+        FRLR run is consistent only under anchor ownership.
+        """
+        if not self.frlr:
+            return False
+        if not self.anchor_owns_q:
+            raise RuntimeError(
+                "comm_eff.activation_mask: anchor_update_basis() called with anchor_owns_q=false. "
+                "The anchor must not write Q unless it owns it, or Q would get two writers."
+            )
+        boundaries = sorted(self.boundary_indices)
+        if not boundaries:
+            return False
+        do_sync = False
+        if torch.distributed.is_initialized():
+            try:
+                do_sync = torch.distributed.get_world_size(group=dp_group) > 1
+            except Exception:
+                do_sync = False
+        step = int(self._global_step)
+        updated = 0
+        for idx in boundaries:
+            v = self._frlr_sketch.pop(idx, None)
+            if do_sync:
+                q_prev = self._frlr_basis.get(idx)
+                if q_prev is None:
+                    raise RuntimeError(
+                        "comm_eff.activation_mask anchor-owns-Q: boundary "
+                        f"{idx} has no basis to shape a zero sketch from, so the DP "
+                        "all-reduce sequence would differ across ranks and hang. The "
+                        "anchor forward must fire every boundary before the refresh."
+                    )
+                if v is None:
+                    v = torch.zeros_like(q_prev)
+                torch.distributed.all_reduce(v, group=dp_group)
+            if v is None:
+                continue
+            if not torch.isfinite(v).all():
+                raise RuntimeError(
+                    f"comm_eff.activation_mask anchor-owns-Q: sketch V at boundary {idx} is "
+                    "not finite; orth(V) would produce a garbage basis. Refusing to refresh Q."
+                )
+            device = self._frlr_basis[idx].device if idx in self._frlr_basis else v.device
+            self._frlr_basis[idx] = orthonormalize(v).to(device=device, dtype=torch.float32)
+            self._frlr_q_step[idx] = step
+            self.frlr_q_refreshes += 1
+            updated += 1
+        # Anything left (a boundary that fired outside `boundary_indices`) would
+        # otherwise leak across windows and pollute the next refresh.
+        self._frlr_sketch.clear()
+        return updated > 0
 
     def _frlr_transform(self, h: torch.Tensor, *, layer_idx: int) -> torch.Tensor:
         """Apply the FRLR ``rank + k + 1`` reconstruction to a boundary activation.
@@ -534,12 +665,7 @@ class ActivationMasker:
             # Cross-step Q refresh sketch V += h^T (h Q): the gradient-bearing
             # train forward only, at most once per forward generation (dedupe
             # against gradient-checkpoint recompute), mirroring PowerSGD.
-            tag = getattr(self._state, "path_tag", None) if self._state is not None else TRAIN_TAG
-            if (
-                grad_enabled
-                and tag == TRAIN_TAG
-                and self._frlr_sketched_this_gen.get(layer_idx, -1) != self._frlr_fwd_generation
-            ):
+            if self._should_accumulate_frlr_sketch(layer_idx, grad_enabled=grad_enabled):
                 m32 = m.detach().to(torch.float32)
                 contrib = m32.t() @ (m32 @ q_fp32)  # (H, r)
                 cur = self._frlr_sketch.get(layer_idx)
@@ -563,6 +689,33 @@ class ActivationMasker:
         def _hook(_mod: nn.Module, _inputs: tuple, output: Any):
             h = output[0] if isinstance(output, tuple) else output
             if not torch.is_tensor(h):
+                return output
+
+            # Anchor stale-forward harvest (anchor-owns-Q, FRLR only). The anchor
+            # forward must be CLEAN: its gradient is G_anchor and its activations
+            # feed Q, so fold the RAW activation into V (V += hᵀ(hQ)) and return h
+            # UNCHANGED with no reconstruction. This runs BEFORE the confinement
+            # assert and the per-token identity check on purpose: the anchor pass
+            # carries path_tag=None and needs no PRF key (no mask is drawn here).
+            if masker._anchor_sketch_mode:
+                # Captured BEFORE the no_grad block: inside it is_grad_enabled()
+                # is False by construction, which would gate the harvest off
+                # unconditionally. Same ordering as the PowerSGD hook.
+                harvest_grad_enabled = torch.is_grad_enabled()
+                with torch.no_grad():
+                    hidden = int(h.shape[-1])
+                    if masker.hidden_size is None:
+                        masker.hidden_size = hidden
+                    q_fp32 = masker._frlr_ensure_basis(layer_idx, hidden_size=hidden, device=h.device)
+                    if masker._should_accumulate_frlr_sketch(layer_idx, grad_enabled=harvest_grad_enabled):
+                        m32 = h.detach().reshape(-1, hidden).to(torch.float32)
+                        contrib = m32.t() @ (m32 @ q_fp32)  # (H, r)
+                        cur = masker._frlr_sketch.get(layer_idx)
+                        if cur is None:
+                            masker._frlr_sketch[layer_idx] = contrib
+                        else:
+                            cur.add_(contrib)
+                        masker._frlr_sketched_this_gen[layer_idx] = masker._frlr_fwd_generation
                 return output
 
             # Confinement guard: the mask must fire only on eligible paths

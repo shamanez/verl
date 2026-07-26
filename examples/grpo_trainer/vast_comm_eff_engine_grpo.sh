@@ -443,7 +443,14 @@ EOF
 MASK_PBB_OVERRIDE=()
 if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_mask" ]]; then
   [[ "${COMM_EFF_MASK_ENABLED}" == "true" ]] || { echo "FATAL: compression_type=prf_mask but COMM_EFF_MASK_ENABLED != true — codec would resolve to dense." >&2; exit 1; }
-  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: prf_mask requires COMM_EFF_ANCHOR_OWNS_Q=false (mask has no PowerSGD basis Q)." >&2; exit 1; }
+  # Only FRLR carries a basis Q the anchor can own (issue #93). The PLAIN PRF
+  # mask is a PRF of seed/step/layer with nothing to own, so owns_q stays false
+  # there. Under FRLR + owns_q the fast path is gated off as a Q writer and the
+  # anchor refreshes the basis when it fires, so the anchor must be enabled.
+  if [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]]; then
+    [[ "${COMM_EFF_MASK_FRLR}" == "true" ]] || { echo "FATAL: prf_mask requires COMM_EFF_ANCHOR_OWNS_Q=false unless COMM_EFF_MASK_FRLR=true (the plain mask has no basis Q)." >&2; exit 1; }
+    [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]] || { echo "FATAL: COMM_EFF_MASK_FRLR with COMM_EFF_ANCHOR_OWNS_Q=true requires COMM_EFF_ANCHOR_ENABLED=true (the anchor is the only Q updater)." >&2; exit 1; }
+  fi
   case "${COMM_EFF_MASK_RESCALE_MODE}" in none|constant|rms_match|auto) ;; *) echo "FATAL: bad COMM_EFF_MASK_RESCALE_MODE='${COMM_EFF_MASK_RESCALE_MODE}' (none|constant|rms_match|auto)." >&2; exit 1;; esac
   if [[ "${COMM_EFF_MASK_FRLR}" == "true" ]]; then
     # FRLR is mutually exclusive with the plain-mask levers and the plain

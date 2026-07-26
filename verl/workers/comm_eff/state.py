@@ -228,6 +228,13 @@ class CommEffState:
             from verl.workers.comm_eff.activation_mask import ActivationMasker
 
             mask_cfg = getattr(self.config, "mask", None)
+            # Anchor ownership of the FRLR basis Q (issue #93). Only FRLR carries
+            # a basis, so a plain-PRF arm always resolves to False here; the
+            # config validator rejects the plain-mask + owns_q combination.
+            mask_anchor_cfg = getattr(self.config, "anchor", None)
+            mask_anchor_owns_q = bool(getattr(mask_anchor_cfg, "owns_q", False)) and bool(
+                getattr(mask_cfg, "frlr", False)
+            )
             self.masker = ActivationMasker(
                 p=float(getattr(mask_cfg, "p", 0.0)),
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
@@ -242,12 +249,14 @@ class CommEffState:
                 frlr_k=int(getattr(mask_cfg, "frlr_k", 44)),
                 frlr_unbiased=bool(getattr(mask_cfg, "frlr_unbiased", False)),
                 frlr_q_cadence=int(getattr(mask_cfg, "frlr_q_cadence", 1)),
+                anchor_owns_q=mask_anchor_owns_q,
                 state=self,
             )
             logger.info(
                 "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
                 "exact_k=%s antithetic=%s p_by_boundary=%s "
-                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s",
+                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s "
+                "anchor_owns_q=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
@@ -260,6 +269,7 @@ class CommEffState:
                 getattr(mask_cfg, "frlr_k", 44),
                 getattr(mask_cfg, "frlr_unbiased", False),
                 getattr(mask_cfg, "frlr_q_cadence", 1),
+                mask_anchor_owns_q,
             )
 
         if self.compression_type == "sr_quant":

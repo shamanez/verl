@@ -113,7 +113,8 @@ def test_b1_requires_codec_arm_and_table():
 
 
 def test_b1_rejects_unknown_codec_arm():
-    proc = _run_cell("b1", CODEC_ARM="a9", COMM_EFF_PROBE_KL_TARGET_TABLE=TABLE)
+    # NOT a9/a10: those became real arms with anchor-owned FRLR (issue #93).
+    proc = _run_cell("b1", CODEC_ARM="a99", COMM_EFF_PROBE_KL_TARGET_TABLE=TABLE)
     assert proc.returncode != 0 and "unknown CODEC_ARM" in proc.stderr
 
 
@@ -122,7 +123,7 @@ def test_c_winner_cell_val_and_r2():
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
     assert "c-a3-srq-parity-k493-val600" in out
-    assert "steps=600 test_freq=150 val_before_train=True save_freq=100" in out
+    assert "steps=600 test_freq=300 val_before_train=True save_freq=100" in out
     assert "r2 ckpt sink:        true" in out
     assert "every=25 ctrl=true" in out
 
@@ -136,3 +137,66 @@ def test_engine_wires_new_knobs_to_hydra():
     assert 'algorithm.rollout_correction.rollout_is_threshold="$ROLLOUT_IS_THRESHOLD"' in text
     assert "sr_quant subset accounting" in text
     assert "incumbent prf exact-k 77x16 = 1232" in text
+
+
+def test_a9_anchor_owned_frlr_flips_owns_q():
+    """a9 = a7's codec with the anchor as the sole Q writer (issue #93)."""
+    proc = _run_cell("a9")
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "a9-frlr-anchorq" in out
+    assert "owns_q=true" in out
+    assert "frlr:                true rank=48 k=28" in out
+
+
+def test_a10_adds_unbiased_residual_gain():
+    """a10 = a9 + the constant H/k gain, so E[h_hat|h,Q] = h exactly."""
+    proc = _run_cell("a10")
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "a10-frlr-anchorq-unbiased" in out
+    assert "owns_q=true" in out
+
+
+def test_plain_prf_still_cannot_anchor_own_q():
+    """Only FRLR carries a basis; the plain mask must keep owns_q=false."""
+    proc = _run_cell("a4", COMM_EFF_ANCHOR_OWNS_Q="true")
+    assert proc.returncode == 0, proc.stderr
+    # a4 is plain PRF exact-k: the arm body resets owns_q to false regardless.
+    assert "owns_q=false" in proc.stdout
+
+
+def test_engine_prf_mask_owns_q_guard_admits_frlr_only():
+    """Execute the engine's owns_q gate directly over all four combinations.
+
+    The gate sits before any GPU bring-up and the launcher has no dry-run mode,
+    so extract the block and run it as bash rather than asserting on its text.
+    """
+    lines = ENGINE.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if 'if [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]]; then' in ln)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
+    block = "\n".join(lines[start : end + 1])
+
+    def _run(owns_q, frlr, anchor_enabled):
+        env = {
+            "COMM_EFF_ANCHOR_OWNS_Q": owns_q,
+            "COMM_EFF_MASK_FRLR": frlr,
+            "COMM_EFF_ANCHOR_ENABLED": anchor_enabled,
+        }
+        return subprocess.run(
+            ["bash", "-c", "set -uo pipefail\n" + block],
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+        )
+
+    # Plain PRF mask cannot anchor-own Q.
+    bad = _run("true", "false", "true")
+    assert bad.returncode != 0 and "unless COMM_EFF_MASK_FRLR=true" in bad.stderr
+    # FRLR can, but needs an anchor to do the updating.
+    no_anchor = _run("true", "true", "false")
+    assert no_anchor.returncode != 0 and "COMM_EFF_ANCHOR_ENABLED=true" in no_anchor.stderr
+    # The a9/a10 configuration passes.
+    assert _run("true", "true", "true").returncode == 0
+    # a7/a8 (fast path owns Q) is untouched.
+    assert _run("false", "true", "true").returncode == 0

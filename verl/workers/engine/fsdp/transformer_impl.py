@@ -1406,6 +1406,16 @@ class FSDPEngine(BaseEngine):
         anchor_owns_q = bool(getattr(anchor_cfg, "owns_q", False))
         powersgd = getattr(state, "powersgd", None)
         do_anchor_q = anchor_owns_q and powersgd is not None
+        # Anchor-owns-Q for the FRLR codec (issue #93). Same governance, other
+        # compressor: the mask codec's FRLR basis is harvested and refreshed on
+        # the anchor's clean stale-weight forward and NEVER on the fast path, so
+        # Q moves only when the anchor fires (like PowerSGD) and its side channel
+        # rides the slow circuit. The two are mutually exclusive by construction
+        # (state.build() creates either masker or powersgd, never both).
+        _mask_codec = getattr(state, "masker", None)
+        do_anchor_frlr_q = (
+            anchor_owns_q and _mask_codec is not None and bool(getattr(_mask_codec, "anchor_owns_q", False))
+        )
 
         use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
         module_is_fsdp1 = isinstance(self.module, FSDP)
@@ -2035,6 +2045,16 @@ class FSDPEngine(BaseEngine):
             if do_anchor_q:
                 powersgd.set_anchor_sketch_mode(True)
                 powersgd.register(self.module)  # self.module is the clone now
+            # Same handoff for the FRLR basis. The mask hooks are registered and
+            # unregistered inside forward_backward_batch, and the anchor refresh
+            # runs at the TOP of train_batch (see engine/base.py), so the live
+            # codec is NOT registered here and register() will not no-op on its
+            # idempotence guard. In sketch mode the hook returns the RAW
+            # activation, so the anchor forward stays dense and its gradient
+            # stays clean.
+            if do_anchor_frlr_q:
+                _mask_codec.set_anchor_sketch_mode(True)
+                _mask_codec.register(self.module)  # self.module is the clone now
 
             # Dense forward/backward on the clone. No FSDP hooks fire because the
             # clone is a plain module. forward_only=False populates .grad on its
@@ -2092,6 +2112,13 @@ class FSDPEngine(BaseEngine):
                     powersgd.unregister()
                 finally:
                     powersgd.set_anchor_sketch_mode(False)
+            # Same teardown for the FRLR codec. Its sketch V also persists past
+            # this block and is consumed by anchor_update_basis below.
+            if do_anchor_frlr_q:
+                try:
+                    _mask_codec.unregister()
+                finally:
+                    _mask_codec.set_anchor_sketch_mode(False)
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
@@ -2228,11 +2255,44 @@ class FSDPEngine(BaseEngine):
         if spectral is not None:
             deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
-        if do_anchor_q:
+        if do_anchor_q or do_anchor_frlr_q:
             _signal_role = "Q+M" if spectral is not None else "Q"
         else:
             _signal_role = "M"
         _record_anchor_batch_telemetry(_signal_role)
+
+        # Anchor-owned FRLR basis. The clean anchor forward has folded slow-net
+        # activations into the FRLR sketch V; refresh Q ← orth(V) here, once per
+        # anchor fire. The fast path is gated off as a Q writer, so this is the
+        # sole refresh and Q stays bitwise frozen across every step in between.
+        if do_anchor_frlr_q:
+            # Fail-closed must-fire invariant, same reasoning as the PowerSGD
+            # branch below: an EMPTY sketch means the mask hooks never fired on
+            # the clone (find_decoder_layers returned None / register no-op'd), and
+            # Q would then silently never move for the whole run while the arm
+            # still reported as anchor-owned.
+            assert getattr(_mask_codec, "_frlr_sketch", None), (
+                "comm_eff anchor-owns-Q (FRLR): the anchor clone forward harvested an EMPTY "
+                "sketch V — the mask hooks did not fire on the clone (find_decoder_layers/"
+                "register no-op?). Q would never refresh. Refusing to continue."
+            )
+            _frlr_dp_group = None
+            try:
+                _frlr_dp_group = self.get_data_parallel_group()
+            except Exception:
+                _frlr_dp_group = None
+            _frlr_q_updated = _mask_codec.anchor_update_basis(dp_group=_frlr_dp_group)
+            assert _frlr_q_updated, (
+                "comm_eff anchor-owns-Q (FRLR): anchor_update_basis() did NOT refresh Q "
+                "(orth(V) produced nothing). Q must refresh every anchor cadence."
+            )
+            print(
+                "[comm_eff][frlr-anchor-q] refreshed global_step="
+                f"{getattr(state, 'global_step', -1)} anchor_step={step} "
+                f"boundaries={len(_mask_codec.boundary_indices)} "
+                f"refreshes={_mask_codec.frlr_q_refreshes}",
+                flush=True,
+            )
 
         # Anchor-owned Q. Now that the slow-net activations are
         # harvested into V (during the clean anchor forward above), compute

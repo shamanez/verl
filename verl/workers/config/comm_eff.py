@@ -733,13 +733,23 @@ class CommEffConfig(BaseConfig):
 
         if not self.enabled:
             return
-        # The PRF activation mask is anchor-independent and carries no PowerSGD
-        # basis, so the anchor cannot own a Q under this codec.
+        # The PLAIN PRF activation mask is anchor-independent and carries no
+        # basis at all (its mask is a PRF of seed/step/layer), so the anchor
+        # cannot own a Q under it. FRLR is the exception: it does carry a
+        # per-boundary basis Q, so the anchor CAN own it (issue #93), and then
+        # the Q side channel rides the slow circuit instead of the boundary.
         if self.compression_type == "prf_mask" and self.anchor.owns_q:
-            raise ValueError(
-                "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false: the PRF "
-                "activation mask has no PowerSGD basis Q for the anchor to own."
-            )
+            if not self.mask.frlr:
+                raise ValueError(
+                    "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false unless "
+                    "mask.frlr=true: the plain PRF activation mask has no basis Q for the "
+                    "anchor to own."
+                )
+            if not self.anchor.enabled:
+                raise ValueError(
+                    "comm_eff: mask.frlr with anchor.owns_q=true requires anchor.enabled=true "
+                    "so the FRLR basis has an updater (the fast path is gated off as a Q writer)"
+                )
         # The SR boundary quantizer is likewise anchor-independent and carries
         # no PowerSGD basis, so the anchor cannot own a Q under this codec.
         if self.compression_type == "sr_quant" and self.anchor.owns_q:

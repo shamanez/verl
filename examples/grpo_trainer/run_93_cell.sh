@@ -16,6 +16,8 @@
 #   a5  frlr rank=48 k=28 + decoupled token-IS 2.0     (coherent+corrected)
 #   a6  prf_mask exact-k + decoupled token-IS 2.0      (weighting-only cell)
 #   a7  frlr rank=48 k=28, NO token-IS                 (codec-only cell)
+#   a9  a7 + ANCHOR-OWNED Q (refresh only at anchor fires, PowerSGD rule)
+#   a10 a9 + frlr_unbiased (constant H/k gain, E[h_hat|h,Q]=h)
 #   b1  CODEC_ARM=<a1..a6> + dense-view probe(25) + KL controller (200 steps)
 #   c   CODEC_ARM=<a1..a6> + probe/controller + 600 steps, val 0/150/300/450/
 #       600, SAVE_FREQ=100, R2 checkpoint sink on
@@ -40,7 +42,7 @@ GPU_MEM="${GPU_MEM:-0.72}"                      # the #90 rollout KV-cache setti
 RUN_GROUP="${WANDB_RUN_GROUP:-93-long-horizon-stability}"
 # ------------------------------------
 
-[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|a7|b1|c> bash run_93_cell.sh"
+[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|a7|a9|a10|b1|c> bash run_93_cell.sh"
 
 # ---------------------------------------------------------------------------
 # 1. Resolve the arm BEFORE any bring-up: fail loud on an unknown ARM, echo
@@ -147,8 +149,46 @@ apply_codec_arm() {
       # ROLLOUT_IS deliberately UNSET: engine default is null (correction off).
       CODEC_SLUG="frlr-r48k28-notis"
       ;;
+    a9|a10)
+      # ANCHOR-OWNED FRLR (operator instruction 2026-07-26: "Q update only in
+      # the anchor and only when it fires, like in normal PowerSGD Q").
+      # a7's exact codec, but the fast path is no longer a Q writer: the basis is
+      # harvested from the anchor's clean stale-weight forward and refreshed once
+      # per anchor fire (cadence 20 optimizer ticks), which is the same
+      # governance PowerSGD has always used. Two consequences beyond a8's
+      # frlr_q_cadence=20, which only slowed the fast-path refresh:
+      #   1. Q is fitted to the SLOW (stale-weight) net, not to the policy it is
+      #      compressing, so it cannot chase a moving policy at all.
+      #   2. the Q broadcast rides the slow circuit, which this program does not
+      #      charge to the boundary wire budget, so FRLR regains exact 1232-bit
+      #      parity with the PRF incumbent instead of 1233.4.
+      # a10 additionally flips the residual gain to the UNBIASED constant H/k,
+      # giving exact E[h_hat|h,Q]=h at zero extra wire. That isolates
+      # directional bias, which the a1/a2 factorial (biased RN killed at step 60
+      # with 6.9x worse drift at z=+15, unbiased SR survived) says is the
+      # program's collapse mechanism. Its evidence sits on the actor/kl_loss
+      # channel this program has since discredited, so the law is OPEN, and a9
+      # vs a10 is one env var apart.
+      export COMM_EFF_COMPRESSION_TYPE=prf_mask
+      export COMM_EFF_MASK_ENABLED=true
+      export COMM_EFF_MASK_FRLR=true
+      export COMM_EFF_MASK_FRLR_RANK=48
+      export COMM_EFF_MASK_FRLR_K=28
+      export COMM_EFF_MASK_RESCALE=false
+      export COMM_EFF_MASK_RESCALE_MODE=auto   # frlr does its own norm matching
+      # The whole point of these arms. Overrides the matrix-wide false above.
+      export COMM_EFF_ANCHOR_OWNS_Q=true
+      # ROLLOUT_IS deliberately UNSET, matching a7/a8: token-IS was shown to
+      # contribute nothing to the gap and to cause the learning-onset delay.
+      if [[ "$codec" == "a10" ]]; then
+        export COMM_EFF_MASK_FRLR_UNBIASED=true
+        CODEC_SLUG="frlr-anchorq-unbiased"
+      else
+        CODEC_SLUG="frlr-anchorq"
+      fi
+      ;;
     *)
-      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6|a7)"
+      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6|a7|a9|a10)"
       ;;
   esac
 }
@@ -168,7 +208,7 @@ apply_control_plane() {
 }
 
 case "$ARM" in
-  a1|a2|a3|a4|a5|a6|a7)
+  a1|a2|a3|a4|a5|a6|a7|a9|a10)
     apply_codec_arm "$ARM"
     TOTAL_STEPS="${TOTAL_STEPS:-120}"
     # Default -1 preserves the registered "validation OFF for all gate cells".
@@ -212,7 +252,7 @@ case "$ARM" in
     export R2_REGIME="${R2_REGIME:-$EXPERIMENT_NAME}"
     ;;
   *)
-    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|a7|b1|c)"
+    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|a7|a9|a10|b1|c)"
     ;;
 esac
 
@@ -225,7 +265,8 @@ cat <<EOF
   codec:               ${COMM_EFF_COMPRESSION_TYPE}
   sr_quant:            bits=${COMM_EFF_QUANT_BITS:-<default>} block=${COMM_EFF_QUANT_BLOCK_SIZE:-<default>} rounding=${COMM_EFF_QUANT_ROUNDING:-<default>} subset_k=${COMM_EFF_QUANT_SUBSET_K:-0}
   prf_mask:            enabled=${COMM_EFF_MASK_ENABLED:-false} p=${COMM_EFF_MASK_P:-<default>} rescale_mode=${COMM_EFF_MASK_RESCALE_MODE:-<default>} exact_k=${COMM_EFF_MASK_EXACT_K:-false}
-  frlr:                ${COMM_EFF_MASK_FRLR:-false} rank=${COMM_EFF_MASK_FRLR_RANK:-<default>} k=${COMM_EFF_MASK_FRLR_K:-<default>}
+  frlr:                ${COMM_EFF_MASK_FRLR:-false} rank=${COMM_EFF_MASK_FRLR_RANK:-<default>} k=${COMM_EFF_MASK_FRLR_K:-<default>} unbiased=${COMM_EFF_MASK_FRLR_UNBIASED:-false} q_cadence=${COMM_EFF_MASK_FRLR_Q_CADENCE:-<default>}
+  anchor:              owns_q=${COMM_EFF_ANCHOR_OWNS_Q:-<default>} (true = Q moves ONLY when the anchor fires; requires frlr)
   cvc:                 ce_lambda=${COMM_EFF_CVC_LAMBDA:-0.0} warmup=${COMM_EFF_CVC_WARMUP_STEPS:-20}
   rollout_is:          ${ROLLOUT_IS:-null} threshold=${ROLLOUT_IS_THRESHOLD:-2.0}
   probe:               every=${COMM_EFF_PROBE_EVERY:-0} ctrl=${COMM_EFF_PROBE_CTRL_ENABLED:-false} table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}]
