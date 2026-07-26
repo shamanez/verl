@@ -1,4 +1,11 @@
-# Verdict: a8-frlr-qcad20-200. The best cell in the program, and it beats the dense-grade incumbent on learning.
+# Verdict: a8-frlr-qcad20-200. Capability tied with a7 and the incumbent, and the gap trend 13x flatter.
+
+> **Header corrected after the terminal val landed.** This document was first
+> written at the training window, where a8 leads, and titled "the best cell in the
+> program". Its terminal val (0.6613) came in **below** a7's 0.6713, so the two
+> channels rank the arms oppositely and both differences are inside the
+> reference's own noise. The terminal addendum has the arithmetic. Corrected here
+> rather than edited away.
 
 Scored 2026-07-26T13:35Z at the registered primary window **100-120**, complete at
 21 rows. Cell: a7's exact codec with `frlr_q_cadence` raised from 1 to 20. Run
@@ -8,13 +15,13 @@ continues to 200 for its terminal val; a terminal addendum follows.
 
 | gate | measured | bar | call |
 |---|---|---|---|
-| **G1** learning, score level | **0.6602** | >= 0.6248 | **PASS, and 1.004x the incumbent's 0.6577** |
+| **G1** learning, score level | **0.6602** | >= 0.6248 | **PASS**, 1.004x the incumbent's 0.6577 at the window; the held-out val disagrees, see addendum |
 | **G2** gap level | **6.8293** | < 14.2458 | **PASS, 0.48x** |
 | **G2** gap slope | **+0.001262** | <= +5.0e-4 | FAIL 2.5x, but **13x flatter than a7** and negative over 61-120 |
 | **G3** drift slope | +0.006967 | <= 3.264e-3 | FAIL 2.1x, codec-view, no physical content |
 | **G4** wire | 1233.4 bits | 1232 | parity to 0.1 percent |
 
-## G1: the first compressed arm to out-learn the incumbent
+## G1 at the training window (see the terminal addendum: this does NOT survive as a capability claim)
 
 | | score 100-120 | gap 100-120 | grad_norm |
 |---|---|---|---|
@@ -90,7 +97,7 @@ window, so no reward degeneracy.
 ## Verdict
 
 **PASS on G1 and G2-level, FAIL on both slope clauses, and it is the arm to
-build on.** a8 has the best learning in the program, less than half the
+build on.** a8 has capability tied with a7 and the incumbent, less than half the
 incumbent's gap, the flattest gap trend of any FRLR arm by 13x, the lowest
 codec-free drift, no importance-sampling machinery, and wire parity to 0.1
 percent. Its two failures are a slope that misses by 2.5x while falling over the
