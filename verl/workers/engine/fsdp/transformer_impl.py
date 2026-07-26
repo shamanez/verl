@@ -831,6 +831,18 @@ class FSDPEngine(BaseEngine):
             masker = getattr(state, "quantizer", None)
         if masker is None or not masker.is_registered:
             return
+        if getattr(masker, "_anchor_sketch_mode", False):
+            # Anchor-owned-Q harvest (issue #93). The FRLR sketch needs the step
+            # and a fresh forward-generation (the grad-checkpoint dedupe key),
+            # but NO per-token PRF key: no mask is drawn on the anchor pass, the
+            # hook returns the raw activation. So skip the rmpad and
+            # comm_eff_sample_id requirements below rather than making the
+            # anchor's replayed batch satisfy them.
+            _gstep = getattr(state, "global_step", None)
+            if _gstep is None or int(_gstep) < 0:
+                _gstep = getattr(self, "_comm_eff_global_step", 0)
+            masker.set_context(global_step=int(_gstep), sample_ids=None, position_ids=None)
+            return
         if not getattr(input_ids, "is_nested", False):
             raise NotImplementedError(
                 "comm_eff per-element masking requires rmpad (nested / no-padding) "

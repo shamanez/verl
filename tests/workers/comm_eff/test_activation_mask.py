@@ -1384,3 +1384,33 @@ def test_state_plumbs_anchor_owns_q_into_the_masker():
     # A plain-mask config never resolves to anchor ownership, even if the anchor
     # sub-config says owns_q=true (which is its dataclass DEFAULT).
     assert _build(frlr=False, owns_q=True).anchor_owns_q is False
+
+
+def test_set_context_with_null_ids_bumps_generation_for_harvest():
+    """The anchor path sets context with NO per-token ids; harvest must still dedupe.
+
+    The engine calls set_context(sample_ids=None, position_ids=None) on the
+    anchor pass, because the harvest draws no mask and the anchor's replayed
+    batch need not carry a PRF key. The forward-generation counter is the only
+    thing that matters there, and it must still advance so a new micro-batch
+    folds while a grad-checkpoint recompute does not.
+    """
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    masker.set_anchor_sketch_mode(True)
+    h = torch.randn(2, 8, H)
+
+    masker.set_context(global_step=0, sample_ids=None, position_ids=None)
+    gen0 = masker._frlr_fwd_generation
+    hook(nn.Identity(), (), h)
+    first = masker._frlr_sketch[3].clone()
+    hook(nn.Identity(), (), h)  # recompute, same generation
+    assert torch.equal(masker._frlr_sketch[3], first)
+
+    masker.set_context(global_step=0, sample_ids=None, position_ids=None)
+    assert masker._frlr_fwd_generation == gen0 + 1
+    hook(nn.Identity(), (), h)
+    assert not torch.equal(masker._frlr_sketch[3], first)
+    assert masker._sample_ids is None and masker._position_ids is None
