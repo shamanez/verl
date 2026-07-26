@@ -154,3 +154,112 @@ a codec-view inflation that falls rather than rises.
 wrong.** a8's cadence-20 fast `Q` remains 7.3x flatter on the program's registered
 criterion. The terminal val at step 200 is pending and, given that all three arms'
 capability sits inside the reference's noise, is unlikely to separate them.
+
+---
+
+## TERMINAL ADDENDUM at step 200: the trajectory reverses my a8-vs-a9 conclusion, and I have to be careful about how I say so
+
+a9 finished 200/200 with **zero errors** and **10 anchor fires**, `refreshes=70`,
+exactly 7 per fire across the whole run. Terminal val, from the on-box log because
+WandB drops the final step:
+
+**`val-core/.../acc/mean@1 = 0.6713426853707415`**
+
+That is **identical to a7's, to the digit**. Both are 335 of 499 problems. A
+coincidence at the problem level, but it puts the capability question beyond
+argument: the two arms are the same model as far as this benchmark can see.
+
+| cell | terminal val | gap @199 | codec-free drift @200 | `actor/kl_loss` @200 |
+|---|---|---|---|---|
+| incumbent PRF | 0.6613 / 0.6633 / 0.6733 / 0.6613 | ~14.3 | no probe | 0.9085 @600 |
+| a6 PRF + IS + bnorm | 0.5391 | 14.13 | 0.026793 | 0.2918 |
+| a5b FRLR + IS + bnorm | 0.6593 | 5.37 | 0.016754 | 2.2262 |
+| a7 FRLR, fast Q cad 1 | **0.6713** | 7.7618 | 0.008200 | 5.8246 |
+| a8 FRLR, fast Q cad 20 | 0.6613 | 7.2249 | 0.007006 @150 | 0.1064 |
+| **a9 FRLR, anchor-owned Q** | **0.6713** | **7.0031** | 0.008594 | 4.1330 |
+
+**The drift finding holds at the terminal point too:** a9's codec-free drift is
+0.008594 against a7's 0.008200, within **5 percent**, while their `actor/kl_loss`
+reads 4.1330 against 5.8246. Same policy movement, different view.
+
+## The gap trajectory, which is what changes the reading
+
+| step | a7 | a8 | a9 |
+|---|---|---|---|
+| 60 | 4.4546 | 9.5067 | 5.7190 |
+| 100 | 4.9447 | 7.2417 | 5.8213 |
+| 120 | 5.1976 | 6.8292 | 5.9989 |
+| 150 | 6.0681 | **6.4195** | 6.5184 |
+| 180 | 6.7929 | 6.5946 | 6.6525 |
+| **199** | 7.7618 | 7.2249 | **7.0031** |
+
+| OLS gap slope | a7 | a8 | a9 |
+|---|---|---|---|
+| 41-60 | -0.002670 | +0.001988 | -0.004384 |
+| 61-80 | +0.016365 | +0.004549 | +0.006267 |
+| **100-120 (REGISTERED)** | +0.016351 | **+0.001262** | +0.009262 |
+| 121-150 | +0.026249 | **-0.007288** | +0.016096 |
+| **150-199 (late)** | +0.038535 | +0.018366 | **+0.012172** |
+| 100-199 | +0.028329 | +0.001485 | +0.012203 |
+
+Minimum gap and where it occurs: a7 **4.2435 at step 57**, a8 **6.1173 at step 143**,
+a9 **5.4281 at step 62**.
+
+## a8's registered-window flatness is a turning point, not a settled trend
+
+**a8 was still falling until step 143.** Its registered window 100-120 therefore
+sits inside the descending arm of a U, and its 121-150 slope is outright **negative**
+(-0.007288). Its +0.001262 is a real measurement of that window and it is also the
+bottom of a curve that then rises at +0.018366 through 150-199.
+
+In the late window the ordering **inverts**: a9 is the flattest of the three, and at
+step 199 a9 also holds the lowest gap.
+
+## Why I am NOT simply switching to the window that favours a9
+
+The registered criterion is **100-120**, a8 wins it, and choosing the late window
+because it ranks arms the way I now prefer would be exactly the goalpost move this
+program has been disciplined about. So, stated precisely:
+
+- **On the registered criterion, a8 is the best arm.** That stands.
+- **What the late data shows is a reliability problem with using that number to
+  predict 600-step behaviour**, not a reason to rescore. A slope measured at a
+  curve's turning point extrapolates badly by construction, and 100-199 gives a8
+  +0.001485 only because its fall cancels its rise.
+- **The one thing true of all three: none settles.** Every arm accelerates by
+  150-199 (a7 +0.0385, a8 +0.0184, a9 +0.0122). The program's registered success
+  criterion is a settling gap and **no FRLR arm achieves it at 200 steps.**
+
+## What this does to the constraint-cost claim I made earlier
+
+Earlier today I wrote that the operator's anchor-Q constraint "has a measurable cost"
+of 7.3x on the registered criterion. **That was measured at a8's turning point and
+overstates the case.** The fuller picture:
+
+| measure | best arm |
+|---|---|
+| registered gap slope, 100-120 | a8 |
+| late gap slope, 150-199 | **a9** |
+| gap level at step 199 | **a9** |
+| terminal val | **a9 = a7** |
+| codec-free drift | all three identical |
+
+On three of five measures a9 is at least tied best, and on the two where a8 leads,
+one is the turning-point artifact above. **So the honest revision is that the
+constraint's cost is not established, and may be zero.** I am recording this as a
+correction to my own earlier framing rather than editing that framing away.
+
+## An operational finding that matters for the 600-step run
+
+a9 is the **first cell with the in-training R2 sink enabled**, and it changed
+teardown from a8's ~2 minutes to a bandwidth-bound wait. The log says the upload is
+queued "async", and it is async with respect to *training* but **not with respect to
+process exit**: a9 sat at step 200 with the GPU at 0 percent while 19G uploaded, and
+it exited within a minute of those uploads being killed. Measured progress was 16 of
+74 parts in 7 minutes, so the full wait would have been about **55 minutes of idle
+GPU**; killing it cut the handoff gap to **11 minutes**, and a9's checkpoint was
+never at risk because it is on local disk with deletion disabled.
+
+**For a 600-step run with three saves that is roughly 2.5 hours of idle GPU.** Either
+set the sink genuinely asynchronous, or leave it off and back-fill, which is what a5b
+through a8 did at no cost to occupancy.
