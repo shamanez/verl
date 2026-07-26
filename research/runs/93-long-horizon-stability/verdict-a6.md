@@ -114,3 +114,72 @@ where the codec-view gap is small, actively harmful where it is large. A cheap g
 is to refuse the knob, or fall back to unnormalised truncated IS, whenever the
 measured mean IS weight falls below some floor. On this evidence a floor near 0.05,
 which a5b clears at 0.17 and a6 misses by 100x, would have caught it before the run.
+
+---
+
+## TERMINAL ADDENDUM at step 200: the codec-view drift gate does not merely fail to predict capability, it ANTI-predicts it
+
+a6 finished 200/200 at 02:05Z with 2 error markers, both shutdown-path (atexit,
+teardown, workers). Both checkpoints saved. Its terminal val is the number that
+closes the gating argument.
+
+| cell | codec-view drift @200 | codec-FREE drift @200 | terminal val | val vs incumbent |
+|---|---|---|---|---|
+| incumbent | 0.9085 at step 600 | no probe exists | 0.6613 @150 | 1.000x |
+| **a5b** FRLR+TIS | **2.2262** | **0.016754** | **0.6593** | **0.997x** |
+| **a6** PRF+TIS | **0.2918** | **0.026793** | **0.5391** | **0.815x** |
+
+Read the first and third columns together. **a5b carries 7.63x a6's codec-view
+drift and has 1.22x its capability.** The registered gate, computed on
+`actor/kl_loss`, **passed a6** (slope +0.001404, better than the incumbent's
++0.002176) and **failed a5b** at 2.48x over threshold. The capability outcome is
+the exact reverse of both calls.
+
+So the earlier claim, that the gate fails to predict capability, was too gentle. On
+this pair it is **anti-correlated with capability**. A veto that reliably points the
+wrong way is worse than no veto.
+
+**The codec-free channel gets the ordering right.** a6's true drift is **1.60x**
+a5b's (0.026793 against 0.016754) and its val is **0.82x**. That is the correct
+sign, on the only two cells in the program that both have a dense probe.
+
+## What a6's val does and does not show
+
+**It does not show damage below baseline.** a6's val of 0.5391 tracks its own
+training score of 0.4932 at step 200, and both arms started near 0.357. a6 improved
+on the base model; it simply improved less. Calling this "capability damage" would
+overstate it.
+
+**What it does show is movement without benefit.** Taking the common starting score
+of about 0.357 as a proxy for base val, which is a proxy because these cells ran
+with `VAL_BEFORE_TRAIN=False`:
+
+| cell | true drift | capability gained | drift per unit gain |
+|---|---|---|---|
+| a5b | 0.016754 | 0.302 | **0.0554** |
+| a6 | 0.026793 | 0.182 | **0.1471** |
+
+a6 moved **2.66x further from the base model per unit of capability acquired**. That
+is the real cost of the gradient explosion: ESS 0.00067 and grad_norm 64.05 at step
+200 do not produce a broken model, they produce an inefficient one that spends
+weight movement without buying accuracy.
+
+## Consequence for the registered procedure
+
+This is the third and strongest piece of evidence, and the three are independent:
+
+1. a5b failed the drift gate by 2.48x and validated at **parity**
+2. the two channels **rank a6 and a5b in opposite orders**, so codec-view drift is
+   not a valid cross-codec comparison at all
+3. across these two cells the gate is **anti-correlated with capability**, passing
+   the arm that lost 18.5 percent and failing the arm that lost nothing
+
+`actor/kl_loss` should be demoted to a labelled codec-view diagnostic,
+`probe/kl_dense` promoted to the drift criterion, a cadence-5 probe required on
+every cell, and promotion gated on val and OOD. That remains the operator's call
+because it changes the registered procedure, and it is now flagged with three
+independent supports rather than one.
+
+**Neither a5b's nor a6's recorded verdict changes.** Both were scored against bars
+registered before their data existed, and that is exactly why this evidence is
+worth anything.
