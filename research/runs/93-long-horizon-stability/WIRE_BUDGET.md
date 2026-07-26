@@ -38,3 +38,61 @@ So the two families are reported in **different units**. Coordinates convert to 
 4. Only a1 has a real budget problem (1.87x). a3's 0.5-bit overage is 0.04 percent and `subset_k=492` would give exactly 1230.0.
 
 So on wire budget the ranking is: a4 = a5 = incumbent (parity) < a3 (+0.04 percent) << a1 (+87 percent). Two of the three arms that could plausibly win round A are at exact parity, which means a communication-efficiency claim is available to either of them without any "accounting of the trade" caveat.
+
+## CORRECTION 2026-07-26T04:00Z: the FRLR basis Q was never counted, and it must be
+
+Raised by the operator. Every FRLR figure in this document, and every "identical
+1232-bit wire" claim in the a5b, a6 and a7 write-ups, counted **only the per-token
+activation payload**. FRLR also needs its basis `Q` on the receiving side, because
+reconstruction is `h ~ Qy` and the receiver cannot compute `Q` itself: it is
+produced by power iteration on an activation sketch that only the sender holds.
+
+**Why it stayed invisible.** The implementation is a single-process simulation. It
+masks and reconstructs the activation in place, so there is no send or receive
+anywhere in `activation_mask.py` (no `dist.` call, no broadcast) and the cost is
+never actually paid. The wire budget is an accounting abstraction of what a real
+split deployment would transmit, and this line item was simply missing from it.
+
+### The cost, measured against a7's live traffic
+
+| quantity | value |
+|---|---|
+| `Q` per boundary | 1536 x 48 = **73,728 elements** |
+| refresh cadence | `frlr_q_cadence=1`, every step (455 refreshes by step 66, about 7 per step for 7 boundary layers) |
+| `Q` as fp16 | 1,179,648 bits = **0.15 MB** per boundary per refresh |
+| `Q` as fp32 | 2,359,296 bits = 0.29 MB (the basis is computed in fp32; fp16 on the wire is an assumption) |
+| activation payload | 830,710 tokens x 1232 bits = **127.9 MB** per boundary per step |
+| **`Q` share at cadence 1** | **0.115 percent** fp16, 0.231 percent fp32 |
+| **effective bits/token/boundary** | **1233.4** fp16, against PRF's 1232 |
+
+| cadence | `Q` share of boundary traffic |
+|---|---|
+| 1 (current) | 0.115% |
+| 5 | 0.023% |
+| 20 | 0.006% |
+| 50 | 0.002% |
+
+### What changes and what does not
+
+**Corrected claim.** FRLR r48/k28 costs **1233.4 bits per token per boundary**, not
+1232. The parity claim survives at 0.1 percent, so no verdict or comparison in this
+program is affected, but the exact-parity phrasing was an unverified assumption and
+should read "parity to within 0.1 percent, including the basis broadcast".
+
+**An advantage PRF should have been credited with.** PRF exact-k requires **no side
+channel at all**. Its mask is a pseudo-random function of (seed, step, layer), so
+both sides derive it from a shared seed with **zero bits transmitted**. FRLR
+structurally must ship a data-dependent basis. That is a real architectural
+difference, and this document presented the two codecs as equivalent on wire when
+one needs a side channel and the other does not.
+
+### The lever, and a connection worth pursuing
+
+`frlr_q_cadence` already exists (the #89 slow-Q lever) and at cadence 20 the basis
+cost falls to 0.006 percent. But the more interesting point is that cadence 1 is
+also the cause of the measurement pathology in `FINDING_drift_metric_invalid.md`:
+refreshing `Q` every step is what makes FRLR's view offset **time-varying**, driving
+`probe/kl_gain` from 13.8x to 132.9x over 200 steps, where PRF's stationary mask
+gives a falling offset instead. **Slowing `Q` should reduce the wire cost and the
+codec-view distortion together**, using a knob that already exists. Worth a cell if
+the operator wants one; not started.
