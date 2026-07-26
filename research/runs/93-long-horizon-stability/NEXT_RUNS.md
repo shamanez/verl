@@ -82,9 +82,14 @@ This is new spend on top of a9+a10 and needs the operator's word.
 
 ## Disk and R2
 
-The three finished cells were **37G each**, not the 19G I recorded earlier, and
-the disk was at 114G of 200G with three more saves queued (a8, a9, a10) which
-would have overflowed it. The R2 back-fill is running now in tmux `r2-backfill`:
+**Correction to my own correction.** I first recorded ~19G per cell, then
+"corrected" it to 37G on seeing three 37G directories, then said the disk would
+overflow. The precise figure is **~19G per checkpoint**: a5b/a6/a7 are 37G because
+they saved twice (steps 100 and 200), and a8 is **19G** because it saved once. So
+a9 and a10 add ~19G each and the disk (132G of 200G now) would have finished around
+170G. **It was never going to overflow, and the back-fill is not urgent for space.**
+What it IS for is not losing the checkpoints with the box, which is pre-teardown
+step 1. The R2 back-fill is running now in tmux `r2-backfill`:
 per cell it syncs, verifies **byte-exact** against the remote listing, and only
 then deletes the local copy. A cell that fails verification is left on disk. a9
 and a10 run with the sink ON, so they upload as they save. That retires
