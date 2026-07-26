@@ -15,6 +15,7 @@
 #   a4  prf_mask exact-k + CVC CE mode lambda=0.003    (make-it-settle arm)
 #   a5  frlr rank=48 k=28 + decoupled token-IS 2.0     (coherent+corrected)
 #   a6  prf_mask exact-k + decoupled token-IS 2.0      (weighting-only cell)
+#   a7  frlr rank=48 k=28, NO token-IS                 (codec-only cell)
 #   b1  CODEC_ARM=<a1..a6> + dense-view probe(25) + KL controller (200 steps)
 #   c   CODEC_ARM=<a1..a6> + probe/controller + 600 steps, val 0/150/300/450/
 #       600, SAVE_FREQ=100, R2 checkpoint sink on
@@ -39,7 +40,7 @@ GPU_MEM="${GPU_MEM:-0.72}"                      # the #90 rollout KV-cache setti
 RUN_GROUP="${WANDB_RUN_GROUP:-93-long-horizon-stability}"
 # ------------------------------------
 
-[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|b1|c> bash run_93_cell.sh"
+[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|a7|b1|c> bash run_93_cell.sh"
 
 # ---------------------------------------------------------------------------
 # 1. Resolve the arm BEFORE any bring-up: fail loud on an unknown ARM, echo
@@ -126,8 +127,28 @@ apply_codec_arm() {
       export ROLLOUT_IS_THRESHOLD=2.0
       CODEC_SLUG="prf-exactk-tis"
       ;;
+    a7)
+      # The NEVER-RUN corner of the 2x2 (queued 2026-07-26): FRLR r48/k28 with
+      # NO token-IS at all. a5b showed FRLR+TIS+bnorm gets the 3.2x gap win and
+      # learns to 0.98x; a6 showed the weighting is only viable BECAUSE the gap
+      # is low, and is catastrophic at 14 nats (ESS 0.0006, grad_norm 57). Nobody
+      # has tried FRLR on its own. Two questions in one cell:
+      #   1. does FRLR alone deliver the gap win without any IS pathology?
+      #   2. against a5b (same codec, TIS on) with probes on both, does token-IS
+      #      add TRUE codec-free drift? That attribution was otherwise impossible
+      #      because the incumbent has no probe.
+      export COMM_EFF_COMPRESSION_TYPE=prf_mask
+      export COMM_EFF_MASK_ENABLED=true
+      export COMM_EFF_MASK_FRLR=true
+      export COMM_EFF_MASK_FRLR_RANK=48
+      export COMM_EFF_MASK_FRLR_K=28
+      export COMM_EFF_MASK_RESCALE=false
+      export COMM_EFF_MASK_RESCALE_MODE=auto   # frlr does its own norm matching
+      # ROLLOUT_IS deliberately UNSET: engine default is null (correction off).
+      CODEC_SLUG="frlr-r48k28-notis"
+      ;;
     *)
-      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6)"
+      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6|a7)"
       ;;
   esac
 }
@@ -147,7 +168,7 @@ apply_control_plane() {
 }
 
 case "$ARM" in
-  a1|a2|a3|a4|a5|a6)
+  a1|a2|a3|a4|a5|a6|a7)
     apply_codec_arm "$ARM"
     TOTAL_STEPS="${TOTAL_STEPS:-120}"
     # Default -1 preserves the registered "validation OFF for all gate cells".
@@ -165,7 +186,7 @@ case "$ARM" in
     EXPERIMENT_NAME="${EXPERIMENT_NAME:-${ARM}-${CODEC_SLUG}}"
     ;;
   b1)
-    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=b1 requires CODEC_ARM=<a1|a2|a3|a4|a5|a6> (the round-A winner codec)"
+    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=b1 requires CODEC_ARM=<a1|a2|a3|a4|a5|a6|a7> (the round-A winner codec)"
     apply_codec_arm "$CODEC_ARM"
     apply_control_plane
     TOTAL_STEPS="${TOTAL_STEPS:-200}"
@@ -175,7 +196,7 @@ case "$ARM" in
     EXPERIMENT_NAME="b1-${CODEC_ARM}-${CODEC_SLUG}-ctrl"
     ;;
   c)
-    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=c requires CODEC_ARM=<a1|a2|a3|a4|a5|a6> (the round-B winner codec)"
+    [[ -n "${CODEC_ARM:-}" ]] || fatal "ARM=c requires CODEC_ARM=<a1|a2|a3|a4|a5|a6|a7> (the round-B winner codec)"
     apply_codec_arm "$CODEC_ARM"
     apply_control_plane
     TOTAL_STEPS="${TOTAL_STEPS:-600}"
@@ -191,7 +212,7 @@ case "$ARM" in
     export R2_REGIME="${R2_REGIME:-$EXPERIMENT_NAME}"
     ;;
   *)
-    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|b1|c)"
+    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|a7|b1|c)"
     ;;
 esac
 
