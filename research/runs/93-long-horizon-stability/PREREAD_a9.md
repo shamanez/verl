@@ -157,3 +157,67 @@ that distribution than it does to the live policy a8's basis chases.
 Recorded now so that if a9 does beat a8 at the registered window, this reading was
 on the record beforehand rather than assembled afterwards, and if it does not, the
 hypothesis is visibly wrong rather than quietly dropped.
+
+---
+
+## Addendum 2, step 80: all three triggers cleared, and a trade-off is emerging that undercuts my own framing
+
+| trigger | measured 61-80 | threshold | call |
+|---|---|---|---|
+| score level | **0.6088** | >= 0.40 | pass |
+| gap at step 80 | 5.6084 | <= 12 | pass |
+| gap slope | **+0.006267** | <= +0.016 | **pass, and this is the clause a7 FAILS** |
+
+**CONTINUE.** All three registered early-kill triggers are now cleared.
+
+### The matched-window a7 comparison, which is the point of the arm
+
+| at 61-80 | score | gap level | gap slope |
+|---|---|---|---|
+| a7, fast Q, cadence 1 | 0.6032 | 4.5858 | **+0.016365** (kills) |
+| **a9, anchor-owned Q** | **0.6088** | 5.5597 | **+0.006267** (passes) |
+
+At the identical window a9's slope is **2.6x flatter than a7's** at equal-or-better
+learning. Anchor ownership does move the defect in the intended direction.
+
+### But it attenuates the turnaround rather than removing it, and that matters
+
+a9's slope went **-0.004384 at 41-60 to +0.006267 at 61-80**. a7 did the same thing
+at the same place, **-0.00267 to +0.016365**. So a9 reproduces a7's turnaround near
+step 60 in *kind*, at about 2.6x smaller magnitude. Fitting `Q` to the slow net does
+not prevent the sign flip; it damps it.
+
+### The trade-off this sets up, stated before the registered window
+
+a7's slope was essentially unchanged between 61-80 (+0.016365) and 100-120
+(+0.016351). If a9 is similarly stable, its 100-120 slope lands near **+0.006**,
+which would be:
+
+- **2.6x better than a7's** +0.016351, and
+- about **5x WORSE than a8's** +0.001262.
+
+If that holds, then on gap slope the ordering is **a8 better than a9 better than
+a7**, and combined with the level reading from addendum 1 (a9 ~5.6 against a8's
+6.83) the picture is a genuine trade: **anchor-owned Q buys a better gap LEVEL and
+a worse gap SLOPE than a8's cadence-20 fast Q.**
+
+**That undercuts how I framed a9.** I called it "the limit case of what a8
+validated", which presumes more of the same good thing. If a9's slope is worse than
+a8's, anchor ownership is not a stronger version of a8's mechanism, it is a
+*different* mechanism with its own trade-off: alignment to the slow net helps the
+level, while a single-minibatch sketch per refresh hurts the slope. That reading is
+consistent with addendum 1, where a9's better level came from 1/20th the sketch
+data, and it would mean a8's slope advantage really was the sample-size averaging
+after all, on the slope alone.
+
+**Registered honestly:** this is an extrapolation from a7's window-to-window
+stability, which a9 need not share, and it is exactly the sort of projection this
+session has already got wrong three times. The scored answer is at 100-120 and
+nothing above substitutes for it. What I am committing to now is the *reading* of
+each outcome, so it cannot be chosen afterwards:
+
+| a9's 100-120 slope | reading |
+|---|---|
+| below a8's +0.001262 | anchor ownership dominates; it is the limit case as originally framed |
+| between a8 and a7 | a genuine trade-off; the 600-step run needs a level-vs-slope decision, and a cadence-20 anchor-owned hybrid becomes the obvious untested cell |
+| above a7's +0.016351 | anchor ownership is worse than either fast-path option and the operator's constraint costs real performance, which must be reported as such |
