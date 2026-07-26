@@ -104,6 +104,23 @@ at the default concurrency of 10. The per-cell byte-exact check caught it and
 fails part-way the half that post-hoc geometry and OOD eval need is already safe.
 a9 and a10 run with the sink ON.
 
+**The measured ceiling changes the scope, so state it plainly.** The fix works
+(part size lands at exactly 268435456), but throughput is **~2.2 MB/s**, and
+concurrency is not the lever: 1 and 4 both gave ~0.5 parts/min, so **the box uplink
+is the ceiling**. All 130G is therefore ~16 h, longer than a9 and a10 combined
+(~13 h), so the back-fill **will not finish**. The model-first ordering is what
+makes that acceptable rather than a problem:
+
+| tier | size | time at 2.2 MB/s | needed for |
+|---|---|---|---|
+| model + config + tokenizer | ~46G | ~6 h | post-hoc geometry, OOD eval, weight diffs |
+| `optim_*.pt` optimizer state | ~84G | ~10 h more | RESUMING training only |
+
+So the model tier lands comfortably and the optimizer state is **explicitly
+best-effort**. Losing it costs the ability to resume a 200-step gate cell, which we
+would re-run rather than resume. Recorded now so that a partial upload at teardown
+reads as the planned outcome rather than a failure.
+
 ## Teardown
 
 **No standing authorization. Ask explicitly, every time.** The trigger is a10
