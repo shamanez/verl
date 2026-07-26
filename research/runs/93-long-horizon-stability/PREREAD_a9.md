@@ -69,3 +69,36 @@ The program had already written down that early windows lie. Writing it down is
 evidently not the same as applying it, so: **no rate or trend claim from under 15
 minutes of wall clock or fewer than about 10 samples, and no gate read before its
 registered window.** a9's five predictions are scored at 100-120 and nowhere else.
+
+## Config verified from WandB, and one reading trap to flag now
+
+The engine truncates `$LOG` at start, so the config was read off WandB
+(`a9-frlr-anchorq-200`, id `x6miw0zd`):
+
+| key | value | as registered? |
+|---|---|---|
+| `comm_eff.anchor.owns_q` | **True** | yes, the point of the arm |
+| `comm_eff.mask.frlr` | True | yes |
+| `comm_eff.mask.frlr_unbiased` | **False** | yes, a9 is the biased variant; a10 flips it |
+| `comm_eff.anchor.cadence` | 20 | yes, so Q moves every 20 optimizer ticks |
+| `comm_eff.compression_type` | prf_mask | yes |
+| `trainer.checkpoint_r2_enabled` | **True** | yes, so a9 uploads its own step-200 save |
+| `trainer.save_freq` / `test_freq` | 200 / 200 | yes |
+| `comm_eff.mask.frlr_q_cadence` | **1** | **inert here, see below** |
+
+**The trap: a9's config says `frlr_q_cadence = 1`, and that does NOT mean Q
+refreshes every step.** Under `anchor_owns_q` the fast-path cadence branch is
+skipped entirely, so the knob has no effect. Anyone reading a9's config next to
+a7's would see the same `frlr_q_cadence=1` and could conclude the two arms are
+identical in Q handling, which is the exact opposite of the truth. The
+disambiguator is the counter: a9 reads `refreshes=7` after 20 steps where a7 would
+read about 140. Flagged here because a future reader of this program (or of these
+notes after a context compaction) is the most likely person to make that mistake.
+
+**Also worth recording:** the `aws configure` fix that repaired the R2 back-fill
+lives in `/root/.aws/config` and therefore applies to the **in-training** sink as
+well, since `r2_sink.py` shells out to the same `aws` binary as root. Without it,
+a9's and a10's automatic step-200 uploads would have hit the same `InvalidPart`
+failure on their 6.62G model files. The checkpoint-tree upload is exception-guarded
+(WARN, keep local, continue), so it would not have crashed the run, but both cells'
+checkpoints would have silently stayed local while the log claimed a sink was on.
