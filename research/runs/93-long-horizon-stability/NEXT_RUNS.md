@@ -102,7 +102,17 @@ at the default concurrency of 10. The per-cell byte-exact check caught it and
 `aws s3 cp` (the `r2_sink.py` path #90 already proved) instead of `sync`.
 `chain/r2_backfill2.sh` retries with model files before optimizer state, so if it
 fails part-way the half that post-hoc geometry and OOD eval need is already safe.
-a9 and a10 run with the sink ON.
+a9 and a10 run with the sink ON (`checkpoint_r2_enabled=True` verified on a9 from
+WandB, since the engine truncates the log).
+
+**Result: a5b is fully in R2** (21 of 21 files byte-exact) and its local copy is
+gone; 37G took 87.7 min, so **7.0 MB/s**. a6, a7 and a8 follow, ETA ~20:20Z.
+
+**Deletion is now DISABLED for the rest** (decided 16:40Z, while a6 was one minute
+in, so it cost nothing). They are already on disk, so keeping them consumes no
+additional space; the disk finishes near **134G of 200G** after a9 and a10; and it
+preserves an on-box OOD eval for a7 and a8, the co-best arms, without a 1.7h
+re-download. There was never a reason to delete them, only an inherited default.
 
 **Throughput, corrected against a longer window.** The fix works (part size lands
 at exactly 268435456). I first projected **2.2 MB/s** from a 4-minute part count
