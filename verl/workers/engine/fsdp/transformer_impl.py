@@ -2293,7 +2293,15 @@ class FSDPEngine(BaseEngine):
                 _frlr_dp_group = self.get_data_parallel_group()
             except Exception:
                 _frlr_dp_group = None
-            _frlr_q_updated = _mask_codec.anchor_update_basis(dp_group=_frlr_dp_group)
+            # STAGED, not live. The anchor fires here, at the top of train_batch,
+            # AFTER this step's old_log_probs were recomputed. Publishing Q now
+            # would make the old-logprob and train forwards of the same step see
+            # different bases, so the PPO ratio would deviate from 1 for a reason
+            # that is not a policy change and PPO would clip it (measured at
+            # pg_clipfrac 0.19-0.37 on exactly the anchor steps, against
+            # identically 0 for the fast-Q arms). engine_workers publishes the
+            # candidate after all PPO minibatches, as it already does for PowerSGD.
+            _frlr_q_updated = _mask_codec.anchor_update_basis(staged=True, dp_group=_frlr_dp_group)
             assert _frlr_q_updated, (
                 "comm_eff anchor-owns-Q (FRLR): anchor_update_basis() did NOT refresh Q "
                 "(orth(V) produced nothing). Q must refresh every anchor cadence."

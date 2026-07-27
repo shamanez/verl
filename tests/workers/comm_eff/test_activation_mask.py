@@ -1414,3 +1414,117 @@ def test_set_context_with_null_ids_bumps_generation_for_harvest():
     hook(nn.Identity(), (), h)
     assert not torch.equal(masker._frlr_sketch[3], first)
     assert masker._sample_ids is None and masker._position_ids is None
+
+
+# =========================================================================== #
+# issue #93: the STAGED anchor basis handoff.
+#
+# Bug found by the operator from a WandB plot: actor/pg_clipfrac spiked to
+# 0.19-0.37 at exactly every anchor step in a9/a10/c600, and is identically 0
+# across all 200 steps of the fast-Q arms a7/a8. Cause: anchor_update_basis
+# published Q immediately, but the anchor fires INSIDE train_batch, after the
+# step's old_log_probs were already recomputed. The old-logprob and train forwards
+# of the same step therefore saw DIFFERENT bases, so the PPO ratio deviated from 1
+# for a reason that is not a policy change, and PPO clipped it. PowerSGD's anchor
+# path already stages precisely to avoid this; only the harvest half was ported.
+# =========================================================================== #
+def test_frlr_staged_anchor_basis_leaves_live_q_untouched():
+    """Staging must not move live Q: that is the whole point of the fix."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    q_live = masker._frlr_basis[3].clone()
+    masker.set_anchor_sketch_mode(False)
+
+    assert masker.anchor_update_basis(staged=True) is True
+    # Live Q is byte-identical; the candidate sits to one side.
+    assert torch.equal(masker._frlr_basis[3], q_live)
+    assert 3 in masker._pending_frlr_basis
+    assert not torch.equal(masker._pending_frlr_basis[3], q_live)
+    assert masker.frlr_q_activations == 0
+
+    # Publishing moves it, exactly once.
+    assert masker.activate_staged_frlr_basis() is True
+    assert not torch.equal(masker._frlr_basis[3], q_live)
+    assert masker._pending_frlr_basis == {}
+    assert masker.frlr_q_activations == 1 and masker.frlr_basis_generation == 1
+    assert masker.activate_staged_frlr_basis() is False
+
+
+def test_frlr_reconstruction_is_identical_across_a_step_when_staged():
+    """The regression that the clipfrac spike actually was.
+
+    Two forwards in the SAME step (old-logprob then train) must reconstruct
+    identically. With an immediate publish between them they do not, which is what
+    produced a non-unit PPO ratio and the clipping.
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    h = torch.randn(2, 8, H)
+
+    def one(staged):
+        m = _frlr_masker(r=r, k=k, seed=11, anchor_owns_q=True)
+        m.register(_ToyDecoder(num_layers=16, d=H))
+        hook = m._make_hook(3)
+        _set_ctx(m, 2, 8, step=7)
+        out_old = hook(nn.Identity(), (), h)  # "old_logprob" forward
+        # anchor fires mid-step and updates Q from a harvested sketch
+        m.set_anchor_sketch_mode(True)
+        _set_ctx(m, 2, 8, step=7)
+        hook(nn.Identity(), (), h)
+        m.set_anchor_sketch_mode(False)
+        m.anchor_update_basis(staged=staged)
+        _set_ctx(m, 2, 8, step=7)
+        out_train = hook(nn.Identity(), (), h)  # "train" forward, same step
+        return out_old, out_train
+
+    old_s, train_s = one(staged=True)
+    assert torch.equal(old_s, train_s), "staged: same step must reconstruct identically"
+
+    old_u, train_u = one(staged=False)
+    assert not torch.equal(old_u, train_u), (
+        "unstaged: the two forwards of one step differ, which is the bug that made "
+        "the PPO ratio deviate from 1 and get clipped"
+    )
+
+
+def test_frlr_discard_staged_basis_drops_the_candidate():
+    """A candidate from an update that did not commit must never be published."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    masker.set_anchor_sketch_mode(False)
+    q_live = masker._frlr_basis[3].clone()
+    masker.anchor_update_basis(staged=True)
+    assert masker._pending_frlr_basis
+    masker.discard_staged_frlr_basis()
+    assert masker._pending_frlr_basis == {}
+    assert masker.activate_staged_frlr_basis() is False
+    assert torch.equal(masker._frlr_basis[3], q_live)
+
+
+def test_frlr_unstaged_anchor_update_still_publishes_immediately():
+    """staged=False keeps the old behaviour, so existing tests stay meaningful."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    masker.set_anchor_sketch_mode(False)
+    q_live = masker._frlr_basis[3].clone()
+    assert masker.anchor_update_basis() is True
+    assert not torch.equal(masker._frlr_basis[3], q_live)
+    assert masker._pending_frlr_basis == {}

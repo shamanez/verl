@@ -409,6 +409,19 @@ class ActivationMasker:
         # cycles, like the PowerSGD basis. _frlr_q_step is the step of the
         # last refresh attempt (bootstrap counts), which anchors the cadence.
         self._frlr_basis: dict[int, torch.Tensor] = {}
+        # Staged anchor candidate (issue #93). Under anchor ownership the anchor
+        # fires INSIDE train_batch, AFTER this step's old_log_probs were already
+        # recomputed. Publishing Q immediately therefore makes the old-logprob and
+        # the train forward of the SAME step see DIFFERENT bases, so the PPO ratio
+        # deviates from 1 for a reason that is NOT a policy change, and PPO clips
+        # it. Measured before this was fixed: actor/pg_clipfrac spiked to 0.19-0.37
+        # at exactly every anchor step in a9/a10/c600 and is identically 0 across
+        # all 200 steps of the fast-Q arms a7/a8. So the candidate is STAGED here
+        # and published only once every PPO minibatch sharing those old_log_probs
+        # has completed, which is what the PowerSGD anchor path already does.
+        self._pending_frlr_basis: dict[int, torch.Tensor] = {}
+        self.frlr_basis_generation = 0
+        self.frlr_q_activations = 0
         self._frlr_q_step: dict[int, int] = {}
         self._frlr_sketch: dict[int, torch.Tensor] = {}
         self._frlr_sketched_this_gen: dict[int, int] = {}
@@ -542,7 +555,7 @@ class ActivationMasker:
         """
         self._anchor_sketch_mode = bool(on)
 
-    def anchor_update_basis(self, *, dp_group: Any = None) -> bool:
+    def anchor_update_basis(self, *, staged: bool = False, dp_group: Any = None) -> bool:
         """Build ``Q <- orth(V)`` from the anchor's harvested sketch.
 
         The same warm-started block power iteration the fast path uses at
@@ -600,14 +613,46 @@ class ActivationMasker:
                     "not finite; orth(V) would produce a garbage basis. Refusing to refresh Q."
                 )
             device = self._frlr_basis[idx].device if idx in self._frlr_basis else v.device
-            self._frlr_basis[idx] = orthonormalize(v).to(device=device, dtype=torch.float32)
-            self._frlr_q_step[idx] = step
+            q_new = orthonormalize(v).to(device=device, dtype=torch.float32)
+            if staged:
+                # Live Q untouched; activate_staged_frlr_basis() publishes it.
+                self._pending_frlr_basis[idx] = q_new
+            else:
+                self._frlr_basis[idx] = q_new
+                self._frlr_q_step[idx] = step
             self.frlr_q_refreshes += 1
             updated += 1
         # Anything left (a boundary that fired outside `boundary_indices`) would
         # otherwise leak across windows and pollute the next refresh.
         self._frlr_sketch.clear()
         return updated > 0
+
+    def activate_staged_frlr_basis(self) -> bool:
+        """Publish the staged anchor candidate as the live basis.
+
+        Called by the engine AFTER every PPO minibatch sharing this step's
+        ``old_log_probs`` has completed, so the NEXT step's old-logprob and train
+        forwards both see the same new ``Q``. Returns True iff a candidate was
+        published. Mirrors ``PowerSGDActivationCompressor.activate_staged_anchor_basis``.
+        """
+        if not self._pending_frlr_basis:
+            return False
+        step = int(self._global_step)
+        for idx, q in self._pending_frlr_basis.items():
+            self._frlr_basis[idx] = q
+            self._frlr_q_step[idx] = step
+        self._pending_frlr_basis = {}
+        self.frlr_basis_generation += 1
+        self.frlr_q_activations += 1
+        return True
+
+    def discard_staged_frlr_basis(self) -> None:
+        """Drop the staged candidate.
+
+        Used when the optimizer update it was derived from did not commit: such a
+        candidate must never leak into a later policy pair.
+        """
+        self._pending_frlr_basis = {}
 
     def _frlr_transform(self, h: torch.Tensor, *, layer_idx: int) -> torch.Tensor:
         """Apply the FRLR ``rank + k + 1`` reconstruction to a boundary activation.

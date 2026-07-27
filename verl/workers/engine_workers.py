@@ -1033,6 +1033,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         # A candidate was derived from an update that did not
                         # commit. Never let it leak into a later policy pair.
                         powersgd.discard_staged_anchor_basis()
+                # Same handoff for the FRLR mask codec (issue #93). Identical
+                # reasoning to the PowerSGD block above: its anchor fire also lands
+                # inside train_mini_batch, after this batch's old_log_probs were
+                # recomputed, so the candidate is staged there and published here.
+                _mask_codec = getattr(comm_eff_state, "masker", None)
+                if _mask_codec is not None and bool(getattr(_mask_codec, "anchor_owns_q", False)):
+                    if actor_update_succeeded:
+                        try:
+                            did_activate_frlr = _mask_codec.activate_staged_frlr_basis()
+                        except Exception:
+                            _mask_codec.discard_staged_frlr_basis()
+                            raise
+                        if did_activate_frlr:
+                            print(
+                                "[comm_eff][frlr-q-stage] activated after update_actor "
+                                f"global_step={global_step} "
+                                f"generation={_mask_codec.frlr_basis_generation} "
+                                f"activations={_mask_codec.frlr_q_activations}",
+                                flush=True,
+                            )
+                    else:
+                        # Derived from an update that did not commit: never let it
+                        # leak into a later policy pair.
+                        _mask_codec.discard_staged_frlr_basis()
+
                 fast_owns_q = not anchor_owns_q
                 if powersgd is not None and fast_owns_q:
                     did_update = powersgd.maybe_update_basis()
