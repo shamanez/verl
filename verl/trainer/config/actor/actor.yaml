@@ -320,6 +320,7 @@ comm_eff:
     pp_size: 8
     mask_recompute: false
     mask_reference: false
+    dense_every: 0
     rescale: false
     rescale_mode: auto
     exact_k: false
