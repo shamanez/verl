@@ -1,12 +1,86 @@
-# Pre-registration: a11-prf-exactk-dense50
+# Pre-registration: a11-prf-exactk-dense50-1000
 
-Written 2026-07-28 while the run was at **step 5**, before any step-50 data
-existed. Every threshold below is hardcoded from the incumbent's own history and
-from the dense control, both of which are finished runs. Nothing here is to be
-rescored on a window chosen after the fact.
+**AMENDED 2026-07-28 at step 1 of the relaunch: the operator raised the horizon
+from 100 steps to 1000.** The 100-step run (`6zk556im`) was killed at step 3 and
+is void; ignore it. Everything below is registered against the new run, still
+before any step-50 data exists.
 
-WandB `93-long-horizon-stability/a11-prf-exactk-dense50`, id `6zk556im`.
+Original registration written at step 5 of the 100-step run. Every threshold is
+hardcoded from the incumbent's own finished history and from the dense control.
+Nothing here is to be rescored on a window chosen after the fact.
+
+WandB `93-long-horizon-stability/a11-prf-exactk-dense50-1000`, id `d3h0fgg5`.
 Code: `93-mismatch-control-kit` at `0d7886ce`.
+
+## What the longer horizon changes
+
+**Twenty injections instead of two.** At `dense_every=50` over 1000 steps the
+codec is bypassed at steps 50, 100, 150, ... 1000. Nineteen of those are
+followed by at least 50 more steps, so the creep test that rested on a single
+event at 100 steps now rests on nineteen, eleven of them inside the region where
+a matched control exists.
+
+**The control runs out at step 600.** The incumbent `90-prf-exactk-600` is 600
+steps long. Steps 1-600 are controlled and are where every registered threshold
+lives. **Steps 601-1000 have no control at all** and are descriptive only: they
+can show whether an effect compounds or decays, but they cannot be scored
+against anything, and no claim of the form "better than the incumbent at step
+800" is admissible.
+
+**Capability becomes measurable.** Validation now runs every 150 steps, so
+150/300/450/600 are **matched** against the incumbent's own 0.6613 / 0.6633 /
+0.6733 / 0.6613, and 750/900 are uncontrolled.
+
+**Cost.** About 30 to 45 hours at the observed 109 to 163 s/step, so roughly
+$100 to $150, taking the ledger past its 100 GPU-h cap to about 105-120. The
+operator asked for the horizon directly; the cap is a harness backstop, not a
+spend authorisation, and it is flagged rather than silently exceeded.
+
+## The primary readout at 1000 steps
+
+The headline stability number of issue #93 is the incumbent's gap slope over
+**100-599: +0.000848 nats/step**. That is the number a11 has to beat, and it is
+now directly comparable because a11 covers the same window.
+
+| control quantity (90-prf-exactk-600) | value |
+|---|---|
+| gap slope 100-599 | **+0.000848** /step |
+| gap slope 100-300 | +0.000924 /step |
+| gap slope 300-599 | +0.000814 /step |
+| gap @100 / @300 / @600 | 14.2427 / 14.4294 / **14.6583** |
+| grad_norm 1-600 | min 1.181, p50 1.594, max 4.645 |
+| val @150/300/450/600 | 0.6613 / 0.6633 / 0.6733 / 0.6613 |
+
+**S2-LONG (the primary test, supersedes S2 as the headline).** a11's gap slope
+over **100-599** against the control's +0.000848.
+- **Success** iff **<= +0.000424** (half the control).
+- **Null** iff inside +/-25 percent, so +0.000636 to +0.001060.
+- **Backfire** iff **>= +0.001272**.
+
+**S3-LONG.** a11 gap@600 against the control's **14.6583**. Success iff
+**<= 14.50**, which is 0.16 nats below, more than 3x the ordinary 0.05-nat
+step-to-step wander.
+
+**S6 (new, capability).** Matched val at 150/300/450/600 against 0.6613 /
+0.6633 / 0.6733 / 0.6613. Registered fail iff any matched val comes in more than
+**0.03 below** its control point, which is about 15 problems on the 499-problem
+set and well outside the incumbent's own 0.0120 checkpoint spread. Capability is
+a **veto, not a score**: it cannot promote this arm, only sink it. That is the
+issue #93 lesson and it is not being unlearned here.
+
+**S7 (new, and this is the one 1000 steps is really for).** Does the effect
+**compound or decay**? Fit the gap slope separately over 100-300 and 300-599 and
+compare each against the control's +0.000924 and +0.000814. If the injections
+cancel accumulated coherent error, the benefit should be at least as large in
+the second window as the first. A benefit that appears early and washes out by
+step 600 is a different and weaker finding than one that holds, and the two must
+not be reported as the same thing.
+
+**S8 (new, per-injection).** For each injection at step `i` inside 50..550,
+compute `gap(i+1..i+10) mean` minus `gap(i-10..i-1) mean`. Under the snap-back
+prior this is about zero every time. A consistently negative value across eleven
+injections is the cleanest possible evidence for the operator's mechanism, and
+with eleven independent events it does not depend on any single one.
 
 ## The question
 
@@ -122,15 +196,21 @@ never as a comparison against another arm.
 
 ## What this design cannot answer, stated in advance
 
-- **One injection.** Only step 50 lies inside the measurable window, since step
-  100 is the last step and nothing follows it. So S2 rests on a single event.
-- **Short horizon.** The control's own slope over 51-100 is +0.002909, which is
-  0.145 nats across the whole window. Detecting a halving means resolving about
-  0.07 nats. A 50-point OLS averages the 0.05-nat wander down enough for that,
-  but it is not a comfortable margin, and a null result at 100 steps does not
-  license the claim that the idea fails at 600.
-- **Cadence is unexplored.** N=50 is the operator's choice. If S2 succeeds, N is
-  the obvious next axis; if it nulls, N=25 is a cheaper retry than N=100.
+- **No control past step 600.** Steps 601-1000 are descriptive. They can show
+  compounding or decay in a11's own trajectory and nothing more.
+- **Cadence is unexplored.** N=50 is the operator's choice. If S2-LONG succeeds,
+  N is the obvious next axis; if it nulls, N=25 is a cheaper retry than N=100.
+- **One arm, one seed.** Every threshold treats the incumbent's single run as
+  the control, so a difference smaller than run-to-run variation cannot be
+  distinguished from one. The 0.05-nat wander figure is the only variance
+  estimate available and it is within-run, not between-run. Thresholds are set
+  at 3x that or more for exactly this reason.
+- **The dense steps are inside the measured series.** Steps 50, 100, 150 and so
+  on will read a near-zero gap by construction, so every slope fit must
+  EXCLUDE the bypassed steps or it will be dragged down by the mechanism rather
+  than by the effect. Registered: all slope fits drop steps where
+  `step % 50 == 0`. This is a real way to fool ourselves and it is being closed
+  in advance.
 - **Wire cost is not settled.** A dense step sends 1536 numbers per token rather
   than 77. At N=50 that is an average of about 1699 bits/token/boundary against
   the incumbent's 1232, a 1.38x increase, and it only counts if the dense pass
