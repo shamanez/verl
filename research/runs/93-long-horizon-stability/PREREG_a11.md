@@ -115,19 +115,22 @@ never been run.
 The #90 incumbent config with exactly one thing changed: `mask.dense_every=50`.
 On every step where `global_step % 50 == 0` the codec is bypassed on every path,
 so the forward AND backward are uncompressed and the anchor refresh is
-suppressed. 100 steps, so the injections land at **step 50 and step 100**.
-Validation off, no checkpoints, `probe/kl_dense` at cadence 5 for measurement
-only (controller off).
+suppressed. **1000 steps**, so the injections land at 50, 100, 150 ... 1000.
+Validation every 150, checkpoints every 200 (local only, R2 sink off),
+`probe/kl_dense` at cadence 5 for measurement only (controller off).
 
 Verified from WandB, not from the log: `dense_every=50`, `p=0.95`,
 `exact_k=true`, `rescale_mode=constant`, `mask_recompute=true`,
 `mask_reference=true`, `frlr=false`, anchor enabled 20/20 `owns_q=false`
 `rollout_batch`, spectral on. Identical to the incumbent on every one of those.
 
-**The incumbent's own steps 1-100 are the matched control.** No separate control
-run is needed and none will be launched.
+**The incumbent's own steps 1-600 are the matched control.** No separate control
+run is needed and none will be launched. Steps 601-1000 are uncontrolled.
 
-## Control values, all from finished runs
+## Control values for the 100-step window, retained for the early mechanism checks
+
+These remain valid for M1 and for the first injection. The primary scoring
+window is the 100-599 table above.
 
 | quantity | incumbent (90-prf-exactk-600) | dense control (90-dense-600) |
 |---|---|---|
