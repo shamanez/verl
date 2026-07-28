@@ -9,8 +9,22 @@ Original registration written at step 5 of the 100-step run. Every threshold is
 hardcoded from the incumbent's own finished history and from the dense control.
 Nothing here is to be rescored on a window chosen after the fact.
 
-WandB `93-long-horizon-stability/a11-prf-exactk-dense50-1000`, id `d3h0fgg5`.
-Code: `93-mismatch-control-kit` at `0d7886ce`.
+**THE RUN OF RECORD IS WandB ID `agwwys1z`.** Select it by ID, never by name.
+Three runs carry an `a11-` name and two of them share the string
+`a11-prf-exactk-dense50-1000` exactly:
+
+| id | steps | save_freq | status |
+|---|---|---|---|
+| `6zk556im` | 100 | -1 | VOID, killed at step 3 when the horizon changed |
+| `d3h0fgg5` | 1000 | 1000 | VOID, killed at step 9 to add periodic checkpoints |
+| **`agwwys1z`** | **1000** | **200** | **the run of record**, created 2026-07-28T02:56:07Z |
+
+Selecting by name and taking the newest happens to work today, but it broke once
+already in this program and there is no reason to rely on it. Every figure in
+the verdict must come from `agwwys1z`.
+
+Code: `93-mismatch-control-kit` at `0d7886ce`. Checkpoints every 200 steps
+(200/400/600/800/1000), local only, R2 sink off so it cannot idle the GPU.
 
 ## What the longer horizon changes
 
