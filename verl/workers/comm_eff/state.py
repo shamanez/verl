@@ -244,6 +244,7 @@ class CommEffState:
                 exact_k=bool(getattr(mask_cfg, "exact_k", False)),
                 antithetic=bool(getattr(mask_cfg, "antithetic", False)),
                 p_by_boundary=list(getattr(mask_cfg, "p_by_boundary", []) or []),
+                dense_every=int(getattr(mask_cfg, "dense_every", 0) or 0),
                 frlr=bool(getattr(mask_cfg, "frlr", False)),
                 frlr_rank=int(getattr(mask_cfg, "frlr_rank", 32)),
                 frlr_k=int(getattr(mask_cfg, "frlr_k", 44)),
@@ -256,7 +257,7 @@ class CommEffState:
                 "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
                 "exact_k=%s antithetic=%s p_by_boundary=%s "
                 "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s "
-                "anchor_owns_q=%s",
+                "anchor_owns_q=%s dense_every=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
@@ -270,6 +271,7 @@ class CommEffState:
                 getattr(mask_cfg, "frlr_unbiased", False),
                 getattr(mask_cfg, "frlr_q_cadence", 1),
                 mask_anchor_owns_q,
+                int(getattr(mask_cfg, "dense_every", 0) or 0),
             )
 
         if self.compression_type == "sr_quant":

@@ -298,6 +298,7 @@ class ActivationMasker:
         exact_k: bool = False,
         antithetic: bool = False,
         p_by_boundary: Optional[list] = None,
+        dense_every: int = 0,
         frlr: bool = False,
         frlr_rank: int = 32,
         frlr_k: int = 44,
@@ -324,6 +325,18 @@ class ActivationMasker:
                 raise ValueError(f"mask p_by_boundary entries must be in [0, 1]; got {v}")
         # boundary_idx -> p, built in register() once the boundaries are known.
         self._p_for_layer: dict[int, float] = {}
+        # Periodic full-fidelity step (issue #93). 0 = off. When N > 0 the codec
+        # is bypassed on every step where global_step % N == 0, on EVERY path, so
+        # the fast circuit takes one ordinary uncompressed RLVR update. This is
+        # the first and only step-number gate on the codec: every other cadence
+        # in this file (frlr_q_cadence) gates a basis refresh, not the firing.
+        self.dense_every = max(0, int(dense_every))
+        # Cumulative count of hook calls skipped by the dense-step bypass, and
+        # the set of steps on which it fired. Both exist so the mechanism can be
+        # VERIFIED rather than assumed; comm_eff/mask_applications also stays
+        # flat across a bypassed step because the hook never reaches the counter.
+        self.dense_bypasses = 0
+        self.dense_steps_fired: set[int] = set()
         # Magnitude-restoration scheme applied to h*mask. `rescale_mode` selects
         # it; the `rescale` bool is honored when rescale_mode == "auto".
         #   "none"      -> h*mask                             (raw product)
@@ -443,6 +456,18 @@ class ActivationMasker:
         # PP byte budget (kept coords/token = (1-p)*H) for comparison against
         # PowerSGD's n*r. None until a mask fires.
         self.hidden_size: Optional[int] = None
+
+    def is_dense_step(self, global_step: Optional[int] = None) -> bool:
+        """True iff the codec is bypassed on ``global_step`` (issue #93).
+
+        ``global_step`` defaults to the context set by the engine. Step 0 never
+        counts: the trainer's first step is 1, and ``0 % N == 0`` would otherwise
+        make an unstamped context look dense.
+        """
+        step = self._global_step if global_step is None else int(global_step)
+        if self.dense_every <= 0 or step <= 0:
+            return False
+        return (step % self.dense_every) == 0
 
     def set_context(
         self,
@@ -734,6 +759,24 @@ class ActivationMasker:
         def _hook(_mod: nn.Module, _inputs: tuple, output: Any):
             h = output[0] if isinstance(output, tuple) else output
             if not torch.is_tensor(h):
+                return output
+
+            # Periodic full-fidelity step (issue #93). Return the RAW activation
+            # so nothing is written into the autograd graph: the forward carries
+            # the true hidden state and the backward carries the true boundary
+            # gradient. Placed FIRST, ahead of the anchor-harvest branch and the
+            # confinement assert, because "no compression this step" has to mean
+            # every path without exception. Skipping the hook (rather than
+            # masking with p=0) is what makes the backward dense too.
+            if masker.is_dense_step():
+                if masker._global_step not in masker.dense_steps_fired:
+                    masker.dense_steps_fired.add(masker._global_step)
+                    logger.info(
+                        "comm_eff: DENSE STEP %d (dense_every=%d) - codec bypassed on all paths",
+                        masker._global_step,
+                        masker.dense_every,
+                    )
+                masker.dense_bypasses += 1
                 return output
 
             # Anchor stale-forward harvest (anchor-owns-Q, FRLR only). The anchor

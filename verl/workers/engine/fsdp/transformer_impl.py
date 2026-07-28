@@ -1537,6 +1537,28 @@ class FSDPEngine(BaseEngine):
                 while len(_canaries) > delay_K + 1:
                     _canaries.popitem(last=False)
 
+        # Periodic full-fidelity step (issue #93): suppress the anchor on a
+        # bypassed step. The anchor exists to correct a COMPRESSED gradient, and
+        # on a dense step there is no compression error to correct, so firing it
+        # would inject a correction against an error that is not there. Read the
+        # global step fresh rather than relying on _gs_now, which is bound inside
+        # the snapshot branch above and is not guaranteed to be in scope here.
+        # NOTE this gates the anchor REFRESH only. The signed-EMA `M` accumulated
+        # by earlier fires is applied by the spectral circuit on its own cadence
+        # and is deliberately left alone: zeroing it would change the optimizer
+        # state itself rather than just skipping one correction.
+        _mask_codec_dense = getattr(state, "masker", None)
+        if _mask_codec_dense is not None and _mask_codec_dense.is_dense_step(
+            int(getattr(self, "_comm_eff_global_step", 0))
+        ):
+            print(
+                f"[comm_eff][dense-step] anchor refresh SUPPRESSED at "
+                f"gs={int(getattr(self, '_comm_eff_global_step', 0))} tick={step} "
+                f"(dense_every={_mask_codec_dense.dense_every})",
+                flush=True,
+            )
+            return
+
         if not anchor_should_fire(step, cadence, True):
             return
 

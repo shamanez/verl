@@ -88,6 +88,24 @@ class CommEffMaskConfig(BaseConfig):
             masked-reference), directly comparable to the PowerSGD codec's
             ``compress_reference`` circuit. ``False`` (default) leaves the
             reference forward dense (masked-current vs dense-reference).
+        dense_every (int): Periodic full-fidelity step (issue #93, default ``0``
+            = off). When ``N > 0`` the codec is bypassed entirely on every
+            trainer step where ``global_step % N == 0``: the boundary hook
+            returns the RAW activation on every path (train, old-logprob
+            recompute and reference alike), so that step's forward AND backward
+            are uncompressed and the fast circuit takes one ordinary RLVR
+            update. The anchor is suppressed on the same step (see
+            ``_comm_eff_maybe_anchor_refresh``), because the anchor computes a
+            correction to a COMPRESSED gradient and there is no compression
+            error to correct on a dense step. Bypassed steps are visible in
+            WandB as a FLAT ``comm_eff/mask_applications/<tag>`` counter across
+            the step, since the hook never fires. Wire accounting: a dense step
+            sends ``H`` numbers per token instead of ``(1-p)*H``, so at
+            ``H=1536``, ``k=77`` and ``N=50`` the average boundary payload rises
+            from 1232 to about 1699 bits/token, 1.38x. Under the deployment
+            premise in ``CLAUDE.md`` that cost is only real if the dense pass
+            crosses the constrained link rather than running in the central
+            mesh, which is the same accounting already applied to the anchor.
         rescale (bool): ``False`` (default) writes the raw product ``h * mask``;
             ``True`` applies inverted-dropout ``h * mask / (1 - p)`` so
             ``E[h_tilde] = h`` (requires ``p < 1``). Honored only when
@@ -148,6 +166,7 @@ class CommEffMaskConfig(BaseConfig):
     pp_size: int = 8
     mask_recompute: bool = False
     mask_reference: bool = False
+    dense_every: int = 0
     rescale: bool = False
     rescale_mode: str = "auto"
     exact_k: bool = False
@@ -444,6 +463,8 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.mask_recompute must be a bool; got {self.mask.mask_recompute!r}")
         if not isinstance(self.mask.mask_reference, bool):
             raise ValueError(f"comm_eff.mask.mask_reference must be a bool; got {self.mask.mask_reference!r}")
+        if int(self.mask.dense_every) < 0:
+            raise ValueError(f"comm_eff.mask.dense_every must be >= 0 (0 = off); got {self.mask.dense_every!r}")
         if not isinstance(self.mask.rescale, bool):
             raise ValueError(f"comm_eff.mask.rescale must be a bool; got {self.mask.rescale!r}")
         if str(self.mask.rescale_mode).lower() not in ("none", "constant", "rms_match", "auto"):

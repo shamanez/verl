@@ -18,6 +18,10 @@
 #   a7  frlr rank=48 k=28, NO token-IS                 (codec-only cell)
 #   a9  a7 + ANCHOR-OWNED Q (refresh only at anchor fires, PowerSGD rule)
 #   a10 a9 + frlr_unbiased (constant H/k gain, E[h_hat|h,Q]=h)
+#   a11 prf_mask exact-k (the #90 incumbent) + DENSE_EVERY periodic
+#       full-fidelity step: on every step where global_step%N==0 the codec
+#       is bypassed on all paths (dense fwd AND bwd) and the anchor is
+#       suppressed. DENSE_EVERY defaults to 50.
 #   b1  CODEC_ARM=<a1..a6> + dense-view probe(25) + KL controller (200 steps)
 #   c   CODEC_ARM=<a1..a6> + probe/controller + 600 steps, val 0/150/300/450/
 #       600, SAVE_FREQ=100, R2 checkpoint sink on
@@ -42,7 +46,7 @@ GPU_MEM="${GPU_MEM:-0.72}"                      # the #90 rollout KV-cache setti
 RUN_GROUP="${WANDB_RUN_GROUP:-93-long-horizon-stability}"
 # ------------------------------------
 
-[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|a7|a9|a10|b1|c> bash run_93_cell.sh"
+[[ -n "$ARM" ]] || fatal "no ARM given. Usage: ARM=<a1|a2|a3|a4|a5|a6|a7|a9|a10|a11|b1|c> bash run_93_cell.sh"
 
 # ---------------------------------------------------------------------------
 # 1. Resolve the arm BEFORE any bring-up: fail loud on an unknown ARM, echo
@@ -85,6 +89,32 @@ apply_codec_arm() {
       export COMM_EFF_QUANT_ROUNDING=sr
       export COMM_EFF_QUANT_SUBSET_K=493
       CODEC_SLUG="srq-parity-k493"
+      ;;
+    a11)
+      # PERIODIC FULL-FIDELITY STEP (operator, 2026-07-28). The #90 incumbent
+      # PRF exact-k codec with NOTHING changed except a new knob: every
+      # DENSE_EVERY steps the codec is bypassed on every path, so the fast
+      # circuit takes one ordinary uncompressed RLVR update (dense forward AND
+      # dense backward) and the anchor is suppressed on that step.
+      #
+      # The question: the incumbent's train-inference gap rises monotonically
+      # (13.879 at step 1 to 14.659 at 600, slope +0.000848 over 100-599). Round
+      # A established that drift is gated by COHERENT constant-direction error,
+      # not by error magnitude, so a compressed run accumulates one direction
+      # step after step. One clean unbiased gradient every N steps should
+      # partially cancel that accumulation. Nobody has ever run the duty cycle
+      # between "always compressed" and "never compressed".
+      #
+      # Byte-identical to the incumbent otherwise, so its own steps 1-100 are
+      # the matched control: p=0.95, exact_k, rescale constant, recompute and
+      # reference both masked, anchor 20/20 rank1_relex, spectral on.
+      export COMM_EFF_COMPRESSION_TYPE=prf_mask
+      export COMM_EFF_MASK_ENABLED=true
+      export COMM_EFF_MASK_P=0.95
+      export COMM_EFF_MASK_RESCALE_MODE=constant
+      export COMM_EFF_MASK_EXACT_K=true
+      export COMM_EFF_MASK_DENSE_EVERY="${DENSE_EVERY:-50}"
+      CODEC_SLUG="prf-exactk-dense${DENSE_EVERY:-50}"
       ;;
     a4)
       # The #89/#90 incumbent PRF exact-k codec + CVC CE mode (issue #93 4.7a).
@@ -188,7 +218,7 @@ apply_codec_arm() {
       fi
       ;;
     *)
-      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6|a7|a9|a10)"
+      fatal "unknown CODEC_ARM '$codec' (a1|a2|a3|a4|a5|a6|a7|a9|a10|a11)"
       ;;
   esac
 }
@@ -208,7 +238,7 @@ apply_control_plane() {
 }
 
 case "$ARM" in
-  a1|a2|a3|a4|a5|a6|a7|a9|a10)
+  a1|a2|a3|a4|a5|a6|a7|a9|a10|a11)
     apply_codec_arm "$ARM"
     TOTAL_STEPS="${TOTAL_STEPS:-120}"
     # Default -1 preserves the registered "validation OFF for all gate cells".
@@ -252,7 +282,7 @@ case "$ARM" in
     export R2_REGIME="${R2_REGIME:-$EXPERIMENT_NAME}"
     ;;
   *)
-    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|a7|a9|a10|b1|c)"
+    fatal "unknown ARM '$ARM' (a1|a2|a3|a4|a5|a6|a7|a9|a10|a11|b1|c)"
     ;;
 esac
 
@@ -265,6 +295,7 @@ cat <<EOF
   codec:               ${COMM_EFF_COMPRESSION_TYPE}
   sr_quant:            bits=${COMM_EFF_QUANT_BITS:-<default>} block=${COMM_EFF_QUANT_BLOCK_SIZE:-<default>} rounding=${COMM_EFF_QUANT_ROUNDING:-<default>} subset_k=${COMM_EFF_QUANT_SUBSET_K:-0}
   prf_mask:            enabled=${COMM_EFF_MASK_ENABLED:-false} p=${COMM_EFF_MASK_P:-<default>} rescale_mode=${COMM_EFF_MASK_RESCALE_MODE:-<default>} exact_k=${COMM_EFF_MASK_EXACT_K:-false}
+  dense_every:         ${COMM_EFF_MASK_DENSE_EVERY:-0}  (0=off; N>0 = uncompressed fwd+bwd on every step where global_step%N==0, anchor suppressed there)
   frlr:                ${COMM_EFF_MASK_FRLR:-false} rank=${COMM_EFF_MASK_FRLR_RANK:-<default>} k=${COMM_EFF_MASK_FRLR_K:-<default>} unbiased=${COMM_EFF_MASK_FRLR_UNBIASED:-false} q_cadence=${COMM_EFF_MASK_FRLR_Q_CADENCE:-<default>}
   anchor:              owns_q=${COMM_EFF_ANCHOR_OWNS_Q:-<default>} (true = Q moves ONLY when the anchor fires; requires frlr)
   cvc:                 ce_lambda=${COMM_EFF_CVC_LAMBDA:-0.0} warmup=${COMM_EFF_CVC_WARMUP_STEPS:-20}

@@ -274,6 +274,7 @@ COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                  # logical p
 # issue #89 codec levers — default-off so the baseline PRF stays bit-identical.
 COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-auto}"     # none|constant|rms_match|auto magnitude restoration (lever 1)
 COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-false}"              # keep EXACTLY round((1-p)*H)/token via hash order stat (lever 2)
+COMM_EFF_MASK_DENSE_EVERY="${COMM_EFF_MASK_DENSE_EVERY:-0}"          # issue #93: 0=off; N>0 bypasses the codec entirely on every step where global_step%N==0 (dense fwd+bwd, anchor suppressed)
 COMM_EFF_MASK_ANTITHETIC="${COMM_EFF_MASK_ANTITHETIC:-false}"        # step t+1 keeps the antithetic complement of step t (lever 5)
 COMM_EFF_MASK_P_BY_BOUNDARY="${COMM_EFF_MASK_P_BY_BOUNDARY:-}"       # optional per-boundary p vector, e.g. [0.92,..] mean ~p (lever 4); empty=off
 COMM_EFF_MASK_FRLR="${COMM_EFF_MASK_FRLR:-false}"                    # FRLR "32+44+1" fresh-residual low-rank codec (issue #89); off=baseline PRF
@@ -424,6 +425,7 @@ cat <<EOF
   sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
   probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
   cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
+  dense_every:         $COMM_EFF_MASK_DENSE_EVERY  (0=off; N>0 = full-fidelity uncompressed fwd+bwd on every step where global_step%N==0, anchor suppressed there)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
@@ -656,6 +658,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.mask.rescale_mode="$COMM_EFF_MASK_RESCALE_MODE" \
   actor_rollout_ref.actor.comm_eff.mask.exact_k="$COMM_EFF_MASK_EXACT_K" \
+  actor_rollout_ref.actor.comm_eff.mask.dense_every="$COMM_EFF_MASK_DENSE_EVERY" \
   actor_rollout_ref.actor.comm_eff.mask.antithetic="$COMM_EFF_MASK_ANTITHETIC" \
   actor_rollout_ref.actor.comm_eff.mask.frlr="$COMM_EFF_MASK_FRLR" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_rank="$COMM_EFF_MASK_FRLR_RANK" \
