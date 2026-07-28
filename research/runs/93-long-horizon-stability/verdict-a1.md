@@ -1,5 +1,31 @@
 # Verdict: issue 93 round A, cell `a1-srq-b1-sr`
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 3 of 12.** a1 is 1-bit stochastic-rounding quantisation at block 32, unbiased, and it produced the tightest gradient behaviour ever measured in this program, but it did so on a 2304-bit wire, 1.87x the incumbent's parity budget, so it buys the calm with bandwidth rather than with a better codec.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.002825 nats/step over the matched window 100-120 (13.727 -> 13.775); no longer window exists, a1 stopped at 120 | incumbent +0.000838 over the same 100-120 window, and +0.000848 over 100-599 (n=500) | on the ONLY overlapping window the incumbent is 3.4x flatter. a1 is 7th of 11 on this axis |
+| gap drift ratio | 1.003 | incumbent 1.029 | a1 looks flatter, but the ratio spans 20 steps for a1 against 500 for the incumbent. It is a horizon-length artifact, not an advantage |
+| grad_norm drift | 0.77x (p50 first 20 percent 0.8499, p50 last 20 percent 0.6504), max/p50 **1.3x**, the tightest ratio in the whole table | incumbent 0.85x, max/p50 2.9x | genuine and the strongest thing a1 has. Below 1.0 without a decaying startup transient, unlike a8 0.05x or a9 0.40x |
+| grad_norm max | **0.898** over 120 steps | incumbent 4.645 over 600 steps | absolute levels are not comparable across codecs, but the shape is: a1 never spikes at all, while a5b hits 204.39 and a6 608.81 |
+| collapse / kill | none. Ran its full 120 steps, no kill trigger, no collapse signature | incumbent none in 600 | passes, at one fifth of the horizon |
+| capability | no val, a1 ran val-off by design. Training reward 0.4993 over 1-100 | incumbent 0.5015 over 1-100, val 0.6613 @600 inside the 0.6573-0.6713 field of arms | does not separate the arms |
+
+What a1 proves about stability is narrow and real: within one codec family, removing estimator bias is what keeps the optimizer tight. a1 and a2 differ only in the rounding rule, stochastic against round-to-nearest, and a2's run-MINIMUM grad_norm of 6.153 is 6.9x a1's 120-step MAXIMUM of 0.898. That is the cleanest single-variable gradient result in the program, and it is why a2 was killed at step 60 while a1 finished. a1 is also the counterexample to reading a low grad_norm drift ratio as automatic calm: its 0.77x comes with max/p50 1.3x, meaning the whole run sits inside a narrow band, whereas a8's much lower 0.05x comes with a 42.9 startup transient and a run max of 53.82.
+
+What a1 does NOT prove is anything at horizon, and the gap axis is where the original body and this re-scoring agree. a1's gap slope over 100-120 is +0.002825/step against the incumbent's +0.000838/step over the identical window. Extended naively that is roughly 1.4 nats of movement per 500 steps against the incumbent's measured 0.42 nats over 100-599. The 1.003 drift ratio does not rescue this: it is computed over a 120-step run, so it is measuring 20 steps of drift, and a3 (1.001), a4 (1.002) and a6 (1.002) all sit in the same band without that being decisive either. a6 is the disciplining case: it has the flattest 200-step gap in the program at +0.000413 and it collapsed to val 0.5391 with grad_norm to 608.81. Gap flatness alone is not stability. a1 has no `probe/kl_dense` points in the fact sheet, so its codec-free drift is **not measured**, and axis 4 cannot be used to defend or attack it.
+
+Against the incumbent PRF exact-k this is not a like-for-like win and should not be reported as one. a1's wire is 2304 bits per token per boundary, 1.87x the incumbent's 1232-bit parity. The program's premise is that stage boundaries cross the ordinary internet, so an arm that gets its stability by sending almost twice the bytes has not solved the problem the program is about. The honest statement is that a1 is the best-behaved optimizer in the field at 120 steps, off-parity, with no horizon evidence and no val, while the incumbent is the only configuration in the program whose optimizer is demonstrated to sit in a steady state for 600 steps (block median flat at 1.50-1.82 across all twelve 50-step blocks, block max never above 4.645). a3, at 2-bit byte parity, is the arm that tests whether a1's gradient tightness survives at the incumbent's wire budget.
+
+Three claims in the body below are corrected here rather than edited away. First, the body's central FAIL, "reference-KL slope +0.003887/step against the baseline's +0.0015/step, 2.59x worse", and the section-5 statement that "under the literal rule a1 cannot be the winner" because of that clause, both rank on `actor/kl_loss`. That metric is disqualified for ranking: it is real drift multiplied by a codec-view inflation factor that itself moves by 50x between arms and across a run, so it confounds the thing being measured with the instrument. It spans 55x across a7, a8 and a9, which differ only in `Q` governance and have identical physical drift. Second, the body cites rising entropy (7.899606 to 7.938554) as no-collapse evidence; `actor/entropy` is also disqualified, because the dense control sharpens the same way and the quantity is codec-view (c600 reads 6.14 to 0.053 while the incumbent reads a flat 7.81 to 7.85, with sampler-side `rollout_log_ppl` near-identical across c600, incumbent and dense at step 599). a1's non-collapse stands on grad_norm and on completion, not on entropy. Third, the body's long section 4 on the reward-slope criterion window is now beside the point for ranking: capability is a tie across every arm that did not collapse, so no reward or val figure separates a1 from the field, and the ranking above rests entirely on gradient shape, gap stationarity and non-collapse.
+
 VERDICT: REVISE
 
 Cell `a1-srq-b1-sr` (WandB `h0n67q3a`, project `93-long-horizon-stability`) completed

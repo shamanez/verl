@@ -1,5 +1,85 @@
 # Verdict, issue 93 round A, cell a3-srq-parity-k493
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 1 of 12.** a3 is the sr_quant 2-bit byte-parity subset arm at
+k=493, and it produced the flattest gap trajectory of any arm in the program on
+the registered gate window while keeping its optimizer in the tightest shape of
+any non-PRF arm, over 120 steps and with no held-out measurement of any kind.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.000101 nats/step, window 100-120, n=21, level 14.984 to 14.990 | incumbent +0.000838 on the same 100-120 window, and +0.000848 on 100-599, n=500 | a3 is 8.3x flatter on the matched window, and it is rank 1 of the eleven arms in that table. It has 21 rows against the incumbent's 500. |
+| gap drift ratio | 1.001, the closest to unity in the program | incumbent 1.029 | a3 sits 29x closer to perfect stationarity, but over 120 steps rather than 600. |
+| grad_norm drift | 0.71x, p50 3.6585 in the first 20 percent to 2.5972 in the last 20 percent, 120 steps | incumbent 0.85x, p50 1.7866 to 1.5259, 600 steps | Both are below 1.0 and neither is the large decaying transient that makes a8's 0.05x and a2's 0.49x unreadable. a3's is a genuinely declining, not collapsing, optimizer. |
+| grad_norm max | 7.28, max/p50 2.5x | incumbent 4.645, max/p50 2.9x | a3's shape ratio is tighter than the incumbent's and than dense's 2.3x. Its absolute max is 1.57x the incumbent's, but the fact sheet states absolute grad_norm level is not comparable across codecs, so only the shape reading counts. |
+| collapse / kill | none. Ran to its scheduled end at 120 of 120. | incumbent none in 600 | a3's non-collapse claim covers one fifth of the horizon the incumbent's does. |
+| capability | not measured. a3 ran val-off by design, no checkpoints, so none can be added. Training reward block means 0.5071 over 1-100 and 0.6562 over the 101-120 rows it has. | incumbent 0.6613 @150, 0.6633 @300, 0.6733 @450, 0.6613 @600; reward 0.5015 then 0.6726 | does not separate the arms |
+
+What a3 proves is that the gap can be held essentially still under an
+internet-grade codec. +0.000101 nats/step at 100-120 with a drift ratio of 1.001
+is the flattest pair of numbers the program has produced, and it clears the a5
+trap that voids flat metrics on runs that are not learning: a3's reward block
+mean over steps 1-100 is 0.5071, against the incumbent's 0.5015 and c600's
+0.5081, so a3 was learning at incumbent pace while its gap stood still. That is
+the difference between a3 and a5, whose drift ratio of exactly 1.00x came with a
+101-200 reward of 0.5895, second worst in the field. a3's gradient behaviour
+carries the same check: max/p50 of 2.5x is tighter than the incumbent's 2.9x and
+essentially dense's 2.3x, so the 0.71x drift is a calm optimizer and not a
+startup spike decaying, which is what makes a8's 0.05x and a2's 0.49x
+uninformative.
+
+What a3 does not prove is that any of this survives. The window is 21 rows. There
+is no val, and there is no `probe/kl_dense` column for a3 at all, so codec-free
+drift for this arm is not measured and cannot be inferred from the gap. The
+disciplining counterexample sits one row below a3 in the same table: a6 is third
+at +0.000383 on 100-120 and stays flat at +0.000413 out to 199, and a6 is the
+program's only collapse, val 0.5391 with grad_norm p50 40.2 in its last 20
+percent and a run max of 608.81. Flatness on this exact window has therefore
+already been shown, once, to be compatible with a collapsed model eighty steps
+later. The only arm where the short window was checked against a long one is the
+incumbent, whose 100-120 slope of +0.000838 predicted its 100-599 slope of
++0.000848 to within about one percent. One confirmation and one refutation is not
+a track record.
+
+Against the incumbent, a3 does not displace it, and rank 1 of 12 should not be
+read as if it did. The incumbent and dense are references, not program arms, and
+the headline of the re-scoring is that twelve arms were run to beat the incumbent
+and none of them did. The incumbent's case is entirely a horizon case: block
+median grad_norm flat at 1.50-1.82 across all twelve 50-step blocks, block max
+never above 4.645, 0.42 nats of gap movement in 500 steps, four held-out vals
+inside 0.6613-0.6733. a3 has no analogue of any of that. Worth naming as an
+honest tension: the fact sheet's shipping recommendation puts a4 ahead of a3 as
+the first horizon run, even though a3 outranks a4 on both stability axes at 120
+steps (a4 is +0.001542 over 100-120, n=21, with drift ratio 1.002, and 0.91x with max 3.62), because a4 is
+the incumbent's own codec plus CVC and a3 is a different codec family. That
+ordering is a risk-of-change judgement, not a measurement, and it should be
+stated as one.
+
+Three things in the body below are corrected here rather than edited away.
+First, the body's V1 axis is the `actor/kl_loss` slope and its section 3 leads
+with the 0.743x ratio on that metric; `actor/kl_loss` may not rank arms, because
+it is real drift multiplied by a codec-view inflation factor that itself moves by
+50x between arms and across a run, spanning 55x across a7, a8 and a9, which
+differ only in `Q` governance and have identical physical drift. Second, the
+body's section 5 corroborates health with entropy level and slope; `actor/entropy`
+is likewise disqualified, because the dense control sharpens the same way and the
+quantity is codec-view, c600 reading 6.14 to 0.053 while the incumbent reads a
+flat 7.81 to 7.85. Third, the O2 gap-level failure, the step-1 offset accounting
+and the horizon extrapolation in section 3(d) that projects 15.6294 at step 600
+with a crossover at step 1427 are all statements about gap LEVEL. The stability
+bar does not rank on level, it ranks on slope stationarity, drift ratio,
+gradient-norm shape and non-collapse. So section 3(d)'s "no, not yet" is a
+correct answer to the registered gate and the wrong answer to the question this
+re-scoring asks. The body's REVISE stands as the record of the registered gate.
+Under the stability bar a3 is the top-ranked of the twelve arms and still not a
+replacement for the incumbent, on horizon evidence alone.
+
 VERDICT: REVISE
 
 WandB `k8dvru5l`, project `93-long-horizon-stability`, entity `shamanework-pl`, state

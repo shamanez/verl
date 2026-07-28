@@ -1,5 +1,80 @@
 # Verdict, issue #93 round A, cell `a4-prf-exactk-cvc-ce`
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 2 of 12.** a4 is the incumbent's own PRF exact-k codec at exact
+wire parity with one added loss term, CVC cross-entropy, and over its 120 steps it
+left both stability axes intact: the second-flattest gap drift ratio in the program
+and the third-tightest gradient profile, with no collapse and no kill.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.001542, `rollout_corr/kl` over the matched window 100-120, n=21, level 14.230 to 14.265 | incumbent +0.000838 on the identical 100-120 window, +0.000848 over 100-599 (n=500) | a4 is the steeper of the two on the one window both arms share; the body's section 3f already records the same figure as 1.84x. a4 has no window longer than 100-120. |
+| gap drift ratio | **1.002** | incumbent 1.029 | flatter than the incumbent, and second only to a3's 1.001, but computed over 120 steps against the incumbent's 600 |
+| grad_norm drift | **0.91x** (p50 1.9412 over the first 20 percent to 1.7667 over the last 20 percent, 120 steps) | incumbent 0.85x | both sit below 1.0, both are stationary optimizers, and this axis does not separate them |
+| grad_norm max | **3.62**, max/p50 **2.0x** | incumbent 4.645, max/p50 2.9x | third-tightest max/p50 in the field behind a1's 1.3x and a10's 1.9x, and a1 pays 2304 bits of wire for it |
+| collapse / kill | none. Ran 120/120 to its scheduled end | incumbent none in 600 | clean, but a fifth of the demonstrated horizon |
+| capability | no held-out val: a4 ran val-off by design and saved no checkpoint, so the only read is train-side `critic/score/mean` 0.4987 over the 1-100 block | incumbent 0.6613 at step 600, four vals inside 0.6613-0.6733 | does not separate the arms |
+
+What a4 proves is that the CVC cross-entropy term can be added to the shipping
+codec without disturbing either stability axis. Wire is unchanged at parity, the
+gap drift ratio comes in at 1.002 against the incumbent's 1.029, and the optimizer
+stays in a steady state: drift 0.91x, run max 3.62, max/p50 2.0x, all tighter on
+the max axis than the incumbent's 4.645 and 2.9x. Nothing in this arm's dynamics
+looks like the failure modes elsewhere in the field, neither a6's grad_norm max of
+608.81 with a collapsed val of 0.5391, nor c600's 9.25x gradient drift to a max of
+176.367, nor a5b's single 204.39 spike behind an otherwise calm 0.86x drift.
+
+What a4 does not prove is anything about horizon. Every stability number above
+comes from 120 steps. The drift ratio takes the mean of the last 5 percent of
+steps, which for a4 is a handful of steps near 120 and for the incumbent is a
+stretch near 600, so a4's 1.002 and the incumbent's 1.029 are not measured on
+comparable ground. On the OLS slope over the one window both arms share, 100-120,
+a4 is the steeper arm at +0.001542 against +0.000838, and it ranks 6th of the 11
+arms on that table; its rank-2 standing comes from the gradient axis and
+non-collapse, not from that slope. a4 also does not move the gap level: 14.230 to
+14.265 over 100-120 against the incumbent's 14.243 to 14.239, which is the same
+number. There is no `probe/kl_dense` series for a4, so its codec-free drift is not
+measured, and since no checkpoint exists there is no held-out capability read for
+this arm and there never can be.
+
+The clean max/p50 of 2.0x deserves a plain caveat, because it looks good for a
+reason that is partly bad: a short run has fewer opportunities to sample a tail
+spike. a5b's drift of 0.86x over 200 steps looked calm until one 204.39 excursion
+put its max/p50 at 284x, and c600's worst 50-step block max, 176.367, arrived in
+block 501-550, past a horizon a4 never approached. A tight maximum over 120 steps
+is weak evidence about step 500.
+
+Against the incumbent, a4 does not win. The incumbent is the only codec in the
+program demonstrated stable for 600 steps: gap slope +0.000848 over 100-599 with
+0.42 nats moved in 500 steps, drift ratio 1.029, grad_norm block median flat at
+1.50 to 1.82 across all twelve 50-step blocks with block max never above 4.645, no
+collapse, and four held-out vals inside 0.6613-0.6733. a4 has 120 steps and no
+val. What a4 earns is a 600-step re-run, not adoption, and it is the most natural
+horizon candidate of the twelve precisely because it is the same codec family at
+exact wire parity with a single knob changed.
+
+Two claims in the body below no longer carry, and are corrected here rather than
+edited away. First, the REVISE verdict turns on the V1 drift veto, which is a
+clause on `actor/kl_loss`; that metric is disqualified as a ranking instrument
+because it is real drift multiplied by a codec-view inflation factor that itself
+moves by 50x between arms and across a run, spanning 55x across a7, a8 and a9,
+which differ only in `Q` governance and have identical physical drift. Sections 3,
+3a through 3f, 4d and the section 11 horizon caution are all built on that series
+and cannot rank this arm. Second, section 4e's entropy argument leans on
+`actor/entropy`, which is disqualified because the dense control sharpens the same
+way, so entropy decline is normal GRPO on math and not compression damage. The
+body's separate section 4c finding, that CVC produced no descent on its own
+objective, is not on any stability axis in the fact sheet and is neither confirmed
+nor overturned here; but the body's conclusion that "the CVC route is closed at
+this setting" is not supported by the stability evidence, which puts a4 second in
+the field.
+
 VERDICT: REVISE
 
 | field | value |

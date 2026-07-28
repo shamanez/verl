@@ -1,5 +1,79 @@
 # Verdict, issue #93 round A cell a5 `a5-frlr-r48k28-tis` (FINAL round-A cell)
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 8 of 12.** a5 is FRLR r48/k28 plus token-IS, and it is the
+cautionary arm of the program: it holds the most stationary numbers ever measured
+here, and they are worthless, because token-IS suppressed the update that would
+have moved them.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | -0.005037 at 100-120 (n=21, the only window a5 reached) | incumbent +0.000838 at 100-120, +0.000848 at 100-599 (n=500) | the only negative slope in the matched window, and the lowest level in the field there, 4.350 to 4.312 against the incumbent's 14.243 to 14.239. Measured on 21 rows of a run that was barely moving |
+| gap drift ratio | 1.016 | incumbent 1.029 | nominally flatter, but over 120 steps against 600, and flatness is cheap when the policy is not being updated |
+| grad_norm drift | 1.00x exactly, p50 0.1457 in the first 20 percent and 0.1457 in the last 20 percent | incumbent 0.85x | the single most stationary number in the program's axis-2 table, and it is an artifact of step-size suppression, not of a calm optimizer |
+| grad_norm max | 2.91, max/p50 **20.9x** | incumbent 4.645, max/p50 **2.9x** | absolute levels are not comparable across codecs. On the comparable statistic, spike relative to its own median, a5 is 7.2x worse than the incumbent |
+| collapse / kill | none, ran to its scheduled end at 120 | incumbent none in 600 | no collapse, but 120 steps is one fifth of the horizon that the incumbent survived. Not a horizon result |
+| capability | no val, ran val-off by design. Training reward block 101-200 (steps 101 to 120 for a 120-step arm): **0.5895**, second-worst in the field behind only a6's 0.5185 | incumbent 0.6613 to 0.6733 across four vals, reward 0.6726 in the same block | does not separate the arms; here the reward deficit is not a capability claim, it is the evidence that the update was suppressed |
+
+**What this arm proves.** It proves that axis 2 cannot be read alone. a5's
+gradient-norm drift is exactly 1.00x, its median is 0.1457 in both the first and
+the last fifth of the run, and its gap is the lowest and the only falling one at
+the matched 100-120 window. Every one of those is the best or near-best number on
+its axis. The arm that produced them learned less over block 101-200 than
+every non-collapsed arm: 0.5895, second-worst overall behind only a6's 0.5185. Its
+1-100 block, 0.4233, sits with a10's 0.4216 and a5b's 0.4234, against the
+incumbent's 0.5015 and 0.6726 over the same two blocks. A flat metric on a run
+that is not learning is worthless. The rule this arm establishes for the rest of
+the program is that axis 2 must always be read next to `critic/score/mean`, and
+that a suspiciously perfect drift ratio is a suppression signature until proven
+otherwise.
+
+**The sibling test settles the mechanism.** a5b is the self-normalised variant,
+the exact knob the body below proposes as option A. Restoring the step size
+restored the learning, reward 0.6606 at 101-200 against a5's 0.5895 with a val of
+0.6593 at 200, and it destroyed the calm: gap drift ratio worsens from 1.016 to
+1.150, and grad_norm max goes from 2.91 to **204.39**, a max/p50 of 284.4x against
+a5's 20.9x. That is the falsifier the body wrote in advance, resolved against a5.
+The calm was the small steps.
+
+**What this arm does NOT prove.** Nothing at horizon. The fact sheet carries a5 at
+exactly one window, 100-120, n=21, so no longer trend can be quoted for it. It has
+no held-out val at all, and it has no `probe/kl_dense` row, so a5 has zero
+codec-free drift measurement: the codec-free axis cannot speak for or against this
+arm. Its family was tested at horizon by c600, which fails: gap drift ratio 5.122,
+grad_norm drift 9.25x with a run max of 176.4, crossing the incumbent's gap level
+at step 417 first and 424 permanently. Whatever a5's early gap advantage is worth,
+the codec underneath it inverts by step 424.
+
+**Against the incumbent.** The incumbent is flat where flatness costs something:
+gap slope +0.000848 over 500 steps, drift ratio 1.029, grad_norm block median held
+at 1.50 to 1.82 across all twelve 50-step blocks with a block max never above
+4.645, and it did that while its reward climbed 0.5015 to 0.7406 and four vals
+landed inside 0.6613 to 0.6733. a5 is flatter on paper over 21 rows and 120 steps
+while giving up 0.083 of training reward in the matched 101-200 block. That is not
+a better trade, it is a different experiment. a5 does not threaten the incumbent
+and it was never close to doing so.
+
+**Two claims in the body below now read as wrong, corrected here rather than
+edited away.** First, the V2 result is reported as "PASS, best in matrix" on
+`actor/grad_norm` max and mean at 61+. Under the stability bar the same fact is a
+disqualifier, because a bar on gradient magnitude rewards an arm for not updating,
+and the correct statistic is the drift ratio read next to reward, which puts a5 at
+rank 8. Second, the whole V1 reconciliation in sections 3 and 4 is built on
+`actor/kl_loss`; that metric may not be used to rank or praise an arm, because it
+is real drift multiplied by a codec-view inflation factor that itself moves by 50x
+between arms and across a run, so it confounds the thing being measured with the
+instrument. Sections 3 and 4 therefore neither convict nor exonerate a5 in this
+ranking, in either direction. The section 8 headline that a5's turned-over wedge
+is the round's positive result survives only as a statement about the gap level
+and slope at 100-120, and it is not a stability result.
+
 VERDICT: REVISE
 
 WandB `kfrkehju`, project `93-long-horizon-stability`, entity `shamanework-pl`, state

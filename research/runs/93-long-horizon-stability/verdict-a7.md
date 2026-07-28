@@ -1,5 +1,75 @@
 # Verdict: a7-frlr-r48k28-notis-200. The best cell in the program, and the first with a REAL gap-slope failure.
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 6 of 12.** a7 is FRLR r48/k28 with the fast `Q` refreshed every
+step (`frlr_q_cadence=1`) and no token-IS, and it produced the worst gap trend and
+the worst gradient trend of any arm in the program that was not run to horizon.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.016351 over 100-120; +0.028329 over 100-199 (n=100) | incumbent +0.000838 over 100-120, +0.000848 over 100-599 (n=500) | last of the eleven arms that reached the matched 100-120 window, and the steepest 100-199 slope of any arm |
+| gap drift ratio | 1.551 | incumbent 1.029 | the gap ends half again above its own step-100 level; only c600 (5.122) is worse |
+| grad_norm drift | 1.86x over 200 steps, p50 1.9744 to 3.6814 | incumbent 0.85x over 600 steps, p50 1.7866 to 1.5259 | the optimizer walks up rather than settling; the incumbent's twelve 50-step block medians never leave 1.50-1.82 |
+| grad_norm max | 68.01, max/p50 30.1x | incumbent 4.645, max/p50 2.9x | large excursions sit on top of the upward walk |
+| collapse / kill | none, ran 200/200 to its scheduled end | incumbent none in 600 | a7 did not fail, its trends did |
+| capability | val 0.6713426853707415 @200, joint-best of the twelve program arms and identical to a9 to the digit (= 335/499); dense and the incumbent, both references, read higher | incumbent 0.6613 @150, 0.6633 @300, 0.6733 @450, 0.6613 @600; dense 0.6874 @450, 0.6774 @600 | does not separate the arms |
+
+What a7 proves is that the every-step `Q` refit buys a low gap level and pays for it
+with the worst trend in the field. Its level is genuinely low, 4.945 at step 100
+against the incumbent's 14.243, and the original body was right about that. But the
+level is not held: over 100-199 the gap climbs at +0.028329 nats per step and the
+drift ratio reaches 1.551, against the incumbent's +0.000848 over 100-599 at a ratio
+of 1.029. The gradient side tells the same story on the same run: median 1.9744 in
+the first 20 percent rising to 3.6814 in the last 20 percent, drift 1.86x, run max
+68.01. Both axes point the same way, which is why this arm ranks below a8 (gap ratio
+0.986) and a9 (1.192) despite the three sharing one codec.
+
+The cause is `Q` governance, not physical drift, and the fact sheet pins that down
+twice. At the matched step 200 a7's codec-free `probe/kl_dense` is 0.008201 against
+c600's 0.008186, identical to 0.2 percent, so the arms that differ only in how `Q` is
+governed have the same real drift. On the identical 100-199 window a8, which is a7's
+codec with cadence raised from 1 to 20, has a gap slope of +0.001485 against a7's
++0.028329. The every-step refit is therefore the thing being measured, and slowing it
+costs nothing physical. That vindicates the mechanism hypothesis the original body
+offered in the body's section "The one genuine concern: the gap has stopped
+settling", and it removes a7's own configuration from consideration: if
+cadence 20 is available at the same real drift, cadence 1 has no argument left.
+
+What a7 does NOT prove is where its trend ends. It stopped at 200 steps, so no
+crossing against the incumbent was ever observed for this arm. The relevant horizon
+evidence belongs to c600, the only FRLR arm run to 600: gap slope +0.045972 over
+100-599, drift ratio 5.122, gradient drift 9.25x with max 176.367, first exceeding
+the incumbent's gap at step 417 and staying above from 424. a7 is the FRLR governance
+variant whose 200-step signature most resembles that arm's early signature, higher
+ratio than both a8 and a9, so the natural expectation is that it would have crossed
+sooner. That is an extrapolation from an unrun horizon and is stated as one, not as a
+result. Axis 4 also cannot be used to argue PRF against FRLR at all here, because the
+incumbent has no probe: it has 0 probe points.
+
+Three claims in the body below are wrong under the stability bar and are corrected
+here rather than edited away. First, the title's "best cell in the program" and the
+addendum's "best capability in the program" do not hold: a7's terminal val
+0.6713426853707415 is identical to a9's to sixteen digits and both sit below dense's
+0.6874 @450 and 0.6774 @600, which is the cleanest demonstration in the program that
+499 held-out problems cannot resolve these arms. Second, the addendum's headline
+number, 5.8246 nats of `actor/kl_loss`, cannot rank or defend this arm: `actor/kl_loss`
+is real drift multiplied by a codec-view inflation factor that itself moves 50x
+between arms and across a run, and it spans 55x across a7, a8 and a9, which differ
+only in `Q` governance and have identical physical drift. The same disqualification
+applies to the codec-view entropy readings quoted alongside it: the dense control
+sharpens the same way, and sampler-side `rollout_log_ppl` at step 599 is near
+identical across c600, incumbent and dense at 0.091, 0.093 and 0.108. That also voids
+the n=3 Spearman table, whose one axis is a disqualified metric and whose other axis
+is a tie. Third, "grad_norm also rose to 4.64 at step 200 ... neither is alarming"
+understates the run: the 200-step maximum is 68.01 at 30.1x the median, and the
+directional worry the sentence raises is exactly the one that ranks this arm sixth.
+
 Scored 2026-07-26T05:10Z at the registered primary window **100-120**, complete at
 21 rows. Cell: FRLR r48/k28, **no token-IS, no batch normalisation**, probe cadence
 5. Run continues to 200 with a terminal val.

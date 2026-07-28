@@ -1,5 +1,78 @@
 # Verdict: a6-prf-exactk-tis-bnorm-200. FAILS on G1, and the mechanism reverses my earlier reading of a5b
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 12 of 12.** a6 is PRF exact-k plus token-IS plus batch
+normalisation, and it is the most important counterexample in the program: it
+produced the flattest gap of any 200-step arm and it collapsed anyway, so it is
+the arm that proves gap stationarity alone cannot be the bar.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.000413 over window 100-199 (n=100); +0.000383 over the matched window 100-120 | incumbent +0.000848 over 100-599 (n=500); +0.000838 over 100-120 | flatter than the incumbent on both windows, and the flattest slope of any arm that reached 200 |
+| gap drift ratio | 1.002 | incumbent 1.029 | nominally 14x closer to perfectly stationary, and it means nothing, see below |
+| grad_norm drift | 2.27x, p50 17.7015 over the first 20 percent rising to 40.2098 over the last 20 percent, 200 steps | incumbent 0.85x, p50 1.7866 falling to 1.5259, 600 steps | second-worst drift in the program, beaten only by c600's 9.25x, and the only arm that combines a rising optimizer with a flat gap |
+| grad_norm max | 608.81, max/p50 18.3x | incumbent 4.645, max/p50 2.9x | the largest run maximum measured anywhere in the program, 131x the incumbent's |
+| collapse / kill | ran to its scheduled 200 and collapsed capability: val 0.5391 against a field of 0.6593-0.6713 | incumbent none in 600 | the only collapse in the program, and it was not a kill, nothing tripped |
+| capability | 0.5391 @200 | incumbent 0.6613 @150, 0.6633 @300, 0.6733 @450, 0.6613 @600 | does not separate the arms; a6 sits outside the tie only because it collapsed, which is already carried by the collapse row |
+
+What a6 proves is a decoupling. Gap stationarity measures the sampler/trainer
+wedge, and on this arm that wedge was as still as anything in the program: level
+14.132 at step 100 and 14.131 at step 120, ratio 1.002, slope +0.000413 across
+100-199. Underneath that still surface the optimizer was doing the opposite. The
+grad_norm median went 17.7015 to 40.2098 across the run, the run maximum reached
+608.81, and the codec-free drift on `probe/kl_dense` went 0.006561 at step 100 to
+0.010755 at 150 to 0.026793 at 200, which is 3.27x c600's 0.008186 and 1.60x
+a5b's 0.016754 at the same step 200. Training reward confirms it: a6's 101-200
+block mean is 0.5185, the lowest 101-200 figure in the whole table, against
+0.6726 for the incumbent and 0.6833 for c600. So the flat gap here is flat for a
+bad reason. It is the codec's own high plateau being reported back, not evidence
+that anything was under control.
+
+That is the disciplining result for the program's bar. If the bar had been "gap
+slope at the matched window", a6 would have ranked third at 100-120, ahead of
+the incumbent, and it would have been promoted. The bar has to be conjunctive:
+flat gap AND a stationary optimizer AND no collapse. a6 clears the first and
+fails the other two as hard as any arm in the field.
+
+What a6 does NOT prove is an indictment of PRF exact-k. a6 runs the incumbent's
+codec at the incumbent's 1232-bit wire, and the incumbent ran 600 steps with a
+block median flat at 1.50-1.82 and a block max never above 4.645. The failure
+therefore belongs to the token-IS plus batch-normalisation layer stacked on top,
+not to the codec underneath. The fact sheet does not contain an arm that is PRF
+exact-k plus token-IS with batch normalisation switched off, so the split of
+blame between the weighting and the normalisation is not measured here. It is
+also worth pairing a6 with a5, which the fact sheet records as the second
+counterexample: a5's grad_norm drift is exactly 1.00x, the most stationary number
+in the program, achieved by token-IS suppressing the update to a 101-200 reward
+of 0.5895. Token-IS produces either a suppressed run or an exploded one on this
+evidence, and neither is stability.
+
+Three things in the body below now read as wrong, and they are corrected here
+rather than edited away. First, the mid-run health section says a6 "is not
+collapsing"; that was written before step 200 and the terminal val of 0.5391
+against a field of 0.6593-0.6713 makes a6 the one collapse recorded in the
+program. The terminal addendum's softer reading, that a6 improved on base and so
+this is not damage, is not the frame used now: whether or not it fell below base,
+it is the only arm outside the capability tie and that is what "collapse" names
+here. Second, the body quotes a run max of 248.79 excluding the early transient;
+the authoritative run max is 608.81 and that is the number to quote. Third, the
+body ranks and grades a6 on `actor/kl_loss` slopes, quoting +0.001404 against the
+incumbent's +0.002176. Those numbers are disqualified for ranking: `actor/kl_loss`
+is real drift multiplied by a codec-view inflation factor that itself moves by
+50x between arms and within a run, so it confounds the thing being measured with
+the instrument. The body's own conclusion from that comparison survives and is
+in fact strengthened, because the gate it describes would have passed the one arm
+that collapsed. Finally, on codec-free drift the axis still cannot compare the
+shipping PRF configuration against FRLR at all: the incumbent and the dense
+control have no probe, so a6's probe characterises the token-IS plus batch-norm
+variant and nothing more.
+
 Scored 2026-07-25T23:30Z at the registered primary window **100-120**, complete at
 21 rows. Cell: incumbent PRF exact-k codec + token-IS 2.0 +
 `rollout_is_batch_normalize=true`. Run continues to 200 with a terminal val.

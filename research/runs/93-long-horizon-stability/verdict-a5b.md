@@ -1,5 +1,73 @@
 # Verdict: a5b-frlr-bnorm-200. FAILS the registered bar. Decisive clause is G3.
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 7 of 12.** a5b is FRLR r48/k28 plus token-IS 2.0 plus
+`rollout_is_batch_normalize=true`, and it bought a calm-looking gradient trace by
+damping the update rather than by stabilising it, while producing the largest
+gradient excursion ever recorded in this program.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.000358 over 100-120 (n=21); +0.006673 over 100-199 (n=100), its longest window | incumbent +0.000838 over 100-120, +0.000848 over 100-599 (n=500) | the 100-120 flatness that ranked a5b 2nd does not survive to 200 steps; the incumbent's flatness survives to 600 |
+| gap drift ratio | 1.150 | incumbent 1.029 | a5b ends 15 percent above its step-100 level, 9th of the 13 rows in the fact sheet |
+| grad_norm drift | 0.86x over 200 steps (p50 0.7236 to 0.6255) | incumbent 0.85x over 600 steps (p50 1.7866 to 1.5259) | the same shape on paper, but read next to reward: a5b's update was suppressed, so the flat ratio is not earned |
+| grad_norm max | **204.39**, max/p50 **284.4x** | incumbent 4.645, max/p50 2.9x | worst spike ratio in the program, above a7 30.1x, a5 20.9x, a8 18.6x, a6 18.3x and c600 12.1x |
+| collapse / kill | none, ran to its scheduled 200 steps | incumbent none in 600 | clean exit, but only a third of the incumbent's horizon |
+| capability | val 0.6593 @200; reward 0.6606 over 101-200 | incumbent val 0.6613 @150, 0.6633 @300, 0.6733 @450, 0.6613 @600; reward 0.6726 over 101-200 | does not separate the arms |
+
+What a5b proves is that batch normalisation partially undoes token-IS
+suppression. Against a5 on matched blocks, reward over 101-200 goes 0.5895 to
+0.6606 and the terminal val lands at 0.6593, inside the non-collapsed field of
+0.6593 to 0.6713. That is a real fix and it is why a5b sits above a5 in the
+ranking. What it does NOT prove is that the training got calmer. The 0.86x
+gradient drift ratio is measured on an optimizer that is still moving less than
+the incumbent's: reward 0.4234 against the incumbent's 0.5015 over 1-100, and
+0.6606 against 0.6726 over 101-200. The fact sheet's second counterexample
+applies here in weakened form, and axis 2 must be read next to reward.
+
+The number that decides the rank is the run maximum. a5b's p50 sits near 0.63
+and its run max is 204.39, a ratio of 284.4x, the worst in the program by an
+order of magnitude over the next arm. The incumbent's twelve 50-step blocks
+never produce a block max above 4.645 in 600 steps. On an internet-split
+pipeline a single excursion of that size is precisely the event a stability
+program exists to exclude, and no evidence in the fact sheet shows it was
+contained rather than merely unrepeated inside 200 steps. a5b ranks below a7
+despite a7's much worse gap trend (+0.028329 over 100-199, ratio 1.551) because
+a7's worst excursion is 68.01 at 30.1x against a5b's 204.39 at 284.4x.
+Capability does not enter: a7's 0.6713 and a5b's 0.6593 are inside the tie.
+
+On the gap axis the original body leads with LEVEL, 4.45 against 14.25, and
+level is not stationarity. On stationarity a5b is 1.150 against the incumbent's
+1.029, and its own longest-window slope is +0.006673 over 100-199 against the
+incumbent's +0.000848 over 100-599. That is the FRLR family signature: a large
+early level advantage that is not stationary. c600 is the same story with 400
+more steps of evidence, crossing the incumbent at 417 and staying above from
+424, ending 2.12x worse with a 9.25x gradient drift. a5b has no horizon evidence
+at all. The codec-free channel points the same way: `probe/kl_dense` at the
+matched step 200 reads 0.016754 for a5b against 0.008186 for c600, 0.008201 for
+a7 and 0.010872 for a8, second only to a6's 0.026793, and a6 is the one arm that
+collapsed. Note the limit: the incumbent has no probe, so axis 4 cannot rank a5b
+against PRF at all.
+
+Three things in the body below are corrected here rather than edited away.
+First, the whole G3 apparatus, the FAIL, the acceleration tables and the
+terminal "indictment of the gate", is built on `actor/kl_loss`, which is
+disqualified for ranking: it is real drift multiplied by a codec-view inflation
+factor that itself moves by 50x between arms and across a run, so it confounds
+the thing being measured with the instrument. The body's own probe data, which
+survives, was the right instrument. Second, the terminal addendum recommends
+making val and OOD the promotion gate; under the reframe that is wrong, because
+every non-collapsed arm lands in 0.6593 to 0.6713 and the incumbent ends 600
+steps at 0.6613, so capability promotes nothing. Third, the rider's health line
+"`grad_norm` max 2.0774 excluding the step 1-3 transient" was scored around step
+120 and is superseded by the 200-step run max of 204.39.
+
 Scored 2026-07-25T17:35Z at the registered primary window **100-120**, window
 **complete at 21 rows**. Cell: FRLR r48/k28 + token-IS 2.0 +
 `rollout_is_batch_normalize=true`. Scored with

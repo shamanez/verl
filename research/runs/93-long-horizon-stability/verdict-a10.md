@@ -1,5 +1,31 @@
 # Verdict: a10-frlr-anchorq-unbiased-200. KILLED at step 62 on two registered triggers. The codec's bias is what buys the entire gap advantage, and removing it barely touches real drift.
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 9 of 12.** a10 is a9 plus `frlr_unbiased`, killed at step 62 on two registered triggers for FUTILITY and not for instability: it did nothing bad to the training dynamics, it simply removed the only reason FRLR was on the table.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.009809 over its only window, 30-60, n=31 | incumbent +0.000848 over 100-599 (n=500), +0.000838 over 100-120 | no matched window exists: a10 stopped at 62 and the fact sheet records no incumbent 30-60 slope, so this is 31 rows of early-run trend against 500 rows of horizon evidence, not a comparison |
+| gap drift ratio | 1.018 over 61 steps | incumbent 1.029 over 600 steps | nominally flatter than the incumbent and it means almost nothing: 61 steps is not enough elapsed training for a gap to drift |
+| grad_norm drift | 1.31x, p50 1.0318 in the first 20 percent to 1.3471 in the last 20 percent, 61 steps | incumbent 0.85x over 600 steps | mildly rising, unremarkable, and measured over one tenth of the incumbent's horizon |
+| grad_norm max | 2.285, max/p50 1.9x | incumbent 4.645, max/p50 2.9x | the tightest gradient envelope of the whole FRLR family and tighter than the incumbent's, with no spike anywhere in 61 steps |
+| collapse / kill | killed at step 62 on two registered triggers, both gap-level triggers | incumbent none in 600 | this is a futility kill, not an instability kill. Nothing in axis 2 was firing |
+| capability | no val, ran val-off by design. Training reward 0.4216 over its 1-100 block, which covers only 62 steps | incumbent 0.6613 @600 val, reward 0.5015 over 1-100 | does not separate the arms |
+
+What a10 proves is a negative about the codec, not about the optimizer. Removing the bias from FRLR's residual gain removes FRLR's entire gap advantage: a10 sits at 14.93 against the incumbent's own 14.66. That is the incumbent's operating point, reached by a codec that additionally needs a basis, an anchor coupling and a `Q` to govern, none of which PRF exact-k requires. Under a stability bar this reads harder than it did under a capability bar. The only argument for carrying FRLR's extra machinery was a lower mismatch gap. Unbiased, there is no lower gap, so there is nothing left to defend, and the horizon evidence that landed later (c600, gap drift ratio 5.122 and grad_norm drift 9.25x with max 176.367) closes the family out anyway.
+
+What a10 does NOT prove is that unbiased FRLR is unstable. Its gradient behaviour is genuinely clean: run max 2.285 and max/p50 1.9x are better than the incumbent's 4.645 and 2.9x, and second only to a1's 1.3x in the whole program. Its gap drift ratio of 1.018 is nominally flatter than the incumbent's 1.029. Those numbers look good for a bad reason: they come from 61 steps. Absence of instability at step 62 is worth very little as evidence about step 600, and this program has two direct demonstrations of that. a7 looked ordinary early and reached grad_norm drift 1.86x with max 68.01 by 200. c600 is a9's configuration, which is a10's configuration minus the unbiased flag, carried to horizon, and it drifts 9.25x. There is a second reason to discount a10's calm: its 1-100 training reward block mean is 0.4216, the second-lowest in the field above only a6's 0.4150, and that block covers only 62 steps so it is dominated by the startup ramp. The same discipline that disqualified a5's perfect 1.00x drift ratio applies here, read axis 2 next to reward and do not credit a quiet optimizer on a run that had barely started learning.
+
+Two corrections from the earlier reading are preserved and must not be re-reverted. First, a10 does NOT overturn the a1/a2 bias result. a2 was killed at step 60 with a run-minimum grad_norm of 6.153, 6.9x a1's 120-step maximum of 0.898, on the same codec with only the estimator bias differing, and that bias is per-coordinate rounding in a 1-bit quantizer. a10's bias is a single detached per-token norm scalar on a low-rank residual, a structurally different object. Bias matters for some codecs and not for this one. Second, running the arm was correct: the earlier claim that the unbiased test was pointless because bias was not the driver is recorded as a corrected claim, and the test is what established that FRLR's advantage is bias-dependent, which is a real and previously unstated property of the method.
+
+Two of the body's channels below need labels. The comparison table quoting `actor/kl_loss` at 0.0637 for a9 against 0.1775 for a10 may not be used to rank either arm: that metric is real drift multiplied by a codec-view inflation factor that itself moves by 50x between arms and across a run, and the very same table shows `probe/kl_gain` moving 106.5x to 322.7x alongside it, so the row is measuring the instrument tripling, not the drift tripling. The codec-free probe is the channel that survives, and at the matched step 60 the field is tightly bunched: a10 0.002419, a9 0.002511, a7 0.002613, c600 0.002647, a8 0.002666, a6 0.002270. The incumbent has no probe at all, so axis 4 cannot compare a10 to PRF. Separately, a10 is one of only two runs in the entire program with nonzero `pg_clipfrac`, 3 steps with a maximum of 0.374120 against exactly 0 everywhere else including c600, and that too was instrument rather than policy: `anchor_update_basis` published `Q` before the anchor fired inside `train_batch`, so the two forwards of one step used different bases. Fixed in commit `f2ac3c64`. So even a10's single anomalous PPO signal is not a stability finding against it.
+
 Killed 2026-07-26T23:40Z at step 62 of 200 under the pre-registered early-kill
 triggers in `PREREG_a10.md`, per the operator's instruction not to wait for 200 steps
 when the signal is clear. Cell: a9's exact configuration plus

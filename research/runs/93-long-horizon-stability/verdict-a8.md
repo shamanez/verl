@@ -1,5 +1,31 @@
 # Verdict: a8-frlr-qcad20-200. Capability tied with a7 and the incumbent, and the gap trend 13x flatter.
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 4 of 12.** a8 is FRLR with `frlr_q_cadence` raised from 1 to 20, and it is the best-behaved gap in the program on the drift-ratio axis: it is the only arm whose gap ends BELOW its step-100 level, but it bought its flattering gradient number with a large startup transient, and the FRLR family's only horizon test fails.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.001262 over 100-120; +0.001485 over 100-199, n=100 | incumbent +0.000838 over 100-120; +0.000848 over 100-599, n=500 | 5th on the matched 100-120 window, roughly 1.5x the incumbent's slope, and a8 has no window past 199 to test with |
+| gap drift ratio | 0.986, level 7.242 at 100 falling to 6.829 at 120 | incumbent 1.029 | best in the entire field, the only arm ending below its step-100 level |
+| grad_norm drift | 0.05x, p50 42.9403 over the first 20 percent falling to 2.1538 over the last 20 percent | incumbent 0.85x | not calm, this is a large startup transient decaying; the fact sheet says to read a sub-1.0 ratio next to the run max |
+| grad_norm max | 53.82, max/p50 18.6x | incumbent 4.645, max/p50 2.9x | an order of magnitude looser than the incumbent on both the level and the peak-to-median shape |
+| collapse / kill | none, ran 200/200 to its scheduled end | incumbent none in 600 | clean at 200, but a8 has one third of the incumbent's horizon and its corrected family continuation c600 fails at 600 |
+| capability | val 0.6613 at 200; training reward 0.6837 over 101-200 | incumbent 0.6613 at 150 and 0.6613 at 600; a7 and a9 both 0.6713 at 200; dense 0.6774 at 600 | does not separate the arms |
+
+What a8 proves about stability is narrow and real: freezing `Q` for 20 steps produces the only gap in the program that is genuinely settling rather than merely flat. Drift ratio 0.986 beats a3's 1.001 and the incumbent's 1.029, and it is the sole sub-1.0 entry in the field. That is a mechanism result, not a horizon result. It says `Q` estimator variance, not `Q` staleness, was driving a7's climb, and the matched-step evidence backs it: a7's slope over 100-199 is +0.028329 against a8's +0.001485 on the same window, a 19x difference from the cadence knob alone.
+
+What a8 does not prove is that FRLR is stable. Its 0.05x gradient drift ratio is the single most misleading number in this document. A median of 42.9403 over the first 20 percent of a 200-step run means the elevated regime covers roughly the first forty steps, not the "step 1-3 transient" the body below calls it. The ratio is low because the run started badly and recovered, not because the optimizer sat still, and the run max of 53.82 against the incumbent's 4.645 is the check that catches it. Corrected here rather than edited away: the body's line that grad_norm is "unremarkable" at 1.6x the incumbent is scoped to the window value 2.931 and does not describe the run.
+
+Two further body claims now read wrong and are corrected here rather than edited away. First, "codec-free drift is the lowest in the program" is an unmatched-step artifact of the same kind the fact sheet already flags for a9. At the matched step 200 a8's `probe/kl_dense` is 0.010872 against a7's 0.008201 and c600's 0.008186, the HIGHEST of the three, and at matched step 150 a7's 0.005214 is below a8's 0.007006. Second, "it is the arm to build on" does not survive. The FRLR family's only 600-step test is c600, which crosses the incumbent at step 417 and permanently at 424, ends at gap ratio 5.122 with grad_norm drift 9.25x and a run max of 176.367, and a10 showed that removing the estimator bias removes FRLR's early gap advantage entirely. The upgrade candidates worth a horizon run are a4 and a3, both PRF-side.
+
+Against the incumbent, a8 wins one axis and loses the rest. It wins gap drift ratio 0.986 to 1.029 and it wins gap level, 6.829 at step 120 against 14.239. It loses gap slope on the matched window, it loses gradient shape by roughly an order of magnitude on both max and max/p50, and it has 200 steps of evidence against 600. Note also that the body's 55x `actor/kl_loss` spread between a7 and a8 is quoted here only as evidence that the channel is an instrument artifact, never as a ranking input: `actor/kl_loss` is disqualified because it is real drift multiplied by a codec-view inflation factor that itself moves by 50x between arms, so it confounds the measurement with the thing measured. The same disqualification applies to the body's `entropy` line: the dense control sharpens the same way, so entropy decline is normal GRPO on math and not compression damage.
+
 > **Header corrected after the terminal val landed.** This document was first
 > written at the training window, where a8 leads, and titled "the best cell in the
 > program". Its terminal val (0.6613) came in **below** a7's 0.6713, so the two

@@ -1,5 +1,72 @@
 # Verdict: issue 93 round A, cell `a2-srq-b1-rn` (the bias/coherence control)
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 11 of 12.** a2 is 1-bit `sr_quant` with round-to-nearest, the
+deliberately BIASED twin of a1, and it destabilised the optimizer so plainly
+that it was killed at step 60 on a pre-authorised trigger having never reached
+the gate window.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.014397 nats/step, steps 30-60, n=31, the only window a2 has | incumbent +0.000838 at steps 100-120 and +0.000848 at steps 100-599 | not a matched comparison. a2 died at 60 and never entered the 100-120 window, so this is a different phase of training, not a like-for-like number |
+| gap drift ratio | 1.033 | incumbent 1.029 | apparently identical, and meaningless: a2's ratio covers 60 steps, the incumbent's covers 600. Sixty steps of stationarity is not evidence of stationarity |
+| grad_norm drift | 0.49x, p50 16.3871 falling to 8.0670 | incumbent 0.85x | below 1.0 is NOT calm here. The fact sheet's rule applies directly: a ratio far below 1.0 is a large startup transient decaying. Read it only next to the run max |
+| grad_norm max | 62.24, max/p50 6.8x | incumbent 4.645, max/p50 2.9x | a2's run MINIMUM of 6.153 is already above the incumbent's run MAXIMUM of 4.645, and is 6.9x a1's 120-step maximum of 0.898 |
+| collapse / kill | killed at step 60, pre-authorised trigger, 62 steps of history | incumbent none in 600 | no collapse was ever demonstrated because the run was stopped before it could be |
+| capability | no val, a2 ran val-off by design. Training reward 0.4580 in the 1-100 block, which for a2 is only 60 steps | incumbent 0.6613 val at 600, reward 0.7406 in the 501-600 block | does not separate the arms |
+
+**What a2 proves.** It is the sharpest single-variable instability result in the
+program. a1 and a2 are the same codec at the same wire budget with only the
+estimator's bias differing: stochastic rounding versus round-to-nearest. a1's
+entire 120-step gradient-norm envelope tops out at 0.898, the tightest ever
+measured here, max/p50 1.3x. a2's *minimum* over 62 steps is 6.153, which is
+6.9x a1's maximum, and its run max is 62.24. The two distributions do not
+overlap at any point. Bias alone, at fixed bits and fixed noise energy, moved
+the optimizer to a different scale and kept it there. That is a clean causal
+attribution and it is why a2 is worth keeping in the record despite ranking 11th.
+
+**What a2 does NOT prove.** It has 62 steps. Its gap slope of +0.014397 is fitted
+over steps 30-60 and cannot be placed on the same axis as the incumbent's
+100-120 or 100-599 figures. Its gap drift ratio of 1.033 sits next to the
+incumbent's 1.029 and that proximity is an artifact of horizon, not a similarity
+in behaviour. Nothing here says a2 would have collapsed, only that its optimizer
+was running 7x to 70x hotter than its unbiased twin with no capability payoff on
+the board to justify it. Most importantly, and the fact sheet is explicit on
+this: **this result does NOT generalise to a10.** a10's bias is one detached
+per-token scalar, not per-coordinate rounding, and a10's gradient behaviour is
+unremarkable, max 2.285 and drift 1.31x. a10 was killed for futility, not
+instability. Do not cite a2 as evidence against a10's bias.
+
+**Against the incumbent.** Not a candidate, and not close. The incumbent holds a
+flat gradient-norm block median of 1.50 to 1.82 across all twelve 50-step blocks
+with a block max never above 4.645, for 600 steps. a2 spent every one of its 62
+logged steps above that ceiling. There is no window on which a2 is the more
+stable arm.
+
+**Where the body below is now wrong, corrected here rather than edited away.**
+The original verdict is built on the pre-registered kill gate, which is an
+`actor/kl_loss` slope comparison, 6.856x at z = +15.02 over steps 2-60. That
+gate was correctly executed and the kill was correct, but `actor/kl_loss` is
+disqualified for ranking arms: it is real drift multiplied by a codec-view
+inflation factor that itself moves by 50x between arms and across a run, so it
+confounds the thing being measured with the instrument. The kill therefore
+stands on axis 2, the gradient norms, which pointed the same way from step 1 and
+did so without an instrument confound. Section 3.4's grad-norm reading and
+section 8's proposed grad_norm instability flag are the parts of the original
+that survive the reframe intact. Section 6's claim that a2 "has the lowest
+measured gap of anything this program has run" is a level claim on a view metric
+and must not be read as a stability claim: the original text says so itself in
+section 3.5, and that lesson, that the gap can never be a standalone objective,
+is reinforced rather than superseded. `actor/entropy`, quoted at 7.9494 in the
+section 2 table, is likewise disqualified: the dense control sharpens the same
+way, so entropy movement is normal GRPO on math and not compression damage.
+
 VERDICT: REVISE
 
 Cell `a2-srq-b1-rn` (WandB `3muohefm`, `state=finished`, history through step 62) was

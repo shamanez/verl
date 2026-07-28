@@ -1,5 +1,84 @@
 # Verdict: a9-frlr-anchorq-200. Q governance does not touch real drift at all, and on the full trajectory a9 may simply be the best arm.
 
+## STABILITY VERDICT (2026-07-28 re-scoring)
+
+> **Re-scored against stability, not reward.** The body below this section was
+> written against a bar that leads with capability. Capability turned out to be
+> a tie across the field, so it cannot carry a conclusion. What follows
+> supersedes the original ranking claims; the original text is kept in place.
+
+**Stability rank: 5 of 12.** a9 is FRLR with `Q` harvested from the anchor's
+stale-weight forward and refreshed only when the anchor fires: it ran its full
+200 steps without collapse and learned normally, but its gap kept climbing, its
+gradients only look calm because a large startup transient was decaying, and it
+is the run that carried the `pg_clipfrac` measurement bug.
+
+| axis | this arm | reference | read |
+|---|---|---|---|
+| gap slope | +0.012203 over 100-199 (its longest window, n=100); +0.009262 over the matched 100-120, which is 10th of the 11 arms that reached 120 | incumbent +0.000838 over 100-120 and +0.000848 over 100-599 | an order of magnitude steeper than the incumbent at the only window both arms ran. No settling anywhere in 200 steps |
+| gap drift ratio | 1.192 | incumbent 1.029 | the gap ends 19 percent above its step-100 level. Not stationary, and worse than a5b's 1.150 |
+| grad_norm drift | 0.40x, p50 13.1143 over the first 20 percent of steps falling to 5.2952 over the last 20 percent | incumbent 0.85x, 1.7866 to 1.5259 | below 1.0 for a bad reason: a startup transient decaying, not a calm optimizer. The fact sheet flags exactly this for a8 0.05x, a9 0.40x and a2 0.49x |
+| grad_norm max | 24.70, max over its own p50 6.2x | incumbent 4.645, max over its own p50 2.9x | spikier than the incumbent on the scale-free measure. Absolute levels are not comparable across codecs, so only the shape counts |
+| collapse / kill | none. 200/200, zero errors, 10 anchor fires, `refreshes=70` | incumbent none in 600 | passes the non-collapse axis on 200 steps of evidence, one third of the incumbent's horizon |
+| capability | 0.6713426853707415 at step 200, joint best of the twelve program arms with a7 to the digit; dense and the incumbent, both references, read higher | incumbent 0.6613 / 0.6633 / 0.6733 / 0.6613 at 150 / 300 / 450 / 600; dense 0.6774 at 600 | does not separate the arms |
+
+What a9 proves about stability is narrow but real: anchor-owned `Q` does not
+break training. It ran to its scheduled end, `lr_brake` never fired, and its
+training reward over 101-200 is 0.6821, second only to a8's 0.6837 and above the
+incumbent's 0.6726 over the same block. That matters because it rules out the
+a5 and a5b failure mode, where flat-looking metrics came from an update that was
+being suppressed (a5's reward over 101-200 is 0.5895). a9's numbers are the
+numbers of a run that was genuinely learning. What it does not prove is
+stationarity: gap drift ratio 1.192 against the incumbent's 1.029, and the
+gradient drift of 0.40x is not a calm reading, it is 13.1143 decaying toward
+5.2952. The body's Health section describes the transient as "the step 1-3
+transient", which understates it: the elevated median covers the whole first
+fifth of the run.
+
+a9 is not a clean cell, and this has to lead. The fact sheet confirms a9 has
+**9 nonzero `pg_clipfrac` steps, maximum 0.352534, first at step 20**, one per
+anchor fire, and that every other run in the program except a10 (3 steps, max
+0.374120) is exactly 0 at every step, c600 included. The cause was that
+`anchor_update_basis` published `Q` immediately while the anchor fires inside
+`train_batch` after `old_log_probs` were recomputed, so the two forwards of one
+step used different bases and the PPO ratio deviated from 1 for a measurement
+reason. It was fixed in commit `f2ac3c64`. The corrected continuation is c600,
+and the fix does not rescue the family. Over the matched 100-120 window c600
+reads +0.008696 against a9's +0.009262, so the bug was not what made a9's gap
+climb; c600 then goes to +0.045972 over 100-599 with drift ratio 5.122,
+gradient drift 9.25x, run max 176.367, and it crosses the incumbent at step 417
+and permanently at 424. a9's own trend was the early part of that curve.
+
+Two corrections in the body stand and are not re-reverted here. First, the cost
+of the operator's anchor-`Q` constraint is **not established**: the 7.3x figure
+was measured at a8's U-curve turning point, and a8's gap was still falling until
+step 143. Second, "a9 has the lowest codec-free drift in the program" was an
+unmatched-step artifact. At matched steps a9 reads `probe/kl_dense` 0.004319 at
+100, 0.005265 at 120, 0.006088 at 150 and 0.008593 at 195, sitting between a7
+and a8 rather than below them, and the snapshot re-confirms with clean data that
+at step 200 c600 0.008186 and a7 0.008201 agree to 0.2 percent. `Q` governance
+does not touch physical drift. Note also that axis 4 cannot be used to compare
+a9 against the incumbent at all, because the incumbent has no probe.
+
+Against the incumbent, a9 loses on every axis that survives the reframe. The
+title of this file says a9 "may simply be the best arm" and the terminal
+addendum builds that on the joint-best terminal val plus the lowest gap level at
+step 199. Corrected here rather than edited away: capability is a tie, so the
+val argument carries no weight, and gap level is not the stability axis, gap
+stationarity is. The body also leans on `actor/kl_loss` (the 55x spread across
+a7, a8 and a9) and on codec-view entropy. Neither may rank arms: `actor/kl_loss`
+is real drift multiplied by a codec-view inflation factor that itself moves by
+50x between arms and within a run, and entropy decline is normal GRPO on math
+because the dense control sharpens the same way. The body's use of the 55x
+spread as an *instrument* critique is legitimate and still stands; using it to
+order arms is not. a9 sits at 5 because a3, a4 and a1 all have flatter gaps with
+tighter gradients at 120 steps, and a8 is the only arm whose gap ends below its
+step-100 level (ratio 0.986); it sits above a7, whose 100-199 slope is
++0.028329 with drift ratio 1.551 and gradient drift 1.86x to a max of 68.01.
+The discipline from a6 applies to a9 too: a flat or acceptable gap is not
+stability on its own, the bar is flat gap and a stationary optimizer and no
+collapse, and a9 clears only the third of those.
+
 > **Read the terminal addendum before acting on this section.** This body was
 > written at the registered window 100-120, where a8's gap slope beats a9's 7.3x,
 > and it concludes that anchor ownership is a trade-off carrying a measurable cost.
