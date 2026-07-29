@@ -1,0 +1,79 @@
+# resolved params for cell a3-srq-parity-k493 (issue 93, round A, WandB k8dvru5l)
+# Written alongside resolved_params.txt (cell a1) and resolved_params-a2.txt so no
+# cell's provenance is clobbered.
+#
+# STATUS: PARTIAL, flag RESOLVED_CONFIG_MISSING.
+#   $ python3 scripts/capture_resolved_config.py runs/93-long-horizon-stability
+#   capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+#   rc=1
+# The synced log (metrics/incoming.log) contains no launcher `set -x` trace and no
+# "python3 -m verl.trainer.main_ppo" line (grep count 0), so there is no expanded
+# command line to recover. The launcher's own "=== resolved #93 cell config ==="
+# banner is also absent from the synced tail (grep count 0).
+#
+# a3 is nonetheless the BEST-pinned cell of the three, because the codec branch is
+# fixed three independent ways and one of them is arithmetically unique.
+
+# --- 1. runtime metric, logged every step, uniquely pins the codec ---
+# actor/comm_eff/logical_pp_bits_sr_quant = 1232.5   (constant over all 120 steps)
+# actor/comm_eff/logical_pp_bytes_sr_quant = 154.0625
+# The accounting is bits = subset_k*bits + subset_k*16/block_size
+# (verl/workers/comm_eff/activation_quant.py, docstring line 101 and lines 38-49).
+# 493*2 + 493*16/32 = 1232.5 EXACTLY and no other (bits, block, subset_k) triple in
+# the launcher's option space reproduces it. For contrast a1 and a2 both log 2304.0
+# = 1536*1 + 1536*16/32, the full-width 1-bit value.
+actor_rollout_ref.actor.comm_eff.compression_type=sr_quant
+actor_rollout_ref.actor.comm_eff.quant.bits=2
+actor_rollout_ref.actor.comm_eff.quant.block_size=32
+actor_rollout_ref.actor.comm_eff.quant.rounding=sr
+actor_rollout_ref.actor.comm_eff.quant.subset_k=493
+
+# --- 2. hydra config echo present in metrics/incoming.log (pid=139095) ---
+trainer.experiment_name=a3-srq-parity-k493
+trainer.project_name=93-long-horizon-stability
+trainer.total_training_steps=120
+trainer.save_freq=-1
+trainer.test_freq=-1
+trainer.val_before_train=False
+
+# --- 3. launcher source, examples/grpo_trainer/run_93_cell.sh on branch
+#        93-mismatch-control-kit, ARM=a3 block (lines 74-84) ---
+# export COMM_EFF_COMPRESSION_TYPE=sr_quant
+# export COMM_EFF_QUANT_BITS=2
+# export COMM_EFF_QUANT_BLOCK_SIZE=32
+# export COMM_EFF_QUANT_ROUNDING=sr
+# export COMM_EFF_QUANT_SUBSET_K=493
+# shared across every a-cell (lines 55-60):
+COMM_EFF_ANCHOR_OWNS_Q=false
+COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP=false
+COMM_EFF_MASK_RECOMPUTE=true
+COMM_EFF_MASK_REFERENCE=true
+COMM_EFF_MASK_PP_SIZE=8
+# a-cell shape (lines 127-134): TOTAL_STEPS=120, TEST_FREQ=-1,
+# VAL_BEFORE_TRAIN=False, SAVE_FREQ=-1, EXPERIMENT_NAME=a3-srq-parity-k493.
+# prf_mask is NOT enabled on a3 (that branch belongs to a4/a5); the exact-k order
+# statistic is reached through sr_quantize's subset_k path, not through the mask hook.
+
+# --- 4. corroborated from the metrics side ---
+# actor/ppo_kl == 0 at every one of 120 steps, and
+# actor/comm_eff/anchor_replay_fires = 6 = floor(120/20), which together require
+# train_batch_size == ppo_mini_batch_size (one optimizer tick per global step) and
+# anchor cadence 20 in optimizer ticks. Consistent with the round-A protocol
+# (train_batch 128 / ppo_mini 128) recorded in run.json and PROGRAM_STATE.md.
+# actor/comm_eff/mask_applications decomposes 19642 old_logprob + 19642 ref_logprob
+# + 38892 train + 0 ckpt, the same structure as a1's 19691/19691/38976, which is the
+# PRF pass-identity that makes ppo_kl == 0 hold.
+# actor/comm_eff/rank1_window_span = 20, rank1_prediction_horizon = 20,
+# rank1_evr_mean = 1.0, rank1_r2_mean = 1.0, merger_coldM_fallbacks = 0: the W2
+# rank-1 RELEX path with the project default cadence.
+# actor/lr = 1e-06 constant, actor/kl_coef = 0.001 constant.
+
+# --- 5. divergence check, plan versus ran ---
+# One divergence, and it is a real finding rather than a transcription slip.
+# run.json cell a3 and run_93_cell.sh line 76 both state the budget as
+# "1232.5 -> 1233 bits/token/boundary". The runtime logs 1232.5. The committed E
+# eligibility clause is "wire budget <= 1232 for any round-C promotion", so the
+# arm as launched is 0.5 bits (0.041 percent) OVER the literal bar. subset_k=492
+# would log 1230.0 and clear it. See verdict-a3.md section 6.
+# No other divergence: bits, block, rounding, subset_k, step count, val-off and
+# save-off all match the plan and the approved matrix.

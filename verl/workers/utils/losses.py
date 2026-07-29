@@ -54,6 +54,20 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
+def cvc_warmup_ramp(warmup_steps: int, global_step) -> float:
+    """Linear CVC warmup multiplier in [0, 1] (issue #93 4.7a).
+
+    Ramps 0 -> 1 over ``warmup_steps`` trainer steps; ``warmup_steps <= 0``
+    means no ramp. A missing step (``None``: a caller outside the trainer's
+    stamped path) counts as fully warmed, since the ramp exists only to soften
+    the earliest below-uniform codec-view CE gradients.
+    """
+    warmup_steps = int(warmup_steps or 0)
+    if warmup_steps <= 0 or global_step is None:
+        return 1.0
+    return min(1.0, max(0.0, float(global_step)) / float(warmup_steps))
+
+
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data.
 
@@ -90,6 +104,19 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metric_aggregation = AggregationType.MEAN
 
     metrics = {}
+
+    # Adaptive reference-KL coefficient (comm_eff I3 controller, issue #93).
+    # The trainer stamps comm_eff_kl_coef on the batch once per step while the
+    # controller is enabled; absent (the default), the static config
+    # coefficient applies unchanged. Read before the select below drops the
+    # batch's non-tensor entries.
+    kl_loss_coef = tu.get_non_tensor_data(data=data, key="comm_eff_kl_coef", default=None)
+    kl_loss_coef = config.kl_loss_coef if kl_loss_coef is None else float(kl_loss_coef)
+
+    # CVC CE warmup clock (issue #93 4.7a): the trainer stamps the same
+    # comm_eff_global_step it threads to the PowerSGD/anchor circuits; read it
+    # here too, before the select below drops non-tensor entries.
+    cvc_global_step = tu.get_non_tensor_data(data=data, key="comm_eff_global_step", default=None)
 
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
@@ -146,9 +173,29 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
         )
 
-        policy_loss += kl_loss * config.kl_loss_coef
+        policy_loss += kl_loss * kl_loss_coef
+        # kl_coef reflects the coefficient actually applied (controller beta
+        # when stamped, the static config value otherwise).
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
-        metrics["kl_coef"] = config.kl_loss_coef
+        metrics["kl_coef"] = kl_loss_coef
+
+    # CVC CE mode (issue #93 4.7a): under an active comm_eff codec, log_prob
+    # here IS the codec view of the sampled tokens, so this cross entropy is
+    # the training-view disagreement and its gradient pulls the codec view
+    # toward the sampler's choices. cvc_lambda=0.0 (default) never enters this
+    # block: the loss graph stays bit-identical.
+    cvc_lambda = float(getattr(config, "cvc_lambda", 0.0))
+    if cvc_lambda > 0.0:
+        cvc_ce = agg_loss(
+            loss_mat=-log_prob, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+        )
+        cvc_lambda_eff = cvc_lambda * cvc_warmup_ramp(getattr(config, "cvc_warmup_steps", 0), cvc_global_step)
+        if cvc_lambda_eff > 0.0:
+            policy_loss += cvc_lambda_eff * cvc_ce
+        metrics["cvc_ce"] = Metric(value=cvc_ce, aggregation=metric_aggregation)
+        # cvc_lambda logs the coefficient actually applied at this step's
+        # warmup clock, not the configured ceiling.
+        metrics["cvc_lambda"] = cvc_lambda_eff
 
     return policy_loss, metrics
 

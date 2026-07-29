@@ -1,0 +1,153 @@
+== integrity (a3 rows only, TaskRunner pid=139095) ==
+metric lines parsed: 229  unique steps: 109  min: 1  max: 120
+MISSING steps in local synced log (rsync tail gaps): [75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85]
+duplicate log lines that DISAGREE at the same step: 0
+NaN/Inf metric entries: 0
+cross-check: a1 pid=6382 has 120 unique steps (excluded from a3 series)
+cross-check: a2 pid=93602 has 61 unique steps (excluded from a3 series)
+
+== WINDOW steps 100-120 ==
+actor/kl_loss                              n= 21 mean=    0.911128 last=    0.929045 min=    0.888786 max=    0.929045 slope=+0.001616 ols_se=0.000167 hac_se=0.000137 r2=0.831 intercept=0.7334
+rollout_corr/kl                            n= 21 mean=   14.992396 last=   14.989995 min=   14.983729 max=   15.011344 slope=+0.000101 ols_se=0.000244 hac_se=0.000224 r2=0.009 intercept=14.9813
+rollout_corr/k3_kl                         n= 21 mean=   13.995056 last=   13.994002 min=   13.986966 max=   14.012537 slope=-0.000127 ols_se=0.000228 hac_se=0.000144 r2=0.016 intercept=14.0091
+critic/score/mean                          n= 21 mean=    0.656855 last=    0.646484 min=    0.621094 max=    0.701172 slope=-0.000099 ols_se=0.000690 hac_se=0.000477 r2=0.001 intercept=0.6677
+critic/rewards/mean                        n= 21 mean=    0.656855 last=    0.646484 min=    0.621094 max=    0.701172 slope=-0.000099 ols_se=0.000690 hac_se=0.000477 r2=0.001 intercept=0.6677
+actor/entropy                              n= 21 mean=    7.788831 last=    7.787574 min=    7.786819 max=    7.790888 slope=+0.000004 ols_se=0.000043 hac_se=0.000038 r2=0.000 intercept=7.7884
+actor/grad_norm                            n= 21 mean=    2.748124 last=    2.692308 min=    2.425812 max=    4.172865 slope=+0.007996 ols_se=0.017241 hac_se=0.011128 r2=0.011 intercept=1.8686
+actor/ppo_kl                               n= 21 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+actor/pg_clipfrac                          n= 21 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+response_length/mean                       n= 21 mean=  661.976795 last=  660.891602 min=  597.681641 max=  710.236328 slope=+1.392988 ols_se=0.998445 hac_se=0.698047 r2=0.093 intercept=508.7481
+actor/comm_eff/logical_pp_bits_sr_quant    n= 21 mean= 1232.500000 last= 1232.500000 min= 1232.500000 max= 1232.500000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=1232.5000
+actor/comm_eff/logical_pp_bytes_sr_quant   n= 21 mean=  154.062500 last=  154.062500 min=  154.062500 max=  154.062500 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=154.0625
+E[rho]=k3_kl-kl+1                          n= 21 mean=    0.002661 median=    0.001652 last=    0.004007 min=    0.000597 max=    0.015097
+
+== WINDOW steps 61-120 ==
+actor/kl_loss                              n= 49 mean=    0.882359 last=    0.929045 min=    0.826138 max=    0.929045 slope=+0.001622 ols_se=0.000039 hac_se=0.000026 r2=0.974 intercept=0.7317
+rollout_corr/kl                            n= 49 mean=   14.970506 last=   14.989995 min=   14.907491 max=   15.011344 slope=+0.001374 ols_se=0.000087 hac_se=0.000137 r2=0.842 intercept=14.8429
+rollout_corr/k3_kl                         n= 49 mean=   13.975022 last=   13.994002 min=   13.913957 max=   14.012537 slope=+0.001254 ols_se=0.000089 hac_se=0.000124 r2=0.808 intercept=13.8586
+critic/score/mean                          n= 49 mean=    0.633052 last=    0.646484 min=    0.516602 max=    0.704102 slope=+0.001298 ols_se=0.000248 hac_se=0.000184 r2=0.369 intercept=0.5125
+critic/rewards/mean                        n= 49 mean=    0.633052 last=    0.646484 min=    0.516602 max=    0.704102 slope=+0.001298 ols_se=0.000248 hac_se=0.000184 r2=0.369 intercept=0.5125
+actor/entropy                              n= 49 mean=    7.788821 last=    7.787574 min=    7.786819 max=    7.790888 slope=+0.000002 ols_se=0.000008 hac_se=0.000007 r2=0.001 intercept=7.7886
+actor/grad_norm                            n= 49 mean=    2.908772 last=    2.692308 min=    2.425812 max=    5.251674 slope=-0.004182 ols_se=0.004367 hac_se=0.004704 r2=0.019 intercept=3.2971
+actor/ppo_kl                               n= 49 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+actor/pg_clipfrac                          n= 49 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+response_length/mean                       n= 49 mean=  677.259188 last=  660.891602 min=  597.681641 max=  752.303711 slope=-0.727474 ols_se=0.235406 hac_se=0.180067 r2=0.169 intercept=744.8103
+actor/comm_eff/logical_pp_bits_sr_quant    n= 49 mean= 1232.500000 last= 1232.500000 min= 1232.500000 max= 1232.500000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=1232.5000
+actor/comm_eff/logical_pp_bytes_sr_quant   n= 49 mean=  154.062500 last=  154.062500 min=  154.062500 max=  154.062500 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=154.0625
+E[rho]=k3_kl-kl+1                          n= 49 mean=    0.004515 median=    0.002734 last=    0.004007 min=    0.000597 max=    0.033536
+
+== WINDOW steps 21-120 ==
+actor/kl_loss                              n= 89 mean=    0.842109 last=    0.929045 min=    0.756134 max=    0.929045 slope=+0.001684 ols_se=0.000022 hac_se=0.000022 r2=0.985 intercept=0.7254
+rollout_corr/kl                            n= 89 mean=   14.851480 last=   14.989995 min=   14.407557 max=   15.011344 slope=+0.004845 ols_se=0.000304 hac_se=0.000542 r2=0.744 intercept=14.5156
+rollout_corr/k3_kl                         n= 89 mean=   13.929543 last=   13.994002 min=   13.496202 max=   18.595085 slope=+0.001386 ols_se=0.001821 hac_se=0.002424 r2=0.007 intercept=13.8335
+critic/score/mean                          n= 89 mean=    0.559867 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003011 ols_se=0.000173 hac_se=0.000260 r2=0.776 intercept=0.3511
+critic/rewards/mean                        n= 89 mean=    0.559867 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003011 ols_se=0.000173 hac_se=0.000260 r2=0.776 intercept=0.3511
+actor/entropy                              n= 89 mean=    7.788325 last=    7.787574 min=    7.785266 max=    7.790888 slope=+0.000016 ols_se=0.000003 hac_se=0.000003 r2=0.199 intercept=7.7872
+actor/grad_norm                            n= 89 mean=    2.987726 last=    2.692308 min=    2.425812 max=    5.251674 slope=-0.003853 ols_se=0.002023 hac_se=0.002022 r2=0.040 intercept=3.2549
+actor/ppo_kl                               n= 89 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+actor/pg_clipfrac                          n= 89 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+response_length/mean                       n= 89 mean=  707.527333 last=  660.891602 min=  597.681641 max=  824.049805 slope=-1.234233 ols_se=0.106157 hac_se=0.115055 r2=0.608 intercept=793.0915
+actor/comm_eff/logical_pp_bits_sr_quant    n= 89 mean= 1232.500000 last= 1232.500000 min= 1232.500000 max= 1232.500000 slope=-0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=1232.5000
+actor/comm_eff/logical_pp_bytes_sr_quant   n= 89 mean=  154.062500 last=  154.062500 min=  154.062500 max=  154.062500 slope=-0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=154.0625
+E[rho]=k3_kl-kl+1                          n= 89 mean=    0.078063 median=    0.007315 last=    0.004007 min=    0.000597 max=    5.084892
+
+== WINDOW steps 2-120 ==
+actor/kl_loss                              n=108 mean=    0.826900 last=    0.929045 min=    0.745409 max=    0.929045 slope=+0.001598 ols_se=0.000022 hac_se=0.000034 r2=0.981 intercept=0.7325
+rollout_corr/kl                            n=108 mean=   14.791919 last=   14.989995 min=   14.366620 max=   15.011344 slope=+0.005214 ols_se=0.000228 hac_se=0.000315 r2=0.831 intercept=14.4839
+rollout_corr/k3_kl                         n=108 mean=   13.869633 last=   13.994002 min=   13.430162 max=   18.595085 slope=+0.003137 ols_se=0.001301 hac_se=0.001230 r2=0.052 intercept=13.6844
+critic/score/mean                          n=108 mean=    0.524007 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003179 ols_se=0.000131 hac_se=0.000170 r2=0.847 intercept=0.3362
+critic/rewards/mean                        n=108 mean=    0.524007 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003179 ols_se=0.000131 hac_se=0.000170 r2=0.847 intercept=0.3362
+actor/entropy                              n=108 mean=    7.788156 last=    7.787574 min=    7.785266 max=    7.790888 slope=+0.000016 ols_se=0.000002 hac_se=0.000002 r2=0.286 intercept=7.7872
+actor/grad_norm                            n=108 mean=    3.172152 last=    2.692308 min=    2.425812 max=    7.282734 slope=-0.009305 ols_se=0.001931 hac_se=0.002337 r2=0.180 intercept=3.7218
+actor/ppo_kl                               n=108 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+actor/pg_clipfrac                          n=108 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+response_length/mean                       n=108 mean=  719.500859 last=  660.891602 min=  597.681641 max=  838.716797 slope=-1.197482 ols_se=0.083933 hac_se=0.093230 r2=0.658 intercept=790.2299
+actor/comm_eff/logical_pp_bits_sr_quant    n=108 mean= 1232.500000 last= 1232.500000 min= 1232.500000 max= 1232.500000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=1232.5000
+actor/comm_eff/logical_pp_bytes_sr_quant   n=108 mean=  154.062500 last=  154.062500 min=  154.062500 max=  154.062500 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=154.0625
+E[rho]=k3_kl-kl+1                          n=108 mean=    0.077714 median=    0.015028 last=    0.004007 min=    0.000597 max=    5.084892
+
+== WINDOW steps 1-120 ==
+actor/kl_loss                              n=109 mean=    0.819314 last=    0.929045 min=    0.000000 max=    0.929045 slope=+0.001901 ols_se=0.000188 hac_se=0.000290 r2=0.488 intercept=0.7080
+rollout_corr/kl                            n=109 mean=   14.789501 last=   14.989995 min=   14.366620 max=   15.011344 slope=+0.005198 ols_se=0.000225 hac_se=0.000308 r2=0.834 intercept=14.4852
+rollout_corr/k3_kl                         n=109 mean=   13.866926 last=   13.994002 min=   13.430162 max=   18.595085 slope=+0.003184 ols_se=0.001279 hac_se=0.001185 r2=0.055 intercept=13.6806
+critic/score/mean                          n=109 mean=    0.522559 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003168 ols_se=0.000129 hac_se=0.000167 r2=0.849 intercept=0.3371
+critic/rewards/mean                        n=109 mean=    0.522559 last=    0.646484 min=    0.314453 max=    0.704102 slope=+0.003168 ols_se=0.000129 hac_se=0.000167 r2=0.849 intercept=0.3371
+actor/entropy                              n=109 mean=    7.788150 last=    7.787574 min=    7.785266 max=    7.790888 slope=+0.000016 ols_se=0.000002 hac_se=0.000002 r2=0.288 intercept=7.7872
+actor/grad_norm                            n=109 mean=    3.173440 last=    2.692308 min=    2.425812 max=    7.282734 slope=-0.009140 ols_se=0.001902 hac_se=0.002286 r2=0.178 intercept=3.7084
+actor/ppo_kl                               n=109 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+actor/pg_clipfrac                          n=109 mean=    0.000000 last=    0.000000 min=    0.000000 max=    0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=0.0000
+response_length/mean                       n=109 mean=  719.868218 last=  660.891602 min=  597.681641 max=  838.716797 slope=-1.185300 ols_se=0.082873 hac_se=0.092562 r2=0.657 intercept=789.2463
+actor/comm_eff/logical_pp_bits_sr_quant    n=109 mean= 1232.500000 last= 1232.500000 min= 1232.500000 max= 1232.500000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=1232.5000
+actor/comm_eff/logical_pp_bytes_sr_quant   n=109 mean=  154.062500 last=  154.062500 min=  154.062500 max=  154.062500 slope=+0.000000 ols_se=0.000000 hac_se=0.000000 r2=nan intercept=154.0625
+E[rho]=k3_kl-kl+1                          n=109 mean=    0.077425 median=    0.015097 last=    0.004007 min=    0.000597 max=    5.084892
+
+== EXTREMA over the whole a3 series ==
+actor/grad_norm              max=    7.282734 @step  14   min=    2.425812 @step 107   maxabs=    7.282734
+actor/ppo_kl                 max=    0.000000 @step 120   min=    0.000000 @step   1   maxabs=    0.000000
+actor/pg_clipfrac            max=    0.000000 @step 120   min=    0.000000 @step   1   maxabs=    0.000000
+actor/kl_loss                max=    0.929045 @step 120   min=    0.000000 @step   1   maxabs=    0.929045
+rollout_corr/kl              max=   15.011344 @step 111   min=   14.366620 @step  10   maxabs=   15.011344
+critic/score/mean            max=    0.704102 @step  92   min=    0.314453 @step  25   maxabs=    0.704102
+actor/entropy                max=    7.790888 @step 111   min=    7.785266 @step  56   maxabs=    7.790888
+
+== grad_norm restricted to steps 61+ (V2 window) ==
+n=49  max=5.251674 @step 71  mean=2.908772  p90=3.562750
+
+== confinement counters, last observed step (120) ==
+actor/comm_eff/anchor_backwards                            6.0
+actor/comm_eff/anchor_batch_fraction                       1.0
+actor/comm_eff/anchor_batch_prompt_equivalents_global      128.0
+actor/comm_eff/anchor_batch_scope_rollout                  1.0
+actor/comm_eff/anchor_batch_sequences_global               1024.0
+actor/comm_eff/anchor_grad_corrected                       0.0
+actor/comm_eff/anchor_optimizer_steps                      0.0
+actor/comm_eff/anchor_q_activations                        0.0
+actor/comm_eff/anchor_q_broadcasts                         0.0
+actor/comm_eff/anchor_q_stage_overwrites                   0.0
+actor/comm_eff/anchor_q_updates                            0.0
+actor/comm_eff/anchor_replay_fires                         6.0
+actor/comm_eff/anchor_rewards_recomputed                   0.0
+actor/comm_eff/anchor_rollout_n                            8.0
+actor/comm_eff/anchor_rollouts_generated                   0.0
+actor/comm_eff/anchor_update_prompt_equivalents_global     128.0
+actor/comm_eff/anchor_update_sequences_global              1024.0
+actor/comm_eff/logical_pp_bits_sr_quant                    1232.5
+actor/comm_eff/logical_pp_bytes_sr_quant                   154.0625
+actor/comm_eff/mask_applications                           78176.0
+actor/comm_eff/mask_applications/ckpt                      0.0
+actor/comm_eff/mask_applications/old_logprob               19642.0
+actor/comm_eff/mask_applications/ref_logprob               19642.0
+actor/comm_eff/mask_applications/train                     38892.0
+actor/comm_eff/merger_coldM_fallbacks                      0.0
+actor/comm_eff/rank1_correction_bypass_ticks               19.0
+actor/comm_eff/rank1_evr_mean                              1.0
+actor/comm_eff/rank1_fires                                 5.0
+actor/comm_eff/rank1_history_checkpoints                   2.0
+actor/comm_eff/rank1_history_deltas                        1.0
+actor/comm_eff/rank1_m_ready                               1.0
+actor/comm_eff/rank1_prediction_horizon                    20.0
+actor/comm_eff/rank1_q_only_fires                          0.0
+actor/comm_eff/rank1_r2_mean                               1.0
+actor/comm_eff/rank1_warmup_correction_fires               1.0
+actor/comm_eff/rank1_window_span                           20.0
+actor/comm_eff/rank1_zero_motion_tensors                   0.0
+actor/comm_eff/spectral_corrections                        34138.0
+actor/comm_eff/spectral_step                               120.0
+
+== reward level/slope detail, powered vs underpowered windows ==
+critic/score/mean [100,120] n= 21 mean=0.656855 slope=-0.000099 ols_se=0.000690 hac_se=0.000477  t_vs_0=-0.21  t_vs_0.00288=-6.25  MDS95=0.000935
+critic/score/mean [ 91,120] n= 30 mean=0.650130 slope=+0.000761 ols_se=0.000544 hac_se=0.000437  t_vs_0=+1.74  t_vs_0.00288=-4.84  MDS95=0.000857
+critic/score/mean [ 61,120] n= 49 mean=0.633052 slope=+0.001298 ols_se=0.000248 hac_se=0.000184  t_vs_0=+7.04  t_vs_0.00288=-8.58  MDS95=0.000361
+critic/score/mean [ 21,120] n= 89 mean=0.559867 slope=+0.003011 ols_se=0.000173 hac_se=0.000260  t_vs_0=+11.60  t_vs_0.00288=+0.50  MDS95=0.000509
+critic/score/mean [  2,120] n=108 mean=0.524007 slope=+0.003179 ols_se=0.000131 hac_se=0.000170  t_vs_0=+18.68  t_vs_0.00288=+1.76  MDS95=0.000334
+critic/score/mean [  1,120] n=109 mean=0.522559 slope=+0.003168 ols_se=0.000129 hac_se=0.000167  t_vs_0=+18.97  t_vs_0.00288=+1.72  MDS95=0.000327
+
+== gap (rollout_corr/kl) horizon extrapolation on measured 61-120 slope ==
+a3 gap level(100-120)=14.9924  slope(61-120)=+0.001374  hac_se=0.000137  ->  gap(600) ~ 15.6657
+
+== curvature, quadratic fit ==
+rollout_corr/kl        [1,120]: 14.365902 +0.011140x -0.00004857x^2
+actor/kl_loss          [1,120]: 0.682870 +0.003154x -0.00001024x^2
+critic/score/mean      [1,120]: 0.283427 +0.005842x -0.00002186x^2
+
+wrote /Users/shamane/Documents/new-harness/verl/research/runs/93-long-horizon-stability/metrics/a3_local.json

@@ -712,12 +712,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # the engine's ref_logprob branch (gated on Q readiness) registers the hooks
         # on the reference module, and the read-only forward never folds the sketch
         # or advances Q. Mirrors compute_log_prob's compression_active stamping.
-        with self._comm_eff_path("ref_logprob"):
+        #
+        # Dense-view probe (issue #93 I3): when the trainer stamped
+        # comm_eff_probe_dense, this is a measurement-only rerun that must see
+        # every codec silent. Tag None is the anchor's dense precedent: no codec
+        # eligibility set contains None and compression_active stays False, so
+        # mask/quant/powersgd hooks all stay quiet for this forward.
+        probe_dense = bool(tu.get(data, key="comm_eff_probe_dense", default=False))
+        with self._comm_eff_path(None if probe_dense else "ref_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
             self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_compression_active = False
             prev_compression_active = False
-            if comm_eff_state is not None:
+            if comm_eff_state is not None and not probe_dense:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_reference = bool(getattr(ps_cfg, "compress_reference", False)) if ps_cfg is not None else False
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
@@ -728,7 +735,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # (mask_eligible_tags) gates it identically. This makes the
                 # reference-KL a codec-vs-codec quantity (masked-current vs
                 # masked-reference), comparable to PowerSGD's compress_reference.
-                masker_reference = getattr(comm_eff_state, "masker", None) is not None and mask_reference
+                # The sr_quant codec reuses the same mask_reference knob for its
+                # reference-forward eligibility (quantized-current vs
+                # quantized-reference).
+                boundary_codec = getattr(comm_eff_state, "masker", None)
+                if boundary_codec is None:
+                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                masker_reference = boundary_codec is not None and mask_reference
                 if powersgd_reference or masker_reference:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
@@ -754,12 +767,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         # With compress_recompute enabled, old-policy log-prob uses the same
         # frozen PowerSGD basis as the paired actor-train forward.
-        with self._comm_eff_path("old_logprob"):
+        #
+        # Dense-view probe (issue #93 I3): the trainer-stamped
+        # comm_eff_probe_dense flag reruns this pass measurement-only with tag
+        # None (the anchor's dense precedent), so every codec stays silent; see
+        # compute_ref_log_prob.
+        probe_dense = bool(tu.get(data, key="comm_eff_probe_dense", default=False))
+        with self._comm_eff_path(None if probe_dense else "old_logprob"):
             comm_eff_state = self._maybe_comm_eff_state()
             self._comm_eff_thread_global_step(data, comm_eff_state)
             stamped_compression_active = False
             prev_compression_active = False
-            if comm_eff_state is not None:
+            if comm_eff_state is not None and not probe_dense:
                 ps_cfg = getattr(comm_eff_state.config, "powersgd", None)
                 ps_recompute = bool(getattr(ps_cfg, "compress_recompute", False)) if ps_cfg is not None else False
                 mask_cfg = getattr(comm_eff_state.config, "mask", None)
@@ -767,8 +786,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 powersgd_recompute = getattr(comm_eff_state, "powersgd", None) is not None and ps_recompute
                 # The prf_mask codec masks the old-logprob recompute only when
                 # mask.mask_recompute is set; the mask hook's eligibility check
-                # (mask_eligible_tags) gates it identically.
-                masker_recompute = getattr(comm_eff_state, "masker", None) is not None and mask_recompute
+                # (mask_eligible_tags) gates it identically. The sr_quant codec
+                # reuses the same mask_recompute knob.
+                boundary_codec = getattr(comm_eff_state, "masker", None)
+                if boundary_codec is None:
+                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                masker_recompute = boundary_codec is not None and mask_recompute
                 if powersgd_recompute or masker_recompute:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
                     comm_eff_state.compression_active = True
@@ -889,14 +912,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
         """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
 
-        The prf_mask codec keys each token's mask on ``(sample_id, position_id)``;
-        ``sample_id`` is the row's index in this rank's batch. compute_log_prob
-        and update_actor receive that batch in identical row order, so the id is
-        consistent across both forwards and rides each row through PPO mini-batch
-        splitting / dynamic-bsz repacking. No-op when the mask codec is off (no
-        masker built); the PowerSGD and dense paths never see the extra column.
+        The prf_mask and sr_quant codecs key each token's draw on
+        ``(sample_id, position_id)``; ``sample_id`` is the row's index in this
+        rank's batch. compute_log_prob and update_actor receive that batch in
+        identical row order, so the id is consistent across both forwards and
+        rides each row through PPO mini-batch splitting / dynamic-bsz
+        repacking. No-op when neither per-token codec is live (no masker or
+        quantizer built); the PowerSGD and dense paths never see the extra
+        column.
         """
-        if state is None or getattr(state, "masker", None) is None:
+        if state is None or (getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None):
             return
         if "comm_eff_sample_id" in data.keys():
             return
@@ -904,13 +929,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
 
     @contextmanager
-    def _comm_eff_path(self, tag: str):
+    def _comm_eff_path(self, tag: Optional[str]):
         """Stamp the comm_eff execution-path ``tag`` for the wrapped forward.
 
         PowerSGD is allowed only on the actor-train path and, when explicitly
         configured, the paired old-logprob recompute. The prior tag is restored
         on exit so nested operations cannot leak compression into inference,
-        validation, reference-policy, or checkpoint paths.
+        validation, reference-policy, or checkpoint paths. ``None`` stamps the
+        dense measurement view (no codec eligibility set contains ``None``);
+        the trainer's probe passes use it.
         """
         state = self._maybe_comm_eff_state()
         if state is None:
@@ -1006,6 +1033,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         # A candidate was derived from an update that did not
                         # commit. Never let it leak into a later policy pair.
                         powersgd.discard_staged_anchor_basis()
+                # Same handoff for the FRLR mask codec (issue #93). Identical
+                # reasoning to the PowerSGD block above: its anchor fire also lands
+                # inside train_mini_batch, after this batch's old_log_probs were
+                # recomputed, so the candidate is staged there and published here.
+                _mask_codec = getattr(comm_eff_state, "masker", None)
+                if _mask_codec is not None and bool(getattr(_mask_codec, "anchor_owns_q", False)):
+                    if actor_update_succeeded:
+                        try:
+                            did_activate_frlr = _mask_codec.activate_staged_frlr_basis()
+                        except Exception:
+                            _mask_codec.discard_staged_frlr_basis()
+                            raise
+                        if did_activate_frlr:
+                            print(
+                                "[comm_eff][frlr-q-stage] activated after update_actor "
+                                f"global_step={global_step} "
+                                f"generation={_mask_codec.frlr_basis_generation} "
+                                f"activations={_mask_codec.frlr_q_activations}",
+                                flush=True,
+                            )
+                    else:
+                        # Derived from an update that did not commit: never let it
+                        # leak into a later policy pair.
+                        _mask_codec.discard_staged_frlr_basis()
+
                 fast_owns_q = not anchor_owns_q
                 if powersgd is not None and fast_owns_q:
                     did_update = powersgd.maybe_update_basis()

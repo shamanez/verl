@@ -103,6 +103,12 @@ DEFAULT_IGNORE_FILES = (
     # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
     # in this PR.
     "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
+    # This fork's comm-eff research launchers, not model examples: the shared
+    # env-driven engine every MATH launcher execs, the #90 600-step cell and
+    # the #93 run-matrix cell (ARM-selected, model/backend fixed by protocol).
+    "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh",
+    "examples/grpo_trainer/run_prf_exactk_600.sh",
+    "examples/grpo_trainer/run_93_cell.sh",
 )
 
 

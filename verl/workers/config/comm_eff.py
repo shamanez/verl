@@ -26,23 +26,28 @@ no-op path. The nested settings become active only when
 ``comm_eff.enabled=true``.
 """
 
+import math
 from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 
 __all__ = [
     "CommEffMaskConfig",
+    "CommEffQuantConfig",
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
+    "CommEffProbeConfig",
+    "CommEffDCConfig",
     "CommEffConfig",
 ]
 
 # The compression codecs ``comm_eff.compression_type`` may select. Exactly one
 # codec is active per run (mutually exclusive). ``dense`` leaves the activation
 # path uncompressed; ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask;
-# ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``.
-COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd")
+# ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``;
+# ``sr_quant`` is the dense low-bit stochastic-rounding boundary quantizer.
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant")
 
 
 @dataclass
@@ -83,6 +88,24 @@ class CommEffMaskConfig(BaseConfig):
             masked-reference), directly comparable to the PowerSGD codec's
             ``compress_reference`` circuit. ``False`` (default) leaves the
             reference forward dense (masked-current vs dense-reference).
+        dense_every (int): Periodic full-fidelity step (issue #93, default ``0``
+            = off). When ``N > 0`` the codec is bypassed entirely on every
+            trainer step where ``global_step % N == 0``: the boundary hook
+            returns the RAW activation on every path (train, old-logprob
+            recompute and reference alike), so that step's forward AND backward
+            are uncompressed and the fast circuit takes one ordinary RLVR
+            update. The anchor is suppressed on the same step (see
+            ``_comm_eff_maybe_anchor_refresh``), because the anchor computes a
+            correction to a COMPRESSED gradient and there is no compression
+            error to correct on a dense step. Bypassed steps are visible in
+            WandB as a FLAT ``comm_eff/mask_applications/<tag>`` counter across
+            the step, since the hook never fires. Wire accounting: a dense step
+            sends ``H`` numbers per token instead of ``(1-p)*H``, so at
+            ``H=1536``, ``k=77`` and ``N=50`` the average boundary payload rises
+            from 1232 to about 1699 bits/token, 1.38x. Under the deployment
+            premise in ``CLAUDE.md`` that cost is only real if the dense pass
+            crosses the constrained link rather than running in the central
+            mesh, which is the same accounting already applied to the anchor.
         rescale (bool): ``False`` (default) writes the raw product ``h * mask``;
             ``True`` applies inverted-dropout ``h * mask / (1 - p)`` so
             ``E[h_tilde] = h`` (requires ``p < 1``). Honored only when
@@ -143,6 +166,7 @@ class CommEffMaskConfig(BaseConfig):
     pp_size: int = 8
     mask_recompute: bool = False
     mask_reference: bool = False
+    dense_every: int = 0
     rescale: bool = False
     rescale_mode: str = "auto"
     exact_k: bool = False
@@ -153,6 +177,58 @@ class CommEffMaskConfig(BaseConfig):
     frlr_k: int = 44
     frlr_unbiased: bool = False
     frlr_q_cadence: int = 1
+
+
+@dataclass
+class CommEffQuantConfig(BaseConfig):
+    """Dense stochastic-rounding boundary-activation quantization (inert while disabled).
+
+    The sr_quant codec, selected by ``comm_eff.compression_type='sr_quant'``:
+    every pipeline-boundary hidden-state channel is quantized in-graph to
+    ``bits`` bits per value with blockwise absmax scales and unbiased stochastic
+    rounding (``E[q] = h``), and the upstream gradient at the same boundary is
+    quantized the same way on backward (``E[g_hat] = g``, fresh PRF
+    ``direction`` subkey). ``rounding='rn'`` swaps in deterministic
+    round-to-nearest (biased; the ablation control). See
+    ``verl.workers.comm_eff.activation_quant``.
+
+    Knob reuse: sr_quant reuses the ``mask`` sub-config for eligibility and
+    keying: ``mask.mask_recompute`` / ``mask.mask_reference`` widen the
+    eligible path tags exactly as for prf_mask, and ``mask.seed`` /
+    ``mask.pp_size`` provide the PRF base seed and the boundary placement.
+    ``mask.p`` / ``rescale*`` / ``exact_k`` / ``antithetic`` / ``frlr*`` are
+    IGNORED by sr_quant. Like prf_mask, sr_quant carries no PowerSGD basis, so
+    the anchor cannot own ``Q`` under this codec (``anchor.owns_q=false``).
+
+    Args:
+        bits (int): Quantization width per channel; ``L = 2**bits`` uniform
+            levels span ``[-s, +s]`` per (token, block). Default 1 (sign-like:
+            ``q in {-s, +s}`` with ``P(+s) = (h/s + 1)/2``).
+        block_size (int): Channels per absmax-scale block within a token
+            (QSGD-style bucketing). ``0`` (or ``>= hidden_size``) means one
+            whole-token scale. Default 32. Logical PP bits per token per
+            boundary: ``hidden_size*bits + ceil(hidden_size/block_size)*16``
+            (one fp16 scale per block).
+        rounding (str): ``sr`` (default) = unbiased PRF-keyed stochastic
+            rounding; ``rn`` = deterministic round-to-nearest to the same level
+            grid (no PRF draw, trivially pass-identical, biased: the required
+            ablation control).
+        subset_k (int): ``0`` (default) = full-width quantization of all ``H``
+            channels. ``> 0`` (issue #93 I5, the byte-parity hybrid): per token
+            quantize only a PRF-fresh EXACT-``subset_k`` channel subset ``J``
+            (drawn with the mask codec's order-statistic machinery, keyed
+            identically, so ``J`` is bit-identical across the old/train/ref
+            passes of one step), zero elsewhere, rescale by ``H/subset_k``
+            (``E[q] = h`` through both the subset draw and the rounding).
+            Blocks then span ``subset_k`` consecutive KEPT channels; logical PP
+            bits per token per boundary become
+            ``subset_k*bits + subset_k*16/block_size`` (pro-rata tail).
+    """
+
+    bits: int = 1
+    block_size: int = 32
+    rounding: str = "sr"
+    subset_k: int = 0
 
 
 @dataclass
@@ -248,6 +324,95 @@ class CommEffPowerSGDConfig(BaseConfig):
 
 
 @dataclass
+class CommEffProbeConfig(BaseConfig):
+    """Dense-view probe + adaptive reference-KL coefficient (issue #93, I3).
+
+    Every ``probe_every`` trainer steps the trainer reruns the current batch's
+    actor and reference log-prob computations once with every comm_eff codec
+    silent (path tag ``None``, ``compression_active`` untouched): a pure
+    measurement pass, no backward, no weight change. It logs
+    ``probe/kl_dense`` (token-mean ``kl_loss_type`` estimate of
+    KL(pi_theta_dense || pi_ref_dense), the same estimator + aggregation as
+    ``actor/kl_loss``), ``probe/kl_gain`` (actor/kl_loss / probe/kl_dense, the
+    measured G(t)), and ``probe/gap_dense`` (token-mean
+    ``rollout_log_probs - dense actor log probs``, the dense-view
+    train-inference gap).
+
+    ``ctrl_enabled`` closes the loop: projected dual ascent in log space with
+    proportional damping retunes the reference-KL coefficient once per probe,
+    ``beta <- clip(beta * exp(ki*e + kp*(e - e_prev)), beta_min, beta_max)``
+    with ``e = (kl_dense - c)/c`` and setpoint
+    ``c = max(kl_target_floor, kl_target_gain * table(step))``; anti-windup is
+    conditional integration (the integral term freezes while pinned at a
+    bound). ``beta_0`` is the actor's static ``kl_loss_coef``. See
+    ``verl.trainer.ppo.comm_eff_control``.
+
+    Args:
+        probe_every (int): Probe cadence in trainer global steps; 0 (default)
+            disables the probe entirely (bit-identical trainer path).
+        ctrl_enabled (bool): Enable the adaptive KL coefficient controller
+            (requires ``probe_every >= 1``). Off (default) leaves the loss on
+            the static ``kl_loss_coef``.
+        kl_target_table (str): ``"step:value,step:value"`` dense-control
+            reference-KL curve (baked from the finished dense run at matched
+            steps); linear interpolation with edge clamping. Empty (default)
+            means the floor alone sets the target.
+        kl_target_floor (float): Setpoint floor ``c_floor`` in nats.
+        kl_target_gain (float): Multiplier on the interpolated dense KL
+            (``2.0`` = "hold compressed dense-view KL <= 2x dense control").
+        ctrl_ki (float): Integral (dual-ascent) gain on ``e_k``.
+        ctrl_kp (float): Proportional damping gain on ``e_k - e_{k-1}``.
+        ctrl_beta_min (float): Lower projection bound for beta.
+        ctrl_beta_max (float): Upper projection bound for beta.
+    """
+
+    probe_every: int = 0
+    ctrl_enabled: bool = False
+    kl_target_table: str = ""
+    kl_target_floor: float = 0.005
+    kl_target_gain: float = 2.0
+    ctrl_ki: float = 0.3
+    ctrl_kp: float = 0.1
+    ctrl_beta_min: float = 2.0e-4
+    ctrl_beta_max: float = 0.05
+
+
+@dataclass
+class CommEffDCConfig(BaseConfig):
+    """DC-GRPO advantage shaping (issue #93 4.7b, arXiv 2606.08779).
+
+    Once per trainer step, after advantages exist and before ``update_actor``,
+    the driver computes the per-response-token probability discrepancy
+    ``delta_t = |exp(old_log_probs) - exp(rollout_log_probs)|`` (the codec-view
+    trainer probability vs the sampler's; bounded, ratio-free, so it stays
+    numerically alive where importance ratios die) and shapes
+    ``A_t <- A_t - lambda * delta_t`` on response tokens only. The dual
+    variable then takes one projected ascent step,
+    ``lambda <- clip(lambda + eta * (delta_bar - target), 0, lambda_max)``
+    with ``delta_bar`` the response-masked mean of ``delta_t``: lambda grows
+    while the gap exceeds the target and decays toward 0 below it, regulating
+    the GROWTH of the gap without fighting its static part. Zero extra forward
+    passes, zero wire cost; logs ``dc/lambda`` (applied) and ``dc/delta_bar``.
+
+    Args:
+        enabled (bool): Enable DC advantage shaping. Off (default) is a strict
+            trainer no-op (advantages untouched, no metrics).
+        eta (float): Dual ascent step size on ``delta_bar - target``.
+        target (float): Per-token discrepancy setpoint ``c_gap`` = the measured
+            step-1 static floor plus slack. Deliberately NO default magic:
+            the -1.0 sentinel is rejected when enabled; measure, then set.
+        lambda0 (float): Initial shaping strength lambda.
+        lambda_max (float): Upper projection bound for lambda.
+    """
+
+    enabled: bool = False
+    eta: float = 1.0
+    target: float = -1.0
+    lambda0: float = 0.05
+    lambda_max: float = 1.0
+
+
+@dataclass
 class CommEffConfig(BaseConfig):
     """Top-level communication-efficient method configuration.
 
@@ -259,9 +424,12 @@ class CommEffConfig(BaseConfig):
     enabled: bool = False
     compression_type: str = "powersgd"
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
+    quant: CommEffQuantConfig = field(default_factory=CommEffQuantConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
+    probe: CommEffProbeConfig = field(default_factory=CommEffProbeConfig)
+    dc: CommEffDCConfig = field(default_factory=CommEffDCConfig)
 
     def __post_init__(self):
         """Validate without allocating tensors, communicating, or drawing RNG."""
@@ -274,9 +442,12 @@ class CommEffConfig(BaseConfig):
             )
 
         self._validate_mask()
+        self._validate_quant()
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
+        self._validate_probe()
+        self._validate_dc()
         self._validate_cross_circuit_contract()
 
     def _validate_mask(self) -> None:
@@ -292,6 +463,8 @@ class CommEffConfig(BaseConfig):
             raise ValueError(f"comm_eff.mask.mask_recompute must be a bool; got {self.mask.mask_recompute!r}")
         if not isinstance(self.mask.mask_reference, bool):
             raise ValueError(f"comm_eff.mask.mask_reference must be a bool; got {self.mask.mask_reference!r}")
+        if int(self.mask.dense_every) < 0:
+            raise ValueError(f"comm_eff.mask.dense_every must be >= 0 (0 = off); got {self.mask.dense_every!r}")
         if not isinstance(self.mask.rescale, bool):
             raise ValueError(f"comm_eff.mask.rescale must be a bool; got {self.mask.rescale!r}")
         if str(self.mask.rescale_mode).lower() not in ("none", "constant", "rms_match", "auto"):
@@ -343,6 +516,23 @@ class CommEffConfig(BaseConfig):
                     f"residual-norm matching. Got rescale={self.mask.rescale}, "
                     f"rescale_mode={self.mask.rescale_mode!r}."
                 )
+
+    def _validate_quant(self) -> None:
+        """Validate the sr_quant sub-config (no allocation, no RNG)."""
+
+        bits = self.quant.bits
+        if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 16:
+            raise ValueError(f"comm_eff.quant.bits must be an integer in [1, 16]; got {bits!r}")
+        block_size = self.quant.block_size
+        if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 0:
+            raise ValueError(
+                f"comm_eff.quant.block_size must be an integer >= 0 (0 = whole-token scale); got {block_size!r}"
+            )
+        if str(self.quant.rounding) not in ("sr", "rn"):
+            raise ValueError(f"comm_eff.quant.rounding must be one of (sr, rn); got {self.quant.rounding!r}")
+        subset_k = self.quant.subset_k
+        if isinstance(subset_k, bool) or not isinstance(subset_k, int) or subset_k < 0:
+            raise ValueError(f"comm_eff.quant.subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
@@ -493,17 +683,100 @@ class CommEffConfig(BaseConfig):
         if self.powersgd.reortho_eps <= 0.0:
             raise ValueError(f"comm_eff.powersgd.reortho_eps must be > 0; got {self.powersgd.reortho_eps}")
 
+    def _validate_probe(self) -> None:
+        """Validate the dense-view probe / controller sub-config (no allocation)."""
+
+        probe = self.probe
+        if isinstance(probe.probe_every, bool) or not isinstance(probe.probe_every, int) or probe.probe_every < 0:
+            raise ValueError(f"comm_eff.probe.probe_every must be an integer >= 0 (0 = off); got {probe.probe_every!r}")
+        if not isinstance(probe.ctrl_enabled, bool):
+            raise ValueError(f"comm_eff.probe.ctrl_enabled must be a bool; got {probe.ctrl_enabled!r}")
+        if probe.ctrl_enabled and probe.probe_every < 1:
+            raise ValueError(
+                "comm_eff.probe.ctrl_enabled=true requires probe_every >= 1: the controller "
+                "only updates at probes, so without a probe cadence it would never act."
+            )
+        if not isinstance(probe.kl_target_table, str):
+            raise ValueError(
+                f"comm_eff.probe.kl_target_table must be a 'step:value,...' string; got {probe.kl_target_table!r}"
+            )
+        # Import-light parser shared with the runtime controller; fails here so
+        # a malformed table dies at config time, not at the first probe.
+        from verl.trainer.ppo.comm_eff_control import parse_kl_target_table
+
+        try:
+            parse_kl_target_table(probe.kl_target_table)
+        except ValueError as e:
+            raise ValueError(f"comm_eff.probe.kl_target_table invalid: {e}") from None
+        if probe.kl_target_floor <= 0.0:
+            raise ValueError(
+                f"comm_eff.probe.kl_target_floor must be > 0 (the setpoint divides the error); "
+                f"got {probe.kl_target_floor}"
+            )
+        if probe.kl_target_gain <= 0.0:
+            raise ValueError(f"comm_eff.probe.kl_target_gain must be > 0; got {probe.kl_target_gain}")
+        for name in ("ctrl_ki", "ctrl_kp"):
+            value = getattr(probe, name)
+            if value < 0.0:
+                raise ValueError(f"comm_eff.probe.{name} must be >= 0; got {value}")
+        if not 0.0 < probe.ctrl_beta_min <= probe.ctrl_beta_max:
+            raise ValueError(
+                "comm_eff.probe requires 0 < ctrl_beta_min <= ctrl_beta_max; "
+                f"got [{probe.ctrl_beta_min}, {probe.ctrl_beta_max}]"
+            )
+
+    def _validate_dc(self) -> None:
+        """Validate the DC-GRPO advantage-shaping sub-config (no allocation)."""
+
+        dc = self.dc
+        if not isinstance(dc.enabled, bool):
+            raise ValueError(f"comm_eff.dc.enabled must be a bool; got {dc.enabled!r}")
+        if not math.isfinite(dc.eta) or dc.eta < 0.0:
+            raise ValueError(f"comm_eff.dc.eta must be finite and >= 0; got {dc.eta}")
+        if not math.isfinite(dc.lambda_max) or dc.lambda_max <= 0.0:
+            raise ValueError(f"comm_eff.dc.lambda_max must be finite and > 0; got {dc.lambda_max}")
+        if not math.isfinite(dc.lambda0) or not 0.0 <= dc.lambda0 <= dc.lambda_max:
+            raise ValueError(f"comm_eff.dc.lambda0 must be in [0, lambda_max={dc.lambda_max}]; got {dc.lambda0}")
+        if not math.isfinite(dc.target):
+            raise ValueError(f"comm_eff.dc.target must be finite; got {dc.target}")
+        # target has no default magic on purpose: it is the measured step-1
+        # static per-token discrepancy floor plus slack. Reject the sentinel at
+        # config time instead of silently pinning lambda at lambda_max.
+        if dc.enabled and dc.target < 0.0:
+            raise ValueError(
+                "comm_eff.dc.enabled=true requires an explicit comm_eff.dc.target >= 0 "
+                "(the measured step-1 static per-token discrepancy floor plus slack); "
+                f"got {dc.target}"
+            )
+
     def _validate_cross_circuit_contract(self) -> None:
         from verl.workers.comm_eff.lookahead import rank1_relex_enabled
 
         if not self.enabled:
             return
-        # The PRF activation mask is anchor-independent and carries no PowerSGD
-        # basis, so the anchor cannot own a Q under this codec.
+        # The PLAIN PRF activation mask is anchor-independent and carries no
+        # basis at all (its mask is a PRF of seed/step/layer), so the anchor
+        # cannot own a Q under it. FRLR is the exception: it does carry a
+        # per-boundary basis Q, so the anchor CAN own it (issue #93), and then
+        # the Q side channel rides the slow circuit instead of the boundary.
         if self.compression_type == "prf_mask" and self.anchor.owns_q:
+            if not self.mask.frlr:
+                raise ValueError(
+                    "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false unless "
+                    "mask.frlr=true: the plain PRF activation mask has no basis Q for the "
+                    "anchor to own."
+                )
+            if not self.anchor.enabled:
+                raise ValueError(
+                    "comm_eff: mask.frlr with anchor.owns_q=true requires anchor.enabled=true "
+                    "so the FRLR basis has an updater (the fast path is gated off as a Q writer)"
+                )
+        # The SR boundary quantizer is likewise anchor-independent and carries
+        # no PowerSGD basis, so the anchor cannot own a Q under this codec.
+        if self.compression_type == "sr_quant" and self.anchor.owns_q:
             raise ValueError(
-                "comm_eff.compression_type='prf_mask' requires anchor.owns_q=false: the PRF "
-                "activation mask has no PowerSGD basis Q for the anchor to own."
+                "comm_eff.compression_type='sr_quant' requires anchor.owns_q=false: the SR "
+                "boundary quantizer has no PowerSGD basis Q for the anchor to own."
             )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")
@@ -535,10 +808,10 @@ class CommEffConfig(BaseConfig):
             if not self.anchor.owns_q:
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
         # fast_q_bootstrap is a PowerSGD-only feature. It is inert for the
-        # prf_mask codec (no PowerSGD compressor is built), so leaving the
-        # launcher default fast_q_bootstrap=true on a prf_mask arm must not error;
-        # the powersgd path validation below is unchanged.
-        if self.powersgd.fast_q_bootstrap and self.compression_type != "prf_mask":
+        # prf_mask and sr_quant codecs (no PowerSGD compressor is built), so
+        # leaving the launcher default fast_q_bootstrap=true on such an arm must
+        # not error; the powersgd path validation below is unchanged.
+        if self.powersgd.fast_q_bootstrap and self.compression_type not in ("prf_mask", "sr_quant"):
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
             if not self.anchor.owns_q:

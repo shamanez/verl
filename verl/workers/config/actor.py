@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -177,6 +178,17 @@ class ActorConfig(BaseConfig):
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
+    # CVC CE mode (issue #93 4.7a): weight on the training-view cross entropy
+    # -log pi_theta(a_t) over response tokens. Under an active comm_eff codec
+    # that log-prob IS the codec view, so the term trains the train-inference
+    # disagreement down. 0.0 (default) is a strict no-op; the effective weight
+    # ramps linearly from 0 over cvc_warmup_steps trainer steps (the codec view
+    # starts below uniform, so the earliest CE gradient points toward
+    # uniformizing). The anchor pass does not mirror this term: its dense
+    # forward has no codec disagreement to train down (#93 4.8, anchor
+    # unchanged in phase 1).
+    cvc_lambda: float = 0.0
+    cvc_warmup_steps: int = 20
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 1
@@ -222,6 +234,13 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+
+        if not math.isfinite(self.cvc_lambda) or self.cvc_lambda < 0.0:
+            raise ValueError(f"actor.cvc_lambda must be finite and >= 0 (0 = off); got {self.cvc_lambda!r}")
+        if isinstance(self.cvc_warmup_steps, bool) or not isinstance(self.cvc_warmup_steps, int):
+            raise ValueError(f"actor.cvc_warmup_steps must be an integer >= 0; got {self.cvc_warmup_steps!r}")
+        if self.cvc_warmup_steps < 0:
+            raise ValueError(f"actor.cvc_warmup_steps must be >= 0 (0 = no ramp); got {self.cvc_warmup_steps}")
 
         # The dense anchor M is a control signal for the fast actor, so silently
         # changing its objective is unsafe. anchor_pg_loss implements an explicit

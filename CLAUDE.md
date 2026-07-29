@@ -10,11 +10,22 @@ dataset, and launcher defaults from unrelated upstream examples.
   `EleutherAI/hendrycks_math`; default directory `$HOME/data/math`.
 - GRPO: train batch 512, PPO mini-batch 256, rollout `n=8`, prompt/response
   1024/3072, AdamW `1e-6`, reference `low_var_kl=0.001`, 100 steps.
-- Activations: PowerSGD rank 77 with synchronized, warm-started,
-  activation-derived `Q` and fast-Q bootstrap.
+- Activations: **PRF exact-k** (`compression_type=prf_mask`, `p=0.95`,
+  `exact_k=true`, `rescale_mode=constant`, masking the train forward, the
+  old-logprob recompute and the reference forward). Exactly 77 of 1536
+  coordinates per token, 1232 bits/token/boundary. Unbiased, and the mask is a
+  PRF of seed/step/layer so nothing is transmitted and there is no side channel.
+  **Changed from PowerSGD rank 77 on 2026-07-29 by issue #93:** twelve arms were
+  run to beat it on stability and none did; it is the only codec with 600 steps
+  of evidence that the optimizer stays in a steady state (gap slope
+  +0.000848/step over 100-599, grad-norm block median flat 1.50-1.82, block max
+  never above 4.645). PowerSGD rank 77 is unchanged and still tested; reach it
+  with `COMM_EFF_COMPRESSION_TYPE=powersgd`.
 - Anchor: paired dense replay, cadence/delay 20/20 optimizer ticks,
   `rollout_batch` (full 512p/4096s replay; `ppo_minibatch` halves it at ~no
-  accuracy cost per #84), CPU replay/snapshots, anchor-owned `Q`.
+  accuracy cost per #84), CPU replay/snapshots, **`owns_q=false`** (the plain PRF
+  mask has no basis `Q` for the anchor to own, and the config validator rejects
+  `owns_q=true` with `prf_mask` unless `mask.frlr=true`).
 - Weights: rank-1 RELEX, fixed W2 (window 2, two-checkpoint secant; #83 val@60
   winner over progressive/W4), strength 1, `auto`, `stale_correct`.
 - Gradient signal: signed-EMA `M` over all floating parameters,

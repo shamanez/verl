@@ -1,0 +1,46 @@
+{
+  "run": "a2-srq-b1-rn",
+  "run_id": "3muohefm",
+  "state": "finished",
+  "max_step": 62,
+  "gate_window": [
+    40,
+    60
+  ],
+  "gate_window_rows": 21,
+  "metrics": {
+    "ref_kl_gate": 1.452130673275817,
+    "ref_kl_slope_per_step": 0.019097069309785792,
+    "gap_gate": 12.185135341825939,
+    "gap_slope_per_step": 0.01689619217212904,
+    "e_rho_gate": 0.03245794205438557,
+    "reward_slope_full": 0.005216669932449454,
+    "reward_slope_gate": 0.004842228084415582,
+    "ppo_kl_max_abs": 0.0,
+    "entropy_gate": 7.9493730408804755,
+    "entropy_slope_per_step": 0.0011940444204119273,
+    "grad_norm_max": 62.237796783447266
+  },
+  "confinement": {
+    "mask_applications": 41636.0,
+    "spectral_corrections": 14534.0,
+    "anchor_replay_fires": 3.0,
+    "rank1_bypass_ticks": 19.0
+  },
+  "baseline": {
+    "run": "90-prf-exactk-600",
+    "ref_kl_gate_lo": 0.156,
+    "ref_kl_gate_hi": 0.203,
+    "gap": 14.24,
+    "e_rho": 0.0014,
+    "reward_slope": 0.0032
+  },
+  "gate_flags": {
+    "ref_kl_le_baseline": false,
+    "gap_lt_10": false,
+    "gap_lt_3_target": false,
+    "reward_slope_parity": true,
+    "ppo_kl_zero": true,
+    "e_rho_gt_0p05": false
+  }
+}

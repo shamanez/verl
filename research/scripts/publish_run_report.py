@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ruff: noqa: E501  (inline report-template CSS lines are long by design)
+
 """publish_run_report.py — publish a finished run's report to the Cloudflare
 Pages repo (project.yaml `reports:` block) and its bulk artifacts to R2.
 
@@ -35,16 +51,17 @@ import sys
 from datetime import date
 from pathlib import Path
 
+
 def _resolve_research() -> Path:
     """Anchor to the PRIMARY checkout's research/ (same rule as _lib.sh
     lib_research_dir) — /close may run in a per-issue worktree whose runs/
     is empty while the artifacts live in the primary checkout."""
-    here = Path(__file__).resolve().parent.parent            # this file's research/
+    here = Path(__file__).resolve().parent.parent  # this file's research/
     try:
-        out = subprocess.run(["git", "-C", str(here), "worktree", "list", "--porcelain"],
-                             capture_output=True, text=True, timeout=15)
-        first = next((l.split(" ", 1)[1] for l in out.stdout.splitlines()
-                      if l.startswith("worktree ")), None)
+        out = subprocess.run(
+            ["git", "-C", str(here), "worktree", "list", "--porcelain"], capture_output=True, text=True, timeout=15
+        )
+        first = next((ln.split(" ", 1)[1] for ln in out.stdout.splitlines() if ln.startswith("worktree ")), None)
         if first and (Path(first) / "research").is_dir():
             return Path(first) / "research"
     except Exception:
@@ -52,7 +69,7 @@ def _resolve_research() -> Path:
     return here
 
 
-RESEARCH = _resolve_research()                               # primary checkout's research/
+RESEARCH = _resolve_research()  # primary checkout's research/
 PROJECT_YAML = RESEARCH / ".claude" / "project.yaml"
 SECRETS_FILE = Path(os.path.expanduser("~/.config/verl-research/secrets.env"))
 MARKER = "<!-- runs:insert -->"
@@ -65,7 +82,7 @@ def yaml_block_value(block: str, key: str, default: str = "") -> str:
         if re.match(rf"^{block}:", line):
             in_block = True
             continue
-        if in_block and re.match(r"^[a-zA-Z_]", line):        # next top-level block
+        if in_block and re.match(r"^[a-zA-Z_]", line):  # next top-level block
             break
         if in_block:
             m = re.match(rf"^  {key}:\s*(.*?)\s*(?:#.*)?$", line)
@@ -110,25 +127,34 @@ def md_to_html(md: str) -> str:
     in_list = False
     while i < len(lines):
         ln = lines[i]
-        if ln.startswith("```"):                              # code fence
+        if ln.startswith("```"):  # code fence
             fence = []
             i += 1
             while i < len(lines) and not lines[i].startswith("```"):
-                fence.append(lines[i]); i += 1
-            out.append("<pre><code>%s</code></pre>" % html.escape("\n".join(fence)))
+                fence.append(lines[i])
+                i += 1
+            fence_html = html.escape("\n".join(fence))
+            out.append(f"<pre><code>{fence_html}</code></pre>")
             i += 1
             continue
         # a GFM separator row must carry BOTH '-' and '|' — a bare '---' hr or a
         # whitespace-only line must not turn the preceding prose into a table
-        if ("|" in ln and i + 1 < len(lines)
-                and re.match(r"^\s*[|: -]+$", lines[i + 1])
-                and "-" in lines[i + 1] and "|" in lines[i + 1]):
+        if (
+            "|" in ln
+            and i + 1 < len(lines)
+            and re.match(r"^\s*[|: -]+$", lines[i + 1])
+            and "-" in lines[i + 1]
+            and "|" in lines[i + 1]
+        ):
             if in_list:
-                out.append("</ul>"); in_list = False
+                out.append("</ul>")
+                in_list = False
             hdr = [c.strip() for c in ln.strip().strip("|").split("|")]
-            out.append('<div class="tablewrap"><table><thead><tr>'
-                       + "".join(f"<th>{inline(c)}</th>" for c in hdr)
-                       + "</tr></thead><tbody>")
+            out.append(
+                '<div class="tablewrap"><table><thead><tr>'
+                + "".join(f"<th>{inline(c)}</th>" for c in hdr)
+                + "</tr></thead><tbody>"
+            )
             i += 2
             while i < len(lines) and "|" in lines[i]:
                 cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
@@ -137,14 +163,16 @@ def md_to_html(md: str) -> str:
             out.append("</tbody></table></div>")
             continue
         if in_list and not re.match(r"^\s*[-*] ", ln):
-            out.append("</ul>"); in_list = False
+            out.append("</ul>")
+            in_list = False
         m = re.match(r"^(#{1,4})\s+(.*)$", ln)
         if m:
-            lvl = min(len(m.group(1)) + 1, 5)                 # h1 in md → h2 on page
+            lvl = min(len(m.group(1)) + 1, 5)  # h1 in md → h2 on page
             out.append(f"<h{lvl}>{inline(m.group(2))}</h{lvl}>")
         elif re.match(r"^\s*[-*] ", ln):
             if not in_list:
-                out.append("<ul>"); in_list = True
+                out.append("<ul>")
+                in_list = True
             item = re.sub(r"^\s*[-*] ", "", ln)
             out.append(f"<li>{inline(item)}</li>")
         elif ln.strip() == "":
@@ -161,11 +189,14 @@ def md_to_html(md: str) -> str:
 def gh_issue(repo: str, n: int) -> dict:
     try:
         raw = subprocess.run(
-            ["gh", "issue", "view", str(n), "--repo", repo,
-             "--json", "title,url,labels,closedAt,comments,body"],
-            capture_output=True, text=True, timeout=60, check=True).stdout
+            ["gh", "issue", "view", str(n), "--repo", repo, "--json", "title,url,labels,closedAt,comments,body"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
         return json.loads(raw)
-    except Exception as e:                                    # offline degradation
+    except Exception as e:  # offline degradation
         print(f"warn: gh issue view failed ({e}) — building from local files only", file=sys.stderr)
         return {}
 
@@ -222,17 +253,19 @@ details{margin:12px 0}summary{cursor:pointer;font-weight:700}
 VERDICT_CLASS = {"PASS": "pass", "STOP": "stop", "REVISE": "revise", "DONE": "info"}
 
 
-def render_page(cfg, run_id, issue_n, issue, verdict, close_md, verdict_md,
-                resolved_txt, wandb_url, r2_url, pr_url, artifacts_rel):
+def render_page(
+    cfg, run_id, issue_n, issue, verdict, close_md, verdict_md, resolved_txt, wandb_url, r2_url, pr_url, artifacts_rel
+):
     title = issue.get("title", run_id)
     closed = (issue.get("closedAt") or "")[:10] or date.today().isoformat()
-    kind = next((l["name"].split(":", 1)[1] for l in issue.get("labels", [])
-                 if l["name"].startswith("kind:")), "")
+    kind = next((lb["name"].split(":", 1)[1] for lb in issue.get("labels", []) if lb["name"].startswith("kind:")), "")
     parts = []
     parts.append(f'<p class="crumb"><a href="index.html">← All runs</a> · {run_id}</p>')
     parts.append(f"<h1>{html.escape(title)}</h1>")
-    badges = [f'<span class="badge {VERDICT_CLASS.get(verdict, "info")}">{verdict}</span>',
-              f'<span class="badge info">closed {closed}</span>']
+    badges = [
+        f'<span class="badge {VERDICT_CLASS.get(verdict, "info")}">{verdict}</span>',
+        f'<span class="badge info">closed {closed}</span>',
+    ]
     if kind:
         badges.append(f'<span class="badge info">kind: {html.escape(kind)}</span>')
     parts.append('<div class="badges">' + "".join(badges) + "</div>")
@@ -247,26 +280,31 @@ def render_page(cfg, run_id, issue_n, issue, verdict, close_md, verdict_md,
         links.append(f'<a href="{r2_url}">R2 artifacts</a>')
     parts.append('<div class="links">' + "".join(links) + "</div>")
     if artifacts_rel:
-        parts.append(f'<p class="crumb">Small artifacts (local only, not deployed): '
-                     f'<code>{html.escape(artifacts_rel)}</code></p>')
+        parts.append(
+            f'<p class="crumb">Small artifacts (local only, not deployed): '
+            f"<code>{html.escape(artifacts_rel)}</code></p>"
+        )
     if close_md:
-        parts.append("<section><h2>Close-out verdict (issue record)</h2>"
-                     + md_to_html(close_md) + "</section>")
+        parts.append("<section><h2>Close-out verdict (issue record)</h2>" + md_to_html(close_md) + "</section>")
     if verdict_md:
-        parts.append("<section><h2>Analyst verdict (verdict.md)</h2>"
-                     + md_to_html(verdict_md) + "</section>")
+        parts.append("<section><h2>Analyst verdict (verdict.md)</h2>" + md_to_html(verdict_md) + "</section>")
     if resolved_txt:
-        parts.append("<section><h2>Provenance</h2><details><summary>resolved_params.txt "
-                     "(what actually ran)</summary><pre>"
-                     + html.escape(resolved_txt) + "</pre></details></section>")
-    parts.append('<p class="footer">Generated by the research harness at /close '
-                 f'(publish_run_report.py) · source of truth: the GitHub issue thread.</p>')
+        parts.append(
+            "<section><h2>Provenance</h2><details><summary>resolved_params.txt "
+            "(what actually ran)</summary><pre>" + html.escape(resolved_txt) + "</pre></details></section>"
+        )
+    parts.append(
+        '<p class="footer">Generated by the research harness at /close '
+        "(publish_run_report.py) · source of truth: the GitHub issue thread.</p>"
+    )
     body = "\n".join(parts)
-    return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-            f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{html.escape(run_id)} · run report</title>\n"
-            f"<style>{PAGE_CSS}</style>\n</head>\n<body>\n<div class=\"shell\">\n"
-            f"{body}\n</div>\n</body>\n</html>\n")
+    return (
+        f'<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{html.escape(run_id)} · run report</title>\n"
+        f'<style>{PAGE_CSS}</style>\n</head>\n<body>\n<div class="shell">\n'
+        f"{body}\n</div>\n</body>\n</html>\n"
+    )
 
 
 def index_card(run_id, issue_n, issue, verdict, one_liner):
@@ -275,7 +313,7 @@ def index_card(run_id, issue_n, issue, verdict, one_liner):
     return f"""      <a class="run-card" href="{run_id}.html" data-run="{run_id}">
         <div class="card-top">
           <span class="date">{closed}</span>
-          <span class="status {VERDICT_CLASS.get(verdict, 'info')}">{verdict}</span>
+          <span class="status {VERDICT_CLASS.get(verdict, "info")}">{verdict}</span>
         </div>
         <h3>#{issue_n} · {title}</h3>
         <p>{html.escape(one_liner)}</p>
@@ -291,8 +329,12 @@ def main():
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--no-push", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--small-mb", type=float, default=20.0,
-                    help="files ≤ this size copy to the local artifacts dir; larger go to R2")
+    ap.add_argument(
+        "--small-mb",
+        type=float,
+        default=20.0,
+        help="files ≤ this size copy to the local artifacts dir; larger go to R2",
+    )
     args = ap.parse_args()
     n, run_id = args.issue, args.run_id
 
@@ -304,7 +346,7 @@ def main():
     push_on_publish = yaml_block_value("reports", "push_on_publish", "true") == "true"
     research_repo = yaml_block_value("github", "research_repo")
     wandb_entity = yaml_block_value("wandb", "entity")
-    wandb_project = yaml_block_value("wandb", "project")
+    wandb_project = yaml_block_value("wandb", "project")  # noqa: F841  (parsed for parity with entity)
     if not repo_dir.is_dir():
         sys.exit(f"REFUSED: reports.repo_dir {repo_dir} does not exist")
 
@@ -319,8 +361,7 @@ def main():
     # WandB uses a PER-ISSUE project == run_id (the launcher exports PROJECT_NAME=$RUN_ID
     # and WANDB_RUN_GROUP=$RUN_ID). project.yaml wandb.project is the GLOBAL default, NOT
     # what per-issue runs log to, so link the per-issue project view directly.
-    wandb_url = (f"https://wandb.ai/{wandb_entity}/{run_id}"
-                 if wandb_entity else "")
+    wandb_url = f"https://wandb.ai/{wandb_entity}/{run_id}" if wandb_entity else ""
     one_liner = ""
     if close_md:
         for ln in close_md.splitlines():
@@ -355,13 +396,19 @@ def main():
                 if args.dry_run:
                     uploaded.append(str(rel))
                 elif r2["R2_ACCESS_KEY_ID"] and shutil.which("aws"):
-                    env = dict(os.environ,
-                               AWS_ACCESS_KEY_ID=r2["R2_ACCESS_KEY_ID"],
-                               AWS_SECRET_ACCESS_KEY=r2["R2_SECRET_ACCESS_KEY"])
+                    env = dict(
+                        os.environ,
+                        AWS_ACCESS_KEY_ID=r2["R2_ACCESS_KEY_ID"],
+                        AWS_SECRET_ACCESS_KEY=r2["R2_SECRET_ACCESS_KEY"],
+                    )
                     try:
-                        rc = subprocess.run(["aws", "s3", "cp", str(f), key,
-                                             "--endpoint-url", r2["R2_ENDPOINT"]],
-                                            env=env, capture_output=True, text=True, timeout=1800)
+                        rc = subprocess.run(
+                            ["aws", "s3", "cp", str(f), key, "--endpoint-url", r2["R2_ENDPOINT"]],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=1800,
+                        )
                         err = rc.stderr[-300:] if rc.returncode != 0 else ""
                     except (subprocess.TimeoutExpired, OSError) as e:
                         rc, err = None, str(e)[-300:]
@@ -375,10 +422,20 @@ def main():
                     print(f"warn: no R2 creds/aws CLI — skipped {rel} ({size_mb:.0f} MB)", file=sys.stderr)
 
     # page + index card
-    page = render_page(cfg=None, run_id=run_id, issue_n=n, issue=issue, verdict=verdict,
-                       close_md=close_md, verdict_md=verdict_md, resolved_txt=resolved,
-                       wandb_url=wandb_url, r2_url=r2_url, pr_url=pr_url,
-                       artifacts_rel=f"artifacts/{run_id}/" if copied else "")
+    page = render_page(
+        cfg=None,
+        run_id=run_id,
+        issue_n=n,
+        issue=issue,
+        verdict=verdict,
+        close_md=close_md,
+        verdict_md=verdict_md,
+        resolved_txt=resolved,
+        wandb_url=wandb_url,
+        r2_url=r2_url,
+        pr_url=pr_url,
+        artifacts_rel=f"artifacts/{run_id}/" if copied else "",
+    )
     page_path = runs_dir / f"{run_id}.html"
     index_path = runs_dir / "index.html"
     if args.dry_run:
@@ -402,14 +459,18 @@ def main():
     if not args.dry_run:
         to_add = [str(p) for p in (page_path, index_path) if p.exists()]
         try:
-            rc = subprocess.run(["git", "-C", str(repo_dir), "add", *to_add],
-                                capture_output=True, text=True, timeout=60)
+            rc = subprocess.run(
+                ["git", "-C", str(repo_dir), "add", *to_add], capture_output=True, text=True, timeout=60
+            )
             if rc.returncode != 0:
                 problems.append("git add failed in report repo")
                 print(f"warn: report-repo add failed: {rc.stderr[-200:]}", file=sys.stderr)
-            rc = subprocess.run(["git", "-C", str(repo_dir), "commit", "-q", "-m",
-                                 f"run report: {run_id} (#{n}) {verdict}"],
-                                capture_output=True, text=True, timeout=60)
+            rc = subprocess.run(
+                ["git", "-C", str(repo_dir), "commit", "-q", "-m", f"run report: {run_id} (#{n}) {verdict}"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
             if rc.returncode != 0 and "nothing to commit" not in (rc.stdout + rc.stderr):
                 problems.append("git commit failed in report repo")
                 print(f"warn: report-repo commit failed: {(rc.stdout + rc.stderr)[-200:]}", file=sys.stderr)
@@ -418,8 +479,7 @@ def main():
             print(f"warn: report-repo git error: {str(e)[-200:]}", file=sys.stderr)
         if push_on_publish and not args.no_push:
             try:
-                rc = subprocess.run(["git", "-C", str(repo_dir), "push"],
-                                    capture_output=True, text=True, timeout=120)
+                rc = subprocess.run(["git", "-C", str(repo_dir), "push"], capture_output=True, text=True, timeout=120)
                 if rc.returncode == 0:
                     print("report repo pushed — Cloudflare Pages will deploy")
                 else:
@@ -429,13 +489,14 @@ def main():
                 problems.append("push errored (report committed locally, NOT deployed)")
                 print(f"warn: push errored: {str(e)[-200:]}", file=sys.stderr)
 
-    tail = (f" · small_artifacts={len(copied)} → {artifacts_dir if copied else '—'}"
-            f" · r2_uploads={len(uploaded)} → {r2_prefix}/{run_id}/")
+    tail = (
+        f" · small_artifacts={len(copied)} → {artifacts_dir if copied else '—'}"
+        f" · r2_uploads={len(uploaded)} → {r2_prefix}/{run_id}/"
+    )
     if problems and not args.dry_run:
         # nonzero exit so /close flags a human instead of running the cleanup
         # sweep — a partial publish must never look like success.
-        print(f"REPORT_PUBLISH_PARTIAL: {site_url}/runs/{run_id}.html{tail}"
-              f" · problems: {'; '.join(problems)}")
+        print(f"REPORT_PUBLISH_PARTIAL: {site_url}/runs/{run_id}.html{tail} · problems: {'; '.join(problems)}")
         sys.exit(2)
     print(f"REPORT_PUBLISHED: {site_url}/runs/{run_id}.html{tail}")
 

@@ -1,0 +1,145 @@
+== integrity (a1 rows only, pid 6382) ==
+metric lines parsed: 1070 unique steps: 120 min: 1 max: 120
+gaps: []
+steps whose duplicate log lines disagree on ['actor/kl_loss', 'rollout_corr/kl', 'critic/rewards/mean', 'response_length/mean'] : 0
+NaN/Inf metric entries: 0
+EXCLUDED foreign rows (a2, pid 93602): 2 (steps 1-2); they differ from a1 at the same step,
+  e.g. a1 step1 reward 0.3662109375 gap 13.182190895080566 vs a2 step1 reward 0.3525390625 gap 11.496414184570312
+
+== GATE WINDOW, steps 100-120 (n=21) ==
+actor/kl_loss          n= 21 mean=    2.251837 last=    2.304283 min=   2.216483 max=   2.304283 slope=+0.003887 ols_se=0.000234 hac_se=0.000251(L=2) r2=0.935 residSD=0.00650
+rollout_corr/kl        n= 21 mean=   13.751145 last=   13.774802 min=  13.717097 max=  13.787826 slope=+0.002825 ols_se=0.000351 hac_se=0.000219(L=2) r2=0.773 residSD=0.00974
+rollout_corr/k3_kl     n= 21 mean=   12.756624 last=   12.776819 min=  12.721568 max=  12.790096 slope=+0.002311 ols_se=0.000428 hac_se=0.000384(L=2) r2=0.605 residSD=0.01189
+critic/rewards/mean    n= 21 mean=    0.652948 last=    0.631836 min=   0.603516 max=   0.735352 slope=-0.001074 ols_se=0.001003 hac_se=0.000621(L=2) r2=0.057 residSD=0.02782
+critic/score/mean      n= 21 mean=    0.652948 last=    0.631836 min=   0.603516 max=   0.735352 slope=-0.001074 ols_se=0.001003 hac_se=0.000621(L=2) r2=0.057 residSD=0.02782
+actor/entropy          n= 21 mean=    7.934806 last=    7.938554 min=   7.931649 max=   7.938554 slope=+0.000309 ols_se=0.000040 hac_se=0.000023(L=2) r2=0.756 residSD=0.00112
+actor/grad_norm        n= 21 mean=    0.648968 last=    0.657618 min=   0.608056 max=   0.699805 slope=-0.000881 ols_se=0.000829 hac_se=0.000760(L=2) r2=0.056 residSD=0.02300
+actor/ppo_kl           n= 21 mean=    0.000000 last=    0.000000 min=   0.000000 max=   0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000(L=2) r2=nan residSD=0.00000
+actor/pg_clipfrac      n= 21 mean=    0.000000 last=    0.000000 min=   0.000000 max=   0.000000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000(L=2) r2=nan residSD=0.00000
+actor/kl_coef          n= 21 mean=    0.001000 last=    0.001000 min=   0.001000 max=   0.001000 slope=+0.000000 ols_se=0.000000 hac_se=0.000000(L=2) r2=0.000 residSD=0.00000
+E[rho]=k3_kl-kl+1      n= 21 mean=    0.005479 last=    0.002017 median=0.002527 min=0.000504 max=0.027912
+
+== FULL RUN, steps 1-120 ==
+actor/kl_loss          n=120 first=   0.000000 last=   2.304283 slope=+0.004349 ols_se=0.000446 hac_se=0.000707 r2=0.447  t_hac(vs 0.00288)=+2.08
+rollout_corr/kl        n=120 first=  13.182191 last=  13.774802 slope=+0.006583 ols_se=0.000168 hac_se=0.000312 r2=0.929  t_hac(vs 0.00288)=+11.87
+critic/rewards/mean    n=120 first=   0.366211 last=   0.631836 slope=+0.003235 ols_se=0.000125 hac_se=0.000210 r2=0.850  t_hac(vs 0.00288)=+1.69
+actor/entropy          n=120 first=   7.899606 last=   7.938554 slope=+0.000365 ols_se=0.000004 hac_se=0.000006 r2=0.986  t_hac(vs 0.00288)=-441.53
+actor/grad_norm        n=120 first=   0.863399 last=   0.657618 slope=-0.001545 ols_se=0.000138 hac_se=0.000328 r2=0.514  t_hac(vs 0.00288)=-13.49
+actor/ppo_kl max|.| over 120 steps = 0.0   actor/pg_clipfrac max|.| = 0.0
+actor/grad_norm max = 0.898240 at step 11
+actor/kl_coef distinct values = [0.001, 0.0010000000000000002]
+
+== SEGMENT SLOPES (window dependence) ==
+  actor/kl_loss
+    [  1,120] n=120 mean=  2.05573 slope=+0.004349 se=0.000446 r2=0.447
+    [  2,120] n=119 mean=  2.07301 slope=+0.003581 se=0.000046 r2=0.981
+    [  1, 30] n= 30 mean=  1.85406 slope=+0.013162 se=0.007098 r2=0.109
+    [  2, 39] n= 38 mean=  1.92860 slope=+0.001743 se=0.000195 r2=0.689
+    [ 31, 60] n= 30 mean=  2.00137 slope=+0.003682 se=0.000212 r2=0.915
+    [  2, 60] n= 59 mean=  1.96039 slope=+0.002707 se=0.000121 r2=0.897
+    [ 40, 77] n= 38 mean=  2.06083 slope=+0.004592 se=0.000186 r2=0.944
+    [ 61, 90] n= 30 mean=  2.13267 slope=+0.002931 se=0.000146 r2=0.935
+    [ 61,120] n= 60 mean=  2.18375 slope=+0.003400 se=0.000059 r2=0.983
+    [ 78,120] n= 43 mean=  2.21138 slope=+0.003684 se=0.000087 r2=0.978
+    [ 81,120] n= 40 mean=  2.21671 slope=+0.003719 se=0.000094 r2=0.976
+    [ 91,120] n= 30 mean=  2.23483 slope=+0.003834 se=0.000150 r2=0.959
+    [100,120] n= 21 mean=  2.25184 slope=+0.003887 se=0.000234 r2=0.935
+  rollout_corr/kl
+    [  1,120] n=120 mean= 13.48620 slope=+0.006583 se=0.000168 r2=0.929
+    [  2,120] n=119 mean= 13.48875 slope=+0.006620 se=0.000169 r2=0.929
+    [  1, 30] n= 30 mean= 13.14484 slope=+0.002872 se=0.001146 r2=0.183
+    [  2, 39] n= 38 mean= 13.18061 slope=+0.006112 se=0.000826 r2=0.604
+    [ 31, 60] n= 30 mean= 13.41899 slope=+0.010602 se=0.000648 r2=0.905
+    [  2, 60] n= 59 mean= 13.28361 slope=+0.008805 se=0.000419 r2=0.886
+    [ 40, 77] n= 38 mean= 13.53628 slope=+0.007795 se=0.000367 r2=0.926
+    [ 61, 90] n= 30 mean= 13.64101 slope=+0.003722 se=0.000316 r2=0.832
+    [ 61,120] n= 60 mean= 13.69048 slope=+0.003265 se=0.000100 r2=0.948
+    [ 78,120] n= 43 mean= 13.71906 slope=+0.003020 se=0.000157 r2=0.900
+    [ 81,120] n= 40 mean= 13.72376 slope=+0.002990 se=0.000155 r2=0.908
+    [ 91,120] n= 30 mean= 13.73995 slope=+0.002610 se=0.000209 r2=0.847
+    [100,120] n= 21 mean= 13.75114 slope=+0.002825 se=0.000351 r2=0.773
+  critic/rewards/mean
+    [  1,120] n=120 mean=  0.52475 slope=+0.003235 se=0.000125 r2=0.850 t(vs 0)=+25.87 t(vs 0.00288 bar)=+2.84
+    [  2,120] n=119 mean=  0.52608 slope=+0.003250 se=0.000127 r2=0.849 t(vs 0)=+25.61 t(vs 0.00288 bar)=+2.92
+    [  1, 30] n= 30 mean=  0.35553 slope=+0.000210 se=0.000525 r2=0.006 t(vs 0)=+0.40 t(vs 0.00288 bar)=-5.08
+    [  2, 39] n= 38 mean=  0.36786 slope=+0.001738 se=0.000424 r2=0.318 t(vs 0)=+4.09 t(vs 0.00288 bar)=-2.69
+    [ 31, 60] n= 30 mean=  0.48848 slope=+0.007261 se=0.000603 r2=0.838 t(vs 0)=+12.03 t(vs 0.00288 bar)=+7.26
+    [  2, 60] n= 59 mean=  0.42295 slope=+0.004380 se=0.000308 r2=0.780 t(vs 0)=+14.22 t(vs 0.00288 bar)=+4.87
+    [ 40, 77] n= 38 mean=  0.55754 slope=+0.004362 se=0.000523 r2=0.659 t(vs 0)=+8.34 t(vs 0.00288 bar)=+2.83
+    [ 61, 90] n= 30 mean=  0.61136 slope=+0.001405 se=0.000670 r2=0.136 t(vs 0)=+2.10 t(vs 0.00288 bar)=-2.20
+    [ 61,120] n= 60 mean=  0.62749 slope=+0.001077 se=0.000243 r2=0.254 t(vs 0)=+4.44 t(vs 0.00288 bar)=-7.43
+    [ 78,120] n= 43 mean=  0.63810 slope=+0.000743 se=0.000384 r2=0.084 t(vs 0)=+1.94 t(vs 0.00288 bar)=-5.56
+    [ 81,120] n= 40 mean=  0.63794 slope=+0.000949 se=0.000438 r2=0.110 t(vs 0)=+2.17 t(vs 0.00288 bar)=-4.41
+    [ 91,120] n= 30 mean=  0.64362 slope=+0.000762 se=0.000722 r2=0.038 t(vs 0)=+1.06 t(vs 0.00288 bar)=-2.93
+    [100,120] n= 21 mean=  0.65295 slope=-0.001074 se=0.001003 r2=0.057 t(vs 0)=-1.07 t(vs 0.00288 bar)=-3.94
+
+== CURVATURE (positive x^2 = accelerating, negative = decelerating) ==
+  actor/kl_loss       [2,120]: 1.872597 +0.002715x +0.00000710x^2
+  rollout_corr/kl     [1,120]: 12.994664 +0.011171x -0.00003792x^2
+  critic/rewards/mean [1,120]: 0.275361 +0.005874x -0.00002180x^2
+
+== REWARD WINDOW POWER ANALYSIS (steps 100-120) ==
+  slope=-0.001074 ols_se=0.001003 sigma=0.02782 sxx=770.0 df=19
+  t(vs 0)=-1.071   t(vs 0.00288 parity bar)=-3.944
+  95% CI = [-0.003173, +0.001024]
+  minimum detectable |slope| at 80% power, alpha=0.05 = 0.002807
+  moving-block bootstrap L=4 B=20000: P(fitted slope < 0) = 0.881
+  mean reward 1-20=0.35234  79-99=0.62337  100-120=0.65295 (delta 79-99 -> 100-120 = +0.02958)
+  reward max=0.73535 at step 107
+
+== CONFINEMENT COUNTERS AND WIRE BUDGET, final step 120 ==
+  actor/comm_eff/anchor_backwards = 6.0
+  actor/comm_eff/anchor_batch_fraction = 1.0
+  actor/comm_eff/anchor_batch_prompt_equivalents_global = 128.0
+  actor/comm_eff/anchor_batch_scope_rollout = 1.0
+  actor/comm_eff/anchor_batch_sequences_global = 1024.0
+  actor/comm_eff/anchor_grad_corrected = 0.0
+  actor/comm_eff/anchor_optimizer_steps = 0.0
+  actor/comm_eff/anchor_q_activations = 0.0
+  actor/comm_eff/anchor_q_broadcasts = 0.0
+  actor/comm_eff/anchor_q_stage_overwrites = 0.0
+  actor/comm_eff/anchor_q_updates = 0.0
+  actor/comm_eff/anchor_replay_fires = 6.0
+  actor/comm_eff/anchor_rewards_recomputed = 0.0
+  actor/comm_eff/anchor_rollout_n = 8.0
+  actor/comm_eff/anchor_rollouts_generated = 0.0
+  actor/comm_eff/anchor_update_prompt_equivalents_global = 128.0
+  actor/comm_eff/anchor_update_sequences_global = 1024.0
+  actor/comm_eff/logical_pp_bits_sr_quant = 2304.0
+  actor/comm_eff/logical_pp_bytes_sr_quant = 288.0
+  actor/comm_eff/mask_applications = 78358.0
+  actor/comm_eff/mask_applications/ckpt = 0.0
+  actor/comm_eff/mask_applications/old_logprob = 19691.0
+  actor/comm_eff/mask_applications/ref_logprob = 19691.0
+  actor/comm_eff/mask_applications/train = 38976.0
+  actor/comm_eff/merger_coldM_fallbacks = 0.0
+  actor/comm_eff/rank1_correction_bypass_ticks = 19.0
+  actor/comm_eff/rank1_evr_mean = 1.0
+  actor/comm_eff/rank1_fires = 5.0
+  actor/comm_eff/rank1_history_checkpoints = 2.0
+  actor/comm_eff/rank1_history_deltas = 1.0
+  actor/comm_eff/rank1_m_ready = 1.0
+  actor/comm_eff/rank1_prediction_horizon = 20.0
+  actor/comm_eff/rank1_q_only_fires = 0.0
+  actor/comm_eff/rank1_r2_mean = 1.0
+  actor/comm_eff/rank1_warmup_correction_fires = 1.0
+  actor/comm_eff/rank1_window_span = 20.0
+  actor/comm_eff/rank1_zero_motion_tensors = 0.0
+  actor/comm_eff/spectral_corrections = 34138.0
+  actor/comm_eff/spectral_step = 120.0
+  bits/token/boundary logged = 2304 (288 bytes); incumbent PRF exact-k = 1232 bits; ratio = 1.8701x
+  anchor_replay_fires expected at cadence 20 over 120 optimizer ticks = 6; observed = 6
+  response_length/mean step1=748.4 step120=659.9
+  entropy step1=7.899606 step120=7.938554
+
+== RESOLVED CONFIG recovered from the log hydra echo (partial) ==
+  'experiment_name': cuda', 'esi_redundant_time': 0, 'experiment_name': 'a1-srq-b1-sr', 'log_val_generations'
+  'project_name': gpus_per_node': 1, 'nnodes': 1, 'project_name': '93-long-horizon-stability', 'ray_wait_r
+  'total_training_steps': _freq': -1, 'total_epochs': 20, 'total_training_steps': 120, 'val_before_train': False, 
+  'save_freq': uto', 'rollout_data_dir': None, 'save_freq': -1, 'test_freq': -1, 'total_e
+  'test_freq': ta_dir': None, 'save_freq': -1, 'test_freq': -1, 'total_epochs': 20, 'tota
+  'val_before_train': 0, 'total_training_steps': 120, 'val_before_train': False, 'val_only': False, 
+  'prompt_length': 1024:  'prompt_length': 1024, 
+  'response_length': 2048:  'response_length': 2048, 
+  'python3 -m verl.trainer.main_ppo' set -x trace present: False
+  -> comm_eff / data blocks are NOT in the synced tail: RESOLVED_CONFIG_MISSING

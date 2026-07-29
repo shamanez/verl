@@ -765,7 +765,7 @@ def test_p_by_boundary_out_of_range_raises_at_construction():
 from verl.workers.comm_eff.powersgd_activation import init_basis, orthonormalize  # noqa: E402
 
 
-def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None, q_cadence=1):
+def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None, q_cadence=1, anchor_owns_q=False):
     return ActivationMasker(
         p=0.95,
         base_seed=seed,
@@ -775,6 +775,7 @@ def _frlr_masker(r=8, k=12, unbiased=False, seed=0, state=None, q_cadence=1):
         frlr_k=k,
         frlr_unbiased=unbiased,
         frlr_q_cadence=q_cadence,
+        anchor_owns_q=anchor_owns_q,
         state=state,
     )
 
@@ -1163,3 +1164,367 @@ def test_frlr_q_refreshes_metric_counts_only_actual_refreshes():
     metrics = comm_eff_metrics(state)
     assert metrics["comm_eff/frlr_q_refreshes"] == 2
     assert state.masker.frlr_q_refreshes == 2  # cadence=1 would have logged 7
+
+
+# =========================================================================== #
+# issue #93: anchor-owned FRLR basis Q
+#
+# Operator instruction 2026-07-26: "Q update only in the anchor and only when it
+# fires, like in normal powerSGD Q". The fast path must stop being a Q writer
+# entirely: no sketch folding, no refresh. Both move onto the anchor's clean
+# stale-weight forward, which is also where PowerSGD has always done it.
+# =========================================================================== #
+def test_frlr_anchor_owns_q_requires_frlr():
+    """The plain PRF mask has no basis to own, so the combination is refused."""
+    with pytest.raises(ValueError, match="requires frlr=true"):
+        ActivationMasker(p=0.95, base_seed=0, pp_size=8, anchor_owns_q=True)
+
+
+def test_frlr_anchor_owns_q_fast_path_never_folds_or_refreshes():
+    """Under anchor ownership the fast path writes NOTHING to the basis state."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    q0 = masker._frlr_basis[3].clone()
+    assert masker._frlr_sketch == {}, "fast path folded into the sketch under anchor ownership"
+    # Ten more fast steps: Q must be BITWISE frozen the whole way.
+    for step in range(1, 11):
+        _set_ctx(masker, 2, 8, step=step)
+        hook(nn.Identity(), (), torch.randn(2, 8, H))
+    assert masker._frlr_sketch == {}
+    assert masker.frlr_q_refreshes == 0
+    assert torch.equal(masker._frlr_basis[3], q0)
+
+
+def test_frlr_anchor_sketch_mode_returns_raw_and_harvests():
+    """In harvest mode the hook is a pass-through that folds the RAW activation.
+
+    The anchor forward must stay dense: its gradient is G_anchor. So the hook
+    returns h byte-identically while V += h^T(hQ) lands.
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 8, H)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    out = hook(nn.Identity(), (), h)
+    assert out is h, "anchor harvest must return the activation object untouched"
+    q0 = masker._frlr_basis[3]
+    m = h.reshape(-1, H).to(torch.float32)
+    assert torch.allclose(masker._frlr_sketch[3], m.t() @ (m @ q0), rtol=1e-5, atol=1e-6)
+
+
+def test_frlr_anchor_harvest_needs_no_prf_key_and_ignores_path_tag():
+    """Harvest runs with path_tag=None and no per-token ids, like the anchor pass.
+
+    The live-path hook asserts on both. Placing the harvest branch ahead of them
+    is what lets the anchor's clone forward fire at all.
+    """
+    torch.manual_seed(0)
+    H = 32
+    state, _ = _make_enabled_state(frlr=True, frlr_rank=4, frlr_k=8)
+    masker = state.masker
+    masker.anchor_owns_q = True
+    hook = masker._make_hook(3)
+    state.set_path_tag(None)
+    masker._sample_ids = None
+    masker._position_ids = None
+    masker.set_anchor_sketch_mode(True)
+    out = hook(nn.Identity(), (), torch.randn(2, 8, H))
+    assert out.shape == (2, 8, H)
+    assert 3 in masker._frlr_sketch
+
+
+def test_frlr_anchor_harvest_dedupes_per_forward_generation():
+    """Grad-checkpoint recompute reuses the generation, so it folds once."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    h = torch.randn(2, 8, H)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), h)
+    first = masker._frlr_sketch[3].clone()
+    hook(nn.Identity(), (), h)  # recompute: no set_context between
+    assert torch.equal(masker._frlr_sketch[3], first)
+    # A new micro-batch bumps the generation, so it DOES fold again.
+    _set_ctx(masker, 2, 8, step=0)
+    hook(nn.Identity(), (), h)
+    assert not torch.equal(masker._frlr_sketch[3], first)
+
+
+def test_frlr_anchor_update_basis_refreshes_from_harvest_and_clears():
+    """Q <- orth(V) at the anchor fire, exactly the warm-started power step."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    assert 3 in masker.boundary_indices
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    h = torch.randn(2, 8, H)
+    hook(nn.Identity(), (), h)
+    q0 = masker._frlr_basis[3].clone()
+    v = masker._frlr_sketch[3].clone()
+    masker.set_anchor_sketch_mode(False)
+    assert masker.anchor_update_basis() is True
+    assert masker.frlr_q_refreshes == 1
+    assert torch.allclose(masker._frlr_basis[3], orthonormalize(v), rtol=1e-5, atol=1e-6)
+    assert not torch.allclose(masker._frlr_basis[3], q0)
+    # The sketch is consumed, so the next window starts clean.
+    assert masker._frlr_sketch == {}
+    assert masker.anchor_update_basis() is False
+
+
+def test_frlr_anchor_update_basis_refuses_when_fast_path_owns_q():
+    """Two Q writers is the failure mode this guard exists to prevent."""
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=False)
+    masker.register(_ToyDecoder(num_layers=16, d=32))
+    with pytest.raises(RuntimeError, match="anchor_owns_q=false"):
+        masker.anchor_update_basis()
+
+
+def test_frlr_anchor_ownership_leaves_fast_path_codec_bit_identical():
+    """a7/a8 regression guard: the reconstruction itself must not change.
+
+    Anchor ownership changes WHEN Q moves, never the transform. With the same
+    frozen basis the two configurations must agree bitwise.
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    fast = _frlr_masker(r=r, k=k, seed=5, anchor_owns_q=False)
+    owned = _frlr_masker(r=r, k=k, seed=5, anchor_owns_q=True)
+    h = torch.randn(2, 8, H)
+    for m in (fast, owned):
+        _set_ctx(m, 2, 8, step=0)
+    out_fast = fast._make_hook(3)(nn.Identity(), (), h)
+    out_owned = owned._make_hook(3)(nn.Identity(), (), h)
+    assert torch.equal(out_fast, out_owned)
+
+
+def test_config_allows_anchor_owned_q_only_for_frlr():
+    """comm_eff.py's prf_mask/owns_q veto is relaxed for FRLR ONLY (issue #93).
+
+    The old check rejected the combination outright on the premise that the PRF
+    mask "has no PowerSGD basis Q for the anchor to own". That premise is false
+    when frlr=true: FRLR carries a per-boundary basis.
+    """
+    from verl.workers.config.comm_eff import CommEffAnchorConfig, CommEffConfig, CommEffMaskConfig
+
+    # Plain PRF exact-k: still refused, and the message says why.
+    with pytest.raises(ValueError, match="unless.*mask.frlr=true"):
+        CommEffConfig(
+            enabled=True,
+            compression_type="prf_mask",
+            mask=CommEffMaskConfig(enabled=True, p=0.95, exact_k=True, rescale_mode="constant"),
+            anchor=CommEffAnchorConfig(owns_q=True),
+        )
+    # FRLR + anchor-owned Q: accepted.
+    CommEffConfig(
+        enabled=True,
+        compression_type="prf_mask",
+        mask=CommEffMaskConfig(enabled=True, frlr=True, frlr_rank=48, frlr_k=28),
+        anchor=CommEffAnchorConfig(owns_q=True, enabled=True),
+    )
+    # ... but only with an anchor to do the updating.
+    with pytest.raises(ValueError, match="requires anchor.enabled=true"):
+        CommEffConfig(
+            enabled=True,
+            compression_type="prf_mask",
+            mask=CommEffMaskConfig(enabled=True, frlr=True, frlr_rank=48, frlr_k=28),
+            anchor=CommEffAnchorConfig(owns_q=True, enabled=False),
+        )
+    # a7/a8 regression: FRLR with the fast path owning Q is untouched.
+    CommEffConfig(
+        enabled=True,
+        compression_type="prf_mask",
+        mask=CommEffMaskConfig(enabled=True, frlr=True, frlr_rank=48, frlr_k=28),
+        anchor=CommEffAnchorConfig(owns_q=False),
+    )
+
+
+def test_state_plumbs_anchor_owns_q_into_the_masker():
+    """state.build() must carry anchor.owns_q onto the FRLR codec, and only there."""
+    from verl.workers.comm_eff.state import maybe_build_comm_eff_state
+
+    def _build(frlr, owns_q):
+        cfg = SimpleNamespace(
+            enabled=True,
+            anchor=SimpleNamespace(owns_q=owns_q),
+            mask=SimpleNamespace(
+                enabled=True,
+                p=0.95,
+                seed=0,
+                pp_size=8,
+                mask_recompute=False,
+                mask_reference=False,
+                exact_k=False,
+                antithetic=False,
+                p_by_boundary=[],
+                frlr=frlr,
+                frlr_rank=48,
+                frlr_k=28,
+                frlr_unbiased=False,
+                frlr_q_cadence=1,
+            ),
+        )
+        st = maybe_build_comm_eff_state(cfg)
+        st.build(_ToyDecoder(num_layers=16, d=32))
+        return st.masker
+
+    assert _build(frlr=True, owns_q=True).anchor_owns_q is True
+    assert _build(frlr=True, owns_q=False).anchor_owns_q is False
+    # A plain-mask config never resolves to anchor ownership, even if the anchor
+    # sub-config says owns_q=true (which is its dataclass DEFAULT).
+    assert _build(frlr=False, owns_q=True).anchor_owns_q is False
+
+
+def test_set_context_with_null_ids_bumps_generation_for_harvest():
+    """The anchor path sets context with NO per-token ids; harvest must still dedupe.
+
+    The engine calls set_context(sample_ids=None, position_ids=None) on the
+    anchor pass, because the harvest draws no mask and the anchor's replayed
+    batch need not carry a PRF key. The forward-generation counter is the only
+    thing that matters there, and it must still advance so a new micro-batch
+    folds while a grad-checkpoint recompute does not.
+    """
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    hook = masker._make_hook(3)
+    masker.set_anchor_sketch_mode(True)
+    h = torch.randn(2, 8, H)
+
+    masker.set_context(global_step=0, sample_ids=None, position_ids=None)
+    gen0 = masker._frlr_fwd_generation
+    hook(nn.Identity(), (), h)
+    first = masker._frlr_sketch[3].clone()
+    hook(nn.Identity(), (), h)  # recompute, same generation
+    assert torch.equal(masker._frlr_sketch[3], first)
+
+    masker.set_context(global_step=0, sample_ids=None, position_ids=None)
+    assert masker._frlr_fwd_generation == gen0 + 1
+    hook(nn.Identity(), (), h)
+    assert not torch.equal(masker._frlr_sketch[3], first)
+    assert masker._sample_ids is None and masker._position_ids is None
+
+
+# =========================================================================== #
+# issue #93: the STAGED anchor basis handoff.
+#
+# Bug found by the operator from a WandB plot: actor/pg_clipfrac spiked to
+# 0.19-0.37 at exactly every anchor step in a9/a10/c600, and is identically 0
+# across all 200 steps of the fast-Q arms a7/a8. Cause: anchor_update_basis
+# published Q immediately, but the anchor fires INSIDE train_batch, after the
+# step's old_log_probs were already recomputed. The old-logprob and train forwards
+# of the same step therefore saw DIFFERENT bases, so the PPO ratio deviated from 1
+# for a reason that is not a policy change, and PPO clipped it. PowerSGD's anchor
+# path already stages precisely to avoid this; only the harvest half was ported.
+# =========================================================================== #
+def test_frlr_staged_anchor_basis_leaves_live_q_untouched():
+    """Staging must not move live Q: that is the whole point of the fix."""
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    masker = _frlr_masker(r=r, k=k, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    q_live = masker._frlr_basis[3].clone()
+    masker.set_anchor_sketch_mode(False)
+
+    assert masker.anchor_update_basis(staged=True) is True
+    # Live Q is byte-identical; the candidate sits to one side.
+    assert torch.equal(masker._frlr_basis[3], q_live)
+    assert 3 in masker._pending_frlr_basis
+    assert not torch.equal(masker._pending_frlr_basis[3], q_live)
+    assert masker.frlr_q_activations == 0
+
+    # Publishing moves it, exactly once.
+    assert masker.activate_staged_frlr_basis() is True
+    assert not torch.equal(masker._frlr_basis[3], q_live)
+    assert masker._pending_frlr_basis == {}
+    assert masker.frlr_q_activations == 1 and masker.frlr_basis_generation == 1
+    assert masker.activate_staged_frlr_basis() is False
+
+
+def test_frlr_reconstruction_is_identical_across_a_step_when_staged():
+    """The regression that the clipfrac spike actually was.
+
+    Two forwards in the SAME step (old-logprob then train) must reconstruct
+    identically. With an immediate publish between them they do not, which is what
+    produced a non-unit PPO ratio and the clipping.
+    """
+    torch.manual_seed(0)
+    H, r, k = 32, 4, 8
+    h = torch.randn(2, 8, H)
+
+    def one(staged):
+        m = _frlr_masker(r=r, k=k, seed=11, anchor_owns_q=True)
+        m.register(_ToyDecoder(num_layers=16, d=H))
+        hook = m._make_hook(3)
+        _set_ctx(m, 2, 8, step=7)
+        out_old = hook(nn.Identity(), (), h)  # "old_logprob" forward
+        # anchor fires mid-step and updates Q from a harvested sketch
+        m.set_anchor_sketch_mode(True)
+        _set_ctx(m, 2, 8, step=7)
+        hook(nn.Identity(), (), h)
+        m.set_anchor_sketch_mode(False)
+        m.anchor_update_basis(staged=staged)
+        _set_ctx(m, 2, 8, step=7)
+        out_train = hook(nn.Identity(), (), h)  # "train" forward, same step
+        return out_old, out_train
+
+    old_s, train_s = one(staged=True)
+    assert torch.equal(old_s, train_s), "staged: same step must reconstruct identically"
+
+    old_u, train_u = one(staged=False)
+    assert not torch.equal(old_u, train_u), (
+        "unstaged: the two forwards of one step differ, which is the bug that made "
+        "the PPO ratio deviate from 1 and get clipped"
+    )
+
+
+def test_frlr_discard_staged_basis_drops_the_candidate():
+    """A candidate from an update that did not commit must never be published."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    masker.set_anchor_sketch_mode(False)
+    q_live = masker._frlr_basis[3].clone()
+    masker.anchor_update_basis(staged=True)
+    assert masker._pending_frlr_basis
+    masker.discard_staged_frlr_basis()
+    assert masker._pending_frlr_basis == {}
+    assert masker.activate_staged_frlr_basis() is False
+    assert torch.equal(masker._frlr_basis[3], q_live)
+
+
+def test_frlr_unstaged_anchor_update_still_publishes_immediately():
+    """staged=False keeps the old behaviour, so existing tests stay meaningful."""
+    torch.manual_seed(0)
+    H = 32
+    masker = _frlr_masker(r=4, k=8, anchor_owns_q=True)
+    masker.register(_ToyDecoder(num_layers=16, d=H))
+    hook = masker._make_hook(3)
+    _set_ctx(masker, 2, 8, step=0)
+    masker.set_anchor_sketch_mode(True)
+    hook(nn.Identity(), (), torch.randn(2, 8, H))
+    masker.set_anchor_sketch_mode(False)
+    q_live = masker._frlr_basis[3].clone()
+    assert masker.anchor_update_basis() is True
+    assert not torch.equal(masker._frlr_basis[3], q_live)
+    assert masker._pending_frlr_basis == {}

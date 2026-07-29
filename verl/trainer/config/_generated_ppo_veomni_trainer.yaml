@@ -83,6 +83,8 @@ actor_rollout_ref:
     use_torch_compile: true
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
+    cvc_lambda: 0.0
+    cvc_warmup_steps: 20
     ppo_epochs: 1
     shuffle: false
     data_loader_seed: 42
@@ -145,6 +147,7 @@ actor_rollout_ref:
         pp_size: 8
         mask_recompute: false
         mask_reference: false
+        dense_every: 0
         rescale: false
         rescale_mode: auto
         exact_k: false
@@ -155,6 +158,12 @@ actor_rollout_ref:
         frlr_k: 44
         frlr_unbiased: false
         frlr_q_cadence: 1
+      quant:
+        _target_: verl.workers.config.CommEffQuantConfig
+        bits: 1
+        block_size: 32
+        rounding: sr
+        subset_k: 0
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true
@@ -205,6 +214,24 @@ actor_rollout_ref:
         qr_dtype: fp32
         reortho_eps: 1.0e-06
         fast_q_bootstrap: true
+      probe:
+        _target_: verl.workers.config.CommEffProbeConfig
+        probe_every: 0
+        ctrl_enabled: false
+        kl_target_table: ''
+        kl_target_floor: 0.005
+        kl_target_gain: 2.0
+        ctrl_ki: 0.3
+        ctrl_kp: 0.1
+        ctrl_beta_min: 0.0002
+        ctrl_beta_max: 0.05
+      dc:
+        _target_: verl.workers.config.CommEffDCConfig
+        enabled: false
+        eta: 1.0
+        target: -1.0
+        lambda0: 0.05
+        lambda_max: 1.0
     qat:
       enable: false
       mode: w4a16

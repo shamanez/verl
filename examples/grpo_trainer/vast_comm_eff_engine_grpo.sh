@@ -180,9 +180,21 @@ export USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-True}"
 # calculate_log_probs=True makes vLLM return its rollout log-probs so the trainer
 # logs training/rollout_probs_diff_* and rollout_corr/* (vLLM rollout vs the
 # train-engine-recomputed old_log_prob). Rollout CORRECTION stays STRICTLY OFF
-# (rollout_is/rollout_rs=null, bypass_mode=false): old_log_prob is always
-# recomputed by the train engine and vLLM log-probs are never used in the loss.
+# by default (rollout_is=null, rollout_rs=null, bypass_mode=false): old_log_prob
+# is always recomputed by the train engine and vLLM log-probs are never used in
+# the loss. ROLLOUT_IS=token|sequence turns on decoupled importance weighting
+# (issue #93 arm A5, FRLR only: token-IS is measured dead on PRF/sr_quant views).
 export ROLLOUT_CALC_LOGPROBS="${ROLLOUT_CALC_LOGPROBS:-True}"
+export ROLLOUT_IS="${ROLLOUT_IS:-null}"
+export ROLLOUT_IS_THRESHOLD="${ROLLOUT_IS_THRESHOLD:-2.0}"
+# Self-normalized IS: divide the weights by their batch mean so they average 1.0.
+# Default false preserves existing behaviour for every other issue. Turning it on
+# keeps the RELATIVE token reweighting (the correction you want) while removing the
+# blanket shrinkage: #93 cell a5 measured a mean IS weight of 0.166, which scaled
+# every gradient down about 6x and starved learning.
+export ROLLOUT_IS_BATCH_NORMALIZE="${ROLLOUT_IS_BATCH_NORMALIZE:-false}"
+case "${ROLLOUT_IS_BATCH_NORMALIZE}" in true|false) ;; *) echo "FATAL: bad ROLLOUT_IS_BATCH_NORMALIZE='${ROLLOUT_IS_BATCH_NORMALIZE}' (true|false)." >&2; exit 1;; esac
+case "${ROLLOUT_IS}" in null|token|sequence) ;; *) echo "FATAL: bad ROLLOUT_IS='${ROLLOUT_IS}' (null|token|sequence)." >&2; exit 1;; esac
 
 # Context window — 4096 total tokens in the reference protocol.
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
@@ -262,6 +274,7 @@ COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"                  # logical p
 # issue #89 codec levers — default-off so the baseline PRF stays bit-identical.
 COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-auto}"     # none|constant|rms_match|auto magnitude restoration (lever 1)
 COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-false}"              # keep EXACTLY round((1-p)*H)/token via hash order stat (lever 2)
+COMM_EFF_MASK_DENSE_EVERY="${COMM_EFF_MASK_DENSE_EVERY:-0}"          # issue #93: 0=off; N>0 bypasses the codec entirely on every step where global_step%N==0 (dense fwd+bwd, anchor suppressed)
 COMM_EFF_MASK_ANTITHETIC="${COMM_EFF_MASK_ANTITHETIC:-false}"        # step t+1 keeps the antithetic complement of step t (lever 5)
 COMM_EFF_MASK_P_BY_BOUNDARY="${COMM_EFF_MASK_P_BY_BOUNDARY:-}"       # optional per-boundary p vector, e.g. [0.92,..] mean ~p (lever 4); empty=off
 COMM_EFF_MASK_FRLR="${COMM_EFF_MASK_FRLR:-false}"                    # FRLR "32+44+1" fresh-residual low-rank codec (issue #89); off=baseline PRF
@@ -269,6 +282,49 @@ COMM_EFF_MASK_FRLR_RANK="${COMM_EFF_MASK_FRLR_RANK:-32}"             # FRLR core
 COMM_EFF_MASK_FRLR_K="${COMM_EFF_MASK_FRLR_K:-44}"                   # FRLR per-token PRF-fresh exact-k residual subset size
 COMM_EFF_MASK_FRLR_UNBIASED="${COMM_EFF_MASK_FRLR_UNBIASED:-false}"  # H/k constant gain (E[h_hat|h,Q]=h) instead of capped norm matching
 COMM_EFF_MASK_FRLR_Q_CADENCE="${COMM_EFF_MASK_FRLR_Q_CADENCE:-1}"    # refresh FRLR Q every N global steps (1=every step); frozen between refreshes, sketch accumulates
+# --- sr_quant codec (active iff COMM_EFF_COMPRESSION_TYPE=sr_quant) ---
+# Dense low-bit stochastic-rounding quantization of the boundary activations
+# (and of the boundary backward gradient). Reuses COMM_EFF_MASK_RECOMPUTE /
+# COMM_EFF_MASK_REFERENCE / COMM_EFF_MASK_SEED / COMM_EFF_MASK_PP_SIZE for
+# eligibility and keying (MASK_P / RESCALE / EXACT_K etc. are ignored). Like
+# prf_mask it cannot anchor-own-Q: an sr_quant arm must set
+# COMM_EFF_ANCHOR_OWNS_Q=false (COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP is inert).
+COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"                      # bits/channel; 2**bits uniform levels in [-s,+s]
+COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"         # channels per fp16 absmax-scale block (0 = whole-token scale)
+COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"             # sr = unbiased PRF stochastic rounding | rn = round-to-nearest (biased ablation control)
+COMM_EFF_QUANT_SUBSET_K="${COMM_EFF_QUANT_SUBSET_K:-0}"              # issue #93 I5 byte-parity hybrid: quantize only a PRF-fresh exact-k channel subset J/token, rescale H/k; 0 = full width
+# --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---
+# Every PROBE_EVERY trainer steps the trainer reruns the step's actor +
+# reference logprob passes once with the codec silent (measurement only, no
+# backward) and logs probe/kl_dense, probe/kl_gain, probe/gap_dense. The
+# controller (CTRL_ENABLED) retunes kl_loss_coef by projected dual ascent in
+# log space toward max(FLOOR, GAIN x dense_table(step)); the LR brake only
+# DETECTS and logs (probe/lr_brake_triggered), it never mutates the LR.
+# Defaults off: every existing config is bit-identical unchanged.
+COMM_EFF_PROBE_EVERY="${COMM_EFF_PROBE_EVERY:-0}"                    # probe cadence in trainer steps (0 = off)
+COMM_EFF_PROBE_CTRL_ENABLED="${COMM_EFF_PROBE_CTRL_ENABLED:-false}"  # adaptive KL coefficient controller (requires PROBE_EVERY >= 1)
+COMM_EFF_PROBE_KL_TARGET_TABLE="${COMM_EFF_PROBE_KL_TARGET_TABLE:-}" # "step:value,step:value" dense-control reference-KL curve; empty = floor only
+COMM_EFF_PROBE_KL_TARGET_FLOOR="${COMM_EFF_PROBE_KL_TARGET_FLOOR:-0.005}"  # setpoint floor c_floor (nats)
+COMM_EFF_PROBE_KL_TARGET_GAIN="${COMM_EFF_PROBE_KL_TARGET_GAIN:-2.0}"      # setpoint multiplier on the interpolated dense KL
+COMM_EFF_PROBE_CTRL_KI="${COMM_EFF_PROBE_CTRL_KI:-0.3}"              # integral (dual-ascent) gain
+COMM_EFF_PROBE_CTRL_KP="${COMM_EFF_PROBE_CTRL_KP:-0.1}"              # proportional damping gain
+COMM_EFF_PROBE_CTRL_BETA_MIN="${COMM_EFF_PROBE_CTRL_BETA_MIN:-2e-4}" # beta projection lower bound
+COMM_EFF_PROBE_CTRL_BETA_MAX="${COMM_EFF_PROBE_CTRL_BETA_MAX:-0.05}" # beta projection upper bound
+# --- CVC: train the train-inference disagreement down (issue #93 I4) ---
+# CE mode: loss += lambda_eff * (-mean log pi_theta(a_t)) on response tokens
+# (the codec view under an active codec); lambda_eff ramps linearly over
+# CVC_WARMUP_STEPS trainer steps. DC mode (DC-GRPO, arXiv 2606.08779):
+# advantage shaping A_t -= lambda * |p_train - p_inf| with a once-per-step
+# projected dual update of lambda toward DC_TARGET (the measured step-1 static
+# per-token discrepancy floor plus slack; REQUIRED when DC is enabled, no
+# default magic). Both default off (bit-identical), zero extra forward passes.
+COMM_EFF_CVC_LAMBDA="${COMM_EFF_CVC_LAMBDA:-0.0}"                # CE-mode weight (0 = off)
+COMM_EFF_CVC_WARMUP_STEPS="${COMM_EFF_CVC_WARMUP_STEPS:-20}"     # linear lambda ramp in trainer steps
+COMM_EFF_DC_ENABLED="${COMM_EFF_DC_ENABLED:-false}"              # DC-GRPO advantage shaping
+COMM_EFF_DC_ETA="${COMM_EFF_DC_ETA:-1.0}"                        # dual ascent step size
+COMM_EFF_DC_TARGET="${COMM_EFF_DC_TARGET:--1.0}"                 # per-token discrepancy setpoint; -1.0 = unset sentinel
+COMM_EFF_DC_LAMBDA0="${COMM_EFF_DC_LAMBDA0:-0.05}"               # initial shaping strength
+COMM_EFF_DC_LAMBDA_MAX="${COMM_EFF_DC_LAMBDA_MAX:-1.0}"          # lambda projection upper bound
 # --- anchor circuit ---
 COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 # Anchor cadence is measured in optimizer ticks, not trainer global steps.
@@ -362,10 +418,14 @@ cat <<EOF
   epochs:              $TOTAL_EPOCHS  (save $SAVE_FREQ, validate $TEST_FREQ, total steps $TOTAL_TRAINING_STEPS)
   val_before_train:    $VAL_BEFORE_TRAIN
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
-  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout correction STRICTLY OFF (recompute old_log_prob)
+  mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout_is=$ROLLOUT_IS threshold=$ROLLOUT_IS_THRESHOLD (null = correction OFF, recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
+  sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
+  probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
+  cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
+  dense_every:         $COMM_EFF_MASK_DENSE_EVERY  (0=off; N>0 = full-fidelity uncompressed fwd+bwd on every step where global_step%N==0, anchor suppressed there)
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
@@ -385,7 +445,14 @@ EOF
 MASK_PBB_OVERRIDE=()
 if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_mask" ]]; then
   [[ "${COMM_EFF_MASK_ENABLED}" == "true" ]] || { echo "FATAL: compression_type=prf_mask but COMM_EFF_MASK_ENABLED != true — codec would resolve to dense." >&2; exit 1; }
-  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: prf_mask requires COMM_EFF_ANCHOR_OWNS_Q=false (mask has no PowerSGD basis Q)." >&2; exit 1; }
+  # Only FRLR carries a basis Q the anchor can own (issue #93). The PLAIN PRF
+  # mask is a PRF of seed/step/layer with nothing to own, so owns_q stays false
+  # there. Under FRLR + owns_q the fast path is gated off as a Q writer and the
+  # anchor refreshes the basis when it fires, so the anchor must be enabled.
+  if [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]]; then
+    [[ "${COMM_EFF_MASK_FRLR}" == "true" ]] || { echo "FATAL: prf_mask requires COMM_EFF_ANCHOR_OWNS_Q=false unless COMM_EFF_MASK_FRLR=true (the plain mask has no basis Q)." >&2; exit 1; }
+    [[ "${COMM_EFF_ANCHOR_ENABLED}" == "true" ]] || { echo "FATAL: COMM_EFF_MASK_FRLR with COMM_EFF_ANCHOR_OWNS_Q=true requires COMM_EFF_ANCHOR_ENABLED=true (the anchor is the only Q updater)." >&2; exit 1; }
+  fi
   case "${COMM_EFF_MASK_RESCALE_MODE}" in none|constant|rms_match|auto) ;; *) echo "FATAL: bad COMM_EFF_MASK_RESCALE_MODE='${COMM_EFF_MASK_RESCALE_MODE}' (none|constant|rms_match|auto)." >&2; exit 1;; esac
   if [[ "${COMM_EFF_MASK_FRLR}" == "true" ]]; then
     # FRLR is mutually exclusive with the plain-mask levers and the plain
@@ -399,9 +466,69 @@ if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "prf_
   fi
   echo "=== resolved codec OK (before GPU): prf_mask p=$COMM_EFF_MASK_P rescale_mode=$COMM_EFF_MASK_RESCALE_MODE exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY}] frlr=$COMM_EFF_MASK_FRLR rank=$COMM_EFF_MASK_FRLR_RANK k=$COMM_EFF_MASK_FRLR_K unbiased=$COMM_EFF_MASK_FRLR_UNBIASED q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE ==="
 fi
+if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "sr_quant" ]]; then
+  # Mirror the prf_mask gate: sr_quant carries no PowerSGD basis Q, so the
+  # anchor cannot own it; fail before any GPU spend, matching CommEffConfig.
+  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: sr_quant requires COMM_EFF_ANCHOR_OWNS_Q=false (quantizer has no PowerSGD basis Q)." >&2; exit 1; }
+  [[ "${COMM_EFF_QUANT_BITS}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_QUANT_BITS='${COMM_EFF_QUANT_BITS}' must be an integer >= 1." >&2; exit 1; }
+  [[ "${COMM_EFF_QUANT_BLOCK_SIZE}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_QUANT_BLOCK_SIZE='${COMM_EFF_QUANT_BLOCK_SIZE}' must be an integer >= 0 (0 = whole-token scale)." >&2; exit 1; }
+  case "${COMM_EFF_QUANT_ROUNDING}" in sr|rn) ;; *) echo "FATAL: bad COMM_EFF_QUANT_ROUNDING='${COMM_EFF_QUANT_ROUNDING}' (sr|rn)." >&2; exit 1;; esac
+  [[ "${COMM_EFF_QUANT_SUBSET_K}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_QUANT_SUBSET_K='${COMM_EFF_QUANT_SUBSET_K}' must be an integer >= 0 (0 = full width)." >&2; exit 1; }
+  if (( COMM_EFF_QUANT_SUBSET_K > 0 )); then
+    # Exact wire accounting for the subset arm (issue #93 4.3): payload
+    # k*bits + one fp16 scale per block of KEPT channels, ragged tail
+    # pro-rata; J costs no index bits (PRF-derivable at the receiver).
+    # Target parity arm k=493 bits=2 block=32 -> 1233 bits vs incumbent 1232.
+    SUBSET_BITS_LINE="$(python3 -c "
+import math
+k = ${COMM_EFF_QUANT_SUBSET_K}; b = ${COMM_EFF_QUANT_BITS}; blk = ${COMM_EFF_QUANT_BLOCK_SIZE}
+eff = k if (blk <= 0 or blk >= k) else blk
+payload = k * b
+scales = k * 16 / eff
+total = payload + scales
+print(f'payload {payload} + fp16 scales {scales:g} = {total:g} bits/token/boundary'
+      f' (ceil {math.ceil(total)}; incumbent prf exact-k 77x16 = 1232)')
+")" || { echo "FATAL: subset bit-accounting computation failed." >&2; exit 1; }
+    echo "=== sr_quant subset accounting (before GPU): k=$COMM_EFF_QUANT_SUBSET_K bits=$COMM_EFF_QUANT_BITS block=$COMM_EFF_QUANT_BLOCK_SIZE -> $SUBSET_BITS_LINE ==="
+  fi
+  echo "=== resolved codec OK (before GPU): sr_quant bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
+fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
   MASK_PBB_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.mask.p_by_boundary=${COMM_EFF_MASK_P_BY_BOUNDARY}")
+fi
+# Probe/controller boot gate (issue #93 I3): fail before any GPU spend,
+# matching the CommEffProbeConfig validation that would reject it on the box.
+[[ "${COMM_EFF_PROBE_EVERY}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_PROBE_EVERY='${COMM_EFF_PROBE_EVERY}' must be an integer >= 0 (0 = off)." >&2; exit 1; }
+case "${COMM_EFF_PROBE_CTRL_ENABLED}" in true|false) ;; *) echo "FATAL: bad COMM_EFF_PROBE_CTRL_ENABLED='${COMM_EFF_PROBE_CTRL_ENABLED}' (true|false)." >&2; exit 1;; esac
+if [[ "${COMM_EFF_PROBE_CTRL_ENABLED}" == "true" ]]; then
+  [[ "${COMM_EFF_PROBE_EVERY}" -ge 1 ]] || { echo "FATAL: COMM_EFF_PROBE_CTRL_ENABLED=true requires COMM_EFF_PROBE_EVERY >= 1 (the controller only updates at probes)." >&2; exit 1; }
+fi
+if [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE}" ]]; then
+  # "step:value,step:value": integer steps, plain/scientific float values.
+  TABLE_ENTRY_RE='[0-9]+:[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?'
+  [[ "${COMM_EFF_PROBE_KL_TARGET_TABLE}" =~ ^${TABLE_ENTRY_RE}(,${TABLE_ENTRY_RE})*$ ]] || { echo "FATAL: COMM_EFF_PROBE_KL_TARGET_TABLE='${COMM_EFF_PROBE_KL_TARGET_TABLE}' must be 'step:value,step:value'." >&2; exit 1; }
+fi
+if [[ "${COMM_EFF_PROBE_EVERY}" -ge 1 ]]; then
+  echo "=== resolved probe OK (before GPU): every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX] ==="
+fi
+# The table rides Hydra as a quoted string (commas would otherwise parse as a
+# choice sweep); only override when set (empty = default "").
+PROBE_TABLE_OVERRIDE=()
+if [[ -n "${COMM_EFF_PROBE_KL_TARGET_TABLE}" ]]; then
+  PROBE_TABLE_OVERRIDE+=("actor_rollout_ref.actor.comm_eff.probe.kl_target_table='${COMM_EFF_PROBE_KL_TARGET_TABLE}'")
+fi
+# CVC/DC boot gate (issue #93 I4): fail before any GPU spend, matching the
+# ActorConfig / CommEffDCConfig validation that would reject it on the box.
+FLOAT_RE='-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?'
+[[ "${COMM_EFF_CVC_LAMBDA}" =~ ^${FLOAT_RE}$ && ! "${COMM_EFF_CVC_LAMBDA}" =~ ^- ]] || { echo "FATAL: COMM_EFF_CVC_LAMBDA='${COMM_EFF_CVC_LAMBDA}' must be a float >= 0 (0 = off)." >&2; exit 1; }
+[[ "${COMM_EFF_CVC_WARMUP_STEPS}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_CVC_WARMUP_STEPS='${COMM_EFF_CVC_WARMUP_STEPS}' must be an integer >= 0." >&2; exit 1; }
+case "${COMM_EFF_DC_ENABLED}" in true|false) ;; *) echo "FATAL: bad COMM_EFF_DC_ENABLED='${COMM_EFF_DC_ENABLED}' (true|false)." >&2; exit 1;; esac
+if [[ "${COMM_EFF_DC_ENABLED}" == "true" ]]; then
+  # target has no default magic: it is the measured step-1 static per-token
+  # discrepancy floor plus slack; the -1.0 sentinel must be replaced.
+  [[ "${COMM_EFF_DC_TARGET}" =~ ^${FLOAT_RE}$ && ! "${COMM_EFF_DC_TARGET}" =~ ^- ]] || { echo "FATAL: COMM_EFF_DC_ENABLED=true requires an explicit COMM_EFF_DC_TARGET >= 0 (measured step-1 static floor + slack); got '${COMM_EFF_DC_TARGET}'." >&2; exit 1; }
+  echo "=== resolved cvc/dc OK (before GPU): ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=true eta=$COMM_EFF_DC_ETA target=$COMM_EFF_DC_TARGET lambda0=$COMM_EFF_DC_LAMBDA0 lambda_max=$COMM_EFF_DC_LAMBDA_MAX ==="
 fi
 
 # ---------------------------------------------------------------------------
@@ -503,7 +630,9 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.log_prob_use_dynamic_bsz="$USE_DYNAMIC_BSZ" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU" \
   actor_rollout_ref.rollout.calculate_log_probs="$ROLLOUT_CALC_LOGPROBS" \
-  algorithm.rollout_correction.rollout_is=null \
+  algorithm.rollout_correction.rollout_is="$ROLLOUT_IS" \
+  algorithm.rollout_correction.rollout_is_threshold="$ROLLOUT_IS_THRESHOLD" \
+  algorithm.rollout_correction.rollout_is_batch_normalize="$ROLLOUT_IS_BATCH_NORMALIZE" \
   algorithm.rollout_correction.rollout_rs=null \
   algorithm.rollout_correction.bypass_mode=false \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -529,12 +658,32 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.mask.pp_size="$COMM_EFF_MASK_PP_SIZE" \
   actor_rollout_ref.actor.comm_eff.mask.rescale_mode="$COMM_EFF_MASK_RESCALE_MODE" \
   actor_rollout_ref.actor.comm_eff.mask.exact_k="$COMM_EFF_MASK_EXACT_K" \
+  actor_rollout_ref.actor.comm_eff.mask.dense_every="$COMM_EFF_MASK_DENSE_EVERY" \
   actor_rollout_ref.actor.comm_eff.mask.antithetic="$COMM_EFF_MASK_ANTITHETIC" \
   actor_rollout_ref.actor.comm_eff.mask.frlr="$COMM_EFF_MASK_FRLR" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_rank="$COMM_EFF_MASK_FRLR_RANK" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_k="$COMM_EFF_MASK_FRLR_K" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased="$COMM_EFF_MASK_FRLR_UNBIASED" \
   actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence="$COMM_EFF_MASK_FRLR_Q_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.quant.bits="$COMM_EFF_QUANT_BITS" \
+  actor_rollout_ref.actor.comm_eff.quant.block_size="$COMM_EFF_QUANT_BLOCK_SIZE" \
+  actor_rollout_ref.actor.comm_eff.quant.rounding="$COMM_EFF_QUANT_ROUNDING" \
+  actor_rollout_ref.actor.comm_eff.quant.subset_k="$COMM_EFF_QUANT_SUBSET_K" \
+  actor_rollout_ref.actor.comm_eff.probe.probe_every="$COMM_EFF_PROBE_EVERY" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled="$COMM_EFF_PROBE_CTRL_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.probe.kl_target_floor="$COMM_EFF_PROBE_KL_TARGET_FLOOR" \
+  actor_rollout_ref.actor.comm_eff.probe.kl_target_gain="$COMM_EFF_PROBE_KL_TARGET_GAIN" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_ki="$COMM_EFF_PROBE_CTRL_KI" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_kp="$COMM_EFF_PROBE_CTRL_KP" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_min="$COMM_EFF_PROBE_CTRL_BETA_MIN" \
+  actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_max="$COMM_EFF_PROBE_CTRL_BETA_MAX" \
+  actor_rollout_ref.actor.cvc_lambda="$COMM_EFF_CVC_LAMBDA" \
+  actor_rollout_ref.actor.cvc_warmup_steps="$COMM_EFF_CVC_WARMUP_STEPS" \
+  actor_rollout_ref.actor.comm_eff.dc.enabled="$COMM_EFF_DC_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.dc.eta="$COMM_EFF_DC_ETA" \
+  actor_rollout_ref.actor.comm_eff.dc.target="$COMM_EFF_DC_TARGET" \
+  actor_rollout_ref.actor.comm_eff.dc.lambda0="$COMM_EFF_DC_LAMBDA0" \
+  actor_rollout_ref.actor.comm_eff.dc.lambda_max="$COMM_EFF_DC_LAMBDA_MAX" \
   actor_rollout_ref.actor.comm_eff.anchor.enabled="$COMM_EFF_ANCHOR_ENABLED" \
   actor_rollout_ref.actor.comm_eff.anchor.cadence="$COMM_EFF_ANCHOR_CADENCE" \
   actor_rollout_ref.actor.comm_eff.anchor.delay_K="$COMM_EFF_ANCHOR_DELAY_K" \
@@ -572,6 +721,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps="$COMM_EFF_POWERSGD_REORTHO_EPS" \
   "${VLLM_ALLREDUCE_OVERRIDE[@]+"${VLLM_ALLREDUCE_OVERRIDE[@]}"}" \
   "${MASK_PBB_OVERRIDE[@]+"${MASK_PBB_OVERRIDE[@]}"}" \
+  "${PROBE_TABLE_OVERRIDE[@]+"${PROBE_TABLE_OVERRIDE[@]}"}" \
   "$@" \
   > "$LOG" 2>&1 &
 TRAIN_PID=$!

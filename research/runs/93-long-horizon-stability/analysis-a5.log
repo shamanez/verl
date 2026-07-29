@@ -1,0 +1,500 @@
+############################################################
+# analysis-a5.log  -  issue #93 round-A cell a5-frlr-r48k28-tis
+# WandB kfrkehju  project 93-long-horizon-stability  entity shamanework-pl
+# generated 2026-07-25T12:26:18Z on the laptop; GPU box IDLE, read-only pulls only
+############################################################
+
+== SECTION 1: plan verification command, gate93.py, verbatim stdout ==
+$ python3 scripts/gate93.py --run a5-frlr-r48k28-tis --gate-lo 100 --gate-hi 120 --json runs/93-long-horizon-stability/metrics/a5_gate.json
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== gate93: a5-frlr-r48k28-tis (kfrkehju) state=finished max_step=120 ===
+gate window: steps 100-120  (21 rows)
+
+  reference KL (actor/kl_loss)   gate=0.1496   slope=+0.00018/step   [baseline 0.156-0.203]
+  train-inference gap (rc/kl)    gate=4.484    slope=-0.01105/step   [baseline 14.24; beat<10.0 target<3.0]
+  E[rho]=k3-kl+1                 gate=0.4768   [baseline 0.0014]
+  reward slope (full)            +0.00247/step   gate-win +0.00029/step   [baseline 0.0032; 90%=0.00288]
+  actor/ppo_kl max|.|            0.00e+00   (within-step identity; want ~0)
+  entropy                        gate=3.437   slope=-0.00918/step
+  grad_norm max                  2.913
+  confinement counters (last)    {'mask_applications': 82887.0, 'spectral_corrections': 34138.0, 'anchor_replay_fires': 6.0, 'rank1_bypass_ticks': 19.0}
+
+  section-1 gate flags (informational):
+    ref_kl_le_baseline         True
+    gap_lt_10                  True
+    gap_lt_3_target            False
+    reward_slope_parity        False
+    ppo_kl_zero                True
+    e_rho_gt_0p05              True
+
+  NOTE: for sr_quant arms actor/kl_loss carries an SR view-noise floor
+        (~1.9 for a1); judge those on ref_kl_slope, not the absolute gate value.
+
+  wrote runs/93-long-horizon-stability/metrics/a5_gate.json
+rc=0
+NOTE: gate93 prints FULL-RUN slopes in the slope column (see _fit_slope/full_slope);
+      the committed V1/O window slopes are in SECTION 2, not here.
+
+== SECTION 2: matched-window OLS + Newey-West HAC(4) fits, a5 vs incumbent vs dense ==
+$ python3 <scratchpad>/a5_windows.py runs/93-long-horizon-stability/metrics/a5_windows_wandb.json
+pulled a5         a5-frlr-r48k28-tis     rows=120 max_step=120 state=finished id=kfrkehju
+pulled incumbent  90-prf-exactk-600      rows=600 max_step=600 state=finished id=woqs8zra
+pulled dense      90-dense-600           rows=600 max_step=600 state=finished id=a134dxxx
+
+=== actor/kl_loss : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.047626   0.031515   0.17     0.1627 |     0.000121   0.000058     0.0305 | -394.67   -1.52
+  21-40    |     0.000225   0.000027   0.57     0.0043 |     0.000185   0.000025     0.0329 |    1.22    1.09
+  41-60    |     0.000510   0.000026   0.10     0.0134 |     0.000969   0.000109     0.0452 |    0.53   -4.11
+  61-80    |     0.001640   0.000092   0.34     0.0322 |     0.002848   0.000075     0.0860 |    0.58  -10.15
+  81-100   |     0.002982   0.000071   0.02     0.0777 |     0.002065   0.000095     0.1332 |    1.44    7.75
+ 101-120   |     0.004619   0.000150  -0.23     0.1518 |     0.002158   0.000153     0.1797 |    2.14   11.49
+  61-74    |     0.001368   0.000071   0.04     0.0269 |     0.002625   0.000029     0.0772 |    0.52  -16.27
+  61-120   |     0.002998   0.000182   0.84     0.0872 |     0.002344   0.000038     0.1330 |    1.28    3.51
+ 100-120   |     0.004584   0.000140  -0.20     0.1496 |     0.002176   0.000137     0.1786 |    2.11   12.31
+
+=== rollout_corr/kl : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.271638   0.089428   0.87     5.6377 |    -0.003168   0.000963    13.7495 |   85.74   -3.00
+  21-40    |     0.004627   0.001919  -0.02     4.5093 |     0.010529   0.000957    13.8450 |    0.44   -2.75
+  41-60    |     0.001902   0.002829  -0.31     4.5976 |     0.009324   0.000451    14.0623 |    0.20   -2.59
+  61-80    |     0.001784   0.002894  -0.16     4.5675 |     0.003752   0.000533    14.1744 |    0.48   -0.67
+  81-100   |    -0.003168   0.002925  -0.26     4.5479 |     0.002830   0.000276    14.2176 |   -1.12   -2.04
+ 101-120   |    -0.007951   0.003166   0.05     4.4909 |     0.000922   0.000184    14.2459 |   -8.62   -2.80
+  61-74    |    -0.000559   0.004009  -0.25     4.5571 |     0.004262   0.000994    14.1637 |   -0.13   -1.17
+  61-120   |    -0.002049   0.000819  -0.02     4.5354 |     0.001867   0.000175    14.2127 |   -1.10   -4.67
+ 100-120   |    -0.005037   0.003846   0.08     4.4842 |     0.000838   0.000174    14.2458 |   -6.01   -1.53
+
+=== rollout_corr/k3_kl : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.261439   0.086510   0.81     5.1264 |    -0.000972   0.001712    12.8339 |  268.88   -3.01
+  21-40    |    -0.011452   0.010290  -0.23     4.1338 |     0.008394   0.000997    12.9059 |   -1.36   -1.92
+  41-60    |    -0.022563   0.007306  -0.27     4.2312 |     0.008591   0.000574    13.0840 |   -2.63   -4.25
+  61-80    |    -0.012051   0.004852  -0.13     4.0590 |     0.003109   0.000801    13.1839 |   -3.88   -3.08
+  81-100   |     0.005445   0.002855  -0.46     3.9574 |     0.002975   0.000728    13.2259 |    1.83    0.84
+ 101-120   |    -0.017712   0.006140  -0.26     3.9718 |     0.000682   0.000400    13.2511 |  -25.99   -2.99
+  61-74    |    -0.018058   0.007292  -0.15     4.0899 |     0.003900   0.001360    13.1757 |   -4.63   -2.96
+  61-120   |    -0.002837   0.001551  -0.09     3.9961 |     0.001745   0.000192    13.2203 |   -1.63   -2.93
+ 100-120   |    -0.012339   0.007939  -0.15     3.9610 |     0.000677   0.000344    13.2508 |  -18.22   -1.64
+
+=== critic/score/mean : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.000684   0.000522  -0.12     0.3611 |    -0.000338   0.000837     0.3602 |    2.03   -0.35
+  21-40    |     0.001294   0.000660   0.05     0.3652 |     0.005259   0.000939     0.3920 |    0.25   -3.46
+  41-60    |     0.004340   0.000323   0.08     0.3920 |     0.007236   0.000951     0.5246 |    0.60   -2.88
+  61-80    |     0.005735   0.000809  -0.25     0.4684 |     0.003063   0.000616     0.6068 |    1.87    2.63
+  81-100   |     0.003726   0.000809   0.05     0.5312 |     0.000793   0.000833     0.6240 |    4.70    2.53
+ 101-120   |     0.000754   0.000530   0.01     0.5895 |    -0.001376   0.000578     0.6568 |   -0.55    2.72
+  61-74    |     0.003790   0.001341  -0.35     0.4481 |     0.001571   0.000986     0.5951 |    2.41    1.33
+  61-120   |     0.003069   0.000255   0.04     0.5297 |     0.001203   0.000203     0.6292 |    2.55    5.72
+ 100-120   |     0.000292   0.000595  -0.08     0.5908 |    -0.001422   0.000479     0.6577 |   -0.21    2.24
+
+=== actor/grad_norm : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.051498   0.033052   0.44     0.3194 |    -0.012773   0.008196     2.1392 |    4.03   -1.14
+  21-40    |    -0.001010   0.001148  -0.14     0.1203 |     0.004298   0.014398     1.8451 |   -0.24   -0.37
+  41-60    |     0.001733   0.000518   0.01     0.1224 |     0.010575   0.011350     1.9192 |    0.16   -0.78
+  61-80    |     0.000798   0.000594  -0.03     0.1409 |     0.009425   0.004707     1.7426 |    0.08   -1.82
+  81-100   |     0.001399   0.000760   0.19     0.1402 |     0.005720   0.024281     2.0657 |    0.24   -0.18
+ 101-120   |    -0.001319   0.000339  -0.27     0.1435 |     0.005522   0.005278     1.8019 |   -0.24   -1.29
+  61-74    |     0.000323   0.001110   0.04     0.1379 |     0.002106   0.008546     1.6982 |    0.15   -0.21
+  61-120   |     0.000091   0.000135   0.10     0.1415 |     0.002081   0.002134     1.8701 |    0.04   -0.93
+ 100-120   |    -0.001250   0.000294  -0.25     0.1439 |     0.003068   0.004134     1.8081 |   -0.41   -1.04
+
+=== actor/entropy : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.076084   0.020866   0.47     4.3049 |     0.000131   0.000025     7.8070 | -582.79   -3.65
+  21-40    |    -0.008830   0.001493   0.11     3.9145 |     0.000168   0.000045     7.8087 |  -52.63   -6.03
+  41-60    |    -0.007310   0.002436  -0.16     3.7418 |     0.000137   0.000052     7.8102 |  -53.52   -3.06
+  61-80    |    -0.002116   0.001727  -0.22     3.5672 |     0.000026   0.000044     7.8131 |  -81.35   -1.24
+  81-100   |    -0.001707   0.001800  -0.10     3.4947 |     0.000074   0.000052     7.8145 |  -22.92   -0.99
+ 101-120   |    -0.003863   0.001025  -0.17     3.4387 |     0.000081   0.000025     7.8162 |  -47.68   -3.84
+  61-74    |    -0.003062   0.002836  -0.30     3.5721 |     0.000039   0.000085     7.8131 |  -79.32   -1.09
+  61-120   |    -0.003140   0.000287  -0.12     3.5002 |     0.000076   0.000010     7.8146 |  -41.43  -11.19
+ 100-120   |    -0.002958   0.001101  -0.16     3.4373 |     0.000121   0.000031     7.8160 |  -24.45   -2.79
+
+=== rollout_corr/rollout_log_ppl : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.002458   0.001757  -0.23     0.9407 |     0.002248   0.001672     0.9374 |   -1.09   -1.94
+  21-40    |    -0.006046   0.001068  -0.20     0.9114 |    -0.020808   0.001363     0.7901 |    0.29    8.53
+  41-60    |    -0.016315   0.001012  -0.32     0.7181 |    -0.015119   0.000842     0.3852 |    1.08   -0.91
+  61-80    |    -0.011454   0.000492  -0.17     0.4659 |    -0.003313   0.000462     0.2377 |    3.46  -12.06
+  81-100   |    -0.005659   0.000217  -0.29     0.3041 |    -0.001542   0.000153     0.2022 |    3.67  -15.53
+ 101-120   |    -0.002571   0.000234  -0.52     0.2206 |     0.000005   0.000140     0.1872 | -504.52   -9.45
+  61-74    |    -0.009942   0.000723  -0.65     0.5035 |    -0.003845   0.000748     0.2471 |    2.59   -5.86
+  61-120   |    -0.006179   0.000521   0.57     0.3302 |    -0.001302   0.000198     0.2090 |    4.75   -8.75
+ 100-120   |    -0.002621   0.000226  -0.46     0.2221 |     0.000055   0.000136     0.1870 |  -47.52  -10.14
+
+=== rollout_corr/training_log_ppl : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.264364   0.089652   0.87     6.3776 |     0.000378   0.000241    14.4468 | -699.81   -2.95
+  21-40    |    -0.002511   0.002708   0.38     5.2395 |    -0.001548   0.000259    14.4416 |    1.62   -0.35
+  41-60    |    -0.014096   0.002014  -0.39     5.1321 |    -0.000866   0.000223    14.4105 |   16.29   -6.53
+  61-80    |    -0.008297   0.001898  -0.10     4.9055 |     0.000253   0.000116    14.4176 |  -32.86   -4.50
+  81-100   |    -0.005983   0.001722  -0.15     4.7493 |     0.000945   0.000313    14.4255 |   -6.33   -3.96
+ 101-120   |    -0.004215   0.002705   0.21     4.6536 |     0.000736   0.000194    14.4369 |   -5.73   -1.83
+  61-74    |    -0.009460   0.002716  -0.38     4.9301 |     0.000158   0.000278    14.4166 |  -59.77   -3.52
+  61-120   |    -0.006282   0.000566   0.06     4.7695 |     0.000499   0.000043    14.4267 |  -12.58  -11.94
+ 100-120   |    -0.002748   0.002790   0.21     4.6503 |     0.000741   0.000170    14.4365 |   -3.71   -1.25
+
+=== rollout_corr/rollout_is_eff_sample_size : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |     0.012639   0.003004   0.91     0.1792 |          nan        nan        nan |     nan     nan
+  21-40    |     0.000200   0.000104  -0.09     0.2378 |          nan        nan        nan |     nan     nan
+  41-60    |     0.000579   0.000285  -0.10     0.2420 |          nan        nan        nan |     nan     nan
+  61-80    |     0.000215   0.000153  -0.11     0.2529 |          nan        nan        nan |     nan     nan
+  81-100   |     0.000410   0.000146  -0.05     0.2611 |          nan        nan        nan |     nan     nan
+ 101-120   |     0.000536   0.000181   0.11     0.2681 |          nan        nan        nan |     nan     nan
+  61-74    |     0.000233   0.000239  -0.08     0.2523 |          nan        nan        nan |     nan     nan
+  61-120   |     0.000380   0.000040   0.01     0.2607 |          nan        nan        nan |     nan     nan
+ 100-120   |     0.000383   0.000205   0.10     0.2683 |          nan        nan        nan |     nan     nan
+
+=== rollout_corr/rollout_is_mean : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |     0.009891   0.002262   0.92     0.1422 |          nan        nan        nan |     nan     nan
+  21-40    |    -0.000180   0.000104  -0.19     0.1866 |          nan        nan        nan |     nan     nan
+  41-60    |    -0.000102   0.000249   0.04     0.1802 |          nan        nan        nan |     nan     nan
+  61-80    |    -0.000545   0.000114   0.00     0.1746 |          nan        nan        nan |     nan     nan
+  81-100   |    -0.000267   0.000100  -0.08     0.1703 |          nan        nan        nan |     nan     nan
+ 101-120   |     0.000077   0.000149   0.10     0.1656 |          nan        nan        nan |     nan     nan
+  61-74    |    -0.000621   0.000183  -0.02     0.1761 |          nan        nan        nan |     nan     nan
+  61-120   |    -0.000226   0.000043   0.15     0.1702 |          nan        nan        nan |     nan     nan
+ 100-120   |    -0.000022   0.000162   0.10     0.1660 |          nan        nan        nan |     nan     nan
+
+=== rollout_corr/rollout_is_ratio_fraction_low : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |    -0.007808   0.001585   0.90     0.9045 |          nan        nan        nan |     nan     nan
+  21-40    |     0.000088   0.000118  -0.16     0.8682 |          nan        nan        nan |     nan     nan
+  41-60    |    -0.000114   0.000270   0.21     0.8721 |          nan        nan        nan |     nan     nan
+  61-80    |     0.000481   0.000123   0.05     0.8747 |          nan        nan        nan |     nan     nan
+  81-100   |     0.000358   0.000091  -0.11     0.8784 |          nan        nan        nan |     nan     nan
+ 101-120   |    -0.000072   0.000164   0.10     0.8841 |          nan        nan        nan |     nan     nan
+  61-74    |     0.000585   0.000199   0.06     0.8734 |          nan        nan        nan |     nan     nan
+  61-120   |     0.000235   0.000044   0.14     0.8791 |          nan        nan        nan |     nan     nan
+ 100-120   |     0.000017   0.000168   0.09     0.8838 |          nan        nan        nan |     nan     nan
+
+=== response_length/mean : matched-window OLS slope, HAC(4) se ===
+    window |     a5 slope     se_hac   acf1   a5 level |    inc slope     se_hac  inc level |   ratio  z_diff
+-------------------------------------------------------------------------------------------------------------
+   2-20    |     2.384872   0.958564   0.12   771.0861 |    -0.078636   1.123548   770.8578 |  -30.33    1.67
+  21-40    |     0.236273   0.764685   0.27   780.1712 |    -0.628305   1.166113   761.9158 |   -0.38    0.62
+  41-60    |    -0.170192   0.971616  -0.05   784.9021 |    -3.565404   1.213332   716.9121 |    0.05    2.18
+  61-80    |    -1.194122   0.706298  -0.50   771.9915 |    -2.520881   0.521893   689.0527 |    0.47    1.51
+  81-100   |    -1.581855   0.833153  -0.36   760.8451 |    -0.692591   0.835085   677.5709 |    2.28   -0.75
+ 101-120   |    -0.971880   0.701964   0.04   733.0083 |    -0.128269   0.468412   663.9858 |    7.58   -1.00
+  61-74    |    -1.362328   1.355485  -0.46   775.0758 |    -3.120879   0.855268   695.2926 |    0.44    1.10
+  61-120   |    -1.005035   0.166981  -0.21   755.2816 |    -0.680690   0.157808   676.8698 |    1.48   -1.41
+ 100-120   |    -0.162232   0.909194  -0.00   730.5255 |     0.229846   0.497482   662.7369 |   -0.71   -0.38
+
+=== actor/kl_loss trajectory at named steps (a5 vs incumbent vs dense) ===
+  step    1  a5     0.000000   incumbent     0.000000   dense     0.000000
+  step    2  a5     2.797770   incumbent     0.031558   dense     0.000256
+  step    3  a5     0.242505   incumbent     0.031113   dense     0.000236
+  step    4  a5     0.011521   incumbent     0.028753   dense     0.000235
+  step    5  a5     0.002604   incumbent     0.029091   dense     0.000251
+  step   10  a5     0.002428   incumbent     0.030276   dense     0.000466
+  step   20  a5     0.002504   incumbent     0.033839   dense     0.001516
+  step   24  a5     0.002871   incumbent     0.031434   dense     0.001919
+  step   40  a5     0.007850   incumbent     0.035211   dense     0.002079
+  step   60  a5     0.018515   incumbent     0.060601   dense     0.003536
+  step   80  a5     0.049338   incumbent     0.115972   dense     0.003289
+  step  100  a5     0.105939   incumbent     0.155711   dense     0.003832
+  step  110  a5     0.145231   incumbent     0.182493   dense     0.003721
+  step  120  a5     0.199350   incumbent     0.203385   dense     0.004091
+
+=== rollout_corr/kl (gap) at named steps ===
+  step    1  a5    10.7564   incumbent    13.8794
+  step    2  a5    11.5400   incumbent    13.8316
+  step    5  a5     6.7805   incumbent    13.7243
+  step   20  a5     4.5784   incumbent    13.7273
+  step   40  a5     4.6489   incumbent    13.9729
+  step   60  a5     4.7489   incumbent    14.1469
+  step   80  a5     4.4646   incumbent    14.2052
+  step  100  a5     4.3500   incumbent    14.2427
+  step  120  a5     4.3122   incumbent    14.2394
+
+=== ref-KL LEVEL comparison and linear crossing projection (101-120 fits) ===
+  a5        level(100-120) = 0.149579
+  incumbent level(100-120) = 0.178583
+  dense     level(100-120) = 0.003847
+  fitted value at step 120: a5 0.195636  incumbent 0.200229
+  linear crossing step (a5 level exceeds incumbent) = 122
+  incumbent kl_loss 121-200: slope +0.001455 (hac se 0.000041) level 0.2530
+  incumbent kl_loss 201-300: slope +0.001494 (hac se 0.000019) level 0.3845
+  incumbent kl_loss 301-400: slope +0.001857 (hac se 0.000055) level 0.5497
+  incumbent kl_loss 401-500: slope +0.001589 (hac se 0.000058) level 0.7049
+  incumbent kl_loss 501-600: slope +0.001165 (hac se 0.000053) level 0.8650
+  incumbent kl_loss 580-600: slope +0.000344 (hac se 0.000402) level 0.9071
+
+=== small-step block: per-window grad_norm mean, IS mean weight, ESS, score level ===
+    window |    a5 gn   inc gn gn ratio | a5 IS mean   a5 ESS frac_low |  a5 score inc score  score x
+-----------------------------------------------------------------------------------------------------
+   2-20    |   0.3194   2.1392     6.70 |     0.1422   0.1792   0.9045 |    0.3611    0.3602   1.0024
+  21-40    |   0.1203   1.8451    15.33 |     0.1866   0.2378   0.8682 |    0.3652    0.3920   0.9316
+  41-60    |   0.1224   1.9192    15.68 |     0.1802   0.2420   0.8721 |    0.3920    0.5246   0.7474
+  61-80    |   0.1409   1.7426    12.37 |     0.1746   0.2529   0.8747 |    0.4684    0.6068   0.7719
+  81-100   |   0.1402   2.0657    14.73 |     0.1703   0.2611   0.8784 |    0.5312    0.6240   0.8513
+ 101-120   |   0.1435   1.8019    12.55 |     0.1656   0.2681   0.8841 |    0.5895    0.6568   0.8975
+
+=== codec convergence: rollout_corr/training_log_ppl vs rollout_log_ppl (a5) ===
+  step    1  training_log_ppl   11.3824  rollout_log_ppl  0.8878  diff   10.4946  gap   10.7564
+  step    2  training_log_ppl   12.2780  rollout_log_ppl  1.0435  diff   11.2345  gap   11.5400
+  step    5  training_log_ppl    7.4492  rollout_log_ppl  0.9684  diff    6.4808  gap    6.7805
+  step   20  training_log_ppl    5.3639  rollout_log_ppl  1.0188  diff    4.3451  gap    4.5784
+  step   40  training_log_ppl    5.2809  rollout_log_ppl  0.8229  diff    4.4580  gap    4.6489
+  step   60  training_log_ppl    5.0674  rollout_log_ppl  0.6159  diff    4.4515  gap    4.7489
+  step   80  training_log_ppl    4.7744  rollout_log_ppl  0.3403  diff    4.4341  gap    4.4646
+  step  100  training_log_ppl    4.5849  rollout_log_ppl  0.2514  diff    4.3335  gap    4.3500
+  step  120  training_log_ppl    4.4848  rollout_log_ppl  0.1948  diff    4.2900  gap    4.3122
+
+wrote runs/93-long-horizon-stability/metrics/a5_windows_wandb.json
+
+== SECTION 3: derived quantities (drift-per-learning, progress-matched read, horizon, IS clamp, costs) ==
+$ python3 <scratchpad>/a5_derived.py
+== 1. drift per unit of learning (step 20 -> step 120, point values) ==
+  a5         d(kl_loss) +0.196847  d(score) +0.2284  nats per unit score 0.8619
+  incumbent  d(kl_loss) +0.169546  d(score) +0.2966  nats per unit score 0.5717
+  a5 / incumbent drift-per-learning = 1.508x
+
+== 2. progress-matched read (compare at equal reward level, not equal step) ==
+  a5 score level 101-120 = 0.5895
+  incumbent score level 41-60    = 0.5246   kl slope +0.000969  kl level 0.0452
+  incumbent score level 61-80    = 0.6068   kl slope +0.002848  kl level 0.0860
+  a5 at its own 101-120:            kl slope +0.004619  kl level 0.1518
+  progress-matched (a5 101-120 vs incumbent 61-80, score 0.5895 vs 0.6068): slope 1.62x, level 1.76x
+
+== 3. horizon projection of the ref-KL drift ==
+  a5 linear-extrapolated kl_loss at step 200: 0.569 nats (constant 101-120 slope 0.004619)
+  a5 linear-extrapolated kl_loss at step 300: 1.031 nats (constant 101-120 slope 0.004619)
+  a5 linear-extrapolated kl_loss at step 600: 2.416 nats (constant 101-120 slope 0.004619)
+  incumbent measured 121_200: level 0.2530 slope +0.001455
+  incumbent measured 201_300: level 0.3845 slope +0.001494
+  incumbent measured 301_400: level 0.5497 slope +0.001857
+  incumbent measured 401_500: level 0.7049 slope +0.001589
+  incumbent measured 501_600: level 0.8650 slope +0.001165
+  incumbent measured 580_600: level 0.9071 slope +0.000344
+  incumbent measured level 580-600 = 0.9071 (600 steps, no collapse)
+  linear crossing step where a5 level exceeds incumbent = 122
+
+== 4. IS clamp headroom: can raising the threshold buy back step size? ==
+  101-120: IS mean weight 0.1656, ESS 0.2681, fraction_low 0.8841
+  fraction at the UPPER clamp (rollout_is_ratio_fraction_high, summary @120) = 0.002929
+  grad_norm a5 0.1435 vs incumbent 1.8019 => incumbent/a5 = 12.55x
+  arithmetic bound: raising the threshold can only re-weight the tokens currently AT the cap.
+    threshold 2.0 ->    4.0: max achievable mean-weight gain <= frac_high*(thr_new-2) = 0.0059 on a base of 0.1656 (1.04x at most)
+    threshold 2.0 ->    8.0: max achievable mean-weight gain <= frac_high*(thr_new-2) = 0.0176 on a base of 0.1656 (1.11x at most)
+    threshold 2.0 -> 1000000000.0: max achievable mean-weight gain <= frac_high*(thr_new-2) = 2928999.9941 on a base of 0.1656 (17684106.69x at most)
+  logratio_p50 (summary @120) = 3.4469 nats => median token ratio ~ exp(-3.4469) = 0.0318
+  => the mass is at the LOW end, not the cap: the clamp is not what shrinks the step.
+
+== 5. V3 catch-up arithmetic (bar 0.6248, incumbent level 0.6577) ==
+  at a5 101-120 slope +0.000754/step:    47 steps to the V3 bar,    90 steps to the incumbent level
+  at a5 61-120 slope +0.003069/step:    12 steps to the V3 bar,    22 steps to the incumbent level
+  BUT a5's own reward slope decelerates: 61-80 +0.005735, 81-100 +0.003726, 101-120 +0.000754
+  incumbent 101-120 reward slope -0.001376 (negative; it has plateaued)
+  a5 61-120 reward slope +0.003069 vs incumbent +0.001203 = 2.55x  (z=+5.72)
+
+== 6. GPU cost at the measured 121 s/step ==
+   60 steps =  2.02 GPU-h  (at $3.344/h = $  6.74)
+   80 steps =  2.69 GPU-h  (at $3.344/h = $  8.99)
+  120 steps =  4.03 GPU-h  (at $3.344/h = $ 13.49)
+  200 steps =  6.72 GPU-h  (at $3.344/h = $ 22.48)
+  a5 actual: 120 steps in 4h02m = 4.03 GPU-h
+
+== SECTION 4: incumbent measured ref-KL past step 120 (its own 600-step log) ==
+incumbent step 120: kl_loss 0.203385
+incumbent step 140: kl_loss 0.234543
+incumbent step 160: kl_loss 0.238600
+incumbent step 180: kl_loss 0.281091
+incumbent step 200: kl_loss 0.303538
+incumbent step 300: kl_loss 0.460520
+incumbent step 400: kl_loss 0.624353
+incumbent step 500: kl_loss 0.783957
+incumbent step 600: kl_loss 0.928460
+
+== SECTION 5: provenance capture (contract item 3) ==
+$ python3 scripts/capture_resolved_config.py runs/93-long-horizon-stability
+capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+=> no expanded 'python3 -m verl.trainer.main_ppo' line available locally, as for a1-a4.
+   Flag RESOLVED_CONFIG_MISSING for the shell set -x path. The resolved Hydra config
+   was instead recovered from the WandB run record (821 flattened keys) and from the
+   on-box log's runtime echoes; both are written to resolved_params-a5.txt.
+
+== SECTION 6: a5 resolved config, selected keys (WandB run record kfrkehju) ==
+# a5 resolved config from WandB run kfrkehju (821 flattened keys, 149 selected)
+actor_rollout_ref.actor.comm_eff._target_ = verl.workers.config.CommEffConfig
+actor_rollout_ref.actor.comm_eff.anchor._target_ = verl.workers.config.CommEffAnchorConfig
+actor_rollout_ref.actor.comm_eff.anchor.batch_scope = rollout_batch
+actor_rollout_ref.actor.comm_eff.anchor.cadence = 20
+actor_rollout_ref.actor.comm_eff.anchor.delay_K = 20
+actor_rollout_ref.actor.comm_eff.anchor.enabled = True
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_anchor = True
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_history_mode = sliding_window
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_max_snapshots = -1
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots = 2
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_mode = rank1_relex
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_rollout_source = auto
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_strength = 1
+actor_rollout_ref.actor.comm_eff.anchor.lookahead_window_snapshots = 2
+actor_rollout_ref.actor.comm_eff.anchor.owns_q = False
+actor_rollout_ref.actor.comm_eff.anchor.replay_paired_batch = True
+actor_rollout_ref.actor.comm_eff.anchor.snapshot_device = cpu
+actor_rollout_ref.actor.comm_eff.anchor.warmup_mode = stale_correct
+actor_rollout_ref.actor.comm_eff.compression_type = prf_mask
+actor_rollout_ref.actor.comm_eff.dc._target_ = verl.workers.config.CommEffDCConfig
+actor_rollout_ref.actor.comm_eff.dc.enabled = False
+actor_rollout_ref.actor.comm_eff.dc.eta = 1
+actor_rollout_ref.actor.comm_eff.dc.lambda0 = 0.05
+actor_rollout_ref.actor.comm_eff.dc.lambda_max = 1
+actor_rollout_ref.actor.comm_eff.dc.target = -1
+actor_rollout_ref.actor.comm_eff.enabled = True
+actor_rollout_ref.actor.comm_eff.mask._target_ = verl.workers.config.CommEffMaskConfig
+actor_rollout_ref.actor.comm_eff.mask.antithetic = False
+actor_rollout_ref.actor.comm_eff.mask.enabled = True
+actor_rollout_ref.actor.comm_eff.mask.exact_k = False
+actor_rollout_ref.actor.comm_eff.mask.frlr = True
+actor_rollout_ref.actor.comm_eff.mask.frlr_k = 28
+actor_rollout_ref.actor.comm_eff.mask.frlr_q_cadence = 1
+actor_rollout_ref.actor.comm_eff.mask.frlr_rank = 48
+actor_rollout_ref.actor.comm_eff.mask.frlr_unbiased = False
+actor_rollout_ref.actor.comm_eff.mask.mask_recompute = True
+actor_rollout_ref.actor.comm_eff.mask.mask_reference = True
+actor_rollout_ref.actor.comm_eff.mask.p = 0.95
+actor_rollout_ref.actor.comm_eff.mask.p_by_boundary = []
+actor_rollout_ref.actor.comm_eff.mask.pp_size = 8
+actor_rollout_ref.actor.comm_eff.mask.rescale = False
+actor_rollout_ref.actor.comm_eff.mask.rescale_mode = auto
+actor_rollout_ref.actor.comm_eff.mask.seed = 0
+actor_rollout_ref.actor.comm_eff.powersgd._target_ = verl.workers.config.CommEffPowerSGDConfig
+actor_rollout_ref.actor.comm_eff.powersgd.compress_recompute = True
+actor_rollout_ref.actor.comm_eff.powersgd.compress_reference = True
+actor_rollout_ref.actor.comm_eff.powersgd.enabled = True
+actor_rollout_ref.actor.comm_eff.powersgd.fast_q_bootstrap = False
+actor_rollout_ref.actor.comm_eff.powersgd.pp_size = 8
+actor_rollout_ref.actor.comm_eff.powersgd.qr_dtype = fp32
+actor_rollout_ref.actor.comm_eff.powersgd.rank = 77
+actor_rollout_ref.actor.comm_eff.powersgd.reortho_eps = 1e-06
+actor_rollout_ref.actor.comm_eff.powersgd.seed = 0
+actor_rollout_ref.actor.comm_eff.powersgd.sync_basis = True
+actor_rollout_ref.actor.comm_eff.powersgd.update_cadence = 1
+actor_rollout_ref.actor.comm_eff.powersgd.warm_start = True
+actor_rollout_ref.actor.comm_eff.probe._target_ = verl.workers.config.CommEffProbeConfig
+actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_max = 0.05
+actor_rollout_ref.actor.comm_eff.probe.ctrl_beta_min = 0.0002
+actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled = False
+actor_rollout_ref.actor.comm_eff.probe.ctrl_ki = 0.3
+actor_rollout_ref.actor.comm_eff.probe.ctrl_kp = 0.1
+actor_rollout_ref.actor.comm_eff.probe.kl_target_floor = 0.005
+actor_rollout_ref.actor.comm_eff.probe.kl_target_gain = 2
+actor_rollout_ref.actor.comm_eff.probe.kl_target_table = 
+actor_rollout_ref.actor.comm_eff.probe.probe_every = 0
+actor_rollout_ref.actor.comm_eff.quant._target_ = verl.workers.config.CommEffQuantConfig
+actor_rollout_ref.actor.comm_eff.quant.bits = 1
+actor_rollout_ref.actor.comm_eff.quant.block_size = 32
+actor_rollout_ref.actor.comm_eff.quant.rounding = sr
+actor_rollout_ref.actor.comm_eff.quant.subset_k = 0
+actor_rollout_ref.actor.comm_eff.spectral._target_ = verl.workers.config.CommEffSpectralConfig
+actor_rollout_ref.actor.comm_eff.spectral.beta_anc = 0.25
+actor_rollout_ref.actor.comm_eff.spectral.cadence = 1
+actor_rollout_ref.actor.comm_eff.spectral.diagnostics = False
+actor_rollout_ref.actor.comm_eff.spectral.ema_device = cpu
+actor_rollout_ref.actor.comm_eff.spectral.enabled = True
+actor_rollout_ref.actor.comm_eff.spectral.max_targets = -1
+actor_rollout_ref.actor.comm_eff.spectral.signed_ema_alpha = 0.25
+actor_rollout_ref.actor.comm_eff.spectral.target_scope = all_floating
+actor_rollout_ref.actor.comm_eff.spectral.target_substr = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+actor_rollout_ref.actor.fsdp_config.optimizer_offload = False
+actor_rollout_ref.actor.kl_loss_coef = 0.001
+actor_rollout_ref.actor.kl_loss_type = low_var_kl
+actor_rollout_ref.actor.optim._target_ = verl.workers.config.FSDPOptimizerConfig
+actor_rollout_ref.actor.optim.betas = [0.9, 0.999]
+actor_rollout_ref.actor.optim.clip_grad = 1
+actor_rollout_ref.actor.optim.lr = 1e-06
+actor_rollout_ref.actor.optim.lr_scheduler_type = constant
+actor_rollout_ref.actor.optim.lr_warmup_steps = -1
+actor_rollout_ref.actor.optim.lr_warmup_steps_ratio = 0
+actor_rollout_ref.actor.optim.min_lr_ratio = 0
+actor_rollout_ref.actor.optim.num_cycles = 0.5
+actor_rollout_ref.actor.optim.optimizer = AdamW
+actor_rollout_ref.actor.optim.optimizer_impl = torch.optim
+actor_rollout_ref.actor.optim.override_optimizer_config = None
+actor_rollout_ref.actor.optim.total_training_steps = 120
+actor_rollout_ref.actor.optim.warmup_style = None
+actor_rollout_ref.actor.optim.weight_decay = 0.01
+actor_rollout_ref.actor.optim.zero_indexed_step = True
+actor_rollout_ref.actor.ppo_micro_batch_size = None
+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu = 1
+actor_rollout_ref.actor.ppo_mini_batch_size = 128
+actor_rollout_ref.actor.use_kl_loss = True
+actor_rollout_ref.ref.fsdp_config.optimizer_offload = False
+actor_rollout_ref.rollout.n = 8
+actor_rollout_ref.rollout.pipeline_model_parallel_size = 1
+actor_rollout_ref.rollout.temperature = 1
+actor_rollout_ref.rollout.trace.experiment_name = a5-frlr-r48k28-tis
+actor_rollout_ref.rollout.val_kwargs.temperature = 0
+algorithm.kl_ctrl._target_ = verl.trainer.config.KLControlConfig
+algorithm.kl_ctrl.horizon = 10000
+algorithm.kl_ctrl.kl_coef = 0.001
+algorithm.kl_ctrl.target_kl = 0.1
+algorithm.kl_ctrl.type = fixed
+algorithm.rollout_correction.rollout_is = token
+algorithm.rollout_correction.rollout_is_batch_normalize = False
+algorithm.rollout_correction.rollout_is_threshold = 2
+critic.fsdp.optimizer_offload = False
+critic.optim._target_ = verl.workers.config.FSDPOptimizerConfig
+critic.optim.betas = [0.9, 0.999]
+critic.optim.clip_grad = 1
+critic.optim.lr = 1e-05
+critic.optim.lr_scheduler_type = constant
+critic.optim.lr_warmup_steps = -1
+critic.optim.lr_warmup_steps_ratio = 0
+critic.optim.min_lr_ratio = 0
+critic.optim.num_cycles = 0.5
+critic.optim.optimizer = AdamW
+critic.optim.optimizer_impl = torch.optim
+critic.optim.override_optimizer_config = None
+critic.optim.total_training_steps = 120
+critic.optim.warmup_style = None
+critic.optim.weight_decay = 0.01
+critic.optim.zero_indexed_step = True
+critic.ppo_micro_batch_size = None
+critic.ppo_micro_batch_size_per_gpu = None
+critic.ppo_mini_batch_size = 128
+data.max_prompt_length = 1024
+data.max_response_length = 2048
+data.train_batch_size = 128
+distillation.teacher_models.teacher_model.inference.temperature = 1
+reward.reward_model.rollout.n = 1
+reward.reward_model.rollout.pipeline_model_parallel_size = 1
+reward.reward_model.rollout.temperature = 1
+trainer.experiment_name = a5-frlr-r48k28-tis
+trainer.save_freq = -1
+trainer.test_freq = -1
+trainer.total_training_steps = 120
+
+== SECTION 7: on-box runtime echoes proving the arm-exclusive knob ==
+metrics/incoming.log:1625  [comm_eff][anchor-objective] parity=PASS ... rollout_is_weights=false   (a1..a4 segments)
+metrics/incoming.log:14892 [comm_eff][anchor-objective] parity=PASS ... rollout_is_weights=true    (a5 segment, pid 308160)
+metrics/incoming.log        anchor refresh step=20/40/60/80/100/120 fired backward (cadence=20 delay_K=20) targets=338; anchor_backwards=6 at step 120
+WandB summary               actor/comm_eff/logical_pp_bytes_prf = 77 (COORDINATES; x16 bits = 1232 bits/token/boundary)
+WandB summary               actor/comm_eff/mask_ratio = 0.9498697916666666 = 1 - 77/1536
+WandB summary               actor/comm_eff/frlr_q_refreshes = 833 ; spectral_corrections = 34138 ; mask_applications = 82887
+WandB summary               rollout_corr/rollout_is_max = 2.0 (the threshold clamp is active)
+
+== SECTION 8: final-step cross-check, WandB vs on-box log (the 'final step dropped' hazard) ==
+on-box metrics/a5_onbox_final_parsed.json step 120: actor/kl_loss 0.1993504697456956, critic/score/mean 0.599609375,
+  rollout_corr/kl 4.312202453613281, actor/grad_norm 0.12113713473081589, actor/entropy 3.3851022720336914,
+  rollout_corr/rollout_is_eff_sample_size 0.2753135008641815, response_length/mean 692.3896484375
+WandB summary step 120 agrees to all printed digits => the final step was NOT dropped for a5.
+

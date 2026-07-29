@@ -1,3 +1,17 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Sum spend across the runs.jsonl ledger.
 
 Default: prints a JSON summary of {currently_running_dph, today_spent, month_spent, lifetime_spent}.
@@ -12,6 +26,7 @@ Reads `.claude/state/runs.jsonl` (one JSON object per line). Each row carries:
     id, handles, started_at_epoch, dph (sum across handles), max_gpu_hr,
     per_node_gpus, status, [torn_down_at, teardown_reason]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -95,14 +110,13 @@ def main() -> int:
     default_budget = here / ".claude" / "project.yaml"
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("scope", nargs="?", default=None,
-                    help="optional single run dir to inspect")
+    ap.add_argument("scope", nargs="?", default=None, help="optional single run dir to inspect")
     ap.add_argument("--ledger", type=Path, default=default_ledger)
     ap.add_argument("--budget", type=Path, default=default_budget)
-    ap.add_argument("--month", action="store_true",
-                    help="restrict accounting to the current calendar month")
-    ap.add_argument("--cap-check", action="store_true",
-                    help="exit 2 if monthly_cap_usd in project.yaml budget: is exceeded")
+    ap.add_argument("--month", action="store_true", help="restrict accounting to the current calendar month")
+    ap.add_argument(
+        "--cap-check", action="store_true", help="exit 2 if monthly_cap_usd in project.yaml budget: is exceeded"
+    )
     args = ap.parse_args()
 
     rows = _load_ledger(args.ledger)
@@ -111,14 +125,15 @@ def main() -> int:
         rows = [r for r in rows if "".join(ch for ch in r.get("id", "") if ch.isdigit()) == target_id]
 
     now = time.time()
-    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0,
-                                                     second=0, microsecond=0).timestamp()
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
 
-    running_dph = sum(float(r.get("dph", 0) or 0) for r in rows
-                      if r.get("status") == "RUNNING")
+    running_dph = sum(float(r.get("dph", 0) or 0) for r in rows if r.get("status") == "RUNNING")
     lifetime = sum(_row_spent_usd(r, now) for r in rows)
-    this_month = sum(_row_spent_usd(r, now) for r in rows
-                     if float(r.get("started_at_epoch") or _parse_iso(r.get("started_at", ""))) >= month_start)
+    this_month = sum(
+        _row_spent_usd(r, now)
+        for r in rows
+        if float(r.get("started_at_epoch") or _parse_iso(r.get("started_at", ""))) >= month_start
+    )
 
     summary = {
         "running_count": sum(1 for r in rows if r.get("status") == "RUNNING"),
@@ -138,8 +153,9 @@ def main() -> int:
     if args.cap_check:
         cap = summary["monthly_cap_usd"]
         if cap is not None and summary["month_spent_usd"] > cap:
-            print(f"check_budget: month spend ${summary['month_spent_usd']:.2f} "
-                  f"exceeds cap ${cap:.2f}", file=sys.stderr)
+            print(
+                f"check_budget: month spend ${summary['month_spent_usd']:.2f} exceeds cap ${cap:.2f}", file=sys.stderr
+            )
             return 2
     return 0
 

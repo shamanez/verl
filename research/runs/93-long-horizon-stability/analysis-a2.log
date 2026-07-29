@@ -1,0 +1,202 @@
+===== issue 93 cell a2-srq-b1-rn : verification pass (2026-07-24T23:46:46Z) =====
+plan verification command (per finished cell): pull WandB history, compute the gate table.
+
+##### 1. KILL GATE, authorized window steps 2-60, both arms fitted identically #####
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== slope_compare93: actor/kl_loss over steps 2-60 ===
+
+  [REF] a1-srq-b1-sr (h0n67q3a) state=finished max_step=120 n=59
+    actor/kl_loss: 1.909554 -> 2.077836
+    slope   = +0.002707/step
+    se      = 0.000121 (iid)   0.000214 (Newey-West L=3)
+    boot95  = [+0.001958, +0.003536]  (moving block, 20000 draws)
+    resid   = sd 0.015851, lag-1 ACF +0.666
+
+  [TEST] a2-srq-b1-rn (3muohefm) state=finished max_step=62 n=59
+    actor/kl_loss: 0.639383 -> 1.542281
+    slope   = +0.018559/step
+    se      = 0.000484 (iid)   0.000764 (Newey-West L=3)
+    boot95  = [+0.017432, +0.023351]  (moving block, 20000 draws)
+    resid   = sd 0.063259, lag-1 ACF +0.850
+
+  ratio test/ref            = 6.856x
+  threshold (2.0x ref)      = +0.005414/step
+  test - threshold          = +0.013145  (combined se 0.000875, z +15.02)
+
+  CALL: KILL
+        test slope exceeds the threshold by more than the combined standard error
+
+  NOTE: both arms are fitted over the IDENTICAL window on purpose. These
+        slopes accelerate, so a full-run reference fit would move the gate.
+
+  wrote runs/93-long-horizon-stability/metrics/a2_killgate_2_60.json
+
+##### 2. KILL GATE re-fit at the earlier matched window steps 2-38 (record only) #####
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== slope_compare93: actor/kl_loss over steps 2-38 ===
+
+  [REF] a1-srq-b1-sr (h0n67q3a) state=finished max_step=120 n=37
+    actor/kl_loss: 1.909554 -> 1.976170
+    slope   = +0.001632/step
+    se      = 0.000194 (iid)   0.000329 (Newey-West L=3)
+    boot95  = [+0.000685, +0.002458]  (moving block, 20000 draws)
+    resid   = sd 0.012620, lag-1 ACF +0.357
+
+  [TEST] a2-srq-b1-rn (3muohefm) state=finished max_step=62 n=37
+    actor/kl_loss: 0.639383 -> 1.317351
+    slope   = +0.019221/step
+    se      = 0.000916 (iid)   0.001857 (Newey-West L=3)
+    boot95  = [+0.014055, +0.024070]  (moving block, 20000 draws)
+    resid   = sd 0.059522, lag-1 ACF +0.771
+
+  ratio test/ref            = 11.778x
+  threshold (2.0x ref)      = +0.003264/step
+  test - threshold          = +0.015957  (combined se 0.001970, z +8.10)
+
+  CALL: KILL
+        test slope exceeds the threshold by more than the combined standard error
+
+  NOTE: both arms are fitted over the IDENTICAL window on purpose. These
+        slopes accelerate, so a full-run reference fit would move the gate.
+
+  wrote runs/93-long-horizon-stability/metrics/a2_killgate_2_38.json
+
+##### 3. train-inference gap, same matched window 2-60 (corroboration) #####
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== slope_compare93: rollout_corr/kl over steps 2-60 ===
+
+  [REF] a1-srq-b1-sr (h0n67q3a) state=finished max_step=120 n=59
+    rollout_corr/kl: 13.111959 -> 13.534945
+    slope   = +0.008805/step
+    se      = 0.000419 (iid)   0.000560 (Newey-West L=3)
+    boot95  = [+0.006706, +0.011524]  (moving block, 20000 draws)
+    resid   = sd 0.054757, lag-1 ACF +0.434
+
+  [TEST] a2-srq-b1-rn (3muohefm) state=finished max_step=62 n=59
+    rollout_corr/kl: 11.491019 -> 12.243382
+    slope   = +0.017478/step
+    se      = 0.000540 (iid)   0.000788 (Newey-West L=3)
+    boot95  = [+0.016511, +0.022543]  (moving block, 20000 draws)
+    resid   = sd 0.070687, lag-1 ACF +0.598
+
+  ratio test/ref            = 1.985x
+  threshold (2.0x ref)      = +0.017611/step
+  test - threshold          = -0.000132  (combined se 0.001370, z -0.10)
+
+  CALL: INCONCLUSIVE
+        test slope is within one combined standard error of the threshold; decide on reward slope and gap corroboration, and prefer running to completion over killing on noise
+
+  NOTE: both arms are fitted over the IDENTICAL window on purpose. These
+        slopes accelerate, so a full-run reference fit would move the gate.
+
+  wrote runs/93-long-horizon-stability/metrics/a2_gapslope_2_60.json
+
+##### 4. a2 section-1 gate table, read window steps 40-60 (early-stop tail) #####
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== gate93: a2-srq-b1-rn (3muohefm) state=finished max_step=62 ===
+gate window: steps 40-60  (21 rows)
+
+  reference KL (actor/kl_loss)   gate=1.4521   slope=+0.01910/step   [baseline 0.156-0.203]
+  train-inference gap (rc/kl)    gate=12.185    slope=+0.01690/step   [baseline 14.24; beat<10.0 target<3.0]
+  E[rho]=k3-kl+1                 gate=0.0325   [baseline 0.0014]
+  reward slope (full)            +0.00522/step   gate-win +0.00484/step   [baseline 0.0032; 90%=0.00288]
+  actor/ppo_kl max|.|            0.00e+00   (within-step identity; want ~0)
+  entropy                        gate=7.949   slope=+0.00119/step
+  grad_norm max                  62.238
+  confinement counters (last)    {'mask_applications': 41636.0, 'spectral_corrections': 14534.0, 'anchor_replay_fires': 3.0, 'rank1_bypass_ticks': 19.0}
+
+  section-1 gate flags (informational):
+    ref_kl_le_baseline         False
+    gap_lt_10                  False
+    gap_lt_3_target            False
+    reward_slope_parity        True
+    ppo_kl_zero                True
+    e_rho_gt_0p05              False
+
+  NOTE: for sr_quant arms actor/kl_loss carries an SR view-noise floor
+        (~1.9 for a1); judge those on ref_kl_slope, not the absolute gate value.
+
+  wrote runs/93-long-horizon-stability/metrics/a2_gate.json
+
+===== end verification pass =====
+
+##### 5. a1 read at a2 MATCHED window steps 40-60 (fair level comparison) #####
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+=== gate93: a1-srq-b1-sr (h0n67q3a) state=finished max_step=120 ===
+gate window: steps 40-60  (21 rows)
+
+  reference KL (actor/kl_loss)   gate=2.0179   slope=+0.00435/step   [baseline 0.156-0.203]
+  train-inference gap (rc/kl)    gate=13.470    slope=+0.00658/step   [baseline 14.24; beat<10.0 target<3.0]
+  E[rho]=k3-kl+1                 gate=0.0269   [baseline 0.0014]
+  reward slope (full)            +0.00324/step   gate-win +0.00680/step   [baseline 0.0032; 90%=0.00288]
+  actor/ppo_kl max|.|            0.00e+00   (within-step identity; want ~0)
+  entropy                        gate=7.912   slope=+0.00036/step
+  grad_norm max                  0.898
+  confinement counters (last)    {'mask_applications': 78358.0, 'spectral_corrections': 34138.0, 'anchor_replay_fires': 6.0, 'rank1_bypass_ticks': 19.0}
+
+  section-1 gate flags (informational):
+    ref_kl_le_baseline         False
+    gap_lt_10                  False
+    gap_lt_3_target            False
+    reward_slope_parity        True
+    ppo_kl_zero                True
+    e_rho_gt_0p05              False
+
+  NOTE: for sr_quant arms actor/kl_loss carries an SR view-noise floor
+        (~1.9 for a1); judge those on ref_kl_slope, not the absolute gate value.
+
+  wrote runs/93-long-horizon-stability/metrics/a1_matched_40_60.json
+===== end matched-window addendum =====##### 6. OFFLINE ADDENDUM from metrics/incoming.log (pid=93602 = a2), no GPU touched #####
+a2 rows in the local sync: 61 steps 1 to 61
+non-finite metric values across all a2 rows: 0
+actor/grad_norm: n=61 min=6.1533 max=62.2378 at step 1
+actor/grad_norm > 1.0 at 61 of 61 steps; > 5.0 at 61; > 10.0 at 29
+actor/grad_norm steps 1-10: 1:62.238, 2:16.387, 3:18.001, 4:16.056, 5:18.031, 6:15.029, 7:14.329, 8:15.780, 9:14.943, 10:17.587
+actor/grad_norm last 10 rows: 52:8.200, 53:6.616, 54:6.692, 55:8.929, 56:8.014, 57:8.265, 58:8.038, 59:8.190, 60:7.976, 61:9.146
+actor/grad_norm window 40-60: mean 7.574 median 7.763 max 8.929 min 6.153
+wire-budget key actor/comm_eff/logical_pp_bits_sr_quant: values ['2304.0']
+confinement at step 60: {'mask_applications': '40376.0', 'spectral_corrections': '13858.0', 'anchor_replay_fires': '3.0', 'rank1_correction_bypass_ticks': '19.0'}
+actor/kl_coef at step 60: 0.001 | max |actor/ppo_kl| over all a2 rows: 0.0
+actor/kl_loss: step1=0.0 step2=0.6393831232562661 step61=1.5594099257141352
+critic/rewards/mean: step1=0.3525390625 step61=0.5869140625
+response_length/mean: step1=779.5908203125 step61=710.79296875
+##### end offline addendum #####
+##### 7. MATCHED-WINDOW addendum, a1 vs a2 at steps 40-60, from incoming.log #####
+  actor/grad_norm                            a1 n=21 mean=0.6741 max=0.7248   |   a2 n=21 mean=7.5738 max=8.9295
+  actor/entropy                              a1 n=21 mean=7.9125 max=7.9184   |   a2 n=21 mean=7.9494 max=7.9574
+  actor/kl_loss                              a1 n=21 mean=2.0179 max=2.0778   |   a2 n=21 mean=1.4521 max=1.5423
+  rollout_corr/kl                            a1 n=21 mean=13.4700 max=13.5743   |   a2 n=21 mean=12.1851 max=12.3062
+  critic/rewards/mean                        a1 n=21 mean=0.5226 max=0.6152   |   a2 n=21 mean=0.5683 max=0.6680
+  actor/comm_eff/logical_pp_bits_sr_quant    a1 n=21 mean=2304.0000 max=2304.0000   |   a2 n=21 mean=2304.0000 max=2304.0000
+  a1 full-run actor/grad_norm: n=120 min=0.6081 mean=0.6916 max=0.8982
+  a2 full-run actor/grad_norm: n=61 min=6.1533 mean=12.0357 max=62.2378
+  grad_norm ratio a2/a1 at matched steps 40-60 (means): 11.23x
+##### end matched-window addendum #####
+capture_resolved_config: no train.log at runs/93-long-horizon-stability/train.log
+capture rc=1
+##### 8. TRULY MATCHED HORIZON: both arms over steps 2-61 only (a2 full life) #####
+  critic/rewards/mean
+      a1 slope=+0.004390/step (se 0.000298) last(step61)=0.5605
+      a2 slope=+0.005243/step (se 0.000302) last(step61)=0.5869
+  actor/kl_loss
+      a1 slope=+0.002776/step (se 0.000124) last(step61)=2.0838
+      a2 slope=+0.018410/step (se 0.000475) last(step61)=1.5594
+  rollout_corr/kl
+      a1 slope=+0.008836/step (se 0.000405) last(step61)=13.5666
+      a2 slope=+0.017331/step (se 0.000529) last(step61)=12.2740
+  actor/entropy
+      a1 slope=+0.000328/step (se 0.000010) last(step61)=7.9178
+      a2 slope=+0.001194/step (se 0.000051) last(step61)=7.9555
+  actor/grad_norm
+      a1 slope=-0.003816/step (se 0.000402) last(step61)=0.6470
+      a2 slope=-0.197155/step (se 0.015699) last(step61)=9.1457
+##### end matched-horizon addendum #####
+##### 9. CONFINEMENT COUNTERS at MATCHED step 60 #####
+  mask_applications                                    a1@60=40950.0      a2@60=40376.0     
+  spectral_corrections                                 a1@60=13858.0      a2@60=13858.0     
+  anchor_replay_fires                                  a1@60=3.0          a2@60=3.0         
+  rank1_correction_bypass_ticks                        a1@60=19.0         a2@60=19.0        
+  rank1_fires                                          a1@60=2.0          a2@60=2.0         
+  merger_coldM_fallbacks                               a1@60=0.0          a2@60=0.0         
+  rank1_m_ready                                        a1@60=1.0          a2@60=1.0         
+##### end counter addendum #####

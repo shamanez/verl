@@ -727,27 +727,29 @@ class FSDPEngine(BaseEngine):
         compressor.set_context(global_step=int(getattr(self, "_comm_eff_global_step", 0)))
 
     def _comm_eff_mask_active(self, forward_only: bool) -> bool:
-        """True iff the activation-mask (prf_mask codec) hooks should be live.
+        """True iff the boundary-codec (prf_mask / sr_quant) hooks should be live.
 
-        Masking is confined to the actor-train forward/backward by default,
+        The prf_mask masker and the sr_quant quantizer share one lifecycle:
+        both are confined to the actor-train forward/backward by default,
         additionally to the old-policy log-prob recompute when
         ``comm_eff.mask.mask_recompute=true``, and additionally to the frozen
-        reference-policy forward when ``comm_eff.mask.mask_reference=true``.
-        Returns False (strict no-op) unless an enabled state with the prf_mask
-        codec (``masker`` built), a live ``compression_active`` flag, and an
-        eligible ``path_tag`` is attached. The gate mirrors
-        ``_comm_eff_powersgd_active``; because the masker and the PowerSGD
-        compressor are mutually exclusive (state.build constructs exactly one),
-        only one of the two ``*_active`` gates can be positive for any forward.
-        The anchor pass (``path_tag=None``) never matches an eligible tag, so
-        anchors stay unmasked.
+        reference-policy forward when ``comm_eff.mask.mask_reference=true``
+        (sr_quant reuses the mask eligibility knobs). Returns False (strict
+        no-op) unless an enabled state with a built boundary codec (``masker``
+        or ``quantizer``), a live ``compression_active`` flag, and an eligible
+        ``path_tag`` is attached. The gate mirrors
+        ``_comm_eff_powersgd_active``; because the masker, the quantizer and
+        the PowerSGD compressor are mutually exclusive (state.build constructs
+        exactly one), only one of the ``*_active`` gates can be positive for
+        any forward. The anchor pass (``path_tag=None``) never matches an
+        eligible tag, so anchors stay uncompressed.
         """
         from verl.workers.comm_eff.state import OLD_LOGPROB_TAG, REF_LOGPROB_TAG, TRAIN_TAG, mask_eligible_tags
 
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
             return False
-        if getattr(state, "masker", None) is None:
+        if getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None:
             return False
         if not getattr(state, "compression_active", False):
             return False
@@ -774,7 +776,7 @@ class FSDPEngine(BaseEngine):
         return False
 
     def _comm_eff_register_mask_hooks(self) -> bool:
-        """Register the per-element mask hooks on the boundary decoder blocks.
+        """Register the boundary-codec (mask or quant) hooks on the boundary blocks.
 
         The per-token PRF context (``global_step`` + token-aligned
         ``sample_ids`` / ``position_ids``) is set per micro-batch in
@@ -782,7 +784,9 @@ class FSDPEngine(BaseEngine):
         micro-batch is packed. SP guard mirrors the PowerSGD path: the key is
         aligned to the rmpad token axis, which Ulysses SP>1 slices/pads across
         ranks (out of scope); refuse it loudly. Returns True if hooks were
-        registered.
+        registered. The prf_mask masker and the sr_quant quantizer expose the
+        identical register/set_context/unregister surface, so one call site
+        serves both codecs.
         """
         if getattr(self, "ulysses_sequence_parallel_size", 1) and self.ulysses_sequence_parallel_size > 1:
             raise NotImplementedError(
@@ -791,7 +795,7 @@ class FSDPEngine(BaseEngine):
                 "set ulysses_sequence_parallel_size=1 for this codec."
             )
         state = self._comm_eff_state
-        masker = state.masker
+        masker = state.masker if state.masker is not None else state.quantizer
         masker.register(self.module)
         return masker.is_registered
 
@@ -821,7 +825,23 @@ class FSDPEngine(BaseEngine):
         if state is None:
             return
         masker = getattr(state, "masker", None)
+        if masker is None:
+            # The sr_quant quantizer shares the masker's context surface
+            # (set_context keyed on the same stable per-token ids).
+            masker = getattr(state, "quantizer", None)
         if masker is None or not masker.is_registered:
+            return
+        if getattr(masker, "_anchor_sketch_mode", False):
+            # Anchor-owned-Q harvest (issue #93). The FRLR sketch needs the step
+            # and a fresh forward-generation (the grad-checkpoint dedupe key),
+            # but NO per-token PRF key: no mask is drawn on the anchor pass, the
+            # hook returns the raw activation. So skip the rmpad and
+            # comm_eff_sample_id requirements below rather than making the
+            # anchor's replayed batch satisfy them.
+            _gstep = getattr(state, "global_step", None)
+            if _gstep is None or int(_gstep) < 0:
+                _gstep = getattr(self, "_comm_eff_global_step", 0)
+            masker.set_context(global_step=int(_gstep), sample_ids=None, position_ids=None)
             return
         if not getattr(input_ids, "is_nested", False):
             raise NotImplementedError(
@@ -865,9 +885,9 @@ class FSDPEngine(BaseEngine):
         _powersgd_hooks_live = self._comm_eff_powersgd_active(forward_only=forward_only)
         if _powersgd_hooks_live:
             _powersgd_hooks_live = self._comm_eff_register_powersgd_hooks()
-        # Register the prf_mask codec around the same eligible forwards. The mask
-        # and PowerSGD compressors are mutually exclusive, so at most one of these
-        # two is live per forward.
+        # Register the prf_mask / sr_quant boundary codec around the same eligible
+        # forwards. The mask, quantizer and PowerSGD compressors are mutually
+        # exclusive, so at most one codec is live per forward.
         _mask_hooks_live = self._comm_eff_mask_active(forward_only=forward_only)
         if _mask_hooks_live:
             _mask_hooks_live = self._comm_eff_register_mask_hooks()
@@ -941,7 +961,10 @@ class FSDPEngine(BaseEngine):
             if _powersgd_hooks_live:
                 self._comm_eff_state.powersgd.unregister()
             if _mask_hooks_live:
-                self._comm_eff_state.masker.unregister()
+                _codec = self._comm_eff_state.masker
+                if _codec is None:
+                    _codec = self._comm_eff_state.quantizer
+                _codec.unregister()
 
     def _forward_backward_batch_inner(
         self,
@@ -1395,6 +1418,16 @@ class FSDPEngine(BaseEngine):
         anchor_owns_q = bool(getattr(anchor_cfg, "owns_q", False))
         powersgd = getattr(state, "powersgd", None)
         do_anchor_q = anchor_owns_q and powersgd is not None
+        # Anchor-owns-Q for the FRLR codec (issue #93). Same governance, other
+        # compressor: the mask codec's FRLR basis is harvested and refreshed on
+        # the anchor's clean stale-weight forward and NEVER on the fast path, so
+        # Q moves only when the anchor fires (like PowerSGD) and its side channel
+        # rides the slow circuit. The two are mutually exclusive by construction
+        # (state.build() creates either masker or powersgd, never both).
+        _mask_codec = getattr(state, "masker", None)
+        do_anchor_frlr_q = (
+            anchor_owns_q and _mask_codec is not None and bool(getattr(_mask_codec, "anchor_owns_q", False))
+        )
 
         use_orig = bool(getattr(self.engine_config, "use_orig_params", False))
         module_is_fsdp1 = isinstance(self.module, FSDP)
@@ -1503,6 +1536,28 @@ class FSDPEngine(BaseEngine):
                 _canaries[step] = snapshot_canary(cur_snapshot, target_substrs=target_substrs)
                 while len(_canaries) > delay_K + 1:
                     _canaries.popitem(last=False)
+
+        # Periodic full-fidelity step (issue #93): suppress the anchor on a
+        # bypassed step. The anchor exists to correct a COMPRESSED gradient, and
+        # on a dense step there is no compression error to correct, so firing it
+        # would inject a correction against an error that is not there. Read the
+        # global step fresh rather than relying on _gs_now, which is bound inside
+        # the snapshot branch above and is not guaranteed to be in scope here.
+        # NOTE this gates the anchor REFRESH only. The signed-EMA `M` accumulated
+        # by earlier fires is applied by the spectral circuit on its own cadence
+        # and is deliberately left alone: zeroing it would change the optimizer
+        # state itself rather than just skipping one correction.
+        _mask_codec_dense = getattr(state, "masker", None)
+        if _mask_codec_dense is not None and _mask_codec_dense.is_dense_step(
+            int(getattr(self, "_comm_eff_global_step", 0))
+        ):
+            print(
+                f"[comm_eff][dense-step] anchor refresh SUPPRESSED at "
+                f"gs={int(getattr(self, '_comm_eff_global_step', 0))} tick={step} "
+                f"(dense_every={_mask_codec_dense.dense_every})",
+                flush=True,
+            )
+            return
 
         if not anchor_should_fire(step, cadence, True):
             return
@@ -2024,6 +2079,16 @@ class FSDPEngine(BaseEngine):
             if do_anchor_q:
                 powersgd.set_anchor_sketch_mode(True)
                 powersgd.register(self.module)  # self.module is the clone now
+            # Same handoff for the FRLR basis. The mask hooks are registered and
+            # unregistered inside forward_backward_batch, and the anchor refresh
+            # runs at the TOP of train_batch (see engine/base.py), so the live
+            # codec is NOT registered here and register() will not no-op on its
+            # idempotence guard. In sketch mode the hook returns the RAW
+            # activation, so the anchor forward stays dense and its gradient
+            # stays clean.
+            if do_anchor_frlr_q:
+                _mask_codec.set_anchor_sketch_mode(True)
+                _mask_codec.register(self.module)  # self.module is the clone now
 
             # Dense forward/backward on the clone. No FSDP hooks fire because the
             # clone is a plain module. forward_only=False populates .grad on its
@@ -2081,6 +2146,13 @@ class FSDPEngine(BaseEngine):
                     powersgd.unregister()
                 finally:
                     powersgd.set_anchor_sketch_mode(False)
+            # Same teardown for the FRLR codec. Its sketch V also persists past
+            # this block and is consumed by anchor_update_basis below.
+            if do_anchor_frlr_q:
+                try:
+                    _mask_codec.unregister()
+                finally:
+                    _mask_codec.set_anchor_sketch_mode(False)
             # Restore self.module to the live FSDP-wrapped actor.
             if live_module_swap is not None:
                 self.module = live_module_swap
@@ -2217,11 +2289,52 @@ class FSDPEngine(BaseEngine):
         if spectral is not None:
             deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
         state.anchor_backwards += 1
-        if do_anchor_q:
+        if do_anchor_q or do_anchor_frlr_q:
             _signal_role = "Q+M" if spectral is not None else "Q"
         else:
             _signal_role = "M"
         _record_anchor_batch_telemetry(_signal_role)
+
+        # Anchor-owned FRLR basis. The clean anchor forward has folded slow-net
+        # activations into the FRLR sketch V; refresh Q ← orth(V) here, once per
+        # anchor fire. The fast path is gated off as a Q writer, so this is the
+        # sole refresh and Q stays bitwise frozen across every step in between.
+        if do_anchor_frlr_q:
+            # Fail-closed must-fire invariant, same reasoning as the PowerSGD
+            # branch below: an EMPTY sketch means the mask hooks never fired on
+            # the clone (find_decoder_layers returned None / register no-op'd), and
+            # Q would then silently never move for the whole run while the arm
+            # still reported as anchor-owned.
+            assert getattr(_mask_codec, "_frlr_sketch", None), (
+                "comm_eff anchor-owns-Q (FRLR): the anchor clone forward harvested an EMPTY "
+                "sketch V — the mask hooks did not fire on the clone (find_decoder_layers/"
+                "register no-op?). Q would never refresh. Refusing to continue."
+            )
+            _frlr_dp_group = None
+            try:
+                _frlr_dp_group = self.get_data_parallel_group()
+            except Exception:
+                _frlr_dp_group = None
+            # STAGED, not live. The anchor fires here, at the top of train_batch,
+            # AFTER this step's old_log_probs were recomputed. Publishing Q now
+            # would make the old-logprob and train forwards of the same step see
+            # different bases, so the PPO ratio would deviate from 1 for a reason
+            # that is not a policy change and PPO would clip it (measured at
+            # pg_clipfrac 0.19-0.37 on exactly the anchor steps, against
+            # identically 0 for the fast-Q arms). engine_workers publishes the
+            # candidate after all PPO minibatches, as it already does for PowerSGD.
+            _frlr_q_updated = _mask_codec.anchor_update_basis(staged=True, dp_group=_frlr_dp_group)
+            assert _frlr_q_updated, (
+                "comm_eff anchor-owns-Q (FRLR): anchor_update_basis() did NOT refresh Q "
+                "(orth(V) produced nothing). Q must refresh every anchor cadence."
+            )
+            print(
+                "[comm_eff][frlr-anchor-q] refreshed global_step="
+                f"{getattr(state, 'global_step', -1)} anchor_step={step} "
+                f"boundaries={len(_mask_codec.boundary_indices)} "
+                f"refreshes={_mask_codec.frlr_q_refreshes}",
+                flush=True,
+            )
 
         # Anchor-owned Q. Now that the slow-net activations are
         # harvested into V (during the clean anchor forward above), compute
@@ -2881,8 +2994,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # Bump the PowerSGD forward generation and stamp the step before the
             # boundary projection hooks fire (no-op unless powersgd is live).
             self._comm_eff_maybe_set_powersgd_context(micro_batch, input_ids)
-            # Set the per-token PRF mask context before the boundary mask hooks
-            # fire (no-op unless the prf_mask codec is live).
+            # Set the per-token PRF context before the boundary mask/quant hooks
+            # fire (no-op unless the prf_mask or sr_quant codec is live).
             self._comm_eff_maybe_set_mask_context(micro_batch, input_ids)
             # support per sample temperature
             # temperature (bsz,)

@@ -412,6 +412,80 @@ def test_bool_rollout_is_threshold_is_rejected():
         )
 
 
+def test_logratio_distribution_metrics():
+    """Log-ratio distribution metrics: exact quantiles/std/agree-fraction on a hand-built tensor.
+
+    d = rollout_log_prob - old_log_prob over VALID tokens is exactly
+    [0, 1, 2, 3, 4] (masked positions carry poison values that must not leak):
+    - p10/p50/p90 follow torch.quantile's linear interpolation on the sorted
+      valid values: 0.4 / 2.0 / 3.6.
+    - std is the unbiased std of [0..4] = sqrt(2.5).
+    - agree_frac_1nat = fraction with |d| < 1.0 = 1/5.
+    """
+    old_log_prob = torch.full((2, 4), -1.0)
+    d = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 50.0],  # last token masked (poison)
+            [3.0, 4.0, -50.0, 99.0],  # last two tokens masked (poison)
+        ]
+    )
+    rollout_log_prob = old_log_prob + d
+    response_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]], dtype=torch.float32)
+
+    metrics = compute_offpolicy_metrics(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+    )
+
+    for key in ("logratio_p10", "logratio_p50", "logratio_p90", "logratio_std", "agree_frac_1nat"):
+        assert key in metrics, f"Missing metric: {key}"
+
+    # torch.quantile (linear): index q*(n-1) into sorted [0,1,2,3,4].
+    assert metrics["logratio_p10"] == pytest.approx(0.4, abs=1e-6)
+    assert metrics["logratio_p50"] == pytest.approx(2.0, abs=1e-6)
+    assert metrics["logratio_p90"] == pytest.approx(3.6, abs=1e-6)
+    assert metrics["logratio_std"] == pytest.approx(2.5**0.5, abs=1e-6)
+    assert metrics["agree_frac_1nat"] == pytest.approx(0.2, abs=1e-6)
+
+    # The existing metric names are untouched.
+    for key in ("kl", "k3_kl", "training_ppl", "rollout_ppl", "chi2_token", "chi2_seq"):
+        assert key in metrics
+
+    # Absent without rollout log-probs (like the other rollout metrics).
+    metrics_no_rollout = compute_offpolicy_metrics(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=None,
+        response_mask=response_mask,
+    )
+    assert "logratio_p50" not in metrics_no_rollout
+    assert "agree_frac_1nat" not in metrics_no_rollout
+
+
+def test_logratio_quantiles_above_torch_quantile_limit(monkeypatch):
+    """The quantile path must survive batches beyond torch.quantile's 2^24-element cap.
+
+    torch.quantile raises 'input tensor is too large' above 2^24 elements, which a
+    long-context train batch can exceed. Force the fallback by shrinking the module
+    limit and check the kthvalue nearest-rank path returns exact order statistics.
+    """
+    from verl.trainer.ppo import rollout_corr_helper as rch
+
+    monkeypatch.setattr(rch, "_QUANTILE_NUMEL_LIMIT", 3)
+
+    d = torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])
+    p10, p50, p90 = rch._tensor_quantiles(d, (0.10, 0.50, 0.90))
+    # nearest-rank on sorted [0..4]: round(q*(n-1)) -> ranks 0, 2, 4.
+    assert p10 == pytest.approx(0.0)
+    assert p50 == pytest.approx(2.0)
+    assert p90 == pytest.approx(4.0)
+
+    # Below the (patched) limit the interpolating torch.quantile path is used.
+    small = torch.tensor([0.0, 1.0, 2.0])
+    q = rch._tensor_quantiles(small, (0.50,))
+    assert q[0] == pytest.approx(1.0)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Rollout Correction Test Suite")

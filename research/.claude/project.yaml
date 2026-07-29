@@ -93,12 +93,28 @@ current_default:
   fast_circuit:
     pipeline_parallelism: required
     pipeline_stages: 8
-    activation_projection: powersgd
+    # DEFAULT CHANGED 2026-07-29 by the issue #93 stability programme: twelve arms
+    # were run to beat PRF exact-k on stability and none did. It is the only codec
+    # with 600 steps of evidence that the optimizer stays in a steady state, it is
+    # unbiased, and its mask is a PRF of seed/step/layer so there is no side
+    # channel and nothing to transmit. Prior default was powersgd rank 77; that
+    # path is unchanged, still tested, and reachable via
+    # COMM_EFF_COMPRESSION_TYPE=powersgd.
+    activation_projection: prf_mask
+    mask_p: 0.95
+    mask_exact_k: true
+    mask_rescale_mode: constant
+    mask_recompute: true
+    mask_reference: true
+    kept_coords_per_token: 77
+    wire_bits_per_token_per_boundary: 1232
+    # PowerSGD-only knobs, inapplicable while activation_projection is prf_mask.
+    # Retained so the powersgd path stays fully specified.
     powersgd_rank: 77
     activation_derived_q: true
     synchronized_q: true
     warm_start_q: true
-    fast_q_bootstrap: true
+    fast_q_bootstrap: false
   slow_circuit:
     device: separate
     role: periodic_dense_gradient_anchor
@@ -107,7 +123,10 @@ current_default:
     cadence_optimizer_ticks: 20
     delay_optimizer_ticks: 20
     state_device: cpu
-    owns_q: true
+    # false under the prf_mask default: the plain PRF mask has no basis Q for
+    # the anchor to own, and the config validator rejects owns_q=true with
+    # compression_type=prf_mask unless mask.frlr=true.
+    owns_q: false
     weight_projection: rank1_relex
     weight_window: 4
     minimum_snapshots: 2

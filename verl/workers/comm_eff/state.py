@@ -57,11 +57,12 @@ MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
 
 
 def mask_eligible_tags(state: Any) -> frozenset:
-    """Return the path tags the activation mask may fire on for ``state``.
+    """Return the path tags the activation mask / sr_quant codec may fire on.
 
     Pure read (no side effects, no allocation). The default eligibility
     (``{TRAIN_TAG}``) is widened, only when ``state.config.mask.enabled`` is
-    truthy, by:
+    truthy OR the codec is ``sr_quant`` (which reuses the mask eligibility
+    knobs without requiring ``mask.enabled``), by:
 
     * ``OLD_LOGPROB_TAG`` when ``state.config.mask.mask_recompute`` is truthy;
     * ``REF_LOGPROB_TAG`` when ``state.config.mask.mask_reference`` is truthy.
@@ -73,10 +74,12 @@ def mask_eligible_tags(state: Any) -> frozenset:
     """
     if state is None:
         return MASK_ELIGIBLE_TAGS
-    mask_cfg = getattr(getattr(state, "config", None), "mask", None)
+    config = getattr(state, "config", None)
+    mask_cfg = getattr(config, "mask", None)
     if mask_cfg is None:
         return MASK_ELIGIBLE_TAGS
-    if not bool(getattr(mask_cfg, "enabled", False)):
+    sr_quant_codec = str(getattr(config, "compression_type", "")) == "sr_quant"
+    if not (bool(getattr(mask_cfg, "enabled", False)) or sr_quant_codec):
         return MASK_ELIGIBLE_TAGS
     tags = {TRAIN_TAG}
     if bool(getattr(mask_cfg, "mask_recompute", False)):
@@ -97,12 +100,13 @@ def _is_enabled(config: Any) -> bool:
 
 
 def resolve_compression_type(config: Any) -> str:
-    """Resolve the effective boundary codec: ``dense``, ``prf_mask`` or ``powersgd``.
+    """Resolve the effective boundary codec: ``dense``, ``prf_mask``, ``powersgd`` or ``sr_quant``.
 
     Pure read (no side effects, no allocation). The resolution is
     back-compatible:
 
-    * an explicit ``compression_type`` of ``prf_mask`` or ``powersgd`` wins;
+    * an explicit ``compression_type`` of ``prf_mask``, ``powersgd`` or
+      ``sr_quant`` wins;
     * ``dense`` (the fall-through) honors the mask selector: a mask sub-config
       enabled with ``p > 0`` resolves to ``prf_mask``, otherwise ``dense``.
 
@@ -114,7 +118,7 @@ def resolve_compression_type(config: Any) -> str:
     if config is None:
         return "dense"
     ctype = str(getattr(config, "compression_type", "dense"))
-    if ctype in ("prf_mask", "powersgd"):
+    if ctype in ("prf_mask", "powersgd", "sr_quant"):
         return ctype
     # ctype == "dense": honor the mask selector for back-compat.
     mask_cfg = getattr(config, "mask", None)
@@ -148,6 +152,11 @@ class CommEffState:
         # Mutually exclusive with self.powersgd: a run is either the mask codec
         # or the powersgd codec, never both.
         self.masker = None
+        # The activation quantizer (sr_quant codec). Constructed in build() only
+        # when compression_type resolves to sr_quant; mutually exclusive with
+        # both the masker and the powersgd compressor (exactly one boundary
+        # codec object exists per run).
+        self.quantizer = None
         self.powersgd = None
         self.spectral = None
         self.fsdp_grad_repr: dict = {}
@@ -219,6 +228,13 @@ class CommEffState:
             from verl.workers.comm_eff.activation_mask import ActivationMasker
 
             mask_cfg = getattr(self.config, "mask", None)
+            # Anchor ownership of the FRLR basis Q (issue #93). Only FRLR carries
+            # a basis, so a plain-PRF arm always resolves to False here; the
+            # config validator rejects the plain-mask + owns_q combination.
+            mask_anchor_cfg = getattr(self.config, "anchor", None)
+            mask_anchor_owns_q = bool(getattr(mask_anchor_cfg, "owns_q", False)) and bool(
+                getattr(mask_cfg, "frlr", False)
+            )
             self.masker = ActivationMasker(
                 p=float(getattr(mask_cfg, "p", 0.0)),
                 base_seed=int(getattr(mask_cfg, "seed", 0)),
@@ -228,17 +244,20 @@ class CommEffState:
                 exact_k=bool(getattr(mask_cfg, "exact_k", False)),
                 antithetic=bool(getattr(mask_cfg, "antithetic", False)),
                 p_by_boundary=list(getattr(mask_cfg, "p_by_boundary", []) or []),
+                dense_every=int(getattr(mask_cfg, "dense_every", 0) or 0),
                 frlr=bool(getattr(mask_cfg, "frlr", False)),
                 frlr_rank=int(getattr(mask_cfg, "frlr_rank", 32)),
                 frlr_k=int(getattr(mask_cfg, "frlr_k", 44)),
                 frlr_unbiased=bool(getattr(mask_cfg, "frlr_unbiased", False)),
                 frlr_q_cadence=int(getattr(mask_cfg, "frlr_q_cadence", 1)),
+                anchor_owns_q=mask_anchor_owns_q,
                 state=self,
             )
             logger.info(
                 "comm_eff: prf_mask p=%s pp_size=%s rescale=%s rescale_mode=%s "
                 "exact_k=%s antithetic=%s p_by_boundary=%s "
-                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s",
+                "frlr=%s frlr_rank=%s frlr_k=%s frlr_unbiased=%s frlr_q_cadence=%s "
+                "anchor_owns_q=%s dense_every=%s",
                 getattr(mask_cfg, "p", 0.0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "rescale", False),
@@ -251,6 +270,41 @@ class CommEffState:
                 getattr(mask_cfg, "frlr_k", 44),
                 getattr(mask_cfg, "frlr_unbiased", False),
                 getattr(mask_cfg, "frlr_q_cadence", 1),
+                mask_anchor_owns_q,
+                int(getattr(mask_cfg, "dense_every", 0) or 0),
+            )
+
+        if self.compression_type == "sr_quant":
+            # Imported lazily so the disabled / dense / powersgd / prf_mask
+            # paths never pay the import cost. Mutually exclusive with the
+            # prf_mask branch above and the powersgd branch below. sr_quant
+            # reuses the mask sub-config for eligibility (mask_recompute /
+            # mask_reference) and keying (seed / pp_size); mask.p / rescale /
+            # exact_k / antithetic / frlr are ignored by this codec.
+            from verl.workers.comm_eff.activation_quant import ActivationQuantizer
+
+            mask_cfg = getattr(self.config, "mask", None)
+            quant_cfg = getattr(self.config, "quant", None)
+            self.quantizer = ActivationQuantizer(
+                bits=int(getattr(quant_cfg, "bits", 1)),
+                base_seed=int(getattr(mask_cfg, "seed", 0)),
+                pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                block_size=int(getattr(quant_cfg, "block_size", 32)),
+                rounding=str(getattr(quant_cfg, "rounding", "sr")),
+                subset_k=int(getattr(quant_cfg, "subset_k", 0)),
+                state=self,
+            )
+            logger.info(
+                "comm_eff: sr_quant bits=%s block_size=%s rounding=%s subset_k=%s pp_size=%s seed=%s "
+                "mask_recompute=%s mask_reference=%s",
+                getattr(quant_cfg, "bits", 1),
+                getattr(quant_cfg, "block_size", 32),
+                getattr(quant_cfg, "rounding", "sr"),
+                getattr(quant_cfg, "subset_k", 0),
+                getattr(mask_cfg, "pp_size", 8),
+                getattr(mask_cfg, "seed", 0),
+                getattr(mask_cfg, "mask_recompute", False),
+                getattr(mask_cfg, "mask_reference", False),
             )
 
         if self.compression_type == "powersgd":
@@ -404,8 +458,10 @@ class CommEffState:
         Emits ``comm_eff/mask_applications/<tag>`` for every tag; the only
         nonzero key should be ``.../train`` (plus ``.../old_logprob`` under
         mask_recompute). Any other nonzero key is the confinement falsifier.
+        The sr_quant codec shares these counters (its hook calls
+        ``note_mask_application`` too), so the same falsifier covers it.
         """
-        if self.masker is None:
+        if self.masker is None and self.quantizer is None:
             return {}
         return {f"comm_eff/mask_applications/{tag}": count for tag, count in self.mask_applications_by_path.items()}
 
@@ -436,6 +492,26 @@ class CommEffState:
         elif hidden_size is not None:
             out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - p) * float(hidden_size))
         return out
+
+    def quant_metrics(self) -> dict:
+        """sr_quant codec metrics: logical PP bit budget per token per boundary.
+
+        ``comm_eff/logical_pp_bits_sr_quant`` is ``H*bits + n_blocks*16``
+        (payload plus one fp16 scale per block; in subset mode
+        ``subset_k*bits + subset_k*16/block``), the sr_quant analogue of the
+        PRF codec's ``comm_eff/logical_pp_bytes_prf``; the ``_bytes_`` variant
+        is the same number divided by 8 for direct budget comparison. Empty
+        until the first quant hook fire records the hidden size.
+        """
+        if self.quantizer is None:
+            return {}
+        bits_per_token = getattr(self.quantizer, "logical_pp_bits_sr_quant", None)
+        if bits_per_token is None:
+            return {}
+        return {
+            "comm_eff/logical_pp_bits_sr_quant": float(bits_per_token),
+            "comm_eff/logical_pp_bytes_sr_quant": float(bits_per_token) / 8.0,
+        }
 
     def note_powersgd_application(self) -> None:
         self.powersgd_applications += 1
@@ -568,4 +644,5 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     output.update(state.powersgd_metrics())
     output.update(state.path_metrics())
     output.update(state.mask_ratio_metrics())
+    output.update(state.quant_metrics())
     return output

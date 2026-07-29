@@ -111,6 +111,15 @@ kl_loss_coef: 0.001
 # Type of KL divergence loss. Options: "kl"(k1), "abs", "mse"(k2), "low_var_kl"(k3), "full"
 kl_loss_type: low_var_kl
 
+# CVC CE mode (issue #93 I4a): weight on the training-view cross entropy
+# -log pi(a_t) over response tokens (the codec view under an active comm_eff
+# codec, so the term trains the train-inference disagreement down).
+# 0.0 (default) keeps the loss graph bit-identical.
+cvc_lambda: 0.0
+
+# Trainer steps over which the effective CVC lambda ramps linearly 0 -> cvc_lambda
+cvc_warmup_steps: 20
+
 # Number of PPO epochs per batch
 ppo_epochs: 1
 
@@ -295,7 +304,7 @@ comm_eff:
   # Dense compatibility is the strict enabled=false path.
   enabled: false
 
-  # The supported lossy activation codec is PowerSGD.
+  # Boundary activation codec: dense | prf_mask | powersgd | sr_quant.
   compression_type: powersgd
 
   # PRF per-(token, dimension) pipeline-boundary activation mask. Inert while
@@ -311,6 +320,7 @@ comm_eff:
     pp_size: 8
     mask_recompute: false
     mask_reference: false
+    dense_every: 0
     rescale: false
     rescale_mode: auto
     exact_k: false
@@ -321,6 +331,24 @@ comm_eff:
     frlr_k: 44
     frlr_unbiased: false
     frlr_q_cadence: 1
+
+  # Dense low-bit stochastic-rounding quantization of pipeline-boundary
+  # activations (and of the boundary backward gradient). Active only when
+  # compression_type=sr_quant; reuses mask.{seed,pp_size,mask_recompute,
+  # mask_reference} for keying and eligibility (mask.p / rescale / exact_k /
+  # antithetic / frlr are ignored). Fields mirror
+  # verl.workers.config.CommEffQuantConfig exactly.
+  quant:
+
+    _target_: verl.workers.config.CommEffQuantConfig
+
+    bits: 1
+    block_size: 32
+    rounding: sr
+    # 0 = full-width. > 0 (issue #93 I5 byte-parity hybrid): quantize only a
+    # PRF-fresh exact-subset_k channel subset J per token (mask-keyed, pass
+    # identical within a step), zero elsewhere, rescale by H/subset_k.
+    subset_k: 0
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:
@@ -381,6 +409,39 @@ comm_eff:
     qr_dtype: fp32
     reortho_eps: 1e-6
     fast_q_bootstrap: true
+
+  # Dense-view probe + adaptive reference-KL coefficient (issue #93 I3).
+  # probe_every=0 keeps the trainer path bit-identical; ctrl_enabled=false
+  # keeps the loss on the static kl_loss_coef. Fields mirror
+  # verl.workers.config.CommEffProbeConfig exactly.
+  probe:
+
+    _target_: verl.workers.config.CommEffProbeConfig
+
+    probe_every: 0
+    ctrl_enabled: false
+    kl_target_table: ""
+    kl_target_floor: 0.005
+    kl_target_gain: 2.0
+    ctrl_ki: 0.3
+    ctrl_kp: 0.1
+    ctrl_beta_min: 2.0e-4
+    ctrl_beta_max: 0.05
+
+  # DC-GRPO advantage shaping (issue #93 I4b, arXiv 2606.08779). enabled=false
+  # keeps the trainer path bit-identical. target carries NO default magic: it
+  # is the measured step-1 static per-token discrepancy floor plus slack and
+  # must be set explicitly when enabled (-1.0 = unset sentinel, rejected at
+  # config time). Fields mirror verl.workers.config.CommEffDCConfig exactly.
+  dc:
+
+    _target_: verl.workers.config.CommEffDCConfig
+
+    enabled: false
+    eta: 1.0
+    target: -1.0
+    lambda0: 0.05
+    lambda_max: 1.0
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
