@@ -12,6 +12,47 @@
 > `COMM_EFF_COMPRESSION_TYPE=powersgd`. Full reasoning:
 > `research/runs/93-long-horizon-stability/STABILITY_RANKING.md`.
 
+## Why PRF exact-k, and why not the alternatives
+
+Settled by issue #93. **PRF exact-k is the only method to move forward with.**
+Every other codec family either failed outright or is unproven at horizon.
+
+| family | status | the decisive number |
+|---|---|---|
+| **low-rank / basis `Q`** (PowerSGD, FRLR) | **rejected** | PowerSGD is the only codec ever to collapse a run here (early-band rotation about 3.4x the dense NSS). FRLR is 2.55x better than PRF at step 100 and **inverts**: above PRF from step 424, ending 2.12x worse (31.10 vs 14.66), gradient median drifting 9.25x to 176.4 |
+| importance-ratio corrections (token-IS) | **rejected** | at ~14 nats, token overlap collapses about 170x and ESS measured 0.0006; a6 collapsed to val 0.5391 with `grad_norm` 608.8, a5/a5b simply stopped learning (reward 0.5895 / 0.6606) |
+| biased quantization (`sr_quant` 1-bit RN) | **rejected** | killed at step 60; run-**minimum** `grad_norm` 6.153 exceeds the unbiased twin's 120-step **maximum** of 0.898, with only the bias differing |
+| unbiased 1-bit (`sr_quant` 1-bit SR) | **rejected on wire** | tightest gradients ever measured here (max/min 1.2x) but 2304 bits/token/boundary, 1.87x parity |
+| periodic uncompressed step (`mask.dense_every`) | **null** | creep only 0.86x, inside its pre-registered null band; no pull-back at the injections (-0.0024 nats over eleven); the clean gradient is 30-35x smaller than the compressed ones it should correct |
+| **`a4`** PRF + CVC, **`a3`** sr_quant 2-bit parity | **unproven, not beaten** | both matched or beat PRF on gap flatness *and* gradient tightness at 120 steps and were never run longer; a3 holds the flattest gap measured anywhere (+0.000101) |
+
+### The mechanism, for the basis-`Q` family specifically
+
+A projection codec's error is **alignment-dependent**: it lives in the
+retained/discarded subspace, so it points the same way step after step. That
+error is **coherent**, meaning constant-direction, and this project established
+that ref-KL drift is gated by **bias times coherence** rather than by error
+magnitude. The subspace is also fitted to activations the policy keeps moving, so
+`Q` is permanently chasing and the error grows with the run.
+
+PRF's error is **rotation-invariant**. It has no preferred direction, nothing
+accumulates, and the gap is therefore stationary. That difference is the entire
+result.
+
+Governance does not rescue the family. Fast `Q` at cadence 1, slow `Q` at cadence
+20, anchor-owned `Q`, and an unbiased gain were all tried. `Q` governance moves
+the gap and the codec view and moves **neither capability nor real drift**: three
+arms differing only in `Q` governance have identical `probe/kl_dense` to within 4
+percent at matched step 120. And with `frlr_unbiased=true` the gap returns to
+14.88, PRF's own operating point, so **FRLR's entire advantage is bought by its
+bias** and there is no unbiased version of the win. A basis is also an operational
+cost PRF does not pay: `Q` has to be broadcast or anchor-coupled, which is
+side-channel traffic on the link we are trying not to use.
+
+**Read this as a horizon result, not a claim of superiority at every scale.** On
+the short 100-120 window PRF exact-k ranks fourth. Single seed per arm, so a
+difference smaller than run-to-run variation cannot be distinguished from one.
+
 ## Run
 
 Prepare MATH `train.parquet` and `test.parquet` under `$HOME/data/math`, then run:
