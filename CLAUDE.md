@@ -3,6 +3,27 @@
 This fork is only for the communication-efficient GRPO pipeline. Ignore model,
 dataset, and launcher defaults from unrelated upstream examples.
 
+## Deployment context (why this pipeline exists)
+
+- Goal: RL fine-tuning (RLVR/GRPO) of models too large for one GPU. As models
+  grow the model must be split with PIPELINE PARALLELISM into stages, and the
+  stages live on small community GPUs connected over the ordinary internet:
+  no InfiniBand, no co-located mesh.
+- Because stage boundaries cross the internet, inter-stage activations
+  (forward) and boundary gradients (backward) MUST be aggressively compressed.
+  That compression, and keeping RL stable under it, is the research object.
+- Rollout generation is not the constrained path: rollouts can come from
+  quantized serving copies of the policy. The compressed path is the training
+  forward/backward through the pipeline stages.
+- A periodic slow sync is allowed: from time to time the system can do a dense
+  weight sync or dense passes (for example in a central GPU mesh). Cadence and
+  latency of that slow path are set by the network, not tunable per step. The
+  anchor circuit models this.
+- Cardinal rule of post-training: do not damage the base model's weights or
+  capabilities. Stability and capability preservation outrank raw reward.
+- Out of scope: data-parallel replica merging / federated averaging. One
+  model, split into stages, is the setting.
+
 ## Current default
 
 - Model: `Qwen/Qwen2.5-Math-1.5B`.
