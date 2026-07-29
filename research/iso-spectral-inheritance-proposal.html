@@ -1,0 +1,2132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A skeptical, ISO-inspired proposal for reusable pipeline-boundary structure in communication-efficient GRPO.">
+  <title>FROST — Spectral inheritance at the pipeline boundary</title>
+  <style>
+    :root {
+      --ink: #142238;
+      --muted: #526174;
+      --paper: #f6f2e9;
+      --paper-2: #fffdf7;
+      --navy: #0d2638;
+      --navy-2: #143b4d;
+      --cyan: #1f8a8a;
+      --cyan-soft: #dceeed;
+      --orange: #d76532;
+      --orange-soft: #f7e1d3;
+      --yellow: #e1b64b;
+      --yellow-soft: #fbf1ce;
+      --green: #267859;
+      --green-soft: #dcefe5;
+      --red: #a84343;
+      --red-soft: #f6dddd;
+      --line: #d8d3c8;
+      --shadow: 0 16px 42px rgba(21, 34, 49, .09);
+      --radius: 20px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 2%, rgba(31,138,138,.12), transparent 25rem),
+        radial-gradient(circle at 93% 8%, rgba(215,101,50,.11), transparent 28rem),
+        var(--paper);
+      font-family: var(--sans);
+      line-height: 1.58;
+    }
+
+    a { color: #0d6671; text-underline-offset: 3px; }
+    a:hover { color: var(--orange); }
+    code, .mono { font-family: var(--mono); }
+    code {
+      padding: .14rem .34rem;
+      border-radius: 6px;
+      background: rgba(13,38,56,.07);
+      font-size: .91em;
+    }
+    sub, sup { line-height: 0; }
+    strong { color: #102336; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(255,255,255,.14);
+      background: rgba(13,38,56,.96);
+      backdrop-filter: blur(14px);
+    }
+    .topbar-inner {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .brand {
+      color: white;
+      text-decoration: none;
+      font-weight: 800;
+      letter-spacing: .09em;
+      font-size: .84rem;
+    }
+    .navlinks {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      overflow-x: auto;
+      white-space: nowrap;
+      scrollbar-width: none;
+    }
+    .navlinks a {
+      color: #dce8ed;
+      text-decoration: none;
+      font-size: .8rem;
+      font-weight: 700;
+    }
+    .navlinks a:hover { color: #fff; }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+    section {
+      padding: 72px 0 10px;
+      scroll-margin-top: 58px;
+    }
+    .hero {
+      padding: 84px 0 44px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr);
+      gap: 40px;
+      align-items: center;
+    }
+    .eyebrow {
+      margin: 0 0 13px;
+      color: var(--orange);
+      font-weight: 850;
+      font-size: .76rem;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      color: var(--navy);
+      font-size: clamp(2.6rem, 7vw, 6.5rem);
+      line-height: .92;
+      letter-spacing: -.065em;
+    }
+    h1 .accent { color: var(--cyan); }
+    .hero-copy {
+      max-width: 800px;
+      margin: 24px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.04rem, 1.7vw, 1.28rem);
+    }
+    .hero-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #234759;
+      border-radius: 28px;
+      padding: 28px;
+      color: #eef7f6;
+      background: linear-gradient(150deg, var(--navy), var(--navy-2));
+      box-shadow: var(--shadow);
+    }
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      width: 180px;
+      height: 180px;
+      right: -65px;
+      top: -70px;
+      border-radius: 50%;
+      border: 32px solid rgba(31,138,138,.24);
+    }
+    .hero-card h2 {
+      position: relative;
+      z-index: 1;
+      margin: 0 0 10px;
+      color: white;
+      font-size: 1.35rem;
+    }
+    .hero-card p { position: relative; z-index: 1; margin: 0; color: #cedfe4; }
+    .decision {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 7px 11px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 999px;
+      color: #fff;
+      background: rgba(255,255,255,.08);
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .decision-dot {
+      width: 9px; height: 9px; border-radius: 50%; background: #f3c95d;
+      box-shadow: 0 0 0 4px rgba(243,201,93,.15);
+    }
+
+    .metric-strip {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .metric {
+      min-height: 112px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,253,247,.74);
+    }
+    .metric .value {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--navy);
+      font-size: clamp(1.45rem, 3vw, 2.2rem);
+      font-weight: 900;
+      letter-spacing: -.04em;
+    }
+    .metric .label { color: var(--muted); font-size: .82rem; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, .56fr) minmax(260px, .44fr);
+      gap: 36px;
+      align-items: end;
+      margin-bottom: 30px;
+    }
+    .kicker {
+      display: block;
+      margin-bottom: 9px;
+      color: var(--cyan);
+      font-size: .73rem;
+      font-weight: 900;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h2 {
+      margin: 0;
+      color: var(--navy);
+      font-size: clamp(2rem, 4.6vw, 4.25rem);
+      line-height: 1.02;
+      letter-spacing: -.05em;
+    }
+    h3 {
+      margin: 0 0 10px;
+      color: var(--navy);
+      font-size: 1.16rem;
+      line-height: 1.25;
+    }
+    h4 { margin: 0 0 8px; color: var(--navy); }
+    .lede { margin: 0; color: var(--muted); font-size: 1.02rem; }
+
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 16px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-2);
+      box-shadow: 0 8px 30px rgba(20,34,56,.045);
+    }
+    .card p:last-child { margin-bottom: 0; }
+    .small { color: var(--muted); font-size: .84rem; }
+    .fine { color: var(--muted); font-size: .74rem; }
+
+    .label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 12px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: .67rem;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .label.evidence { color: #1c694b; background: var(--green-soft); }
+    .label.inference { color: #8a5710; background: var(--yellow-soft); }
+    .label.speculation { color: #9b3f27; background: var(--orange-soft); }
+    .label.reject { color: #8c3434; background: var(--red-soft); }
+    .label.system { color: #12606a; background: var(--cyan-soft); }
+
+    .ladder .card { position: relative; padding-top: 28px; }
+    .ladder .card::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; right: 0;
+      height: 5px;
+      border-radius: 20px 20px 0 0;
+      background: var(--cyan);
+    }
+    .ladder .card:nth-child(2)::before { background: var(--yellow); }
+    .ladder .card:nth-child(3)::before { background: var(--orange); }
+    .ladder .card:nth-child(4)::before { background: var(--red); }
+
+    .equation {
+      margin: 18px 0;
+      padding: 19px 22px;
+      overflow-x: auto;
+      border: 1px solid #cbd8da;
+      border-left: 5px solid var(--cyan);
+      border-radius: 12px;
+      color: #0b3140;
+      background: #eef6f4;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(1rem, 2.1vw, 1.27rem);
+      white-space: nowrap;
+    }
+    .equation.orange {
+      border-color: #edd5c7;
+      border-left-color: var(--orange);
+      background: #fff5ee;
+      color: #54291a;
+    }
+    .formula-note {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: .72rem;
+      white-space: normal;
+    }
+
+    .fixed-change {
+      display: grid;
+      grid-template-columns: 1fr 54px 1fr;
+      gap: 15px;
+      align-items: stretch;
+      margin-top: 20px;
+    }
+    .fixed-change .arrow {
+      display: grid;
+      place-items: center;
+      color: var(--orange);
+      font-size: 2rem;
+      font-weight: 900;
+    }
+    .mini-list { margin: 12px 0 0; padding-left: 18px; }
+    .mini-list li { margin: 7px 0; }
+
+    .architecture {
+      position: relative;
+      overflow: hidden;
+      margin-top: 20px;
+      padding: 26px;
+      border: 1px solid #c9d3d6;
+      border-radius: 24px;
+      background:
+        linear-gradient(rgba(255,255,255,.88), rgba(255,255,255,.88)),
+        repeating-linear-gradient(90deg, transparent 0 45px, rgba(13,38,56,.035) 46px),
+        repeating-linear-gradient(0deg, transparent 0 45px, rgba(13,38,56,.035) 46px);
+      box-shadow: var(--shadow);
+    }
+    .arch-row {
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+      margin: 14px 0;
+    }
+    .lane-label {
+      color: var(--muted);
+      font-size: .72rem;
+      font-weight: 900;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .stage-line {
+      display: grid;
+      grid-template-columns: repeat(15, minmax(20px, 1fr));
+      align-items: center;
+      gap: 5px;
+    }
+    .stage {
+      min-height: 72px;
+      display: grid;
+      place-items: center;
+      padding: 8px 3px;
+      border: 1px solid #21485a;
+      border-radius: 12px;
+      color: white;
+      background: var(--navy-2);
+      font-size: .76rem;
+      font-weight: 900;
+      text-align: center;
+    }
+    .stage.proposed { background: #165d61; border-color: #277a78; }
+    .wire {
+      display: grid;
+      place-items: center;
+      min-height: 42px;
+      color: var(--orange);
+      font-size: 1rem;
+      font-weight: 900;
+      text-align: center;
+    }
+    .wire small {
+      display: block;
+      font-size: .55rem;
+      letter-spacing: .03em;
+    }
+    .rollout-flow, .anchor-flow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .node {
+      padding: 11px 14px;
+      border: 1px solid #c8d4d7;
+      border-radius: 11px;
+      background: white;
+      font-size: .78rem;
+      font-weight: 750;
+    }
+    .node.slow { border-color: #ecc7b6; background: #fff2e9; }
+    .node.once { border-color: #c2ddd8; background: #e9f5f2; }
+    .flow-arrow { color: var(--orange); font-weight: 900; }
+    .anchor-up {
+      margin: 10px 0 0 130px;
+      padding: 10px 14px;
+      border-left: 3px dashed var(--orange);
+      color: #78442d;
+      font-size: .77rem;
+    }
+    .arch-caption {
+      margin: 16px 0 0;
+      padding-top: 14px;
+      border-top: 1px dashed #cbd3d5;
+      color: var(--muted);
+      font-size: .75rem;
+    }
+
+    .boundary {
+      display: grid;
+      grid-template-columns: minmax(180px, .72fr) 64px minmax(280px, 1.28fr);
+      gap: 15px;
+      align-items: stretch;
+    }
+    .boundary-stage {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 310px;
+      padding: 22px;
+      border-radius: 18px;
+      color: white;
+      background: var(--navy);
+    }
+    .boundary-stage.right { background: #165d61; }
+    .boundary-stage h3 { color: white; }
+    .boundary-stage p { color: #cbdde3; font-size: .82rem; }
+    .boundary-wire {
+      display: grid;
+      place-items: center;
+      color: var(--orange);
+      font-size: 1.8rem;
+      font-weight: 900;
+    }
+    .ledger {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .ledger-item {
+      min-height: 132px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper-2);
+    }
+    .ledger-item h4 { font-size: .86rem; }
+    .ledger-item p { margin: 0; color: var(--muted); font-size: .77rem; }
+    .ledger-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 26px; height: 26px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      color: white;
+      background: var(--cyan);
+      font-size: .72rem;
+      font-weight: 900;
+    }
+    .ledger-item:nth-child(2) .ledger-icon { background: var(--green); }
+    .ledger-item:nth-child(3) .ledger-icon { background: var(--yellow); color: #543808; }
+    .ledger-item:nth-child(4) .ledger-icon { background: var(--orange); }
+
+    .callout {
+      margin: 18px 0;
+      padding: 18px 20px;
+      border-radius: 14px;
+      border: 1px solid #e5c6a4;
+      color: #674318;
+      background: var(--yellow-soft);
+    }
+    .callout strong { color: #4f3414; }
+    .callout.red { border-color: #e0b3b3; color: #743737; background: var(--red-soft); }
+    .callout.green { border-color: #bcd9cb; color: #235b45; background: var(--green-soft); }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--paper-2);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .79rem;
+    }
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid #e5e0d6;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: #e9f4f5;
+      background: var(--navy);
+      font-size: .7rem;
+      letter-spacing: .045em;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:nth-child(even) td { background: rgba(13,38,56,.025); }
+    td.num { white-space: nowrap; font-family: var(--mono); font-weight: 700; }
+
+    .calculator {
+      display: grid;
+      grid-template-columns: .8fr 1.2fr;
+      gap: 18px;
+      padding: 22px;
+      border: 1px solid #22495a;
+      border-radius: 20px;
+      color: white;
+      background: linear-gradient(140deg, var(--navy), #123f4c);
+    }
+    .calc-controls { display: grid; gap: 13px; align-content: center; }
+    .calc-controls label {
+      color: #cfe0e4;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .calc-controls input, .calc-controls select {
+      width: 100%;
+      margin-top: 5px;
+      padding: 11px 12px;
+      border: 1px solid #52707c;
+      border-radius: 9px;
+      color: white;
+      background: #0c2a39;
+      font: inherit;
+    }
+    .calc-output {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .calc-stat {
+      padding: 15px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 13px;
+      background: rgba(255,255,255,.06);
+    }
+    .calc-stat span { display: block; color: #a9c4cb; font-size: .68rem; }
+    .calc-stat strong { color: white; font-size: 1.25rem; }
+
+    .steps {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+    .step {
+      position: relative;
+      min-height: 205px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--paper-2);
+    }
+    .step-num {
+      display: grid;
+      place-items: center;
+      width: 36px; height: 36px;
+      margin-bottom: 17px;
+      border-radius: 50%;
+      color: white;
+      background: var(--orange);
+      font-size: .8rem;
+      font-weight: 900;
+    }
+    .step p { margin: 0; color: var(--muted); font-size: .78rem; }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr) 160px;
+      gap: 20px;
+      align-items: start;
+      padding: 20px 0;
+      border-top: 1px solid var(--line);
+    }
+    .phase:last-child { border-bottom: 1px solid var(--line); }
+    .phase-tag {
+      display: inline-block;
+      padding: 6px 9px;
+      border-radius: 9px;
+      color: white;
+      background: var(--navy);
+      font-size: .68rem;
+      font-weight: 850;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .phase p { margin: 0; color: var(--muted); font-size: .84rem; }
+    .gate {
+      color: var(--green);
+      font-size: .75rem;
+      font-weight: 800;
+    }
+
+    .risk {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .risk-score {
+      display: grid;
+      place-items: center;
+      width: 42px; height: 42px;
+      border-radius: 12px;
+      color: white;
+      background: var(--red);
+      font-size: .7rem;
+      font-weight: 900;
+    }
+    .risk p { margin: 0; color: var(--muted); font-size: .8rem; }
+
+    .verdict-panel {
+      overflow: hidden;
+      border-radius: 26px;
+      color: white;
+      background: var(--navy);
+      box-shadow: var(--shadow);
+    }
+    .verdict-top {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 28px;
+      padding: 32px;
+      background:
+        radial-gradient(circle at 90% 10%, rgba(31,138,138,.27), transparent 18rem),
+        var(--navy);
+    }
+    .verdict-top h2 { color: white; }
+    .verdict-top p { color: #cadae0; }
+    .verdict-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid rgba(255,255,255,.13);
+    }
+    .verdict-cell {
+      padding: 25px;
+      border-right: 1px solid rgba(255,255,255,.13);
+    }
+    .verdict-cell:last-child { border-right: 0; }
+    .verdict-cell h3 { color: white; }
+    .verdict-cell p { margin: 0; color: #bdcfd5; font-size: .8rem; }
+
+    .sources {
+      columns: 2;
+      column-gap: 34px;
+      padding-left: 20px;
+    }
+    .sources li {
+      break-inside: avoid;
+      margin-bottom: 11px;
+      color: var(--muted);
+      font-size: .77rem;
+    }
+    footer {
+      margin-top: 74px;
+      padding: 28px 0 45px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .74rem;
+    }
+
+    @media (max-width: 920px) {
+      .hero, .section-head, .calculator, .verdict-top { grid-template-columns: 1fr; }
+      .metric-strip, .grid-4, .steps { grid-template-columns: repeat(2, 1fr); }
+      .grid-3 { grid-template-columns: 1fr; }
+      .arch-row { grid-template-columns: 1fr; }
+      .stage-line { grid-template-columns: repeat(8, minmax(45px, 1fr)); overflow-x: auto; padding-bottom: 8px; }
+      .anchor-up { margin-left: 0; }
+      .boundary { grid-template-columns: 1fr; }
+      .boundary-wire { transform: rotate(90deg); min-height: 40px; }
+      .phase { grid-template-columns: 100px 1fr; }
+      .phase .gate { grid-column: 2; }
+    }
+
+    @media (max-width: 650px) {
+      main, .topbar-inner { width: min(100% - 22px, 1180px); }
+      .navlinks { display: none; }
+      .hero { padding-top: 54px; }
+      section { padding-top: 56px; }
+      .metric-strip, .grid-2, .grid-4, .steps, .calc-output, .ledger, .verdict-grid { grid-template-columns: 1fr; }
+      .fixed-change { grid-template-columns: 1fr; }
+      .fixed-change .arrow { transform: rotate(90deg); }
+      .architecture { padding: 16px; }
+      .stage-line { grid-template-columns: repeat(15, 54px); }
+      .verdict-cell { border-right: 0; border-bottom: 1px solid rgba(255,255,255,.13); }
+      .sources { columns: 1; }
+    }
+
+    @media print {
+      body { background: white; }
+      .topbar { display: none; }
+      main { width: 100%; padding: 0 16px; }
+      section { break-inside: avoid; padding-top: 30px; }
+      .card, .architecture, .verdict-panel { box-shadow: none; }
+      a { color: inherit; text-decoration: none; }
+      .calculator { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top">FROST / RESEARCH NOTE</a>
+      <nav class="navlinks" aria-label="Document sections">
+        <a href="#verdict-first">Decision</a>
+        <a href="#iso">ISO</a>
+        <a href="#current">Current system</a>
+        <a href="#proposal">Proposal</a>
+        <a href="#boundary">Boundary</a>
+        <a href="#cost">Cost</a>
+        <a href="#experiment">Experiment</a>
+        <a href="#final">Verdict</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">ISO × communication-efficient GRPO</p>
+        <h1 id="hero-title">Freeze a <span class="accent">dictionary</span>, not the conclusion.</h1>
+        <p class="hero-copy">
+          ISO shows that RLVR can reuse a base model’s singular <em>values</em> while both singular
+          <em>frames</em> move. That does not compress pipeline activations. It does motivate one clean
+          test: pre-distribute a base-checkpoint boundary dictionary, freeze it, and protect it with a
+          fresh unbiased residual channel.
+        </p>
+      </div>
+      <aside class="hero-card" id="verdict-first">
+        <div class="decision"><span class="decision-dot"></span> Decision: test, do not adopt</div>
+        <h2>FROST</h2>
+        <p><strong style="color:white">F</strong>rozen <strong style="color:white">R</strong>eference
+          <strong style="color:white">O</strong>rthogonal <strong style="color:white">S</strong>ubspace +
+          stochastic <strong style="color:white">T</strong>ail.</p>
+        <p style="margin-top:14px">One new codec arm. Same 77 BF16 values per token per boundary.
+          The dense anchor remains. Success must come from lower mismatch—not from claiming new wire savings.</p>
+      </aside>
+
+      <div class="metric-strip" aria-label="Key proposal numbers">
+        <div class="metric"><span class="value">49 + 28</span><span class="label">frozen core coordinates + fresh residual coordinates</span></div>
+        <div class="metric"><span class="value">19.95×</span><span class="label">logical payload reduction versus dense BF16 boundaries</span></div>
+        <div class="metric"><span class="value">2.01 MiB</span><span class="label">unique FP32 dictionary data; ≈4.02 MiB resident on both sides</span></div>
+        <div class="metric"><span class="value">0</span><span class="label">anchor removals in the first experiment</span></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="ladder-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Claim discipline</span>
+          <h2 id="ladder-title">The evidence ladder</h2>
+        </div>
+        <p class="lede">The bridge from weight spectra to activation compression has three missing steps.
+          The experiment is designed to falsify the first one cheaply.</p>
+      </div>
+
+      <div class="grid-4 ladder">
+        <article class="card">
+          <span class="label evidence">Evidence</span>
+          <h3>Base spectra are reusable</h3>
+          <p class="small">In the reported RLVR settings, restoring the base singular values preserves most gains;
+            fixed-spectrum training learns strongly; spectrum-only training barely learns.</p>
+        </article>
+        <article class="card">
+          <span class="label inference">Inference</span>
+          <h3>Base activations may share structure</h3>
+          <p class="small">A base-checkpoint activation covariance might define a useful boundary dictionary.
+            ISO does not measure this.</p>
+        </article>
+        <article class="card">
+          <span class="label speculation">Speculation</span>
+          <h3>A frozen dictionary may reduce mismatch</h3>
+          <p class="small">Stationary decoding might outperform a moving coherent projector when paired with
+            an unbiased fresh residual.</p>
+        </article>
+        <article class="card">
+          <span class="label reject">Not supported</span>
+          <h3>The anchor can disappear</h3>
+          <p class="small">A boundary dictionary does not provide dense gradient signs, stale-checkpoint correction,
+            or a check on policy-ratio drift.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="iso" aria-labelledby="iso-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">What ISO actually fixes</span>
+          <h2 id="iso-title">The spectrum is scale, not a codebook</h2>
+        </div>
+        <p class="lede">For every selected matrix, ISO keeps the base singular values and optimizes both
+          orthonormal frames. Those frames are precisely the directional information a decoder would need.</p>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label evidence">ISO parameterization</span>
+          <div class="equation">W<sub>t</sub> = U<sub>t</sub> Σ<sub>0</sub> V<sub>t</sub><sup>⊤</sup></div>
+          <div class="fixed-change">
+            <div class="card" style="box-shadow:none;background:var(--green-soft);border-color:#bcdacb">
+              <h3>Fixed</h3>
+              <ul class="mini-list small">
+                <li>Σ<sub>0</sub>: base singular values</li>
+                <li>the feasible fixed-spectrum family</li>
+                <li>operator singular-value profile</li>
+              </ul>
+            </div>
+            <div class="arrow">→</div>
+            <div class="card" style="box-shadow:none;background:var(--orange-soft);border-color:#ecc8b5">
+              <h3>Still changing</h3>
+              <ul class="mini-list small">
+                <li>U<sub>t</sub>: output frame</li>
+                <li>V<sub>t</sub>: input frame</li>
+                <li>activations, Jacobians and gradients</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="card">
+          <span class="label evidence">Online optimizer</span>
+          <div class="equation">
+            G<sub>U</sub> = G<sub>W</sub> V Σ<sub>0</sub>
+            &nbsp;&nbsp;·&nbsp;&nbsp;
+            G<sub>V</sub> = G<sub>W</sub><sup>⊤</sup> U Σ<sub>0</sub>
+            <span class="formula-note">AdamW or Muon updates U and V separately; polar retractions restore orthonormality.</span>
+          </div>
+          <p class="small">For an <em>m × n</em> matrix with <em>q = min(m,n)</em>, ISO exposes
+            <strong>q(m+n)</strong> frame elements. Relative to <em>mn</em> dense elements, the ratio is
+            <strong>1 + min(m,n)/max(m,n)</strong>: square matrices have 2× factor elements before a
+            reconstructed weight or retraction workspace.</p>
+          <p class="small">The paper reports about 86 seconds of added optimizer time—about 7% of one
+            Qwen3-4B, 8K, A100-80GB end-to-end RL step. That is not a low-bandwidth measurement.</p>
+        </article>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <article class="card">
+          <span class="label evidence">Functional result</span>
+          <h3>Restore Σ<sub>0</sub></h3>
+          <p class="small">Keeping RL-trained frames while replacing the learned spectrum with the base spectrum
+            preserves most acquired performance. <span class="fine">ISO paper, Fig. 4a, PDF p. 8.</span></p>
+        </article>
+        <article class="card">
+          <span class="label evidence">Intervention</span>
+          <h3>Freeze Σ<sub>0</sub> during RLVR</h3>
+          <p class="small">Frame-only ISO training learns strongly; the spectrum-only control learns little.
+            <span class="fine">Fig. 4b, PDF p. 8.</span></p>
+        </article>
+        <article class="card">
+          <span class="label evidence">Necessary freedom</span>
+          <h3>Both U and V move</h3>
+          <p class="small">One-sided or subspace-retaining alternatives leave much more of the endpoint update
+            unexplained; allowing both frames leaves about 2%. <span class="fine">Fig. 5, PDF p. 10.</span></p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Dimension check.</strong> With distinct nonzero singular values, a square
+        1536 × 1536 fixed-spectrum family still has 1536² − 1536 = 2,357,760 degrees of freedom:
+        <strong>99.935%</strong> of the dense matrix count. Fixing the spectrum is a meaningful
+        optimization prior, but not a low-dimensional communication representation.
+      </div>
+
+      <div class="callout red">
+        <strong>Paper caveat that matters here.</strong> The authors’ own dimension-aware calibration finds no
+        strong extra preference for spectrum-preserving motion beyond high-dimensional geometry. The stronger
+        evidence is functional intervention—not proximity alone. ISO-Optimizer code is also not present in the
+        released local repository as of this review; only the offline merger is released.
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label evidence">Released-code audit</span>
+          <h3>ISO-Merger is an offline frame merger</h3>
+          <p class="small">The 389-line implementation computes FP64 SVDs, retains each selected base
+            matrix’s Σ<sub>0</sub>, sign-aligns and tangent-projects expert frame changes, masks the trailing
+            10% of frame-displacement columns, solves clipped Gram weights, polar-retracts both frames, and
+            reconstructs. It is not the online optimizer and it contains no activation codec.</p>
+        </article>
+        <article class="card">
+          <span class="label reject">Release limits</span>
+          <h3>Reproducibility is incomplete</h3>
+          <p class="small">Matrix selection is hard-coded to Qwen-style projections plus exact embedding/head
+            names; 1-D tensors use a Euclidean task-vector average; there are no optimizer configs, tests,
+            seeds or benchmark scripts. The output dtype path can retain low-precision rounding, and no final
+            singular-value invariant is checked. The project website is a static result surface, not code.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="current" aria-labelledby="current-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Repository ground truth</span>
+          <h2 id="current-title">The current two-circuit system</h2>
+        </div>
+        <p class="lede">Qwen2.5-Math-1.5B has 28 blocks, hidden width 1536, and seven logical boundaries
+          for <code>pp_size=8</code>. The fast path compresses boundary states; the slow path supplies dense
+          correction every 20 optimizer ticks.</p>
+      </div>
+
+      <div class="architecture" role="img" aria-label="Current logical fast and slow circuit architecture">
+        <div class="arch-row">
+          <div class="lane-label">Rollout / data</div>
+          <div class="rollout-flow">
+            <div class="node">dense rollout generation</div><div class="flow-arrow">→</div>
+            <div class="node">old policy + reference</div><div class="flow-arrow">→</div>
+            <div class="node">GRPO batches</div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Fast circuit</div>
+          <div class="stage-line" aria-label="Eight stages and seven compressed boundaries">
+            <div class="stage">S0<br><small>layers 0–3</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S1<br><small>4–7</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S2<br><small>8–11</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S3<br><small>12–15</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S4<br><small>16–18</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S5<br><small>19–21</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S6<br><small>22–24</small></div><div class="wire">⇄<small>77</small></div>
+            <div class="stage">S7<br><small>25–27</small></div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Slow circuit</div>
+          <div class="anchor-flow">
+            <div class="node slow">paired stale batch + snapshot</div><div class="flow-arrow">→</div>
+            <div class="node slow">W2 RELEX projection</div><div class="flow-arrow">→</div>
+            <div class="node slow">dense ratio-one PG backward</div><div class="flow-arrow">→</div>
+            <div class="node slow">signed-EMA M</div>
+          </div>
+        </div>
+        <div class="anchor-up">Every 20 ticks after a 20-tick delay: correct fast gradients with
+          G<sub>corr</sub> = .25 G<sub>comp</sub> + .75 |G<sub>comp</sub>| sign(M).</div>
+        <p class="arch-caption"><strong>Implementation status:</strong> this is presently an in-process,
+          logical pipeline-boundary/FSDP proxy. Hooks reconstruct compressed states in one model; the
+          training mesh is data parallel, and the dense anchor clone uses the same accelerator.
+          The geographically distributed eight-stage mesh and separate slow device are the deployment target.
+          Therefore all boundary numbers below are modeled payloads, not observed internet traffic.</p>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <article class="card">
+          <span class="label system">Shipped fast codec</span>
+          <h3>Rank-77 PowerSGD projector</h3>
+          <p class="small">Sends <em>hQ</em>, reconstructs <em>hQQ<sup>⊤</sup></em>, and uses the exact
+            projector adjoint in backward. Anchor-derived Q refreshes are coherent and directional.</p>
+        </article>
+        <article class="card">
+          <span class="label evidence">Known result</span>
+          <h3>Coherent Q collapses long-horizon</h3>
+          <p class="small">The canonical 200-step run crossed reference KL 1 near step 49 and reached 9.84;
+            reward collapsed around steps 163–171. A frozen pure projector is therefore a risky proposal.</p>
+        </article>
+        <article class="card">
+          <span class="label evidence">Research incumbent</span>
+          <h3>Fresh PRF exact-k survives 600</h3>
+          <p class="small">Exactly 77 random BF16 coordinates per token stayed stable through 600 steps,
+            but left a roughly 14.4-nat dense/compressed codec wedge. It is recommended by research evidence,
+            not yet the shipped default.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="proposal" aria-labelledby="proposal-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">One minimal proposal</span>
+          <h2 id="proposal-title">FROST: stationary core, fresh tail</h2>
+        </div>
+        <p class="lede">Do not transplant ISO-Optimizer. Keep the actor optimizer and slow circuit unchanged.
+          Replace only the boundary representation with a frozen base-derived core plus a PRF-fresh
+          unbiased residual.</p>
+      </div>
+
+      <div class="architecture" role="img" aria-label="Proposed FROST architecture with a frozen shared dictionary and retained anchor">
+        <div class="arch-row">
+          <div class="lane-label">One-time setup</div>
+          <div class="rollout-flow">
+            <div class="node once">base checkpoint</div><div class="flow-arrow">→</div>
+            <div class="node once">fixed calibration batch</div><div class="flow-arrow">→</div>
+            <div class="node once">Q<sup>0</sup><sub>ℓ</sub> ∈ ℝ<sup>1536×49</sup></div><div class="flow-arrow">→</div>
+            <div class="node once">hash + pre-distribute once</div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Fast circuit</div>
+          <div class="stage-line">
+            <div class="stage proposed">S0<br><small>Q<sup>0</sup><sub>0</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S1<br><small>Q<sup>0</sup><sub>1</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S2<br><small>Q<sup>0</sup><sub>2</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S3<br><small>Q<sup>0</sup><sub>3</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S4<br><small>Q<sup>0</sup><sub>4</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S5<br><small>Q<sup>0</sup><sub>5</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S6<br><small>Q<sup>0</sup><sub>6</sub></small></div><div class="wire">⇄<small>49+28</small></div>
+            <div class="stage proposed">S7<br><small>decoder</small></div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Slow circuit</div>
+          <div class="anchor-flow">
+            <div class="node slow">same cadence / delay 20</div><div class="flow-arrow">→</div>
+            <div class="node slow">same paired dense replay</div><div class="flow-arrow">→</div>
+            <div class="node slow">same W2 RELEX + signed M</div><div class="flow-arrow">→</div>
+            <div class="node slow"><strong>no Q ownership</strong></div>
+          </div>
+        </div>
+        <div class="anchor-up">The anchor still corrects weight gradients and staleness. It simply stops
+          refreshing the boundary dictionary. Removing it is a later, separately authorized ablation.</div>
+        <p class="arch-caption">FROST borrows ISO’s <em>inherit once, adapt elsewhere</em> design pattern,
+          not its weight parameterization. The inherited object here is an activation-statistics dictionary
+          Q<sup>0</sup>, which is an explicit new hypothesis and must beat a frozen random dictionary.</p>
+      </div>
+
+      <div class="callout green">
+        <strong>Why not freeze the existing rank-77 projector?</strong> It has no residual escape path and
+        permanently deletes the same 1,459 directions. The repository already has evidence that coherent
+        low-rank projection creates directional policy drift. FROST makes the core stationary but gives every
+        omitted coordinate a fresh, unbiased chance to cross the boundary.
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label system">Minimal implementation delta</span>
+          <h3>Reuse the experimental FRLR path</h3>
+          <p class="small">Start from the issue-89/93 fresh-residual prototype, set
+            <code>frlr_unbiased=true</code>, <code>rank=49</code>, <code>k=28</code>, and add a
+            base-bootstrap/frozen Q source. Gate off only anchor Q harvesting; do not alter rollouts,
+            AdamW, signed M or W2 RELEX.</p>
+        </article>
+        <article class="card">
+          <span class="label inference">Resume requirement</span>
+          <h3>Q<sup>0</sup> is part of the checkpoint contract</h3>
+          <p class="small">Persist the exact dictionary artifact, calibration hash, seed and per-boundary
+            checksums. Current PowerSGD reset behavior can re-bootstrap Q after load; that would silently
+            invalidate a “frozen” resumed run and must be blocked.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="boundary" aria-labelledby="boundary-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Exact boundary contract</span>
+          <h2 id="boundary-title">What crosses—and what never does</h2>
+        </div>
+        <p class="lede">Each neighboring stage shares the same immutable dictionary and PRF key schedule.
+          Indices are implicit. Payloads contain only numerical coordinates.</p>
+      </div>
+
+      <div class="boundary">
+        <div class="boundary-stage">
+          <h3>Stage ℓ / encoder</h3>
+          <p>Owns its local weights and Q<sup>0</sup><sub>ℓ</sub>. Splits each hidden token into a 49-D
+            base core and a residual, then selects 28 residual coordinates with a shared counter-based PRF.</p>
+          <div class="equation" style="font-size:.94rem;margin-bottom:0">c = hQ<sup>0</sup><br>e = h − cQ<sup>0⊤</sup><br>z = e[J<sub>t</sub>]</div>
+        </div>
+        <div class="boundary-wire" aria-label="Bidirectional payload">⇄</div>
+        <div>
+          <div class="boundary-stage right">
+            <h3>Stage ℓ+1 / decoder</h3>
+            <p>Reconstructs with the shared dictionary and exact-k residual scatter. The H/k gain makes the
+              reconstruction unbiased over fresh subsets; the receiver computes the next stage normally.</p>
+            <div class="equation" style="font-size:.94rem;margin-bottom:0">
+              ĥ = cQ<sup>0⊤</sup> + (H/k) scatter<sub>J<sub>t</sub></sub>(z)
+              <span class="formula-note">H = 1536, r = 49, k = 28, H/k ≈ 54.86.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="equation orange">
+        E<sub>J</sub>[ĥ | h, Q<sup>0</sup>] = h
+        <span class="formula-note">Because the exact-k subset is uniform and fresh:
+          E[(H/k) scatter<sub>J</sub>(e[J])] = e. Q<sup>0</sup> and J are detached buffers.</span>
+      </div>
+
+      <div class="callout red">
+        <strong>Unbiased means the reconstructed activation only.</strong> It does not make downstream
+        logits, losses or parameter gradients unbiased: the network after this boundary is nonlinear.
+        This is a variance-controlled representation experiment, not an unbiased-RL estimator claim.
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label system">Forward wire</span>
+          <h3>77 BF16 values / token / boundary</h3>
+          <p class="small"><strong>49 core coefficients c</strong> + <strong>28 residual values z</strong>.
+            The exact-k indices cost zero bytes because both sides derive J<sub>t</sub> from
+            sample ID, token position, step, boundary and a shared seed.</p>
+        </article>
+        <article class="card">
+          <span class="label system">Backward wire</span>
+          <h3>77 BF16 cotangents / token / boundary</h3>
+          <p class="small">Let S<sub>J</sub> select the k coordinates and g = ∂L/∂ĥ. The receiver sends
+            dc = gQ<sup>0</sup> and dz = (H/k)gS<sub>J</sub><sup>⊤</sup>. The sender applies the exact
+            adjoint:</p>
+          <div class="equation" style="font-size:.9rem;margin-bottom:0">
+            dh = dc Q<sup>0⊤</sup> + dz S<sub>J</sub>(I − Q<sup>0</sup>Q<sup>0⊤</sup>)
+          </div>
+          <p class="fine">This is not a straight-through estimator and need not equal “compress g with the forward formula.”</p>
+        </article>
+      </div>
+
+      <div class="ledger" aria-label="Boundary state ledger">
+        <article class="ledger-item">
+          <div class="ledger-icon">L</div>
+          <h4>Stored locally</h4>
+          <p>Stage weights, optimizer state, local activations needed for backward, PRF seed, and the
+            boundary’s Q<sup>0</sup> copy on each adjacent stage.</p>
+        </article>
+        <article class="ledger-item">
+          <div class="ledger-icon">1×</div>
+          <h4>Distributed once</h4>
+          <p>Seven FP32 Q<sup>0</sup> dictionaries, basis version, checksum, seed and the fixed calibration
+            provenance. About 2.01 MiB of unique wire data before topology fan-out; about 4.02 MiB resident
+            when both adjacent stages keep a full copy.</p>
+        </article>
+        <article class="ledger-item">
+          <div class="ledger-icon">↻</div>
+          <h4>Updated during training</h4>
+          <p>Actor weights, AdamW state, replay snapshots, signed-EMA M and RELEX state.
+            Q<sup>0</sup> is checksum-locked and never refreshed.</p>
+        </article>
+        <article class="ledger-item">
+          <div class="ledger-icon">μ</div>
+          <h4>Every microbatch</h4>
+          <p>Forward: c and z. Backward: their cotangents. No dense activations, dense gradients,
+            singular frames, singular values, Q updates or index lists.</p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Base dictionary construction.</strong> Primary: a randomized top-49 eigenspace of each
+        base checkpoint boundary covariance using a fixed MATH calibration batch. Required controls:
+        (1) frozen random Q, and (2) a checkpoint-only “spectral-frame” dictionary formed from the top
+        eigenspace of downstream base-weight Gramians ∑W<sub>0</sub><sup>⊤</sup>W<sub>0</sub>.
+        The latter is the direct ISO-inspired control; neither is assumed to win.
+      </div>
+    </section>
+
+    <section id="cost" aria-labelledby="cost-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Communication and memory</span>
+          <h2 id="cost-title">Same fast budget, less basis churn</h2>
+        </div>
+        <p class="lede">FROST does not improve the 77-coordinate payload on day one. Its value proposition is
+          better dense-view fidelity at that payload, plus a one-time dictionary that could later support a
+          smaller payload if—and only if—the experiment passes.</p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Logical payload, BF16</th>
+              <th>Dense H=1536</th>
+              <th>Rank-77 / FROST</th>
+              <th>Reduction</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>One direction, one boundary, one token</td>
+              <td class="num">3,072 B</td>
+              <td class="num">154 B</td>
+              <td class="num">19.95×</td>
+            </tr>
+            <tr>
+              <td>Train forward + backward, seven boundaries, one token</td>
+              <td class="num">43,008 B</td>
+              <td class="num">2,156 B</td>
+              <td class="num">19.95×</td>
+            </tr>
+            <tr>
+              <td>Old forward + reference forward + train fwd/bwd, seven boundaries, one token</td>
+              <td class="num">86,016 B</td>
+              <td class="num">4,312 B</td>
+              <td class="num">19.95×</td>
+            </tr>
+            <tr>
+              <td>Train fwd/bwd, seven boundaries, 4,096 packed tokens</td>
+              <td class="num">168.00 MiB</td>
+              <td class="num">8.42 MiB</td>
+              <td class="num">159.58 MiB saved</td>
+            </tr>
+            <tr>
+              <td>All four actor passes above, 4,096 packed tokens</td>
+              <td class="num">336.00 MiB</td>
+              <td class="num">16.84 MiB</td>
+              <td class="num">319.16 MiB saved</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="calculator" style="margin-top:16px">
+        <div class="calc-controls">
+          <div>
+            <label for="tokens">Packed tokens in microbatch</label>
+            <input id="tokens" type="number" min="1" step="1" value="4096">
+          </div>
+          <div>
+            <label for="passes">Boundary traversals</label>
+            <select id="passes">
+              <option value="2">train forward + backward</option>
+              <option value="4">old + reference + train fwd/bwd</option>
+              <option value="1">one forward only</option>
+            </select>
+          </div>
+        </div>
+        <div class="calc-output" aria-live="polite">
+          <div class="calc-stat"><span>Dense / microbatch</span><strong id="denseOut">168.00 MiB</strong></div>
+          <div class="calc-stat"><span>FROST / microbatch</span><strong id="frostOut">8.42 MiB</strong></div>
+          <div class="calc-stat"><span>Saved / microbatch</span><strong id="savedOut">159.58 MiB</strong></div>
+          <div class="calc-stat"><span>Payload ratio</span><strong>5.013%</strong></div>
+        </div>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <article class="card">
+          <span class="label system">FROST one-time state</span>
+          <h3>2.01 MiB wire / 4.02 MiB resident</h3>
+          <p class="small">Unique data is 7 × 1536 × 49 × 4 bytes. Both adjacent stages retain a copy,
+            doubling target-topology resident dictionary memory before extra replication or sharding.
+            BF16 would halve both, but the first test should retain FP32 for checksums and stability.</p>
+        </article>
+        <article class="card">
+          <span class="label system">Current Q refresh</span>
+          <h3>3.16 MiB / refresh</h3>
+          <p class="small">7 × 1536 × 77 × 4 bytes before fan-out, currently every 20 ticks under
+            anchor-owned Q. FROST removes this recurring basis message, a small saving compared with
+            token traffic.</p>
+        </article>
+        <article class="card">
+          <span class="label reject">Direct ISO transplant</span>
+          <h3>No boundary savings</h3>
+          <p class="small">Updating U and V remains local optimizer work and leaves H unchanged.
+            Square factor/state storage is nominally 2× dense, plus Σ<sub>0</sub>, reconstructed W and
+            polar-SVD workspace. It is excluded from the minimal experiment.</p>
+        </article>
+      </div>
+
+      <div class="callout red">
+        <strong>Slow-path accounting is not solved by FROST.</strong> The present proxy uses local
+        CPU/GPU transfers and DP collectives, not measured internet sends. A run-90 target-model estimate
+        cites roughly 193 MB for sign(M) and about 3 MB for rank-1 RELEX per anchor fire, while the current
+        implementation can manipulate full FP32 tensors. Topology, sharding and protocol must be specified
+        before those become defensible wire numbers. The existing <code>comm/bytes_*</code> fast metric also
+        counts elements as “bytes” and covers only the gradient-bearing train forward, so the table above is an
+        explicit dtype-aware model that additionally includes backward and old/reference passes.
+      </div>
+    </section>
+
+    <section aria-labelledby="comparison-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Design comparison</span>
+          <h2 id="comparison-title">Four mechanisms, four different jobs</h2>
+        </div>
+        <p class="lede">The name “spectral” appears in several places, but the underlying objects are not interchangeable.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Mechanism</th>
+              <th>Reusable object</th>
+              <th>Per-token fast payload</th>
+              <th>What it addresses</th>
+              <th>What it does not address</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>PowerSGD fast path</strong><br><span class="fine">shipped default</span></td>
+              <td>moving activation second-moment basis Q</td>
+              <td class="num">77 BF16</td>
+              <td>boundary dimensionality</td>
+              <td>coherent projection bias; known long-horizon collapse</td>
+            </tr>
+            <tr>
+              <td><strong>PRF exact-k</strong><br><span class="fine">research incumbent</span></td>
+              <td>shared seed only; fresh coordinates</td>
+              <td class="num">77 BF16</td>
+              <td>unbiased, incoherent boundary sampling</td>
+              <td>large dense/compressed log-prob wedge</td>
+            </tr>
+            <tr>
+              <td><strong>Dense slow anchor</strong><br><span class="fine">cadence / delay 20</span></td>
+              <td>paired stale snapshots, W2 trajectory, EMA M</td>
+              <td class="num">periodic, model-sized</td>
+              <td>dense gradient signs and staleness correction</td>
+              <td>per-microbatch boundary payload</td>
+            </tr>
+            <tr>
+              <td><strong>FROST</strong><br><span class="fine">proposed test</span></td>
+              <td>frozen base activation dictionary + fresh tail</td>
+              <td class="num">49 + 28 BF16</td>
+              <td>stationary decoding with unbiased residual access</td>
+              <td>anchor functions; guaranteed quality; new wire reduction</td>
+            </tr>
+            <tr>
+              <td><strong>ISO-Optimizer</strong><br><span class="fine">paper; online code unreleased</span></td>
+              <td>base singular values Σ<sub>0</sub></td>
+              <td class="num">dense H unless another codec is added</td>
+              <td>weight-space optimization geometry</td>
+              <td>pipeline activations, gradients and slow synchronization</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="flow-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Training and synchronization</span>
+          <h2 id="flow-title">One setup, then eight repeated steps</h2>
+        </div>
+        <p class="lede">The only lifecycle change is Q ownership. The anchor remains in the same position
+          relative to fast backward, signed correction, clipping and AdamW.</p>
+      </div>
+
+      <div class="steps">
+        <article class="step"><div class="step-num">0</div><h3>Calibrate once</h3><p>At the base checkpoint, form seven Q<sup>0</sup> dictionaries from a versioned fixed batch. Orthonormalize in FP32; record hashes and energy curves.</p></article>
+        <article class="step"><div class="step-num">1</div><h3>Distribute once</h3><p>Copy each Q<sup>0</sup> to both adjacent logical stages. Verify cross-rank checksum equality before training.</p></article>
+        <article class="step"><div class="step-num">2</div><h3>Generate densely</h3><p>Keep rollout generation and rewards unchanged. FROST is confined to eligible old, reference and actor-training boundary paths.</p></article>
+        <article class="step"><div class="step-num">3</div><h3>Freeze the key</h3><p>Derive exact-k J<sub>t</sub> from stable token identity and step. Old, train and reference use the same key within a step; the tail changes next step.</p></article>
+        <article class="step"><div class="step-num">4</div><h3>Required cadenced anchor</h3><p>At cadence 20 after delay 20, run the existing paired dense replay at the stale/projected checkpoint. Do not harvest a new Q.</p></article>
+        <article class="step"><div class="step-num">5</div><h3>Fast fwd/bwd</h3><p>Send 49 core + 28 residual values forward and their exact cotangents backward at each of seven boundaries.</p></article>
+        <article class="step"><div class="step-num">6</div><h3>Correct weights</h3><p>Apply the unchanged signed-EMA blend from dense anchor M, then clip and take the existing AdamW step.</p></article>
+        <article class="step"><div class="step-num">7</div><h3>Audit invariants</h3><p>Assert Q hashes never change; log energy, residual variance, gradient cosine, codec log-prob gap, reference KL, reward and validation.</p></article>
+      </div>
+    </section>
+
+    <section id="experiment" aria-labelledby="experiment-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Smallest credible falsification</span>
+          <h2 id="experiment-title">One hypothesis, staged gates</h2>
+        </div>
+        <p class="lede"><strong>Hypothesis:</strong> a base-checkpoint boundary subspace contains reusable
+          directional information beyond stationarity alone, and an unbiased stochastic tail can preserve
+          safety at the matched 1,232-bit budget.</p>
+      </div>
+
+      <div class="phase">
+        <div><span class="phase-tag">Stage 0</span><div class="fine" style="margin-top:6px">saved traces first</div></div>
+        <div><h3>Offline subspace audit</h3><p>Using saved base and research traces/checkpoints, compare base-activation Q<sup>0</sup>, base-weight-Gram Q<sup>W</sup>, adaptive rank-49 Q and frozen random Q. Pre-register relative reconstruction MSE as the primary read; captured energy, principal angles, logit divergence and projected-gradient cosine are secondary. If activations/gradients were not saved, their recomputation is separately approved diagnostic compute—not assumed to be CPU-free.</p></div>
+        <div class="gate">GO only if Q<sup>0</sup> lowers median relative reconstruction MSE by ≥10% versus frozen random AND retains ≥80% of adaptive-Q captured energy on ≥5/7 boundaries.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 1</span><div class="fine" style="margin-top:6px">60 steps</div></div>
+        <div><h3>Mechanism screen</h3><p>Run one paired seed of FROST-U and frozen-random-U (both r49+k28, unbiased) with the current anchor and actor recipe. This is a kill screen, not an inference stage, and must include multiple anchor fires.</p></div>
+        <div class="gate">STOP on NaN, Q checksum drift, payload mismatch, grad max &gt;10, or an extrapolated violation of the numerical V1/V3 bars below.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 2</span><div class="fine" style="margin-top:6px">200 steps</div></div>
+        <div><h3>Credible stability test</h3><p>Run three paired training seeds for dense GRPO, PRF exact-k-77, adaptive-FRLR-U, frozen-random-U and FROST-U. Adaptive-FRLR-U must use the exact same r49+k28 unbiased estimator, anchor settings and <strong>no token-IS</strong>; issue-93’s confounded r48+k28+1/token-IS arm is historical evidence only. The 200-step horizon covers the prior PowerSGD collapse window.</p></div>
+        <div class="gate">GO only if every FROST seed clears the absolute gates and its primary gap slope beats frozen random on all three paired seeds by a median ≥5.0e−4 nat/step.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 3</span><div class="fine" style="margin-top:6px">600 steps</div></div>
+        <div><h3>Long-horizon confirmation</h3><p>Confirm with seeds and a matched 600-step run. Only after this passes may the project test r+k below 77. An anchor-off run is a separate ablation after—not during—the validation of the boundary hypothesis.</p></div>
+        <div class="gate">ADOPT only with stable long-horizon reward/KL and a repeatable quality gain or a safely lower payload.</div>
+      </div>
+
+      <div class="grid-2" style="margin-top:24px">
+        <article class="card">
+          <span class="label system">Required baselines</span>
+          <ol class="mini-list small">
+            <li><strong>Dense GRPO</strong>: quality ceiling and policy reference.</li>
+            <li><strong>PRF exact-k-77</strong>: stable wire-matched incumbent.</li>
+            <li><strong>Adaptive-FRLR-U r49+k28</strong>: identical unbiased estimator, same anchor,
+              no token-IS; isolates frozen versus adaptive Q.</li>
+            <li><strong>Frozen random-U</strong>: separates inherited structure from stationarity.</li>
+            <li><strong>FROST-U</strong>: base-activation Q<sup>0</sup>, r49+k28.</li>
+          </ol>
+        </article>
+        <article class="card">
+          <span class="label inference">Ablations after the primary</span>
+          <ol class="mini-list small">
+            <li>Base-weight-Gram Q<sup>W</sup> versus activation-derived Q<sup>0</sup>.</li>
+            <li>Existing norm-matched r48+k28+1 versus unbiased r49+k28.</li>
+            <li>Fixed residual keys versus fresh keys to expose coherence.</li>
+            <li>Rank splits at fixed 77: 32+45, 49+28, 64+13.</li>
+            <li><strong>Last:</strong> anchor on versus off, only after FROST passes.</li>
+          </ol>
+        </article>
+      </div>
+
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead>
+            <tr><th>Priority</th><th>Pre-registered measurement</th><th>Exact go / no-go rule</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>E · eligibility</strong></td><td>step count, payload, <code>actor/ppo_kl</code>, confinement counters and Q hashes</td><td>Reach 120 and 200; exactly 1,232 bits/token/boundary/direction; <code>ppo_kl=0</code> or explained; counters move; Q is bit-identical across ranks, time and resume.</td></tr>
+            <tr><td><strong>O1 · primary endpoint</strong></td><td>OLS slope of <code>rollout_corr/kl</code>, steps 61–120, HAC(4)</td><td>Each FROST seed ≤ +5.0e−4 nat/step; FROST lower than frozen random on all 3 paired seeds, with median paired improvement ≥5.0e−4.</td></tr>
+            <tr><td><strong>O2 · secondary endpoint</strong></td><td>mean <code>rollout_corr/kl</code>, steps 100–120</td><td>≤14.2458 nats in every FROST seed. Reported after O1; it cannot rescue an O1 failure.</td></tr>
+            <tr><td><strong>V1 · drift veto</strong></td><td><code>actor/kl_loss</code> OLS slope, HAC(4)</td><td>≤3.5162e−3 over steps 61–120 <em>and</em> ≤3.2636e−3 over steps 100–120 in every seed. Slope only, never level.</td></tr>
+            <tr><td><strong>V2 · gradient veto</strong></td><td><code>grad_norm</code> from step 61 onward</td><td>Run maximum ≤10.0 and window mean ≤3.62 in every seed.</td></tr>
+            <tr><td><strong>V3 · learning veto</strong></td><td><code>critic/score/mean</code> level at 100–120 and slope at 61–120</td><td>Level ≥0.6248 and HAC(4) slope significantly positive (one-sided z &gt;1.645) in every seed.</td></tr>
+            <tr><td><strong>C · capability</strong></td><td>dense-view validation at steps 0, 120 and 200</td><td>At step 200, FROST−PRF lower 95% clustered-bootstrap bound &gt;−0.02 absolute. Bootstrap 10,000 times by prompt/problem, keeping all rollouts from one prompt together.</td></tr>
+            <tr><td><strong>L · long horizon</strong></td><td>600-step reward, validation, drift and gap curves</td><td>No reward cliff, no V1/V2/V3 veto and no widening O1 slope. Only then may payload reduction or anchor-off be proposed.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="fine" style="margin-top:10px"><strong>Statistical hierarchy:</strong> Stage 1 uses one paired
+        seed only for killing obvious failures. Stage 2 uses three paired training seeds. Time-series gates use
+        the fixed HAC(4) windows above; only held-out prompt-level endpoints use the stated clustered bootstrap.
+        No metric may be swapped after results are visible.</p>
+    </section>
+
+    <section aria-labelledby="assumptions-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Required assumptions</span>
+          <h2 id="assumptions-title">The idea works only if…</h2>
+        </div>
+        <p class="lede">These are testable preconditions, not consequences of ISO. Failure of any first-row
+          assumption is enough to stop the proposal before an anchor-off or lower-budget experiment.</p>
+      </div>
+      <div class="grid-3">
+        <article class="card"><span class="label inference">A1 · persistence</span><h3>Base Q retains useful energy</h3><p class="small">Across RLVR checkpoints and prompts, Q<sup>0</sup> must capture materially more boundary signal or policy-relevant variation than a frozen random frame.</p></article>
+        <article class="card"><span class="label inference">A2 · escape path</span><h3>The fresh tail controls coherence</h3><p class="small">Exact-k residual refresh must prevent permanently erased directions from becoming a one-sided policy bias across steps and seven boundaries.</p></article>
+        <article class="card"><span class="label inference">A3 · variance</span><h3>Unbiased scaling is trainable</h3><p class="small">The H/k residual gain must not create gradient or logit variance large enough to overwhelm the benefits of a stable core.</p></article>
+        <article class="card"><span class="label system">A4 · identity</span><h3>Both sides derive the same J<sub>t</sub></h3><p class="small">Sample IDs, token positions, step counters, boundary IDs and seeds must survive packing, recompute and resume identically.</p></article>
+        <article class="card"><span class="label system">A5 · confinement</span><h3>All compared paths share one codec state</h3><p class="small">Old, train and reference forwards must use the same Q<sup>0</sup> and within-step PRF key; rollout generation remains dense and untouched.</p></article>
+        <article class="card"><span class="label system">A6 · anchor adequacy</span><h3>The current slow correction remains valid</h3><p class="small">Cadence/delay 20, paired replay, W2 and signed M must still stabilize the new codec; FROST does not compensate for a broken slow circuit.</p></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="risks-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Failure analysis</span>
+          <h2 id="risks-title">Reasons FROST may fail</h2>
+        </div>
+        <p class="lede">The proposal is deliberately easy to reject. A negative result would rule out a tempting
+          but unjustified reading of ISO before it reshapes the architecture.</p>
+      </div>
+
+      <div class="grid-2">
+        <article class="card risk"><div class="risk-score">HIGH</div><div><h3>Spectrum ≠ activation orientation</h3><p>Σ<sub>0</sub> constrains operator scales. Moving U and V, attention, residual additions, RMSNorm and nonlinearities can rotate boundary covariance arbitrarily.</p></div></article>
+        <article class="card risk"><div class="risk-score">HIGH</div><div><h3>Known coherent-erasure failure</h3><p>A frozen core repeatedly privileges the same directions. The fresh tail reduces—but does not remove—the correlated bias induced by a privileged subspace.</p></div></article>
+        <article class="card risk"><div class="risk-score">HIGH</div><div><h3>Unbiased can still be noisy</h3><p>H/k ≈ 54.86. Horvitz–Thompson residual scaling is unbiased in expectation but can have severe per-token variance and compound across seven boundaries.</p></div></article>
+        <article class="card risk"><div class="risk-score">MED</div><div><h3>Calibration may be parochial</h3><p>A MATH calibration batch may encode prompt-length, domain or position structure. Frozen random and weight-only controls are required; out-of-domain checks should follow.</p></div></article>
+        <article class="card risk"><div class="risk-score">HIGH</div><div><h3>Training–inference mismatch remains</h3><p>Rollouts are generated densely while trainer paths see reconstructed states. A stationary decoder may make the mismatch predictable, but it does not remove it.</p></div></article>
+        <article class="card risk"><div class="risk-score">MED</div><div><h3>No immediate wire win</h3><p>FROST matches the existing 77-coordinate budget. Eliminating a 3.16 MiB basis refresh every 20 ticks is minor beside token traffic and the slow path.</p></div></article>
+        <article class="card risk"><div class="risk-score">HIGH</div><div><h3>Anchor solves another problem</h3><p>The anchor supplies dense gradient signs at a corrected checkpoint. Q<sup>0</sup> cannot detect stale policy ratios, correct all parameter directions or forecast weight motion.</p></div></article>
+        <article class="card risk"><div class="risk-score">MED</div><div><h3>Current network is simulated</h3><p>Logical element counters undercount backward, old/reference passes, dtype bytes and some slow collectives. Real topology, retransmission and overlap may change the economics.</p></div></article>
+      </div>
+    </section>
+
+    <section id="final" aria-labelledby="final-title">
+      <div class="verdict-panel">
+        <div class="verdict-top">
+          <div>
+            <span class="kicker" style="color:#65c9c2">Final verdict</span>
+            <h2 id="final-title">ISO is an optimizer clue, not a communication theorem.</h2>
+          </div>
+          <p>The strongest responsible action is a matched-wire frozen-dictionary experiment with an
+            unbiased residual and the dense anchor retained. Anything stronger outruns the evidence.</p>
+        </div>
+        <div class="verdict-grid">
+          <div class="verdict-cell">
+            <span class="label evidence">Supported</span>
+            <h3>Reuse Σ<sub>0</sub> for RLVR weights</h3>
+            <p>The ISO interventions support fixed base spectra as a useful weight-optimization prior in the
+              reported settings. Both singular frames must remain adaptable.</p>
+          </div>
+          <div class="verdict-cell">
+            <span class="label inference">Worth testing</span>
+            <h3>Reuse Q<sup>0</sup> at boundaries</h3>
+            <p>A base activation dictionary may carry reusable directional structure. FROST is the smallest
+              experiment that isolates this from mere stationarity and coherent low-rank bias.</p>
+          </div>
+          <div class="verdict-cell">
+            <span class="label reject">Do not infer</span>
+            <h3>Remove the slow circuit</h3>
+            <p>No ISO result replaces dense gradient correction, staleness handling or synchronization.
+              Anchor removal requires its own later evidence.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="sage" aria-labelledby="sage-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Follow-on long-horizon design</span>
+          <h2 id="sage-title">Can the anchor + inherited spectrum prevent collapse?</h2>
+        </div>
+        <p class="lede"><strong>Conditional yes—but not with the current sign rule alone.</strong>
+          The defensible route is a low-bias fast codec, a slow circuit that communicates the
+          <em>dense-minus-compressed gradient error</em>, a synchronized inference-view governor, and a
+          base-spectrum trust envelope. This can bound individual updates and surface divergence early;
+          it cannot guarantee that an uninterrupted run will never stop.</p>
+      </div>
+
+      <div class="grid-3">
+        <article class="card">
+          <span class="label evidence">Evidence</span>
+          <h3>The anchor stack is not sufficient</h3>
+          <p class="small">The collapsed 200-step PowerSGD run already used cadence/delay 20,
+            W2 RELEX and all-floating signed EMA. Conversely, PRF exact-k with the same anchor
+            survived 600 steps. This is consistent with persistent codec-direction bias being
+            load-bearing, but protocol differences mean it is not a causal proof.</p>
+        </article>
+        <article class="card">
+          <span class="label evidence">Evidence</span>
+          <h3>High codec KL can be benign</h3>
+          <p class="small">Run 90 retained validation near 0.66–0.67 through step 600 while its
+            codec-view <code>actor/kl_loss</code> rose toward 0.9. A controller must read an anchor
+            synchronized dense-inference channel, not brake on the codec-view number by itself.</p>
+        </article>
+        <article class="card">
+          <span class="label inference">Design claim</span>
+          <h3>Correct the error, then bound the step</h3>
+          <p class="small">The slow circuit should estimate what compression changed, send that
+            residual once with confidence, and let Σ<sub>0</sub> define a local update scale.
+            Spectra are a guardrail—not the learning direction.</p>
+        </article>
+      </div>
+
+      <div class="callout red">
+        <strong>Important correction to the premise.</strong> “The anchor gives the correct direction”
+        is only approximately true. It is delayed, RELEX-projected and batch-dependent. Even a
+        coordinate-wise correct sign does not specify the relative coordinate magnitudes, so the full
+        vector can remain badly rotated inside the same orthant. Reusing one stale sign field for
+        twenty fast ticks can itself become a coherent bias.
+      </div>
+
+      <div class="section-head" style="margin-top:42px">
+        <div>
+          <span class="kicker">1 · Improve the anchor message</span>
+          <h2 style="font-size:clamp(1.8rem,3.8vw,3.35rem)">Sign is useful—but throws away the error</h2>
+        </div>
+        <p class="lede">The current merger keeps the compressed gradient’s magnitude and asks the
+          anchor EMA for one bit of direction.</p>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label system">Current rule</span>
+          <div class="equation">
+            G<sub>corr</sub> = αG<sub>fast</sub> +
+            (1−α)|G<sub>fast</sub>| sign(M), &nbsp; α = 0.25
+          </div>
+          <ul class="mini-list small">
+            <li>If signs agree, the coordinate is unchanged.</li>
+            <li>If signs disagree, it flips to the anchor sign at half the fast magnitude.</li>
+            <li>A tiny, noisy or 19-tick-old EMA sign gets the same authority as a stable one.</li>
+            <li>The relative magnitudes still come entirely from the potentially biased fast gradient.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <span class="label inference">Better target</span>
+          <h3>Send the compression-induced gradient error</h3>
+          <p class="small">On the same paired replay batch, the slow circuit runs a dense backward and
+            a shadow backward through the exact same seeded codec state:</p>
+          <div class="equation">
+            Ê<sub>a</sub> = G<sub>dense,a</sub><sup>shadow</sup> −
+            G<sub>codec,a</sub><sup>shadow</sup>
+            <span class="formula-note">Same weights, samples, PRF keys or Q, objective and replay tick.
+              The difference isolates the codec contribution for the anchor’s shadow objective.</span>
+          </div>
+          <p class="small">Call this an estimator when the live fast update uses a different PPO
+            normalization or ratio-one surrogate. Stage 0 must test whether it predicts the
+            same-objective dense correction and then the next live fast update; otherwise it remains
+            telemetry. It adds slow compute at anchor cadence, but no fast pipeline-boundary traffic.</p>
+        </article>
+      </div>
+
+      <div class="architecture" role="img" aria-label="SAGE slow-to-fast gradient error feedback loop">
+        <div class="arch-row">
+          <div class="lane-label">Slow circuit</div>
+          <div class="rollout-flow">
+            <div class="node slow">paired replay</div><div class="flow-arrow">→</div>
+            <div class="node slow">dense G<sub>d</sub></div><div class="flow-arrow">+</div>
+            <div class="node slow">same-codec G<sub>c</sub></div><div class="flow-arrow">→</div>
+            <div class="node slow">Ê = G<sub>d</sub> − G<sub>c</sub></div><div class="flow-arrow">→</div>
+            <div class="node slow">EMA + error feedback</div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Anchor packet</div>
+          <div class="rollout-flow">
+            <div class="node once">1-bit residual sign</div><div class="flow-arrow">+</div>
+            <div class="node once">8-bit block scale</div><div class="flow-arrow">+</div>
+            <div class="node once">4-bit confidence</div><div class="flow-arrow">+</div>
+            <div class="node once">dense-probe header</div>
+          </div>
+        </div>
+        <div class="arch-row">
+          <div class="lane-label">Fast circuit</div>
+          <div class="rollout-flow">
+            <div class="node">G<sub>fast</sub></div><div class="flow-arrow">+</div>
+            <div class="node">one normalized error dose</div><div class="flow-arrow">→</div>
+            <div class="node">AdamW proposal</div><div class="flow-arrow">→</div>
+            <div class="node">Σ<sub>0</sub>-scaled cap</div><div class="flow-arrow">→</div>
+            <div class="node">weight update</div>
+          </div>
+        </div>
+        <div class="anchor-up">Incremental telemetry beyond the required replica/replay channel is tiny:
+          same-token action log-probs, boundary residual norms, counters and acknowledgements. SAGE sends
+          a compressed gradient-error packet slow→fast, but no full-precision gradient, vocabulary logits,
+          dense activations, U or V frames.</div>
+        <p class="arch-caption"><strong>SAGE:</strong> Spectrally-Gated Anchor Error feedback.
+          The first implementation keeps PRF exact-k-77 as the fast codec so the controller is not
+          confounded with the unvalidated FROST dictionary.</p>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <article class="card">
+          <span class="label system">Slow quantizer</span>
+          <div class="equation" style="font-size:1rem">
+            Ē<sub>a</sub> = βĒ<sub>a−1</sub> + (1−β)Ê<sub>a</sub><br>
+            u<sub>a,b</sub> = Ē<sub>a,b</sub> + δr<sub>a−1,b</sub>,
+            &nbsp; β=0.25, δ=0.5<br>
+            s<sub>b</sub>=mean(|u<sub>b</sub>|), &nbsp;
+            z<sub>b</sub>=Q<sub>8,T</sub>(s<sub>b</sub>), &nbsp;
+            q<sub>b</sub>=D<sub>8,T</sub>(z<sub>b</sub>)sign(u<sub>b</sub>)<br>
+            r<sub>a,b</sub> =
+            𝟙[c<sub>a,b</sub>≥c<sub>min</sub> ∧ cos(Ê<sub>a,b</sub>,q<sub>a−1,b</sub>)&gt;0
+            ∧ age≤K]
+            (u<sub>a,b</sub>−q<sub>a,b</sub>)
+            <span class="formula-note">For tensor T, Q<sub>8,T</sub> uniformly encodes
+              log<sub>2</sub>(s+ε) into 0…255 over frozen Stage-0 endpoints [L<sub>T</sub>,U<sub>T</sub>];
+              D<sub>8,T</sub> is the shared inverse. Saturation zeroes confidence rather than refreshing
+              the range. Blocks contain 256 values.</span>
+          </div>
+          <p class="small">Stage 0 fits one pre-specified logistic calibrator
+            c=Q<sub>4</sub>(sigmoid(θ<sup>⊤</sup>x))—using error persistence, dense/codec
+            shadow-gradient cosine, last measured RELEX projection error and packet age—on its first half.
+            Q<sub>4</sub> maps to j/15 and c<sub>min</sub>=10/15. Validate by confidence bin on the
+            second half, then freeze θ, feature normalization and every [L<sub>T</sub>,U<sub>T</sub>]
+            before any live arm. Error persistence uses the previous decoded packet q<sub>a−1</sub>,
+            not another full error tensor. Residual reuse is half-decayed and reset on a sign-regime
+            change, low confidence or expiry; low-confidence packets are telemetry-only.</p>
+        </article>
+        <article class="card">
+          <span class="label system">One periodic repair dose</span>
+          <div class="equation" style="font-size:1rem">
+            w<sub>k</sub> =
+            e<sup>−k/τ</sup> / Σ<sub>j=0</sub><sup>K−1</sup>e<sup>−j/τ</sup>,
+            &nbsp; K=20, τ=5, Σw<sub>k</sub> = 1<br>
+            G<sub>used,b</sub> =
+            G<sub>fast,b</sub> + λc<sub>b</sub>w<sub>k</sub>q<sub>b</sub>,
+            &nbsp; λ=1 before clipping
+          </div>
+          <p class="small">For the first test, q is explicitly <em>one periodic dense-repair dose</em>,
+            always smoothed with this fixed kernel. It is not claimed to cancel twenty unseen per-step
+            codec errors. A later per-step-bias design would require Σw=K and a separate safety study.</p>
+          <p class="small"><strong>Safety cap:</strong>
+            ‖λc<sub>b</sub>w<sub>k</sub>q<sub>b</sub>‖<sub>2</sub>
+            ≤ 0.25‖G<sub>fast,b</sub>‖<sub>2</sub> for every active 256-value block.</p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Dose attribution is mandatory.</strong> Compare SAGE with both the deployed every-tick
+        signed EMA and a packet-format control that encodes the absolute dense-gradient EMA using the
+        identical quantizer, confidence mapping, cap and temporal kernel. Match per-layer
+        Σ<sub>k</sub>‖ΔG<sub>k</sub>‖<sub>F</sub>,
+        ‖Σ<sub>k</sub>ΔG<sub>k</sub>‖<sub>F</sub> and the realized post-Adam correction dose.
+        Include an actual correction-disabled training arm. Otherwise a win could simply mean less
+        anchor influence, different timing or a different optimizer perturbation.
+      </div>
+
+      <div class="callout" style="border-color:rgba(242,168,90,.45)">
+        <strong>Local cost is not wire cost.</strong> Ē replaces the incumbent full-sized EMA state, but
+        FP32 error feedback adds one extra model-sized residual: about 6.17 GB for 1,543,714,304
+        parameters (3.09 GB in BF16). It must be sharded or offloaded and measured before promotion.
+        Persistence stores the previous bit-packed packet plus scales/confidence (about 202 MB), not
+        another full error tensor.
+        The same-codec shadow also adds one extra slow backward per anchor fire—roughly one per 20 fast
+        ticks at the starting cadence. Neither cost appears in the packet total below.
+      </div>
+
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead>
+            <tr><th>Cross-circuit item</th><th>Direction / cadence</th><th>Modeled payload</th><th>Why it is sent</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Current bit-packed sign baseline</td>
+              <td>slow → fast, every anchor fire</td>
+              <td class="num">193.0 MB/fire</td>
+              <td>One sign bit for each of 1,543,714,304 parameters. The current proxy actually moves full FP32 tensors; bit-packing is a required deployment change.</td>
+            </tr>
+            <tr>
+              <td>SAGE residual sign</td>
+              <td>slow → fast, every anchor fire</td>
+              <td class="num">193.0 MB/fire</td>
+              <td>Direction of the dense-minus-codec error, not direction of the absolute dense gradient.</td>
+            </tr>
+            <tr>
+              <td>8-bit scale + 4-bit confidence / 256 values</td>
+              <td>slow → fast, with sign packet</td>
+              <td class="num">9.05 MB/fire</td>
+              <td>Restores block magnitude and suppresses noisy, stale or non-predictive corrections. Two frozen FP32 log-range endpoints per tensor are checksum-locked and distributed once.</td>
+            </tr>
+            <tr>
+              <td><strong>Incremental SAGE packet</strong></td>
+              <td>slow → fast, cadence 20</td>
+              <td class="num"><strong>202.0 MB/fire</strong><br>10.10 MB/tick amortized</td>
+              <td>4.69% above the modeled sign-only message. This is one aggregate packet copy before topology fan-out or retransmission—not total slow-replica cost.</td>
+            </tr>
+            <tr>
+              <td>Slow-replica weights</td>
+              <td>fast → slow, anchor maintenance</td>
+              <td class="num">≥3.09 GB / naïve BF16 snapshot</td>
+              <td>The current proxy copies local CPU/GPU snapshots. A separate slow device must instead receive sharded weights or equivalent deltas; FP32 is 6.17 GB. This existing anchor prerequisite is unchanged by SAGE.</td>
+            </tr>
+            <tr>
+              <td>Replay + objective + codec state</td>
+              <td>fast → slow, every shadow replay</td>
+              <td class="num">Core model ≈21N bytes + sequence/serialization overhead</td>
+              <td>For N packed tokens: int32 IDs (4N), byte mask (N), FP32 advantages (4N), and three FP32 behavior/old/reference log-prob fields (12N), plus normalization metadata, sample identity and exact PRF/Q version. Serialize and measure the real batch.</td>
+            </tr>
+            <tr>
+              <td>Initial base/reference replicas</td>
+              <td>storage → slow/rollout devices, once</td>
+              <td class="num">≥3.09 GB BF16 per full replica</td>
+              <td>The frozen reference, base hash, tokenizer/objective contract and codec bootstrap state must be identical before probes or shadow differences are comparable.</td>
+            </tr>
+            <tr>
+              <td>Synchronized inference sentinel</td>
+              <td>actor ↔ rollout engine, existing sync points</td>
+              <td class="num">No extra model sync at an existing rollout refresh;<br>otherwise ≥3.09 GB</td>
+              <td>Hard controller decisions use a fixed action-token estimator at exact synchronized inference weights. It is not full-distribution KL. Between refreshes, the anchor estimate is explicitly lagged/predictive.</td>
+            </tr>
+            <tr>
+              <td>Same-token action log-probs</td>
+              <td>fast → slow, every probe</td>
+              <td class="num">8 KiB FP16 or 16 KiB FP32 / 4,096 tokens</td>
+              <td>Separates policy drift from dense-versus-codec view error without shipping vocabulary logits.</td>
+            </tr>
+            <tr>
+              <td>Red recovery state</td>
+              <td>checkpoint → repaired actor, exceptional</td>
+              <td class="num">≥3.09 GB weights + sharded optimizer state</td>
+              <td>Rollback or a dense repair cannot be called free: optimizer moments, scheduler and codec/controller state must match the restored checkpoint.</td>
+            </tr>
+            <tr>
+              <td>Base spectra</td>
+              <td>local / once</td>
+              <td class="num">&lt;1 MiB FP32</td>
+              <td>All singular values for the seven Qwen projection families across 28 layers; U and V are never transmitted.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout red">
+        <strong>The dominant deployment cost may still be actor synchronization.</strong> If the slow
+        circuit does not maintain a persistent replica, a naïve BF16 weight snapshot is about 15.3×
+        larger than the 202 MB SAGE packet. SAGE improves the semantics of the return message; it does
+        not solve fast→slow model synchronization. A real experiment must report both directions,
+        sharding/fan-out and retransmission—not only the attractive bit-packed packet.
+      </div>
+
+      <div class="callout">
+        <strong>Further slow-wire reduction, only after SAGE works:</strong> early layers 0–7 were the
+        strongest stored-checkpoint discriminator: the collapsed PowerSGD case showed materially larger
+        early-layer operator/subspace drift than the dense comparator, while healthy PRF allowed useful
+        late-layer adaptation. Restricting the packet to those
+        decoder layers (excluding embeddings and output head) is an approximately 49 MB/fire follow-up.
+        It must be compared with a scope-matched
+        sign-only control so “better message” is not confounded with “fewer corrected layers.”
+      </div>
+
+      <div class="section-head" style="margin-top:48px">
+        <div>
+          <span class="kicker">2 · Reduce mismatch and prevent collapse</span>
+          <h2 style="font-size:clamp(1.8rem,3.8vw,3.35rem)">Control the dense policy—not the instrument</h2>
+        </div>
+        <p class="lede">Use two explicitly different signals: synchronized action-token policy probes at
+          real actor/rollout weight-sync points, and the delayed anchor as a prediction between them. Never
+          present a RELEX-projected checkpoint as the current policy.</p>
+      </div>
+
+      <div class="grid-3">
+        <article class="card">
+          <span class="label system">Policy channel</span>
+          <h3><code>probe/kl_infer_sync</code></h3>
+          <p class="small">At each actor-to-rollout weight refresh, evaluate the same fixed action tokens
+            through the synchronized dense inference path and frozen reference. This is an estimator at
+            exact synchronized weights—not full-distribution KL. Only its re-registered thresholds, never
+            codec-view <code>actor/kl_loss</code>, can authorize a hard brake.</p>
+        </article>
+        <article class="card">
+          <span class="label system">View channel</span>
+          <h3>Inference ↔ codec log-prob error</h3>
+          <p class="small">Track the signed and squared difference between dense and compressed
+            action-token log-probs on the same fixed sentinel and synchronized weights. This isolates
+            instantaneous training–inference mismatch at the probe.</p>
+        </article>
+        <article class="card">
+          <span class="label system">Bias channel</span>
+          <h3><code>probe/kl_anchor_pred</code> + geometry</h3>
+          <p class="small">Log cos(Ê<sub>a</sub>,Ê<sub>a−1</sub>), dense/codec gradient cosine,
+            ‖Ê‖/‖G<sub>dense</sub>‖, projection age/error, and registered early-layer
+            operator/subspace drift. The
+            stale/RELEX anchor is a warning signal with uncertainty; it cannot independently trigger
+            a destructive rollback.</p>
+        </article>
+      </div>
+
+      <div class="equation orange">
+        e<sub>t</sub> = K<sub>infer,sync</sub>(t) − K<sub>dense-control</sub>(t)
+        <span class="formula-note">Healthy dense KL is mildly convex. Govern the excess over a
+          pre-registered matched-dense trajectory and its confidence band—not raw KL acceleration.</span>
+      </div>
+
+      <div class="table-wrap" style="margin-top:16px">
+        <table>
+          <thead>
+            <tr><th>Controller state</th><th>Evidence required</th><th>Automatic action</th><th>Communication effect</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong style="color:var(--green)">Green</strong></td>
+              <td>Synchronized inference estimator inside its identically measured dense-control band; excess e<sub>t</sub> is not growing beyond uncertainty; reward and early geometry healthy.</td>
+              <td>Cadence 20, normal learning rate, one normalized SAGE packet dose.</td>
+              <td class="num">10.10 MB/tick slow amortized;<br>1,232 fast bits unchanged.</td>
+            </tr>
+            <tr>
+              <td><strong style="color:#9b6c10">Yellow</strong></td>
+              <td>One synchronized probe above its confidence band, or two uncertain anchor predictions plus persistent error and early operator/subspace drift outside the healthy dense/PRF envelope.</td>
+              <td>Pause promotion, halve LR for one anchor interval, raise the bounded KL dual, optionally request an extra synchronized weight-sync probe, and require two synchronized green probes to release.</td>
+              <td>An extra synchronized probe may require a ≥3.09 GB actor sync; cadence and fast wire stay unchanged unless separately authorized.</td>
+            </tr>
+            <tr>
+              <td><strong style="color:var(--red)">Red</strong></td>
+              <td>Synchronized inference estimator &gt;2× its identically measured target on two probes together with reward degradation or registered early operator/subspace drift &gt;2× control; immediate on NaN or severe gradient blow-up.</td>
+              <td>Pause, restore the last good synchronized checkpoint, restore matching optimizer/controller state, re-probe, and stop rather than auto-resume if it is not green.</td>
+              <td>Recovery invokes the exceptional multi-GB checkpoint channel accounted above; there is no free blind dense repair.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout green">
+        <strong>Initial dense-KL trajectory:</strong> use the repository’s existing dense-derived setpoints
+        (approximately 0.011265 at step 200 and 0.031209 at step 600), then re-register on the identical
+        synchronized action-token estimator, sentinel and reference implementation before
+        Stage 1. Until then they are orientation only, not controller thresholds. A codec-view KL level,
+        anchor prediction, entropy reading, or <code>ppo_kl==0</code> is never sufficient to declare green or red.
+      </div>
+
+      <div class="callout orange">
+        <strong>What this does—and does not—repair.</strong> SAGE does not make the compressed activation
+        ĥ equal the dense activation h on each pass. It targets the <em>accumulated weight drift</em>
+        caused by a persistent codec-gradient bias and gives the controller a dense view of that drift.
+        The per-pass train–inference wedge remains a codec problem; test FROST or another boundary change
+        separately only after this correction channel is understood.
+      </div>
+
+      <div class="section-head" style="margin-top:48px">
+        <div>
+          <span class="kicker">3 · Use base spectral values safely</span>
+          <h2 style="font-size:clamp(1.8rem,3.8vw,3.35rem)">Σ<sub>0</sub> defines scale—not direction</h2>
+        </div>
+        <p class="lede">The base checkpoint can cheaply supply gauge-free trust scales for the seven
+          decoder projection families across 28 layers while both singular frames remain free to learn.
+          Embeddings and the output head are outside this first cap.</p>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <span class="label inference">Primary spectral use</span>
+          <h3>Dual post-Adam spectral envelope</h3>
+          <div class="equation" style="font-size:1rem">
+            u<sub>2</sub>(Δ) =
+            min(‖Δ‖<sub>F</sub>, √(‖Δ‖<sub>1</sub>‖Δ‖<sub>∞</sub>))<br>
+            γ<sub>ℓ</sub> = min(1,
+            ρ<sub>F,ℓ</sub>‖Σ<sub>0,ℓ</sub>‖<sub>F</sub> /
+            (‖ΔW<sub>ℓ</sub><sup>*</sup>‖<sub>F</sub>+ε),
+            ρ<sub>2,ℓ</sub>σ<sub>max</sub>(W<sub>0,ℓ</sub>) /
+            (u<sub>2</sub>(ΔW<sub>ℓ</sub><sup>*</sup>)+ε))<br>
+            ΔW<sub>ℓ</sub> = γ<sub>ℓ</sub>ΔW<sub>ℓ</sub><sup>*</sup>
+          </div>
+          <p class="small">Here ‖·‖<sub>1</sub> is the induced maximum-column-sum norm and
+            ‖·‖<sub>∞</sub> the induced maximum-row-sum norm, making u<sub>2</sub> a certified upper
+            bound; use warm-started power iteration as telemetry. Apply the dual cap first to decoder
+            layers 0–7 and the Frobenius leg elsewhere. Frobenius movement alone did not distinguish
+            the healthy and collapsed runs, so it is not the sole guard.</p>
+        </article>
+        <article class="card">
+          <span class="label evidence">What the bound guarantees</span>
+          <h3>Frobenius and worst singular-value perturbations are bounded</h3>
+          <div class="equation" style="font-size:1rem">
+            max<sub>i</sub>|σ<sub>i</sub>(W+ΔW)−σ<sub>i</sub>(W)|
+            ≤ ‖ΔW‖<sub>2</sub> ≤ u<sub>2</sub>(ΔW)
+            ≤ ρ<sub>2</sub>σ<sub>max</sub>(W<sub>0</sub>)<br>
+            ‖σ(W+ΔW)−σ(W)‖<sub>2</sub>
+            ≤ ‖ΔW‖<sub>F</sub> ≤ ρ<sub>F</sub>‖Σ<sub>0</sub>‖<sub>F</sub>
+            <span class="formula-note">Weyl plus Hoffman–Wielandt. These are one-step bounds, not
+              guarantees on cumulative drift, frame rotation or end-to-end Jacobians.</span>
+          </div>
+          <p class="small">ΔW* must be the complete FP32 proposal after Adam preconditioning, learning
+            rate, decoupled weight decay and SAGE correction, immediately before parameter writeback;
+            audit the realized post-cast delta. Adam moments still reflect the unclipped proposal, so a
+            frequently active cap is a stop/tune signal. No frame is frozen or synchronized.</p>
+        </article>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <article class="card">
+          <span class="label system">Store once</span>
+          <h3>Σ<sub>0</sub> on slow; two scalars on fast</h3>
+          <p class="small">The slow circuit keeps the base singular values for audit. Each fast stage only
+            needs ‖Σ<sub>0,ℓ</sub>‖<sub>F</sub> and σ<sub>max</sub>(W<sub>0,ℓ</sub>); both derive from
+            its local base weight, so recurring wire cost is zero. The Frobenius term is ordinary
+            base-weight normalization because ‖Σ<sub>0</sub>‖<sub>F</sub>=‖W<sub>0</sub>‖<sub>F</sub>;
+            σ<sub>max</sub> is the specifically spectral control input.</p>
+        </article>
+        <article class="card">
+          <span class="label inference">Audit periodically</span>
+          <h3>Separate radial drift from frame motion</h3>
+          <p class="small">At saved checkpoints, log normalized singular drift, early-layer spectral-norm
+            shift and principal angles between clustered near-degenerate subspaces rather than unstable
+            individual vectors. Spectral drift alone never triggers a verdict without policy and capability evidence.</p>
+        </article>
+        <article class="card">
+          <span class="label speculation">Later canary</span>
+          <h3>Restore Σ<sub>0</sub> offline</h3>
+          <p class="small">Only after SAGE passes, evaluate W′=U<sub>t</sub>Σ<sub>0</sub>V<sub>t</sub><sup>⊤</sup>
+            at a saved checkpoint. If dense policy and validation remain intact, a gentle radial repair becomes
+            a separate ablation—not an automatic training operation.</p>
+        </article>
+      </div>
+
+      <div class="callout red">
+        <strong>Why not project every update onto the ISO tangent immediately?</strong> Harmful frame
+        rotations can occur while singular values remain fixed; that is exactly what an isospectral
+        constraint permits. A tangent projection could preserve the collapse direction. The first spectral
+        intervention therefore caps update scale and monitors geometry without dictating U or V.
+      </div>
+
+      <div class="section-head" style="margin-top:48px">
+        <div>
+          <span class="kicker">Minimal experiment</span>
+          <h2 style="font-size:clamp(1.8rem,3.8vw,3.35rem)">Isolate the message, controller, then spectrum</h2>
+        </div>
+        <p class="lede">Do not combine SAGE with FROST in the first run. One changes the weight-correction
+          channel; the other changes the boundary representation. A clean result needs one moving part at a time.</p>
+      </div>
+
+      <div class="phase">
+        <div><span class="phase-tag">Stage 0</span><div class="fine" style="margin-top:6px">shadow only</div></div>
+        <div><h3>120–200-step packet audit</h3><p>Use PRF exact-k-77. On the identical shadow objective, compute G<sub>d</sub>, G<sub>c</sub>, Ê, both packet targets, dose metrics, future-fire prediction and spectral telemetry—but apply no correction. Fit confidence on the first half, validate/freeze it on the second, and probe inference only at real weight-sync points.</p></div>
+        <div class="gate">GO only if cos(G<sub>c</sub>+cq,G<sub>d</sub>) and
+          cos(ΔW<sub>corr</sub><sup>*</sup>,ΔW<sub>dense</sub><sup>*</sup>) from cloned identical Adam
+          state each beat the same-batch incumbent by ≥0.05, confidence calibrates on held-forward
+          errors, and the packet stays within 1.05× modeled sign wire.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 1A</span><div class="fine" style="margin-top:6px">message · matched 200</div></div>
+        <div><h3>Four-arm message attribution</h3><p>A0: correction disabled. A: deployed every-tick signed EMA. A′: absolute dense-gradient EMA encoded with SAGE’s identical block quantizer, frozen confidence values, cap, K=20/τ=5 kernel and matched interval dose. B: SAGE error target with that same packet format, fixed LR/cadence and no governor.</p></div>
+        <div class="gate">All arms execute the extra shadow codec backward—or a cost-matched dummy—and deliver packets at the same registered age. B must beat A0, A and A′; otherwise semantics, dose, compute or staleness remain confounded.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 1B</span><div class="fine" style="margin-top:6px">control · matched 200</div></div>
+        <div><h3>Add one mechanism at a time</h3><p>B: winning SAGE message. C: B + synchronized-inference governor. D: C + dual Σ<sub>0</sub> envelope. If D wins, run E: lower-LR incumbent matched to D’s realized total update norm before promotion.</p></div>
+        <div class="gate">This separately attributes the message, controller and spectral envelope, then tests whether D only shrank the effective step.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 1C</span><div class="fine" style="margin-top:6px">registered stress</div></div>
+        <div><h3>Known-bias falsification window</h3><p>PRF already survives, so its survival cannot prove collapse prevention. After 1A/1B pass, replay the winning controller against one pre-registered biased-codec stress arm spanning the historical PowerSGD failure window, with checkpointed early-stop vetoes.</p></div>
+        <div class="gate">This is a stress falsification, not a promoted codec and never an automatic launch. Failure to improve the registered drift/reward precursors rejects the prevention claim.</div>
+      </div>
+      <div class="phase">
+        <div><span class="phase-tag">Stage 2</span><div class="fine" style="margin-top:6px">600 steps</div></div>
+        <div><h3>Long-horizon promotion</h3><p>Promote only the veto-clean winner. Save synchronized inference probes, anchor predictions and checkpoints at registered intervals; require final validation and OOD capability reads. No anchor-off arm.</p></div>
+        <div class="gate">PASS only if synchronized-inference excess stays inside its registered band without growing, validation remains within 0.02 absolute of control, no red recovery occurs, and the cap touches &lt;10% of active matrix updates.</div>
+      </div>
+
+      <div class="table-wrap" style="margin-top:18px">
+        <table>
+          <thead>
+            <tr><th>Hard decision</th><th>Pre-registered criterion</th><th>Falsifies what</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Fast wire</td><td>Exactly 1,232 bits/token/boundary; no new index payload.</td><td>Any apparent stability bought by more fast bandwidth is not a SAGE result.</td></tr>
+            <tr><td>Slow correction wire</td><td>SAGE packet ≤1.05× the modeled bit-packed deployment baseline; replica/replay/recovery channels measured separately and held identical.</td><td>A richer message that silently ships FP32 M—or hides actor synchronization—is rejected.</td></tr>
+            <tr><td>Correction quality</td><td>On the identical shadow batch/objective, median cos(G<sub>c</sub>+cq,G<sub>d</sub>) and cos(ΔW<sub>corr</sub><sup>*</sup>,ΔW<sub>dense</sub><sup>*</sup>) from cloned identical Adam state improve by ≥0.05 over the incumbent; saturation on &lt;10% of active packet blocks.</td><td>If not, dense-minus-codec error is not being conveyed usefully.</td></tr>
+            <tr><td>Dose / timing</td><td>Per-layer Σ‖ΔG<sub>k</sub>‖<sub>F</sub>, ‖ΣΔG<sub>k</sub>‖<sub>F</sub>, realized post-Adam correction dose, slow compute and packet age match A′ versus B within the registered tolerance.</td><td>If not, message semantics are still confounded with strength, optimizer timing or staleness.</td></tr>
+            <tr><td>True policy drift</td><td><code>probe/kl_infer_sync</code> remains inside 2× its identically measured dense-control target, and excess e<sub>t</sub> does not grow beyond its confidence band in terminal windows.</td><td>If codec-view metrics improve but synchronized inference drift worsens, the controller optimized an instrument.</td></tr>
+            <tr><td>Learning</td><td>Step-200/600 validation no more than 0.02 absolute below matched control; reward/OOD vetoes clean.</td><td>If E matches D, the gain was only a lower effective learning rate.</td></tr>
+            <tr><td>Spectral relevance</td><td>D improves beyond C while the cap touches &lt;10% of active matrix updates and reward is not attenuated.</td><td>If collapsing and healthy runs share the envelope—or D adds nothing—ISO-derived scaling is irrelevant here.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="verdict-panel" style="margin-top:24px">
+        <div class="verdict-top">
+          <div>
+            <span class="kicker" style="color:#65c9c2">Answer to the three questions</span>
+            <h2 style="font-size:clamp(1.9rem,4vw,3.6rem)">Plausible stability, with a bounded controller—not a promise.</h2>
+          </div>
+          <p>Use the anchor to estimate and transmit compression error, use synchronized inference-view
+            probes to govern actual policy drift, and use Σ<sub>0</sub> to limit abnormal update scale.
+            Keep the low-bias codec and retain the anchor.</p>
+        </div>
+        <div class="verdict-grid">
+          <div class="verdict-cell">
+            <span class="label evidence">1 · Sign EMA</span>
+            <h3>Keep the bit efficiency; replace the semantics</h3>
+            <p>Send signed, block-scaled, confidence-gated gradient <em>error</em> with error feedback,
+              not a timeless sign of the absolute dense gradient.</p>
+          </div>
+          <div class="verdict-cell">
+            <span class="label inference">2 · Mismatch / collapse</span>
+            <h3>Close the loop on dense probes</h3>
+            <p>Separate true policy KL from codec-view offset. Brake, repair or roll back before the
+              synchronized-inference trajectory escapes the registered dense-control envelope.</p>
+          </div>
+          <div class="verdict-cell">
+            <span class="label inference">3 · Base spectra</span>
+            <h3>Use Σ<sub>0</sub> as a trust ruler</h3>
+            <p>Bound normalized matrix updates and audit drift. Do not transmit or freeze U,V, and do
+              not expect spectra to decode activations.</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="fine" style="margin-top:12px"><strong>Provenance:</strong> this follow-on synthesis was
+        independently stress-tested by three research subagents covering anchor-message compression,
+        long-horizon failure evidence and spectral geometry. It changes no prior section and authorizes
+        no run; the repository’s human approval gate still applies.</p>
+    </section>
+
+    <section aria-labelledby="sources-title">
+      <div class="section-head">
+        <div>
+          <span class="kicker">Evidence and provenance</span>
+          <h2 id="sources-title">Sources reviewed</h2>
+        </div>
+        <p class="lede">Claims from the thread and supplied screenshots were checked against the paper,
+          website, released code and local implementation wherever possible.</p>
+      </div>
+      <ol class="sources">
+        <li><a href="https://arxiv.org/abs/2607.19331">Zhu et al., “ISO: An RLVR-Native Optimization Stack,” arXiv:2607.19331v1</a>, submitted 21 July 2026. Key evidence: pp. 2–10, 14, 17–19; Figs. 2–5, 6, 9–10.</li>
+        <li><a href="https://iso-rlvr.github.io/">ISO project website</a>, including reported optimizer and merger summaries.</li>
+        <li><a href="https://x.com/zhu_hanqing666/status/2080020648135680215">Complete eight-post author thread</a> and all eight supplied screenshots.</li>
+        <li>Released local ISO repository at <code>/Users/shamane/Documents/ISO</code>. The review found the 389-line offline merger and no online optimizer implementation; README says optimizer code is forthcoming.</li>
+        <li><code>research/.claude/GOAL.md</code>, <code>CLAUDE.md</code>, the executable Qwen2.5-Math-1.5B launcher, and current communication/anchor modules in this checkout.</li>
+        <li>Local research runs 89, 90 and 93: FRLR/PRF structure study, 600-step exact-k result, and the current matched-wire long-horizon mismatch-control verdict.</li>
+        <li>Effective defaults in this document follow the executable bare launcher and <code>CLAUDE.md</code>: rollout-batch anchor, W2 and β<sub>anc</sub>=0.25. Some schema/project metadata still carries older ppo-minibatch, W4 and 0.50 values.</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Scope note.</strong> “2.7× fewer steps” in ISO is not 2.7× fewer tokens, FLOPs, seconds or
+        bytes; the 8B ISO run produced longer responses. “7% overhead” is one profiled 4B/A100 setting.
+        The paper is a fresh v1 preprint and the headline online optimizer code was unavailable in the
+        inspected release, so all engineering extrapolations remain provisional.
+      </div>
+    </section>
+
+    <footer>
+      <strong>Prepared 26 July 2026 · Australia/Melbourne.</strong>
+      Self-contained research artifact; no external fonts, scripts or image assets.
+      Proposal only—no experiment was launched and the mandatory human approval gate remains untouched.
+    </footer>
+  </main>
+
+  <script>
+    (() => {
+      const tokenInput = document.getElementById("tokens");
+      const passInput = document.getElementById("passes");
+      const denseOut = document.getElementById("denseOut");
+      const frostOut = document.getElementById("frostOut");
+      const savedOut = document.getElementById("savedOut");
+      const boundaries = 7;
+      const bytesPerValue = 2;
+      const denseWidth = 1536;
+      const frostWidth = 77;
+
+      const formatBytes = (bytes) => {
+        if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 ** 3)).toFixed(2)} GiB`;
+        if (bytes >= 1024 * 1024) return `${(bytes / (1024 ** 2)).toFixed(2)} MiB`;
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KiB`;
+        return `${Math.round(bytes)} B`;
+      };
+
+      const update = () => {
+        const tokens = Math.max(1, Number(tokenInput.value) || 1);
+        const passes = Number(passInput.value);
+        const dense = tokens * passes * boundaries * denseWidth * bytesPerValue;
+        const frost = tokens * passes * boundaries * frostWidth * bytesPerValue;
+        denseOut.textContent = formatBytes(dense);
+        frostOut.textContent = formatBytes(frost);
+        savedOut.textContent = formatBytes(dense - frost);
+      };
+
+      tokenInput.addEventListener("input", update);
+      passInput.addEventListener("change", update);
+      update();
+    })();
+  </script>
+</body>
+</html>
