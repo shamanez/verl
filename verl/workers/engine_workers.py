@@ -213,6 +213,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         final_metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
         final_metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
+        # LAYER_SCHEDULE telemetry (issue #95). Merged next to the perf/* keys so it
+        # rides the normal metric path into WandB with no new plumbing. Absent for
+        # dense runs and for every forward_only engine (controller is None there),
+        # so the dense control's metric set is unchanged.
+        _layer_rotation = getattr(self.engine, "_layer_rotation", None)
+        if _layer_rotation is not None:
+            final_metrics.update(_layer_rotation.telemetry())
+
         # TODO: confirm the mtp loss IS same across dp
         for k, v in final_metrics.items():
             if k.startswith("mtp_losses"):
@@ -950,6 +958,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         finally:
             state.set_path_tag(prev)
 
+    def _layer_rotation_advance(self, data: TensorDict) -> Optional[int]:
+        """Advance the actor engine's layer-rotation schedule for this global step.
+
+        Reads the trainer's private ``trainer_global_step`` meta_info key (stamped in
+        ray_trainer alongside ``comm_eff_global_step``) and forwards it to the FSDP
+        engine. Strict no-op when the key is absent, when the engine predates the
+        hook, or when ``LAYER_SCHEDULE`` is unset (the controller is None), so the
+        dense path is untouched.
+        """
+        step = tu.get(data, key="trainer_global_step", default=None)
+        if step is None:
+            return None
+        engine = getattr(getattr(self, "actor", None), "engine", None)
+        advance = getattr(engine, "layer_rotation_advance", None)
+        if advance is None:
+            return None
+        advance(int(step))
+        return int(step)
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
@@ -975,6 +1002,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # Thread the trainer step into the communication-efficient circuits.
         global_step = self._comm_eff_thread_global_step(data, comm_eff_state)
+
+        # Layer-rotation clock (issue #95). Deliberately INDEPENDENT of comm_eff:
+        # _comm_eff_thread_global_step returns early when the comm_eff state is None,
+        # which is exactly the dense case every layer-rotation cell runs in, so the
+        # engine would never see a step. The trainer stamps a second private key,
+        # ``trainer_global_step``, and we advance the cyclic active-layer schedule
+        # HERE -- at the top of update_actor, before train_mini_batch -- so every
+        # optimizer tick inside one global step trains the same layer.
+        #
+        # The key must be private: the vLLM rollout already emits ``global_steps`` as
+        # a per-sample batch column, so a bare ``global_steps`` meta_info key would
+        # collide in to_tensordict's "meta key must not be a batch column" assert
+        # (see _comm_eff_thread_global_step's docstring).
+        self._layer_rotation_advance(data)
 
         # Scope projection hooks to the actor-train forward/backward. Other paths
         # never set this flag and therefore remain dense.

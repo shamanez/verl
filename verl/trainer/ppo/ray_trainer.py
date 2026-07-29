@@ -1421,6 +1421,12 @@ class RayPPOTrainer:
         # clock for this old-logprob recompute and the paired actor update. The
         # private key avoids colliding with vLLM's per-sample ``global_steps``.
         batch.meta_info["comm_eff_global_step"] = self.global_steps
+        # Layer rotation (issue #95) needs the trainer step even when comm_eff is
+        # OFF, which is every cell of that issue. comm_eff's own threading returns
+        # early when the comm_eff state is None, so a second, equally private key is
+        # stamped here. Private for the same reason: vLLM already emits a per-sample
+        # ``global_steps`` batch column, so that name would collide in to_tensordict.
+        batch.meta_info["trainer_global_step"] = self.global_steps
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to nopadding
@@ -1557,6 +1563,12 @@ class RayPPOTrainer:
         reference policy.
         """
         batch.meta_info["comm_eff_global_step"] = self.global_steps
+        # Layer rotation (issue #95) needs the trainer step even when comm_eff is
+        # OFF, which is every cell of that issue. comm_eff's own threading returns
+        # early when the comm_eff state is None, so a second, equally private key is
+        # stamped here. Private for the same reason: vLLM already emits a per-sample
+        # ``global_steps`` batch column, so that name would collide in to_tensordict.
+        batch.meta_info["trainer_global_step"] = self.global_steps
         batch.meta_info["comm_eff_probe_dense"] = True
         try:
             batch_td = batch.to_tensordict()
@@ -1639,6 +1651,12 @@ class RayPPOTrainer:
         batch.meta_info["temperature"] = rollout_config.temperature
         # Thread the same private PowerSGD/anchor clock into the actor update.
         batch.meta_info["comm_eff_global_step"] = self.global_steps
+        # Layer rotation (issue #95) needs the trainer step even when comm_eff is
+        # OFF, which is every cell of that issue. comm_eff's own threading returns
+        # early when the comm_eff state is None, so a second, equally private key is
+        # stamped here. Private for the same reason: vLLM already emits a per-sample
+        # ``global_steps`` batch column, so that name would collide in to_tensordict.
+        batch.meta_info["trainer_global_step"] = self.global_steps
         # Adaptive reference-KL coefficient (issue #93 I3): once the controller
         # is enabled, stamp its current beta every step so ppo_loss applies it
         # instead of the static kl_loss_coef (the loss falls back to config

@@ -445,6 +445,35 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
+        ctrl = getattr(self, "_layer_rotation", None)
+        if ctrl is not None:
+            # Layer rotation / static layer selection (issue #95).
+            #
+            # Static arms reproduce the issue #64 mechanism exactly: hand the
+            # optimizer ONLY the trainable params (minus any grad-masked root
+            # param), so Adam state and the DP grad-reduce shrink to the active
+            # block and the optimizer never sees a parameter that must not move.
+            #
+            # Rotating arms hand over every DECODER param, split into one group per
+            # decoder layer plus one ``other`` group (identical lr/betas/weight
+            # decay), so the active set can change without rebuilding the
+            # optimizer. Adam state is lazy in torch, so an unvisited layer holds
+            # nothing at all.
+            from verl.workers.layer_rotation import gate_print
+
+            payload = ctrl.optimizer_input(module)
+            if self.rank == 0:
+                n_all = sum(1 for _ in module.parameters())
+                if ctrl.is_rotating:
+                    n_params = sum(len(g["params"]) for g in payload)
+                    gate_print(
+                        f"optimizer param groups: {len(payload)} "
+                        f"({len(payload) - 1} decoder layers + 1 other) over {n_params}/{n_all} param tensors"
+                    )
+                else:
+                    gate_print(f"optimizer param tensors: {len(payload)}/{n_all} (static schedule)")
+            return build_optimizer(payload, self.optimizer_config)
+
         return build_optimizer(module.parameters(), self.optimizer_config)
 
     def _build_lr_scheduler(self, optimizer):
@@ -545,6 +574,16 @@ class FSDPEngine(BaseEngine):
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
 
+        # LAYER_SCHEDULE (issue #95) -- must run AFTER _build_module() and BEFORE
+        # _build_fsdp_module()/_build_optimizer() so (a) the FSDP flat-params inherit
+        # the right requires_grad at the whole-decoder-layer auto-wrap boundary (no
+        # mixed flat-param), (b) DP grad-reduce is skipped for frozen units, and
+        # (c) the optimizer sees the right surface. Only TRAINING engines are
+        # touched; forward_only ref/rollout engines are untouched, so their
+        # full-model forward is unchanged. LAYER_SCHEDULE unset/empty is a strict
+        # no-op => byte-identical to the dense control.
+        self._maybe_init_layer_rotation(module)
+
         # Synchronize all distributed processes before proceeding
         torch.distributed.barrier()
         if self.rank == 0:
@@ -568,6 +607,44 @@ class FSDPEngine(BaseEngine):
         self.module = module
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+
+        # Bind the layer-rotation controller to the WRAPPED module + optimizer.
+        if getattr(self, "_layer_rotation", None) is not None:
+            self._layer_rotation.bind(module, optimizer, compute_device=get_device_name())
+
+    # ------------------------------------------------------------------ #
+    # LAYER_SCHEDULE: static layer selection + layer rotation (issue #95) #
+    # -- money gate. A mis-index, a partial freeze, or a schedule that   #
+    # never reached the worker silently trains the wrong surface and     #
+    # burns the whole spend, so every step here is loud + asserted, and  #
+    # every gate line goes through print(..., flush=True).               #
+    # ------------------------------------------------------------------ #
+    def _maybe_init_layer_rotation(self, module):
+        """Resolve ``LAYER_SCHEDULE`` and apply the pre-wrap active set.
+
+        Sets ``self._layer_rotation`` to a ``LayerRotationController`` or ``None``
+        (the dense path and every forward_only engine). Raises when a non-empty
+        schedule cannot be honoured -- never falls back to dense.
+        """
+        from verl.workers.layer_rotation import build_controller
+
+        self._layer_rotation = build_controller(
+            module,
+            rank=self.rank,
+            forward_only=bool(self.engine_config.forward_only),
+        )
+
+    def layer_rotation_advance(self, step):
+        """Advance the cyclic active-layer schedule to the trainer's global step.
+
+        Called from ``TrainingWorker.update_actor`` BEFORE ``train_mini_batch``, so
+        every optimizer tick inside one global step trains the same layer. No-op
+        for dense / static schedules and when the trainer did not stamp a step.
+        """
+        ctrl = getattr(self, "_layer_rotation", None)
+        if ctrl is None or step is None:
+            return None
+        return ctrl.advance(int(step))
 
     def train_mode(self, **kwargs):
         """
@@ -2716,6 +2793,15 @@ class FSDPEngine(BaseEngine):
         """
         assert self.optimizer_config.clip_grad is not None
 
+        # LAYER_SCHEDULE (issue #95): after the backward, BEFORE the clip. Masking or
+        # freezing happens before the clip in every arm, so the reported
+        # actor/grad_norm is the norm over the ACTIVE parameters only and the arms
+        # are directly comparable. Also runs the step-1 grad-flow assert, the rider
+        # anti-clobber assert, and the grad-byte measurement.
+        _layer_rotation = getattr(self, "_layer_rotation", None)
+        if _layer_rotation is not None:
+            _layer_rotation.pre_step()
+
         # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__.
         scaler = getattr(self, "scaler", None)
 
@@ -2752,6 +2838,11 @@ class FSDPEngine(BaseEngine):
             from verl.utils.qat.core import invalidate_all_scales
 
             invalidate_all_scales(self.module)
+
+        # LAYER_SCHEDULE (issue #95): after the update -- assert that sampled
+        # never-active tensors are unchanged.
+        if _layer_rotation is not None:
+            _layer_rotation.post_step()
 
         return grad_norm.item()
 
