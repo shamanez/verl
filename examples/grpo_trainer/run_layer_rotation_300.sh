@@ -93,7 +93,17 @@ export EXPERIMENT_NAME="${EXPERIMENT_NAME:-$RUN_ID}"
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-$RUN_ID}"
 export PROJECT_NAME="${PROJECT_NAME:-$WANDB_RUN_GROUP}"
 export LOG="${LOG:-$RUN_DIR/train.log}"
+# Load the box secrets BEFORE the wandb-mode gate below. Without this, the gate sees
+# an EMPTY WANDB_API_KEY (launch.sh does not source secrets.env, and the base engine
+# sources it only AFTER this point), so it pins WANDB_MODE=offline and the engine's
+# later load of the very same key cannot undo it. Result: every cell logs offline and
+# nothing reaches the cloud, which is exactly what happened to cell 1 on 2026-07-30.
+SECRETS_FILE="${SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
+if [[ -r "$SECRETS_FILE" ]]; then
+  set -a; . "$SECRETS_FILE"; set +a
+fi
 [[ -n "${WANDB_API_KEY:-}" ]] || export WANDB_MODE="${WANDB_MODE:-offline}"
+echo "=== wandb: mode=${WANDB_MODE:-online} project=$PROJECT_NAME entity=${WANDB_ENTITY:-<default>} (api key $([[ -n "${WANDB_API_KEY:-}" ]] && echo present || echo MISSING)) ==="
 echo "=== launching $EXPERIMENT_NAME (group $WANDB_RUN_GROUP): DENSE codec, batch 128 / mini 128, 1024/2048, gpu_mem $GPU_MEM, $TOTAL_STEPS steps, test_freq $TEST_FREQ, save_freq $SAVE_FREQ ==="
 echo "=== LAYER_SCHEDULE='${LAYER_SCHEDULE:-<unset: DENSE>}' ROTATE_EVERY=$ROTATE_EVERY ROTATE_ADAM=$ROTATE_ADAM ROTATE_STATE_DEVICE=$ROTATE_STATE_DEVICE LAYER_OTHER=$LAYER_OTHER ==="
 exec bash "$PATCHED"
