@@ -45,21 +45,28 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # Canonical pure rank-1 arm. Every default remains pinned, while explicit env
 # overrides let the comparison launcher print the same values Hydra receives.
 export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
-export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
+export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
 # prf_mask codec (active iff COMM_EFF_COMPRESSION_TYPE=prf_mask). Anchor-independent
 # PRF activation mask; mutually exclusive with PowerSGD and cannot anchor-own-Q, so a
 # prf_mask arm also sets COMM_EFF_ANCHOR_OWNS_Q=false COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP=false.
-# Defaults keep the powersgd path byte-for-byte unchanged (mask disabled).
-export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
+# THE DEFAULT CODEC since issue #93 (2026-07-29). PRF exact-k won the #93
+# stability programme: twelve arms were run to beat it and none did. It is the
+# only codec with 600 steps of evidence that the optimizer stays in a steady
+# state (gap slope +0.000848/step over 100-599, so 0.42 nats in 500 steps;
+# grad-norm block median flat at 1.50-1.82 with a maximum never above 4.645),
+# it is unbiased, and its mask is a PRF of seed/step/layer so there is no side
+# channel and nothing to transmit. Set COMM_EFF_COMPRESSION_TYPE=powersgd to
+# get the pre-#93 default back; that path is unchanged and still tested.
+export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
 export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
 export COMM_EFF_MASK_RESCALE="${COMM_EFF_MASK_RESCALE:-false}"
-export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-false}"
-export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-false}"
+export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
 export COMM_EFF_MASK_SEED="${COMM_EFF_MASK_SEED:-0}"
 export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
 # issue #89 codec levers — default-off; baseline PRF stays bit-identical.
-export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-auto}"
-export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-false}"
+export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
 export COMM_EFF_MASK_ANTITHETIC="${COMM_EFF_MASK_ANTITHETIC:-false}"
 export COMM_EFF_MASK_P_BY_BOUNDARY="${COMM_EFF_MASK_P_BY_BOUNDARY:-}"
 # FRLR (issue #89, "32+44+1"): fresh-residual low-rank codec; default off.
@@ -104,11 +111,15 @@ export COMM_EFF_DC_TARGET="${COMM_EFF_DC_TARGET:--1.0}"
 export COMM_EFF_DC_LAMBDA0="${COMM_EFF_DC_LAMBDA0:-0.05}"
 export COMM_EFF_DC_LAMBDA_MAX="${COMM_EFF_DC_LAMBDA_MAX:-1.0}"
 export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-77}"
-export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
+# false under the prf_mask default: there is no PowerSGD basis to bootstrap.
+export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
 export COMM_EFF_ANCHOR_ENABLED="${COMM_EFF_ANCHOR_ENABLED:-true}"
 export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
 export COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
-export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"
+# false under the prf_mask default: the plain PRF mask has no basis Q for the
+# anchor to own (its mask is a PRF of seed/step/layer), and the config
+# validator rejects owns_q=true with compression_type=prf_mask unless frlr=true.
+export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"
 export COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH="${COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH:-true}"
 export COMM_EFF_ANCHOR_BATCH_SCOPE="${COMM_EFF_ANCHOR_BATCH_SCOPE:-rollout_batch}"
 export COMM_EFF_ANCHOR_SNAPSHOT_DEVICE="${COMM_EFF_ANCHOR_SNAPSHOT_DEVICE:-cpu}"

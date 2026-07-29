@@ -1,5 +1,17 @@
 # Communication-Efficient GRPO Default
 
+> **The default activation codec changed to PRF exact-k on 2026-07-29** (issue
+> #93). Twelve arms were run to beat it on stability and none did. It is the only
+> codec with 600 steps of evidence that the optimizer stays in a steady state:
+> train-inference gap slope **+0.000848 nats/step over 100-599**, so 0.42 nats of
+> movement in 500 steps, with the grad-norm block median flat at 1.50 to 1.82 and
+> a block maximum never above 4.645. It is unbiased, its mask is a PRF of
+> seed/step/layer so there is no side channel and nothing to transmit, it needs no
+> basis broadcast, and it needs no anchor coupling. The previous default, PowerSGD
+> rank 77, is unchanged and still tested; reach it with
+> `COMM_EFF_COMPRESSION_TYPE=powersgd`. Full reasoning:
+> `research/runs/93-long-horizon-stability/STABILITY_RANKING.md`.
+
 ## Run
 
 Prepare MATH `train.parquet` and `test.parquet` under `$HOME/data/math`, then run:
@@ -24,8 +36,8 @@ bash examples/grpo_trainer/run_qwen25_math_1p5b_relex_comparison_fsdp.sh dense
 | Optimizer | AdamW `1e-6`, weight decay `0.01`, gradient clip `1` |
 | Objective | reference `low_var_kl=0.001`, reward KL off, entropy 0 |
 | Schedule | 100 steps, validation every 25 steps |
-| Activations | PowerSGD rank 77, synchronized warm-start `Q`, fast-Q bootstrap |
-| Anchor | paired dense replay, cadence/delay 20/20, `ppo_minibatch`, CPU |
+| Activations | **PRF exact-k**, `p=0.95`, exactly 77 of 1536 coords/token, constant `1/(1-p)` rescale, mask fires on train + old-logprob recompute + reference. 1232 bits/token/boundary |
+| Anchor | paired dense replay, cadence/delay 20/20, `ppo_minibatch`, CPU, **`owns_q=false`** (the plain PRF mask has no basis `Q` to own) |
 | Weight projection | rank-1 RELEX, W2 → W3 → W4, window 4/minimum 2, strength 1 |
 | Anchor warmup/routing | `stale_correct`, `auto`/current trajectories |
 | Gradient signal | signed-EMA all-floating `M`, beta 0.50, alpha 0.25, CPU |
