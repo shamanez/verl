@@ -40,7 +40,9 @@ module must never import or use a ``logging`` logger.
 
 from __future__ import annotations
 
+import math
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
@@ -78,6 +80,15 @@ ENV_ROTATE_EVERY = "ROTATE_EVERY"
 ENV_ROTATE_ADAM = "ROTATE_ADAM"
 ENV_STATE_DEVICE = "ROTATE_STATE_DEVICE"
 ENV_LAYER_OTHER = "LAYER_OTHER"
+# Issue #96. Width (gamma) = how many decoder layers are active AT ONCE, and order =
+# how the cycle walks them. These exist because updates-per-layer is
+# ``u = total_steps * width / len(indices)`` and ROTATE_EVERY does NOT appear in it:
+# rotate_every only controls whether a layer's updates are CONSECUTIVE. Issue #95
+# measured C = 0.115 + 0.165*ln(u) over u in [5.4, 150], so at width=1 a 28-layer
+# rotation needs about 3300 steps to reach C=0.90, while width=4 reaches u=86 in 600.
+ENV_ROTATE_WIDTH = "ROTATE_WIDTH"
+ENV_ROTATE_ORDER = "ROTATE_ORDER"
+ENV_ROTATE_SEED = "ROTATE_SEED"
 # Escape hatch only. The shipped mechanism is decided by the laptop FSDP CPU gate
 # (tests/workers/test_layer_rotation.py gate 3) and recorded in
 # research/runs/95-layer-rotation-grpo/mechanism.txt.
@@ -91,6 +102,15 @@ DEFAULT_MECHANISM = "p1"
 VALID_MECHANISMS = ("p1", "p2")
 VALID_ADAM_POLICIES = ("persist_park", "reset")
 VALID_LAYER_OTHER = ("freeze", "train")
+#: ``cycle`` walks a fixed partition of ``indices`` in order (issue #95 behaviour, and
+#: the default so every #95 arm reproduces bit-for-bit). ``shuffle`` re-permutes
+#: ``indices`` once per full cycle with a seeded RNG and chunks the permutation, i.e.
+#: uniform sampling WITHOUT replacement. That is deliberately not i.i.d. uniform: with
+#: 120 selections over 28 layers, i.i.d. leaves a layer completely untrained with
+#: probability 1.3% each, so about a 30% chance at least one layer never trains at all.
+#: Sampling without replacement gives every layer an equal, deterministic visit count
+#: for the same cost while still removing any fixed-order artefact.
+VALID_ROTATE_ORDERS = ("cycle", "shuffle")
 
 GATE_PREFIX = "[layer_rotation]"
 
@@ -133,6 +153,9 @@ class LayerSchedule:
     state_device: str = "cpu"
     layer_other: str = "freeze"
     mechanism: str = DEFAULT_MECHANISM
+    rotate_width: int = 1
+    rotate_order: str = "cycle"
+    rotate_seed: int = 0
 
     @property
     def is_dense(self) -> bool:
@@ -147,6 +170,7 @@ class LayerSchedule:
             return "dense (every parameter trainable)"
         return (
             f"{self.mode}:{_fmt_indices(self.indices)} | rotate_every={self.rotate_every} "
+            f"| width={self.rotate_width} | order={self.rotate_order} | seed={self.rotate_seed} "
             f"| adam={self.adam_policy} | state_device={self.state_device} "
             f"| layer_other={self.layer_other} | mechanism={self.mechanism}"
         )
@@ -219,6 +243,9 @@ def parse_layer_schedule(
     state_device: Any = "cpu",
     layer_other: Any = "freeze",
     mechanism: Any = DEFAULT_MECHANISM,
+    rotate_width: Any = 1,
+    rotate_order: Any = "cycle",
+    rotate_seed: Any = 0,
 ) -> LayerSchedule:
     """Resolve a ``LAYER_SCHEDULE`` spec into a :class:`LayerSchedule`.
 
@@ -244,6 +271,9 @@ def parse_layer_schedule(
     device = _validate_device(state_device, ENV_STATE_DEVICE)
     other = _validate_choice(layer_other, ENV_LAYER_OTHER, VALID_LAYER_OTHER)
     mech = _validate_choice(mechanism, ENV_MECHANISM, VALID_MECHANISMS)
+    width = _validate_int(rotate_width, ENV_ROTATE_WIDTH, 1)
+    order = _validate_choice(rotate_order, ENV_ROTATE_ORDER, VALID_ROTATE_ORDERS)
+    seed = _validate_int(rotate_seed, ENV_ROTATE_SEED, 0)
 
     if raw == "":
         return LayerSchedule(
@@ -255,6 +285,9 @@ def parse_layer_schedule(
             state_device=device,
             layer_other=other,
             mechanism=mech,
+            rotate_width=width,
+            rotate_order=order,
+            rotate_seed=seed,
         )
 
     if ":" not in raw:
@@ -267,6 +300,20 @@ def parse_layer_schedule(
     if mode not in ("static", "rotate"):
         raise ValueError(f"{ENV_SCHEDULE}={spec!r}: unknown mode {mode!r}; expected 'static' or 'rotate'")
     indices = _parse_index_range(body, num_layers, raw)
+    # Width is only meaningful for a rotation, and a width at or above the set size
+    # would make "rotation" a static arm wearing a rotate label, which would silently
+    # void the memory claim. Refuse it at build time rather than train the wrong
+    # surface for 16 hours.
+    if mode == "rotate" and width > len(indices):
+        raise ValueError(
+            f"{ENV_ROTATE_WIDTH}={width} exceeds the {len(indices)} layers in "
+            f"{ENV_SCHEDULE}={spec!r}; width must be <= the rotating set size"
+        )
+    if mode == "static" and width != 1:
+        raise ValueError(
+            f"{ENV_ROTATE_WIDTH}={width} is meaningless for a static schedule "
+            f"({ENV_SCHEDULE}={spec!r}); every listed layer is always active"
+        )
     return LayerSchedule(
         mode=mode,
         indices=indices,
@@ -276,6 +323,9 @@ def parse_layer_schedule(
         state_device=device,
         layer_other=other,
         mechanism=mech,
+        rotate_width=width,
+        rotate_order=order,
+        rotate_seed=seed,
     )
 
 
@@ -291,6 +341,9 @@ def schedule_from_env(num_layers: int, env: Optional[dict] = None) -> LayerSched
         state_device=src.get(ENV_STATE_DEVICE, "cpu") or "cpu",
         layer_other=src.get(ENV_LAYER_OTHER, "freeze") or "freeze",
         mechanism=src.get(ENV_MECHANISM, DEFAULT_MECHANISM) or DEFAULT_MECHANISM,
+        rotate_width=src.get(ENV_ROTATE_WIDTH, 1) or 1,
+        rotate_order=src.get(ENV_ROTATE_ORDER, "cycle") or "cycle",
+        rotate_seed=src.get(ENV_ROTATE_SEED, 0) or 0,
     )
 
 
@@ -307,38 +360,90 @@ class RotationSchedule:
     repeated / replayed step is idempotent.
     """
 
-    def __init__(self, indices: Sequence[int], rotate_every: int = 1):
+    def __init__(
+        self,
+        indices: Sequence[int],
+        rotate_every: int = 1,
+        *,
+        width: int = 1,
+        order: str = "cycle",
+        seed: int = 0,
+    ):
         if not indices:
             raise ValueError("RotationSchedule needs at least one decoder-layer index")
         if int(rotate_every) < 1:
             raise ValueError(f"rotate_every must be >= 1, got {rotate_every!r}")
+        if int(width) < 1:
+            raise ValueError(f"width must be >= 1, got {width!r}")
+        if int(width) > len(indices):
+            raise ValueError(f"width {width} exceeds the {len(indices)} rotating layers")
+        if str(order) not in VALID_ROTATE_ORDERS:
+            raise ValueError(f"order must be one of {VALID_ROTATE_ORDERS}, got {order!r}")
         self.indices: tuple[int, ...] = tuple(int(i) for i in indices)
         self.rotate_every = int(rotate_every)
+        self.width = int(width)
+        self.order = str(order)
+        self.seed = int(seed)
+        # Groups per full cycle. The last group is short when width does not divide
+        # the set evenly (28 / 4 = 7 exact, but 28 / 5 leaves a group of 3).
+        self._n_groups = math.ceil(len(self.indices) / self.width)
 
     @property
     def cycle_len(self) -> int:
-        return len(self.indices)
+        """Number of GROUPS in one full cycle, i.e. selections needed to cover the set."""
+        return self._n_groups
 
     def visit_index(self, step: int) -> int:
         return (max(int(step), 1) - 1) // self.rotate_every
 
+    def _cycle_order(self, cycle: int) -> tuple[int, ...]:
+        """The layer order used for one full cycle.
+
+        ``cycle`` walks the natural order every time. ``shuffle`` draws a fresh
+        permutation per cycle from a seeded RNG, so it is uniform WITHOUT replacement:
+        every layer is visited exactly once per cycle, and the order carries no
+        positional artefact. Deriving the RNG from ``(seed, cycle)`` keeps the whole
+        calendar pure, so replaying a step always yields the same group and a
+        resumed or re-run job reproduces bit-for-bit.
+        """
+        if self.order == "cycle":
+            return self.indices
+        # Explicit arithmetic, not tuple hashing: hash() is only guaranteed stable
+        # for ints, and relying on that subtlety in a calendar that must reproduce
+        # across processes and resumes is not worth the cleverness.
+        rng = random.Random(self.seed * 1_000_003 + int(cycle))
+        perm = list(self.indices)
+        rng.shuffle(perm)
+        return tuple(perm)
+
+    def active_layers(self, step: int) -> tuple[int, ...]:
+        """The ``width`` decoder layers active at ``step``, sorted."""
+        v = self.visit_index(step)
+        cycle, pos = divmod(v, self._n_groups)
+        order = self._cycle_order(cycle)
+        return tuple(sorted(order[pos * self.width : (pos + 1) * self.width]))
+
     def active_layer(self, step: int) -> int:
-        return self.indices[self.visit_index(step) % self.cycle_len]
+        """Back-compat single-layer view: the lowest active index at ``step``."""
+        return self.active_layers(step)[0]
 
     def visits_of_active_layer(self, step: int) -> int:
-        """How many times the currently active layer has been visited, inclusive."""
-        return self.visit_index(step) // self.cycle_len + 1
+        """How many times the current group's layers have been visited, inclusive.
+
+        With sampling without replacement every layer is visited exactly once per
+        cycle, so this is the cycle number regardless of width or order.
+        """
+        return self.visit_index(step) // self._n_groups + 1
 
     def visit_counts(self, last_step: int) -> dict[int, int]:
         """Per-layer visit counts over steps ``1..last_step`` (inclusive)."""
         counts = {i: 0 for i in self.indices}
-        seen: set[int] = set()
-        for step in range(1, int(last_step) + 1):
-            v = self.visit_index(step)
-            if v in seen:
-                continue
-            seen.add(v)
-            counts[self.indices[v % self.cycle_len]] += 1
+        n_visits = self.visit_index(int(last_step)) + 1 if int(last_step) >= 1 else 0
+        for v in range(n_visits):
+            cycle, pos = divmod(v, self._n_groups)
+            order = self._cycle_order(cycle)
+            for layer in order[pos * self.width : (pos + 1) * self.width]:
+                counts[layer] += 1
         return counts
 
 
@@ -711,9 +816,23 @@ class LayerRotationController:
         self.rank = int(rank)
         self.mechanism = schedule.mechanism
         self.rotation: Optional[RotationSchedule] = (
-            RotationSchedule(schedule.indices, schedule.rotate_every) if schedule.is_rotating else None
+            RotationSchedule(
+                schedule.indices,
+                schedule.rotate_every,
+                width=schedule.rotate_width,
+                order=schedule.rotate_order,
+                seed=schedule.rotate_seed,
+            )
+            if schedule.is_rotating
+            else None
         )
-        self.active: tuple[int, ...] = tuple(schedule.indices[:1]) if schedule.is_rotating else tuple(schedule.indices)
+        # Seed with step 1's GROUP (not indices[:1]): under width > 1 or a shuffled
+        # order the first group is neither a single layer nor necessarily the lowest,
+        # and the pre-wrap active set must match step 1 exactly or the FSDP wrap is
+        # built against a different surface than the first optimizer tick trains.
+        self.active: tuple[int, ...] = (
+            self.rotation.active_layers(1) if self.rotation is not None else tuple(schedule.indices)
+        )
         self.step: int = 1
         self.visit_index: int = 0
         self.visits_of_active: int = 1
@@ -916,40 +1035,50 @@ class LayerRotationController:
             return None
         step = int(step)
         new_visit = self.rotation.visit_index(step)
-        new_active = self.rotation.active_layer(step)
+        new_active = self.rotation.active_layers(step)
         self.step = step
         self.visits_of_active = self.rotation.visits_of_active_layer(step)
-        if new_visit == self.visit_index and (new_active,) == self.active:
+        if new_visit == self.visit_index and new_active == self.active:
             return None
 
         outgoing = tuple(self.active)
         self.visit_index = new_visit
-        self.active = (new_active,)
+        self.active = new_active
         self.rotations += 1
-        self._visited.add(new_active)
+        self._visited.update(new_active)
+
+        # Set differences, not "everything except the one new layer". Under a shuffled
+        # order consecutive groups can overlap, and toggling a layer that stays active
+        # off and on again would drop its grads and needlessly park then unpark its
+        # Adam state in the same rotation.
+        stay = set(outgoing) & set(new_active)
+        leaving = [i for i in outgoing if i not in stay]
+        entering = [i for i in new_active if i not in stay]
 
         if self.module is not None and self.mechanism == "p1":
-            self._set_requires_grad([i for i in outgoing if i != new_active], False)
-            self._set_requires_grad([new_active], True)
+            self._set_requires_grad(leaving, False)
+            self._set_requires_grad(entering, True)
 
         park_moved = unparked = 0
         if self.optimizer is not None:
             if self.schedule.adam_policy == "reset":
-                # ROTATE_ADAM=reset: drop the outgoing layer's moments outright, so
+                # ROTATE_ADAM=reset: drop the outgoing layers' moments outright, so
                 # nothing is parked and nothing survives the visit.
-                outgoing_params = self.params_of(outgoing)
+                outgoing_params = self.params_of(leaving)
                 reset_optimizer_state(self.optimizer, outgoing_params)
                 for p in outgoing_params:
                     self._parked.discard(id(p))
             else:
-                park_moved = park_optimizer_state(self.optimizer, self.params_of(outgoing), self.schedule.state_device)
-                for p in self.params_of(outgoing):
+                park_moved = park_optimizer_state(self.optimizer, self.params_of(leaving), self.schedule.state_device)
+                for p in self.params_of(leaving):
                     if self.optimizer.state.get(p):
                         self._parked.add(id(p))
-                target = self._compute_device or _infer_param_device(self.params_of([new_active]))
-                unparked = unpark_optimizer_state(self.optimizer, self.params_of([new_active]), target)
-                for p in self.params_of([new_active]):
-                    self._parked.discard(id(p))
+                entering_params = self.params_of(entering)
+                if entering_params:
+                    target = self._compute_device or _infer_param_device(entering_params)
+                    unparked = unpark_optimizer_state(self.optimizer, entering_params, target)
+                    for p in entering_params:
+                        self._parked.discard(id(p))
         self._park_bytes_moved = park_moved
         self._unpark_bytes_moved = unparked
 
@@ -1157,6 +1286,13 @@ class LayerRotationController:
         trainable = sum(p.numel() for p in self.optimized_params())
         out = {
             "layer_rotation/active_layer": float(self.active_layer),
+            # active_layer is -1 whenever more than one layer is active, which is
+            # EVERY step once width > 1, so it cannot carry the visit accounting on
+            # its own. These two do: first + count identify the group, and summing
+            # active_layers_n over steps recovers total layer-updates.
+            "layer_rotation/active_layer_first": float(self.active[0]) if self.active else -1.0,
+            "layer_rotation/active_layers_n": float(len(self.active)),
+            "layer_rotation/width": float(self.schedule.rotate_width),
             "layer_rotation/visit_index": float(self.visit_index),
             "layer_rotation/visits_of_active_layer": float(self.visits_of_active),
             "layer_rotation/opt_state_bytes_gpu": float(resident),

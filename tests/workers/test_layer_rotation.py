@@ -1024,3 +1024,159 @@ def test_real_model_arithmetic_matches_the_plan_numbers():
     rider = per_layer + tied + hidden
     assert 279.0e6 < rider < 281.5e6, rider
     assert 0.17 < rider / 1.54e9 < 0.19
+
+
+# ===========================================================================#
+# Gate 9 (issue #96): width (gamma) > 1 and shuffled order.                   #
+#                                                                             #
+# Motivation. Issue #95 measured C = 0.115 + 0.165*ln(u) where u is optimizer #
+# updates per layer, and u = total_steps * width / len(indices). ROTATE_EVERY #
+# does NOT appear in u; it only controls whether a layer's updates are        #
+# consecutive. So a 28-layer rotation at width=1 needs ~3300 steps to reach   #
+# C=0.90, while width=4 reaches u=86 in 600. These gates protect the two      #
+# things that could silently void that: a group that is not the requested     #
+# size, and GPU-resident optimizer state that is not exactly `width` layers.  #
+# ===========================================================================#
+def test_gate9_width_keeps_exactly_width_layers_resident_and_parks_the_rest():
+    from verl.workers.layer_rotation import build_controller
+
+    width = 2
+    model = toy_model(seed=11)
+    ctrl = build_controller(
+        model,
+        rank=0,
+        env={
+            "LAYER_SCHEDULE": f"rotate:0-{NUM_TOY_LAYERS - 1}",
+            "ROTATE_EVERY": "1",
+            "ROTATE_WIDTH": str(width),
+            "ROTATE_ORDER": "shuffle",
+            "ROTATE_SEED": "42",
+            "ROTATE_ADAM": "persist_park",
+            "ROTATE_STATE_DEVICE": "cpu",
+            "ROTATE_MECHANISM": "p1",
+        },
+        forward_only=False,
+    )
+    optimizer = torch.optim.AdamW(ctrl.optimizer_input(model), lr=1e-3)
+    ctrl.bind(model, optimizer, compute_device="cpu")
+
+    by_index = decoder_layer_params(model)
+    per_layer_bytes = {i: 2 * 4 * sum(p.numel() for p in ps) for i, ps in by_index.items()}
+
+    # Enough steps to cross several cycle boundaries, where park/unpark overlap.
+    for step in range(1, 13):
+        ctrl.advance(step)
+        active = tuple(ctrl.active)
+        assert len(active) == width, f"step {step}: active={active}, expected {width} layers"
+
+        optimizer.zero_grad(set_to_none=True)
+        x = toy_batch(seed=step)
+        model(input_ids=x, labels=x).loss.backward()
+
+        # Only the active layers may carry gradient into the optimizer step.
+        for idx, params in by_index.items():
+            has_grad = any(p.grad is not None and p.grad.abs().sum().item() > 0 for p in params)
+            if idx in active:
+                assert has_grad, f"step {step}: active layer {idx} has no grad"
+            else:
+                assert not has_grad, f"step {step}: inactive layer {idx} carries grad"
+
+        ctrl.pre_step()
+        optimizer.step()
+        ctrl.post_step()
+
+        resident, parked = optimizer_state_bytes_split(
+            optimizer, ctrl.parked_params(), park_device="cpu", compute_device="cpu"
+        )
+        # THE memory claim at width > 1: resident state is exactly `width` layers,
+        # never the whole visited set. Everything previously visited is on CPU.
+        # AdamW also keeps a `step` scalar per parameter tensor, so allow that
+        # explicitly (same slack convention as gate 5) rather than pretending it
+        # is zero.
+        expected_resident = sum(per_layer_bytes[i] for i in active)
+        resident_slack = sum(len(by_index[i]) for i in active) * 8
+        assert expected_resident <= resident <= expected_resident + resident_slack, (
+            f"step {step}: resident {resident} outside the {width}-layer budget "
+            f"{expected_resident} (+{resident_slack} step-scalar slack)"
+        )
+        seen = set()
+        for s2 in range(1, step + 1):
+            seen.update(ctrl.rotation.active_layers(s2))
+        parked_layers = sorted(i for i in seen if i not in active)
+        expected_parked = sum(per_layer_bytes[i] for i in parked_layers)
+        parked_slack = sum(len(by_index[i]) for i in parked_layers) * 8
+        assert expected_parked <= parked <= expected_parked + parked_slack, (
+            f"step {step}: parked {parked} outside [{expected_parked}, "
+            f"{expected_parked + parked_slack}] for layers {parked_layers}"
+        )
+
+
+def test_gate9_shuffle_is_uniform_without_replacement_and_reproducible():
+    from verl.workers.layer_rotation import RotationSchedule
+
+    layers = tuple(range(28))
+    width, every, seed = 4, 5, 42
+    sched = RotationSchedule(layers, every, width=width, order="shuffle", seed=seed)
+    assert sched.cycle_len == 7  # ceil(28 / 4)
+
+    # Every cycle is a PERMUTATION: each layer exactly once, so no layer can starve.
+    # i.i.d. uniform would leave a layer untrained with probability (27/28)^120 = 1.3%
+    # each, i.e. about a 30% chance of at least one dead layer over a 600-step run.
+    for cycle in range(4):
+        flat = []
+        for pos in range(sched.cycle_len):
+            flat.extend(sched.active_layers(cycle * sched.cycle_len * every + pos * every + 1))
+        assert sorted(flat) == list(layers), f"cycle {cycle} is not a permutation: {sorted(flat)}"
+
+    # u = T*width/L must hold exactly, since the whole budget argument rests on it.
+    counts = sched.visit_counts(600)
+    assert sum(counts.values()) * every == 600 * width == 2400
+    assert abs(sum(counts.values()) * every / len(layers) - 600 * width / len(layers)) < 1e-9
+    assert max(counts.values()) - min(counts.values()) <= 1, counts
+
+    # Pure and seed-stable, so a replayed or resumed step yields the same group.
+    twin = RotationSchedule(layers, every, width=width, order="shuffle", seed=seed)
+    assert [sched.active_layers(s) for s in range(1, 300)] == [twin.active_layers(s) for s in range(1, 300)]
+    other = RotationSchedule(layers, every, width=width, order="shuffle", seed=7)
+    assert [other.active_layers(s) for s in range(1, 60)] != [sched.active_layers(s) for s in range(1, 60)]
+
+
+def test_gate9_defaults_reproduce_issue_95_calendars_bit_for_bit():
+    from verl.workers.layer_rotation import RotationSchedule
+
+    # rotate-band5: measured 30 visits per layer over 150 steps.
+    band = RotationSchedule(tuple(range(11, 16)), 1)
+    assert [band.active_layer(s) for s in range(1, 11)] == [11, 12, 13, 14, 15, 11, 12, 13, 14, 15]
+    assert set(band.visit_counts(150).values()) == {30}
+
+    # rotate-all28: measured 6 visits for layers 0-9 and 5 for layers 10-27.
+    all28 = RotationSchedule(tuple(range(28)), 1).visit_counts(150)
+    assert all(all28[i] == 6 for i in range(10)), all28
+    assert all(all28[i] == 5 for i in range(10, 28)), all28
+    assert sum(all28.values()) == 150
+
+
+def test_gate9_width_rejects_configs_that_would_silently_change_the_surface():
+    from verl.workers.layer_rotation import parse_layer_schedule
+
+    # width == set size would be a static arm wearing a rotate label.
+    with pytest.raises(ValueError):
+        parse_layer_schedule("rotate:0-27", 28, rotate_width=29)
+    with pytest.raises(ValueError):
+        parse_layer_schedule("static:11-15", 28, rotate_width=4)
+    with pytest.raises(ValueError):
+        parse_layer_schedule("rotate:0-27", 28, rotate_order="random")
+    with pytest.raises(ValueError):
+        parse_layer_schedule("rotate:0-27", 28, rotate_width=0)
+
+    s = parse_layer_schedule(
+        "rotate:0-27",
+        28,
+        rotate_every=5,
+        rotate_width=4,
+        rotate_order="shuffle",
+        rotate_seed=42,
+        layer_other="train",
+    )
+    assert (s.rotate_width, s.rotate_order, s.rotate_seed) == (4, "shuffle", 42)
+    assert "width=4" in s.describe() and "order=shuffle" in s.describe()

@@ -83,6 +83,16 @@ export ROTATE_EVERY="${ROTATE_EVERY:-1}"
 export ROTATE_ADAM="${ROTATE_ADAM:-persist_park}"
 export ROTATE_STATE_DEVICE="${ROTATE_STATE_DEVICE:-cpu}"
 export LAYER_OTHER="${LAYER_OTHER:-freeze}"
+# Issue #96. WIDTH is the one knob that changes updates-per-layer:
+# u = TOTAL_STEPS * ROTATE_WIDTH / len(indices). ROTATE_EVERY does NOT appear in u,
+# it only decides whether a layer's updates are consecutive, so raising it is not a
+# substitute. Defaults reproduce every issue #95 arm bit-for-bit.
+export ROTATE_WIDTH="${ROTATE_WIDTH:-1}"
+export ROTATE_ORDER="${ROTATE_ORDER:-cycle}"
+export ROTATE_SEED="${ROTATE_SEED:-0}"
+case "$ROTATE_ORDER" in cycle|shuffle) : ;; *) echo "FATAL: ROTATE_ORDER='$ROTATE_ORDER' must be cycle|shuffle" >&2; exit 1 ;; esac
+case "$ROTATE_WIDTH" in ''|*[!0-9]*) echo "FATAL: ROTATE_WIDTH='$ROTATE_WIDTH' must be a positive integer" >&2; exit 1 ;; esac
+[ "$ROTATE_WIDTH" -ge 1 ] || { echo "FATAL: ROTATE_WIDTH='$ROTATE_WIDTH' must be >= 1" >&2; exit 1; }
 case "$LAYER_SCHEDULE" in
   ""|static:*|rotate:*) : ;;
   *) echo "FATAL: LAYER_SCHEDULE='$LAYER_SCHEDULE' must be empty, 'static:<idx|lo-hi>' or 'rotate:<idx|lo-hi>'" >&2; exit 1 ;;
@@ -105,5 +115,5 @@ fi
 [[ -n "${WANDB_API_KEY:-}" ]] || export WANDB_MODE="${WANDB_MODE:-offline}"
 echo "=== wandb: mode=${WANDB_MODE:-online} project=$PROJECT_NAME entity=${WANDB_ENTITY:-<default>} (api key $([[ -n "${WANDB_API_KEY:-}" ]] && echo present || echo MISSING)) ==="
 echo "=== launching $EXPERIMENT_NAME (group $WANDB_RUN_GROUP): DENSE codec, batch 128 / mini 128, 1024/2048, gpu_mem $GPU_MEM, $TOTAL_STEPS steps, test_freq $TEST_FREQ, save_freq $SAVE_FREQ ==="
-echo "=== LAYER_SCHEDULE='${LAYER_SCHEDULE:-<unset: DENSE>}' ROTATE_EVERY=$ROTATE_EVERY ROTATE_ADAM=$ROTATE_ADAM ROTATE_STATE_DEVICE=$ROTATE_STATE_DEVICE LAYER_OTHER=$LAYER_OTHER ==="
+echo "=== LAYER_SCHEDULE='${LAYER_SCHEDULE:-<unset: DENSE>}' ROTATE_EVERY=$ROTATE_EVERY ROTATE_WIDTH=$ROTATE_WIDTH ROTATE_ORDER=$ROTATE_ORDER ROTATE_SEED=$ROTATE_SEED ROTATE_ADAM=$ROTATE_ADAM ROTATE_STATE_DEVICE=$ROTATE_STATE_DEVICE LAYER_OTHER=$LAYER_OTHER ==="
 exec bash "$PATCHED"
