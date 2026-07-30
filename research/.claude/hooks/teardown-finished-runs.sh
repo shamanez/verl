@@ -88,9 +88,17 @@ heartbeat_alive() {
   [[ -z "$rlog" && -r "$PROJECT_DIR/runs/$id/run.json" ]] && \
     rlog=$(jq -r '.remote_log // empty' "$PROJECT_DIR/runs/$id/run.json" 2>/dev/null)
   rlog="${rlog:-/workspace/train.log}"
+  # ALSO fold in the newest train*.log beside remote_log. A multi-cell payload
+  # writes each cell to train_<cell>.log, so the canonical remote_log can be
+  # legitimately frozen while training advances normally. On 2026-07-30 that gap
+  # destroyed a HEALTHY operator box (issue #95, step 77 of 200, no checkpoint
+  # saved): the stale-heartbeat trigger fired and this spare re-probed the SAME
+  # frozen file, so it confirmed the false alarm instead of catching it. Either
+  # file advancing now counts as alive.
+  local rdir; rdir=$(dirname "$rlog")
   sig=$(timeout 25 ssh -n -i "$ident" -o ConnectTimeout=8 -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new -p "$port" "root@$host" \
-        "tail -n 3 '$rlog' 2>/dev/null | cksum" 2>/dev/null) || return 1
+        "{ tail -n 3 '$rlog' 2>/dev/null; n=\$(ls -1t '$rdir'/train*.log 2>/dev/null | head -1); [ -n \"\$n\" ] && tail -n 3 \"\$n\" 2>/dev/null; } | cksum" 2>/dev/null) || return 1
   [[ -n "$sig" ]] || return 1
   sigfile="$PROJECT_DIR/runs/$id/metrics/.reaper-probe-sig"
   prev=$(cat "$sigfile" 2>/dev/null || echo "")
@@ -169,6 +177,20 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     REASON=""
   fi
   [[ -z "$REASON" ]] && continue
+
+  # OPERATOR-SUPPLIED BOX: never auto-destroy. /monitor's dispatch table already
+  # says an EXTERNAL box is operator-managed and must never be auto-destroyed, but
+  # that rule was only enforced in the orphan-handle sweep below, not for RUNNING
+  # rows. On 2026-07-30 this reaper destroyed operator box 46231601 (issue #95) 87
+  # seconds after a health check showed it training normally at step 77 of 200, on a
+  # false no-heartbeat-30min. The operator had explicitly authorised teardown ONLY
+  # after all cells finished and a verdict existed. Log loudly and leave it alone;
+  # the throttled line surfaces it for a human decision.
+  EXT_ROW=$(jq -r '(.external // .handles[0].external // false)' <<<"$row" 2>/dev/null)
+  if [[ "$EXT_ROW" == "true" ]]; then
+    echo "[$(date -Iseconds)] SPARE-EXTERNAL $ID: $REASON on an OPERATOR-SUPPLIED box: not destroying; needs a human" >> "$ERRLOG"
+    continue
+  fi
 
   ROW_ACCT=$(jq -r '.vast_account // "team"' <<<"$row")
   # Match provisioning + vast-teardown, which default a missing account to TEAM
