@@ -109,6 +109,10 @@ DEFAULT_IGNORE_FILES = (
     "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh",
     "examples/grpo_trainer/run_prf_exactk_600.sh",
     "examples/grpo_trainer/run_93_cell.sh",
+    # The #96 Qwen3-8B 16k cell: same class as run_prf_exactk_600.sh above. It
+    # patches and execs the canonical FSDP launcher rather than being one, and
+    # the trailing tokens name the codec and the step budget, not a backend.
+    "examples/grpo_trainer/run_qwen3_8b_prf_exactk_1000.sh",
 )
 
 
