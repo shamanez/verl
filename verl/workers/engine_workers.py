@@ -1264,6 +1264,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return
 
         set_expandable_segments(False)
+        # Hand torch's cached-but-free blocks back to the driver BEFORE vLLM re-maps
+        # its weight buffers. vLLM's cumem allocator asks the driver directly and
+        # cannot borrow from torch's caching allocator, so a large reserved pool makes
+        # wake_up(tags=["weights"]) fail with
+        #   RuntimeError: CUDA Error: out of memory at cumem_allocator.cpp:139
+        # even when nearly all of that pool is free. The comm-eff anchor makes this
+        # reachable: on an anchor tick the unsharded replay clone plus its backward
+        # push the high-water mark far above the steady state, and by the time we get
+        # here the clone has parked on host and its activations are freed, so the pool
+        # is mostly cache. The release at the end of this method runs too late to help.
+        # Numerically neutral: empty_cache frees no live tensor.
+        aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
