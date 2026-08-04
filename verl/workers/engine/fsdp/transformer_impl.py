@@ -2166,6 +2166,19 @@ class FSDPEngine(BaseEngine):
                 for _p in anchor_module.parameters():
                     if _p.grad is not None:
                         _p.grad = None
+                # Park the cached clone on HOST between fires. The cache lookup
+                # above happens INSIDE `summon_full_params(with_grads=True)`, so
+                # a clone left resident on device sits alongside the unsharded
+                # summon and the live static state for the whole run — a full
+                # extra copy of the model (~30 GiB at 8B/bf16) held permanently
+                # for a circuit that fires once per `cadence` optimizer ticks.
+                # Numerics are UNCHANGED: the next fire moves it back with
+                # `anchor_module.to(device=live_p.device, dtype=live_p.dtype)`
+                # and then overwrites EVERY parameter from the K-stale snapshot
+                # (guarded by the `loaded == total` assert), and a same-dtype
+                # device<->host round trip is byte-preserving. The cost is one
+                # H2D copy per fire, paid outside the summon.
+                anchor_module.to("cpu")
             except UnboundLocalError:
                 pass
             try:

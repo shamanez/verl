@@ -1068,7 +1068,17 @@ class RayPPOTrainer:
         # and _load_checkpoint reads it locally on an in-place resume; the sink is
         # told delete_local=False for the tracker only. Strict no-op when the flag
         # is false. ---
-        self._maybe_upload_ckpt_tracker_to_r2(local_latest_checkpointed_iteration)
+        # Same best-effort contract as the step-tree mirror above: a transient R2
+        # error on this tiny marker must not kill a run that has already written
+        # its checkpoint locally.
+        try:
+            self._maybe_upload_ckpt_tracker_to_r2(local_latest_checkpointed_iteration)
+        except Exception as _r2_exc:  # noqa: BLE001 — best-effort mirror, never fatal
+            print(
+                f"[comm_eff][r2] WARN tracker R2 upload FAILED — kept LOCAL at "
+                f"{local_latest_checkpointed_iteration}; training continues. cause: {_r2_exc!r}",
+                flush=True,
+            )
 
     # ------------------------------------------------------------------ #
     # Checkpoint -> R2 mirror. All three helpers below are a
