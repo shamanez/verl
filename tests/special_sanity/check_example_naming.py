@@ -113,6 +113,9 @@ DEFAULT_IGNORE_FILES = (
     # patches and execs the canonical FSDP launcher rather than being one, and
     # the trailing tokens name the codec and the step budget, not a backend.
     "examples/grpo_trainer/run_qwen3_8b_prf_exactk_1000.sh",
+    # Its 4-GPU sibling: a thin wrapper that only overrides the three box gates
+    # and execs the launcher above, so the trailing token names a box shape.
+    "examples/grpo_trainer/run_qwen3_8b_prf_exactk_1000_4gpu.sh",
 )
 
 
