@@ -853,6 +853,52 @@ def build_anchor_module(inner_module: torch.nn.Module) -> torch.nn.Module:
                     delattr(p, sentinel)
                 except (AttributeError, TypeError):
                     pass
+
+    # Gradient-checkpointing parity with the live module. LOAD-BEARING — do not
+    # remove.
+    #
+    # The clone is built OUTSIDE the engine's model-init path, so nothing here
+    # ever calls ``gradient_checkpointing_enable``: the only call site in the
+    # tree is on the LIVE module in
+    # ``verl/workers/engine/fsdp/transformer_impl.py``. The two branches above
+    # then behave DIFFERENTLY, which is the whole problem:
+    #   - ``copy.deepcopy`` happens to carry the flag and HF's
+    #     ``_gradient_checkpointing_func`` across today, but that is an
+    #     incidental property of deep-copying attribute-based wiring, not a
+    #     contract, and nothing in the run log ever said so either way.
+    #   - the "cannot pickle" config-rebuild fallback constructs a FRESH model
+    #     and definitively loses it. That clone materializes every activation of
+    #     the anchor's dense replay forward.
+    # Enabling it explicitly makes the two paths identical and, with the line
+    # printed below, makes the clone's activation policy PROVABLE from the run
+    # log instead of inferred.
+    #
+    # Why it is worth being explicit (run 90, Qwen2.5-Math-1.5B, anchor cadence
+    # 20, research/runs/90-prf-exactk-600/metrics/prf_train.log):
+    # ``actor/perf/max_memory_allocated_gb`` is 46.067 GiB flat for steps 3-19
+    # and 109.011 GiB at step 20, the FIRST anchor fire — +62.9 GiB on a 1.5B
+    # model. At 8B / 16k context a regression of that shape is the difference
+    # between a run and an OOM, so the clone must not be allowed to drift back
+    # to storing full activations silently.
+    #
+    # Non-reentrant: the anchor swaps in its own loss function and reads
+    # ``p.grad`` off the clone, and the reentrant variant does not compose with
+    # inputs that do not require grad.
+    src_gc = any(getattr(m, "gradient_checkpointing", False) for m in inner_module.modules())
+    if src_gc and hasattr(clone, "gradient_checkpointing_enable"):
+        clone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        n_ckpt = sum(1 for m in clone.modules() if getattr(m, "gradient_checkpointing", False))
+        print(
+            f"[comm_eff][anchor-build] gradient_checkpointing ENABLED on the anchor clone "
+            f"(use_reentrant=False, {n_ckpt} submodules) — source module had it on",
+            flush=True,
+        )
+    else:
+        print(
+            f"[comm_eff][anchor-build] gradient_checkpointing NOT enabled on the anchor clone "
+            f"(source_had_it={src_gc}, clone_supports={hasattr(clone, 'gradient_checkpointing_enable')})",
+            flush=True,
+        )
     return clone
 
 

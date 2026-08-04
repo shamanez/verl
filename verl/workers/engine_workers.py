@@ -59,6 +59,15 @@ from verl.workers.utils.losses import ppo_loss
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# Per-DP-rank stride for the comm_eff per-row sample id. Each rank stamps
+# ``dp_rank * STRIDE + arange(local_bsz)`` so the (sample_id, position_id) PRF
+# key is globally unique instead of repeating once per rank. The stride is
+# ADDED to the row index and is far larger than any per-rank batch, so the
+# per-rank id ranges cannot overlap, and rank 0's ids remain a bare
+# ``arange`` — bit-identical to every single-rank run recorded before this
+# offset existed.
+_COMM_EFF_SAMPLE_ID_RANK_STRIDE = 1_000_000
+
 
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
@@ -926,7 +935,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "comm_eff_sample_id" in data.keys():
             return
         bsz = data.batch_size[0]
-        data["comm_eff_sample_id"] = torch.arange(bsz, dtype=torch.int64, device=data.device)
+        # Per-rank offset. A bare ``arange`` is the row index WITHIN this rank's
+        # shard, so every DP rank stamps the identical id sequence: at 8 ranks
+        # only ``bsz`` distinct PRF draws exist across the global batch and each
+        # mask is reused verbatim by 8 different sequences, correlating the draws
+        # exactly where the codec's unbiasedness argument assumes independence.
+        # Adding ``dp_rank * STRIDE`` makes the key globally unique. The offset is
+        # ADDED to the id and never folded into the seed derivation, so rank 0
+        # keeps the bare ``arange`` and stays bit-identical to the recorded
+        # single-rank runs.
+        offset = self._comm_eff_dp_rank() * _COMM_EFF_SAMPLE_ID_RANK_STRIDE
+        sample_ids = torch.arange(bsz, dtype=torch.int64, device=data.device)
+        data["comm_eff_sample_id"] = sample_ids if offset == 0 else sample_ids + offset
+
+    def _comm_eff_dp_rank(self) -> int:
+        """This worker's data-parallel rank (cached), or ``0`` when unavailable.
+
+        Reuses the accessor the worker already relies on to register its
+        dispatch info (``engine.get_data_parallel_rank()``, see
+        ``TrainingWorker.init_model``) rather than reading a global rank: the
+        stamp must agree with how the trainer sharded the batch. The actor
+        engine is preferred and the reference engine is the fallback, so both
+        the fused actor-and-ref worker and a ref-only worker resolve the same
+        value for the same shard.
+        """
+        cached = getattr(self, "_comm_eff_dp_rank_cache", None)
+        if cached is not None:
+            return cached
+        rank = 0
+        for holder in (getattr(self, "actor", None), getattr(self, "ref", None)):
+            engine = getattr(holder, "engine", None)
+            if engine is None or not hasattr(engine, "get_data_parallel_rank"):
+                continue
+            try:
+                rank = int(engine.get_data_parallel_rank())
+                break
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("comm_eff: could not read data-parallel rank (%s); stamping with rank 0", e)
+        object.__setattr__(self, "_comm_eff_dp_rank_cache", rank)
+        return rank
 
     @contextmanager
     def _comm_eff_path(self, tag: Optional[str]):
