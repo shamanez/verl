@@ -25,6 +25,7 @@ scorer, no `aime*`/`math_dapo` "Answer:" regex path).
 | `ood_prep.py` | Build `test.parquet` for the 10 benchmarks in the MATH schema. Parameterized by `OOD_ROOT` (default `/root/data/ood`) and `MATH_TRAIN`. No credentials. |
 | `ood_eval.sh` | Evaluate ONE model on ONE benchmark via val-only. Parameterized by `VERL_DIR`, `OOD_EVAL_ROOT`, `OOD_DATA_ROOT`, `LAUNCHER`, `SHIM_DIR`. |
 | `ood_run_all.sh` | Matrix orchestrator: merge each FSDP checkpoint (local or R2), eval each model x 10 benchmarks fanned over a GPU-pair pool, tabulate. Roster is an editable example. |
+| `run98_eval.sh` | Thin driver for run 98 (Qwen3-8B-Base, 16k context): base + step 150 + step 200 on the in-domain MATH test split **and** all 10 OOD benchmarks. Reuses `ood_prep.py` and `ood_eval.sh`, and parses the sampling table out of `ood_run_all.sh`. Written to run on a box that is *not* the trainer: every checkpoint comes from R2, the key layout is discovered from a listing, and each pull is deleted once its merge succeeds so peak disk is one checkpoint plus the merges. Preflights GPUs and per-GPU memory, host RAM for the merge, per-filesystem disk, `aws`, the engine's own `HF_TOKEN`/`WANDB_API_KEY`/no-`VAST_API_KEY` requirement, the base launcher's patch table, a real `head-object` probe, and the **completeness** of every requested step (all `model_world_size_<W>_rank_<i>.pt` present, not merely one of them) before downloading anything (`DRY_RUN=1` stops there and covers every one of these). Idempotent: re-running resumes, keyed on a `.merge_ok` sentinel written only after a merge is verified, never on `config.json`. Single-instance locked. |
 
 ## Benchmarks and sampling protocol
 
@@ -49,6 +50,12 @@ research/scripts/ood_eval/ood_eval.sh /path/to/merged_model math500 mytag 0,1
 # 2b. The full matrix over a roster of checkpoints (edit ROSTER in the script):
 research/scripts/ood_eval/ood_run_all.sh
 # -> writes $OOD_EVAL_ROOT/RESULTS.txt (tag x benchmark table with delta columns)
+
+# 2c. Run 98 (Qwen3-8B-Base, 16k), in-domain + OOD, checkpoints pulled from R2:
+DRY_RUN=1 research/scripts/ood_eval/run98_eval.sh   # every gate, no download
+research/scripts/ood_eval/run98_eval.sh             # the real thing
+EVAL_STEPS="150 200 250" research/scripts/ood_eval/run98_eval.sh
+# -> writes $OOD_EVAL_ROOT/RESULTS_run98.txt
 ```
 
 ## Checkpoint sources (R2) and credentials
