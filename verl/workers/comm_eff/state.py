@@ -483,14 +483,18 @@ class CommEffState:
         # FRLR (issue #89) instead carries rank + k + 1 coords/token (core y,
         # kept residual subset J, one norm scalar), e.g. 32 + 44 + 1 = 77.
         hidden_size = getattr(self.masker, "hidden_size", None)
-        p = float(getattr(self.masker, "p", 0.0))
         if bool(getattr(self.masker, "frlr", False)):
             payload = getattr(self.masker, "frlr_payload_per_token", None)
             if payload is not None:
                 out["comm_eff/logical_pp_bytes_prf"] = float(payload)
             out["comm_eff/frlr_q_refreshes"] = int(getattr(self.masker, "frlr_q_refreshes", 0))
         elif hidden_size is not None:
-            out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - p) * float(hidden_size))
+            # Averaged over boundaries via the MEASURED mask ratio, not the scalar
+            # p: under p_by_boundary the per-cut fractions differ, and a dense cut
+            # (p=0) carries the full hidden state. Reading the scalar understated
+            # a 3-masked/4-dense run by 11.9x (204.8 reported against 2428.4 true)
+            # and made a 40.7 percent wire saving look like 95 percent.
+            out["comm_eff/logical_pp_bytes_prf"] = float((1.0 - out["comm_eff/mask_ratio"]) * float(hidden_size))
         return out
 
     def quant_metrics(self) -> dict:
