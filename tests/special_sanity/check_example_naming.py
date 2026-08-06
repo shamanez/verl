@@ -116,6 +116,16 @@ DEFAULT_IGNORE_FILES = (
     # Its 4-GPU sibling: a thin wrapper that only overrides the three box gates
     # and execs the launcher above, so the trailing token names a box shape.
     "examples/grpo_trainer/run_qwen3_8b_prf_exactk_1000_4gpu.sh",
+    # The #97 dense-middle-cuts cell: a thin wrapper over the #96 launcher that
+    # only sets the p_by_boundary vector and the run controls; the trailing
+    # tokens name the lever and the step budget, not a backend.
+    "examples/grpo_trainer/run_qwen3_8b_densemid_1000.sh",
+    # The #90 dense-control cell: same research-launcher class as
+    # run_prf_exactk_600.sh above (predates this ignore list).
+    "examples/grpo_trainer/run_dense_600.sh",
+    # Environment bring-up utility for non-template vast images, not a model
+    # example at all (predates this ignore list).
+    "examples/grpo_trainer/install_verl_foreign_image.sh",
 )
 
 

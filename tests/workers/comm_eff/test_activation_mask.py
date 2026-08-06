@@ -760,6 +760,216 @@ def test_p_by_boundary_out_of_range_raises_at_construction():
 
 
 # =========================================================================== #
+# issue #97 dense-mid boundaries: a p_by_boundary entry of 0.0 must be a
+# bit-exact identity on that cut (forward AND backward), so the two pipeline
+# boundaries inside the mid band can run uncompressed while the rest keep
+# the default exact-k p=0.95 constant-rescale codec.
+# =========================================================================== #
+def test_p_zero_all_boundaries_bit_exact_identity():
+    """p_by_boundary=[0.0]*7 under exact_k+constant rescale is a true no-op.
+
+    exact_k with p=0.0 keeps round(1.0*H)=H channels, so prf_token_mask
+    early-returns all-ones, and with p_by_boundary set the constant gain is
+    recomputed per boundary as 1/(1-0.0)=1.0. The hook then computes
+    h*ones*1.0: the forward output and every parameter grad must be BITWISE
+    equal to the unhooked run. In particular the precomputed scalar gain
+    1/(1-0.95)=20 must not leak into p=0 boundaries.
+    """
+    torch.manual_seed(0)
+    model = _ToyDecoder(num_layers=16, d=32)
+    x = torch.randn(2, 4, 32)
+
+    out_clean = model(x)
+    out_clean.sum().backward()
+    grads_clean = {name: p.grad.detach().clone() for name, p in model.named_parameters()}
+    model.zero_grad(set_to_none=True)
+
+    masker = ActivationMasker(
+        p=0.95, base_seed=0, pp_size=8, exact_k=True, rescale_mode="constant", p_by_boundary=[0.0] * 7
+    )
+    masker.register(model)
+    _set_ctx(masker, 2, 4)
+    out_masked = model(x)
+    out_masked.sum().backward()
+    masker.unregister()
+
+    assert torch.equal(out_masked, out_clean)
+    for name, p in model.named_parameters():
+        assert torch.equal(p.grad, grads_clean[name]), f"grad mismatch on {name}"
+    # Every boundary reports a measured masked fraction of exactly zero.
+    assert set(masker.last_mask_ratio) == set(masker.boundary_indices)
+    for idx in masker.boundary_indices:
+        assert masker.last_mask_ratio[idx] == 0.0
+
+
+def test_p_by_boundary_mixed_dense_and_masked():
+    """One dense (0.0) boundary among 0.95 exact-k boundaries: exact ratios."""
+    torch.manual_seed(1)
+    H = 64
+    model = _ToyDecoder(num_layers=16, d=H)
+    x = torch.randn(4, 16, H)
+    out_clean = model(x)
+
+    pbb = [0.95, 0.95, 0.0, 0.95, 0.95, 0.95, 0.95]  # dense at boundary 2 -> layer 5
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, exact_k=True, rescale_mode="constant", p_by_boundary=pbb)
+    masker.register(model)
+    assert masker.boundary_indices == [1, 3, 5, 7, 9, 11, 13]
+    _set_ctx(masker, 4, 16)
+    out_masked = model(x)
+    masker.unregister()
+
+    # Masking is live on the other boundaries (sanity).
+    assert not torch.equal(out_masked, out_clean)
+    # The dense boundary measures EXACTLY zero masked fraction.
+    assert masker.last_mask_ratio[5] == 0.0
+    # The masked boundaries measure EXACTLY the exact-k ratio 1 - round(0.05*H)/H.
+    keep = round(0.05 * H)  # 3
+    expected = 1.0 - keep / H  # 0.953125, exactly representable
+    for i, idx in enumerate(masker.boundary_indices):
+        if pbb[i] == 0.0:
+            continue
+        assert masker.last_mask_ratio[idx] == expected
+
+    # Bitwise value pin on the MIXED configuration (run 97's actual shape).
+    # The reference replays the stack manually, applying prf_token_mask times
+    # the constant gain at the masked (p=0.95) boundaries only and leaving the
+    # dense boundary untouched, so torch.equal binds the dense cut's VALUE,
+    # not just its measured ratio. Failure mode caught: ANY transform landing
+    # on the p=0.0 boundary, in particular the precomputed scalar constant
+    # gain 1/(1-0.95)=20 leaking onto it.
+    sid, pos = _ids_for(4, 16)
+    p_for_layer = dict(zip(masker.boundary_indices, pbb, strict=False))
+
+    def _reference(dense_gain):
+        # dense_gain=1.0 is the healthy transform (dense cut untouched);
+        # dense_gain=20.0 simulates the scalar-gain leak at the dense cut
+        # (all-ones mask times the precomputed scalar gain).
+        ref = x
+        for i, layer in enumerate(model.layers):
+            ref = layer(ref)
+            p_i = p_for_layer.get(i)
+            if p_i is None:
+                continue
+            if p_i == 0.0:
+                if dense_gain != 1.0:
+                    ref = ref * dense_gain
+                continue
+            mask = prf_token_mask(
+                sid,
+                pos,
+                layer_idx=i,
+                global_step=0,
+                base_seed=0,
+                hidden_size=H,
+                p=p_i,
+                device=CPU,
+                dtype=torch.float32,
+                exact_k=True,
+            ).view(ref.shape)
+            ref = ref * mask * (1.0 / (1.0 - p_i))
+        return ref
+
+    assert torch.equal(out_masked, _reference(dense_gain=1.0))
+    # Mutation check: the reference built WITH the leaked gain 20 at the dense
+    # cut must NOT match, so the bitwise pin above genuinely rejects the leak.
+    assert not torch.equal(out_masked, _reference(dense_gain=1.0 / (1.0 - 0.95)))
+
+
+def test_densemid_vector_maps_to_layers_14_19():
+    """The run-97 vector lands its two 0.0 entries on decoder layers 14 and 19.
+
+    36 layers over pp_size=8 cut after layers [4,9,14,19,23,27,31]; the cuts
+    after 14 and 19 sit at fractional depth 0.42/0.56, inside the LayerCompass
+    active band, and the vector [0.95,0.95,0.0,0.0,0.95,0.95,0.95] leaves
+    exactly those two uncompressed. The private dict is not the contract, so a
+    real hooked forward confirms the dense entries land on layers 14 and 19.
+    """
+    assert decoder_boundary_indices(36, 8) == [4, 9, 14, 19, 23, 27, 31]
+    vec = [0.95, 0.95, 0.0, 0.0, 0.95, 0.95, 0.95]
+    H = 16
+    model = _ToyDecoder(num_layers=36, d=H)
+    masker = ActivationMasker(p=0.95, base_seed=0, pp_size=8, exact_k=True, rescale_mode="constant", p_by_boundary=vec)
+    masker.register(model)
+    assert masker.boundary_indices == [4, 9, 14, 19, 23, 27, 31]
+    assert masker._p_for_layer == {4: 0.95, 9: 0.95, 14: 0.0, 19: 0.0, 23: 0.95, 27: 0.95, 31: 0.95}
+
+    # A real hooked forward on the 36-layer stack: the two dense boundaries
+    # measure EXACTLY zero masked fraction and each of the five masked
+    # boundaries measures EXACTLY the exact-k ratio 1 - round(0.05*H)/H.
+    _set_ctx(masker, 2, 8)
+    model(torch.randn(2, 8, H))
+    masker.unregister()
+    keep = round(0.05 * H)  # 1
+    expected = 1.0 - keep / H  # 0.9375, exactly representable
+    assert masker.last_mask_ratio[14] == 0.0
+    assert masker.last_mask_ratio[19] == 0.0
+    for idx in (4, 9, 23, 27, 31):
+        assert masker.last_mask_ratio[idx] == expected
+
+
+def test_mask_ratio_metrics_with_dense_boundaries():
+    """mask_ratio_metrics() averages OVER the dense zeros, not around them."""
+    torch.manual_seed(2)
+    pbb = [0.0, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95]  # dense at boundary 0 -> layer 1
+    state, model = _make_enabled_state(exact_k=True, p_by_boundary=pbb)
+    state.mask_active = True
+    state.set_path_tag(TRAIN_TAG)
+    state.masker.register(model)
+    _set_ctx(state.masker, 4, 16)
+    model(torch.randn(4, 16, 32))
+    state.masker.unregister()
+
+    metrics = state.mask_ratio_metrics()
+    H = 32
+    keep = round(0.05 * H)  # 2
+    masked_ratio = 1.0 - keep / H  # 0.9375, exactly representable
+    assert metrics["comm_eff/mask_ratio/layer_1"] == 0.0
+    for idx in (3, 5, 7, 9, 11, 13):
+        assert metrics[f"comm_eff/mask_ratio/layer_{idx}"] == masked_ratio
+    assert metrics["comm_eff/mask_ratio"] == pytest.approx((0.0 + 6 * masked_ratio) / 7, abs=1e-12)
+
+
+def test_p_by_boundary_all_095_matches_scalar_baseline():
+    """p_by_boundary=[0.95]*7 is bitwise the scalar p=0.95 codec.
+
+    This underwrites run 97's claim that its five masked cuts behave exactly
+    as run 96's: the PRF key excludes p (so the masks are identical draws),
+    and the inline per-boundary constant gain 1.0/(1.0-0.95) must equal the
+    precomputed scalar _rescale_gain bitwise. Forward outputs AND parameter
+    grads must be torch.equal across the two configurations.
+    """
+    torch.manual_seed(3)
+    H = 64
+    model = _ToyDecoder(num_layers=16, d=H)
+    x = torch.randn(4, 8, H)
+
+    def _run(p_by_boundary):
+        masker = ActivationMasker(
+            p=0.95, base_seed=0, pp_size=8, exact_k=True, rescale_mode="constant", p_by_boundary=p_by_boundary
+        )
+        masker.register(model)
+        assert masker.boundary_indices == [1, 3, 5, 7, 9, 11, 13]
+        _set_ctx(masker, 4, 8, step=3)
+        out = model(x)
+        out.sum().backward()
+        masker.unregister()
+        grads = {name: p.grad.detach().clone() for name, p in model.named_parameters()}
+        model.zero_grad(set_to_none=True)
+        return masker, out, grads
+
+    masker_a, out_scalar, grads_scalar = _run(None)
+    _, out_vector, grads_vector = _run([0.95] * 7)
+    assert torch.equal(out_scalar, out_vector)
+    for name in grads_scalar:
+        assert torch.equal(grads_scalar[name], grads_vector[name]), f"grad mismatch on {name}"
+    # The masking was live (this is not two clean forwards agreeing).
+    assert not torch.equal(out_scalar, model(x))
+    # The gain paths themselves agree bitwise: the scalar masker's precomputed
+    # gain equals the expression the per-boundary branch computes inline.
+    assert masker_a._rescale_gain == 1.0 / (1.0 - 0.95)
+
+
+# =========================================================================== #
 # issue #89 FRLR codec: fresh-residual low-rank ("32+44+1")
 # =========================================================================== #
 from verl.workers.comm_eff.powersgd_activation import init_basis, orthonormalize  # noqa: E402

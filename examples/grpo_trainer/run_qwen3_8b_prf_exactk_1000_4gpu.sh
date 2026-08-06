@@ -54,7 +54,9 @@ TARGET="$HERE/run_qwen3_8b_prf_exactk_1000.sh"
 # The only three deltas. Each is a plain default, so an explicit value from the
 # caller's environment still wins.
 export EXPECT_GPUS="${EXPECT_GPUS:-4}"
-export MIN_RAM_GIB="${MIN_RAM_GIB:-768}"    # 4 ranks replicate less comm-eff state than 8
+# 768 was the pre-run estimate; run 96 MEASURED a 1081 GiB all-time host peak
+# on this recipe at 4x H200 (1368 GiB container). Gate above the measurement.
+export MIN_RAM_GIB="${MIN_RAM_GIB:-1200}"
 export MIN_DISK_GIB="${MIN_DISK_GIB:-700}"  # unchanged, 5 checkpoints at ~98 GB each
 
 echo "=== 4x H200 variant: EXPECT_GPUS=$EXPECT_GPUS MIN_RAM_GIB=$MIN_RAM_GIB MIN_DISK_GIB=$MIN_DISK_GIB ==="

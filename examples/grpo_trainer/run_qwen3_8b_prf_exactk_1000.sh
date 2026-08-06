@@ -151,6 +151,7 @@ python3 -c "import verl" || { echo "FATAL: verl import failed after install" >&2
 # ---------------------------------------------------------------------------
 python3 - <<'PY' || { echo "FATAL: money gate FAILED — this checkout must not be launched" >&2; exit 1; }
 import inspect
+import os
 
 import torch
 
@@ -189,6 +190,67 @@ assert boundaries == [4, 9, 14, 19, 23, 27, 31], f"unexpected boundary set {boun
 print(f"OK: exact-k keeps {kept}/{H} coords per token per boundary ({kept * 16} bits/token/boundary)")
 print("OK: anchor clone inherits gradient checkpointing")
 print(f"OK: 36 layers over 8 stages -> boundaries {boundaries}")
+
+# Per-boundary masked fractions (run 97's dense-middle lever). Gated on the
+# env var so an unset run (a run 96 replay) takes a byte-identical gate. When
+# set, the vector must be one float in [0, 1] per boundary, and every 0.0
+# entry must provably be an identity at this run's hidden size: with
+# exact_k=True, p=0.0 keeps round(1.0*H) = H channels and prf_token_mask
+# early-returns all-ones, while the hook recomputes the constant-rescale gain
+# per boundary as 1/(1-0.0) = 1.0.
+p_by_boundary_raw = os.environ.get("COMM_EFF_MASK_P_BY_BOUNDARY", "").strip()
+if p_by_boundary_raw:
+    inner = p_by_boundary_raw
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    entries = [tok.strip() for tok in inner.split(",")]
+    assert entries and all(entries), (
+        f"COMM_EFF_MASK_P_BY_BOUNDARY={p_by_boundary_raw!r} parsed to an empty entry"
+    )
+    p_vec = []
+    for tok in entries:
+        try:
+            val = float(tok)
+        except ValueError as exc:
+            raise AssertionError(f"COMM_EFF_MASK_P_BY_BOUNDARY entry {tok!r} is not a float") from exc
+        # Strictly below 1.0: a 1.0 entry keeps round(0*H)=0 channels and the
+        # hook clamps its gain to 1.0, so the run would train through an
+        # all-zero boundary without any other gate tripping.
+        assert 0.0 <= val < 1.0, f"COMM_EFF_MASK_P_BY_BOUNDARY entry {val} is outside [0, 1)"
+        p_vec.append(val)
+    # Validate the length against the pp_size this run will actually use, not
+    # the hardcoded 8-stage set above: a caller overriding COMM_EFF_MASK_PP_SIZE
+    # would otherwise pass here and die in ActivationMasker.register() after
+    # Ray boot and the 8B model pull.
+    pp_size = int(os.environ.get("COMM_EFF_MASK_PP_SIZE", "8"))
+    run_boundaries = decoder_boundary_indices(36, pp_size)
+    assert len(p_vec) == len(run_boundaries), (
+        f"COMM_EFF_MASK_P_BY_BOUNDARY has {len(p_vec)} entries but 36 layers over "
+        f"{pp_size} stages give {len(run_boundaries)} boundaries {run_boundaries}. "
+        "Supply exactly one p per boundary."
+    )
+    for layer_idx, p_i in zip(run_boundaries, p_vec):
+        if p_i == 0.0:
+            dense_mask = prf_token_mask(
+                sample_ids=torch.zeros(1, dtype=torch.int64),
+                position_ids=torch.zeros(1, dtype=torch.int64),
+                layer_idx=layer_idx,
+                global_step=1,
+                base_seed=0,
+                hidden_size=H,
+                p=0.0,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                exact_k=True,
+            )
+            assert bool((dense_mask == 1.0).all()), (
+                f"p=0.0 with exact_k=True did NOT return an all-ones mask at boundary layer "
+                f"{layer_idx} (H={H}). The dense-cut identity does not hold on this checkout."
+            )
+    print(f"OK: p_by_boundary supplies {len(p_vec)} per-boundary fractions, cut map (layer -> p):")
+    for layer_idx, p_i in zip(run_boundaries, p_vec):
+        tag = f"  DENSE (identity proved at H={H})" if p_i == 0.0 else ""
+        print(f"    cut after layer {layer_idx:>2}: p={p_i}{tag}")
 PY
 
 # ---------------------------------------------------------------------------
@@ -314,7 +376,7 @@ cat <<EOF
     model            $MODEL_PATH
     context          $MAX_PROMPT_LENGTH prompt + $MAX_RESPONSE_LENGTH response = $TOTAL_CTX
     batch            train $TRAIN_BATCH_SIZE / mini $PPO_MINI_BATCH_SIZE (one on-policy tick per step)
-    codec            $COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE
+    codec            $COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE p_by_boundary=${COMM_EFF_MASK_P_BY_BOUNDARY:-}
     schedule         $TOTAL_TRAINING_STEPS steps, test_freq $TEST_FREQ, save_freq $SAVE_FREQ, R2=$CKPT_R2_ENABLED
     rollout          gpu_mem $ROLLOUT_GPU_MEM_UTIL, max_model_len $MAX_MODEL_LEN
     log              $LOG

@@ -129,6 +129,45 @@ Rule of thumb: prefer `growing_fixed_base` when the concern is anchor-weight
 checkpoint forward more reliably); prefer `sliding_window` when the trajectory is
 strongly non-stationary (a local base adapts to bends) or CPU memory is tight.
 
+## prf_mask levers (`mask.*`, issue #89)
+
+On top of the scalar `mask.p` (`COMM_EFF_MASK_P`) the default codec exposes
+the issue #89 levers:
+
+- `mask.exact_k` (`COMM_EFF_MASK_EXACT_K`, default true): keep EXACTLY
+  `round((1-p)*H)` channels per token by the PRF hash order statistic
+  instead of a per-channel Bernoulli draw. Kills the per-token keep-count
+  variance.
+- `mask.antithetic` (`COMM_EFF_MASK_ANTITHETIC`, default false): steps `2k`
+  and `2k+1` share one uniform draw, flipped on the odd step, so consecutive
+  kept sets land on complementary tails at the same keep fraction.
+- `mask.p_by_boundary` (`COMM_EFF_MASK_P_BY_BOUNDARY`, default empty = off):
+  replaces the scalar `p` with a per-boundary masked fraction, exactly one
+  entry per pipeline cut in boundary order (length is validated against the
+  actual boundary count at hook registration). Must be a Hydra list literal
+  with NO spaces, e.g. `[0.95,0.95,0.0,0.0,0.95,0.95,0.95]`. Composes with
+  `exact_k` (each boundary keeps exactly `round((1-p_i)*H)`), and under
+  constant rescale the gain is recomputed per boundary as `1/(1-p_i)`.
+- `mask.frlr*`: the fixed-rank low-rank plus residual hybrid (rejected at
+  horizon, see the family table above). `frlr=true` is mutually exclusive
+  with `exact_k`, `antithetic` and `p_by_boundary` (both `ActivationMasker`
+  and the engine-script guard reject the combination).
+
+### Dense boundaries via `p_by_boundary`
+
+A `0.0` entry with `exact_k=true` is a bit-exact identity at that cut. The
+keep count is `round((1-0.0)*H) = H` and `prf_token_mask` early-returns an
+all-ones mask at `keep >= H`, while the per-boundary constant gain is
+`1/(1-0.0) = 1`, so the hook computes `h * ones * 1.0` on the forward and the
+backward carries the true boundary gradient. A subset of pipeline cuts can
+therefore run uncompressed (a dense wire at those cuts only) while the stage
+count and every other boundary's codec stay fixed. Visible in WandB as
+`comm_eff/mask_ratio/layer_<idx> == 0.0` at each dense cut (the
+cross-boundary mean `comm_eff/mask_ratio` drops accordingly). Caveat:
+`comm_eff/logical_pp_bytes_prf` is computed from the scalar `p` only, so it
+overstates the saving under `p_by_boundary`; the truthful per-cut signal is
+the per-layer mask ratios.
+
 ## sr_quant boundary codec (`compression_type=sr_quant`)
 
 Dense low-bit stochastic-rounding quantization of the pipeline-boundary
@@ -312,6 +351,31 @@ env. WandB: project `93-long-horizon-stability` (via `WANDB_RUN_GROUP`), run
 `<arm>-<slug>`. Arm a5 enables decoupled token importance weighting via the
 engine's `ROLLOUT_IS=token` / `ROLLOUT_IS_THRESHOLD=2.0` knobs (default
 `null` = correction strictly off, unchanged behavior).
+
+## Qwen3-8B 16k long-context runs (96 and 97)
+
+Both runs move the default recipe to Qwen3-8B-Base on MATH at 16384 total
+context (prompt/response 1024/15360), 1000 steps, batch 128 / mini-batch 128,
+pp 8 (boundaries `[4,9,14,19,23,27,31]` over 36 decoder layers), anchor
+cadence/delay 20/20 with `owns_q=false`.
+
+Run 96 (issue #96): the straight PRF exact-k recipe, `p=0.95` constant
+rescale on all seven cuts. Launchers `run_qwen3_8b_prf_exactk_1000.sh`
+(8x H200) and the thin 4x H200 wrapper
+`run_qwen3_8b_prf_exactk_1000_4gpu.sh`. Collapsed near step 180 (score
+0.85 -> 0.39, ref-KL 2.7 with ppo_kl at 0.0000): truncation feedback at the
+15360 response cap sparked it, and the dense-sampler / masked-trainer
+mismatch compounding over 16k tokens fueled it.
+
+Run 97 (issue #97): the run-96 rerun with ONE scientific change, launcher
+`run_qwen3_8b_densemid_1000.sh`. The two pipeline cuts inside the
+LayerCompass (arXiv 2607.01232) middle band are left uncompressed via
+`COMM_EFF_MASK_P_BY_BOUNDARY=[0.95,0.95,0.0,0.0,0.95,0.95,0.95]`: the cuts
+after layers 14 and 19 (fractional depth 0.42 and 0.56, inside the 0.39-0.57
+active band) become bit-exact dense, giving an uncompressed activation path
+across layers 10..23 to cut the train-inference mismatch that fueled the
+collapse. `SAVE_FREQ=50` (run 96 used 200), 4x H200 box defaults, and
+everything else is inherited from run 96.
 
 ## Anchor batch scope (`anchor.batch_scope`)
 
