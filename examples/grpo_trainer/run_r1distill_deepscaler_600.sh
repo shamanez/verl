@@ -2,7 +2,7 @@
 # run_r1distill_deepscaler_600.sh
 #
 # ONE-COMMAND bring-up and launch of ONE arm of the 600-step communication-
-# efficient GRPO run on DeepSeek-R1-Distill-Qwen-1.5B / DeepScaleR at 4096 total
+# efficient GRPO run on DeepSeek-R1-Distill-Qwen-1.5B / DeepScaleR at 16384 total
 # context. Two arms share this file and differ in exactly one variable:
 #
 #   ARM=prf     PRF exact-k, p=0.95, constant rescale  (the method)
@@ -22,7 +22,7 @@
 # SURFACE, and the deltas from the run-90 reference (90-prf-exactk-600):
 #   model        Qwen2.5-Math-1.5B -> DeepSeek-R1-Distill-Qwen-1.5B
 #   data         MATH              -> DeepScaleR (qingy2024/DeepScaleR-40k)
-#   context      1024/2048 (3072)  -> 1024/3072 (4096, the project protocol)
+#   context      1024/2048 (3072)  -> 1024/15360 (16384, run 96's convention)
 #   chat prompt  RELEX ChatML      -> the model's OWN template (see gate E)
 #   steps        600               -> 600           UNCHANGED
 #   batch/mini   128/128           -> 128/128       UNCHANGED
@@ -37,14 +37,18 @@
 # decoder layers over 8 pipeline stages cut at [3, 7, 11, 15, 18, 21, 24]. Both
 # facts are asserted by the money gate below before a single GPU is touched.
 #
-# KNOWN RISK, stated once and measured every step. R1-Distill is a long-CoT
-# model: its own template opens the assistant turn inside <think>, and issue #63
-# ran it at 16384 response tokens. At a 3072-token response cap a completion that
-# never closes </think> emits no \boxed{} and scores 0, so part of the reward
-# signal is "ran out of tokens" rather than "got it wrong". That is the
-# truncation-feedback mechanism that sparked the run-96 collapse. It is not a
-# reason not to run -- it is the reason to WATCH response_length/clip_ratio,
-# which verl already logs every step. The dense arm prices it first.
+# WHY 16384 AND NOT THE 4096-TOKEN PROTOCOL. R1-Distill is a long-CoT model: its
+# own template opens the assistant turn inside <think>, and issue #63 ran it at
+# 16384 response tokens. At a 3072-token cap a completion that never closes
+# </think> emits no \boxed{} and scores 0, so a large part of the reward signal
+# would be "ran out of tokens" rather than "got it wrong" -- the truncation
+# feedback that sparked the run-96 collapse. 16384 total gives the model room to
+# finish, at the cost of a longer step. This is the one place the run departs
+# from the 4096 protocol, and it departs deliberately.
+#
+# Still WATCH response_length/clip_ratio, which verl logs every step. It is the
+# truncation rate, it should now be small, and run 96 collapsed at a 15360 cap
+# too. A rising clip ratio is the earliest warning this surface gives.
 #
 # Run inside tmux. The engine redirects training to $LOG, which is the heartbeat
 # log the harness registers as run.json's remote_log.
@@ -65,15 +69,16 @@ MODEL_PATH="${MODEL_PATH:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-1536}"     # R1-Distill-Qwen-1.5B
 NUM_LAYERS="${NUM_LAYERS:-28}"
 
-# Context and batch. MAX_PROMPT_LENGTH/MAX_RESPONSE_LENGTH already hold the
-# values this run wants in the base launcher, so they are ASSERTED, not patched;
-# the two batch scalars are bare `export NAME=value` lines that no env var can
-# override, so they have to be patched into a generated copy. See section 6.
+# Context and batch. These are bare `export NAME=value` lines in the base
+# launcher (no ${VAR:-default}), so exporting them here would be overwritten and
+# they have to be patched into a generated copy. MAX_PROMPT_LENGTH is the one
+# value this run shares with the base, so it is ASSERTED rather than patched.
+# See section 7.
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-3072}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-15360}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-128}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 # Data. The canonical prep call, with its canonical defaults, so the parquet is
 # reproducible from the command line alone.
@@ -99,7 +104,7 @@ RUN_DIR="$WORK/runs/$RUN_ID/$ARM"
 mkdir -p "$RUN_DIR" || { echo "FATAL: cannot create $RUN_DIR" >&2; exit 1; }
 cd "$WORK" || { echo "FATAL: cannot cd $WORK" >&2; exit 1; }
 
-echo "=== $EXPERIMENT_NAME: R1-Distill-Qwen-1.5B / DeepScaleR / 4096 ctx / 600 steps / ARM=$ARM ==="
+echo "=== $EXPERIMENT_NAME: R1-Distill-Qwen-1.5B / DeepScaleR / 16384 ctx / 600 steps / ARM=$ARM ==="
 
 # ---------------------------------------------------------------------------
 # 1. Box preflight. Everything that makes this run impossible, checked before
@@ -368,14 +373,14 @@ PATCHED="examples/grpo_trainer/run_r1distill_deepscaler_600.gen.sh"
 [[ -f "$BASE" ]] || { echo "FATAL: base launcher $BASE not found" >&2; exit 1; }
 cp "$BASE" "$PATCHED" || { echo "FATAL: could not copy $BASE" >&2; exit 1; }
 
-# The two context scalars this run INHERITS. Asserted, never patched: if the
-# base ever moves off the 4096-token protocol we want a loud stop, not a run at
-# a context nobody chose.
-for spec in "MAX_PROMPT_LENGTH|$MAX_PROMPT_LENGTH" "MAX_RESPONSE_LENGTH|$MAX_RESPONSE_LENGTH"; do
+# The one context scalar this run INHERITS. Asserted, never patched: if the base
+# ever moves off a 1024-token prompt we want a loud stop, not a run at a prompt
+# budget nobody chose.
+for spec in "MAX_PROMPT_LENGTH|$MAX_PROMPT_LENGTH"; do
   IFS='|' read -r pname pval <<< "$spec"
   grep -q "^export ${pname}=${pval}\$" "$BASE" || {
     echo "FATAL: base launcher no longer holds 'export ${pname}=${pval}'." >&2
-    echo "       This run inherits the 4096-token protocol from the base rather than patching it." >&2
+    echo "       This run inherits its prompt budget from the base rather than patching it." >&2
     exit 1
   }
   echo "--- inherited ${pname}=${pval}"
@@ -383,6 +388,7 @@ done
 
 # name | value the base is expected to hold today | value this run needs
 PATCH_SPEC=(
+  "MAX_RESPONSE_LENGTH|3072|$MAX_RESPONSE_LENGTH"
   "TRAIN_BATCH_SIZE|512|$TRAIN_BATCH_SIZE"
   "PPO_MINI_BATCH_SIZE|256|$PPO_MINI_BATCH_SIZE"
 )
@@ -471,8 +477,9 @@ export TEST_FREQ="${TEST_FREQ:-100}"
 export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 export SAVE_FREQ="${SAVE_FREQ:-100}"
 
-# Checkpoints -> R2, deleted locally after a verified upload. The step-600
-# capability audit reads them from there, on whatever box it runs on.
+# Checkpoints -> R2, deleted locally after a verified upload, so peak local disk
+# stays at roughly one in-flight checkpoint plus staging instead of the keep-all
+# total. The capability audit reads them from there, on whatever box it runs on.
 export CKPT_R2_ENABLED
 export CKPT_R2_MAX_STAGED_GB="${CKPT_R2_MAX_STAGED_GB:-60}"
 export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-8}"
@@ -481,6 +488,30 @@ export CKPT_R2_WORKERS="${CKPT_R2_WORKERS:-8}"
 # from a single listing.
 export R2_EXPERIMENT="${R2_EXPERIMENT:-$RUN_ID}"
 export R2_REGIME="${R2_REGIME:-$ARM}"
+
+# R2_BUCKET IS A TRAP. The shipped secrets.env sets it to the key PREFIX
+# ("autonomous-harness-rlvr-compression"), not to a bucket, while r2_sink.py
+# hard-refuses to construct on any bucket except "shamane-pluralis". Sourcing
+# the secrets file and launching would therefore fail every upload at the first
+# save, after the step-100 compute is already spent. Pin it, and gate it here
+# rather than discovering it at step 100.
+if [[ "$CKPT_R2_ENABLED" == "true" ]]; then
+  export R2_BUCKET="${R2_BUCKET_OVERRIDE:-shamane-pluralis}"
+  for v in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+    [[ -n "${!v:-}" ]] || { echo "FATAL: $v is empty but CKPT_R2_ENABLED=true. The checkpoint mirror cannot authenticate. Add it to $SECRETS_FILE, or set CKPT_R2_ENABLED=false to keep checkpoints local." >&2; exit 1; }
+  done
+  if [[ -z "${R2_ENDPOINT:-}" ]]; then
+    [[ -n "${R2_ACCOUNT_ID:-}" ]] || { echo "FATAL: neither R2_ENDPOINT nor R2_ACCOUNT_ID is set but CKPT_R2_ENABLED=true." >&2; exit 1; }
+    export R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+  fi
+  echo "--- R2 mirror: bucket $R2_BUCKET, prefix autonomous-harness-rlvr-compression/$R2_EXPERIMENT/$R2_REGIME/checkpoints/"
+fi
+
+# Token budgets. The log-prob paths default to 36864, which at 16k context is a
+# much larger live activation set than the 4k protocol they were sized for.
+# 18432 matches the actor's own per-GPU budget, exactly as run 96 set it.
+export LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-18432}"
+export REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU="${REF_LOG_PROB_MAX_TOKEN_LEN_PER_GPU:-18432}"
 
 export ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.72}"
 export ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-1}"
@@ -526,9 +557,9 @@ cat <<EOF
     log              $LOG
     hydra            ${HYDRA_OVERRIDES[*]} $*
 
-    WATCH response_length/clip_ratio. At a 3072-token cap on a long-CoT model it
-    is the truncation rate, and it is the one number that decides whether this
-    surface is measuring reasoning or measuring the cap.
+    WATCH response_length/clip_ratio. It is the truncation rate. At 15360 it
+    should be small, and a rising one is the earliest warning this surface gives
+    (run 96 collapsed at this same cap).
 EOF
 
 exec bash "$PATCHED" "${HYDRA_OVERRIDES[@]}" "$@"

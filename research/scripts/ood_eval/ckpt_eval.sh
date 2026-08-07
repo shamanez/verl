@@ -3,7 +3,7 @@
 #
 # In-domain + OOD capability audit for a MULTI-ARM run. Built for run 99
 # (99-r1distill-deepscaler-600: DeepSeek-R1-Distill-Qwen-1.5B on DeepScaleR,
-# 1024 prompt + 3072 response), and parameterised by env so a differently-named
+# 1024 prompt + 15360 response), and parameterised by env so a differently-named
 # run with the same R2 layout needs no code edit.
 #
 #   bash research/scripts/ood_eval/ckpt_eval.sh
@@ -53,7 +53,7 @@
 #   INDOMAIN_DATA_DIR  the training data dir       (default $HOME/data/deepscaler)
 #   BASE_MODEL      untrained anchor               (default deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)
 #   PAIRS_CSV       GPU-pair pool                  (default "0,1|2,3", a 4-GPU box)
-#   MAX_RESPONSE_LENGTH  generation cap            (default 3072, matches training)
+#   MAX_RESPONSE_LENGTH  generation cap            (default 15360, matches training)
 #   R2_CKPT_BUCKET  bucket                         (pinned to shamane-pluralis)
 #   R2_MIN_MB_S     slowest download rate, sizes the aws timeout (default 15)
 #   DRY_RUN=1       run every preflight gate and stop before the first download
@@ -94,7 +94,7 @@ SECRETS_FILE="${SECRETS_FILE:-$HOME/.config/verl-research/secrets.env}"
 # Generation surface. Identical to training, so the in-domain number is a
 # CROSS-CHECK of the in-training val rather than merely a second opinion.
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-3072}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-15360}"
 MAX_MODEL_LEN=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH ))
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-128}"
@@ -110,8 +110,8 @@ MERGE_MIN_GIB="${MERGE_MIN_GIB:-2}"          # a merge holding less than this is
 BASE_CACHE_GIB="${BASE_CACHE_GIB:-5}"        # the HF download of the untrained anchor
 DISK_SLACK_GIB="${DISK_SLACK_GIB:-20}"       # logs, vLLM scratch, tokenizer caches
 MERGE_RAM_GIB="${MERGE_RAM_GIB:-32}"         # the merge loads every fp32 rank shard at once
-MIN_GPU_GIB="${MIN_GPU_GIB:-24}"             # hard floor per GPU
-WARN_GPU_GIB="${WARN_GPU_GIB:-40}"
+MIN_GPU_GIB="${MIN_GPU_GIB:-40}"             # hard floor per GPU at 16384 context
+WARN_GPU_GIB="${WARN_GPU_GIB:-70}"           # below this the KV cache at 16k gets tight
 
 IN_DOMAIN_BENCH="${IN_DOMAIN_BENCH:-deepscaler_indomain}"
 

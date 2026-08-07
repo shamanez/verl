@@ -1,4 +1,4 @@
-# Run 99: PRF exact-k on R1-Distill-Qwen-1.5B / DeepScaleR at 4096 context
+# Run 99: PRF exact-k on R1-Distill-Qwen-1.5B / DeepScaleR at 16384 context
 
 Replication of the run-90 surface (`90-prf-exactk-600`) and the run-96 launcher
 pattern (`96-qwen3-8b-prf-exactk-16k-1000`) on a different model and dataset, with
@@ -16,7 +16,7 @@ dense-middle lever is run 97's and the launcher refuses to start if it is set.
 | model | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | changed |
 | data | DeepScaleR (`qingy2024/DeepScaleR-40k`), cap 20000, val 500, seed 42 | changed |
 | prompt | the model's own template, `<｜User｜>` / `<｜Assistant｜><think>` | changed |
-| context | 1024 prompt + 3072 response = 4096 | 3072 -> 4096 |
+| context | 1024 prompt + 15360 response = 16384 | 3072 -> 16384 |
 | batch / mini | 128 / 128, one on-policy tick per generation | unchanged |
 | rollout | n=8, TP=1, gpu_mem 0.72 | unchanged |
 | optimizer | AdamW 1e-6, low_var_kl 0.001, entropy 0 | unchanged |
@@ -47,20 +47,22 @@ evaluate a differently-prompted model with no error anywhere. Both the training
 launcher and the eval driver rewrite the override to `null` in a generated copy
 and gate that the rewrite took.
 
-## Open risk, stated before the run rather than after
+## Why 16384 and not the 4096-token protocol
 
-R1-Distill is a long-CoT model and issue #63 ran it at 16384 response tokens. At a
-3072-token cap, a completion that never closes `</think>` emits no `\boxed{}` and
-scores 0, so part of the reward signal is "ran out of tokens" rather than "got it
-wrong". That is the truncation-feedback mechanism that sparked the run-96
-collapse.
+This is the one place the run departs from the project protocol, and it departs
+deliberately. R1-Distill is a long-CoT model, its own template opens the
+assistant turn inside `<think>`, and issue #63 ran it at 16384 response tokens.
+At a 3072-token cap a completion that never closes `</think>` emits no
+`\boxed{}` and scores 0, so a large share of the reward signal would be "ran out
+of tokens" rather than "got it wrong". That is the truncation-feedback mechanism
+that sparked the run-96 collapse. 16384 total gives the model room to finish, at
+the cost of a longer step.
 
-The measurement already exists: verl logs `response_length/clip_ratio` every step,
-which is exactly the truncation rate. The dense arm runs first and prices it. The
-sweep driver prints the per-arm summary between arms, and a sustained clip ratio
-above roughly 0.5 means the surface is measuring the cap more than the reasoning,
-at which point the honest options are a larger response budget or an explicit
-length-aware reward.
+The measurement stays either way: verl logs `response_length/clip_ratio` every
+step, which is exactly the truncation rate. At 15360 it should be small. Run 96
+collapsed at this same cap, so a RISING clip ratio remains the earliest warning
+this surface gives. The dense arm runs first and prices it, and the sweep driver
+prints the per-arm summary between arms.
 
 ## Order of operations
 
@@ -100,9 +102,12 @@ cell rather than redoing the work already on disk.
   renders `<｜begin▁of▁sentence｜><｜User｜>...<｜Assistant｜><think>` with no
   ChatML markers.
 - The launcher's patch pipeline was exercised against the real base launcher: the
-  two batch scalars rewrite, the two context scalars are inherited, and the
-  generated launcher execs with `custom_chat_template=null` and no remaining
-  reference to the RELEX template.
+  response length and two batch scalars rewrite, the prompt length is inherited,
+  and the generated launcher execs with `custom_chat_template=null` and no
+  remaining reference to the RELEX template.
+- `R2_BUCKET` is pinned to `shamane-pluralis`. The shipped secrets file sets it to
+  the key PREFIX, and `r2_sink.py` hard-refuses any other bucket, so an unpinned
+  run would fail every upload at the first save with the compute already spent.
 - `bash -n` on all three shell drivers, `py_compile` on all three Python files,
   and `tests/special_sanity/check_example_naming.py` green.
 - The tabulator and plotter were exercised end to end on synthetic per-cell logs.
