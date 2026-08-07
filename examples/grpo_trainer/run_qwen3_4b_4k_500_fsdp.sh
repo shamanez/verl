@@ -137,6 +137,7 @@ fi
 # ---------------------------------------------------------------------------
 if ! command -v aws >/dev/null 2>&1; then
   echo "=== installing awscli v2 (required by the R2 checkpoint sink) ==="
+  command -v unzip >/dev/null 2>&1 || apt-get install -y -qq unzip >/dev/null 2>&1 || true
   ( cd /tmp \
     && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip \
     && unzip -qo awscliv2.zip \
@@ -177,9 +178,12 @@ grep -qE '^[[:space:]]*(export[[:space:]]+)?R2_BUCKET=["'"'"']?shamane-pluralis'
   || box_gate_fail "R2_BUCKET repair did not stick in $SECRETS_FILE"
 
 # Round-trip the credentials NOW, not an hour into training. Never print a value.
+# The R2_* names must be mapped onto the AWS_* names aws actually reads; the
+# r2_sink does the same mapping internally at upload time.
 ( set +u; set -a; . "$SECRETS_FILE"; set +a
   : "${R2_ENDPOINT:?R2_ENDPOINT missing from the secrets file}"
-  aws s3 ls "s3://shamane-pluralis/" --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1 ) \
+  AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+    aws s3 ls "s3://shamane-pluralis/" --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1 ) \
   || box_gate_fail "R2 credential check failed (aws s3 ls s3://shamane-pluralis/ did not succeed)"
 echo "--- preflight R2:    credentials OK, bucket shamane-pluralis reachable"
 
