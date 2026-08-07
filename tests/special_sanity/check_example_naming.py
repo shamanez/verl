@@ -107,8 +107,19 @@ DEFAULT_IGNORE_FILES = (
     # env-driven engine every MATH launcher execs, the #90 600-step cell and
     # the #93 run-matrix cell (ARM-selected, model/backend fixed by protocol).
     "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh",
+    # Environment bring-up for a non-template Vast image, not a run script at
+    # all: it installs verl and never launches a trainer. Pre-existing violation
+    # on autonomous-harness-v1, listed here so the hook is green again.
+    "examples/grpo_trainer/install_verl_foreign_image.sh",
     "examples/grpo_trainer/run_prf_exactk_600.sh",
     "examples/grpo_trainer/run_93_cell.sh",
+    "examples/grpo_trainer/run_dense_600.sh",
+    # The #99 R1-Distill / DeepScaleR pair: same class as run_prf_exactk_600.sh.
+    # One ARM-selected cell that patches and execs the canonical FSDP launcher
+    # rather than being one, plus the sweep driver that runs both of its arms.
+    # The trailing tokens name the dataset and the step budget, not a backend.
+    "examples/grpo_trainer/run_r1distill_deepscaler_600.sh",
+    "examples/grpo_trainer/run_99_both_arms.sh",
     # The #96 Qwen3-8B 16k cell: same class as run_prf_exactk_600.sh above. It
     # patches and execs the canonical FSDP launcher rather than being one, and
     # the trailing tokens name the codec and the step budget, not a backend.

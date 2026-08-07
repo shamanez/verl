@@ -24,7 +24,45 @@ scorer, no `aime*`/`math_dapo` "Answer:" regex path).
 |---|---|
 | `ood_prep.py` | Build `test.parquet` for the 10 benchmarks in the MATH schema. Parameterized by `OOD_ROOT` (default `/root/data/ood`) and `MATH_TRAIN`. No credentials. |
 | `ood_eval.sh` | Evaluate ONE model on ONE benchmark via val-only. Parameterized by `VERL_DIR`, `OOD_EVAL_ROOT`, `OOD_DATA_ROOT`, `LAUNCHER`, `SHIM_DIR`. |
-| `ood_run_all.sh` | Matrix orchestrator: merge each FSDP checkpoint (local or R2), eval each model x 10 benchmarks fanned over a GPU-pair pool, tabulate. Roster is an editable example. |
+| `ood_run_all.sh` | Matrix orchestrator: merge each FSDP checkpoint (local or R2), eval each model x 10 benchmarks fanned over a GPU-pair pool, tabulate. Roster is an editable example. **Its `BENCHES` table is the single definition of the sampling protocol** and is parsed, not copied, by `ckpt_eval.sh`. |
+| `ckpt_eval.sh` | Multi-arm capability audit, driven entirely by env. Discovers each arm's R2 layout, verifies shard completeness before downloading, pulls / merges / size-verifies / deletes one checkpoint at a time, evals in-domain + all 10 OOD benchmarks per model, tabulates. Resumes per cell. |
+| `tabulate_arms.py` | Turn the per-cell `train.log` files into the printed table plus a `RESULTS_<run>.tsv`, with `arm - base` and `compressed - dense` delta columns. |
+| `plot_dense_vs_compressed.py` | The capability figure from that TSV: paired bars per benchmark, dense in blue and compressed in green, in-domain separated from OOD by a dashed divider. |
+
+## Multi-arm audit (`ckpt_eval.sh`)
+
+Built for a run that writes one R2 regime per arm, so a single listing under
+`autonomous-harness-rlvr-compression/<RUN_ID>/` finds both:
+
+```bash
+# Defaults audit dense + prf at step 600 for run 99.
+bash research/scripts/ood_eval/ckpt_eval.sh
+
+# Every preflight gate, no downloads. Run this first, always.
+DRY_RUN=1 bash research/scripts/ood_eval/ckpt_eval.sh
+
+# A different run, different arms, more steps.
+RUN_ID=... ARMS="dense prf" EVAL_STEPS="200 600" \
+  bash research/scripts/ood_eval/ckpt_eval.sh
+
+# Then the figure.
+python3 research/scripts/ood_eval/plot_dense_vs_compressed.py \
+  --results /workspace/runs/<RUN_ID>-eval/RESULTS_<RUN_ID>.tsv \
+  --title "Capability at step 600: dense against 95 percent compressed"
+```
+
+Two properties worth knowing before trusting a number it prints:
+
+- **The eval prompt is rewritten to match training.** The base launcher pins
+  RELEX's Qwen ChatML template. For any model that is not a Qwen chat model that
+  is the wrong prompt, so the driver rewrites the override to `null` in its
+  generated launcher copy and gates that the rewrite took. The merged-model check
+  also refuses a checkpoint whose tokenizer renders ChatML.
+- **Nothing is trusted that was not verified.** A step is only downloaded once
+  every rank shard is listed, every pulled object is size-checked against R2, and
+  a merge only counts as done once its weights are on disk and large enough, at
+  which point `.merge_ok` is written. `config.json` alone is never a success
+  marker, because `save_pretrained` writes it before the weights.
 
 ## Benchmarks and sampling protocol
 
