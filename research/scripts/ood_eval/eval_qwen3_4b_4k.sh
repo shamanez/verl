@@ -59,9 +59,12 @@ if [[ ! -f "$OOD_DATA_ROOT/math500/test.parquet" ]]; then
 fi
 
 # --- 1. merge <run_name> <step> <tag>: local checkpoint or R2 pull (actor only, no optim) ---
+# A checkpoint PULLED from R2 is deleted again once the merged HF model exists:
+# on a 200G box the alternative (10 pulled FSDP trees + 10 merged models) does
+# not fit. A checkpoint that was already local is never touched.
 merge() {
   local run="$1" step="$2" tag="$3"
-  local ck="$CKPT_ROOT/$run/global_step_$step/actor" out="$MERGED/$tag"
+  local ck="$CKPT_ROOT/$run/global_step_$step/actor" out="$MERGED/$tag" pulled=0
   [[ -f "$out/config.json" ]] && { echo "$out"; return; }
   if [[ ! -f "$ck/fsdp_config.json" ]]; then
     set -a; source ~/.config/verl-research/secrets.env; set +a
@@ -72,11 +75,16 @@ merge() {
     aws s3 cp "$r2" "$ck/" --recursive --exclude "optim*" --only-show-errors \
       --endpoint-url "$R2_ENDPOINT" >> "$OOD_EVAL_ROOT/merge.log" 2>&1 \
       || { echo "R2 PULL FAILED $run s$step" | tee -a "$OOD_EVAL_ROOT/eval.log"; echo ""; return; }
+    pulled=1
   fi
   if [[ -f "$ck/fsdp_config.json" ]]; then
     echo "=== merge $run s$step -> $out ===" | tee -a "$OOD_EVAL_ROOT/eval.log"
     OMP_NUM_THREADS=8 python3 -m verl.model_merger merge --backend fsdp \
       --local_dir "$ck" --target_dir "$out" >> "$OOD_EVAL_ROOT/merge.log" 2>&1
+  fi
+  if (( pulled )) && [[ -f "$out/config.json" ]]; then
+    rm -rf "$CKPT_ROOT/$run/global_step_$step"
+    echo "=== cleaned pulled ckpt $run s$step (merged model kept) ===" | tee -a "$OOD_EVAL_ROOT/eval.log"
   fi
   echo "$out"
 }
