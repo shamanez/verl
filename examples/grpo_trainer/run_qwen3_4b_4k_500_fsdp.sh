@@ -406,8 +406,13 @@ export EXPERIMENT_NAME="${EXPERIMENT_NAME:-$ARM_NAME}"
 export PROJECT_NAME="${PROJECT_NAME:-$RUN_ID}"
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-$RUN_ID}"
 export LOG="${LOG:-$RUN_DIR/train.log}"
-# WandB: use it if a key is present, else fall back to offline (no crash).
-[[ -n "${WANDB_API_KEY:-}" ]] || export WANDB_MODE="${WANDB_MODE:-offline}"
+# WandB: the key lives in the SECRETS FILE the engine sources later, not in this
+# launcher's env, so check there before falling back to offline. Forcing offline
+# here because the key is not exported yet silently downgrades the run's main
+# monitoring surface (it did, once).
+if [[ -z "${WANDB_API_KEY:-}" ]] && ! grep -qE '^(export )?WANDB_API_KEY=.+' "$SECRETS_FILE" 2>/dev/null; then
+  export WANDB_MODE="${WANDB_MODE:-offline}"
+fi
 
 # The engine mkdir -p's only dirname($LOG), then at the very end touches
 # $VERL_ROOT/runs/$EXPERIMENT_NAME/done.flag, a path nothing created. Because
