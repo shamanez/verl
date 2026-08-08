@@ -34,6 +34,7 @@ from verl.base_config import BaseConfig
 __all__ = [
     "CommEffMaskConfig",
     "CommEffQuantConfig",
+    "CommEffAnchorOptResetConfig",
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
@@ -231,6 +232,49 @@ class CommEffQuantConfig(BaseConfig):
     subset_k: int = 0
 
 
+# The overwrite modes ``comm_eff.anchor.opt_reset.mode`` may select.
+# ``anchor_moments`` writes the (optionally norm-matched) anchor-maintained
+# AdamW moments over the fast moments; ``zero`` zeroes both fast moments.
+OPT_RESET_MODES = ("anchor_moments", "zero")
+
+
+@dataclass
+class CommEffAnchorOptResetConfig(BaseConfig):
+    """Anchor-sourced optimizer-state reset for the fast circuit.
+
+    Under a lossy activation codec the fast AdamW moments are built from
+    codec-noised gradients, so compression bias can accumulate in the optimizer
+    state itself. When enabled, the anchor circuit maintains parallel fp32 CPU
+    moments from its clean, DP-averaged dense replay gradients (the same
+    tensors that feed the signed EMA ``M``), and every ``cadence`` optimizer
+    ticks — after ``optimizer.step()`` and after any anchor fire on the same
+    tick — the fast ``exp_avg``/``exp_avg_sq`` are overwritten with them.
+
+    Args:
+        enabled (bool): Off (default) is a strict no-op: no anchor-side moment
+            state is allocated and the optimizer is never touched.
+        cadence (int): Optimizer ticks between resets (the same
+            ``state.anchor_step`` units the anchor cadence counts).
+        mode (str): ``anchor_moments`` overwrites ``exp_avg`` with
+            ``rho * m_anc`` and ``exp_avg_sq`` with ``rho^2 * v_anc``;
+            ``zero`` zeroes both moments.
+        beta1 (float): Per-fire EMA coefficient for the anchor ``exp_avg``
+            (``m <- beta1*m + (1-beta1)*G_anc``); must be in (0, 1).
+        beta2 (float): Per-fire EMA coefficient for the anchor ``exp_avg_sq``
+            (``v <- beta2*v + (1-beta2)*G_anc^2``); must be in (0, 1).
+        scale_match (bool): When true, ``rho`` matches the global L2 of the
+            fast ``exp_avg`` set (``rho = ||exp_avg|| / (||m_anc|| + 1e-12)``);
+            false uses ``rho = 1``.
+    """
+
+    enabled: bool = False
+    cadence: int = 50
+    mode: str = "anchor_moments"
+    beta1: float = 0.8
+    beta2: float = 0.95
+    scale_match: bool = True
+
+
 @dataclass
 class CommEffAnchorConfig(BaseConfig):
     """Delayed dense anchor and RELEX weight-projection configuration.
@@ -267,6 +311,7 @@ class CommEffAnchorConfig(BaseConfig):
     lookahead_window_snapshots: int = 4
     lookahead_history_mode: str = "sliding_window"
     lookahead_max_snapshots: int = -1
+    opt_reset: CommEffAnchorOptResetConfig = field(default_factory=CommEffAnchorOptResetConfig)
 
 
 @dataclass
@@ -634,6 +679,21 @@ class CommEffConfig(BaseConfig):
                 "comm_eff.anchor.lookahead_max_snapshots is only meaningful with "
                 "lookahead_history_mode='growing_fixed_base'; leave it at -1 for sliding_window"
             )
+        opt_reset = self.anchor.opt_reset
+        for name in ("enabled", "scale_match"):
+            value = getattr(opt_reset, name)
+            if not isinstance(value, bool):
+                raise ValueError(f"comm_eff.anchor.opt_reset.{name} must be a bool; got {value!r}")
+        if isinstance(opt_reset.cadence, bool) or not isinstance(opt_reset.cadence, int) or opt_reset.cadence < 1:
+            raise ValueError(f"comm_eff.anchor.opt_reset.cadence must be an integer >= 1; got {opt_reset.cadence!r}")
+        if opt_reset.mode not in OPT_RESET_MODES:
+            raise ValueError(
+                f"comm_eff.anchor.opt_reset.mode must be one of {OPT_RESET_MODES}; got {opt_reset.mode!r}"
+            )
+        for name in ("beta1", "beta2"):
+            value = getattr(opt_reset, name)
+            if not 0.0 < float(value) < 1.0:
+                raise ValueError(f"comm_eff.anchor.opt_reset.{name} must be in (0, 1); got {value}")
 
     def _validate_spectral(self) -> None:
         for name in ("enabled", "diagnostics"):
@@ -777,6 +837,13 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 "comm_eff.compression_type='sr_quant' requires anchor.owns_q=false: the SR "
                 "boundary quantizer has no PowerSGD basis Q for the anchor to own."
+            )
+        # The reset moments are EMAs of the anchor circuit's dense replay
+        # gradients, so without a firing anchor they would stay cold forever.
+        if self.anchor.opt_reset.enabled and not self.anchor.enabled:
+            raise ValueError(
+                "comm_eff.anchor.opt_reset.enabled=true requires anchor.enabled=true: the reset "
+                "moments are built from the anchor circuit's clean dense replay gradients."
             )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")

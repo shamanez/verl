@@ -6,6 +6,7 @@
 #
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff   # arm A (run first)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh dense     # arm B (control)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh optreset  # arm C (arm A + anchor-sourced optimizer reset)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -41,7 +42,10 @@ set -uo pipefail
 ARM="${1:-commeff}"
 case "$ARM" in
   commeff|dense) ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense)" >&2; exit 1 ;;
+  # The optreset arm names itself off the commeff arm it extends (cadence 50),
+  # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
+  optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -362,6 +366,28 @@ if [[ "$ARM" == "commeff" ]]; then
   export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
   export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
   export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+elif [[ "$ARM" == "optreset" ]]; then
+  # ARM C: the commeff codec block VERBATIM (kept a separate branch so arm A
+  # stays byte-identical to its reference launchers), plus the anchor-sourced
+  # optimizer-state reset: every 50 optimizer ticks the fast AdamW moments are
+  # overwritten with the anchor's clean-replay moments (norm-matched).
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  export COMM_EFF_OPT_RESET_ENABLED="${COMM_EFF_OPT_RESET_ENABLED:-true}"
+  export COMM_EFF_OPT_RESET_CADENCE="${COMM_EFF_OPT_RESET_CADENCE:-50}"
+  export COMM_EFF_OPT_RESET_MODE="${COMM_EFF_OPT_RESET_MODE:-anchor_moments}"
+  export COMM_EFF_OPT_RESET_B1="${COMM_EFF_OPT_RESET_B1:-0.8}"
+  export COMM_EFF_OPT_RESET_B2="${COMM_EFF_OPT_RESET_B2:-0.95}"
+  export COMM_EFF_OPT_RESET_SCALE_MATCH="${COMM_EFF_OPT_RESET_SCALE_MATCH:-true}"
 else
   export COMM_EFF_ENABLED=false
 fi
@@ -469,6 +495,8 @@ HYDRA_OVERRIDES=(
 
 if [[ "$ARM" == "commeff" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE"
+elif [[ "$ARM" == "optreset" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else
   CODEC_LINE="DENSE CONTROL (comm_eff master switch off)"
 fi

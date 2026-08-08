@@ -140,7 +140,12 @@ run_tag() {  # run_tag <tag> <model_path>
 # ---- model roster (tag  run  step), PRIORITY ORDERED. The headline three come
 #      first so a truncated run still answers the question; the dose axis fills
 #      in behind them. ----
-STEPS="${STEPS:-500 400 300 200 100}"
+# Ordered so the HEADLINE comparison evaluates first. The compressed arm was
+# stopped at step 200 after collapsing (val 0.437 against an untrained 0.645),
+# so its only checkpoints are 100 (the healthy peak) and 200 (post-collapse).
+# Leading with 200 then 100 pairs both against dense before the dense-only dose
+# points; the missing commeff 300/400/500 tags skip cheaply.
+STEPS="${STEPS:-200 100 500 400 300}"
 ROSTER=("base - -")
 read -r HEAD_STEP _ <<<"$STEPS"
 ROSTER+=("commeff${HEAD_STEP} $COMMEFF_RUN ${HEAD_STEP}")

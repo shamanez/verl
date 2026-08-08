@@ -377,6 +377,22 @@ comm_eff:
     lookahead_history_mode: sliding_window
     lookahead_max_snapshots: -1
 
+    # Anchor-sourced optimizer-state reset: every `cadence` optimizer ticks,
+    # overwrite the fast AdamW moments with moments the anchor maintains from
+    # its clean dense replay gradients (mode=anchor_moments, norm-matched when
+    # scale_match) or zero them (mode=zero). Inert while disabled. Fields
+    # mirror verl.workers.config.CommEffAnchorOptResetConfig exactly.
+    opt_reset:
+
+      _target_: verl.workers.config.CommEffAnchorOptResetConfig
+
+      enabled: false
+      cadence: 50
+      mode: anchor_moments
+      beta1: 0.8
+      beta2: 0.95
+      scale_match: true
+
   # Dense-anchor EMA M and the retained signed-EMA merger.
   spectral:
 

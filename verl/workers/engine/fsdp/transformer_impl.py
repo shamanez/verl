@@ -2301,6 +2301,22 @@ class FSDPEngine(BaseEngine):
         deltas = {}
         if spectral is not None:
             deltas = feed_anchor_grads_into_ema(anchor_grads, spectral, state=state)
+        # Anchor-sourced optimizer-moment EMAs (anchor.opt_reset): fold the SAME
+        # DP-reduced RAW G_anchor tensors that feed M into fp32 CPU m/v states.
+        # The overwrite itself runs at the end of the optimizer tick, in
+        # _maybe_comm_eff_opt_reset (called from optimizer_step).
+        _opt_reset_cfg = getattr(anchor_cfg, "opt_reset", None)
+        if _opt_reset_cfg is not None and bool(getattr(_opt_reset_cfg, "enabled", False)):
+            from verl.workers.comm_eff.opt_reset import AnchorOptMoments
+
+            _opt_moments = getattr(state, "_opt_reset_moments", None)
+            if _opt_moments is None:
+                _opt_moments = AnchorOptMoments(
+                    beta1=float(getattr(_opt_reset_cfg, "beta1", 0.8)),
+                    beta2=float(getattr(_opt_reset_cfg, "beta2", 0.95)),
+                )
+                state._opt_reset_moments = _opt_moments
+            _opt_moments.update(anchor_grads)
         state.anchor_backwards += 1
         if do_anchor_q or do_anchor_frlr_q:
             _signal_role = "Q+M" if spectral is not None else "Q"
@@ -2714,6 +2730,136 @@ class FSDPEngine(BaseEngine):
             writeback=writeback,
         )
 
+    def _opt_reset_fsdp1_shard_infos(self) -> dict:
+        """Map ``id(orig_param) -> _ShardParamInfo`` for FSDP1 use_orig_params.
+
+        Outside ``summon_full_params`` each orig param (and hence its lazily
+        created optimizer state) is the rank-local 1-D flat-param slice, so the
+        anchor's FULL logical moment tensors must be sliced per param before
+        the writeback. Empty for non-FSDP1 modules.
+        """
+        infos: dict = {}
+        if not isinstance(self.module, FSDP):
+            return infos
+        for fsdp_mod in FSDP.fsdp_modules(self.module):
+            handle = getattr(fsdp_mod, "_handle", None)
+            flat_param = getattr(handle, "flat_param", None) if handle is not None else None
+            if flat_param is None:
+                continue
+            params = getattr(flat_param, "_params", None)
+            shard_infos = getattr(flat_param, "_shard_param_infos", None)
+            if params is None or shard_infos is None:
+                continue
+            for param, info in zip(params, shard_infos, strict=False):
+                infos[id(param)] = info
+        return infos
+
+    def _opt_reset_reduce_sq_sum(self, local_sq: float) -> float:
+        """all-reduce(SUM) a local sum-of-squares over the DP/sharding group.
+
+        Optimizer-state shards are disjoint slices of the logical tensors, so
+        SUM of per-rank local sq-sums is the exact global L2^2 (the same
+        geometry FSDP1's clip_grad_norm_ relies on). Mirrors the collective
+        pattern of _dp_all_reduce_anchor_grads.
+        """
+        if not torch.distributed.is_initialized():
+            return local_sq
+        group = self.get_data_parallel_group()
+        try:
+            dp_world = torch.distributed.get_world_size(group=group)
+        except Exception:
+            dp_world = 1
+        if dp_world <= 1:
+            return local_sq
+        total = torch.tensor([local_sq], dtype=torch.float32, device=get_device_id())
+        torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM, group=group)
+        return float(total.item())
+
+    def _maybe_comm_eff_opt_reset(self) -> None:
+        """Anchor-sourced optimizer-state reset (comm_eff.anchor.opt_reset).
+
+        Runs at the END of the optimizer tick, from ``optimizer_step`` AFTER
+        ``self.optimizer.step()`` — and therefore also after any anchor fire
+        scheduled on the same tick (the anchor hook runs at the top of
+        ``train_batch``). The cadence counts the same ``state.anchor_step``
+        optimizer ticks the anchor cadence counts. Strict no-op while
+        disabled: no state is read, no tensor is touched.
+        """
+        state = getattr(self, "_comm_eff_state", None)
+        if state is None or not getattr(state, "enabled", False):
+            return
+        anchor_cfg = getattr(state.config, "anchor", None)
+        opt_cfg = getattr(anchor_cfg, "opt_reset", None) if anchor_cfg is not None else None
+        if opt_cfg is None or not bool(getattr(opt_cfg, "enabled", False)):
+            return
+        cadence = int(getattr(opt_cfg, "cadence", 50))
+        tick = int(getattr(state, "anchor_step", 0))
+        if tick <= 0 or tick % cadence != 0:
+            return
+        moments = getattr(state, "_opt_reset_moments", None)
+        if moments is None or int(getattr(moments, "fires", 0)) <= 0:
+            print(
+                f"[comm_eff][opt_reset] SKIP tick={tick} cadence={cadence}: the anchor has never "
+                "fired, so no clean moments exist yet (optimizer state untouched)",
+                flush=True,
+            )
+            return
+
+        from verl.workers.comm_eff.opt_reset import reset_optimizer_moments
+
+        mode = str(getattr(opt_cfg, "mode", "anchor_moments"))
+        scale_match = bool(getattr(opt_cfg, "scale_match", True))
+        shard_infos = self._opt_reset_fsdp1_shard_infos()
+
+        def writeback(state_tensor, param, full):
+            # Full logical fp32 -> this rank's optimizer-state layout: DTensor
+            # (FSDP2) redistributes like the spectral writeback; an FSDP1
+            # use_orig_params state tensor is the 1-D flat-param slice its
+            # _ShardParamInfo describes; a plain tensor is the full shape.
+            if isinstance(state_tensor, DTensor):
+                from torch.distributed.tensor import distribute_tensor
+
+                redist = distribute_tensor(
+                    full.to(state_tensor.dtype), state_tensor.device_mesh, state_tensor.placements
+                )
+                state_tensor.to_local().copy_(redist.to_local())
+                return
+            info = shard_infos.get(id(param))
+            if info is not None and tuple(state_tensor.shape) != tuple(full.shape):
+                if not bool(getattr(info, "in_shard", True)):
+                    return
+                start = int(info.intra_param_start_idx)
+                end = int(info.intra_param_end_idx)
+                src = full.reshape(-1)[start : end + 1]
+            else:
+                src = full.reshape(state_tensor.shape) if tuple(state_tensor.shape) != tuple(full.shape) else full
+            state_tensor.copy_(src.to(device=state_tensor.device, dtype=state_tensor.dtype))
+
+        def sq_sum_of(state_tensor):
+            local = state_tensor.to_local() if isinstance(state_tensor, DTensor) else state_tensor
+            local32 = local.detach().to(torch.float32)
+            return float(torch.sum(local32 * local32).item())
+
+        rho = reset_optimizer_moments(
+            self.optimizer,
+            list(self.module.named_parameters()),
+            moments=moments,
+            mode=mode,
+            scale_match=scale_match,
+            writeback=writeback,
+            sq_sum_of=sq_sum_of,
+            reduce_sq_sum=self._opt_reset_reduce_sq_sum,
+        )
+        state.opt_reset_count = int(getattr(state, "opt_reset_count", 0)) + 1
+        if rho is not None:
+            state.opt_reset_last_rho = float(rho)
+        print(
+            f"[comm_eff][opt_reset] FIRED tick={tick} cadence={cadence} mode={mode} "
+            f"scale_match={scale_match} rho={rho if rho is not None else 'n/a'} "
+            f"anchor_fires_folded={moments.fires} count={state.opt_reset_count}",
+            flush=True,
+        )
+
     def optimizer_zero_grad(self):
         """
         Zero gradients and enforce FSDP grad-clipping logic.
@@ -2765,6 +2911,12 @@ class FSDPEngine(BaseEngine):
             from verl.utils.qat.core import invalidate_all_scales
 
             invalidate_all_scales(self.module)
+
+        # End-of-tick anchor-sourced optimizer-state reset. Placed AFTER the
+        # step so the reset lands on the post-step moments of tick T, and after
+        # any anchor fire of the same tick (the anchor hook ran at the top of
+        # train_batch). No-op unless comm_eff.anchor.opt_reset is enabled.
+        self._maybe_comm_eff_opt_reset()
 
         return grad_norm.item()
 

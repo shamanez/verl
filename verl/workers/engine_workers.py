@@ -1185,6 +1185,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "comm_eff/fast_q_bootstrap_sync_elements": 0.0,
                     "comm_eff/merger_coldM_fallbacks": 0,
                     "comm_eff/anchor_replay_fires": 0,
+                    "comm_eff/opt_reset_count": 0,
+                    "comm_eff/opt_reset_rho": 0.0,
                 }
             else:
                 counters = comm_eff_metrics(comm_eff_state)

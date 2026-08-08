@@ -188,6 +188,11 @@ class CommEffState:
         self.anchor_rewards_recomputed = 0
         self.anchor_optimizer_steps = 0
         self.anchor_replay_fires = 0
+        # Anchor-sourced optimizer-state reset (anchor.opt_reset). The moment
+        # store itself is lazy (state._opt_reset_moments, built at the first
+        # anchor fire); disabled runs allocate nothing beyond these counters.
+        self.opt_reset_count = 0
+        self.opt_reset_last_rho = 0.0
         self.anchor_batch_fraction = 0.0
         self.anchor_batch_sequences_global = 0
         self.anchor_update_sequences_global = 0
@@ -354,6 +359,16 @@ class CommEffState:
                 cfg.target_scope,
             )
 
+        _opt_reset_cfg = getattr(getattr(self.config, "anchor", None), "opt_reset", None)
+        if _opt_reset_cfg is not None and bool(getattr(_opt_reset_cfg, "enabled", False)):
+            # Single resolved line for launch money-gates to grep.
+            print(
+                f"[comm_eff][opt_reset] enabled cadence={int(_opt_reset_cfg.cadence)} "
+                f"mode={_opt_reset_cfg.mode} b1={_opt_reset_cfg.beta1} b2={_opt_reset_cfg.beta2} "
+                f"scale_match={bool(_opt_reset_cfg.scale_match)}",
+                flush=True,
+            )
+
         self._built = True
 
     def rank1_relex_active(self) -> bool:
@@ -396,6 +411,7 @@ class CommEffState:
             "_anchor_replay_ring",
             "_anchor_queue",
             "_anchor_canary_by_tick",
+            "_opt_reset_moments",
         ):
             if hasattr(self, name):
                 delattr(self, name)
@@ -404,6 +420,8 @@ class CommEffState:
         self.anchor_backwards = 0
         self.spectral_corrections = 0
         self.anchor_replay_fires = 0
+        self.opt_reset_count = 0
+        self.opt_reset_last_rho = 0.0
         self.anchor_batch_fraction = 0.0
         self.anchor_batch_sequences_global = 0
         self.anchor_update_sequences_global = 0
@@ -604,6 +622,8 @@ class CommEffState:
             "comm_eff/anchor_q_stage_overwrites": self.anchor_q_stage_overwrites,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
+            "comm_eff/opt_reset_count": self.opt_reset_count,
+            "comm_eff/opt_reset_rho": self.opt_reset_last_rho,
         }
         if self.rank1_relex_active():
             output.update(

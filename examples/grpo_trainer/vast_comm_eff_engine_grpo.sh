@@ -362,6 +362,17 @@ COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHO
 # prior behavior byte-for-byte.
 COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE="${COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE:-sliding_window}"
 COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS="${COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS:--1}"
+# Anchor-sourced optimizer-state reset (anchor.opt_reset). Every CADENCE
+# optimizer ticks (the same tick units as the anchor cadence) the fast AdamW
+# moments are overwritten with moments the anchor maintains from its clean
+# dense replay gradients (mode=anchor_moments, norm-matched when SCALE_MATCH)
+# or zeroed (mode=zero). Defaults off (bit-identical trainer path).
+COMM_EFF_OPT_RESET_ENABLED="${COMM_EFF_OPT_RESET_ENABLED:-false}"
+COMM_EFF_OPT_RESET_CADENCE="${COMM_EFF_OPT_RESET_CADENCE:-50}"
+COMM_EFF_OPT_RESET_MODE="${COMM_EFF_OPT_RESET_MODE:-anchor_moments}"
+COMM_EFF_OPT_RESET_B1="${COMM_EFF_OPT_RESET_B1:-0.8}"
+COMM_EFF_OPT_RESET_B2="${COMM_EFF_OPT_RESET_B2:-0.95}"
+COMM_EFF_OPT_RESET_SCALE_MATCH="${COMM_EFF_OPT_RESET_SCALE_MATCH:-true}"
 # --- anchor-guided gradient correction / merger ---
 COMM_EFF_SPECTRAL_ENABLED="${COMM_EFF_SPECTRAL_ENABLED:-true}"
 COMM_EFF_SPECTRAL_TARGET_SCOPE="${COMM_EFF_SPECTRAL_TARGET_SCOPE:-all_floating}"
@@ -429,6 +440,7 @@ cat <<EOF
   prf_mask levers:     exact_k=$COMM_EFF_MASK_EXACT_K antithetic=$COMM_EFF_MASK_ANTITHETIC p_by_boundary=[${COMM_EFF_MASK_P_BY_BOUNDARY:-<unset>}] frlr=$COMM_EFF_MASK_FRLR frlr_rank=$COMM_EFF_MASK_FRLR_RANK frlr_k=$COMM_EFF_MASK_FRLR_K frlr_unbiased=$COMM_EFF_MASK_FRLR_UNBIASED frlr_q_cadence=$COMM_EFF_MASK_FRLR_Q_CADENCE  (issue #89; all off => baseline PRF)
   powersgd:            rank=$COMM_EFF_POWERSGD_RANK seed=$COMM_EFF_POWERSGD_SEED pp_size=$COMM_EFF_POWERSGD_PP_SIZE update_cadence=$COMM_EFF_POWERSGD_UPDATE_CADENCE warm_start=$COMM_EFF_POWERSGD_WARM_START compress_recompute=$COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE compress_reference=$COMM_EFF_POWERSGD_COMPRESS_REFERENCE sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP qr_dtype=$COMM_EFF_POWERSGD_QR_DTYPE reortho_eps=$COMM_EFF_POWERSGD_REORTHO_EPS  (active iff compression_type=powersgd)
   anchor:              enabled=$COMM_EFF_ANCHOR_ENABLED cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=$COMM_EFF_ANCHOR_DELAY_K owns_q=$COMM_EFF_ANCHOR_OWNS_Q replay_paired_batch=$COMM_EFF_ANCHOR_REPLAY_PAIRED_BATCH batch_scope=$COMM_EFF_ANCHOR_BATCH_SCOPE snapshot_device=$COMM_EFF_ANCHOR_SNAPSHOT_DEVICE
+  opt_reset:           enabled=$COMM_EFF_OPT_RESET_ENABLED cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH  (anchor-sourced AdamW-moment overwrite; enabled=false => off)
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED target_scope=$COMM_EFF_SPECTRAL_TARGET_SCOPE diagnostics=$COMM_EFF_SPECTRAL_DIAGNOSTICS beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
   signed EMA:           alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC
@@ -700,6 +712,12 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_min_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS" \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_history_mode="$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE" \
   actor_rollout_ref.actor.comm_eff.anchor.lookahead_max_snapshots="$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.enabled="$COMM_EFF_OPT_RESET_ENABLED" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.cadence="$COMM_EFF_OPT_RESET_CADENCE" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.mode="$COMM_EFF_OPT_RESET_MODE" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.beta1="$COMM_EFF_OPT_RESET_B1" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.beta2="$COMM_EFF_OPT_RESET_B2" \
+  actor_rollout_ref.actor.comm_eff.anchor.opt_reset.scale_match="$COMM_EFF_OPT_RESET_SCALE_MATCH" \
   actor_rollout_ref.actor.comm_eff.spectral.enabled="$COMM_EFF_SPECTRAL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.spectral.target_scope="$COMM_EFF_SPECTRAL_TARGET_SCOPE" \
   actor_rollout_ref.actor.comm_eff.spectral.diagnostics="$COMM_EFF_SPECTRAL_DIAGNOSTICS" \

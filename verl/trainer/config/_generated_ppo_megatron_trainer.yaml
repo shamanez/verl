@@ -209,6 +209,14 @@ actor_rollout_ref:
         lookahead_window_snapshots: 4
         lookahead_history_mode: sliding_window
         lookahead_max_snapshots: -1
+        opt_reset:
+          _target_: verl.workers.config.CommEffAnchorOptResetConfig
+          enabled: false
+          cadence: 50
+          mode: anchor_moments
+          beta1: 0.8
+          beta2: 0.95
+          scale_match: true
       spectral:
         _target_: verl.workers.config.CommEffSpectralConfig
         enabled: true
