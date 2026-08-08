@@ -7,13 +7,19 @@
 # run with the same R2 layout needs no code edit.
 #
 #   bash research/scripts/ood_eval/ckpt_eval.sh
-#   EVAL_STEPS="200 600" bash research/scripts/ood_eval/ckpt_eval.sh
+#   EVAL_STEPS="100 200" bash research/scripts/ood_eval/ckpt_eval.sh
 #   DRY_RUN=1 bash research/scripts/ood_eval/ckpt_eval.sh     # gates only, no downloads
 #
 # The roster is ARMS x EVAL_STEPS plus the untrained base model. With the
-# defaults that is three columns -- base, dense600, prf600 -- which is exactly
+# defaults that is three columns -- base, dense200, prf200 -- which is exactly
 # the "dense against 95 percent compressed" comparison, with the base as the
 # anchor that says how much either arm moved at all.
+#
+# The comparison step is 200, not 600. The dense arm was stopped at step 289
+# once its step-100 and step-200 checkpoints were verified in R2, and the
+# compressed arm was scoped to 200 steps to match it, so 200 is the deepest
+# step at which BOTH arms have a checkpoint. Auditing an unmatched step would
+# compare two different amounts of training, not two compression regimes.
 #
 # THIS SCRIPT IS WRITTEN TO RUN ON A DIFFERENT BOX THAN THE TRAINER. It never
 # assumes a local checkpoint tree: every checkpoint is pulled from R2, merged to
@@ -46,7 +52,7 @@
 # Knobs (env):
 #   RUN_ID          run whose checkpoints to audit (default 99-r1distill-deepscaler-600)
 #   ARMS            regimes under the run prefix   (default "dense prf")
-#   EVAL_STEPS      steps to evaluate per arm      (default "600")
+#   EVAL_STEPS      steps to evaluate per arm      (default "200")
 #   VERL_DIR        verl checkout                  (default /workspace/verl)
 #   OOD_EVAL_ROOT   eval output root               (default /workspace/runs/<RUN_ID>-eval)
 #   OOD_DATA_ROOT   benchmark parquets             (default /root/data/ood)
@@ -72,7 +78,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RUN_ID="${RUN_ID:-99-r1distill-deepscaler-600}"
 ARMS="${ARMS:-dense prf}"
-EVAL_STEPS="${EVAL_STEPS:-600}"
+EVAL_STEPS="${EVAL_STEPS:-200}"
 
 VERL_DIR="${VERL_DIR:-/workspace/verl}"
 OOD_EVAL_ROOT="${OOD_EVAL_ROOT:-/workspace/runs/$RUN_ID-eval}"

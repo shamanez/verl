@@ -162,5 +162,5 @@ done
 
 say ""
 say "=== run 99 sweep finished  $(date -Iseconds) ==="
-say "    Next: the step-600 capability audit reads both arms' checkpoints from R2."
+say "    Next: the step-200 capability audit reads both arms' checkpoints from R2."
 say "      bash research/scripts/ood_eval/ckpt_eval.sh"

@@ -2,8 +2,8 @@
 
 Replication of the run-90 surface (`90-prf-exactk-600`) and the run-96 launcher
 pattern (`96-qwen3-8b-prf-exactk-16k-1000`) on a different model and dataset, with
-the step-600 dense-against-compressed capability audit that the system-status
-report draws its "Capability at step 600" figure from.
+the dense-against-compressed capability audit that the system-status report
+draws its "Capability at step 600" figure from, run here at step 200.
 
 Base branch `autonomous-harness-v1`, whose `verl/` tree is byte-identical to the
 one run 96 trained on. **No selective compression.** The `p_by_boundary`
@@ -26,12 +26,32 @@ dense-middle lever is run 97's and the launcher refuses to start if it is set.
 | anchor | paired dense replay 20/20 ticks, `rollout_batch`, CPU state, `owns_q=false` | unchanged |
 | weights | rank-1 RELEX, W2, strength 1, `auto`, `stale_correct` | unchanged |
 | signed EMA | `beta_anc=0.25`, `alpha=0.25`, all floating params, CPU | unchanged |
-| steps | 600, val every 100, save every 100 | val 150 -> 100 |
+| steps | 200, val every 100, save every 100 | val 150 -> 100 |
 
 Two arms, one variable apart:
 
 - `dense` runs the same surface with `COMM_EFF_ENABLED=false`.
 - `prf` runs the project-default codec.
+
+## Re-scoped to 200 steps on 2026-08-08
+
+The run was planned at 600 steps per arm, about 4.5 days for the pair. On
+2026-08-08 the operator cut it to 200 once the dense arm's step-100 and
+step-200 checkpoints were verified complete in R2 (19 objects, 19.9 GiB, all
+four rank shards for model, optimizer and extra state).
+
+- The dense arm was stopped at step 289. Steps 201 to 289 are discarded: the
+  next save was step 300, so nothing between 200 and 300 was ever written.
+  `dense/STOPPED_EARLY.txt` on the box records this.
+- The compressed arm runs 200 steps from scratch with the same save and val
+  cadence, so both arms have a checkpoint at 100 and at 200.
+- The capability audit therefore compares the arms at step 200, the deepest
+  step both share. Auditing an unmatched step would compare two different
+  amounts of training rather than two compression regimes.
+
+The dense val curve over the discarded region is still on record in WandB and
+in `dense/train.log`: 0.328 at step 0, 0.342 at 100, 0.322 at 200, which is
+flat within the noise of a 500-problem split.
 
 Checkpoints mirror to R2 under
 `autonomous-harness-rlvr-compression/99-r1distill-deepscaler-600/<arm>/checkpoints/`.
@@ -67,20 +87,21 @@ prints the per-arm summary between arms.
 ## Order of operations
 
 ```bash
-# On the box, inside tmux. Both arms, sequential, dense first.
+# Both arms, sequential, dense first. This is how the run started.
 bash examples/grpo_trainer/run_99_both_arms.sh
 
-# Single arm, if the box is only free for one.
-ARM=prf bash examples/grpo_trainer/run_r1distill_deepscaler_600.sh
+# What actually ran for the compressed arm after the re-scope.
+ARM_ORDER=prf TOTAL_TRAINING_STEPS=200 SAVE_FREQ=100 TEST_FREQ=100 \
+  bash examples/grpo_trainer/run_99_both_arms.sh
 
-# After both arms finish: the step-600 capability audit, every gate first.
+# After both arms finish: the step-200 capability audit, every gate first.
 DRY_RUN=1 bash research/scripts/ood_eval/ckpt_eval.sh
 bash research/scripts/ood_eval/ckpt_eval.sh
 
 # The figure.
 python3 research/scripts/ood_eval/plot_dense_vs_compressed.py \
   --results /workspace/runs/99-r1distill-deepscaler-600-eval/RESULTS_99-r1distill-deepscaler-600.tsv \
-  --title "Capability at step 600: dense against 95 percent compressed"
+  --title "Capability at step 200: dense against 95 percent compressed"
 ```
 
 The audit's in-domain benchmark is DeepScaleR's held-out split, scored with
@@ -88,9 +109,10 @@ verl's own validation sampling, so it cross-checks the in-training val at the
 same step. The out-of-domain suite is the standard ten: math500, gsm8k, minerva,
 olympiad, amc23, mmlu_stem, aime24, aime25, aime26, hmmt25.
 
-`EVAL_STEPS` defaults to `600` because that is the figure. Set
-`EVAL_STEPS="200 600"` to add the step-200 column, and the driver resumes per
-cell rather than redoing the work already on disk.
+`EVAL_STEPS` defaults to `200` because that is the deepest step both arms
+share and therefore the figure. Set `EVAL_STEPS="100 200"` to add the step-100
+column, and the driver resumes per cell rather than redoing work already on
+disk.
 
 ## CPU gates run before any GPU was requested
 

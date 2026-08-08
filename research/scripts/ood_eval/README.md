@@ -35,20 +35,20 @@ Built for a run that writes one R2 regime per arm, so a single listing under
 `autonomous-harness-rlvr-compression/<RUN_ID>/` finds both:
 
 ```bash
-# Defaults audit dense + prf at step 600 for run 99.
+# Defaults audit dense + prf at step 200 for run 99, the deepest step both arms share.
 bash research/scripts/ood_eval/ckpt_eval.sh
 
 # Every preflight gate, no downloads. Run this first, always.
 DRY_RUN=1 bash research/scripts/ood_eval/ckpt_eval.sh
 
 # A different run, different arms, more steps.
-RUN_ID=... ARMS="dense prf" EVAL_STEPS="200 600" \
+RUN_ID=... ARMS="dense prf" EVAL_STEPS="100 200" \
   bash research/scripts/ood_eval/ckpt_eval.sh
 
 # Then the figure.
 python3 research/scripts/ood_eval/plot_dense_vs_compressed.py \
   --results /workspace/runs/<RUN_ID>-eval/RESULTS_<RUN_ID>.tsv \
-  --title "Capability at step 600: dense against 95 percent compressed"
+  --title "Capability at step 200: dense against 95 percent compressed"
 ```
 
 Two properties worth knowing before trusting a number it prints:
