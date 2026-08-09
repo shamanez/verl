@@ -88,6 +88,10 @@ CKPT_ROOT="${CKPT_ROOT:-$OOD_EVAL_ROOT/pulled}"
 MERGED_ROOT="${MERGED_ROOT:-$OOD_EVAL_ROOT/merged}"
 BASE_MODEL="${BASE_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 PAIRS_CSV="${PAIRS_CSV:-0,1|2,3}"
+# Seconds between the launches inside one wave, and the hard ceiling on a single
+# cell. Both exist because of a real hang: see the stagger comment in run_model.
+STAGGER_S="${STAGGER_S:-45}"
+CELL_TIMEOUT_S="${CELL_TIMEOUT_S:-2400}"
 
 # R2. R2_BUCKET is NOT read: on these boxes it holds the prefix, not a bucket.
 R2_CKPT_BUCKET="shamane-pluralis"
@@ -877,8 +881,21 @@ run_tag() {  # run_tag <tag> <model_path>
       continue
     fi
     gpus="${PAIRS[$(( i % ${#PAIRS[@]} ))]}"
+    # Stagger launches inside a wave. Two verl jobs starting in the same second
+    # each bring up their own vLLM HTTP server and request load balancer, and on
+    # 2026-08-09 two simultaneous starts both came up and then hung forever with
+    # the GPUs idle, after 28 cells had run cleanly. Desynchronising the starts
+    # costs a few seconds per wave and removes the race.
+    if (( ${#pids[@]} > 0 )); then
+      sleep "$STAGGER_S"
+    fi
     say "    start $tag/$b on GPUs $gpus (n=$n temp=$t top_p=$p)"
-    bash "$SCRIPT_DIR/ood_eval.sh" "$model" "$b" "$tag" "$gpus" "$n" "$t" "$p" &
+    # Bounded, so a hung cell dies instead of blocking `wait` forever. Healthy
+    # cells on this surface take 5 to 12 minutes, so the default is several
+    # times the worst observed case. A killed cell writes no result and is
+    # simply re-run by the next resuming pass.
+    timeout --signal=TERM --kill-after=120 "$CELL_TIMEOUT_S" \
+      bash "$SCRIPT_DIR/ood_eval.sh" "$model" "$b" "$tag" "$gpus" "$n" "$t" "$p" &
     pids+=("$!")
     i=$(( i + 1 ))
     if (( ${#pids[@]} >= ${#PAIRS[@]} )); then
