@@ -36,6 +36,11 @@ STAGES="${STAGES:-smoke commeff dense eval report}"
 # time, so a fifth of the batch clipping within the first few steps is already
 # far outside anything that has trained here.
 SMOKE_CLIP_MAX="${SMOKE_CLIP_MAX:-0.35}"
+# Which arm the smoke stage prices the box with. commeff is the default because
+# it is the most expensive path (compression plus the anchor). A session running
+# only one other arm should set this to that arm so the smoke exercises the code
+# it is about to commit 500 steps to.
+SMOKE_ARM="${SMOKE_ARM:-commeff}"
 PARALLEL_ARMS="${PARALLEL_ARMS:-0}"
 export RUN_ID
 
@@ -47,10 +52,21 @@ stage_done() { [[ -f "$STATE/$1.done" ]]; }
 mark_done()  { touch "$STATE/$1.done"; }
 say() { echo "[$(date -Iseconds)] $*" | tee -a "$SUMMARY"; }
 
-run_arm() {  # run_arm <commeff|dense>
+# The EXPERIMENT_NAME (and therefore the run dir, done.flag dir and WandB run
+# name) the single-arm launcher derives for each arm. Every arm follows
+# qwen3-4b-4k-<arm>-500 except optreset, which names itself off the commeff arm
+# it extends, so the mapping has to live in one place rather than be re-guessed.
+arm_exp() {
+  case "$1" in
+    optreset) echo "qwen3-4b-4k-commeff-optreset50-500" ;;
+    *)        echo "qwen3-4b-4k-${1}-500" ;;
+  esac
+}
+
+run_arm() {  # run_arm <commeff|dense|nosign|optreset>
   local arm="$1"
   if stage_done "$arm"; then say "SKIP arm $arm (already marked done)"; return 0; fi
-  local exp="qwen3-4b-4k-${arm}-500"
+  local exp; exp="$(arm_exp "$arm")"
   local flag="$WORK/verl/runs/$exp/done.flag"
   rm -f "$flag"
   say "START arm $arm"
@@ -77,9 +93,9 @@ for stage in $STAGES; do
   case "$stage" in
     smoke)
       if stage_done smoke; then say "SKIP smoke"; continue; fi
-      say "START smoke (few steps, no val, no checkpoints, no R2)"
-      SMOKE=1 bash "$HERE/run_qwen3_4b_4k_500_fsdp.sh" commeff
-      SMOKE_LOG="$WORK/runs/qwen3-4b-4k-commeff-500/smoke.log"
+      say "START smoke on arm $SMOKE_ARM (few steps, no val, no checkpoints, no R2)"
+      SMOKE=1 bash "$HERE/run_qwen3_4b_4k_500_fsdp.sh" "$SMOKE_ARM"
+      SMOKE_LOG="$WORK/runs/$(arm_exp "$SMOKE_ARM")/smoke.log"
       if [[ ! -s "$SMOKE_LOG" ]]; then
         say "smoke produced no log at $SMOKE_LOG — the box is not ready, stopping"
         exit 1
@@ -128,7 +144,7 @@ PY
       if (( rc != 0 )); then say "smoke gate FAILED rc=$rc — stopping before the 500-step arms"; exit 1; fi
       mark_done smoke; say "DONE smoke"
       ;;
-    commeff|dense)
+    commeff|dense|nosign|optreset)
       if [[ "$PARALLEL_ARMS" == "1" ]]; then continue; fi
       run_arm "$stage" || exit 1
       ;;

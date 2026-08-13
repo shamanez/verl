@@ -7,6 +7,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff   # arm A (run first)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh dense     # arm B (control)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh optreset  # arm C (arm A + anchor-sourced optimizer reset)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign    # arm D (arm A with the signed-EMA merger OFF)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -21,6 +22,7 @@
 #   checkpoints          off -> every 100 steps, mirrored to R2, KEPT locally for eval
 #   codec (arm A)        UNCHANGED: prf_mask, p=0.95, exact-k, constant rescale
 #   codec (arm B)        COMM_EFF_ENABLED=false               (the engine's dense path)
+#   codec (arm D)        arm A, signed_ema_alpha 0.25 -> 1.0  (merger becomes identity)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -41,11 +43,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense) ;;
+  commeff|dense|nosign) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|nosign)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -292,6 +294,53 @@ print(f"OK: {L} layers over 8 stages -> boundaries {boundaries}")
 PY
 
 # ---------------------------------------------------------------------------
+# 6b. Extra money gate for the nosign arm, on the SAME checkout. The whole arm
+#     rests on one claim: at signed_ema_alpha=1.0 the merger returns the
+#     gradient bit-for-bit, so the anchor's stale signs never reach AdamW. That
+#     claim is worth ten CPU milliseconds before 500 steps of H200 time.
+#     It is checked against a FULLY WARM M whose every sign OPPOSES the
+#     gradient, i.e. the worst case the railgun can present, and the same
+#     tensors are run at the arm-A alpha to prove the knob is a live lever and
+#     not a dead one. Kept in its own block so arm A/B/C gate output is
+#     byte-identical to what it was before this arm existed.
+# ---------------------------------------------------------------------------
+if [[ "$ARM" == "nosign" ]]; then
+python3 - <<'PY' || { echo "FATAL: nosign money gate FAILED, this checkout must not be launched" >&2; exit 1; }
+import torch
+
+from verl.workers.comm_eff.spectral_filter import SpectralFilter
+
+torch.manual_seed(0)
+# fp32 is the live grad dtype here (fsdp_config.model_dtype=fp32), bf16 covers
+# the mixed-precision reduce path; the merger round-trips through fp32 in both.
+for dtype in (torch.float32, torch.bfloat16):
+    grad = torch.randn(64, 48, dtype=dtype)
+    identity = SpectralFilter(beta_anc=0.25, ema_device="cpu", signed_ema_alpha=1.0)
+    railgun = SpectralFilter(beta_anc=0.25, ema_device="cpu", signed_ema_alpha=0.25)
+    # Warm M to the adversarial case: |M| large, sign(M) == -sign(G) everywhere.
+    warm = -torch.sign(grad).to(torch.float32) * 3.0
+    warm[warm == 0] = -3.0
+    for f in (identity, railgun):
+        f._anchor["w"] = warm.clone()
+
+    out = identity.signed_ema_matrix("w", grad)
+    assert out.dtype == grad.dtype, f"alpha=1.0 changed dtype {grad.dtype} -> {out.dtype}"
+    assert torch.equal(out, grad), (
+        f"alpha=1.0 is NOT an identity on {dtype}: max abs deviation "
+        f"{(out.to(torch.float32) - grad.to(torch.float32)).abs().max().item():.3e}"
+    )
+    assert identity.merger_coldM_fallbacks == 0, "M read as cold; the gate did not exercise the merger"
+
+    moved = railgun.signed_ema_matrix("w", grad)
+    rel = railgun.relative_change(grad, moved)
+    assert rel > 0.5, f"alpha=0.25 barely moved the gradient (rel={rel:.4f}); knob is not a live lever"
+    print(f"OK: {str(dtype).split('.')[-1]:8s} alpha=1.0 identity is EXACT; alpha=0.25 moves it rel={rel:.3f}")
+
+print("OK: nosign = signed-EMA merger is an exact no-op, anchor/RELEX/M circuit untouched")
+PY
+fi
+
+# ---------------------------------------------------------------------------
 # 7. MATH parquet ($HOME/data/math), prepared with the canonical research prep.
 # ---------------------------------------------------------------------------
 export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
@@ -351,6 +400,25 @@ TOTAL_CTX=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH ))
 #    ARM B (dense): the master switch OFF. That is the ONLY science delta. The
 #    engine's dense path leaves the anchor, the RELEX projector and the signed
 #    EMA inert, so this is a clean uncompressed control on the same surface.
+#
+#    ARM D (nosign): arm A with ONE number changed, spectral.signed_ema_alpha
+#    0.25 -> 1.0. The merger computes
+#        G_corr = alpha*G + (1-alpha)*|G|*sign(M)
+#    so alpha=1.0 returns G bit-for-bit and the anchor's stale signs never reach
+#    the optimizer. This is the endpoint of the same alpha axis #84 swept (0.25
+#    best, 0.5 worse), and it is the direct ablation of the sign-railgun
+#    mechanism blamed for the qwen3-4b-4k-commeff-500 collapse at step ~152.
+#
+#    Why alpha=1.0 and NOT spectral.enabled=false: the config validator requires
+#    spectral.enabled=true whenever anchor.lookahead_mode=rank1_relex (see
+#    CommEffConfig.__post_init__), and with spectral off the engine's anchor hook
+#    returns before it snapshots anything, so the whole anchor circuit would
+#    disappear too. That is three deltas, not one. alpha=1.0 keeps the anchor
+#    firing, the RELEX projection running and M accumulating exactly as in arm A,
+#    and changes only whether M is allowed to rewrite gradient signs. M becomes
+#    a maintained-but-unread quantity, which costs the anchor's replay time and
+#    its CPU state for no effect on the weights: that is the price of a
+#    single-knob ablation, and it keeps step timing and memory comparable.
 # ---------------------------------------------------------------------------
 export MODEL_PATH
 
@@ -388,6 +456,38 @@ elif [[ "$ARM" == "optreset" ]]; then
   export COMM_EFF_OPT_RESET_B1="${COMM_EFF_OPT_RESET_B1:-0.8}"
   export COMM_EFF_OPT_RESET_B2="${COMM_EFF_OPT_RESET_B2:-0.95}"
   export COMM_EFF_OPT_RESET_SCALE_MATCH="${COMM_EFF_OPT_RESET_SCALE_MATCH:-true}"
+elif [[ "$ARM" == "nosign" ]]; then
+  # ARM D: the commeff codec block VERBATIM (kept a separate branch so arm A
+  # stays byte-identical to its reference launchers), plus the one number that
+  # turns the signed-EMA merger into an identity.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE ONE DELTA against arm A. Everything above and every anchor/RELEX default
+  # in the base launcher is untouched.
+  export COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA="${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-1.0}"
+  # Guard the two knobs whose flipping would silently make this a different
+  # experiment: the merger has to stay wired in (validator + anchor circuit),
+  # and the optimizer-state swap has to stay off (that is arm C, not this).
+  if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: nosign requires COMM_EFF_SPECTRAL_ENABLED=true. alpha=1.0 is how the" >&2
+    echo "       merger is disabled here; spectral.enabled=false additionally deletes the" >&2
+    echo "       anchor circuit and is rejected by the validator under rank1_relex." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: nosign requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    echo "       Run the 'optreset' arm if that is what is wanted." >&2
+    exit 1
+  fi
 else
   export COMM_EFF_ENABLED=false
 fi
@@ -495,6 +595,8 @@ HYDRA_OVERRIDES=(
 
 if [[ "$ARM" == "commeff" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE"
+elif [[ "$ARM" == "nosign" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (merger IDENTITY, anchor/RELEX/M unchanged, no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else

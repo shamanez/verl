@@ -33,6 +33,56 @@ in-domain plus out-of-domain evaluation, then one HTML comparison.
 the chat template, the data order seed, the sampling shape and every optimizer
 constant, is shared.
 
+## Run D: the same compressed run with the gradient merger switched off
+
+Run A collapsed. It reached step 200 and stopped with the score falling away,
+and the mechanism identified afterwards was the gradient merger: between anchor
+fires the compressed gradient keeps its own magnitude but borrows its signs from
+a stale dense average, which pushes every coordinate at once in a fixed
+direction. Run D is the direct ablation of that one mechanism.
+
+| | **Run D: no sign correction** |
+|---|---|
+| launcher | `run_qwen3_4b_4k_500_fsdp.sh nosign` |
+| experiment name | `qwen3-4b-4k-nosign-500` |
+| WandB | project `qwen3-4b-4k-500`, alongside runs A and B |
+| delta against run A | `spectral.signed_ema_alpha` 0.25 to 1.0, one number |
+| what that does | the merger computes `alpha*G + (1-alpha)*abs(G)*sign(M)`, so at 1.0 it returns `G` bit for bit and the anchor's signs never reach the optimizer |
+| anchor circuit | UNCHANGED: still fires every 20 ticks, still replays the paired dense batch, still maintains `M` |
+| weight projection | UNCHANGED: rank-1 RELEX, W2 secant, strength 1 |
+| optimizer state | UNTOUCHED, no swap, no reset (that is the separate `optreset` arm) |
+| everything else | identical to run A, including the codec, the batch shape, the schedule and the checkpoint cadence |
+
+`M` becomes a quantity the run maintains and never reads. That is deliberate:
+the alternative way to switch the merger off, `spectral.enabled=false`, is
+rejected outright by the config validator whenever the weight projection is on,
+and it would additionally make the engine's anchor hook return before it
+snapshots anything, deleting the anchor and the projection along with the
+merger. That is three changes. `alpha=1.0` is one, and it leaves step timing,
+host memory and the whole slow circuit comparable to run A.
+
+`alpha=1.0` is also the endpoint of an axis this project has already swept:
+0.25 was chosen as the best value and 0.5 was measurably worse.
+
+A pre-flight gate proves the claim on CPU before any GPU time is spent. It warms
+`M` so that every one of its signs opposes the gradient, the worst case the
+correction can present, then asserts that the merger returns the gradient
+unchanged bit for bit, in both float32 and bfloat16, and that the same tensors
+at `alpha=0.25` move by 1.5 times their own norm. A knob that were dead would
+fail the second half of that gate.
+
+Two guards refuse the run rather than let it become a different experiment
+quietly: `COMM_EFF_SPECTRAL_ENABLED` must stay `true`, and
+`COMM_EFF_OPT_RESET_ENABLED` must stay `false`.
+
+Confirm it took, once the log has a few steps:
+
+```bash
+grep -m1 "\[comm_eff\]\[signed_ema\] enabled" /workspace/runs/qwen3-4b-4k-nosign-500/train.log
+```
+
+That line reports `alpha=1.0 ... identity=true`.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits
@@ -60,6 +110,7 @@ Individual stages, if they are wanted separately:
 SMOKE=1 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff
 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff
 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh dense
+bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign
 bash research/scripts/ood_eval/eval_qwen3_4b_4k.sh
 python3 research/scripts/ood_eval/report_qwen3_4b_4k.py \
   --results /workspace/runs/ood-eval-4b/results.json \

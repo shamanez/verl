@@ -358,6 +358,20 @@ class CommEffState:
                 cfg.ema_device,
                 cfg.target_scope,
             )
+            # Single resolved line for launch money-gates to grep, matching the
+            # opt_reset marker below. logger.info does NOT reach the vast
+            # launcher's log, and at alpha=1.0 the merger
+            #     G_corr = alpha*G + (1-alpha)*|G|*sign(M)
+            # returns G bit-for-bit, so `identity=true` is the ONE observable
+            # fact separating a merger-off arm from the signed-EMA default.
+            # Without a print there is nothing in the log to confirm it took.
+            print(
+                f"[comm_eff][signed_ema] enabled alpha={float(cfg.signed_ema_alpha)} "
+                f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
+                f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
+                f"identity={'true' if float(cfg.signed_ema_alpha) >= 1.0 else 'false'}",
+                flush=True,
+            )
 
         _opt_reset_cfg = getattr(getattr(self.config, "anchor", None), "opt_reset", None)
         if _opt_reset_cfg is not None and bool(getattr(_opt_reset_cfg, "enabled", False)):
