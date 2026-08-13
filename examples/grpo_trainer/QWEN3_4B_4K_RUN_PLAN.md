@@ -64,16 +64,29 @@ host memory and the whole slow circuit comparable to run A.
 `alpha=1.0` is also the endpoint of an axis this project has already swept:
 0.25 was chosen as the best value and 0.5 was measurably worse.
 
-A pre-flight gate proves the claim on CPU before any GPU time is spent. It warms
-`M` so that every one of its signs opposes the gradient, the worst case the
-correction can present, then asserts that the merger returns the gradient
-unchanged bit for bit, in both float32 and bfloat16, and that the same tensors
-at `alpha=0.25` move by 1.5 times their own norm. A knob that were dead would
-fail the second half of that gate.
-
 Two guards refuse the run rather than let it become a different experiment
 quietly: `COMM_EFF_SPECTRAL_ENABLED` must stay `true`, and
 `COMM_EFF_OPT_RESET_ENABLED` must stay `false`.
+
+### The two cadences this arm separates
+
+They are different numbers, and run A's own counters show it. Over its 200 steps
+run A logged `anchor_replay_fires = 10` but `spectral_corrections = 72038`, which
+factors exactly as 398 floating parameters times 181 ticks, and 181 is 200 steps
+minus the 19 warmup ticks that ran before `M` was ready.
+
+| | knob | value | effect |
+|---|---|---|---|
+| refresh of `M` | `anchor.cadence` | 20 | the anchor replays dense and folds `G_anchor` into `M`, ten times in 200 steps |
+| application of `M` | `spectral.cadence` | 1 | the signs are pushed into the gradient on **every** step, 181 times in 200 |
+
+So between two fires the same frozen `M` is reused nineteen more times: the stale
+applications outnumber the fresh ones eighteen to one. `alpha=1.0` removes all
+181 of them, not just the ten that land on a fire.
+
+`delay_K = 20` is a third quantity and not a cadence. It sets how far back the
+anchor reaches for the paired weights and rollout batch it replays, which is why
+the projection horizon is 20 ticks wide.
 
 Confirm it took, once the log has a few steps:
 

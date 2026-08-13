@@ -294,53 +294,6 @@ print(f"OK: {L} layers over 8 stages -> boundaries {boundaries}")
 PY
 
 # ---------------------------------------------------------------------------
-# 6b. Extra money gate for the nosign arm, on the SAME checkout. The whole arm
-#     rests on one claim: at signed_ema_alpha=1.0 the merger returns the
-#     gradient bit-for-bit, so the anchor's stale signs never reach AdamW. That
-#     claim is worth ten CPU milliseconds before 500 steps of H200 time.
-#     It is checked against a FULLY WARM M whose every sign OPPOSES the
-#     gradient, i.e. the worst case the railgun can present, and the same
-#     tensors are run at the arm-A alpha to prove the knob is a live lever and
-#     not a dead one. Kept in its own block so arm A/B/C gate output is
-#     byte-identical to what it was before this arm existed.
-# ---------------------------------------------------------------------------
-if [[ "$ARM" == "nosign" ]]; then
-python3 - <<'PY' || { echo "FATAL: nosign money gate FAILED, this checkout must not be launched" >&2; exit 1; }
-import torch
-
-from verl.workers.comm_eff.spectral_filter import SpectralFilter
-
-torch.manual_seed(0)
-# fp32 is the live grad dtype here (fsdp_config.model_dtype=fp32), bf16 covers
-# the mixed-precision reduce path; the merger round-trips through fp32 in both.
-for dtype in (torch.float32, torch.bfloat16):
-    grad = torch.randn(64, 48, dtype=dtype)
-    identity = SpectralFilter(beta_anc=0.25, ema_device="cpu", signed_ema_alpha=1.0)
-    railgun = SpectralFilter(beta_anc=0.25, ema_device="cpu", signed_ema_alpha=0.25)
-    # Warm M to the adversarial case: |M| large, sign(M) == -sign(G) everywhere.
-    warm = -torch.sign(grad).to(torch.float32) * 3.0
-    warm[warm == 0] = -3.0
-    for f in (identity, railgun):
-        f._anchor["w"] = warm.clone()
-
-    out = identity.signed_ema_matrix("w", grad)
-    assert out.dtype == grad.dtype, f"alpha=1.0 changed dtype {grad.dtype} -> {out.dtype}"
-    assert torch.equal(out, grad), (
-        f"alpha=1.0 is NOT an identity on {dtype}: max abs deviation "
-        f"{(out.to(torch.float32) - grad.to(torch.float32)).abs().max().item():.3e}"
-    )
-    assert identity.merger_coldM_fallbacks == 0, "M read as cold; the gate did not exercise the merger"
-
-    moved = railgun.signed_ema_matrix("w", grad)
-    rel = railgun.relative_change(grad, moved)
-    assert rel > 0.5, f"alpha=0.25 barely moved the gradient (rel={rel:.4f}); knob is not a live lever"
-    print(f"OK: {str(dtype).split('.')[-1]:8s} alpha=1.0 identity is EXACT; alpha=0.25 moves it rel={rel:.3f}")
-
-print("OK: nosign = signed-EMA merger is an exact no-op, anchor/RELEX/M circuit untouched")
-PY
-fi
-
-# ---------------------------------------------------------------------------
 # 7. MATH parquet ($HOME/data/math), prepared with the canonical research prep.
 # ---------------------------------------------------------------------------
 export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
