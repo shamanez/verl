@@ -144,7 +144,7 @@ PY
       if (( rc != 0 )); then say "smoke gate FAILED rc=$rc — stopping before the 500-step arms"; exit 1; fi
       mark_done smoke; say "DONE smoke"
       ;;
-    commeff|dense|nosign|optreset)
+    commeff|dense|freshm|nosign|optreset)
       if [[ "$PARALLEL_ARMS" == "1" ]]; then continue; fi
       run_arm "$stage" || exit 1
       ;;

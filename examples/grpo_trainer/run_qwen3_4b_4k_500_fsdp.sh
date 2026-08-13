@@ -7,7 +7,8 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff   # arm A (run first)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh dense     # arm B (control)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh optreset  # arm C (arm A + anchor-sourced optimizer reset)
-#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign    # arm D (arm A with the signed-EMA merger OFF)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh freshm    # arm D (arm A, sign correction ONLY on fire ticks)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign    # arm E (arm A with the signed-EMA merger OFF)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -22,7 +23,8 @@
 #   checkpoints          off -> every 100 steps, mirrored to R2, KEPT locally for eval
 #   codec (arm A)        UNCHANGED: prf_mask, p=0.95, exact-k, constant rescale
 #   codec (arm B)        COMM_EFF_ENABLED=false               (the engine's dense path)
-#   codec (arm D)        arm A, signed_ema_alpha 0.25 -> 1.0  (merger becomes identity)
+#   codec (arm D)        arm A, spectral.cadence 1 -> 20       (fresh M only, no stale reuse)
+#   codec (arm E)        arm A, signed_ema_alpha 0.25 -> 1.0   (merger becomes identity)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -43,11 +45,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|nosign) ;;
+  commeff|dense|freshm|nosign) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|nosign)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -354,24 +356,52 @@ TOTAL_CTX=$(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH ))
 #    engine's dense path leaves the anchor, the RELEX projector and the signed
 #    EMA inert, so this is a clean uncompressed control on the same surface.
 #
-#    ARM D (nosign): arm A with ONE number changed, spectral.signed_ema_alpha
-#    0.25 -> 1.0. The merger computes
-#        G_corr = alpha*G + (1-alpha)*|G|*sign(M)
-#    so alpha=1.0 returns G bit-for-bit and the anchor's stale signs never reach
-#    the optimizer. This is the endpoint of the same alpha axis #84 swept (0.25
-#    best, 0.5 worse), and it is the direct ablation of the sign-railgun
-#    mechanism blamed for the qwen3-4b-4k-commeff-500 collapse at step ~152.
+#    ARM D (freshm): arm A with ONE number changed, spectral.cadence 1 -> 20,
+#    locked to anchor.cadence. THE STALE M IS NEVER REUSED: the correction is
+#    applied on the fire ticks only, where M was refreshed earlier in the SAME
+#    train_batch, and is skipped on the nineteen ticks in between.
 #
-#    Why alpha=1.0 and NOT spectral.enabled=false: the config validator requires
-#    spectral.enabled=true whenever anchor.lookahead_mode=rank1_relex (see
-#    CommEffConfig.__post_init__), and with spectral off the engine's anchor hook
-#    returns before it snapshots anything, so the whole anchor circuit would
+#    Two cadences are involved and they are not the same knob:
+#      anchor.cadence=20    REFRESHES M (dense replay -> EMA), on ticks 20,40,...
+#      spectral.cadence=1   APPLIES sign(M) to the gradient, on EVERY tick
+#    Run A's own counters show the consequence: anchor_replay_fires=10 against
+#    spectral_corrections=72038, which factors as 398 floating params x 181
+#    ticks, and 181 = its 200 steps minus the 19 warmup ticks before M was ready.
+#    So 181 of 200 steps took the correction and only 10 of those read a freshly
+#    refreshed M. Stale applications outnumbered fresh ones eighteen to one.
+#    Setting spectral.cadence=anchor.cadence collapses 181 down to 10, each one
+#    fresh, which is the hypothesis this arm tests: that it is the REUSE of a
+#    frozen M between fires that does the damage, not the correction itself.
+#
+#    Ordering is what makes this work, and it is a fact of the engine rather than
+#    an assumption: BaseEngine.train_batch calls the anchor refresh at the TOP,
+#    then the compressed fwd/bwd, then the grad correction, then optimizer_step
+#    (verl/workers/engine/base.py). Both hooks advance their counter on every
+#    train_batch, so with equal cadences they fire on exactly the same ticks and
+#    the correction always reads an M refreshed moments earlier in that tick.
+#    The config validator independently requires anchor.cadence % spectral.cadence
+#    == 0, and 20 % 20 == 0.
+#
+#    Everything else is arm A untouched: alpha stays 0.25, beta_anc 0.25, the
+#    codec, the anchor, the RELEX projection, the batch shape and the schedule.
+#    No optimizer state is swapped or reset (that is arm C).
+#
+#    ARM E (nosign): arm A with spectral.signed_ema_alpha 0.25 -> 1.0. The merger
+#    computes
+#        G_corr = alpha*G + (1-alpha)*|G|*sign(M)
+#    so alpha=1.0 returns G bit-for-bit and M never reaches the optimizer at all.
+#    This is the ZERO point of the same dose axis arm D sits in the middle of:
+#    481 applications (arm A) -> 25 fresh ones (arm D) -> none (arm E) over 500
+#    steps. It is also the endpoint of the alpha axis #84 swept (0.25 best, 0.5
+#    worse).
+#
+#    Why alpha=1.0 and NOT spectral.enabled=false for arm E: the config validator
+#    requires spectral.enabled=true whenever anchor.lookahead_mode=rank1_relex
+#    (see CommEffConfig.__post_init__), and with spectral off the engine's anchor
+#    hook returns before it snapshots anything, so the whole anchor circuit would
 #    disappear too. That is three deltas, not one. alpha=1.0 keeps the anchor
 #    firing, the RELEX projection running and M accumulating exactly as in arm A,
-#    and changes only whether M is allowed to rewrite gradient signs. M becomes
-#    a maintained-but-unread quantity, which costs the anchor's replay time and
-#    its CPU state for no effect on the weights: that is the price of a
-#    single-knob ablation, and it keeps step timing and memory comparable.
+#    and changes only whether M is allowed to rewrite gradient signs.
 # ---------------------------------------------------------------------------
 export MODEL_PATH
 
@@ -409,8 +439,59 @@ elif [[ "$ARM" == "optreset" ]]; then
   export COMM_EFF_OPT_RESET_B1="${COMM_EFF_OPT_RESET_B1:-0.8}"
   export COMM_EFF_OPT_RESET_B2="${COMM_EFF_OPT_RESET_B2:-0.95}"
   export COMM_EFF_OPT_RESET_SCALE_MATCH="${COMM_EFF_OPT_RESET_SCALE_MATCH:-true}"
-elif [[ "$ARM" == "nosign" ]]; then
+elif [[ "$ARM" == "freshm" ]]; then
   # ARM D: the commeff codec block VERBATIM (kept a separate branch so arm A
+  # stays byte-identical to its reference launchers), plus the one number that
+  # stops the frozen M being reused between anchor fires.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE ONE DELTA against arm A. The anchor cadence is pinned to its arm-A value
+  # here (rather than left to the base launcher) purely so the merger cadence can
+  # be DERIVED from it: the two must be equal or a correction lands on a tick
+  # whose M is stale again, which is the thing this arm removes.
+  export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
+  export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-$COMM_EFF_ANCHOR_CADENCE}"
+  if [[ "$COMM_EFF_SPECTRAL_CADENCE" != "$COMM_EFF_ANCHOR_CADENCE" ]]; then
+    echo "FATAL: freshm requires spectral cadence == anchor cadence, got" >&2
+    echo "       COMM_EFF_SPECTRAL_CADENCE=$COMM_EFF_SPECTRAL_CADENCE vs" >&2
+    echo "       COMM_EFF_ANCHOR_CADENCE=$COMM_EFF_ANCHOR_CADENCE. Unequal cadences put" >&2
+    echo "       corrections back on ticks where M is stale, which is arm A's behaviour." >&2
+    exit 1
+  fi
+  # A cadence the anchor cadence is not a multiple of is rejected by the config
+  # validator anyway; catch it here with a message that names the arm.
+  if (( COMM_EFF_ANCHOR_CADENCE % COMM_EFF_SPECTRAL_CADENCE != 0 )); then
+    echo "FATAL: anchor.cadence must be divisible by spectral.cadence" >&2
+    exit 1
+  fi
+  # alpha=1.0 would silently make this the nosign arm under the freshm name.
+  if [[ "${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}" == "1.0" ]]; then
+    echo "FATAL: freshm keeps signed_ema_alpha at its arm-A value; alpha=1.0 disables the" >&2
+    echo "       merger entirely, which is the 'nosign' arm. Run that arm instead." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: freshm requires COMM_EFF_SPECTRAL_ENABLED=true (the merger still runs," >&2
+    echo "       just only on fire ticks). spectral.enabled=false is rejected by the" >&2
+    echo "       validator under rank1_relex and deletes the anchor circuit as well." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: freshm requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    echo "       Run the 'optreset' arm if that is what is wanted." >&2
+    exit 1
+  fi
+elif [[ "$ARM" == "nosign" ]]; then
+  # ARM E: the commeff codec block VERBATIM (kept a separate branch so arm A
   # stays byte-identical to its reference launchers), plus the one number that
   # turns the signed-EMA merger into an identity.
   export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
@@ -548,6 +629,8 @@ HYDRA_OVERRIDES=(
 
 if [[ "$ARM" == "commeff" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE"
+elif [[ "$ARM" == "freshm" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE, alpha=${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25} (sign correction on FIRE TICKS ONLY, stale M never reused, no opt-state swap)"
 elif [[ "$ARM" == "nosign" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (merger IDENTITY, anchor/RELEX/M unchanged, no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then

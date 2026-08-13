@@ -33,60 +33,99 @@ in-domain plus out-of-domain evaluation, then one HTML comparison.
 the chat template, the data order seed, the sampling shape and every optimizer
 constant, is shared.
 
-## Run D: the same compressed run with the gradient merger switched off
+## Run D: the sign correction only ever applied to a fresh M
 
 Run A collapsed. It reached step 200 and stopped with the score falling away,
-and the mechanism identified afterwards was the gradient merger: between anchor
-fires the compressed gradient keeps its own magnitude but borrows its signs from
-a stale dense average, which pushes every coordinate at once in a fixed
-direction. Run D is the direct ablation of that one mechanism.
+and the mechanism identified afterwards was the gradient merger: the compressed
+gradient keeps its own magnitude but borrows its signs from a dense average,
+which pushes every coordinate at once in a fixed direction. What run D tests is
+narrower and sharper than "turn the merger off". It tests whether the damage
+comes from **reusing a frozen average between fires**.
 
-| | **Run D: no sign correction** |
+### The two cadences, and why they are not the same knob
+
+Run A's own counters make the situation concrete. Over its 200 steps it logged
+`anchor_replay_fires = 10` against `spectral_corrections = 72038`, and that
+second number factors exactly as 398 floating parameters times 181 ticks, where
+181 is 200 steps minus the 19 warmup ticks that ran before `M` was ready.
+
+| | knob | run A | effect |
+|---|---|---|---|
+| refresh of `M` | `anchor.cadence` | 20 | the anchor replays dense and folds `G_anchor` into `M`, on ticks 20, 40, 60 and so on |
+| application of `M` | `spectral.cadence` | **1** | the signs are pushed into the gradient on **every** tick, whether or not `M` moved |
+
+So on tick 20 the correction reads a freshly refreshed `M`, and then ticks 21
+through 39 each apply that same frozen `M` again. Over 500 steps that is 481
+applications of which only 25 are fresh: stale beats fresh nineteen to one.
+
+`delay_K = 20` is a third quantity and not a cadence at all. It sets how far back
+the anchor reaches for the paired weights and rollout batch it replays, which is
+why the projection horizon is 20 ticks wide.
+
+### The run
+
+| | **Run D: fresh M only** |
 |---|---|
-| launcher | `run_qwen3_4b_4k_500_fsdp.sh nosign` |
-| experiment name | `qwen3-4b-4k-nosign-500` |
+| launcher | `run_qwen3_4b_4k_500_fsdp.sh freshm` |
+| experiment name | `qwen3-4b-4k-freshm-500` |
 | WandB | project `qwen3-4b-4k-500`, alongside runs A and B |
-| delta against run A | `spectral.signed_ema_alpha` 0.25 to 1.0, one number |
-| what that does | the merger computes `alpha*G + (1-alpha)*abs(G)*sign(M)`, so at 1.0 it returns `G` bit for bit and the anchor's signs never reach the optimizer |
-| anchor circuit | UNCHANGED: still fires every 20 ticks, still replays the paired dense batch, still maintains `M` |
+| delta against run A | `spectral.cadence` 1 to 20, locked equal to `anchor.cadence`, one number |
+| what that does | the correction is applied on the fire ticks only, where `M` was refreshed earlier in the same tick, and skipped on the nineteen ticks between |
+| corrections over 500 steps | 25, every one of them on a fresh `M`, against run A's 481 of which 456 were stale |
+| merger strength | UNCHANGED, `alpha=0.25`, `beta_anc=0.25` |
+| anchor circuit | UNCHANGED: fires every 20 ticks, replays the paired dense batch, maintains `M` |
 | weight projection | UNCHANGED: rank-1 RELEX, W2 secant, strength 1 |
 | optimizer state | UNTOUCHED, no swap, no reset (that is the separate `optreset` arm) |
 | everything else | identical to run A, including the codec, the batch shape, the schedule and the checkpoint cadence |
 
-`M` becomes a quantity the run maintains and never reads. That is deliberate:
-the alternative way to switch the merger off, `spectral.enabled=false`, is
-rejected outright by the config validator whenever the weight projection is on,
-and it would additionally make the engine's anchor hook return before it
-snapshots anything, deleting the anchor and the projection along with the
-merger. That is three changes. `alpha=1.0` is one, and it leaves step timing,
-host memory and the whole slow circuit comparable to run A.
+Ordering is what makes a fire-tick correction read a fresh `M`, and it is a fact
+of the engine rather than an assumption. `BaseEngine.train_batch` calls the
+anchor refresh at the top, then the compressed forward and backward, then the
+gradient correction, then the optimizer step. Both hooks advance their own
+counter on every call, so with equal cadences they land on exactly the same
+ticks and the correction always reads an `M` written moments earlier in that
+tick. Simulating 500 ticks against the real predicates gives 25 corrections, 25
+fresh, 0 stale, against run A's 481 corrections with 456 stale.
 
-`alpha=1.0` is also the endpoint of an axis this project has already swept:
-0.25 was chosen as the best value and 0.5 was measurably worse.
+The launcher derives the merger cadence from the anchor cadence rather than
+hardcoding 20, and then refuses the run if the two are unequal. That guard is
+load-bearing: the config validator only requires that the anchor cadence be
+divisible by the merger cadence, so a value like 10 passes validation and
+quietly puts half the corrections back on stale ticks, which is run A's
+behaviour under run D's name.
 
-Two guards refuse the run rather than let it become a different experiment
-quietly: `COMM_EFF_SPECTRAL_ENABLED` must stay `true`, and
-`COMM_EFF_OPT_RESET_ENABLED` must stay `false`.
+Two further guards refuse the run rather than let it drift into another
+experiment: `COMM_EFF_SPECTRAL_ENABLED` must stay `true`, and
+`COMM_EFF_OPT_RESET_ENABLED` must stay `false`. A fourth refuses
+`signed_ema_alpha=1.0`, which would silently make this run E.
 
-### The two cadences this arm separates
+### Run E, the zero point of the same axis
 
-They are different numbers, and run A's own counters show it. Over its 200 steps
-run A logged `anchor_replay_fires = 10` but `spectral_corrections = 72038`, which
-factors exactly as 398 floating parameters times 181 ticks, and 181 is 200 steps
-minus the 19 warmup ticks that ran before `M` was ready.
+`run_qwen3_4b_4k_500_fsdp.sh nosign` (`qwen3-4b-4k-nosign-500`) sets
+`signed_ema_alpha` to 1.0 instead. The merger computes
+`alpha*G + (1-alpha)*abs(G)*sign(M)`, so at 1.0 it returns `G` bit for bit and
+`M` never reaches the optimizer at all. That places the three arms on one dose
+axis, which is worth having because run D alone changes both the staleness and
+the number of applications and cannot separate them:
 
-| | knob | value | effect |
-|---|---|---|---|
-| refresh of `M` | `anchor.cadence` | 20 | the anchor replays dense and folds `G_anchor` into `M`, ten times in 200 steps |
-| application of `M` | `spectral.cadence` | 1 | the signs are pushed into the gradient on **every** step, 181 times in 200 |
+| | corrections over 500 steps | of which stale |
+|---|---|---|
+| run A | 481 | 456 |
+| run D | 25 | 0 |
+| run E | 0 | 0 |
 
-So between two fires the same frozen `M` is reused nineteen more times: the stale
-applications outnumber the fresh ones eighteen to one. `alpha=1.0` removes all
-181 of them, not just the ten that land on a fire.
+`alpha=1.0` rather than `spectral.enabled=false` because the latter is rejected
+outright by the config validator whenever the weight projection is on, and it
+would additionally make the engine's anchor hook return before it snapshots
+anything, deleting the anchor and the projection along with the merger.
 
-`delay_K = 20` is a third quantity and not a cadence. It sets how far back the
-anchor reaches for the paired weights and rollout batch it replays, which is why
-the projection horizon is 20 ticks wide.
+Confirm either arm took, once the log has a few steps:
+
+```bash
+grep -m1 "\[comm_eff\]\[signed_ema\] enabled" /workspace/runs/qwen3-4b-4k-freshm-500/train.log
+```
+
+It reports the resolved `alpha` and `cadence`.
 
 Confirm it took, once the log has a few steps:
 
@@ -123,6 +162,7 @@ Individual stages, if they are wanted separately:
 SMOKE=1 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff
 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh commeff
 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh dense
+bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh freshm
 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign
 bash research/scripts/ood_eval/eval_qwen3_4b_4k.sh
 python3 research/scripts/ood_eval/report_qwen3_4b_4k.py \
