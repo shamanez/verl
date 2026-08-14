@@ -32,6 +32,13 @@ POLL="${POLL:-120}"
 # The previous arm's last checkpoint keeps uploading after done.flag. Let it
 # drain before the next arm starts competing for the same disk and uplink.
 DRAIN_MAX="${DRAIN_MAX:-3600}"
+# Consecutive no-process no-flag polls before declaring the previous arm dead.
+# The default 2 is right when this chain waits on the CURRENTLY RUNNING arm.
+# A chain armed one link further back (waiting on an arm that has not even
+# started yet) must tolerate the inter-arm gap, where nothing trains while the
+# earlier chain drains uploads and refreshes the checkout: set it to ~30
+# (an hour at the default poll) for those.
+DEAD_POLLS_MAX="${DEAD_POLLS_MAX:-2}"
 
 FLAG="$WORK/verl/runs/$PREV_EXP/done.flag"
 PREV_LOG="$WORK/runs/$PREV_EXP/train.log"
@@ -56,8 +63,8 @@ while true; do
     dead_polls=0
   else
     dead_polls=$((dead_polls + 1))
-    say "no training process and no done.flag (${dead_polls}/2)"
-    if (( dead_polls >= 2 )); then
+    say "no training process and no done.flag (${dead_polls}/${DEAD_POLLS_MAX})"
+    if (( dead_polls >= DEAD_POLLS_MAX )); then
       say "ABORT: $PREV_EXP ended WITHOUT done.flag. Not starting '$NEXT_ARM'."
       say "       Inspect the tail of $PREV_LOG, then launch manually with:"
       say "       cd $WORK/verl && bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh $NEXT_ARM"

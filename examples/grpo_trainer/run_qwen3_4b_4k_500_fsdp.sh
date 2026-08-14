@@ -12,6 +12,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh powersgdq # arm F (arm D, codec swapped to PowerSGD w/ anchor-owned Q)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef       # arm G (arm A, merger swapped to delayed_ef, stale delta reused every tick)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-fresh # arm H (arm G, delta applied on fire ticks ONLY)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh blend           # arm I (arm G, merger swapped to the convex value blend, eta=0.3)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -31,6 +32,7 @@
 #   codec (arm F)        arm D, prf_mask -> powersgd r=128      (anchor-owned Q, same 5.0% wire)
 #   codec (arm G)        arm A, merger signed_ema -> delayed_ef (lambda=1, beta_anc=0; stale delta every tick)
 #   codec (arm H)        arm G, spectral.cadence 1 -> 20        (delta applied on fire ticks only)
+#   codec (arm I)        arm A, merger signed_ema -> blend      (eta=0.3, beta_anc=0; convex, no held residual)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -51,11 +53,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|blend) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|blend)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -660,6 +662,65 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" ]]; then
     echo "FATAL: delayedef arms require COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
     exit 1
   fi
+elif [[ "$ARM" == "blend" ]]; then
+  # ARM I (blend): the commeff codec block VERBATIM, with the MERGER swapped to
+  # the norm-matched convex value blend from the pre-fork menu (EXP-30 B1):
+  #     G_corr = (1-eta) * G_comp + eta * (||G_comp||/||M||) * M
+  # One delta from the delayedef arm: the merge OPERATOR on the identical M
+  # signal (same codec, same anchor 20/20, same RELEX W2 strength 1, same
+  # beta_anc=0 fresh-per-fire M, same spectral.cadence=1). Unlike delayed_ef
+  # there is NO held residual: the blend is re-formed against each tick's fresh
+  # G_comp, M alone carries the staleness, and the update is convex so
+  # ||G_corr|| <= ||G_comp|| (never injects energy). Unlike signed_ema it is a
+  # VALUE merger: no sign transplant, real heterogeneous per-coordinate
+  # magnitudes reach Adam, which breaks ingredient (i) of the verified
+  # sign-railgun mechanism.
+  #
+  # eta=0.3 is the only eta ever paired with a VALID anchor signal on a val
+  # protocol (EXP-30 B1: val@50 0.7422 vs delayed_ef 0.7528, dense 0.7839,
+  # no-merge floor 0.6300, at 1.5B and anchor cadence 5). Blend at anchor
+  # cadence 20/20 is untested territory. Override with
+  # COMM_EFF_SPECTRAL_BLEND_ETA.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE MERGER SWAP. beta_anc=0 for the same reason as the delayedef arms: M
+  # must be the latest fire's raw dense anchor gradient (EXP-31: no extra
+  # memory on the correction path, and EXP-30 B1 ran beta_anc=0).
+  export COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-blend}"
+  export COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.3}"
+  export COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"
+  # Arm I keeps spectral.cadence=1: the blend consumes M every tick (stale
+  # between fires), the same dose surface as arms A and G. A fresh-only blend
+  # would be a different arm; refuse the knob rather than run it mislabelled.
+  if [[ "${COMM_EFF_SPECTRAL_CADENCE:-1}" != "1" ]]; then
+    echo "FATAL: blend requires spectral.cadence=1 (M consumed every tick, the arm-A/G" >&2
+    echo "       dose surface). A fire-tick-only blend is a different experiment; add it" >&2
+    echo "       as its own arm rather than overriding the cadence." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_SPECTRAL_BLEND_ETA" == "0.0" || "$COMM_EFF_SPECTRAL_BLEND_ETA" == "0" ]]; then
+    echo "FATAL: blend at eta=0 is a bitwise identity, i.e. the 'nosign' experiment under" >&2
+    echo "       a blend name. Run that arm instead." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: blend requires COMM_EFF_SPECTRAL_ENABLED=true. spectral.enabled=false is" >&2
+    echo "       rejected by the validator under rank1_relex and deletes the anchor circuit." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: blend requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    exit 1
+  fi
 else
   export COMM_EFF_ENABLED=false
 fi
@@ -777,6 +838,8 @@ elif [[ "$ARM" == "delayedef" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = G_comp + lambda*(M - G_comp@fire); STALE delta re-applied every tick between fires; no opt-state swap)"
 elif [[ "$ARM" == "delayedef-fresh" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (delta applied on FIRE TICKS ONLY, so every 20th tick G_corr = G_anchor exactly; no opt-state swap)"
+elif [[ "$ARM" == "blend" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=blend eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, convex, no held residual, no sign transplant; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else

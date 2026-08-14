@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SpectralFilter", "apply_spectral_correction_to_params", "is_spectral_target"]
 
 SPECTRAL_TARGET_SCOPES = ("decoder_matrices", "all_floating")
-SPECTRAL_CORRECTION_MODES = ("signed_ema", "delayed_ef")
+SPECTRAL_CORRECTION_MODES = ("signed_ema", "delayed_ef", "blend")
 
 
 def is_spectral_target(
@@ -95,6 +95,7 @@ class SpectralFilter:
         signed_ema_alpha: float = 0.25,
         correction_mode: str = "signed_ema",
         delayed_ef_lambda: float = 1.0,
+        blend_eta: float = 0.5,
         diagnostics: bool = False,
     ):
         if not 0.0 <= float(beta_anc) <= 1.0:
@@ -107,12 +108,15 @@ class SpectralFilter:
             raise ValueError(f"correction_mode must be one of {SPECTRAL_CORRECTION_MODES}; got {correction_mode!r}")
         if not float(delayed_ef_lambda) >= 0.0:
             raise ValueError(f"delayed_ef_lambda must be >= 0; got {delayed_ef_lambda}")
+        if not 0.0 <= float(blend_eta) <= 1.0:
+            raise ValueError(f"blend_eta must be in [0, 1]; got {blend_eta}")
 
         self.beta_anc = float(beta_anc)
         self.ema_device = str(ema_device)
         self.signed_ema_alpha = float(signed_ema_alpha)
         self.correction_mode = str(correction_mode)
         self.delayed_ef_lambda = float(delayed_ef_lambda)
+        self.blend_eta = float(blend_eta)
         self.diagnostics = bool(diagnostics)
         self.merger_coldM_fallbacks = 0
         self._anchor: dict[str, torch.Tensor] = {}
@@ -235,11 +239,51 @@ class SpectralFilter:
         corrected = grad + lam * delta
         return corrected.to(g_comp.dtype)
 
+    def blend_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
+        """Norm-matched convex blend: ``G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M``.
+
+        The VALUE merger from the pre-fork menu (EXP-30 B1 scored val@50 0.7422
+        at eta=0.3 against delayed_ef 0.7528 and dense 0.7839), ported verbatim:
+        ``M`` is rescaled to the compressed gradient's Frobenius norm and the
+        two are convexly combined, so real heterogeneous per-coordinate
+        magnitudes from the dense anchor flow into Adam's moments (no sign
+        transplant, no uniform-magnitude field) and the update energy is
+        bounded: for orthogonal terms
+        ``||G_corr|| = ||G_comp|| * sqrt((1-eta)^2 + eta^2) <= ||G_comp||``.
+        Unlike ``delayed_ef`` there is NO held residual: the blend is re-formed
+        against each tick's fresh ``G_comp``, and ``M`` alone carries the
+        staleness between fires.
+
+        ``eta=0`` returns ``g_comp`` bitwise (the identity limiting case).
+        Cold guards: an unwarmed/shape-mismatched ``M`` or a zero-norm
+        ``g_comp`` returns ``g_comp`` unchanged and counts
+        ``merger_coldM_fallbacks`` (the historical version did not count it;
+        this port does, for telemetry parity with the other modes).
+        """
+        eta = self.blend_eta
+        if eta == 0.0:
+            return g_comp
+        name = _canon(name)
+        self.ensure_anchor(name, g_comp)
+        anchor = self.anchor_on(name, g_comp.device).to(torch.float32)
+        grad = g_comp.to(torch.float32)
+        eps = 1e-12
+        anchor_norm = torch.linalg.norm(anchor)
+        grad_norm = torch.linalg.norm(grad)
+        if anchor_norm <= eps or grad_norm <= eps or tuple(anchor.shape) != tuple(grad.shape):
+            self.merger_coldM_fallbacks += 1
+            return g_comp
+        scale = grad_norm / (anchor_norm + eps)
+        corrected = (1.0 - eta) * grad + eta * scale * anchor
+        return corrected.to(g_comp.dtype)
+
     def correct_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
         """Dispatch ``g_comp`` through the configured ``correction_mode``."""
 
         if self.correction_mode == "delayed_ef":
             return self.delayed_ef_matrix(name, g_comp)
+        if self.correction_mode == "blend":
+            return self.blend_matrix(name, g_comp)
         return self.signed_ema_matrix(name, g_comp)
 
     def relative_change(self, g_comp: torch.Tensor, g_corr: torch.Tensor) -> float:

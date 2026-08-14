@@ -237,6 +237,7 @@ actor_rollout_ref:
         signed_ema_alpha: 0.25
         correction_mode: signed_ema
         delayed_ef_lambda: 1.0
+        blend_eta: 0.5
       powersgd:
         _target_: verl.workers.config.CommEffPowerSGDConfig
         enabled: true

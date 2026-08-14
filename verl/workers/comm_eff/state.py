@@ -352,12 +352,14 @@ class CommEffState:
             cfg = _spectral_cfg
             _correction_mode = str(getattr(cfg, "correction_mode", "signed_ema"))
             _delayed_ef_lambda = float(getattr(cfg, "delayed_ef_lambda", 1.0))
+            _blend_eta = float(getattr(cfg, "blend_eta", 0.5))
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
                 ema_device=str(cfg.ema_device),
                 signed_ema_alpha=float(cfg.signed_ema_alpha),
                 correction_mode=_correction_mode,
                 delayed_ef_lambda=_delayed_ef_lambda,
+                blend_eta=_blend_eta,
                 diagnostics=bool(cfg.diagnostics),
             )
             logger.info(
@@ -382,6 +384,14 @@ class CommEffState:
                     f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
                     f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
                     f"identity={'true' if _delayed_ef_lambda == 0.0 else 'false'}",
+                    flush=True,
+                )
+            elif _correction_mode == "blend":
+                print(
+                    f"[comm_eff][blend] enabled eta={_blend_eta} "
+                    f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
+                    f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
+                    f"identity={'true' if _blend_eta == 0.0 else 'false'}",
                     flush=True,
                 )
             else:

@@ -181,6 +181,37 @@ That line reports the resolved `lambda`, `beta_anc`, `cadence` and
 398 x anchor fires for both arms; `comm_eff/delayed_ef_held` grows by
 398 x 19 per fire interval on run G and stays 0 on run H.
 
+## Run I: the convex value blend, same M signal as run G
+
+`run_qwen3_4b_4k_500_fsdp.sh blend` (`qwen3-4b-4k-blend-500`) is run G with ONLY
+the merge operator changed, on the identical M signal:
+
+    G_corr = (1 - eta) * G_comp + eta * (||G_comp||/||M||) * M
+
+with `eta=0.3` and `beta_anc=0.0`, `spectral.cadence=1`, anchor 20/20, codec
+and RELEX unchanged. eta=0.3 is the only eta ever paired with a valid anchor on
+a val protocol (EXP-30 B1 at 1.5B, cadence 5/5: 0.7422 vs delayed_ef 0.7528,
+dense 0.7839, floor 0.6300). Blend at anchor cadence 20/20 has never been run.
+
+What it isolates against run G: blend is a VALUE merger with no held residual.
+It cannot cancel the codec artifact (delayed_ef's delta explicitly subtracts
+G_comp at the fire), but it re-forms against each tick's fresh G_comp, keeps
+real heterogeneous magnitudes flowing into Adam (no sign transplant, breaking
+ingredient (i) of the verified railgun mechanism), and its update is convex so
+it never injects energy. In bias/variance terms the PRF codec is unbiased and
+high-variance, so blend is a variance-reduction play where delayed_ef is an
+artifact-cancellation play.
+
+Confirm it took:
+
+```bash
+grep -m1 "\[comm_eff\]\[blend\] enabled" /workspace/runs/qwen3-4b-4k-blend-500/train.log
+```
+
+The line reports the resolved `eta`, `beta_anc`, `cadence` and `identity=false`.
+The delayed_ef counters stay 0 on this arm; `spectral_corrections` grows by 398
+per tick once RELEX warmup lifts.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits

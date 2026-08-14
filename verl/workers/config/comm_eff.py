@@ -340,11 +340,14 @@ class CommEffSpectralConfig(BaseConfig):
     # Merger dispatch. "signed_ema" is the historical default
     # (G_corr = alpha*G + (1-alpha)*|G|*sign(M)); "delayed_ef" is the additive
     # anchor-residual merger (delta = M - G_comp refreshed once per anchor fire,
-    # G_corr = G_comp + lambda*delta, held delta re-applied between fires).
-    # Under delayed_ef, signed_ema_alpha is unread; under signed_ema,
-    # delayed_ef_lambda is unread.
+    # G_corr = G_comp + lambda*delta, held delta re-applied between fires);
+    # "blend" is the norm-matched convex value merger
+    # (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, re-formed against
+    # the fresh G_comp every correction tick, no held residual). Each mode
+    # reads only its own knob (alpha / lambda / eta); the other two are unread.
     correction_mode: str = "signed_ema"
     delayed_ef_lambda: float = 1.0
+    blend_eta: float = 0.5
 
 
 @dataclass
@@ -725,13 +728,15 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.signed_ema_alpha must be in [0, 1]; got {self.spectral.signed_ema_alpha}"
             )
-        if self.spectral.correction_mode not in ("signed_ema", "delayed_ef"):
+        if self.spectral.correction_mode not in ("signed_ema", "delayed_ef", "blend"):
             raise ValueError(
-                "comm_eff.spectral.correction_mode must be one of (signed_ema, delayed_ef); "
+                "comm_eff.spectral.correction_mode must be one of (signed_ema, delayed_ef, blend); "
                 f"got {self.spectral.correction_mode!r}"
             )
         if not float(self.spectral.delayed_ef_lambda) >= 0.0:
             raise ValueError(f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}")
+        if not 0.0 <= float(self.spectral.blend_eta) <= 1.0:
+            raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
 
     def _validate_powersgd(self) -> None:
         for name in (

@@ -409,6 +409,7 @@ comm_eff:
     signed_ema_alpha: 0.25
     correction_mode: signed_ema
     delayed_ef_lambda: 1.0
+    blend_eta: 0.5
 
   # Rank-77 activation-energy basis for Qwen2.5-Math-1.5B (hidden size 1536).
   powersgd:
