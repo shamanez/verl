@@ -12,17 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Signed-EMA correction for PowerSGD-compressed actor gradients.
+"""Anchor-guided correction of compressed actor gradients.
 
 The dense anchor supplies a per-parameter gradient EMA ``M``. Before the
-optimizer step, the merger keeps the compressed gradient's magnitude
-and blends its sign with ``sign(M)``::
+optimizer step, the selected ``correction_mode`` merges it into the fast
+compressed gradient.
+
+``signed_ema`` keeps the compressed gradient's magnitude and blends its sign
+with ``sign(M)``::
 
     G_corr = alpha * G_comp + (1 - alpha) * abs(G_comp) * sign(M)
 
-An unwarmed or shape-mismatched anchor entry is a strict no-op for that tensor.
-FSDP extraction and writeback remain engine responsibilities; this module only
-operates on logical full tensors.
+``delayed_ef`` is the additive anchor-residual path. On the tick whose anchor
+fire refreshed ``M`` (at ``beta_anc=0``, ``M`` IS that fire's raw dense anchor
+gradient, computed at the RELEX-projected weights on the SAME batch as this
+tick's fast gradient), the residual is rebuilt and applied; between fires the
+HELD residual is re-applied to each new fast gradient::
+
+    delta      = M - G_comp(fire tick)          # refreshed once per anchor fire
+    G_corr(t)  = G_comp(t) + lambda * delta     # held delta between fires
+
+At ``lambda=1`` and ``beta_anc=0`` the fire tick reduces exactly to
+``G_corr = G_anchor`` (the compressed gradient cancels), and ``lambda=0`` is a
+bitwise identity. Whether stale ``delta`` reuse between fires happens at all is
+the caller's ``spectral.cadence``: 1 re-applies the held residual every tick,
+``cadence == anchor.cadence`` applies it on fire ticks only.
+
+An unwarmed or shape-mismatched anchor entry is a strict no-op for that tensor
+in both modes. FSDP extraction and writeback remain engine responsibilities;
+this module only operates on logical full tensors.
 """
 
 from __future__ import annotations
@@ -36,6 +54,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SpectralFilter", "apply_spectral_correction_to_params", "is_spectral_target"]
 
 SPECTRAL_TARGET_SCOPES = ("decoder_matrices", "all_floating")
+SPECTRAL_CORRECTION_MODES = ("signed_ema", "delayed_ef")
 
 
 def is_spectral_target(
@@ -74,6 +93,8 @@ class SpectralFilter:
         beta_anc: float = 0.50,
         ema_device: str = "cpu",
         signed_ema_alpha: float = 0.25,
+        correction_mode: str = "signed_ema",
+        delayed_ef_lambda: float = 1.0,
         diagnostics: bool = False,
     ):
         if not 0.0 <= float(beta_anc) <= 1.0:
@@ -82,13 +103,30 @@ class SpectralFilter:
             raise ValueError(f"ema_device must be one of (gpu, cpu); got {ema_device!r}")
         if not 0.0 <= float(signed_ema_alpha) <= 1.0:
             raise ValueError(f"signed_ema_alpha must be in [0, 1]; got {signed_ema_alpha}")
+        if correction_mode not in SPECTRAL_CORRECTION_MODES:
+            raise ValueError(f"correction_mode must be one of {SPECTRAL_CORRECTION_MODES}; got {correction_mode!r}")
+        if not float(delayed_ef_lambda) >= 0.0:
+            raise ValueError(f"delayed_ef_lambda must be >= 0; got {delayed_ef_lambda}")
 
         self.beta_anc = float(beta_anc)
         self.ema_device = str(ema_device)
         self.signed_ema_alpha = float(signed_ema_alpha)
+        self.correction_mode = str(correction_mode)
+        self.delayed_ef_lambda = float(delayed_ef_lambda)
         self.diagnostics = bool(diagnostics)
         self.merger_coldM_fallbacks = 0
         self._anchor: dict[str, torch.Tensor] = {}
+        # delayed_ef state. The residual delta is held per target between anchor
+        # fires; _m_version counts update_anchor() calls per target and
+        # _delta_m_version stamps the M version each held delta was built from,
+        # so the residual refreshes exactly once per fire, on the first
+        # correction after it (which, given the engine ordering refresh ->
+        # backward -> correction, is the fire tick itself).
+        self._delayed_ef_delta: dict[str, torch.Tensor] = {}
+        self._m_version: dict[str, int] = {}
+        self._delta_m_version: dict[str, int] = {}
+        self.delayed_ef_refreshed = 0
+        self.delayed_ef_held = 0
 
     def _ema_storage_device(self, grad_device):
         return torch.device("cpu") if self.ema_device == "cpu" else torch.device(grad_device)
@@ -123,6 +161,9 @@ class SpectralFilter:
         if store_device.type == "cpu" and g_anchor.device.type != "cpu":
             stored = stored.pin_memory()
         self._anchor[name] = stored
+        # Version stamp for delayed_ef: this is the only writer of M, and it only
+        # runs on anchor fires, so "M version advanced" IS "a fire refreshed M".
+        self._m_version[name] = self._m_version.get(name, 0) + 1
         return updated
 
     def signed_ema_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
@@ -138,6 +179,68 @@ class SpectralFilter:
         alpha = self.signed_ema_alpha
         corrected = alpha * grad + (1.0 - alpha) * grad.abs() * torch.sign(anchor)
         return corrected.to(g_comp.dtype)
+
+    def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
+        """Additive anchor residual: ``G_corr = G_comp + lambda * delta``.
+
+        On the first correction after an anchor fire (the fire tick itself,
+        given the engine ordering), ``delta = M - G_comp`` is rebuilt from the
+        freshly refreshed ``M`` and persisted on the EMA-storage device; between
+        fires the held ``delta`` is re-applied unchanged. At ``lambda=1`` and
+        ``beta_anc=0`` the fire tick returns exactly the anchor gradient.
+
+        Guards (never a silent grad change): ``lambda=0`` returns ``g_comp``
+        bitwise; an unwarmed or shape-mismatched ``M`` returns ``g_comp`` and
+        drops any held ``delta``; no held ``delta`` before the first fire
+        returns ``g_comp``. All three count ``merger_coldM_fallbacks``.
+        """
+        lam = self.delayed_ef_lambda
+        if lam == 0.0:
+            return g_comp
+        name = _canon(name)
+        self.ensure_anchor(name, g_comp)
+        anchor = self.anchor_on(name, g_comp.device).to(torch.float32)
+        grad = g_comp.to(torch.float32)
+
+        held = self._delayed_ef_delta.get(name)
+        if held is not None and tuple(held.shape) != tuple(grad.shape):
+            held = None
+            self._delayed_ef_delta.pop(name, None)
+            self._delta_m_version.pop(name, None)
+        if torch.linalg.norm(anchor) <= 1e-12 or tuple(anchor.shape) != tuple(grad.shape):
+            self.merger_coldM_fallbacks += 1
+            self._delayed_ef_delta.pop(name, None)
+            self._delta_m_version.pop(name, None)
+            return g_comp
+
+        m_version = self._m_version.get(name, 0)
+        if m_version > self._delta_m_version.get(name, 0):
+            delta = (anchor - grad).detach()
+            store_device = self._ema_storage_device(g_comp.device)
+            stored = delta.to(store_device)
+            if store_device.type == "cpu" and g_comp.device.type != "cpu":
+                stored = stored.pin_memory()
+            self._delayed_ef_delta[name] = stored
+            self._delta_m_version[name] = m_version
+            self.delayed_ef_refreshed += 1
+        elif held is not None:
+            delta = held.to(g_comp.device, torch.float32)
+            self.delayed_ef_held += 1
+        else:
+            # M is warm but no fire has been seen since the last reset: never
+            # invent a residual.
+            self.merger_coldM_fallbacks += 1
+            return g_comp
+
+        corrected = grad + lam * delta
+        return corrected.to(g_comp.dtype)
+
+    def correct_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
+        """Dispatch ``g_comp`` through the configured ``correction_mode``."""
+
+        if self.correction_mode == "delayed_ef":
+            return self.delayed_ef_matrix(name, g_comp)
+        return self.signed_ema_matrix(name, g_comp)
 
     def relative_change(self, g_comp: torch.Tensor, g_corr: torch.Tensor) -> float:
         """Return ``||G_corr-G_comp|| / ||G_comp||`` for diagnostics."""
@@ -162,7 +265,7 @@ def apply_spectral_correction_to_params(
     full_grad_of,
     writeback,
 ) -> int:
-    """Apply signed EMA to selected logical gradients and write them back."""
+    """Apply the configured correction mode to selected logical gradients and write them back."""
 
     instrumented = bool(state.fsdp_grad_repr)
     corrected_count = 0
@@ -197,12 +300,12 @@ def apply_spectral_correction_to_params(
                 print(f"[comm_eff][FSDP-DISCOVERY] {representation}", flush=True)
             instrumented = True
 
-        corrected = spectral.signed_ema_matrix(name, full_grad)
+        corrected = spectral.correct_matrix(name, full_grad)
         if spectral.diagnostics:
             relative_change = spectral.relative_change(full_grad, corrected)
             state.spectral_rel_change[name] = relative_change
             print(
-                f"[comm_eff][signed_ema] {name} rel_change={relative_change:.6f} "
+                f"[comm_eff][{spectral.correction_mode}] {name} rel_change={relative_change:.6f} "
                 f"shape={logical_shape} grad_type={container_meta.get('grad_container_type')}",
                 flush=True,
             )
@@ -212,12 +315,20 @@ def apply_spectral_correction_to_params(
         state.spectral_corrections += 1
 
     state.merger_coldM_fallbacks = int(spectral.merger_coldM_fallbacks)
+    # Cumulative delayed_ef counters (0 forever under signed_ema): refreshed
+    # should factor as n_targets x anchor_fires, held as n_targets x (correction
+    # ticks between fires). Their sum plus coldM fallbacks accounts for every
+    # correction call.
+    state.delayed_ef_refreshed = int(spectral.delayed_ef_refreshed)
+    state.delayed_ef_held = int(spectral.delayed_ef_held)
     if spectral.diagnostics and corrected_count:
         print(
-            f"[comm_eff][signed_ema] alpha={spectral.signed_ema_alpha} "
-            f"corrected={corrected_count} cold_M={spectral.merger_coldM_fallbacks}",
+            f"[comm_eff][{spectral.correction_mode}] alpha={spectral.signed_ema_alpha} "
+            f"lambda={spectral.delayed_ef_lambda} "
+            f"corrected={corrected_count} cold_M={spectral.merger_coldM_fallbacks} "
+            f"delta_refreshed={spectral.delayed_ef_refreshed} delta_held={spectral.delayed_ef_held}",
             flush=True,
         )
     if corrected_count:
-        logger.info("comm_eff: signed-EMA correction applied to %d tensors", corrected_count)
+        logger.info("comm_eff: %s correction applied to %d tensors", spectral.correction_mode, corrected_count)
     return corrected_count

@@ -10,6 +10,8 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh freshm    # arm D (arm A, sign correction ONLY on fire ticks)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign    # arm E (arm A with the signed-EMA merger OFF)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh powersgdq # arm F (arm D, codec swapped to PowerSGD w/ anchor-owned Q)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef       # arm G (arm A, merger swapped to delayed_ef, stale delta reused every tick)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-fresh # arm H (arm G, delta applied on fire ticks ONLY)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -27,6 +29,8 @@
 #   codec (arm D)        arm A, spectral.cadence 1 -> 20       (fresh M only, no stale reuse)
 #   codec (arm E)        arm A, signed_ema_alpha 0.25 -> 1.0   (merger becomes identity)
 #   codec (arm F)        arm D, prf_mask -> powersgd r=128      (anchor-owned Q, same 5.0% wire)
+#   codec (arm G)        arm A, merger signed_ema -> delayed_ef (lambda=1, beta_anc=0; stale delta every tick)
+#   codec (arm H)        arm G, spectral.cadence 1 -> 20        (delta applied on fire ticks only)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -47,11 +51,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -584,6 +588,78 @@ elif [[ "$ARM" == "nosign" ]]; then
     echo "       Run the 'optreset' arm if that is what is wanted." >&2
     exit 1
   fi
+elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" ]]; then
+  # ARM G (delayedef): the commeff codec block VERBATIM (kept a separate branch
+  # so arm A stays byte-identical to its reference launchers), with the MERGER
+  # swapped from signed_ema to delayed_ef. Everything else in arm A is untouched:
+  # PRF exact-k p=0.95 codec, anchor cadence/delay 20/20, rank-1 RELEX W2
+  # strength 1, and (for arm G) spectral.cadence=1 so the held residual is
+  # re-applied on every one of the 19 ticks between fires, the exact analog of
+  # arm A's stale-M reuse. The merger becomes
+  #     delta      = M - G_comp        refreshed ONCE per anchor fire
+  #     G_corr(t)  = G_comp(t) + lambda * delta
+  # with lambda=1 and beta_anc=0 (M is the raw fresh anchor gradient, no EMA
+  # history), so ON the fire tick G_corr = G_anchor exactly: the anchor's dense
+  # gradient (computed at the RELEX-projected weights on the SAME batch as the
+  # fast gradient) replaces the compressed one outright. signed_ema_alpha is
+  # UNREAD in this mode.
+  #
+  # ARM H (delayedef-fresh): arm G with spectral.cadence 1 -> 20 locked to the
+  # anchor cadence, the same one-number change freshm made to arm A. The held
+  # delta is then never re-applied stale: every 20th tick the gradient IS the
+  # anchor gradient, all other ticks are pure G_comp.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE MERGER SWAP. beta_anc=0 is part of it: delayed_ef consumes M as "the
+  # latest fire's raw dense anchor gradient", and any EMA history in M would
+  # smear older fires into the residual.
+  export COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-delayed_ef}"
+  export COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
+  export COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"
+  if [[ "$ARM" == "delayedef-fresh" ]]; then
+    # THE ONE DELTA against arm G, identical in mechanism to freshm vs arm A.
+    export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
+    export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-$COMM_EFF_ANCHOR_CADENCE}"
+    if [[ "$COMM_EFF_SPECTRAL_CADENCE" != "$COMM_EFF_ANCHOR_CADENCE" ]]; then
+      echo "FATAL: delayedef-fresh requires spectral cadence == anchor cadence, got" >&2
+      echo "       COMM_EFF_SPECTRAL_CADENCE=$COMM_EFF_SPECTRAL_CADENCE vs" >&2
+      echo "       COMM_EFF_ANCHOR_CADENCE=$COMM_EFF_ANCHOR_CADENCE. Unequal cadences put" >&2
+      echo "       the residual back on ticks where delta is stale, which is arm G." >&2
+      exit 1
+    fi
+  else
+    # Arm G must keep the base launcher's spectral.cadence=1: the stale-reuse
+    # dose IS the experiment. A different cadence smuggled in via env would
+    # silently run a third experiment under arm G's name.
+    if [[ "${COMM_EFF_SPECTRAL_CADENCE:-1}" != "1" ]]; then
+      echo "FATAL: delayedef requires spectral.cadence=1 (stale delta re-applied every tick," >&2
+      echo "       the arm-A analog). For fire-tick-only application run 'delayedef-fresh'." >&2
+      exit 1
+    fi
+  fi
+  if [[ "$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" == "0.0" || "$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" == "0" ]]; then
+    echo "FATAL: delayed_ef at lambda=0 is a bitwise identity, i.e. the 'nosign' experiment" >&2
+    echo "       under a delayedef name. Run that arm instead." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: delayedef arms require COMM_EFF_SPECTRAL_ENABLED=true. spectral.enabled=false" >&2
+    echo "       is rejected by the validator under rank1_relex and deletes the anchor circuit." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: delayedef arms require COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    exit 1
+  fi
 else
   export COMM_EFF_ENABLED=false
 fi
@@ -697,6 +773,10 @@ elif [[ "$ARM" == "powersgdq" ]]; then
   CODEC_LINE="powersgd rank=$COMM_EFF_POWERSGD_RANK ($(python3 -c "print(f'{100.0*$COMM_EFF_POWERSGD_RANK/2560:.1f}')")% of hidden 2560, matches the PRF arms' 128 coords/token) anchor_owns_q=$COMM_EFF_ANCHOR_OWNS_Q fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS pp=$COMM_EFF_POWERSGD_PP_SIZE + spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (Q via block power iteration on the ANCHOR only; fresh-M merger; no opt-state swap)"
 elif [[ "$ARM" == "nosign" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (merger IDENTITY, anchor/RELEX/M unchanged, no opt-state swap)"
+elif [[ "$ARM" == "delayedef" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = G_comp + lambda*(M - G_comp@fire); STALE delta re-applied every tick between fires; no opt-state swap)"
+elif [[ "$ARM" == "delayedef-fresh" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (delta applied on FIRE TICKS ONLY, so every 20th tick G_corr = G_anchor exactly; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else

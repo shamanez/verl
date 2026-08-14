@@ -235,6 +235,8 @@ actor_rollout_ref:
         max_targets: -1
         ema_device: cpu
         signed_ema_alpha: 0.25
+        correction_mode: signed_ema
+        delayed_ef_lambda: 1.0
       powersgd:
         _target_: verl.workers.config.CommEffPowerSGDConfig
         enabled: true

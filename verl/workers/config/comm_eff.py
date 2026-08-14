@@ -337,6 +337,14 @@ class CommEffSpectralConfig(BaseConfig):
     max_targets: int = -1
     ema_device: str = "cpu"
     signed_ema_alpha: float = 0.25
+    # Merger dispatch. "signed_ema" is the historical default
+    # (G_corr = alpha*G + (1-alpha)*|G|*sign(M)); "delayed_ef" is the additive
+    # anchor-residual merger (delta = M - G_comp refreshed once per anchor fire,
+    # G_corr = G_comp + lambda*delta, held delta re-applied between fires).
+    # Under delayed_ef, signed_ema_alpha is unread; under signed_ema,
+    # delayed_ef_lambda is unread.
+    correction_mode: str = "signed_ema"
+    delayed_ef_lambda: float = 1.0
 
 
 @dataclass
@@ -687,9 +695,7 @@ class CommEffConfig(BaseConfig):
         if isinstance(opt_reset.cadence, bool) or not isinstance(opt_reset.cadence, int) or opt_reset.cadence < 1:
             raise ValueError(f"comm_eff.anchor.opt_reset.cadence must be an integer >= 1; got {opt_reset.cadence!r}")
         if opt_reset.mode not in OPT_RESET_MODES:
-            raise ValueError(
-                f"comm_eff.anchor.opt_reset.mode must be one of {OPT_RESET_MODES}; got {opt_reset.mode!r}"
-            )
+            raise ValueError(f"comm_eff.anchor.opt_reset.mode must be one of {OPT_RESET_MODES}; got {opt_reset.mode!r}")
         for name in ("beta1", "beta2"):
             value = getattr(opt_reset, name)
             if not 0.0 < float(value) < 1.0:
@@ -719,6 +725,13 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 f"comm_eff.spectral.signed_ema_alpha must be in [0, 1]; got {self.spectral.signed_ema_alpha}"
             )
+        if self.spectral.correction_mode not in ("signed_ema", "delayed_ef"):
+            raise ValueError(
+                "comm_eff.spectral.correction_mode must be one of (signed_ema, delayed_ef); "
+                f"got {self.spectral.correction_mode!r}"
+            )
+        if not float(self.spectral.delayed_ef_lambda) >= 0.0:
+            raise ValueError(f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}")
 
     def _validate_powersgd(self) -> None:
         for name in (

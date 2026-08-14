@@ -135,6 +135,52 @@ grep -m1 "\[comm_eff\]\[signed_ema\] enabled" /workspace/runs/qwen3-4b-4k-nosign
 
 That line reports `alpha=1.0 ... identity=true`.
 
+## Runs G and H: the delayed_ef merger, on the same two-cadence axis
+
+`run_qwen3_4b_4k_500_fsdp.sh delayedef` (`qwen3-4b-4k-delayedef-500`) is run A
+with ONLY the merger swapped, signed_ema to delayed_ef:
+
+    delta      = M - G_comp          refreshed once per anchor fire
+    G_corr(t)  = G_comp(t) + lambda * delta
+
+with `lambda=1.0` and `beta_anc=0.0` (part of the swap: M must be the latest
+fire's raw dense anchor gradient, not an EMA of older fires). The codec, the
+anchor cadence/delay 20/20, the rank-1 RELEX projection at strength 1, and
+`spectral.cadence=1` are all run A's values, so the held `delta` is re-applied
+STALE on every one of the 19 ticks between fires, the exact analog of run A's
+stale-M reuse. On the fire tick itself the algebra collapses:
+`G_corr = G_comp + (M - G_comp) = G_anchor`, the anchor's dense gradient
+computed at the RELEX-projected weights on the same batch.
+
+`run_qwen3_4b_4k_500_fsdp.sh delayedef-fresh` (`qwen3-4b-4k-delayedef-fresh-500`)
+is run G with the freshm one-number change, `spectral.cadence` 1 to 20 locked to
+the anchor cadence. The residual is then never re-applied stale: every 20th tick
+the gradient IS the anchor gradient, every other tick is the untouched
+compressed gradient.
+
+The pair asks of the ADDITIVE merger family exactly what runs A and D asked of
+the sign-replacement family: does the stale reuse between fires cause the
+collapse, or does the merger formula itself? Two cautions carried over from the
+pre-fork record (the mergers were pruned from this lineage on 2026-07-15 and
+recovered by archaeology). First, delayed_ef historically ran against a
+RING-paired compressed gradient at a truly visited stale point, scoring 96
+percent of dense at 1.5B, while this port pairs against the CURRENT tick's
+compressed gradient at the RELEX-projected point (same batch, no ring), which is
+the only pairing the projected anchor admits. Second, no historical run ever
+combined delayed_ef with RELEX, so these two arms are also the first clean test
+of that combination.
+
+Confirm either arm took:
+
+```bash
+grep -m1 "\[comm_eff\]\[delayed_ef\] enabled" /workspace/runs/qwen3-4b-4k-delayedef-500/train.log
+```
+
+That line reports the resolved `lambda`, `beta_anc`, `cadence` and
+`identity=false`. In WandB, `comm_eff/delayed_ef_refreshed` must factor as
+398 x anchor fires for both arms; `comm_eff/delayed_ef_held` grows by
+398 x 19 per fire interval on run G and stays 0 on run H.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits

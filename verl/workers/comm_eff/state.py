@@ -179,10 +179,15 @@ class CommEffState:
         object.__setattr__(self, "_powersgd_q_agreement_checked", False)
         object.__setattr__(self, "_powersgd_q_agreement_dev", None)
 
-        # Dense-anchor and signed-EMA counters.
+        # Dense-anchor and merger counters.
         self.anchor_backwards = 0
         self.spectral_corrections = 0
         self.merger_coldM_fallbacks = 0
+        # delayed_ef merger counters (0 forever under signed_ema): refreshed
+        # factors as n_targets x anchor_fires, held as n_targets x (correction
+        # ticks between fires whose delta was re-applied stale).
+        self.delayed_ef_refreshed = 0
+        self.delayed_ef_held = 0
         self.anchor_grad_corrected = 0
         self.anchor_rollouts_generated = 0
         self.anchor_rewards_recomputed = 0
@@ -345,33 +350,48 @@ class CommEffState:
             from verl.workers.comm_eff.spectral_filter import SpectralFilter
 
             cfg = _spectral_cfg
+            _correction_mode = str(getattr(cfg, "correction_mode", "signed_ema"))
+            _delayed_ef_lambda = float(getattr(cfg, "delayed_ef_lambda", 1.0))
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
                 ema_device=str(cfg.ema_device),
                 signed_ema_alpha=float(cfg.signed_ema_alpha),
+                correction_mode=_correction_mode,
+                delayed_ef_lambda=_delayed_ef_lambda,
                 diagnostics=bool(cfg.diagnostics),
             )
             logger.info(
-                "comm_eff: signed EMA beta_anc=%s alpha=%s ema_device=%s target_scope=%s",
+                "comm_eff: merger mode=%s beta_anc=%s alpha=%s lambda=%s ema_device=%s target_scope=%s",
+                _correction_mode,
                 cfg.beta_anc,
                 cfg.signed_ema_alpha,
+                _delayed_ef_lambda,
                 cfg.ema_device,
                 cfg.target_scope,
             )
-            # Single resolved line for launch money-gates to grep, matching the
-            # opt_reset marker below. logger.info does NOT reach the vast
-            # launcher's log, and at alpha=1.0 the merger
-            #     G_corr = alpha*G + (1-alpha)*|G|*sign(M)
-            # returns G bit-for-bit, so `identity=true` is the ONE observable
-            # fact separating a merger-off arm from the signed-EMA default.
-            # Without a print there is nothing in the log to confirm it took.
-            print(
-                f"[comm_eff][signed_ema] enabled alpha={float(cfg.signed_ema_alpha)} "
-                f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
-                f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
-                f"identity={'true' if float(cfg.signed_ema_alpha) >= 1.0 else 'false'}",
-                flush=True,
-            )
+            # Single resolved line per mode for launch money-gates to grep,
+            # matching the opt_reset marker below. logger.info does NOT reach
+            # the vast launcher's log, and each mode has exactly one knob value
+            # that silently turns it into an identity (signed_ema alpha=1.0,
+            # delayed_ef lambda=0.0), so `identity=` is the ONE observable fact
+            # separating a merger-off arm from the merger default. Without a
+            # print there is nothing in the log to confirm the knobs took.
+            if _correction_mode == "delayed_ef":
+                print(
+                    f"[comm_eff][delayed_ef] enabled lambda={_delayed_ef_lambda} "
+                    f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
+                    f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
+                    f"identity={'true' if _delayed_ef_lambda == 0.0 else 'false'}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[comm_eff][signed_ema] enabled alpha={float(cfg.signed_ema_alpha)} "
+                    f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
+                    f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
+                    f"identity={'true' if float(cfg.signed_ema_alpha) >= 1.0 else 'false'}",
+                    flush=True,
+                )
 
         _opt_reset_cfg = getattr(getattr(self.config, "anchor", None), "opt_reset", None)
         if _opt_reset_cfg is not None and bool(getattr(_opt_reset_cfg, "enabled", False)):
@@ -459,6 +479,13 @@ class CommEffState:
         self.rank1_zero_motion_tensors = 0
         if self.spectral is not None:
             self.spectral._anchor.clear()
+            self.spectral._delayed_ef_delta.clear()
+            self.spectral._m_version.clear()
+            self.spectral._delta_m_version.clear()
+            self.spectral.delayed_ef_refreshed = 0
+            self.spectral.delayed_ef_held = 0
+        self.delayed_ef_refreshed = 0
+        self.delayed_ef_held = 0
 
     def set_path_tag(self, tag: Optional[str]) -> None:
         if tag is not None and tag not in PATH_TAGS:
@@ -635,6 +662,8 @@ class CommEffState:
             "comm_eff/anchor_q_activations": self.anchor_q_activations,
             "comm_eff/anchor_q_stage_overwrites": self.anchor_q_stage_overwrites,
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
+            "comm_eff/delayed_ef_refreshed": self.delayed_ef_refreshed,
+            "comm_eff/delayed_ef_held": self.delayed_ef_held,
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
             "comm_eff/opt_reset_count": self.opt_reset_count,
             "comm_eff/opt_reset_rho": self.opt_reset_last_rho,
