@@ -9,6 +9,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh optreset  # arm C (arm A + anchor-sourced optimizer reset)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh freshm    # arm D (arm A, sign correction ONLY on fire ticks)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh nosign    # arm E (arm A with the signed-EMA merger OFF)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh powersgdq # arm F (arm D, codec swapped to PowerSGD w/ anchor-owned Q)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -25,6 +26,7 @@
 #   codec (arm B)        COMM_EFF_ENABLED=false               (the engine's dense path)
 #   codec (arm D)        arm A, spectral.cadence 1 -> 20       (fresh M only, no stale reuse)
 #   codec (arm E)        arm A, signed_ema_alpha 0.25 -> 1.0   (merger becomes identity)
+#   codec (arm F)        arm D, prf_mask -> powersgd r=128      (anchor-owned Q, same 5.0% wire)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -45,11 +47,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign) ;;
+  commeff|dense|freshm|nosign|powersgdq) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -490,6 +492,66 @@ elif [[ "$ARM" == "freshm" ]]; then
     echo "       Run the 'optreset' arm if that is what is wanted." >&2
     exit 1
   fi
+elif [[ "$ARM" == "powersgdq" ]]; then
+  # ARM F: arm D's circuit with the CODEC swapped from the PRF mask back to
+  # PowerSGD with an anchor-owned basis Q. The fresh-M merger stays exactly as
+  # arm D has it (spectral.cadence == anchor.cadence), so the only change from
+  # the freshm run is how the boundary activations are compressed.
+  #
+  # How Q moves, and why this is the "normal" PowerSGD arrangement:
+  #   sketch   V += M^T (M Q)      accumulated under no_grad on the anchor's
+  #                                stale-weight forward (NOT the fast path)
+  #   update   Q <- orth(V)        fp32 QR, then staged and broadcast to every
+  #                                DP rank, published after the PPO minibatches
+  # That is block power iteration on the activation Gram matrix M^T M, whose
+  # fixed point is the top-r right singular subspace. With owns_q=true the fast
+  # path is a READ-ONLY consumer: its sketch accumulation and its end-of-step
+  # orth(V) are both gated off, so Q advances ONLY when the anchor fires. The
+  # basis therefore rides the slow circuit, which is the whole point when the
+  # stage boundary crosses the open internet.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-true}"          # the anchor is the ONLY Q writer
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-true}"
+  export COMM_EFF_POWERSGD_SYNC_BASIS="${COMM_EFF_POWERSGD_SYNC_BASIS:-true}"
+  export COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE="${COMM_EFF_POWERSGD_COMPRESS_RECOMPUTE:-true}"
+  export COMM_EFF_POWERSGD_COMPRESS_REFERENCE="${COMM_EFF_POWERSGD_COMPRESS_REFERENCE:-true}"
+  export COMM_EFF_POWERSGD_WARM_START="${COMM_EFF_POWERSGD_WARM_START:-true}"
+  export COMM_EFF_POWERSGD_QR_DTYPE="${COMM_EFF_POWERSGD_QR_DTYPE:-fp32}"
+  export COMM_EFF_POWERSGD_PP_SIZE="${COMM_EFF_POWERSGD_PP_SIZE:-8}"
+  # RANK = 128, NOT the 77 that is this project's default. 77 was chosen at the
+  # 1.5B model's hidden 1536, where it is 5.0 percent of the wire. Qwen3-4B has
+  # hidden 2560, and both codecs report their cost in the SAME unit, coordinates
+  # per token per boundary:
+  #     PRF exact-k : (1 - p) * H = 0.05 * 2560 = 128   (logical_pp_bytes_prf)
+  #     PowerSGD    : r                                  (logical_pp_bytes_powersgd_y_only)
+  # so r=128 keeps the freshm run's exact budget and r=77 would silently tighten
+  # it to 3.0 percent, confounding the codec change with a bandwidth change.
+  # Set COMM_EFF_POWERSGD_RANK=77 to run the project-default rank instead.
+  export COMM_EFF_POWERSGD_RANK="${COMM_EFF_POWERSGD_RANK:-128}"
+  # THE FRESH-M MERGER, IDENTICAL TO ARM D. Derived from the anchor cadence for
+  # the same reason: unequal cadences put corrections back on stale-M ticks.
+  export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
+  export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-$COMM_EFF_ANCHOR_CADENCE}"
+  if [[ "$COMM_EFF_SPECTRAL_CADENCE" != "$COMM_EFF_ANCHOR_CADENCE" ]]; then
+    echo "FATAL: powersgdq inherits freshm's merger: spectral cadence must equal anchor cadence," >&2
+    echo "       got $COMM_EFF_SPECTRAL_CADENCE vs $COMM_EFF_ANCHOR_CADENCE." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}" == "1.0" ]]; then
+    echo "FATAL: powersgdq keeps signed_ema_alpha at its arm-A value; 1.0 disables the merger." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_ANCHOR_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: powersgdq requires COMM_EFF_ANCHOR_ENABLED=true: with owns_q the anchor is the" >&2
+    echo "       only thing that ever updates Q, so a disabled anchor freezes the basis at its" >&2
+    echo "       random seeded bootstrap for the whole run." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: powersgdq requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    exit 1
+  fi
 elif [[ "$ARM" == "nosign" ]]; then
   # ARM E: the commeff codec block VERBATIM (kept a separate branch so arm A
   # stays byte-identical to its reference launchers), plus the one number that
@@ -631,6 +693,8 @@ if [[ "$ARM" == "commeff" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE"
 elif [[ "$ARM" == "freshm" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE, alpha=${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25} (sign correction on FIRE TICKS ONLY, stale M never reused, no opt-state swap)"
+elif [[ "$ARM" == "powersgdq" ]]; then
+  CODEC_LINE="powersgd rank=$COMM_EFF_POWERSGD_RANK ($(python3 -c "print(f'{100.0*$COMM_EFF_POWERSGD_RANK/2560:.1f}')")% of hidden 2560, matches the PRF arms' 128 coords/token) anchor_owns_q=$COMM_EFF_ANCHOR_OWNS_Q fast_q_bootstrap=$COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP sync_basis=$COMM_EFF_POWERSGD_SYNC_BASIS pp=$COMM_EFF_POWERSGD_PP_SIZE + spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (Q via block power iteration on the ANCHOR only; fresh-M merger; no opt-state swap)"
 elif [[ "$ARM" == "nosign" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + signed_ema_alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA (merger IDENTITY, anchor/RELEX/M unchanged, no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
