@@ -758,8 +758,13 @@ elif [[ "$ARM" == "blend" ]]; then
     echo "FATAL: blend requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
     exit 1
   fi
-else
+elif [[ "$ARM" == "dense" ]]; then
+  # ARM B: the control. The literal quoted arm name matters here: the chain
+  # script's arm-exists gate greps the launcher for "dense" before launching.
   export COMM_EFF_ENABLED=false
+else
+  echo "FATAL: arm '$ARM' passed the case list but has no config block." >&2
+  exit 1
 fi
 
 # The anchor DELAY models the latency of the slow dense path, which the network
