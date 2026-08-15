@@ -95,6 +95,7 @@ class SpectralFilter:
         signed_ema_alpha: float = 0.25,
         correction_mode: str = "signed_ema",
         delayed_ef_lambda: float = 1.0,
+        delayed_ef_decay: float = 1.0,
         blend_eta: float = 0.5,
         diagnostics: bool = False,
     ):
@@ -108,6 +109,8 @@ class SpectralFilter:
             raise ValueError(f"correction_mode must be one of {SPECTRAL_CORRECTION_MODES}; got {correction_mode!r}")
         if not float(delayed_ef_lambda) >= 0.0:
             raise ValueError(f"delayed_ef_lambda must be >= 0; got {delayed_ef_lambda}")
+        if not 0.0 <= float(delayed_ef_decay) <= 1.0:
+            raise ValueError(f"delayed_ef_decay must be in [0, 1]; got {delayed_ef_decay}")
         if not 0.0 <= float(blend_eta) <= 1.0:
             raise ValueError(f"blend_eta must be in [0, 1]; got {blend_eta}")
 
@@ -116,6 +119,7 @@ class SpectralFilter:
         self.signed_ema_alpha = float(signed_ema_alpha)
         self.correction_mode = str(correction_mode)
         self.delayed_ef_lambda = float(delayed_ef_lambda)
+        self.delayed_ef_decay = float(delayed_ef_decay)
         self.blend_eta = float(blend_eta)
         self.diagnostics = bool(diagnostics)
         self.merger_coldM_fallbacks = 0
@@ -129,6 +133,11 @@ class SpectralFilter:
         self._delayed_ef_delta: dict[str, torch.Tensor] = {}
         self._m_version: dict[str, int] = {}
         self._delta_m_version: dict[str, int] = {}
+        # Age of the held delta in correction ticks since its refresh (0 on the
+        # fire tick). Drives the annealed weight lambda * decay**age; at
+        # decay=1.0 the weight is constant and the arm-G behavior is bitwise
+        # unchanged.
+        self._delta_age: dict[str, int] = {}
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
 
@@ -185,13 +194,17 @@ class SpectralFilter:
         return corrected.to(g_comp.dtype)
 
     def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
-        """Additive anchor residual: ``G_corr = G_comp + lambda * delta``.
+        """Additive anchor residual: ``G_corr = G_comp + lambda * decay**age * delta``.
 
         On the first correction after an anchor fire (the fire tick itself,
         given the engine ordering), ``delta = M - G_comp`` is rebuilt from the
-        freshly refreshed ``M`` and persisted on the EMA-storage device; between
-        fires the held ``delta`` is re-applied unchanged. At ``lambda=1`` and
-        ``beta_anc=0`` the fire tick returns exactly the anchor gradient.
+        freshly refreshed ``M`` at ``age=0`` and persisted on the EMA-storage
+        device; between fires the held ``delta`` is re-applied with its weight
+        ANNEALED by ``decay**age``, where ``age`` counts correction ticks since
+        the refresh. At ``lambda=1`` and ``beta_anc=0`` the fire tick returns
+        exactly the anchor gradient regardless of ``decay``. ``decay=1.0`` is
+        the constant-weight arm-G behavior bitwise; ``decay=0.0`` zeroes every
+        held re-application, i.e. the arm-H fire-only dose at any cadence.
 
         Guards (never a silent grad change): ``lambda=0`` returns ``g_comp``
         bitwise; an unwarmed or shape-mismatched ``M`` returns ``g_comp`` and
@@ -211,10 +224,12 @@ class SpectralFilter:
             held = None
             self._delayed_ef_delta.pop(name, None)
             self._delta_m_version.pop(name, None)
+            self._delta_age.pop(name, None)
         if torch.linalg.norm(anchor) <= 1e-12 or tuple(anchor.shape) != tuple(grad.shape):
             self.merger_coldM_fallbacks += 1
             self._delayed_ef_delta.pop(name, None)
             self._delta_m_version.pop(name, None)
+            self._delta_age.pop(name, None)
             return g_comp
 
         m_version = self._m_version.get(name, 0)
@@ -226,17 +241,26 @@ class SpectralFilter:
                 stored = stored.pin_memory()
             self._delayed_ef_delta[name] = stored
             self._delta_m_version[name] = m_version
+            self._delta_age[name] = 0
             self.delayed_ef_refreshed += 1
+            weight = lam
         elif held is not None:
-            delta = held.to(g_comp.device, torch.float32)
+            age = self._delta_age.get(name, 0) + 1
+            self._delta_age[name] = age
             self.delayed_ef_held += 1
+            weight = lam * self.delayed_ef_decay**age
+            if weight == 0.0:
+                # decay=0: the held application is annealed to nothing. Skip
+                # the fp32 round trip rather than add an exact zero.
+                return g_comp
+            delta = held.to(g_comp.device, torch.float32)
         else:
             # M is warm but no fire has been seen since the last reset: never
             # invent a residual.
             self.merger_coldM_fallbacks += 1
             return g_comp
 
-        corrected = grad + lam * delta
+        corrected = grad + weight * delta
         return corrected.to(g_comp.dtype)
 
     def blend_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:

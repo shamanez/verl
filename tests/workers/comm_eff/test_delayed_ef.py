@@ -124,6 +124,83 @@ def test_cad10_schedule_one_stale_application_per_interval():
     assert f.merger_coldM_fallbacks == 1
 
 
+def test_anneal_weight_decays_geometrically_with_age():
+    # Arm K: G_corr = G_comp + lambda * decay^age * delta, age = held ticks
+    # since the refresh (0 on the fire tick, which is therefore unaffected).
+    f = make_filter(delayed_ef_lambda=1.0, delayed_ef_decay=0.75)
+    a, g0 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a)
+    out0 = f.delayed_ef_matrix("w", g0)  # fire tick, age 0
+    assert torch.allclose(out0, a, atol=1e-6)  # decay does not touch the fire tick
+    delta = a - g0
+    g1 = torch.randn(4, 6)
+    assert torch.allclose(f.delayed_ef_matrix("w", g1), g1 + 0.75 * delta, atol=1e-6)
+    g2 = torch.randn(4, 6)
+    assert torch.allclose(f.delayed_ef_matrix("w", g2), g2 + 0.75**2 * delta, atol=1e-6)
+    g3 = torch.randn(4, 6)
+    assert torch.allclose(f.delayed_ef_matrix("w", g3), g3 + 0.75**3 * delta, atol=1e-6)
+    assert f.delayed_ef_refreshed == 1 and f.delayed_ef_held == 3
+
+
+def test_anneal_age_resets_on_refresh():
+    f = make_filter(delayed_ef_decay=0.5)
+    a1, g1 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a1)
+    f.delayed_ef_matrix("w", g1)
+    f.delayed_ef_matrix("w", torch.randn(4, 6))  # age 1
+    f.delayed_ef_matrix("w", torch.randn(4, 6))  # age 2
+    a2, g2 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a2)  # second fire
+    assert torch.allclose(f.delayed_ef_matrix("w", g2), a2, atol=1e-6)  # age back to 0
+    gh = torch.randn(4, 6)  # first held after refresh: weight decay^1 again
+    assert torch.allclose(f.delayed_ef_matrix("w", gh), gh + 0.5 * (a2 - g2), atol=1e-6)
+
+
+def test_anneal_decay_one_is_the_constant_weight_behavior():
+    # decay=1.0 must be bitwise the arm-G semantics: identical held weight
+    # forever. Drive both filters with identical inputs and compare exactly.
+    torch.manual_seed(7)
+    a, g0, g1, g2 = (torch.randn(4, 6) for _ in range(4))
+    f_old = make_filter(delayed_ef_lambda=0.5)  # default decay 1.0
+    f_new = make_filter(delayed_ef_lambda=0.5, delayed_ef_decay=1.0)
+    for f in (f_old, f_new):
+        f.update_anchor("w", a)
+    for g in (g0, g1, g2):
+        assert torch.equal(f_old.delayed_ef_matrix("w", g), f_new.delayed_ef_matrix("w", g))
+
+
+def test_anneal_decay_zero_is_fire_only_dose():
+    # decay=0.0 anneals every held application to nothing: between fires the
+    # gradient passes through untouched (arm-H dose on the arm-G schedule).
+    f = make_filter(delayed_ef_decay=0.0)
+    a, g0 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a)
+    assert torch.allclose(f.delayed_ef_matrix("w", g0), a, atol=1e-6)  # fire unaffected
+    g1 = torch.randn(4, 6)
+    out1 = f.delayed_ef_matrix("w", g1)
+    assert out1 is g1  # zero weight skips the fp32 round trip entirely
+    assert f.delayed_ef_held == 1  # the held tick still counts
+
+
+def test_constructor_and_validator_reject_bad_decay():
+    with pytest.raises(ValueError):
+        make_filter(delayed_ef_decay=1.5)
+    with pytest.raises(ValueError):
+        make_filter(delayed_ef_decay=-0.1)
+    from verl.workers.config.comm_eff import CommEffConfig, CommEffSpectralConfig
+
+    cfg = CommEffConfig(
+        enabled=True,
+        spectral=CommEffSpectralConfig(correction_mode="delayed_ef", delayed_ef_decay=0.75),
+    )
+    assert cfg.spectral.delayed_ef_decay == 0.75
+    with pytest.raises(ValueError, match="delayed_ef_decay"):
+        CommEffConfig(
+            enabled=True,
+            spectral=CommEffSpectralConfig(correction_mode="delayed_ef", delayed_ef_decay=2.0),
+        )
+
+
 def test_beta_anc_ema_enters_the_residual():
     # With beta_anc > 0, M after the second fire is an EMA, and the fire-tick
     # correction at lambda=1 returns M (not the raw second anchor grad).

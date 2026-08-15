@@ -255,6 +255,52 @@ The line must report `lambda=1.0 beta_anc=0.0 cadence=10`. Runtime fingerprint:
 grad_norm ~1.4x their neighbors because the held delta's norm is dominated by
 the anti-correlated fire-tick compressed noise. Expected, not a fault.
 
+## Run K: the annealed residual, arm G's schedule with a dying dose
+
+`run_qwen3_4b_4k_500_fsdp.sh delayedef-anneal` (`qwen3-4b-4k-delayedef-anneal-500`)
+is run G with ONE new number, `delayed_ef_decay` 1.0 -> 0.75:
+
+    G_corr(t) = G_comp(t) + lambda * decay^age * delta
+
+with age = correction ticks since the delta's refresh (0 on the fire tick, so
+every 20th tick still returns `G_anchor` exactly). The held delta is re-applied
+on every tick between fires, as in run G, but its weight anneals geometrically:
+0.75, 0.56, 0.42, ... The interval impulse is Sum decay^a ~ 4 units (1 fresh +
+~3 decaying stale, concentrated at ages 1-4 where the delta is most valid)
+against run G's 20 undecayed units.
+
+Why this is the flagship gap-closer. The accepted plateau diagnosis is per-tick
+SNR starvation on the 19 pure-compressed ticks, and the accepted collapse cause
+is directional persistence: a FIXED direction re-injected against a moving
+policy. Annealing attacks both at once: it puts dense-direction information
+into the ticks right after each fire (where run G earned its +5.8pt val@100
+lead over run H) while killing the standing direction geometrically (the
+period-locked forcing that pumped run G's Mode C oscillator drops by an order
+of magnitude). The decay endpoints are identities of existing arms: 1.0 is run
+G bitwise (collapsed), 0.0 is run H's fire-only dose (best stable arm), so
+d=0.75 is a true interior point of a one-parameter family whose both endpoints
+are measured. External support: arXiv 2602.01826 shows constant-LR Qwen3-4B
+collapses ~300 steps under the sampler/trainer mismatch and annealing the
+update stabilizes it, with mismatch growing as length squared; this arm is the
+transposition of that annealing from the LR to the correction path, which is
+the only surface our frozen protocol lets us shape.
+
+Collapse risk: Mode C is the family risk. The wave-pump argument for safety is
+quantitative, not rhetorical: run G's oscillator needed ~200 steps of 19
+same-vector injections per interval to build wave 1; this arm's injected
+direction is redrawn every interval and its within-interval impulse is ~6x
+smaller. Abort on the standing detectors either way.
+
+Confirm it took:
+
+```bash
+grep -m1 "\[comm_eff\]\[delayed_ef\] enabled" /workspace/runs/qwen3-4b-4k-delayedef-anneal-500/train.log
+```
+
+The line must report `lambda=1.0 decay=0.75 beta_anc=0.0 cadence=1`. Runtime
+fingerprint: held:refreshed ~ 19:1 (the arm-G schedule), but with grad_norm on
+late-interval ticks converging to the pure-compressed band as the weight dies.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits

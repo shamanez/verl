@@ -14,6 +14,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-fresh # arm H (arm G, delta applied on fire ticks ONLY)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh blend           # arm I (arm G, merger swapped to the convex value blend, eta=0.3)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-cad10 # arm J (arm H, spectral.cadence 20 -> 10: ONE stale delta per interval)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-anneal # arm K (arm G + decay=0.75: held delta ANNEALED by decay^age each tick)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -35,6 +36,7 @@
 #   codec (arm H)        arm G, spectral.cadence 1 -> 20        (delta applied on fire ticks only)
 #   codec (arm I)        arm A, merger signed_ema -> blend      (eta=0.3, beta_anc=0; convex, no held residual)
 #   codec (arm J)        arm H, spectral.cadence 20 -> 10       (interior stale-dose point: held delta re-applied ONCE per interval)
+#   codec (arm K)        arm G, delayed_ef_decay 1.0 -> 0.75    (held delta annealed: weight lambda*decay^age, interval impulse ~4 vs arm G's 20)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -55,11 +57,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|blend) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|blend)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -592,7 +594,7 @@ elif [[ "$ARM" == "nosign" ]]; then
     echo "       Run the 'optreset' arm if that is what is wanted." >&2
     exit 1
   fi
-elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delayedef-cad10" ]]; then
+elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delayedef-cad10" || "$ARM" == "delayedef-anneal" ]]; then
   # ARM G (delayedef): the commeff codec block VERBATIM (kept a separate branch
   # so arm A stays byte-identical to its reference launchers), with the MERGER
   # swapped from signed_ema to delayed_ef. Everything else in arm A is untouched:
@@ -627,6 +629,21 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delay
   # anti-correlated tick-20 compressed noise; expected, not a fault).
   # The anchor circuit itself is NOT a knob on this surface: cadence and delay
   # model the slow network path (CLAUDE.md), so both are pinned to 20 below.
+  #
+  # ARM K (delayedef-anneal): arm G with ONE new number, delayed_ef_decay
+  # 1.0 -> 0.75. The held delta is re-applied on every tick between fires (the
+  # arm-G schedule, spectral.cadence=1) but its weight ANNEALS geometrically:
+  #     G_corr(t) = G_comp(t) + lambda * decay^age * delta
+  # with age = ticks since the fire (0 on the fire tick, so the fire tick still
+  # returns G_anchor exactly). Interval impulse Sum decay^a ~ 4 units (1 fresh
+  # + ~3 decaying stale, concentrated at ages 1-4 where delta is most valid)
+  # against arm G's 20 undecayed units. Under the directional-persistence
+  # reading of the collapses this kills the standing direction geometrically
+  # instead of letting it stand 19 ticks; it is the direct attempt to buy arm
+  # G's early speed (+5.8pt val@100 over arm H) without arm G's death. The
+  # decay endpoints are identities of existing arms (1.0 = arm G bitwise,
+  # 0.0 = arm H's fire-only dose), so d=0.75 is a true interior point of the
+  # same one-parameter family.
   export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
   export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
   export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
@@ -675,6 +692,25 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delay
       echo "       got $COMM_EFF_ANCHOR_DELAY_K." >&2
       exit 1
     fi
+  elif [[ "$ARM" == "delayedef-anneal" ]]; then
+    # THE ONE DELTA against arm G: decay 1.0 -> 0.75, on arm G's every-tick
+    # correction schedule. The decay value is the experiment; 1.0 and 0.0 are
+    # identities of arms G and H respectively, and any other value is a
+    # different interior point. Pin it like cad10 pins its cadence pair.
+    export COMM_EFF_SPECTRAL_DELAYED_EF_DECAY="${COMM_EFF_SPECTRAL_DELAYED_EF_DECAY:-0.75}"
+    if [[ "$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY" != "0.75" ]]; then
+      echo "FATAL: delayedef-anneal is the fixed interior point delayed_ef_decay=0.75" >&2
+      echo "       (decay=1.0 is arm G bitwise, decay=0.0 is arm H's fire-only dose)." >&2
+      echo "       Got $COMM_EFF_SPECTRAL_DELAYED_EF_DECAY. A different decay is a" >&2
+      echo "       different experiment; add a new arm for it." >&2
+      exit 1
+    fi
+    if [[ "${COMM_EFF_SPECTRAL_CADENCE:-1}" != "1" ]]; then
+      echo "FATAL: delayedef-anneal requires spectral.cadence=1 (annealing means the" >&2
+      echo "       held delta decays across EVERY tick between fires; a coarser cadence" >&2
+      echo "       is a different dose profile)." >&2
+      exit 1
+    fi
   else
     # Arm G must keep the base launcher's spectral.cadence=1: the stale-reuse
     # dose IS the experiment. A different cadence smuggled in via env would
@@ -688,6 +724,12 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delay
   if [[ "$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" == "0.0" || "$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" == "0" ]]; then
     echo "FATAL: delayed_ef at lambda=0 is a bitwise identity, i.e. the 'nosign' experiment" >&2
     echo "       under a delayedef name. Run that arm instead." >&2
+    exit 1
+  fi
+  if [[ "$ARM" != "delayedef-anneal" && "${COMM_EFF_SPECTRAL_DELAYED_EF_DECAY:-1.0}" != "1.0" ]]; then
+    echo "FATAL: arm '$ARM' requires delayed_ef_decay=1.0 (constant held weight). An" >&2
+    echo "       annealed residual under a non-anneal arm name is a mislabelled run;" >&2
+    echo "       run 'delayedef-anneal' instead. Got ${COMM_EFF_SPECTRAL_DELAYED_EF_DECAY}." >&2
     exit 1
   fi
   if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
@@ -892,6 +934,8 @@ elif [[ "$ARM" == "delayedef-fresh" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (delta applied on FIRE TICKS ONLY, so every 20th tick G_corr = G_anchor exactly; no opt-state swap)"
 elif [[ "$ARM" == "delayedef-cad10" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE anchor_cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=${COMM_EFF_ANCHOR_DELAY_K:-20} (INTERIOR DOSE: fresh delta on fire ticks, held delta re-applied ONCE at +10; held:refreshed must read 1:1; no opt-state swap)"
+elif [[ "$ARM" == "delayedef-anneal" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA decay=$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (ANNEALED DOSE: G_corr = G_comp + lambda*decay^age*delta, fire tick = G_anchor exactly, interval impulse ~4 vs arm G's 20; no opt-state swap)"
 elif [[ "$ARM" == "blend" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=blend eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, convex, no held residual, no sign transplant; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then

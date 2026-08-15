@@ -347,6 +347,13 @@ class CommEffSpectralConfig(BaseConfig):
     # reads only its own knob (alpha / lambda / eta); the other two are unread.
     correction_mode: str = "signed_ema"
     delayed_ef_lambda: float = 1.0
+    # Annealing of the held delayed_ef residual between anchor fires:
+    # G_corr = G_comp + lambda * decay**age * delta, where age counts
+    # correction ticks since the delta's refresh (0 on the fire tick, so the
+    # fire tick is unaffected by decay). 1.0 = constant weight (arm G
+    # behavior, bitwise); 0.0 = fire-only dose (arm H behavior at any
+    # cadence). Read only by correction_mode=delayed_ef.
+    delayed_ef_decay: float = 1.0
     blend_eta: float = 0.5
 
 
@@ -735,6 +742,10 @@ class CommEffConfig(BaseConfig):
             )
         if not float(self.spectral.delayed_ef_lambda) >= 0.0:
             raise ValueError(f"comm_eff.spectral.delayed_ef_lambda must be >= 0; got {self.spectral.delayed_ef_lambda}")
+        if not 0.0 <= float(self.spectral.delayed_ef_decay) <= 1.0:
+            raise ValueError(
+                f"comm_eff.spectral.delayed_ef_decay must be in [0, 1]; got {self.spectral.delayed_ef_decay}"
+            )
         if not 0.0 <= float(self.spectral.blend_eta) <= 1.0:
             raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
 

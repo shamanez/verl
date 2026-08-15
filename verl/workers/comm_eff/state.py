@@ -352,6 +352,7 @@ class CommEffState:
             cfg = _spectral_cfg
             _correction_mode = str(getattr(cfg, "correction_mode", "signed_ema"))
             _delayed_ef_lambda = float(getattr(cfg, "delayed_ef_lambda", 1.0))
+            _delayed_ef_decay = float(getattr(cfg, "delayed_ef_decay", 1.0))
             _blend_eta = float(getattr(cfg, "blend_eta", 0.5))
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
@@ -359,6 +360,7 @@ class CommEffState:
                 signed_ema_alpha=float(cfg.signed_ema_alpha),
                 correction_mode=_correction_mode,
                 delayed_ef_lambda=_delayed_ef_lambda,
+                delayed_ef_decay=_delayed_ef_decay,
                 blend_eta=_blend_eta,
                 diagnostics=bool(cfg.diagnostics),
             )
@@ -381,6 +383,7 @@ class CommEffState:
             if _correction_mode == "delayed_ef":
                 print(
                     f"[comm_eff][delayed_ef] enabled lambda={_delayed_ef_lambda} "
+                    f"decay={_delayed_ef_decay} "
                     f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
                     f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
                     f"identity={'true' if _delayed_ef_lambda == 0.0 else 'false'}",
@@ -492,6 +495,7 @@ class CommEffState:
             self.spectral._delayed_ef_delta.clear()
             self.spectral._m_version.clear()
             self.spectral._delta_m_version.clear()
+            self.spectral._delta_age.clear()
             self.spectral.delayed_ef_refreshed = 0
             self.spectral.delayed_ef_held = 0
         self.delayed_ef_refreshed = 0
