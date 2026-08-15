@@ -212,6 +212,49 @@ The line reports the resolved `eta`, `beta_anc`, `cadence` and `identity=false`.
 The delayed_ef counters stay 0 on this arm; `spectral_corrections` grows by 398
 per tick once RELEX warmup lifts.
 
+## Run J: the interior point of the stale-dose response curve
+
+`run_qwen3_4b_4k_500_fsdp.sh delayedef-cad10` (`qwen3-4b-4k-delayedef-cad10-500`)
+is run H with ONE knob moved: `spectral.cadence` 20 -> 10, under the same
+`anchor.cadence=20`, delay 20, lambda 1, `beta_anc=0`, codec and RELEX unchanged.
+Corrections then run on ticks 10, 20, 30, ...: even correction ticks coincide
+with anchor fires (delta refreshes, `G_corr = G_anchor` exactly, as in run H),
+odd ones re-apply the HELD delta exactly once, 10 ticks stale. Tick 10 is a
+cold-M no-op by construction.
+
+What it prices. The stale-dose response curve has two measured endpoints: run G
+applied the held delta 19 times per 20-tick interval and collapsed (Mode C,
+360-400), run H applied it 0 times and finished 500 clean at +7.02pt, the best
+compressed result. But the stale arms also learned FASTER before dying (run G
+led run H by 5.8pt at val@100), so the dose knob carries both the early speed
+and the death. Run J measures dose 1: one extra unit of 10-tick-stale dense
+gradient per interval, with the injected direction redrawn every interval
+instead of standing for 19 ticks. Under the directional-persistence reading of
+the collapses, one application per interval cuts the component coherent at the
+fire period by over an order of magnitude relative to run G.
+
+Honest prior: dose 1 may land inside the +-0.8pt single-seed noise floor
+against run H. A null result is still the datapoint that licenses (or kills)
+an age-decayed interior ladder as the follow-up.
+
+The anchor circuit is pinned, not defaulted: the arm FATALs on any
+`COMM_EFF_SPECTRAL_CADENCE != 10`, `COMM_EFF_ANCHOR_CADENCE != 20` or
+`COMM_EFF_ANCHOR_DELAY_K != 20`, and a launcher-wide guard refuses a delay
+override on every comm-eff arm (the delay models the slow network path, which
+is not a knob on this surface).
+
+Confirm it took:
+
+```bash
+grep -m1 "\[comm_eff\]\[delayed_ef\] enabled" /workspace/runs/qwen3-4b-4k-delayedef-cad10-500/train.log
+```
+
+The line must report `lambda=1.0 beta_anc=0.0 cadence=10`. Runtime fingerprint:
+`comm_eff/delayed_ef_held : comm_eff/delayed_ef_refreshed` reads 1:1 (run G was
+19:1, run H 0:1), and mid-interval correction ticks (30, 50, ...) show
+grad_norm ~1.4x their neighbors because the held delta's norm is dominated by
+the anti-correlated fire-tick compressed noise. Expected, not a fault.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits

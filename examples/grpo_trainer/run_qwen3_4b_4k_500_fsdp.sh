@@ -13,6 +13,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef       # arm G (arm A, merger swapped to delayed_ef, stale delta reused every tick)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-fresh # arm H (arm G, delta applied on fire ticks ONLY)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh blend           # arm I (arm G, merger swapped to the convex value blend, eta=0.3)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-cad10 # arm J (arm H, spectral.cadence 20 -> 10: ONE stale delta per interval)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -33,6 +34,7 @@
 #   codec (arm G)        arm A, merger signed_ema -> delayed_ef (lambda=1, beta_anc=0; stale delta every tick)
 #   codec (arm H)        arm G, spectral.cadence 1 -> 20        (delta applied on fire ticks only)
 #   codec (arm I)        arm A, merger signed_ema -> blend      (eta=0.3, beta_anc=0; convex, no held residual)
+#   codec (arm J)        arm H, spectral.cadence 20 -> 10       (interior stale-dose point: held delta re-applied ONCE per interval)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -53,11 +55,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|blend) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|blend) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|blend)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|blend)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -590,7 +592,7 @@ elif [[ "$ARM" == "nosign" ]]; then
     echo "       Run the 'optreset' arm if that is what is wanted." >&2
     exit 1
   fi
-elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" ]]; then
+elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" || "$ARM" == "delayedef-cad10" ]]; then
   # ARM G (delayedef): the commeff codec block VERBATIM (kept a separate branch
   # so arm A stays byte-identical to its reference launchers), with the MERGER
   # swapped from signed_ema to delayed_ef. Everything else in arm A is untouched:
@@ -610,6 +612,21 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" ]]; then
   # anchor cadence, the same one-number change freshm made to arm A. The held
   # delta is then never re-applied stale: every 20th tick the gradient IS the
   # anchor gradient, all other ticks are pure G_comp.
+  #
+  # ARM J (delayedef-cad10): arm H with spectral.cadence 20 -> 10, the INTERIOR
+  # point of the stale-dose response curve. Corrections run on ticks 10,20,30,...:
+  # even correction ticks coincide with anchor fires (delta refreshes, so
+  # G_corr = G_anchor exactly, as in arm H), odd ones (30, 50, ...) re-apply the
+  # HELD delta exactly once, 10 ticks stale. Dose per 20-tick interval: arm G 19,
+  # arm J 1, arm H 0. Arm G (dose 19) collapsed via Mode C, arm H (dose 0)
+  # finished 500 clean at +7.02pt; arm J prices dose 1. Tick 10 is a cold-M
+  # no-op by construction (spectral_filter returns G_comp untouched before the
+  # first fire). Runtime fingerprint: delayed_ef_held : delayed_ef_refreshed
+  # must read 1:1 (arm G was 19:1, arm H 0:1), and mid-interval correction
+  # ticks show grad_norm ~1.4x neighbors (delta's norm is dominated by the
+  # anti-correlated tick-20 compressed noise; expected, not a fault).
+  # The anchor circuit itself is NOT a knob on this surface: cadence and delay
+  # model the slow network path (CLAUDE.md), so both are pinned to 20 below.
   export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
   export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
   export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
@@ -636,6 +653,26 @@ elif [[ "$ARM" == "delayedef" || "$ARM" == "delayedef-fresh" ]]; then
       echo "       COMM_EFF_SPECTRAL_CADENCE=$COMM_EFF_SPECTRAL_CADENCE vs" >&2
       echo "       COMM_EFF_ANCHOR_CADENCE=$COMM_EFF_ANCHOR_CADENCE. Unequal cadences put" >&2
       echo "       the residual back on ticks where delta is stale, which is arm G." >&2
+      exit 1
+    fi
+  elif [[ "$ARM" == "delayedef-cad10" ]]; then
+    # THE ONE DELTA against arm H. The pair (anchor=20, spectral=10) is the
+    # experiment; any other pair under this arm name is a different experiment
+    # smuggled in via env, so it is fixed, not defaulted.
+    export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
+    export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-10}"
+    export COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
+    if [[ "$COMM_EFF_SPECTRAL_CADENCE" != "10" || "$COMM_EFF_ANCHOR_CADENCE" != "20" ]]; then
+      echo "FATAL: delayedef-cad10 is the fixed interior dose point spectral.cadence=10" >&2
+      echo "       under anchor.cadence=20 (ONE stale delta re-application per interval)." >&2
+      echo "       Got spectral=$COMM_EFF_SPECTRAL_CADENCE anchor=$COMM_EFF_ANCHOR_CADENCE." >&2
+      echo "       A different ratio is a different dose; add a new arm for it." >&2
+      exit 1
+    fi
+    if [[ "$COMM_EFF_ANCHOR_DELAY_K" != "20" ]]; then
+      echo "FATAL: the anchor delay models the slow network path and is NOT tunable" >&2
+      echo "       (CLAUDE.md). delayedef-cad10 requires COMM_EFF_ANCHOR_DELAY_K=20," >&2
+      echo "       got $COMM_EFF_ANCHOR_DELAY_K." >&2
       exit 1
     fi
   else
@@ -723,6 +760,16 @@ elif [[ "$ARM" == "blend" ]]; then
   fi
 else
   export COMM_EFF_ENABLED=false
+fi
+
+# The anchor DELAY models the latency of the slow dense path, which the network
+# sets, not the experimenter (CLAUDE.md). Every arm on this surface runs
+# delay_K=20; refuse any env override rather than run a mislabelled surface.
+if [[ "${COMM_EFF_ENABLED:-false}" == "true" && "${COMM_EFF_ANCHOR_DELAY_K:-20}" != "20" ]]; then
+  echo "FATAL: COMM_EFF_ANCHOR_DELAY_K=$COMM_EFF_ANCHOR_DELAY_K. The anchor delay is set" >&2
+  echo "       by the network model and is NOT a knob on the qwen3-4b-4k-500 surface;" >&2
+  echo "       all arms run delay_K=20." >&2
+  exit 1
 fi
 
 # Run schedule. 500 steps at batch 128 needs ~9 MATH epochs, so the step cap is
@@ -838,6 +885,8 @@ elif [[ "$ARM" == "delayedef" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = G_comp + lambda*(M - G_comp@fire); STALE delta re-applied every tick between fires; no opt-state swap)"
 elif [[ "$ARM" == "delayedef-fresh" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (delta applied on FIRE TICKS ONLY, so every 20th tick G_corr = G_anchor exactly; no opt-state swap)"
+elif [[ "$ARM" == "delayedef-cad10" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE anchor_cadence=$COMM_EFF_ANCHOR_CADENCE delay_K=${COMM_EFF_ANCHOR_DELAY_K:-20} (INTERIOR DOSE: fresh delta on fire ticks, held delta re-applied ONCE at +10; held:refreshed must read 1:1; no opt-state swap)"
 elif [[ "$ARM" == "blend" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=blend eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, convex, no held residual, no sign transplant; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then

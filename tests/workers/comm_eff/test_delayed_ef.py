@@ -98,6 +98,32 @@ def test_second_fire_refreshes_delta():
     assert f.delayed_ef_refreshed == 2
 
 
+def test_cad10_schedule_one_stale_application_per_interval():
+    # Arm J (delayedef-cad10): corrections on ticks 10,20,30,40 with fires on
+    # 20,40. Tick 10 is a cold-M no-op, tick 20 refreshes (G_corr = anchor),
+    # tick 30 re-applies the HELD tick-20 delta ONCE to a new fast gradient,
+    # tick 40 refreshes again. Fingerprint: held == refreshed (1:1), one
+    # coldM fallback from the pre-fire tick.
+    f = make_filter()
+    g10 = torch.randn(4, 6)
+    assert torch.equal(f.delayed_ef_matrix("w", g10), g10)  # tick 10: cold M
+    a20, g20 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a20)  # fire tick 20
+    assert torch.allclose(f.delayed_ef_matrix("w", g20), a20, atol=1e-6)
+    g30 = torch.randn(4, 6)  # tick 30: held delta from tick 20, 10 ticks stale
+    out30 = f.delayed_ef_matrix("w", g30)
+    assert torch.allclose(out30, g30 + (a20 - g20), atol=1e-6)
+    a40, g40 = torch.randn(4, 6), torch.randn(4, 6)
+    f.update_anchor("w", a40)  # fire tick 40
+    assert torch.allclose(f.delayed_ef_matrix("w", g40), a40, atol=1e-6)
+    g50 = torch.randn(4, 6)  # tick 50: held delta from tick 40
+    assert torch.allclose(f.delayed_ef_matrix("w", g50), g50 + (a40 - g40), atol=1e-6)
+    # Two completed intervals: one refresh and one held application each.
+    assert f.delayed_ef_refreshed == 2
+    assert f.delayed_ef_held == 2  # the 1:1 arm fingerprint (arm G 19:1, arm H 0:1)
+    assert f.merger_coldM_fallbacks == 1
+
+
 def test_beta_anc_ema_enters_the_residual():
     # With beta_anc > 0, M after the second fire is an EMA, and the fire-tick
     # correction at lambda=1 returns M (not the raw second anchor grad).
