@@ -188,6 +188,15 @@ class CommEffState:
         # ticks between fires whose delta was re-applied stale).
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
+        # Learned signed-gate counters and telemetry (0 forever unless
+        # spectral.signed_gate="learned"): refreshed factors as n_targets x
+        # anchor_fires, held as n_targets x held correction ticks; rho_mean is
+        # the mean per-target sign-agreement EMA, w_last the most recent
+        # applied between-fire weight.
+        self.signed_gate_refreshed = 0
+        self.signed_gate_held = 0
+        self.signed_gate_rho_mean = 0.0
+        self.signed_gate_w_last = 0.0
         self.anchor_grad_corrected = 0
         self.anchor_rollouts_generated = 0
         self.anchor_rewards_recomputed = 0
@@ -354,6 +363,8 @@ class CommEffState:
             _delayed_ef_lambda = float(getattr(cfg, "delayed_ef_lambda", 1.0))
             _delayed_ef_decay = float(getattr(cfg, "delayed_ef_decay", 1.0))
             _blend_eta = float(getattr(cfg, "blend_eta", 0.5))
+            _signed_gate = str(getattr(cfg, "signed_gate", "off"))
+            _signed_gate_decay = float(getattr(cfg, "signed_gate_decay", 0.75))
             self.spectral = SpectralFilter(
                 beta_anc=float(cfg.beta_anc),
                 ema_device=str(cfg.ema_device),
@@ -362,6 +373,8 @@ class CommEffState:
                 delayed_ef_lambda=_delayed_ef_lambda,
                 delayed_ef_decay=_delayed_ef_decay,
                 blend_eta=_blend_eta,
+                signed_gate=_signed_gate,
+                signed_gate_decay=_signed_gate_decay,
                 diagnostics=bool(cfg.diagnostics),
             )
             logger.info(
@@ -402,6 +415,7 @@ class CommEffState:
                     f"[comm_eff][signed_ema] enabled alpha={float(cfg.signed_ema_alpha)} "
                     f"beta_anc={float(cfg.beta_anc)} cadence={int(cfg.cadence)} "
                     f"target_scope={cfg.target_scope} ema_device={cfg.ema_device} "
+                    f"gate={_signed_gate} gate_decay={_signed_gate_decay} "
                     f"identity={'true' if float(cfg.signed_ema_alpha) >= 1.0 else 'false'}",
                     flush=True,
                 )
@@ -498,8 +512,18 @@ class CommEffState:
             self.spectral._delta_age.clear()
             self.spectral.delayed_ef_refreshed = 0
             self.spectral.delayed_ef_held = 0
+            self.spectral._gate_rho.clear()
+            self.spectral._gate_m_version.clear()
+            self.spectral._gate_age.clear()
+            self.spectral._gate_last_w = 0.0
+            self.spectral.signed_gate_refreshed = 0
+            self.spectral.signed_gate_held = 0
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
+        self.signed_gate_refreshed = 0
+        self.signed_gate_held = 0
+        self.signed_gate_rho_mean = 0.0
+        self.signed_gate_w_last = 0.0
 
     def set_path_tag(self, tag: Optional[str]) -> None:
         if tag is not None and tag not in PATH_TAGS:
@@ -678,6 +702,10 @@ class CommEffState:
             "comm_eff/merger_coldM_fallbacks": self.merger_coldM_fallbacks,
             "comm_eff/delayed_ef_refreshed": self.delayed_ef_refreshed,
             "comm_eff/delayed_ef_held": self.delayed_ef_held,
+            "comm_eff/signed_gate_refreshed": self.signed_gate_refreshed,
+            "comm_eff/signed_gate_held": self.signed_gate_held,
+            "comm_eff/signed_gate_rho_mean": self.signed_gate_rho_mean,
+            "comm_eff/signed_gate_w_last": self.signed_gate_w_last,
             "comm_eff/anchor_replay_fires": self.anchor_replay_fires,
             "comm_eff/opt_reset_count": self.opt_reset_count,
             "comm_eff/opt_reset_rho": self.opt_reset_last_rho,

@@ -23,6 +23,21 @@ with ``sign(M)``::
 
     G_corr = alpha * G_comp + (1 - alpha) * abs(G_comp) * sign(M)
 
+An optional learned gate (``signed_gate="learned"``) doses that correction
+between anchor fires. The fire tick applies it at full strength with the fresh
+``M`` (the proven use-once dose). Each held tick applies::
+
+    G_corr = (1 - w) * G_comp + w * G_signed,   w = rho * decay**age
+
+where ``age`` counts correction ticks since the fire and ``rho`` is a
+per-target EMA of the measured sign agreement between the direction that was
+being held (``sign(M_old)``) and the next fire's fresh dense anchor gradient
+(``sign(G_anchor)``), clamped to [0, 1]. Each pipeline stage measures its own
+tensors locally, so the gate costs no link traffic. ``rho`` starts at 0: the
+schedule begins as use-once and earns between-fire dose only from agreement
+evidence. ``decay < 1`` is enforced so the learned schedule stays inside the
+geometric envelope and can never re-create standing full-strength reuse.
+
 ``delayed_ef`` is the additive anchor-residual path. On the tick whose anchor
 fire refreshed ``M`` (at ``beta_anc=0``, ``M`` IS that fire's raw dense anchor
 gradient, computed at the RELEX-projected weights on the SAME batch as this
@@ -55,6 +70,12 @@ __all__ = ["SpectralFilter", "apply_spectral_correction_to_params", "is_spectral
 
 SPECTRAL_TARGET_SCOPES = ("decoder_matrices", "all_floating")
 SPECTRAL_CORRECTION_MODES = ("signed_ema", "delayed_ef", "blend")
+SIGNED_GATE_MODES = ("off", "learned")
+# EMA coefficient for the per-target sign-agreement estimate rho behind the
+# learned signed gate: rho <- (1-beta)*rho + beta*rho_raw at each anchor fire.
+# A constant, not a knob: it only sets how fast the gate trusts new agreement
+# evidence (0.5 covers 94% of a step change within 4 fires).
+GATE_RHO_EMA_BETA = 0.5
 
 
 def is_spectral_target(
@@ -97,6 +118,8 @@ class SpectralFilter:
         delayed_ef_lambda: float = 1.0,
         delayed_ef_decay: float = 1.0,
         blend_eta: float = 0.5,
+        signed_gate: str = "off",
+        signed_gate_decay: float = 0.75,
         diagnostics: bool = False,
     ):
         if not 0.0 <= float(beta_anc) <= 1.0:
@@ -113,6 +136,14 @@ class SpectralFilter:
             raise ValueError(f"delayed_ef_decay must be in [0, 1]; got {delayed_ef_decay}")
         if not 0.0 <= float(blend_eta) <= 1.0:
             raise ValueError(f"blend_eta must be in [0, 1]; got {blend_eta}")
+        if signed_gate not in SIGNED_GATE_MODES:
+            raise ValueError(f"signed_gate must be one of {SIGNED_GATE_MODES}; got {signed_gate!r}")
+        if not 0.0 <= float(signed_gate_decay) < 1.0:
+            raise ValueError(
+                "signed_gate_decay must be in [0, 1): decay=1 would let the gated correction "
+                f"stand between fires indefinitely, the reuse pattern the gate exists to prevent; "
+                f"got {signed_gate_decay}"
+            )
 
         self.beta_anc = float(beta_anc)
         self.ema_device = str(ema_device)
@@ -140,6 +171,20 @@ class SpectralFilter:
         self._delta_age: dict[str, int] = {}
         self.delayed_ef_refreshed = 0
         self.delayed_ef_held = 0
+        self.signed_gate = str(signed_gate)
+        self.signed_gate_decay = float(signed_gate_decay)
+        # Learned signed-gate state (empty and never touched while
+        # signed_gate="off"). _gate_rho is the per-target sign-agreement EMA
+        # (absent = 0.0, so the schedule starts as use-once);
+        # _gate_m_version/_gate_age mirror the delayed_ef fire-detection
+        # machinery for the signed path; _gate_last_w is the most recent
+        # applied weight (telemetry).
+        self._gate_rho: dict[str, float] = {}
+        self._gate_m_version: dict[str, int] = {}
+        self._gate_age: dict[str, int] = {}
+        self._gate_last_w = 0.0
+        self.signed_gate_refreshed = 0
+        self.signed_gate_held = 0
 
     def _ema_storage_device(self, grad_device):
         return torch.device("cpu") if self.ema_device == "cpu" else torch.device(grad_device)
@@ -168,7 +213,22 @@ class SpectralFilter:
         name = _canon(name)
         self.ensure_anchor(name, g_anchor)
         anchor = self.anchor_on(name, g_anchor.device).to(torch.float32)
-        updated = self.beta_anc * anchor + (1.0 - self.beta_anc) * g_anchor.to(torch.float32)
+        g_fresh = g_anchor.to(torch.float32)
+        if self.signed_gate == "learned":
+            if torch.linalg.norm(anchor) > 1e-12 and tuple(anchor.shape) == tuple(g_fresh.shape):
+                # Grade the direction that was being held over the closing
+                # interval against this fire's fresh dense evidence. Zero
+                # entries contribute 0 to the product mean, deflating rho
+                # (conservative: less between-fire dose, never more).
+                rho_raw = float((torch.sign(anchor) * torch.sign(g_fresh)).mean())
+                rho_raw = min(max(rho_raw, 0.0), 1.0)
+                previous = self._gate_rho.get(name, 0.0)
+                self._gate_rho[name] = (1.0 - GATE_RHO_EMA_BETA) * previous + GATE_RHO_EMA_BETA * rho_raw
+            else:
+                # First-ever fire (or a shape reset zeroed M): no held
+                # direction existed for this fire to grade. Restart at 0.
+                self._gate_rho.pop(name, None)
+        updated = self.beta_anc * anchor + (1.0 - self.beta_anc) * g_fresh
         store_device = self._ema_storage_device(g_anchor.device)
         stored = updated.to(store_device)
         if store_device.type == "cpu" and g_anchor.device.type != "cpu":
@@ -180,18 +240,60 @@ class SpectralFilter:
         return updated
 
     def signed_ema_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
-        """Apply signed EMA, or return ``g_comp`` unchanged while M is cold."""
+        """Apply signed EMA (gated between fires when ``signed_gate="learned"``).
+
+        Returns ``g_comp`` unchanged while M is cold. With the gate off the
+        arithmetic is bitwise the historical signed_ema. With the gate learned,
+        the fire tick (first correction after ``update_anchor``, the same
+        detection the delayed_ef path uses) applies the correction at full
+        strength; each held tick applies ``(1-w)*G_comp + w*G_signed`` with
+        ``w = rho * decay**age``, and ``w == 0`` (rho unmeasured or graded to
+        zero) skips the fp32 round trip entirely.
+        """
 
         name = _canon(name)
         self.ensure_anchor(name, g_comp)
         anchor = self.anchor_on(name, g_comp.device).to(torch.float32)
         if torch.linalg.norm(anchor) <= 1e-12:
             self.merger_coldM_fallbacks += 1
+            if self.signed_gate != "off":
+                # A cold or shape-reset M invalidates the gate schedule for
+                # this target; the next fire restarts it (and rho, via
+                # update_anchor).
+                self._gate_m_version.pop(name, None)
+                self._gate_age.pop(name, None)
             return g_comp
         grad = g_comp.to(torch.float32)
         alpha = self.signed_ema_alpha
+        weight = 1.0
+        if self.signed_gate == "learned":
+            m_version = self._m_version.get(name, 0)
+            if m_version > self._gate_m_version.get(name, 0):
+                # Fire tick: full strength with the fresh M, the proven
+                # use-once dose.
+                self._gate_m_version[name] = m_version
+                self._gate_age[name] = 0
+                self.signed_gate_refreshed += 1
+                self._gate_last_w = 1.0
+            else:
+                age = self._gate_age.get(name, 0) + 1
+                self._gate_age[name] = age
+                self.signed_gate_held += 1
+                weight = self._gate_rho.get(name, 0.0) * self.signed_gate_decay**age
+                self._gate_last_w = float(weight)
+                if weight == 0.0:
+                    return g_comp
         corrected = alpha * grad + (1.0 - alpha) * grad.abs() * torch.sign(anchor)
+        if weight != 1.0:
+            corrected = (1.0 - weight) * grad + weight * corrected
         return corrected.to(g_comp.dtype)
+
+    def gate_rho_mean(self) -> float:
+        """Mean per-target sign-agreement EMA (0.0 before any measurement)."""
+
+        if not self._gate_rho:
+            return 0.0
+        return float(sum(self._gate_rho.values()) / len(self._gate_rho))
 
     def delayed_ef_matrix(self, name: str, g_comp: torch.Tensor) -> torch.Tensor:
         """Additive anchor residual: ``G_corr = G_comp + lambda * decay**age * delta``.
@@ -389,6 +491,14 @@ def apply_spectral_correction_to_params(
     # correction call.
     state.delayed_ef_refreshed = int(spectral.delayed_ef_refreshed)
     state.delayed_ef_held = int(spectral.delayed_ef_held)
+    # Cumulative signed-gate counters (0 forever unless signed_gate="learned"):
+    # refreshed factors as n_targets x anchor_fires, held as n_targets x held
+    # correction ticks. rho_mean and w_last are the learned schedule itself,
+    # surfaced so WandB shows what the gate learned over the run.
+    state.signed_gate_refreshed = int(spectral.signed_gate_refreshed)
+    state.signed_gate_held = int(spectral.signed_gate_held)
+    state.signed_gate_rho_mean = spectral.gate_rho_mean()
+    state.signed_gate_w_last = float(spectral._gate_last_w)
     if spectral.diagnostics and corrected_count:
         print(
             f"[comm_eff][{spectral.correction_mode}] alpha={spectral.signed_ema_alpha} "

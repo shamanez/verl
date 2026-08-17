@@ -411,6 +411,8 @@ comm_eff:
     delayed_ef_lambda: 1.0
     delayed_ef_decay: 1.0
     blend_eta: 0.5
+    signed_gate: "off"
+    signed_gate_decay: 0.75
 
   # Rank-77 activation-energy basis for Qwen2.5-Math-1.5B (hidden size 1536).
   powersgd:

@@ -301,6 +301,57 @@ The line must report `lambda=1.0 decay=0.75 beta_anc=0.0 cadence=1`. Runtime
 fingerprint: held:refreshed ~ 19:1 (the arm-G schedule), but with grad_norm on
 late-interval ticks converging to the pure-compressed band as the weight dies.
 
+## Run L: the learned gate on the sign correction
+
+`run_qwen3_4b_4k_500_fsdp.sh signgate` (`qwen3-4b-4k-signgate-500`) is run A's
+signed_ema merger (alpha=0.25, spectral.cadence=1) with the between-fire dose
+LEARNED instead of fixed. The fire tick applies the correction at full strength
+with the fresh M, exactly run D's proven use-once dose. Each held tick applies
+
+    G_corr = (1-w) * G_comp + w * (alpha*G_comp + (1-alpha)*|G_comp|*sign(M))
+    w      = rho * 0.75^age
+
+with age = ticks since the fire and rho a per-tensor EMA (beta 0.5) of the
+measured sign agreement between the held direction and the NEXT fire's fresh
+dense anchor gradient, clamped to [0, 1]. The learning signal is free: the
+anchor already computes a clean dense gradient every 20 ticks, and comparing it
+against the direction that was being reused grades that reuse after the fact.
+Each pipeline stage measures its own tensors locally, so the gate costs zero
+extra link traffic, which is why the sign form (the lightest correction on the
+wire) is the right family for it.
+
+Why this design, given the ledger. Full-strength standing reuse is 3-for-3 dead
+across merger families (runs A/G/I, Modes A/C/D); use-once is the optimum so
+far; the fixed 0.75 anneal survived 500 with a slow drift tax. Three safety
+properties are built in rather than hoped for: rho initializes at 0, so the arm
+STARTS as use-once and earns dose only from measured agreement; the 0.75^age
+envelope bounds the worst learnable schedule by the proven-survivable anneal;
+and standing full-strength reuse is unreachable by construction (the config
+validator refuses signed_gate_decay >= 1). The dose ladder showed the stale
+dose buys the first 100 steps (+5.8pt at val@100) and taxes the last 400; if
+direction stability really is higher early and lower late, rho tracks it and
+the schedule gets both regimes right. Either way the learned schedule is a
+readable result: `comm_eff/signed_gate_rho_mean` and
+`comm_eff/signed_gate_w_last` plot what the gate decided over the run.
+
+Collapse risk: Mode A is the family risk, and it needed the full standing dose
+to ignite (run A collapsed at 152-163 with w=1 on every tick). This arm's held
+weight starts at 0, never exceeds rho*0.75 on the first held tick, and decays
+geometrically within every interval. Mode D (quiet drift) is the subtler risk,
+same as the anneal arm; the standing detectors and the val-crash rule apply
+unchanged.
+
+Confirm it took:
+
+```bash
+grep -m1 "\[comm_eff\]\[signed_ema\] enabled" /workspace/runs/qwen3-4b-4k-signgate-500/train.log
+```
+
+The line must report `alpha=0.25 ... cadence=1 ... gate=learned gate_decay=0.75`.
+Runtime fingerprint: `signed_gate_refreshed` = 398 x fires and
+`signed_gate_held` = 398 x held ticks (~1:19 per interval);
+`signed_gate_rho_mean` stays 0 until the second fire (~tick 40), then moves.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits

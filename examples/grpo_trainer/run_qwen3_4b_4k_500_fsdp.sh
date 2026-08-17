@@ -15,6 +15,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh blend           # arm I (arm G, merger swapped to the convex value blend, eta=0.3)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-cad10 # arm J (arm H, spectral.cadence 20 -> 10: ONE stale delta per interval)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-anneal # arm K (arm G + decay=0.75: held delta ANNEALED by decay^age each tick)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh signgate        # arm L (arm A, between-fire sign dose LEARNED from fire-tick agreement)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -37,6 +38,7 @@
 #   codec (arm I)        arm A, merger signed_ema -> blend      (eta=0.3, beta_anc=0; convex, no held residual)
 #   codec (arm J)        arm H, spectral.cadence 20 -> 10       (interior stale-dose point: held delta re-applied ONCE per interval)
 #   codec (arm K)        arm G, delayed_ef_decay 1.0 -> 0.75    (held delta annealed: weight lambda*decay^age, interval impulse ~4 vs arm G's 20)
+#   codec (arm L)        arm A, signed_gate off -> learned      (held sign dose w = rho*0.75^age; rho = fire-tick agreement EMA, init 0 = starts use-once)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -57,11 +59,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -809,6 +811,82 @@ elif [[ "$ARM" == "blend" ]]; then
     echo "FATAL: blend requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
     exit 1
   fi
+elif [[ "$ARM" == "signgate" ]]; then
+  # ARM L (signgate): the commeff codec block VERBATIM (kept a separate branch
+  # so arm A stays byte-identical to its reference launchers), merger signed_ema
+  # exactly as arm A wires it (alpha=0.25, beta_anc untouched, spectral.cadence=1),
+  # with the between-fire dose LEARNED instead of fixed. The fire tick applies
+  # the sign correction at full strength with the fresh M, the proven use-once
+  # dose (freshm finished 500 clean at +6.2). Each held tick applies
+  #     G_corr = (1-w)*G_comp + w*(alpha*G_comp + (1-alpha)*|G_comp|*sign(M))
+  #     w      = rho * 0.75^age
+  # where age counts ticks since the fire and rho is a per-tensor EMA of the
+  # measured sign agreement between the direction that was being held and the
+  # NEXT fire's fresh dense anchor gradient. The slow circuit grades its own
+  # correction once per interval, at zero extra link traffic: each pipeline
+  # stage measures tensors it already holds.
+  #
+  # Why this shape, given the ledger: full-strength standing reuse is 3-for-3
+  # dead (arms A/G/I, Modes A/C/D); the fixed 0.75 anneal (arm K) survived 500
+  # but paid a slow drift tax; use-once is the optimum so far. rho initializes
+  # at 0, so this arm STARTS as use-once and earns between-fire dose only from
+  # agreement evidence; the 0.75^age envelope means the worst it can learn is
+  # the proven-survivable anneal schedule, and w=1 between fires (the dead
+  # pattern) is unreachable by construction (the validator refuses decay >= 1).
+  # The bet: if direction stability is genuinely higher early and lower late,
+  # rho tracks it and buys the stale-dose early speed (arm G was +5.8pt at
+  # val@100 over use-once) without the late tax. rho and the applied weight are
+  # logged (comm_eff/signed_gate_rho_mean, comm_eff/signed_gate_w_last), so the
+  # learned schedule itself is a readable result, win or lose. Counter
+  # fingerprint at cadence 1: signed_gate_refreshed = 398 x fires,
+  # signed_gate_held = 398 x held ticks, ~1:19 per interval.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-prf_mask}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-true}"
+  export COMM_EFF_MASK_P="${COMM_EFF_MASK_P:-0.95}"
+  export COMM_EFF_MASK_RESCALE_MODE="${COMM_EFF_MASK_RESCALE_MODE:-constant}"
+  export COMM_EFF_MASK_EXACT_K="${COMM_EFF_MASK_EXACT_K:-true}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # prf_mask has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE ONE DELTA against arm A: the learned gate. Both knobs are pinned; the
+  # gate mode and its envelope ARE the experiment, so any other value under
+  # this arm name is a different experiment smuggled in via env.
+  export COMM_EFF_SPECTRAL_SIGNED_GATE="${COMM_EFF_SPECTRAL_SIGNED_GATE:-learned}"
+  export COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY="${COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY:-0.75}"
+  if [[ "$COMM_EFF_SPECTRAL_SIGNED_GATE" != "learned" ]]; then
+    echo "FATAL: signgate IS the learned gate; gate=off under this name is arm A" >&2
+    echo "       mislabelled. Got COMM_EFF_SPECTRAL_SIGNED_GATE=$COMM_EFF_SPECTRAL_SIGNED_GATE." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY" != "0.75" ]]; then
+    echo "FATAL: signgate pins its geometric envelope at 0.75, the only decay with 500" >&2
+    echo "       steps of survival evidence (delayedef-anneal). A different envelope is" >&2
+    echo "       a different experiment; add a new arm for it." >&2
+    echo "       Got $COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_CADENCE:-1}" != "1" ]]; then
+    echo "FATAL: signgate requires spectral.cadence=1 (the gate doses EVERY tick between" >&2
+    echo "       fires; a coarser cadence is a different dose surface)." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25}" == "1.0" ]]; then
+    echo "FATAL: signgate keeps signed_ema_alpha at its arm-A value; alpha=1.0 disables the" >&2
+    echo "       merger entirely, which is the 'nosign' arm. Run that arm instead." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_SPECTRAL_ENABLED:-true}" != "true" ]]; then
+    echo "FATAL: signgate requires COMM_EFF_SPECTRAL_ENABLED=true. spectral.enabled=false is" >&2
+    echo "       rejected by the validator under rank1_relex and deletes the anchor circuit." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: signgate requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    exit 1
+  fi
 elif [[ "$ARM" == "dense" ]]; then
   # ARM B: the control. The literal quoted arm name matters here: the chain
   # script's arm-exists gate greps the launcher for "dense" before launching.
@@ -825,6 +903,14 @@ if [[ "${COMM_EFF_ENABLED:-false}" == "true" && "${COMM_EFF_ANCHOR_DELAY_K:-20}"
   echo "FATAL: COMM_EFF_ANCHOR_DELAY_K=$COMM_EFF_ANCHOR_DELAY_K. The anchor delay is set" >&2
   echo "       by the network model and is NOT a knob on the qwen3-4b-4k-500 surface;" >&2
   echo "       all arms run delay_K=20." >&2
+  exit 1
+fi
+
+# The learned signed gate is arm L's experiment alone. Any other arm running
+# with the gate on is a mislabelled run; refuse the env override.
+if [[ "$ARM" != "signgate" && "${COMM_EFF_SPECTRAL_SIGNED_GATE:-off}" != "off" ]]; then
+  echo "FATAL: arm '$ARM' requires COMM_EFF_SPECTRAL_SIGNED_GATE=off; the learned gate" >&2
+  echo "       is the 'signgate' arm. Got ${COMM_EFF_SPECTRAL_SIGNED_GATE}." >&2
   exit 1
 fi
 
@@ -947,6 +1033,8 @@ elif [[ "$ARM" == "delayedef-anneal" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA decay=$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (ANNEALED DOSE: G_corr = G_comp + lambda*decay^age*delta, fire tick = G_anchor exactly, interval impulse ~4 vs arm G's 20; no opt-state swap)"
 elif [[ "$ARM" == "blend" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=blend eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, convex, no held residual, no sign transplant; no opt-state swap)"
+elif [[ "$ARM" == "signgate" ]]; then
+  CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=signed_ema alpha=${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25} gate=$COMM_EFF_SPECTRAL_SIGNED_GATE gate_decay=$COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (LEARNED DOSE: fire ticks full-strength fresh sign(M); held ticks w = rho*decay^age, rho = fire-tick agreement EMA init 0, starts as use-once; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else

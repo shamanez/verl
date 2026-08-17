@@ -355,6 +355,21 @@ class CommEffSpectralConfig(BaseConfig):
     # cadence). Read only by correction_mode=delayed_ef.
     delayed_ef_decay: float = 1.0
     blend_eta: float = 0.5
+    # Learned between-fire gate on the signed_ema correction. "off" (default)
+    # is bitwise the historical signed_ema behavior. "learned": the fire tick
+    # applies the correction at full strength with the fresh M (the proven
+    # use-once dose); each held tick applies
+    #     G_corr = (1-w)*G_comp + w*G_signed,   w = rho * signed_gate_decay**age
+    # where rho is a per-target EMA of the measured sign agreement between the
+    # held direction and the next fire's fresh dense anchor gradient (clamped
+    # to [0, 1], initialized at 0 so the schedule starts as use-once and earns
+    # between-fire dose only from agreement evidence). Read only by
+    # correction_mode=signed_ema.
+    signed_gate: str = "off"
+    # Geometric envelope of the learned gate, strictly below 1: decay=1 would
+    # let the gated correction stand at rho indefinitely between fires, the
+    # standing-reuse pattern that collapsed every ungated stale arm.
+    signed_gate_decay: float = 0.75
 
 
 @dataclass
@@ -748,6 +763,22 @@ class CommEffConfig(BaseConfig):
             )
         if not 0.0 <= float(self.spectral.blend_eta) <= 1.0:
             raise ValueError(f"comm_eff.spectral.blend_eta must be in [0, 1]; got {self.spectral.blend_eta}")
+        if self.spectral.signed_gate not in ("off", "learned"):
+            raise ValueError(
+                f"comm_eff.spectral.signed_gate must be one of (off, learned); got {self.spectral.signed_gate!r}"
+            )
+        if not 0.0 <= float(self.spectral.signed_gate_decay) < 1.0:
+            raise ValueError(
+                "comm_eff.spectral.signed_gate_decay must be in [0, 1): decay=1 lets the gated "
+                "correction stand between fires indefinitely, the standing-reuse pattern the gate "
+                f"exists to prevent; got {self.spectral.signed_gate_decay}"
+            )
+        if self.spectral.signed_gate != "off" and self.spectral.correction_mode != "signed_ema":
+            raise ValueError(
+                "comm_eff.spectral.signed_gate is read only by correction_mode=signed_ema; "
+                f"got signed_gate={self.spectral.signed_gate!r} with "
+                f"correction_mode={self.spectral.correction_mode!r}"
+            )
 
     def _validate_powersgd(self) -> None:
         for name in (

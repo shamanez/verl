@@ -239,6 +239,8 @@ actor_rollout_ref:
         delayed_ef_lambda: 1.0
         delayed_ef_decay: 1.0
         blend_eta: 0.5
+        signed_gate: 'off'
+        signed_gate_decay: 0.75
       powersgd:
         _target_: verl.workers.config.CommEffPowerSGDConfig
         enabled: true

@@ -386,6 +386,11 @@ COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}
 COMM_EFF_SPECTRAL_DELAYED_EF_DECAY="${COMM_EFF_SPECTRAL_DELAYED_EF_DECAY:-1.0}"     # anneal of the held residual, weight = lambda*decay^age (1.0 = constant)
 # blend: G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M (convex value merger, 0 = identity)
 COMM_EFF_SPECTRAL_BLEND_ETA="${COMM_EFF_SPECTRAL_BLEND_ETA:-0.5}"
+# Learned between-fire gate on the signed_ema correction (off|learned): fire
+# ticks full strength, held ticks w = rho*gate_decay^age with rho the measured
+# fire-tick sign agreement (init 0 = starts as the use-once dose).
+COMM_EFF_SPECTRAL_SIGNED_GATE="${COMM_EFF_SPECTRAL_SIGNED_GATE:-off}"
+COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY="${COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY:-0.75}"  # geometric envelope, must be < 1
 # Correction cadence in optimizer ticks.
 COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-1}"
 COMM_EFF_SPECTRAL_EMA_DEVICE="${COMM_EFF_SPECTRAL_EMA_DEVICE:-cpu}"    # offload full-coverage M (OOM guard)
@@ -450,7 +455,7 @@ cat <<EOF
   opt_reset:           enabled=$COMM_EFF_OPT_RESET_ENABLED cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH  (anchor-sourced AdamW-moment overwrite; enabled=false => off)
   lookahead:           enabled=$COMM_EFF_ANCHOR_LOOKAHEAD_ANCHOR mode=$COMM_EFF_ANCHOR_LOOKAHEAD_MODE strength=$COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH rollout_source=$COMM_EFF_ANCHOR_LOOKAHEAD_ROLLOUT_SOURCE window=$COMM_EFF_ANCHOR_LOOKAHEAD_WINDOW_SNAPSHOTS warmup=$COMM_EFF_ANCHOR_WARMUP_MODE min_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MIN_SNAPSHOTS history_mode=$COMM_EFF_ANCHOR_LOOKAHEAD_HISTORY_MODE max_snapshots=$COMM_EFF_ANCHOR_LOOKAHEAD_MAX_SNAPSHOTS
   spectral:            enabled=$COMM_EFF_SPECTRAL_ENABLED target_scope=$COMM_EFF_SPECTRAL_TARGET_SCOPE diagnostics=$COMM_EFF_SPECTRAL_DIAGNOSTICS beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC cadence=$COMM_EFF_SPECTRAL_CADENCE max_targets=$COMM_EFF_SPECTRAL_MAX_TARGETS ema_device=$COMM_EFF_SPECTRAL_EMA_DEVICE
-  merger:               mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA decay=$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC
+  merger:               mode=$COMM_EFF_SPECTRAL_CORRECTION_MODE alpha=$COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA decay=$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY eta=$COMM_EFF_SPECTRAL_BLEND_ETA gate=$COMM_EFF_SPECTRAL_SIGNED_GATE gate_decay=$COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC
   wandb:               $PROJECT_NAME / $EXPERIMENT_NAME
   log:                 $LOG
 === launching ===
@@ -737,6 +742,8 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_lambda="$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" \
   actor_rollout_ref.actor.comm_eff.spectral.delayed_ef_decay="$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY" \
   actor_rollout_ref.actor.comm_eff.spectral.blend_eta="$COMM_EFF_SPECTRAL_BLEND_ETA" \
+  actor_rollout_ref.actor.comm_eff.spectral.signed_gate="$COMM_EFF_SPECTRAL_SIGNED_GATE" \
+  actor_rollout_ref.actor.comm_eff.spectral.signed_gate_decay="$COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY" \
   actor_rollout_ref.actor.comm_eff.powersgd.rank="$COMM_EFF_POWERSGD_RANK" \
   actor_rollout_ref.actor.comm_eff.powersgd.seed="$COMM_EFF_POWERSGD_SEED" \
   actor_rollout_ref.actor.comm_eff.powersgd.pp_size="$COMM_EFF_POWERSGD_PP_SIZE" \
