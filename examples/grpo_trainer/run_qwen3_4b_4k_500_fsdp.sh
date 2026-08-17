@@ -16,6 +16,7 @@
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-cad10 # arm J (arm H, spectral.cadence 20 -> 10: ONE stale delta per interval)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh delayedef-anneal # arm K (arm G + decay=0.75: held delta ANNEALED by decay^age each tick)
 #   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh signgate        # arm L (arm A, between-fire sign dose LEARNED from fire-tick agreement)
+#   bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh srparity        # arm M (arm H, CODEC swapped to sr_quant 2-bit k=800: 6.25x coverage UNDER budget)
 #
 # The two arms are byte-identical except for the master compression switch, so
 # the comparison isolates the codec and nothing else. Everything the box needs is
@@ -39,6 +40,7 @@
 #   codec (arm J)        arm H, spectral.cadence 20 -> 10       (interior stale-dose point: held delta re-applied ONCE per interval)
 #   codec (arm K)        arm G, delayed_ef_decay 1.0 -> 0.75    (held delta annealed: weight lambda*decay^age, interval impulse ~4 vs arm G's 20)
 #   codec (arm L)        arm A, signed_gate off -> learned      (held sign dose w = rho*0.75^age; rho = fire-tick agreement EMA, init 0 = starts use-once)
+#   codec (arm M)        arm H, prf_mask -> sr_quant b2 k800     (2000 bits vs the PRF budget's 2048, coverage 31.25% vs 5.0%: the never-validated #93 rank-1 codec, finished)
 #
 # WHY 128/128 rather than the 512/256 in CLAUDE.md: 128/128 is the surface the
 # 600-step horizon evidence sits on (issue #90's PRF-vs-dense pair and every #93
@@ -59,11 +61,11 @@ set -uo pipefail
 # ---------------------------- arm ------------------------------------------
 ARM="${1:-commeff}"
 case "$ARM" in
-  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate) ;;
+  commeff|dense|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate|srparity) ;;
   # The optreset arm names itself off the commeff arm it extends (cadence 50),
   # so its WandB run, R2 regime, log dir and done.flag dir all carry the delta.
   optreset) ARM_NAME="${ARM_NAME:-qwen3-4b-4k-commeff-optreset50-500}" ;;
-  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate)" >&2; exit 1 ;;
+  *) echo "FATAL: unknown arm '$ARM' (commeff|dense|optreset|freshm|nosign|powersgdq|delayedef|delayedef-fresh|delayedef-cad10|delayedef-anneal|blend|signgate|srparity)" >&2; exit 1 ;;
 esac
 shift || true
 
@@ -898,6 +900,154 @@ elif [[ "$ARM" == "signgate" ]]; then
   # points are still produced, so the arm stays directly comparable to the
   # other ten; the extra passes cost roughly twenty minutes total.
   export TEST_FREQ="${TEST_FREQ:-50}"
+elif [[ "$ARM" == "srparity" ]]; then
+  # ARM M (srparity): delayedef-fresh (the adopted optimum, use-once residual,
+  # 0.7315@500) with ONE thing changed, THE CODEC. The PRF exact-k mask sends
+  # 128 of 2560 coordinates per token per boundary at full precision
+  # (128 x fp16 = 2048 bits, 5.0% coordinate coverage). This arm sends 800
+  # coordinates at 2 bits with one fp16 absmax scale per 32 kept channels
+  # (800*2 + 25*16 = 2000 bits, 31.25% coverage), i.e. UNDER the current wire
+  # budget while the 19 pure-compressed ticks see 6.25x more of each token.
+  #
+  # WHY THIS ARM, AND WHY NOW. The accepted plateau diagnosis is per-tick SNR
+  # starvation on the 19 compressed ticks, and the dense control has now
+  # plateaued at about 0.78 while every stable compressed arm parks at
+  # 0.72-0.74. The difference is therefore a CEILING set by how much the
+  # compressed training path can see, not a rate the compressed circuit could
+  # eventually make up. Every arm to date has changed what the ONE anchor tick
+  # hands the optimizer; this changes what the OTHER NINETEEN see.
+  #
+  # It is a replicate, not a new idea. Issue #93 cell a3-srq-parity-k493 ran
+  # exactly this codec at exactly this budget on the 1.5B surface and was
+  # ranked STABILITY 1 OF 12: gap slope +0.000101 nats/step over 100-120
+  # against the incumbent's +0.000838 on the matched window (8.3x flatter),
+  # gap drift ratio 1.001 (closest to unity in the program, incumbent 1.029),
+  # grad_norm max/p50 2.5x (tighter than the incumbent's 2.9x and dense's
+  # 2.3x), while LEARNING AT INCUMBENT PACE (reward block mean 0.5071 over
+  # steps 1-100 vs 0.5015), which clears the a5 trap of flat metrics on a run
+  # that is not learning. What a3 never had was a horizon or a held-out
+  # number: it ran 120 steps, val-off by design, no checkpoints. It is the
+  # program's most promising never-validated codec, and this arm finishes it.
+  # The knobs here are a3's own, translated to hidden 2560 at the 2048-bit
+  # budget: 800/2560 = 31.25% coverage against a3's 493/1536 = 32.10%, same
+  # 2 bits, same 32-channel blocks.
+  #
+  # UNBIASEDNESS IS LOAD-BEARING AND IS PINNED BELOW. The cleanest
+  # single-variable result in issue #93: a1 (bits=1, STOCHASTIC rounding)
+  # finished its 120 steps with the tightest optimizer in the field
+  # (max/p50 1.3x), while a2, identical except for round-to-nearest, was
+  # KILLED AT STEP 60 with a run-MINIMUM grad_norm of 6.153 against a1's
+  # 120-step MAXIMUM of 0.898. rounding=rn is the biased ablation control and
+  # is refused under this arm name.
+  #
+  # KNOWN RISK, and the reason this arm is smoke-gated before it is committed:
+  # Qwen-family models carry massive-activation channels, and blockwise absmax
+  # scaling gives up its range to whichever channel in the block is largest.
+  # That has never been measured on Qwen3-4B boundary states. Run SMOKE=1
+  # first (25 steps, no val, no checkpoints, nothing to R2) and read the
+  # response length and clip ratio: the disciplining precedent is that the
+  # HIGHER-fidelity PowerSGD codec collapsed by step 41 through a truncation
+  # spiral, so a codec swap on this surface has gone badly once already.
+  export COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"
+  # THE ONE DELTA: prf_mask -> sr_quant. mask.enabled is inert under this codec
+  # (state.build() only constructs the masker for prf_mask), but sr_quant
+  # REUSES the mask sub-config for path eligibility and PRF keying, so
+  # recompute/reference/pp_size/seed stay exactly as the reference arm sets them.
+  export COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-sr_quant}"
+  export COMM_EFF_MASK_ENABLED="${COMM_EFF_MASK_ENABLED:-false}"
+  export COMM_EFF_MASK_RECOMPUTE="${COMM_EFF_MASK_RECOMPUTE:-true}"
+  export COMM_EFF_MASK_REFERENCE="${COMM_EFF_MASK_REFERENCE:-true}"
+  export COMM_EFF_MASK_PP_SIZE="${COMM_EFF_MASK_PP_SIZE:-8}"
+  export COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-2}"
+  export COMM_EFF_QUANT_SUBSET_K="${COMM_EFF_QUANT_SUBSET_K:-800}"
+  export COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"
+  export COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"
+  export COMM_EFF_ANCHOR_OWNS_Q="${COMM_EFF_ANCHOR_OWNS_Q:-false}"        # sr_quant has no basis Q to own
+  export COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP="${COMM_EFF_POWERSGD_FAST_Q_BOOTSTRAP:-false}"
+  # THE MERGER IS delayedef-fresh's, UNCHANGED: use-once residual, the program
+  # optimum. Re-pinned here as literals because every existing guard of this
+  # kind is branch-local and a new branch inherits nothing.
+  export COMM_EFF_SPECTRAL_CORRECTION_MODE="${COMM_EFF_SPECTRAL_CORRECTION_MODE:-delayed_ef}"
+  export COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA="${COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA:-1.0}"
+  export COMM_EFF_SPECTRAL_DELAYED_EF_DECAY="${COMM_EFF_SPECTRAL_DELAYED_EF_DECAY:-1.0}"
+  export COMM_EFF_SPECTRAL_BETA_ANC="${COMM_EFF_SPECTRAL_BETA_ANC:-0.0}"
+  export COMM_EFF_ANCHOR_CADENCE="${COMM_EFF_ANCHOR_CADENCE:-20}"
+  export COMM_EFF_SPECTRAL_CADENCE="${COMM_EFF_SPECTRAL_CADENCE:-20}"
+  export COMM_EFF_ANCHOR_DELAY_K="${COMM_EFF_ANCHOR_DELAY_K:-20}"
+  export COMM_EFF_SPECTRAL_SIGNED_GATE="${COMM_EFF_SPECTRAL_SIGNED_GATE:-off}"
+  if [[ "$COMM_EFF_COMPRESSION_TYPE" != "sr_quant" ]]; then
+    echo "FATAL: srparity IS the sr_quant codec arm; got '$COMM_EFF_COMPRESSION_TYPE'." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_QUANT_ROUNDING" != "sr" ]]; then
+    echo "FATAL: srparity requires COMM_EFF_QUANT_ROUNDING=sr (unbiased stochastic" >&2
+    echo "       rounding). rn is the BIASED ablation control: issue #93 a2 was killed" >&2
+    echo "       at step 60 with a run-minimum grad_norm 6.9x the unbiased arm's" >&2
+    echo "       120-step maximum. Got '$COMM_EFF_QUANT_ROUNDING'." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_QUANT_SUBSET_K" == "0" ]]; then
+    echo "FATAL: srparity requires COMM_EFF_QUANT_SUBSET_K > 0. Full-width sr_quant at" >&2
+    echo "       bits=$COMM_EFF_QUANT_BITS costs 2560*$COMM_EFF_QUANT_BITS + 80*16 bits/token/boundary," >&2
+    echo "       far OVER the 2048-bit budget this arm exists to respect." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_QUANT_BITS" != "2" || "$COMM_EFF_QUANT_SUBSET_K" != "800" || "$COMM_EFF_QUANT_BLOCK_SIZE" != "32" ]]; then
+    echo "FATAL: srparity is the FIXED a3 translation bits=2 subset_k=800 block_size=32" >&2
+    echo "       (2000 bits/token/boundary, 31.25% coverage, matching a3's 32.10% at" >&2
+    echo "       hidden 1536). A different triple is a different codec point and needs" >&2
+    echo "       its own arm. Got bits=$COMM_EFF_QUANT_BITS subset_k=$COMM_EFF_QUANT_SUBSET_K block=$COMM_EFF_QUANT_BLOCK_SIZE." >&2
+    exit 1
+  fi
+  # WIRE BUDGET, ASSERTED BEFORE A GPU IS TOUCHED. The deployment premise is the
+  # 5.0% boundary budget the PRF arms pay (128 coords x fp16 = 2048 bits/token/
+  # boundary at hidden 2560). This arm must not buy its coverage with bandwidth.
+  # The config validator cannot express this: the wire cost needs the model's
+  # hidden size, which is not in the comm_eff config subtree, so the check lives
+  # here where EXPECT_HIDDEN is known. Stated plainly rather than claimed as a
+  # by-construction guarantee.
+  SRP_WIRE="$(python3 -c "
+k = ${COMM_EFF_QUANT_SUBSET_K}; b = ${COMM_EFF_QUANT_BITS}; blk = ${COMM_EFF_QUANT_BLOCK_SIZE}
+H = ${EXPECT_HIDDEN}; prf_k = int(round(0.05 * H))
+eff = k if (blk <= 0 or blk >= k) else blk
+total = k * b + k * 16.0 / eff
+budget = prf_k * 16
+print(f'{total:.1f} {budget} {100.0*k/H:.2f}')
+")" || { echo "FATAL: srparity wire computation failed." >&2; exit 1; }
+  read -r SRP_BITS SRP_BUDGET SRP_COVER <<<"$SRP_WIRE"
+  if ! python3 -c "import sys; sys.exit(0 if float('$SRP_BITS') <= float('$SRP_BUDGET') else 1)"; then
+    echo "FATAL: srparity wire $SRP_BITS bits/token/boundary EXCEEDS the PRF budget of" >&2
+    echo "       $SRP_BUDGET bits (128 coords x fp16 at hidden $EXPECT_HIDDEN). This arm's whole" >&2
+    echo "       claim is more coordinates at EQUAL OR LOWER bandwidth; buying coverage" >&2
+    echo "       with bytes would confound the codec change with a bandwidth change." >&2
+    exit 1
+  fi
+  echo "=== srparity wire check OK: $SRP_BITS bits/token/boundary vs PRF budget $SRP_BUDGET, coverage ${SRP_COVER}% vs 5.00% ==="
+  if [[ "$COMM_EFF_ANCHOR_OWNS_Q" != "false" ]]; then
+    echo "FATAL: srparity requires COMM_EFF_ANCHOR_OWNS_Q=false; sr_quant carries no" >&2
+    echo "       PowerSGD basis Q for the anchor to own (the config validator rejects it too)." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_SPECTRAL_CADENCE" != "20" || "$COMM_EFF_ANCHOR_CADENCE" != "20" ]]; then
+    echo "FATAL: srparity inherits delayedef-fresh's USE-ONCE merger: spectral.cadence and" >&2
+    echo "       anchor.cadence must both be the literal 20, so the held residual is never" >&2
+    echo "       re-applied stale (every stale-reuse arm without a decaying dose collapsed)." >&2
+    echo "       Got spectral=$COMM_EFF_SPECTRAL_CADENCE anchor=$COMM_EFF_ANCHOR_CADENCE." >&2
+    exit 1
+  fi
+  if [[ "$COMM_EFF_SPECTRAL_CORRECTION_MODE" != "delayed_ef" || "$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA" != "1.0" || "$COMM_EFF_SPECTRAL_DELAYED_EF_DECAY" != "1.0" || "$COMM_EFF_SPECTRAL_BETA_ANC" != "0.0" ]]; then
+    echo "FATAL: srparity pins the reference merger (delayed_ef lambda=1.0 decay=1.0" >&2
+    echo "       beta_anc=0.0). Changing it makes the codec swap a two-delta experiment." >&2
+    exit 1
+  fi
+  if [[ "${COMM_EFF_OPT_RESET_ENABLED:-false}" != "false" ]]; then
+    echo "FATAL: srparity requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
+    exit 1
+  fi
+  # Val is the only instrument that detects quiet drift on this surface, so this
+  # arm runs it every 50 steps for the same reason signgate does. The canonical
+  # 100/200/300/400/500 points are still produced.
+  export TEST_FREQ="${TEST_FREQ:-50}"
 elif [[ "$ARM" == "dense" ]]; then
   # ARM B: the control. The literal quoted arm name matters here: the chain
   # script's arm-exists gate greps the launcher for "dense" before launching.
@@ -1046,6 +1196,8 @@ elif [[ "$ARM" == "blend" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=blend eta=$COMM_EFF_SPECTRAL_BLEND_ETA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (G_corr = (1-eta)*G_comp + eta*(||G_comp||/||M||)*M, convex, no held residual, no sign transplant; no opt-state swap)"
 elif [[ "$ARM" == "signgate" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + merger=signed_ema alpha=${COMM_EFF_SPECTRAL_SIGNED_EMA_ALPHA:-0.25} gate=$COMM_EFF_SPECTRAL_SIGNED_GATE gate_decay=$COMM_EFF_SPECTRAL_SIGNED_GATE_DECAY spectral_cadence=${COMM_EFF_SPECTRAL_CADENCE:-1} (LEARNED DOSE: fire ticks full-strength fresh sign(M); held ticks w = rho*decay^age, rho = fire-tick agreement EMA init 0, starts as use-once; no opt-state swap)"
+elif [[ "$ARM" == "srparity" ]]; then
+  CODEC_LINE="sr_quant bits=$COMM_EFF_QUANT_BITS subset_k=$COMM_EFF_QUANT_SUBSET_K block=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING pp=$COMM_EFF_MASK_PP_SIZE ($SRP_BITS bits/token/boundary vs the PRF arms' $SRP_BUDGET, coverage ${SRP_COVER}% vs 5.00%: the #93 a3 rank-1 codec at horizon) + merger=delayed_ef lambda=$COMM_EFF_SPECTRAL_DELAYED_EF_LAMBDA beta_anc=$COMM_EFF_SPECTRAL_BETA_ANC spectral_cadence=$COMM_EFF_SPECTRAL_CADENCE == anchor_cadence=$COMM_EFF_ANCHOR_CADENCE (USE-ONCE residual, unchanged from arm H; no opt-state swap)"
 elif [[ "$ARM" == "optreset" ]]; then
   CODEC_LINE="$COMM_EFF_COMPRESSION_TYPE p=$COMM_EFF_MASK_P exact_k=$COMM_EFF_MASK_EXACT_K rescale=$COMM_EFF_MASK_RESCALE_MODE pp=$COMM_EFF_MASK_PP_SIZE + opt_reset cadence=$COMM_EFF_OPT_RESET_CADENCE mode=$COMM_EFF_OPT_RESET_MODE b1=$COMM_EFF_OPT_RESET_B1 b2=$COMM_EFF_OPT_RESET_B2 scale_match=$COMM_EFF_OPT_RESET_SCALE_MATCH"
 else

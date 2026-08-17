@@ -368,6 +368,76 @@ Runtime fingerprint: `signed_gate_refreshed` = 398 x fires and
 `signed_gate_held` = 398 x held ticks (~1:19 per interval);
 `signed_gate_rho_mean` stays 0 until the second fire (~tick 40), then moves.
 
+## Run M: finish the never-validated rank-1 codec
+
+`run_qwen3_4b_4k_500_fsdp.sh srparity` (`qwen3-4b-4k-srparity-500`) is run H,
+the adopted optimum, with ONE thing changed, the codec:
+
+| | coordinates per token per boundary | bits | coverage |
+|---|---|---|---|
+| PRF exact-k (every arm so far) | 128 at full precision | 2048 | 5.00% |
+| this arm, sr_quant | 800 at 2 bits plus 25 fp16 block scales | 2000 | 31.25% |
+
+So the 19 pure-compressed ticks see 6.25 times more of each token, and the
+payload goes DOWN rather than up. The merger, the anchor, the 20/20 cadence and
+delay, the batch shape and the schedule are all run H's, untouched.
+
+Why now. The dense control has plateaued at about 0.78 while every stable
+compressed arm parks at 0.72 to 0.74, so the difference is a CEILING set by what
+the compressed training path can see, not a rate the compressed circuit would
+eventually make up. Every arm to date changed what the single anchor tick hands
+the optimizer. This is the first one that changes what the other nineteen see,
+which is where the accepted plateau diagnosis puts the problem.
+
+It is a replicate, not a new idea. Issue #93 cell `a3-srq-parity-k493` ran this
+codec at this budget on the 1.5B surface and was ranked **stability 1 of 12**:
+gap slope +0.000101 nats per step over its window against the incumbent's
++0.000838 on the matched window, gap drift ratio 1.001 which is the closest to
+unity in the program, and a gradient shape ratio tighter than both the incumbent
+and dense, all while learning at incumbent pace. What it never had was a horizon
+or a held-out number, because it ran 120 steps with validation off and no
+checkpoints. It is the most promising never-validated codec in the program, and
+this arm finishes it. The knobs are a3's own translated to hidden 2560: same 2
+bits, same 32-channel blocks, and 31.25% coverage against a3's 32.10%.
+
+Unbiasedness is pinned, not optional. The cleanest single-variable result in
+issue #93 is that a1 with stochastic rounding finished with the tightest
+optimizer in the field while a2, identical except for round-to-nearest, was
+killed at step 60 with a run-minimum gradient norm 6.9 times a1's whole-run
+maximum. The launcher refuses `rounding=rn` under this arm name, and a CPU test
+demonstrates the bias gap at this exact codec point.
+
+Smoke first. Qwen models carry massive-activation channels, and blockwise absmax
+scaling surrenders its range to the largest channel in each block. That has never
+been measured on Qwen3-4B boundary states. The disciplining precedent is that the
+HIGHER-fidelity PowerSGD codec collapsed by step 41 through a truncation spiral,
+so a codec swap on this surface has already gone wrong once:
+
+```bash
+SMOKE=1 bash examples/grpo_trainer/run_qwen3_4b_4k_500_fsdp.sh srparity
+```
+
+Read response length and clip ratio over those 25 steps. Anything climbing
+toward the 3072 cap means stop, and the arm does not get its 500 steps.
+
+Confirm it took:
+
+```bash
+grep -m1 "resolved codec OK (before GPU): sr_quant" /workspace/runs/qwen3-4b-4k-srparity-500/train.log
+```
+
+The launcher also prints its own wire check before any GPU is touched, reading
+2000.0 bits per token per boundary against the PRF budget of 2048 at 31.25%
+coverage. Runtime fingerprint: `comm_eff/logical_pp_bits_sr_quant` must read
+2000, and `comm_eff/mask_applications/train` must be the only nonzero path
+counter. Val runs every 50 steps for the same reason run L does.
+
+Win condition, declared in advance: val@500 at or above 0.7555, which is 2.4
+points over run H and three times the noise floor. Dead or null: val@500 at or
+below 0.7395, which fails to clear the best existing clean finisher, in which
+case the "more coordinates, coarser each" axis closes. Anything between is a
+partial that buys one follow-up at a different bit depth and nothing more.
+
 ## Why 128 prompts per step and not the 512 in CLAUDE.md
 
 128/128 is the surface every piece of long-horizon evidence in this project sits
