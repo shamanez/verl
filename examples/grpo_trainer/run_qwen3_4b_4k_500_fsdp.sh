@@ -92,7 +92,6 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 # Box gates.
 EXPECT_GPUS="${EXPECT_GPUS:-4}"
 MIN_RAM_GIB="${MIN_RAM_GIB:-320}"      # anchor keeps a CPU clone + CPU snapshots + the fp32 EMA M, per rank
-MIN_DISK_GIB="${MIN_DISK_GIB:-900}"    # 10 kept 4B checkpoints across both arms + merged eval models
 # SKIP_BOX_GATES=1 downgrades the RAM and disk gates to loud warnings.
 SKIP_BOX_GATES="${SKIP_BOX_GATES:-0}"
 
@@ -100,6 +99,16 @@ SKIP_BOX_GATES="${SKIP_BOX_GATES:-0}"
 # re-pulling ~250 GB per arm over a 2-8 MB/s uplink would dominate the schedule).
 # Set CKPT_R2_DELETE_LOCAL=true on a small-disk box and let the eval re-pull.
 CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-false}"
+# The disk gate advertises CKPT_R2_DELETE_LOCAL as its own escape hatch, so it
+# must actually honor the flag (dense-full stalled 90 idle minutes on a 734 GiB
+# box because it did not): keeping checkpoints needs archive space for ~10 kept
+# 4B checkpoints across both arms plus merged eval models, R2-only checkpoints
+# need staging headroom (CKPT_R2_MAX_STAGED_GB) plus working room.
+if [[ "$CKPT_R2_DELETE_LOCAL" == "true" ]]; then
+  MIN_DISK_GIB="${MIN_DISK_GIB:-400}"
+else
+  MIN_DISK_GIB="${MIN_DISK_GIB:-900}"
+fi
 # ---------------------------------------------------------------------------
 
 RUN_DIR="$WORK/runs/$ARM_NAME"
