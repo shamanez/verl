@@ -887,6 +887,17 @@ elif [[ "$ARM" == "signgate" ]]; then
     echo "FATAL: signgate requires COMM_EFF_OPT_RESET_ENABLED=false (no optimizer-state swap)." >&2
     exit 1
   fi
+  # VAL EVERY 50 STEPS, not 100. Backtesting all seven finished runs on
+  # 2026-08-17 showed the quiet-drift failure (the blend arm's 8.4pt val crash
+  # to base) is NOT detectable from any training vital: the log-perplexity
+  # floor is crossed by the DENSE control at its healthiest, the entropy floor
+  # is crossed by the clean 500-step survivor, and a declining-train-score
+  # rule fires on all three clean finishers while staying silent on the run
+  # that actually died. Greedy val is the only instrument that ever caught it,
+  # so this arm doubles its resolution. The canonical 100/200/300/400/500
+  # points are still produced, so the arm stays directly comparable to the
+  # other ten; the extra passes cost roughly twenty minutes total.
+  export TEST_FREQ="${TEST_FREQ:-50}"
 elif [[ "$ARM" == "dense" ]]; then
   # ARM B: the control. The literal quoted arm name matters here: the chain
   # script's arm-exists gate greps the launcher for "dense" before launching.

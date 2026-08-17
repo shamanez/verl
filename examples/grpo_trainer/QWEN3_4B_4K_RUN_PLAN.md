@@ -338,8 +338,24 @@ Collapse risk: Mode A is the family risk, and it needed the full standing dose
 to ignite (run A collapsed at 152-163 with w=1 on every tick). This arm's held
 weight starts at 0, never exceeds rho*0.75 on the first held tick, and decays
 geometrically within every interval. Mode D (quiet drift) is the subtler risk,
-same as the anneal arm; the standing detectors and the val-crash rule apply
-unchanged.
+same as the anneal arm.
+
+This arm runs `TEST_FREQ=50` rather than 100, because Mode D turned out not to
+be detectable from training vitals at all. Backtested against all seven
+finished runs on 2026-08-17:
+
+| criterion | why it fails |
+|---|---|
+| `rollout_log_ppl` below 0.050 | the dense control reads 0.046 by step 250 at the best score and validation in the study, and the dead blend run tracked dense's perplexity to within 0.002 over steps 200-250 |
+| entropy below 6.615 | the clean 500-step survivor finished at 6.5353 and read 6.6028 at step 300, statistically the same as blend's 6.5975; both instruments bleed monotonically and the dense circuit bleeds harder in relative terms, 0.136 down to 0.052 |
+| three declining 25-step train-score blocks | fires at step 486 on all three clean 500-step finishers, where a 3.3 point late sag is normal, and stays silent on blend, which died having declined only 1.5 points |
+
+Greedy validation is the only instrument that ever caught the drift, so the arm
+doubles its resolution and the watcher arms no vitals criterion for this mode.
+The canonical 100/200/300/400/500 points are still produced, so comparability
+against the other ten runs is unchanged; the extra passes cost about twenty
+minutes. The loud detectors (early clip, Modes A, B and C) and the val-crash
+kill rule apply unchanged.
 
 Confirm it took:
 
