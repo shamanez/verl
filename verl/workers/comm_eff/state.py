@@ -521,10 +521,14 @@ class CommEffState:
         Emits ``comm_eff/mask_applications/<tag>`` for every tag; the only
         nonzero key should be ``.../train`` (plus ``.../old_logprob`` under
         mask_recompute). Any other nonzero key is the confinement falsifier.
-        The sr_quant codec shares these counters (its hook calls
-        ``note_mask_application`` too), so the same falsifier covers it.
+        The sr_quant and aq_sgd codecs share these counters (their hooks call
+        ``note_mask_application`` too), so the same falsifier covers them. All
+        three are enumerated through ``per_token_codec``: listing only two left
+        the per-tag breakdown ABSENT rather than zero for aq_sgd, and a missing
+        panel reads as a logging quirk where a flat zero line reads as a fault,
+        which is the harder failure to notice.
         """
-        if self.masker is None and self.quantizer is None:
+        if self.per_token_codec is None:
             return {}
         return {f"comm_eff/mask_applications/{tag}": count for tag, count in self.mask_applications_by_path.items()}
 

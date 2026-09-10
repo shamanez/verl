@@ -935,7 +935,12 @@ class ActivationAQSGD:
         """
         if self._handles:
             return
-        self._pending = {}
+        # NOT cleared here. The engine registers and unregisters the codec once
+        # per eligible PASS (forward_backward_batch registers on entry and
+        # unregisters in its finally), not once per run, so clearing the stage
+        # here destroyed the train pass's staged buffer before the next step's
+        # set_context could publish it. The buffer and its pending stage are
+        # cross-step state and outlive registration, exactly like self.buffer.
         self._sample_ids = None
         self._position_ids = None
         self._example_ids = None

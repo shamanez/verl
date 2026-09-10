@@ -627,3 +627,172 @@ def test_aqsgd_telemetry_reaches_the_metrics_dict():
     # Pair 1 one; test_wire_ledger_matches_prf_exact_k_at_pair_one pins 1232.5.
     assert mets["comm_eff/logical_pp_bits_aq_sgd"] == pytest.approx(K * BITS + K * 16 / BLK)
 
+# --------------------------------------------------------------------------- #
+# integration gates: the two blockers a hand-called register() cannot catch
+# --------------------------------------------------------------------------- #
+def _pair1_aqsgd_config():
+    from verl.workers.config.comm_eff import (
+        CommEffAnchorConfig,
+        CommEffAQSGDConfig,
+        CommEffConfig,
+        CommEffMaskConfig,
+        CommEffPowerSGDConfig,
+        CommEffSpectralConfig,
+    )
+
+    return CommEffConfig(
+        enabled=True,
+        compression_type="aq_sgd",
+        mask=CommEffMaskConfig(enabled=False, mask_recompute=True, mask_reference=True, pp_size=8),
+        aq_sgd=CommEffAQSGDConfig(bits=2, subset_k=K, block_size=BLK),
+        anchor=CommEffAnchorConfig(
+            enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True
+        ),
+        spectral=CommEffSpectralConfig(enabled=True),
+        powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=False),
+    )
+
+
+def test_engine_registration_gate_opens_for_aq_sgd():
+    """The blocker: the gate enumerated masker/quantizer and not aqsgd.
+
+    Consequence, measured on a live box before this test existed: three aq_sgd
+    arms reported comm_eff/mask_applications = 0 while the matched sr_quant arm
+    reported 10458. No hook was ever installed, so the arms were bit-for-bit
+    DENSE while every pre-flight gate printed "resolved codec OK: aq_sgd".
+    Four GPU-days would have produced dense runs labelled AQ-SGD.
+
+    This asserts the gate expression the engine actually evaluates, so it fails
+    if anyone re-enumerates codecs by hand at that site.
+    """
+    import torch.nn as nn
+
+    from verl.workers.comm_eff.state import maybe_build_comm_eff_state
+
+    class _Blk(nn.Module):
+        def __init__(self, d):
+            super().__init__()
+            self.lin = nn.Linear(d, d)
+
+        def forward(self, x):
+            return self.lin(x)
+
+    class _Dec(nn.Module):
+        def __init__(self, n=16, d=H):
+            super().__init__()
+            self.layers = nn.ModuleList([_Blk(d) for _ in range(n)])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    state = maybe_build_comm_eff_state(_pair1_aqsgd_config())
+    # The codec object is created in build(), not the constructor, so the gate
+    # is only meaningful after the engine has built the state.
+    state.build(_Dec())
+    assert state.masker is None and state.quantizer is None, (
+        "aq_sgd populates neither of the two the old gate looked at, which is the trap"
+    )
+    assert state.aqsgd is not None
+    assert state.per_token_codec is state.aqsgd, "the gate must resolve the live codec"
+
+    # The gate's own predicate, verbatim from transformer_impl._comm_eff_mask_active.
+    assert getattr(state, "per_token_codec", None) is not None, "registration gate would refuse aq_sgd"
+
+
+def test_every_engine_codec_site_uses_per_token_codec():
+    """No site may enumerate codecs by hand; that is what caused both blockers.
+
+    Two sites were blind: the registration gate (silent dense) and the teardown
+    in forward_backward_batch's finally (which, once the gate was fixed, would
+    have raised AttributeError on None.unregister). A third, the per-tag metric,
+    left the counter ABSENT rather than zero.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    for rel in (
+        "verl/workers/engine/fsdp/transformer_impl.py",
+        "verl/workers/comm_eff/state.py",
+    ):
+        text = (root / rel).read_text()
+        # The exact shape that was wrong: masker and quantizer named together
+        # with no aqsgd and no per_token_codec on the same logical line.
+        for pat in (
+            # "." excludes newlines by default, so these stay within one line.
+            r"state\.masker.{0,40}is None and.{0,40}state\.quantizer.{0,20}is None",
+            r"self\.masker is None and self\.quantizer is None",
+            r"_codec = self\._comm_eff_state\.masker",
+        ):
+            hits = [m for m in re.finditer(pat, text)]
+            assert not hits, (
+                f"{rel} still enumerates codecs by hand ({pat!r}); use state.per_token_codec, "
+                "which enumerates masker/quantizer/aqsgd"
+            )
+
+
+def test_register_does_not_discard_the_staged_buffer():
+    """The second blocker: register() cleared _pending.
+
+    The engine registers and unregisters once per eligible PASS, not once per
+    run, so clearing the stage in register() destroyed the train pass's staged
+    buffer before the next step could publish it. The hit rate would have read
+    0 for the whole run even with the codec firing, and the ablation's entire
+    explanation is the hit rate.
+    """
+    import torch.nn as nn
+
+    class _Blk(nn.Module):
+        def __init__(self, d):
+            super().__init__()
+            self.lin = nn.Linear(d, d)
+
+        def forward(self, x):
+            return self.lin(x)
+
+    class _Dec(nn.Module):
+        def __init__(self, n=16, d=H):
+            super().__init__()
+            self.layers = nn.ModuleList([_Blk(d) for _ in range(n)])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    model = _Dec()
+    state = _State(tag="train")
+    codec = ActivationAQSGD(pp_size=8, subset_k=K, bits=BITS, block_size=BLK, scope="prompt", state=state)
+    n = 12
+
+    def ctx(step):
+        return dict(
+            global_step=step,
+            sample_ids=torch.zeros(n, dtype=torch.long),
+            position_ids=torch.arange(n),
+            example_ids=torch.full((n,), 5, dtype=torch.long),
+            prompt_lens=torch.full((n,), 6, dtype=torch.long),
+        )
+
+    torch.manual_seed(0)
+    x = torch.randn(n, H)
+
+    # Step 1: register / forward / unregister, exactly as the engine does per pass.
+    codec.register(model)
+    codec.set_context(**ctx(1))
+    model(x)
+    codec.unregister()
+    assert len(codec._pending) == 7, "the train pass must stage one slab per boundary"
+
+    # Step 2: the engine registers AGAIN for the next pass. That must not discard
+    # the stage, and set_context must then publish it.
+    codec.register(model)
+    assert len(codec._pending) == 7, "register() must not discard the staged buffer"
+    codec.set_context(**ctx(2))
+    assert len(codec.buffer) == 7, "the step boundary must publish the stage"
+    model(x)
+    codec.unregister()
+    assert codec.buffer.hit_rate > 0.0, "the second visit must score hits"
+

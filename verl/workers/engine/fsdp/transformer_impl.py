@@ -749,7 +749,13 @@ class FSDPEngine(BaseEngine):
         state = getattr(self, "_comm_eff_state", None)
         if state is None or not getattr(state, "enabled", False):
             return False
-        if getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None:
+        # Route through per_token_codec, which enumerates masker / quantizer /
+        # aqsgd. Enumerating two of the three here is what made every aq_sgd arm
+        # register no hooks at all and run bit-for-bit DENSE while every
+        # pre-flight gate printed "resolved codec OK: aq_sgd". Measured on the
+        # box: comm_eff/mask_applications was 0 on three aq_sgd arms and 10458
+        # on the matched sr_quant arm, which routes through quantizer.
+        if getattr(state, "per_token_codec", None) is None:
             return False
         if not getattr(state, "compression_active", False):
             return False
@@ -983,10 +989,14 @@ class FSDPEngine(BaseEngine):
             if _powersgd_hooks_live:
                 self._comm_eff_state.powersgd.unregister()
             if _mask_hooks_live:
-                _codec = self._comm_eff_state.masker
-                if _codec is None:
-                    _codec = self._comm_eff_state.quantizer
-                _codec.unregister()
+                # Same property as the registration gate and the context setter.
+                # This site is why fixing the gate alone is not enough: with
+                # masker and quantizer both None under aq_sgd, the old chain
+                # left _codec None and this finally raised AttributeError on the
+                # first eligible forward.
+                _codec = self._comm_eff_state.per_token_codec
+                if _codec is not None:
+                    _codec.unregister()
 
     def _forward_backward_batch_inner(
         self,
