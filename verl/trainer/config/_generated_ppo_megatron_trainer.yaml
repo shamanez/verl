@@ -199,7 +199,7 @@ actor_rollout_ref:
         subset_k: 0
         scope: prompt
         first_visit: rescaled
-        capacity_bytes: 25769803776
+        capacity_bytes: 17179869184
         buffer_device: cpu
         max_positions: 0
       anchor:

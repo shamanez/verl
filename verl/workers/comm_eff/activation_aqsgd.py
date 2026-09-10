@@ -169,10 +169,13 @@ AQSGD_FIRST_VISIT_MODES = ("rescaled", "dense")
 _BUFFER_DTYPE = torch.float16
 _BUFFER_ITEMSIZE = 2
 
-# Default LRU cap on the host-side store. 24 GiB covers Pair 1's prompt
-# prefixes (about 19 GiB measured) with headroom, and is well inside a
-# 4xH200 host. Raise it only against measured free RAM.
-_DEFAULT_CAPACITY_BYTES = 24 * (1024**3)
+# Default LRU cap on the host-side store. 16 GiB is about one epoch of Pair 1's
+# prompt prefixes at n_examples * 7 boundaries * 1536 dims * 2 bytes, which is
+# roughly 0.16 GB per buffered token position. Kept identical to the config
+# dataclass default, the Hydra default and the launcher default: the fanout's
+# host-RAM gate reserves a fixed budget per codec arm, so a layer that
+# defaulted higher on its own would silently overrun it.
+_DEFAULT_CAPACITY_BYTES = 16 * (1024**3)
 
 
 def aqsgd_example_ids(

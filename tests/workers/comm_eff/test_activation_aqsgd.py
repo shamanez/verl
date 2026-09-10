@@ -487,3 +487,51 @@ def test_reference_pass_reads_the_buffer_but_never_writes_it():
         assert len(codec.buffer) == 0, "the reference pass must not advance the buffer"
     finally:
         codec.unregister()
+
+def test_buffer_capacity_default_agrees_at_every_layer():
+    """The fanout's host-RAM gate reserves a fixed per-arm budget, so a layer
+    that defaulted higher on its own would silently overrun it.
+
+    The gate reserves 32 GB + AQ_CAPACITY_GB per codec arm. If the dataclass,
+    the module, Hydra or the engine script defaulted to more than the launchers
+    do, an arm started without the env set would exceed the reservation, and
+    three such arms would exceed it by three times that. This pins all of them
+    to one figure.
+    """
+    import re
+    from pathlib import Path
+
+    from verl.workers.comm_eff.activation_aqsgd import _DEFAULT_CAPACITY_BYTES
+    from verl.workers.config.comm_eff import CommEffAQSGDConfig
+
+    expected = 16 * (1024**3)
+    root = Path(__file__).resolve().parents[3]
+
+    def _grep(rel, pattern):
+        m = re.search(pattern, (root / rel).read_text())
+        assert m, f"{pattern!r} not found in {rel}"
+        return int(m.group(1))
+
+    layers = {
+        "dataclass": CommEffAQSGDConfig().capacity_bytes,
+        "module": _DEFAULT_CAPACITY_BYTES,
+        "codec object": ActivationAQSGD().buffer.capacity_bytes,
+        "actor.yaml": _grep("verl/trainer/config/actor/actor.yaml", r"capacity_bytes: (\d+)"),
+        "generated.yaml": _grep(
+            "verl/trainer/config/_generated_ppo_trainer.yaml", r"capacity_bytes: (\d+)"
+        ),
+        "engine.sh": _grep(
+            "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh",
+            r"COMM_EFF_AQ_SGD_CAPACITY_BYTES:-(\d+)",
+        ),
+    }
+    assert set(layers.values()) == {expected}, layers
+
+    # The launcher-side knob is expressed in GiB and must be the same figure.
+    for rel in (
+        "examples/grpo_trainer/run_qwen25_math_1p5b_aqsgd_fsdp.sh",
+        "examples/grpo_trainer/run_compass_rlvr_ablations_fsdp.sh",
+        "examples/grpo_trainer/run_compass_rlvr_ablations_fanout_fsdp.sh",
+    ):
+        assert _grep(rel, r"AQ_CAPACITY_GB:-(\d+)") * 1024**3 == expected, rel
+

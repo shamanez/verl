@@ -310,7 +310,7 @@ COMM_EFF_AQ_SGD_ROUNDING="${COMM_EFF_AQ_SGD_ROUNDING:-sr}"           # sr = unbi
 COMM_EFF_AQ_SGD_SUBSET_K="${COMM_EFF_AQ_SGD_SUBSET_K:-0}"            # send only a PRF-fresh exact-k channel subset J/token; un-sent channels KEEP m (no H/k gain); 0 = full width
 COMM_EFF_AQ_SGD_SCOPE="${COMM_EFF_AQ_SGD_SCOPE:-prompt}"             # prompt = buffer the recurring prefix only (AQ-SGD's best case here) | all = the literal port
 COMM_EFF_AQ_SGD_FIRST_VISIT="${COMM_EFF_AQ_SGD_FIRST_VISIT:-rescaled}"  # rescaled = byte-matched cold fallback (== sr_quant subset) | dense = the paper's uncompressed first message, OFF-BUDGET
-COMM_EFF_AQ_SGD_CAPACITY_BYTES="${COMM_EFF_AQ_SGD_CAPACITY_BYTES:-25769803776}"  # LRU cap on the host buffer; must span one epoch of prompts to score hits
+COMM_EFF_AQ_SGD_CAPACITY_BYTES="${COMM_EFF_AQ_SGD_CAPACITY_BYTES:-17179869184}"  # 16 GiB LRU cap; must span one epoch of prompts to score hits. Same figure at every layer: the fanout gate reserves a fixed per-arm budget
 COMM_EFF_AQ_SGD_BUFFER_DEVICE="${COMM_EFF_AQ_SGD_BUFFER_DEVICE:-cpu}"
 COMM_EFF_AQ_SGD_MAX_POSITIONS="${COMM_EFF_AQ_SGD_MAX_POSITIONS:-0}"  # hard cap on buffered positions per example (0 = unbounded); bounds the store under scope=all
 # --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---

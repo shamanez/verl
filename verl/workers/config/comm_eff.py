@@ -298,7 +298,11 @@ class CommEffAQSGDConfig(BaseConfig):
         capacity_bytes (int): LRU cap on the host-side buffer, in bytes. The
             store must span the reuse distance (a full epoch of prompts) to
             score a hit, so a cap below that lowers the measured hit rate
-            rather than corrupting the codec. Default 24 GiB.
+            rather than corrupting the codec. Default 16 GiB, which is about
+            one epoch of Pair 1's prompt prefixes. This default is load-bearing
+            for the fanout's host-RAM gate, which reserves a fixed budget per
+            codec arm, so it is pinned to the same figure the launcher and the
+            engine script default to rather than being independently chosen.
         buffer_device (str): Where the buffer lives. ``cpu`` (default); the
             store is orders of magnitude too large for HBM.
         max_positions (int): Optional hard cap on buffered positions per
@@ -312,7 +316,7 @@ class CommEffAQSGDConfig(BaseConfig):
     subset_k: int = 0
     scope: str = "prompt"
     first_visit: str = "rescaled"
-    capacity_bytes: int = 24 * (1024**3)
+    capacity_bytes: int = 16 * (1024**3)
     buffer_device: str = "cpu"
     max_positions: int = 0
 

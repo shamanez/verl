@@ -380,8 +380,10 @@ comm_eff:
     # OFF-BUDGET by construction; use it to measure payload, not accuracy.
     first_visit: rescaled
     # LRU cap on the host-side buffer, in bytes. The store must span the reuse
-    # distance (one epoch of prompts) to score a hit.
-    capacity_bytes: 25769803776
+    # distance (one epoch of prompts) to score a hit. 16 GiB, kept identical to
+    # the dataclass, module and launcher defaults because the fanout's host-RAM
+    # gate reserves a fixed budget per codec arm.
+    capacity_bytes: 17179869184
     buffer_device: cpu
     max_positions: 0
 
