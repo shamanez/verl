@@ -747,9 +747,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # The sr_quant codec reuses the same mask_reference knob for its
                 # reference-forward eligibility (quantized-current vs
                 # quantized-reference).
-                boundary_codec = getattr(comm_eff_state, "masker", None)
-                if boundary_codec is None:
-                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                # per_token_codec enumerates masker / quantizer / aqsgd. Naming
+                # only two here left boundary_codec None under aq_sgd, so
+                # compression_active was never set on the reference path and the
+                # codec fired on the TRAIN forward alone. That is worse than not
+                # firing: the reference KL becomes dense-reference against
+                # compressed-current instead of codec-vs-codec, and the old
+                # log-probs are computed densely, so the PPO ratio no longer
+                # starts each step at one. Caught by the entropy signature,
+                # 0.67 on aq_sgd against 7.79 on the matched sr_quant arm.
+                boundary_codec = getattr(comm_eff_state, "per_token_codec", None)
                 masker_reference = boundary_codec is not None and mask_reference
                 if powersgd_reference or masker_reference:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))
@@ -797,9 +804,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # mask.mask_recompute is set; the mask hook's eligibility check
                 # (mask_eligible_tags) gates it identically. The sr_quant codec
                 # reuses the same mask_recompute knob.
-                boundary_codec = getattr(comm_eff_state, "masker", None)
-                if boundary_codec is None:
-                    boundary_codec = getattr(comm_eff_state, "quantizer", None)
+                # Same fix as the reference path above, same reason.
+                boundary_codec = getattr(comm_eff_state, "per_token_codec", None)
                 masker_recompute = boundary_codec is not None and mask_recompute
                 if powersgd_recompute or masker_recompute:
                     prev_compression_active = bool(getattr(comm_eff_state, "compression_active", False))

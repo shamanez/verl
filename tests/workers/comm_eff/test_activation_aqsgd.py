@@ -716,6 +716,12 @@ def test_every_engine_codec_site_uses_per_token_codec():
     for rel in (
         "verl/workers/engine/fsdp/transformer_impl.py",
         "verl/workers/comm_eff/state.py",
+        # engine_workers.py was NOT in this list on the first pass, and that
+        # omission is exactly why two more sites survived: boundary_codec was
+        # resolved masker-or-quantizer there, so compression_active was never
+        # set on the reference and old-logprob paths and the codec fired on the
+        # train forward alone.
+        "verl/workers/engine_workers.py",
     ):
         text = (root / rel).read_text()
         # The exact shape that was wrong: masker and quantizer named together
@@ -725,6 +731,7 @@ def test_every_engine_codec_site_uses_per_token_codec():
             r"state\.masker.{0,40}is None and.{0,40}state\.quantizer.{0,20}is None",
             r"self\.masker is None and self\.quantizer is None",
             r"_codec = self\._comm_eff_state\.masker",
+            r"boundary_codec = getattr\(comm_eff_state, \"masker\"",
         ):
             hits = [m for m in re.finditer(pat, text)]
             assert not hits, (
