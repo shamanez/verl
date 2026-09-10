@@ -333,7 +333,10 @@ class CommEffState:
             # sr_quant paths never pay the import cost. Mutually exclusive with
             # every other codec branch. aq_sgd reuses the mask sub-config for
             # eligibility, the PRF base seed and the boundary placement.
-            from verl.workers.comm_eff.activation_aqsgd import ActivationAQSGD
+            from verl.workers.comm_eff.activation_aqsgd import (
+                _DEFAULT_CAPACITY_BYTES,
+                ActivationAQSGD,
+            )
 
             aq_cfg = self.config.aq_sgd
             mask_cfg = self.config.mask
@@ -346,7 +349,7 @@ class CommEffState:
                 subset_k=int(getattr(aq_cfg, "subset_k", 0)),
                 scope=str(getattr(aq_cfg, "scope", "prompt")),
                 first_visit=str(getattr(aq_cfg, "first_visit", "rescaled")),
-                capacity_bytes=int(getattr(aq_cfg, "capacity_bytes", 24 * (1024**3))),
+                capacity_bytes=int(getattr(aq_cfg, "capacity_bytes", _DEFAULT_CAPACITY_BYTES)),
                 buffer_device=str(getattr(aq_cfg, "buffer_device", "cpu")),
                 max_positions=int(getattr(aq_cfg, "max_positions", 0)),
                 state=self,
@@ -361,7 +364,7 @@ class CommEffState:
                 getattr(aq_cfg, "subset_k", 0),
                 getattr(aq_cfg, "scope", "prompt"),
                 getattr(aq_cfg, "first_visit", "rescaled"),
-                int(getattr(aq_cfg, "capacity_bytes", 24 * (1024**3))) / float(1024**3),
+                self.aqsgd.buffer.capacity_bytes / float(1024**3),
                 getattr(aq_cfg, "buffer_device", "cpu"),
                 getattr(aq_cfg, "max_positions", 0),
                 getattr(mask_cfg, "pp_size", 8),

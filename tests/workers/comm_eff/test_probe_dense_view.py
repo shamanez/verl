@@ -105,7 +105,7 @@ def test_probe_tag_none_is_legal_and_in_no_eligibility_set():
     assert None not in PATH_TAGS
 
 
-@pytest.mark.parametrize("codec", ["prf_mask", "sr_quant"])
+@pytest.mark.parametrize("codec", ["prf_mask", "sr_quant", "aq_sgd"])
 @pytest.mark.parametrize("forward_only", [True, False])
 def test_engine_mask_gate_rejects_tag_none(codec, forward_only):
     """The engine's boundary-codec gate must reject the probe view even in the
@@ -142,7 +142,7 @@ def test_engine_powersgd_gate_rejects_tag_none(forward_only):
     assert FSDPEngine._comm_eff_powersgd_active(engine, True) is True
 
 
-@pytest.mark.parametrize("codec", ["prf_mask", "sr_quant"])
+@pytest.mark.parametrize("codec", ["prf_mask", "sr_quant", "aq_sgd"])
 def test_codec_hook_asserts_if_fired_under_probe_tag(codec):
     """Defense in depth: were a codec hook still registered during a probe
     pass, its confinement guard must refuse to mask/quantize (tag None)."""

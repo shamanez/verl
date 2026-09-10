@@ -670,6 +670,21 @@ def test_buffer_capacity_default_agrees_at_every_layer():
     }
     assert set(layers.values()) == {expected}, layers
 
+    # The enumeration above is REMEMBERED, and a remembered list certifies only
+    # the layers its author thought of: state.py's own getattr fallback was
+    # missing from it and had drifted to 24 GiB. So DERIVE the check too, by
+    # scanning the package for any numeric capacity_bytes default. A new layer
+    # is then covered the moment it is written, without anyone updating a tuple.
+    derived = {}
+    for path in sorted((root / "verl").rglob("*.py")):
+        for m in re.finditer(
+            r"capacity_bytes[\s\S]{0,40}?(\d+\s*\*\s*\(1024\*\*3\)|\d{6,})",
+            path.read_text(),
+        ):
+            derived[f"{path.relative_to(root)}:{m.group(1)}"] = eval(m.group(1))  # noqa: S307
+    assert derived, "the capacity_bytes scan matched nothing, so the regex has rotted"
+    assert set(derived.values()) == {expected}, derived
+
     # The launcher-side knob is expressed in GiB and must be the same figure.
     for rel in (
         "examples/grpo_trainer/run_compass_rlvr_ablations_fsdp.sh",
@@ -854,16 +869,44 @@ def test_every_engine_codec_site_uses_per_token_codec():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    for rel in (
+
+    # DERIVE the file list, do not remember it. On the first pass this tuple was
+    # hand-written, it omitted engine_workers.py, and that omission is exactly
+    # why two more sites survived: boundary_codec was resolved
+    # masker-or-quantizer there, so compression_active was never set on the
+    # reference and old-logprob paths and the codec fired on the train forward
+    # alone. A list an author maintains certifies only the files that author
+    # thought of, so scan for anything that reaches a codec slot.
+    # A file "touches the codec" if it reads a slot by name OR routes through
+    # the helper. Both belong in the scan: the first is the shape that was
+    # wrong, the second is where a future author will add the next site.
+    # Matches attribute access (``state.masker``) AND the getattr-by-string
+    # form (``getattr(comm_eff_state, "per_token_codec", None)``), which is how
+    # engine_workers.py actually reaches it. Over-matching is safe here: an
+    # extra file just gets checked against the negative patterns below, whereas
+    # under-matching is the failure this whole test exists to prevent.
+    slot_ref = re.compile(r"""(?:\.|["'])(?:masker|quantizer|aqsgd|per_token_codec)\b""")
+    codec_modules = {
+        "verl/workers/comm_eff/activation_mask.py",
+        "verl/workers/comm_eff/activation_quant.py",
+        "verl/workers/comm_eff/activation_aqsgd.py",
+    }
+    scanned = []
+    for path in sorted((root / "verl").rglob("*.py")):
+        rel_path = str(path.relative_to(root))
+        if rel_path in codec_modules:
+            continue
+        if slot_ref.search(path.read_text()):
+            scanned.append(rel_path)
+    assert scanned, "the codec-slot scan matched no files, so the regex has rotted"
+    for expected in (
         "verl/workers/engine/fsdp/transformer_impl.py",
         "verl/workers/comm_eff/state.py",
-        # engine_workers.py was NOT in this list on the first pass, and that
-        # omission is exactly why two more sites survived: boundary_codec was
-        # resolved masker-or-quantizer there, so compression_active was never
-        # set on the reference and old-logprob paths and the codec fired on the
-        # train forward alone.
         "verl/workers/engine_workers.py",
     ):
+        assert expected in scanned, f"{expected} reaches a codec slot but the scan missed it"
+
+    for rel in scanned:
         text = (root / rel).read_text()
         # The exact shape that was wrong: masker and quantizer named together
         # with no aqsgd and no per_token_codec on the same logical line.
@@ -879,6 +922,34 @@ def test_every_engine_codec_site_uses_per_token_codec():
                 f"{rel} still enumerates codecs by hand ({pat!r}); use state.per_token_codec, "
                 "which enumerates masker/quantizer/aqsgd"
             )
+
+
+def test_per_token_codec_covers_every_slot_build_assigns():
+    """The positive half, because absence of old regexes is not presence of the fix.
+
+    Every site above now routes through ``state.per_token_codec``, which makes
+    the ONE tuple inside it a single point of failure for all of them: add a
+    fourth codec, forget that line, and every site fails together while this
+    module's negative scan still passes green.
+
+    So derive the slots from ``build()``, the one place an author cannot forget,
+    because a codec that is never constructed is never used at all.
+    """
+    import inspect
+    import re
+
+    from verl.workers.comm_eff.state import CommEffState
+
+    build_src = inspect.getsource(CommEffState.build)
+    assigned = set(re.findall(r"self\.(\w+) = Activation\w+\(", build_src))
+    assert assigned, "no codec assignment found in build(), so the pattern has rotted"
+
+    enumerated = set(re.findall(r"self\.(\w+)", inspect.getsource(CommEffState.per_token_codec.fget)))
+    missing = assigned - enumerated
+    assert not missing, (
+        f"build() assigns codecs to {sorted(missing)} but per_token_codec does not enumerate them, "
+        "so every engine site that routes through it would be blind to those codecs"
+    )
 
 
 def test_register_does_not_discard_the_staged_buffer():
