@@ -136,6 +136,17 @@ confines the buffer to those positions and is AQ-SGD's best case here. The arm
 labelled ``all positions'' is the unmodified port. We report the measured
 buffer hit rate with both, so the outcome is explained rather than asserted.
 
+One feature of that hit rate needs stating in advance, because it looks like a
+fault and is not. It is exactly zero for the first tenth of the run. The buffer
+is keyed on a persistent identity for the example, so a prompt can only score a
+hit once it is drawn a second time, and Pair~1 draws $128$ of the $7{,}498$
+training problems per step without replacement. The reuse distance is therefore
+one full epoch, $7498/128 = 58.6$ steps, and the earliest possible hit is at
+step $59$. Over $600$ steps a prompt is revisited $10.2$ times. A codec whose
+mechanism cannot engage until step $59$ spends the first $10\%$ of training as
+plain quantization, which is part of what the comparison measures rather than
+an artifact of our implementation.
+
 \subsection{Storage}
 
 The buffer is indexed by example, position and boundary, and it must span the
