@@ -1,0 +1,113 @@
+% Mirror of the TAH-Quant additions made to the COMPASS Overleaf on 2026-09-11.
+% Source of truth is main_rewritten.tex in the Overleaf project; this copy exists
+% so the repo records what was written and against which code.
+%
+% Landed with verl commit 71b37c7d (compression_type=tah_quant, four arms,
+% byte parity 1231.6 bits/token/boundary = 0.99968x PRF exact-k's 1232).
+%
+% ALSO CHANGED in the Overleaf, not reproduced here:
+%   * related work: corrected "AQ-SGD and TAH-Quant use error-compensated
+%     quantization" -- TAH-Quant is deliberately STATELESS and its stated
+%     contribution is avoiding AQ-SGD's activation cache. Verified against the
+%     PDF: abstract, contribution 3 and section 5.2 all say so.
+%   * references.bib he2025tahquant: year 2025 -> 2026 (v2, 8 May 2026), and
+%     Kai Chen added to the author list.
+%   * Table (quantization family): three [pending] TAH-Quant rows at 5% payload.
+%   * Appendix K.3: the measured delta_ratio result (flat at 2.41-2.42 across a
+%     40x hit-rate rise), stated WITHOUT a mechanism because three candidate
+%     mechanisms were tested and rejected.
+
+\subsection{\new{The Stateless Alternative: TAH-Quant}}
+\label{app:rlvr-tahquant}
+
+\new{AQ-SGD's premise is that an example recurs so its activation can be
+differenced against a stored visit, and Section~\ref{app:rlvr-aqsgd} above
+gives the reason that premise sits badly with on-policy RLVR. TAH-Quant
+\citep{he2025tahquant} is the natural control for exactly that objection: it is
+the successor method in the same setting, pipeline parallelism over a slow
+network, and it is \emph{stateless}. Every decision it makes, which coordinate
+is the pivot, whether to rotate a tile, how many bits the tile receives, is
+recomputed from the tile being sent. It keeps no buffer, no residual and no
+error feedback, so the assumption RLVR violates is simply absent. Two
+properties follow for free in our harness: the reconstruction is a
+deterministic function of the current activation, so the three passes of one
+optimizer step agree by construction and the policy ratio still starts at one,
+and there is no shared basis, so the anchor has nothing to own.}
+
+\new{The codec cuts each token's width into contiguous tiles. Each tile is
+ranked against the other tiles of its sample by the entropy of its normalised
+magnitude profile, and the highest-entropy fraction receives INT4 while the
+rest receive INT3, on the reasoning that a tile whose energy is spread evenly
+has no single coordinate a rotation could isolate. A tile whose largest
+magnitude exceeds its second largest by more than a threshold $\tau$ is treated
+as holding an outlier: the outlier is permuted to the first coordinate and the
+tile is rotated by a scaled Hadamard matrix, which spreads that coordinate's
+energy across the tile so the affine quantization range is no longer consumed
+by it. Each tile then carries its own scale and zero point.}
+
+\new{Three deviations from the published method are forced here, and we state
+them because each one is a place a reader could otherwise assume fidelity.
+First, the paper's entropy expression is printed without a leading negative
+sign, which makes it the negative of Shannon entropy and inverts it against the
+paper's own description of when the quantity is large; implementing it as
+printed would award the extra bits to precisely the tiles the rotation already
+repairs, so we use Shannon entropy. Second, the paper states no rounding mode,
+and its convergence assumption bounds relative bias rather than requiring an
+unbiased quantizer, so we run deterministic rounding as the faithful default
+and stochastic rounding as a separate arm; the two are otherwise identical, and
+the pair asks a question the published analysis leaves open. Third, and most
+consequential, the published operating point is far above our payload.}
+
+\new{That third point is worth an explicit number, because it is the reason the
+arm is configured the way it is rather than as published. At the paper's
+default the codec spends about $4.41$ bits per activation element inclusive of
+metadata, which at $H=1536$ is roughly $6773$ bits per token per boundary,
+about $5.5\times$ the $1232$ bits the mask sends. The paper itself describes its
+INT4/INT3 setting as the lowest-bit configuration that remains consistently
+stable. Our operating point is therefore a factor of five below the stability
+floor of the method we are comparing against, and we reach it by spending bits
+on few coordinates rather than few bits on all of them. To hold the payload we
+apply the codec to a keyed subset of coordinates per token, the same device the
+other two quantizing arms use, which costs nothing to signal because both ends
+derive the subset from the shared key. With $242$ of $1536$ coordinates at tile
+size $32$, the cost is $242\times3.8$ bits of payload plus eight tiles of $39$
+bits of metadata, or $1231.6$ bits per token per boundary: $0.99968$ of the
+mask's $1232$, which is tighter than the memoryless quantization arm's
+$1.0004$.}
+
+\new{The tile size deserves a word, since it is not the published one. Metadata
+width is what decides it. Reproducing the paper's $4.41$ figure leaves a unique
+$39$ bits per tile, of which a half-precision scale and zero point take $16$
+each. At the published tile size of $64$ the pivot index needs six bits and the
+budget closes exactly, leaving nothing for the one bit a receiver needs in order
+to know whether the rotation was applied. The published accounting therefore
+cannot pay for the conditional rotation the method itself specifies, and it
+enumerates neither the pivot index nor that flag among its metadata. At tile
+size $32$ the pivot index needs five bits and the flag fits at the same $39$
+bits, so the conditional rotation is preserved and paid for. We measured the
+rotation's benefit to be insensitive to tile size, reducing reconstruction
+error by $3.60$, $3.72$ and $3.69$ times at two bits for tile sizes $16$, $32$
+and $64$ on tiles holding a single dominant coordinate, so nothing is given up;
+$32$ is also a tile size the paper ablates.}
+
+\new{Three arms separate three questions at this payload. The primary arm runs
+the method as described. A second sets $\tau$ to infinity so no tile is ever
+rotated, which isolates outlier suppression from the entropy-guided bit
+allocation; without it a difference could be credited to the wrong half of the
+method. A third substitutes stochastic rounding, which isolates quantizer bias.
+A fourth arm, reported separately because it is deliberately off the payload
+budget, runs the published full-width rate and asks whether the payload or the
+codec is what binds.}
+
+\new{One diagnostic decides whether these arms measure the method at all, and
+it is readable at the first step rather than at the horizon. The rotation only
+helps a tile that holds a dominant coordinate, and a keyed subset scatters a
+model's few outlier channels rather than concentrating them in fixed contiguous
+tiles the way full-width tiling does. We therefore log the fraction of tiles
+whose ratio clears $\tau$. Near zero, the arm has degenerated to per-tile
+affine quantization and reports a payload-allocation result rather than a test
+of TAH-Quant; near one, the threshold is doing no work and the arm is the
+published $\tau=0$ endpoint under another name. We report the measured fraction
+alongside the accuracy rows so that a null result can be read as the mechanism
+not engaging rather than as the mechanism failing.}
+
