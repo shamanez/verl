@@ -32,10 +32,21 @@ export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 
 # GPU index -> remaining arms, in order. The arm already running on each GPU
 # is deliberately NOT listed; the chain waits for it and then continues.
-QUEUE_0="${QUEUE_0:-}"
+#
+# Rebalanced once the no-anchor arm was cut from 600 steps to 200. It never
+# learned: reward flat at 0.35 and validation at the base model's 0.449 while
+# every anchored arm reached 0.63 by step 80, so the late-collapse hypothesis
+# the 600-step horizon existed to test does not apply. That frees GPU 0 early.
+#
+#   GPU 0  k10 -> k40gm    GPU 1  k80gm    GPU 2  nosign    GPU 3  (none)
+#
+# Deliberately leaves GPU 2 and GPU 3 finishing early rather than spreading the
+# work to keep all four busy: two free GPUs partway through are worth more than
+# a marginally shorter total.
+QUEUE_0="${QUEUE_0:-k10 k40gm}"
 QUEUE_1="${QUEUE_1:-k80gm}"
-QUEUE_2="${QUEUE_2:-nosign k10}"
-QUEUE_3="${QUEUE_3:-k40gm}"
+QUEUE_2="${QUEUE_2:-nosign}"
+QUEUE_3="${QUEUE_3-}"
 
 PIN="$(cd "$WORK/verl" && git rev-parse --short HEAD)"
 echo "=== chain starting against pinned tree $PIN, no fetch will happen ==="
