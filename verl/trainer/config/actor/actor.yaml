@@ -304,7 +304,8 @@ comm_eff:
   # Dense compatibility is the strict enabled=false path.
   enabled: false
 
-  # Boundary activation codec: dense | prf_mask | powersgd | sr_quant | aq_sgd.
+  # Boundary activation codec:
+  #   dense | prf_mask | powersgd | sr_quant | aq_sgd | tah_quant.
   compression_type: powersgd
 
   # PRF per-(token, dimension) pipeline-boundary activation mask. Inert while
@@ -388,6 +389,38 @@ comm_eff:
     max_positions: 0
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
+  tah:
+
+    _target_: verl.workers.config.CommEffTAHQuantConfig
+
+    # Contiguous channels per quantization tile, a power of two. 32 and NOT the
+    # paper's 64: reproducing its 4.41 bits/element leaves exactly 39 bits/tile,
+    # of which scale and zero-point take 16 each, so at 64 the 6-bit pivot index
+    # eats the last bit and the receiver has none left to learn whether the
+    # rotation was applied. At 32 the pivot needs 5 bits and the flag fits, at
+    # the same 39 bits/tile. The rotation's benefit is flat in tile size.
+    tile: 32
+    # Fraction of tiles, ranked by entropy within each sample, that get INT4;
+    # the rest get INT3. 0.8 is the paper's 80/20.
+    int4_frac: 0.8
+    # Outlier ratio |a1|/|a2| above which a tile is pivot-swapped and rotated.
+    # 2.0 is the paper's empirical choice; 0 rotates always and inf never,
+    # which are its own two ablation endpoints for isolating the Hadamard.
+    tau: 2.0
+    # rn is the paper's implied mode (it never states one, and its Assumption
+    # 4.4 bounds relative bias rather than requiring unbiasedness). sr is
+    # PRF-keyed stochastic rounding, unbiased within the tile, and is the arm
+    # that tests our own contrary evidence from issue #93.
+    rounding: rn
+    # 0 = quantize every channel. > 0: quantize only a PRF-fresh exact-subset_k
+    # channel subset per token (mask-keyed, so the receiver spends no index
+    # bits), zero elsewhere, survivors carrying the H/k gain. NOT optional at an
+    # aggressive budget: at H=1536 the paper's full-width setting costs 6772.8
+    # bits/token/boundary, 5.50x PRF exact-k's 1232, and per-tile fp16 metadata
+    # alone would exceed the budget before any payload. k=242 at tile=32 gives
+    # 1231.6 bits, 0.99968x the incumbent.
+    subset_k: 0
+
   anchor:
 
     _target_: verl.workers.config.CommEffAnchorConfig

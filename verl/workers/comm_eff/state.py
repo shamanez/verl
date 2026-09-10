@@ -57,12 +57,13 @@ MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
 
 
 def mask_eligible_tags(state: Any) -> frozenset:
-    """Return the path tags the activation mask / sr_quant / aq_sgd codec may fire on.
+    """Return the path tags the activation mask / sr_quant / aq_sgd / tah_quant codec may fire on.
 
     Pure read (no side effects, no allocation). The default eligibility
     (``{TRAIN_TAG}``) is widened, only when ``state.config.mask.enabled`` is
-    truthy OR the codec is ``sr_quant`` / ``aq_sgd`` (both of which reuse the
-    mask eligibility knobs without requiring ``mask.enabled``), by:
+    truthy OR the codec is ``sr_quant`` / ``aq_sgd`` / ``tah_quant`` (all of
+    which reuse the mask eligibility knobs without requiring
+    ``mask.enabled``), by:
 
     * ``OLD_LOGPROB_TAG`` when ``state.config.mask.mask_recompute`` is truthy;
     * ``REF_LOGPROB_TAG`` when ``state.config.mask.mask_reference`` is truthy.
@@ -78,7 +79,7 @@ def mask_eligible_tags(state: Any) -> frozenset:
     mask_cfg = getattr(config, "mask", None)
     if mask_cfg is None:
         return MASK_ELIGIBLE_TAGS
-    reuses_mask_knobs = str(getattr(config, "compression_type", "")) in ("sr_quant", "aq_sgd")
+    reuses_mask_knobs = str(getattr(config, "compression_type", "")) in ("sr_quant", "aq_sgd", "tah_quant")
     if not (bool(getattr(mask_cfg, "enabled", False)) or reuses_mask_knobs):
         return MASK_ELIGIBLE_TAGS
     tags = {TRAIN_TAG}
@@ -100,13 +101,16 @@ def _is_enabled(config: Any) -> bool:
 
 
 def resolve_compression_type(config: Any) -> str:
-    """Resolve the effective boundary codec: ``dense``, ``prf_mask``, ``powersgd``, ``sr_quant`` or ``aq_sgd``.
+    """Resolve the effective boundary codec.
+
+    One of ``dense``, ``prf_mask``, ``powersgd``, ``sr_quant``, ``aq_sgd`` or
+    ``tah_quant``.
 
     Pure read (no side effects, no allocation). The resolution is
     back-compatible:
 
     * an explicit ``compression_type`` of ``prf_mask``, ``powersgd``,
-      ``sr_quant`` or ``aq_sgd`` wins;
+      ``sr_quant``, ``aq_sgd`` or ``tah_quant`` wins;
     * ``dense`` (the fall-through) honors the mask selector: a mask sub-config
       enabled with ``p > 0`` resolves to ``prf_mask``, otherwise ``dense``.
 
@@ -118,7 +122,7 @@ def resolve_compression_type(config: Any) -> str:
     if config is None:
         return "dense"
     ctype = str(getattr(config, "compression_type", "dense"))
-    if ctype in ("prf_mask", "powersgd", "sr_quant", "aq_sgd"):
+    if ctype in ("prf_mask", "powersgd", "sr_quant", "aq_sgd", "tah_quant"):
         return ctype
     # ctype == "dense": honor the mask selector for back-compat.
     mask_cfg = getattr(config, "mask", None)
@@ -163,6 +167,7 @@ class CommEffState:
         # codec carrying cross-STEP state (its per-example activation buffer),
         # so it is held here rather than rebuilt per pass.
         self.aqsgd = None
+        self.tah = None
         self.powersgd = None
         self.spectral = None
         self.fsdp_grad_repr: dict = {}
@@ -230,7 +235,7 @@ class CommEffState:
         PowerSGD is deliberately excluded: it compresses a packed matrix rather
         than per-token entries and has its own registration path.
         """
-        for codec in (self.masker, self.quantizer, self.aqsgd):
+        for codec in (self.masker, self.quantizer, self.aqsgd, self.tah):
             if codec is not None:
                 return codec
         return None
@@ -367,6 +372,39 @@ class CommEffState:
                 self.aqsgd.buffer.capacity_bytes / float(1024**3),
                 getattr(aq_cfg, "buffer_device", "cpu"),
                 getattr(aq_cfg, "max_positions", 0),
+                getattr(mask_cfg, "pp_size", 8),
+                getattr(mask_cfg, "seed", 0),
+                getattr(mask_cfg, "mask_recompute", False),
+                getattr(mask_cfg, "mask_reference", False),
+            )
+
+        if self.compression_type == "tah_quant":
+            from verl.workers.comm_eff.activation_tahquant import (
+                ActivationTAHQuant,
+                tahquant_metadata_bits,
+            )
+
+            mask_cfg = getattr(self.config, "mask", None)
+            tah_cfg = getattr(self.config, "tah", None)
+            self.tah = ActivationTAHQuant(
+                tile=int(getattr(tah_cfg, "tile", 32)),
+                int4_frac=float(getattr(tah_cfg, "int4_frac", 0.8)),
+                tau=float(getattr(tah_cfg, "tau", 2.0)),
+                rounding=str(getattr(tah_cfg, "rounding", "rn")),
+                subset_k=int(getattr(tah_cfg, "subset_k", 0)),
+                base_seed=int(getattr(mask_cfg, "seed", 0)),
+                pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                state=self,
+            )
+            logger.info(
+                "comm_eff: tah_quant tile=%s int4_frac=%s tau=%s rounding=%s subset_k=%s "
+                "metadata_bits_per_tile=%s pp_size=%s seed=%s mask_recompute=%s mask_reference=%s",
+                self.tah.tile,
+                self.tah.int4_frac,
+                self.tah.tau,
+                self.tah.rounding,
+                self.tah.subset_k,
+                tahquant_metadata_bits(self.tah.tile),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "seed", 0),
                 getattr(mask_cfg, "mask_recompute", False),
@@ -622,6 +660,43 @@ class CommEffState:
             pass
         return out
 
+    def tah_metrics(self) -> dict:
+        """tah_quant codec metrics, including the ones that EXPLAIN the arm.
+
+        ``comm_eff/logical_pp_bits_tah_quant`` is the wire ledger, the same
+        accounting sr_quant and aq_sgd report, so the arm can be SHOWN
+        byte-matched to PRF exact-k rather than asserted to be.
+
+        ``tah_quant/rotation_rate`` is the one that decides whether this arm
+        measured anything. It is the fraction of tiles whose outlier ratio
+        cleared ``tau``, and the Hadamard is the method's whole mechanism:
+
+        * near ZERO means no tile had a dominant channel, so the codec has
+          degenerated to plain per-tile asymmetric quantization and the arm is
+          a rate-allocation result, not a test of TAH-Quant. This is a live
+          risk at our operating point rather than a hypothetical, because the
+          PRF subset scatters the model's few massive-activation channels
+          across tokens instead of concentrating them in fixed tiles the way
+          contiguous full-width tiling does.
+        * near ONE means ``tau`` is doing no work and the arm is the paper's
+          ``tau=0`` endpoint under another name.
+
+        Read it at step 1. It is a property of the activations, not of
+        training, so it does not need a horizon to be informative.
+        """
+        if self.tah is None:
+            return {}
+        out = {}
+        bits_per_token = getattr(self.tah, "logical_pp_bits_tah_quant", None)
+        if bits_per_token is not None:
+            out["comm_eff/logical_pp_bits_tah_quant"] = float(bits_per_token)
+            out["comm_eff/logical_pp_bytes_tah_quant"] = float(bits_per_token) / 8.0
+        try:
+            out.update({k: float(v) for k, v in self.tah.telemetry().items()})
+        except Exception:  # telemetry must never be able to kill a run
+            pass
+        return out
+
     def note_powersgd_application(self) -> None:
         self.powersgd_applications += 1
 
@@ -755,4 +830,5 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     output.update(state.mask_ratio_metrics())
     output.update(state.quant_metrics())
     output.update(state.aqsgd_metrics())
+    output.update(state.tah_metrics())
     return output

@@ -36,11 +36,12 @@ import pytest
 from verl.workers.comm_eff.anchor import AnchorReplayRing, anchor_should_fire
 from verl.workers.config.comm_eff import (
     CommEffAnchorConfig,
-    CommEffConfig,
     CommEffAQSGDConfig,
+    CommEffConfig,
     CommEffMaskConfig,
     CommEffQuantConfig,
     CommEffSpectralConfig,
+    CommEffTAHQuantConfig,
 )
 
 # Pair 1: Qwen2.5-Math-1.5B, H = 1536, 8 logical stages, k = 77 of 1536.
@@ -115,6 +116,11 @@ ARMS = {
     "aqsgd-rn": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
     "aqsgd-payload": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
     "srquant": (QUANTIZING_MASK, {}, {}, "sr_quant"),
+    # TAH-Quant (arXiv:2506.01352v2), the STATELESS quantization arm.
+    "tahquant": (QUANTIZING_MASK, {}, {}, "tah_quant"),
+    "tahquant-noh": (QUANTIZING_MASK, {}, {}, "tah_quant"),
+    "tahquant-sr": (QUANTIZING_MASK, {}, {}, "tah_quant"),
+    "tahquant-fullrate": (QUANTIZING_MASK, {}, {}, "tah_quant"),
 }
 
 # Codec sub-config per arm, for the arms whose codec has one. Absent means the
@@ -125,6 +131,13 @@ CODEC_CFG = {
     "aqsgd-rn": dict(**PARITY_CODEC, rounding="rn", scope="prompt", first_visit="rescaled"),
     "aqsgd-payload": dict(**PARITY_CODEC, rounding="sr", scope="prompt", first_visit="dense"),
     "srquant": dict(**PARITY_CODEC, rounding="sr"),
+    # k=242 at tile=32 is the parity point: 242*3.8 + 8 tiles x 39 b = 1231.6
+    # bits/token/boundary, 0.99968x the incumbent's 1232.
+    "tahquant": dict(tile=32, subset_k=242, int4_frac=0.8, tau=2.0, rounding="rn"),
+    "tahquant-noh": dict(tile=32, subset_k=242, int4_frac=0.8, tau=float("inf"), rounding="rn"),
+    "tahquant-sr": dict(tile=32, subset_k=242, int4_frac=0.8, tau=2.0, rounding="sr"),
+    # subset_k=0 is the paper's full width, deliberately OFF budget at 5.50x.
+    "tahquant-fullrate": dict(tile=32, subset_k=0, int4_frac=0.8, tau=2.0, rounding="rn"),
 }
 
 
@@ -142,6 +155,10 @@ def build(arm):
         kwargs["aq_sgd"] = CommEffAQSGDConfig(**codec_d)
     elif codec == "sr_quant":
         kwargs["quant"] = CommEffQuantConfig(**codec_d)
+    elif codec == "tah_quant":
+        kwargs["tah"] = CommEffTAHQuantConfig(**codec_d)
+    elif codec_d:
+        raise AssertionError(f"arm {arm!r} carries a codec sub-config but codec {codec!r} has no branch here")
     return CommEffConfig(**kwargs)
 
 
@@ -280,7 +297,53 @@ if __name__ == "__main__":
 # --------------------------------------------------------------------------- #
 # codec ablation arms (the quantization family)
 # --------------------------------------------------------------------------- #
-CODEC_ARMS = ("aqsgd", "aqsgd-all", "aqsgd-rn", "aqsgd-payload", "srquant")
+CODEC_ARMS = (
+    "aqsgd",
+    "aqsgd-all",
+    "aqsgd-rn",
+    "aqsgd-payload",
+    "srquant",
+    "tahquant",
+    "tahquant-noh",
+    "tahquant-sr",
+)
+# tahquant-fullrate is DELIBERATELY excluded from the byte-parity arms: it runs
+# the paper's published full-width rate, which is 5.50x the incumbent, and it
+# exists to answer whether the budget or the codec binds. Listing it here would
+# assert parity of an arm whose whole point is to break parity.
+OFF_BUDGET_CODEC_ARMS = ("tahquant-fullrate",)
+
+
+def codec_wire_bits(cfg) -> float:
+    """Bits per token per boundary for whichever codec the arm selected.
+
+    Dispatches on ``compression_type`` and RAISES on anything it does not know.
+    The previous form was ``cfg.aq_sgd if compression_type == "aq_sgd" else
+    cfg.quant``, which silently priced any third codec against sr_quant's
+    sub-config and sr_quant's formula, so a new arm would be asserted
+    byte-matched using knobs it does not even have.
+    """
+    ctype = cfg.compression_type
+    if ctype in ("sr_quant", "aq_sgd"):
+        sub = cfg.quant if ctype == "sr_quant" else cfg.aq_sgd
+        eff_block = sub.subset_k if (sub.block_size <= 0 or sub.block_size >= sub.subset_k) else sub.block_size
+        return sub.subset_k * sub.bits + sub.subset_k * 16 / eff_block
+    if ctype == "tah_quant":
+        from verl.workers.comm_eff.activation_tahquant import (
+            TAHQUANT_INT3_BITS,
+            TAHQUANT_INT4_BITS,
+            tahquant_metadata_bits,
+        )
+
+        sub = cfg.tah
+        k = sub.subset_k
+        n_tiles = (k + sub.tile - 1) // sub.tile
+        payload = k * (sub.int4_frac * TAHQUANT_INT4_BITS + (1.0 - sub.int4_frac) * TAHQUANT_INT3_BITS)
+        return payload + n_tiles * tahquant_metadata_bits(sub.tile)
+    raise AssertionError(
+        f"no wire ledger for compression_type={ctype!r}; add one rather than letting the arm "
+        "be priced against another codec's sub-config"
+    )
 
 
 @pytest.mark.parametrize("arm", CODEC_ARMS)
@@ -292,10 +355,35 @@ def test_codec_arm_is_byte_matched_to_the_mask(arm):
     of kept channels. The comparison is only a codec comparison if those match.
     """
     cfg = build(arm)
-    sub = cfg.aq_sgd if cfg.compression_type == "aq_sgd" else cfg.quant
-    bits = sub.subset_k * sub.bits + sub.subset_k * 16 / sub.block_size
-    assert bits == pytest.approx(1232.5), (arm, bits)
-    assert abs(bits / (77 * 16) - 1.0) < 1e-3, (arm, bits / (77 * 16))
+    bits = codec_wire_bits(cfg)
+    prf = 77 * 16  # the incumbent, k=77 fp16 coordinates at H=1536
+    assert abs(bits / prf - 1.0) < 1e-3, (arm, cfg.compression_type, bits, bits / prf)
+
+
+@pytest.mark.parametrize("arm", OFF_BUDGET_CODEC_ARMS)
+def test_off_budget_codec_arm_is_actually_off_budget(arm):
+    """The full-rate arm must be far off parity, and provably so.
+
+    If someone later gives it a subset_k it would quietly become a second,
+    unexplainable byte-matched arm. Asserting the DEVIATION keeps its purpose
+    legible: it is the arm that prices what a bigger budget buys.
+    """
+    cfg = build(arm)
+    assert cfg.compression_type == "tah_quant"
+    assert cfg.tah.subset_k == 0, "the full-rate arm must quantize the full width"
+    # At H=1536 the published setting is about 4.41 bits/element.
+    from verl.workers.comm_eff.activation_tahquant import (
+        TAHQUANT_INT3_BITS,
+        TAHQUANT_INT4_BITS,
+        tahquant_metadata_bits,
+    )
+
+    h = 1536
+    n_tiles = (h + cfg.tah.tile - 1) // cfg.tah.tile
+    payload = h * (cfg.tah.int4_frac * TAHQUANT_INT4_BITS + (1.0 - cfg.tah.int4_frac) * TAHQUANT_INT3_BITS)
+    bits = payload + n_tiles * tahquant_metadata_bits(cfg.tah.tile)
+    ratio = bits / (77 * 16)
+    assert ratio > 5.0, (arm, bits, ratio)
 
 
 @pytest.mark.parametrize("arm", CODEC_ARMS)
@@ -314,7 +402,9 @@ def test_the_codec_arms_differ_only_where_intended():
     """aqsgd vs srquant is delta coding alone; the aqsgd variants are one knob each."""
     aq, sr = build("aqsgd"), build("srquant")
     assert (aq.aq_sgd.bits, aq.aq_sgd.subset_k, aq.aq_sgd.block_size) == (
-        sr.quant.bits, sr.quant.subset_k, sr.quant.block_size
+        sr.quant.bits,
+        sr.quant.subset_k,
+        sr.quant.block_size,
     ), "byte-identical on the wire, so delta coding is the only variable"
     assert build("aqsgd-all").aq_sgd.scope == "all"
     assert build("aqsgd").aq_sgd.scope == "prompt"

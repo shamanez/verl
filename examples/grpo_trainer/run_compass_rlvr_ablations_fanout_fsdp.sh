@@ -65,6 +65,13 @@ for a in "${ARM_LIST[@]}"; do
     aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload)
                     per=$(( 32 + ${AQ_CAPACITY_GB:-16} )) ;;
     srquant)        per=32 ;;     # memoryless: no buffer at all
+    # TAH-Quant is STATELESS: no buffer, no error feedback, no residual, so
+    # it reserves nothing beyond the arm itself. Listed explicitly rather
+    # than left to the `*)` default, because falling through that default is
+    # only correct BY ACCIDENT here and would silently under-reserve any
+    # future codec that does carry host state.
+    tahquant|tahquant-noh|tahquant-sr|tahquant-fullrate)
+                    per=32 ;;
     *)              per=32 ;;
   esac
   need_gb=$(( need_gb + per ))

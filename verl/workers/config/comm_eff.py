@@ -38,6 +38,7 @@ __all__ = [
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
     "CommEffAQSGDConfig",
+    "CommEffTAHQuantConfig",
     "CommEffProbeConfig",
     "CommEffDCConfig",
     "CommEffConfig",
@@ -50,7 +51,7 @@ __all__ = [
 # ``sr_quant`` is the dense low-bit stochastic-rounding boundary quantizer;
 # ``aq_sgd`` is AQ-SGD, which quantizes the CHANGE of the activation for the
 # same example between visits against a local buffer (Wang et al., 2022).
-COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant", "aq_sgd")
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant", "aq_sgd", "tah_quant")
 
 
 @dataclass
@@ -231,6 +232,88 @@ class CommEffQuantConfig(BaseConfig):
     bits: int = 1
     block_size: int = 32
     rounding: str = "sr"
+    subset_k: int = 0
+
+
+@dataclass
+class CommEffTAHQuantConfig(BaseConfig):
+    """TAH-Quant boundary activation compression (inert while disabled).
+
+    The ``tah_quant`` codec, selected by ``comm_eff.compression_type='tah_quant'``.
+    He et al., "TAH-QUANT: Effective Activation Quantization in Pipeline
+    Parallelism over Slow Network" (arXiv:2506.01352v2). Tile-wise Adaptive
+    Hadamard Quantization: the width is cut into contiguous per-token tiles,
+    each tile is ranked by the entropy of its magnitude profile and given INT4
+    or INT3 accordingly, and a tile holding a dominant outlier has that outlier
+    swapped to coordinate 0 and is then rotated by a Hadamard so its energy
+    spreads and the affine range is no longer wasted on it.
+
+    It is the STATELESS member of the quantization family, which is why it is
+    interesting here: AQ-SGD needs an example to recur, and on-policy RLVR
+    resamples every response each step. TAH-Quant keeps no buffer at all, so it
+    drops the assumption RLVR violates along with the host store.
+
+    See ``verl.workers.comm_eff.activation_tahquant`` for the full derivation of
+    the three deviations from the paper (the sign of its entropy equation, the
+    unstated rounding mode, and the subsetting the byte budget forces) and for
+    why ``tile`` defaults to 32 rather than the paper's 64.
+
+    Knob reuse matches sr_quant and aq_sgd: the ``mask`` sub-config supplies
+    eligibility (``mask_recompute`` / ``mask_reference``), the PRF base seed
+    (``mask.seed``) and the boundary placement (``mask.pp_size``); ``mask.p`` /
+    ``rescale*`` / ``exact_k`` / ``antithetic`` / ``frlr*`` are IGNORED.
+    Carrying no PowerSGD basis, it requires ``anchor.owns_q=false``.
+
+    Args:
+        tile (int): Contiguous channels per quantization tile, a power of two.
+            Default 32, and NOT the paper's 64, because the metadata width is
+            forced: reproducing the paper's 4.41 bits/element leaves exactly 39
+            bits/tile, of which scale and zero-point take 16 each, so at 64 the
+            6-bit pivot index consumes the last bit and leaves nothing for the
+            flag the receiver needs in order to know whether the rotation was
+            applied. At 32 the pivot needs 5 bits and the flag fits, at the same
+            39 bits/tile, with the conditional gate intact. The rotation's
+            benefit is flat in tile size (measured 3.60x / 3.72x / 3.69x error
+            reduction at 2 bits for 16 / 32 / 64), so nothing is lost, and 32 is
+            a tile size the paper itself ablates.
+        int4_frac (float): Fraction of tiles, ranked by entropy WITHIN EACH
+            SAMPLE, that receive INT4; the rest receive INT3. Default 0.8, the
+            paper's 80/20. Note the count is ``round(int4_frac * n_tiles)``, so
+            with few tiles the realised share is discretized; ``tah_quant/int4_share``
+            reports what actually happened.
+        tau (float): Outlier ratio ``|a1| / |a2|`` above which a tile is
+            rotated. Default 2.0, the paper's empirical choice. ``0`` rotates
+            every tile and ``inf`` rotates none, which are the paper's own two
+            ablation endpoints (its Table 7) and the way to isolate the
+            Hadamard as a single variable.
+        rounding (str): ``rn`` (default) = deterministic round-to-nearest,
+            which is the paper's implied mode: it never states a rounding mode
+            anywhere, and its Assumption 4.4 does not require an unbiased
+            quantizer but bounds relative bias instead, calibrated empirically
+            at ``delta=0.9``. ``sr`` is PRF-keyed stochastic rounding, unbiased
+            within the tile. Our own evidence pulls the other way from the
+            paper's (issue #93 killed a round-to-nearest arm at step 60, and
+            PRF exact-k is unbiased), so the pair is a one-variable ablation
+            the paper cannot answer. Either way the CODEC stays biased overall,
+            because the Hadamard gate and the affine range are data-dependent.
+        subset_k (int): ``0`` = quantize every channel. ``> 0`` sends only a
+            PRF-fresh exact-``subset_k`` channel subset per token, keyed exactly
+            like the mask codec so the forward wire, the backward wire and every
+            pass of one step share it and the receiver spends no index bits.
+            Un-sent channels are zero and the survivors carry the ``H/k`` gain.
+            This is NOT optional at an aggressive budget: at ``H=1536`` the
+            paper's full-width setting costs 6772.8 bits/token/boundary, which
+            is 5.50x PRF exact-k's 1232, and per-tile fp16 metadata alone would
+            exceed the whole budget before any payload. Bits per token per
+            boundary are ``k*(4*int4_frac + 3*(1-int4_frac)) + ceil(k/tile)*meta``,
+            the ledger that lets an arm be byte-matched: ``k=242`` at
+            ``tile=32`` gives 1231.6 bits, 0.99968x the incumbent.
+    """
+
+    tile: int = 32
+    int4_frac: float = 0.8
+    tau: float = 2.0
+    rounding: str = "rn"
     subset_k: int = 0
 
 
@@ -516,6 +599,7 @@ class CommEffConfig(BaseConfig):
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     quant: CommEffQuantConfig = field(default_factory=CommEffQuantConfig)
     aq_sgd: CommEffAQSGDConfig = field(default_factory=CommEffAQSGDConfig)
+    tah: CommEffTAHQuantConfig = field(default_factory=CommEffTAHQuantConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
@@ -535,6 +619,7 @@ class CommEffConfig(BaseConfig):
         self._validate_mask()
         self._validate_quant()
         self._validate_aq_sgd()
+        self._validate_tah()
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
@@ -676,6 +761,41 @@ class CommEffConfig(BaseConfig):
                 "the codec's buffer is read on every eligible pass of a step and written once, "
                 "and with the recompute pass left dense the reconstruction the backward "
                 "differentiates would not be the one the forward sent."
+            )
+
+    def _validate_tah(self) -> None:
+        """Validate the tah_quant sub-config (no allocation, no RNG)."""
+
+        tile = self.tah.tile
+        if isinstance(tile, bool) or not isinstance(tile, int) or tile < 2 or (tile & (tile - 1)) != 0:
+            raise ValueError(
+                f"comm_eff.tah.tile must be a power of two >= 2 (the Sylvester Hadamard needs it); got {tile!r}"
+            )
+        int4_frac = self.tah.int4_frac
+        if isinstance(int4_frac, bool) or not isinstance(int4_frac, (int, float)) or not 0.0 <= float(int4_frac) <= 1.0:
+            raise ValueError(f"comm_eff.tah.int4_frac must be a float in [0, 1]; got {int4_frac!r}")
+        tau = self.tah.tau
+        if isinstance(tau, bool) or not isinstance(tau, (int, float)) or float(tau) < 0.0:
+            raise ValueError(
+                f"comm_eff.tah.tau must be a float >= 0 (0 rotates every tile, inf rotates none); got {tau!r}"
+            )
+        if str(self.tah.rounding) not in ("sr", "rn"):
+            raise ValueError(f"comm_eff.tah.rounding must be one of (sr, rn); got {self.tah.rounding!r}")
+        subset_k = self.tah.subset_k
+        if isinstance(subset_k, bool) or not isinstance(subset_k, int) or subset_k < 0:
+            raise ValueError(f"comm_eff.tah.subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
+        # A codec-level guard, the same shape as aq_sgd's. TAH-Quant keeps no
+        # buffer, so nothing is corrupted by a dense recompute, but the arm
+        # stops being the thing under test: the old log-probs would come from an
+        # uncompressed forward while the train pass is compressed, so the PPO
+        # ratio no longer starts at one and ref-KL becomes dense-vs-compressed
+        # rather than codec-vs-codec. That is the exact failure that made three
+        # aq_sgd arms unreadable, so it is refused here rather than discovered.
+        if self.compression_type == "tah_quant" and not bool(self.mask.mask_recompute):
+            raise ValueError(
+                "comm_eff.compression_type='tah_quant' requires comm_eff.mask.mask_recompute=true: "
+                "with the recompute pass left dense the old log-probs would be uncompressed against a "
+                "compressed train forward, so the PPO ratio would not start at one."
             )
 
     def _validate_anchor(self) -> None:
@@ -931,6 +1051,16 @@ class CommEffConfig(BaseConfig):
                 "cross-step state is a local per-example activation buffer, not a basis Q, "
                 "so there is nothing for the anchor to own."
             )
+        if self.compression_type == "tah_quant" and self.anchor.owns_q:
+            raise ValueError(
+                "comm_eff.compression_type='tah_quant' requires anchor.owns_q=false: TAH-Quant is "
+                "stateless and carries no shared basis for the anchor to own. Every decision it "
+                "makes (the pivot index, whether to rotate, the per-tile precision) is recomputed "
+                "from the current tile and priced on the per-token ledger, so there is no side "
+                "channel to move onto the slow circuit. Left true, the arm would validate and then "
+                "do nothing at the anchor, because the anchor's Q transaction is guarded on a "
+                "PowerSGD basis that does not exist here."
+            )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")
         if self.compression_type == "powersgd" and self.anchor.owns_q and not self.anchor.enabled:
@@ -965,7 +1095,12 @@ class CommEffConfig(BaseConfig):
         # built), so leaving the launcher default fast_q_bootstrap=true on such
         # an arm must not error; the powersgd path validation below is
         # unchanged.
-        if self.powersgd.fast_q_bootstrap and self.compression_type not in ("prf_mask", "sr_quant", "aq_sgd"):
+        if self.powersgd.fast_q_bootstrap and self.compression_type not in (
+            "prf_mask",
+            "sr_quant",
+            "aq_sgd",
+            "tah_quant",
+        ):
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
             if not self.anchor.owns_q:

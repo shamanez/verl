@@ -158,7 +158,7 @@ case "$ARM" in
   # fp16 scales per 32 kept channels is 1232.5, so 1.0004x. The anchor circuit
   # is untouched in all of them; the codec is the only change.
   # ----------------------------------------------------------------------- #
-  aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload|srquant)
+  aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload|srquant|tahquant|tahquant-noh|tahquant-sr|tahquant-fullrate)
     # HORIZON IS PINNED HERE, not left to the dispatcher default of 200. These
     # arms are read against the PUBLISHED 600-step Pair 1 rows, and issue #93
     # established that codec ranking INVERTS between the short window and the
@@ -170,10 +170,16 @@ case "$ARM" in
     TEST_FREQ="${TEST_FREQ_CODEC:-50}"
     export COMM_EFF_ENABLED=true
     export COMM_EFF_MASK_ENABLED=false     # a quantizing codec REPLACES the mask
-    export COMM_EFF_MASK_RECOMPUTE=true    # aq_sgd reads its buffer every eligible pass
+    export COMM_EFF_MASK_RECOMPUTE=true    # every codec here must fire on the recompute too, or the PPO ratio stops starting at one
     export COMM_EFF_MASK_REFERENCE=true
     export COMM_EFF_ANCHOR_OWNS_Q=false    # no codec here carries a basis Q
-    if [[ "$ARM" == "srquant" ]]; then
+    # A CASE, not an if/else. The binary form this replaces was a fail-open:
+    # an arm added to the label above but forgotten here launched silently as
+    # aq_sgd, with aq_sgd's knobs and aq_sgd's name in the wire ledger, which
+    # is indistinguishable from a correct run until someone reads the config.
+    # The `*)` arm below makes that impossible.
+    case "$ARM" in
+    srquant)
       export COMM_EFF_COMPRESSION_TYPE=sr_quant
       export COMM_EFF_QUANT_BITS=2
       export COMM_EFF_QUANT_SUBSET_K=493
@@ -181,7 +187,57 @@ case "$ARM" in
       export COMM_EFF_QUANT_ROUNDING=sr
       ARM_DESC="A5: memoryless quantization at mask parity (isolates delta coding; also finishes #93 a3-srq-parity-k493 at horizon)"
       KEEP_CKPT=1
-    else
+      ;;
+    tahquant|tahquant-noh|tahquant-sr|tahquant-fullrate)
+      # TAH-Quant (He et al., arXiv:2506.01352v2), the STATELESS quantization
+      # arm. It removes exactly the assumption on-policy RLVR violates: AQ-SGD
+      # needs an example to recur so its activation can be differenced against
+      # a stored visit, and only the prompt prefix recurs here (16.3% of
+      # boundary traffic). TAH-Quant decides everything from the current tile.
+      #
+      # k=242 at tile=32 is the byte-parity point: 242*3.8 payload + 8 tiles x
+      # 39 bits of metadata = 1231.6 bits/token/boundary, 0.99968x the
+      # incumbent's 1232, which is tighter than the srquant arm's 1.0004x.
+      # tile=32 and NOT the paper's 64 because at 64 the 6-bit pivot index
+      # consumes the last of the paper's own 39 bits/tile and leaves nothing
+      # for the flag the receiver needs to know whether the rotation happened.
+      export COMM_EFF_COMPRESSION_TYPE=tah_quant
+      export COMM_EFF_TAH_TILE=32
+      export COMM_EFF_TAH_SUBSET_K=242
+      export COMM_EFF_TAH_INT4_FRAC=0.8
+      export COMM_EFF_TAH_TAU=2.0
+      export COMM_EFF_TAH_ROUNDING=rn
+      case "$ARM" in
+        tahquant)
+          ARM_DESC="A5: TAH-Quant at mask parity, stateless (tile 32, k=242, tau=2.0, rn)"
+          KEEP_CKPT=1 ;;
+        tahquant-noh)
+          # tau=inf never rotates, the paper's own Table 7 endpoint. This is
+          # the arm that isolates the Hadamard, the method's headline
+          # mechanism, and it is the control the primary arm needs: without it
+          # a win could be the entropy-guided bit allocation alone.
+          export COMM_EFF_TAH_TAU=inf
+          ARM_DESC="A5: TAH-Quant with the Hadamard OFF (tau=inf), isolating outlier suppression"
+          KEEP_CKPT=1 ;;
+        tahquant-sr)
+          # The paper never states a rounding mode and its Assumption 4.4
+          # bounds relative bias rather than forbidding it. Our evidence pulls
+          # the other way (issue #93 killed a round-to-nearest arm at step 60),
+          # so this asks whether unbiasedness still matters once the rotation
+          # has flattened the tile. The paper cannot answer it.
+          export COMM_EFF_TAH_ROUNDING=sr
+          ARM_DESC="A5: TAH-Quant with stochastic rounding, the unbiased-quantizer arm" ;;
+        tahquant-fullrate)
+          # The paper's own operating point, all 1536 channels at ~4.41
+          # bits/element. OFF-BUDGET by construction at 5.50x the incumbent:
+          # it answers whether the BUDGET or the CODEC is what binds, which is
+          # a different question from the byte-matched comparison.
+          export COMM_EFF_TAH_SUBSET_K=0
+          ARM_DESC="A5: TAH-Quant at the published full-width rate (OFF-budget, 5.50x; measures what a larger budget buys)"
+          TOTAL_STEPS="${TOTAL_STEPS_TAHFULL:-600}" ;;
+      esac
+      ;;
+    aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload)
       export COMM_EFF_COMPRESSION_TYPE=aq_sgd
       export COMM_EFF_AQ_SGD_BITS=2
       export COMM_EFF_AQ_SGD_SUBSET_K=493
@@ -212,7 +268,9 @@ case "$ARM" in
           TOTAL_STEPS="${TOTAL_STEPS_AQPAYLOAD:-25}"
           TEST_FREQ=-1 ;;
       esac
-    fi
+      ;;
+    *) echo "FATAL: ARM=$ARM matched the codec family but no codec was selected for it. Add it to the case above; do NOT let it fall through, or it would run with another codec's knobs under its own name." >&2; exit 1 ;;
+    esac
     ;;
   smoke)
     ARM_DESC="25-step throughput and memory smoke, no validation"

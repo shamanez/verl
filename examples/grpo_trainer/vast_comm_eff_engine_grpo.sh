@@ -263,6 +263,19 @@ COMM_EFF_ENABLED="${COMM_EFF_ENABLED:-true}"                          # master s
 # PowerSGD is the default communication-efficient path; prf_mask is the
 # per-(token, dim) PRF Bernoulli activation mask; dense is the control.
 COMM_EFF_COMPRESSION_TYPE="${COMM_EFF_COMPRESSION_TYPE:-powersgd}"
+# The codec whitelist, and it has to be HERE rather than implied by the gates
+# below. Those gates are independent `if` blocks with no `else`, so before this
+# existed an unrecognised (or newly added) compression_type fell straight
+# through all of them: no wire accounting, no byte-parity check, no "resolved
+# codec OK" line, and the banner still printed a hard-coded list that made it
+# look correct. The first rejection was COMPRESSION_TYPES inside the config, on
+# the paid box, after Ray and vLLM had come up. Byte parity is the entire
+# premise of the codec ablations, so a codec whose ledger never printed is the
+# same failure as a codec that never fired.
+case "${COMM_EFF_COMPRESSION_TYPE}" in
+  dense|prf_mask|powersgd|sr_quant|aq_sgd|tah_quant) ;;
+  *) echo "FATAL: bad COMM_EFF_COMPRESSION_TYPE='${COMM_EFF_COMPRESSION_TYPE}' (dense|prf_mask|powersgd|sr_quant|aq_sgd|tah_quant). Adding a codec means adding it HERE too, or its arm runs with no ledger and no parity check." >&2; exit 1;;
+esac
 # --- prf_mask codec (active iff COMM_EFF_COMPRESSION_TYPE=prf_mask) ---
 # Anchor-independent boundary activation mask. Mutually exclusive with PowerSGD;
 # it cannot anchor-own-Q, so a prf_mask arm must set COMM_EFF_ANCHOR_OWNS_Q=false
@@ -313,6 +326,19 @@ COMM_EFF_AQ_SGD_FIRST_VISIT="${COMM_EFF_AQ_SGD_FIRST_VISIT:-rescaled}"  # rescal
 COMM_EFF_AQ_SGD_CAPACITY_BYTES="${COMM_EFF_AQ_SGD_CAPACITY_BYTES:-17179869184}"  # 16 GiB LRU cap; must span one epoch of prompts to score hits. Same figure at every layer: the fanout gate reserves a fixed per-arm budget
 COMM_EFF_AQ_SGD_BUFFER_DEVICE="${COMM_EFF_AQ_SGD_BUFFER_DEVICE:-cpu}"
 COMM_EFF_AQ_SGD_MAX_POSITIONS="${COMM_EFF_AQ_SGD_MAX_POSITIONS:-0}"  # hard cap on buffered positions per example (0 = unbounded); bounds the store under scope=all
+
+# --- tah_quant codec (active iff COMM_EFF_COMPRESSION_TYPE=tah_quant) ---
+# TAH-Quant, He et al. arXiv:2506.01352v2. Tile-wise Adaptive Hadamard
+# Quantization: per-token channel tiles, entropy-ranked INT4/INT3, and a
+# conditional pivot-swap + Hadamard rotation that spreads a tile's dominant
+# outlier so the affine range is not wasted on it. STATELESS, which is why it
+# is here: it drops AQ-SGD's requirement that an example recur, the one
+# on-policy RLVR violates, and it drops the host buffer with it.
+COMM_EFF_TAH_TILE="${COMM_EFF_TAH_TILE:-32}"              # contiguous channels/tile, power of two. 32 not the paper's 64: at 64 the 6-bit pivot index leaves no room for the transform flag inside the paper's own 39 bits/tile
+COMM_EFF_TAH_INT4_FRAC="${COMM_EFF_TAH_INT4_FRAC:-0.8}"   # share of tiles (entropy-ranked within a sample) that get INT4; rest INT3. 0.8 = the paper's 80/20
+COMM_EFF_TAH_TAU="${COMM_EFF_TAH_TAU:-2.0}"               # rotate a tile when |a1|/|a2| > tau. 2.0 = the paper's choice; 0 = always, inf = never (its own two ablation endpoints)
+COMM_EFF_TAH_ROUNDING="${COMM_EFF_TAH_ROUNDING:-rn}"      # rn = the paper's implied deterministic mode (it never states one; Assumption 4.4 bounds bias rather than forbidding it) | sr = PRF-keyed stochastic, unbiased in-tile
+COMM_EFF_TAH_SUBSET_K="${COMM_EFF_TAH_SUBSET_K:-0}"       # quantize only a PRF-fresh exact-k channel subset/token, zero elsewhere, survivors carrying the H/k gain; 0 = full width. NOT optional at our budget: full width costs 5.50x PRF exact-k
 # --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---
 # Every PROBE_EVERY trainer steps the trainer reruns the step's actor +
 # reference logprob passes once with the codec silent (measurement only, no
@@ -440,10 +466,11 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout_is=$ROLLOUT_IS threshold=$ROLLOUT_IS_THRESHOLD (null = correction OFF, recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant|aq_sgd)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant|aq_sgd|tah_quant)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
   sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
   aq_sgd:              bits=$COMM_EFF_AQ_SGD_BITS block_size=$COMM_EFF_AQ_SGD_BLOCK_SIZE rounding=$COMM_EFF_AQ_SGD_ROUNDING subset_k=$COMM_EFF_AQ_SGD_SUBSET_K scope=$COMM_EFF_AQ_SGD_SCOPE first_visit=$COMM_EFF_AQ_SGD_FIRST_VISIT capacity=$COMM_EFF_AQ_SGD_CAPACITY_BYTES device=$COMM_EFF_AQ_SGD_BUFFER_DEVICE max_positions=$COMM_EFF_AQ_SGD_MAX_POSITIONS  (active iff compression_type=aq_sgd; reuses mask recompute/reference/seed/pp_size)
+  tah_quant:           tile=$COMM_EFF_TAH_TILE int4_frac=$COMM_EFF_TAH_INT4_FRAC tau=$COMM_EFF_TAH_TAU rounding=$COMM_EFF_TAH_ROUNDING subset_k=$COMM_EFF_TAH_SUBSET_K  (active iff compression_type=tah_quant; reuses mask recompute/reference/seed/pp_size)
   probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
   cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
   dense_every:         $COMM_EFF_MASK_DENSE_EVERY  (0=off; N>0 = full-fidelity uncompressed fwd+bwd on every step where global_step%N==0, anchor suppressed there)
@@ -551,6 +578,55 @@ print(f'payload {payload} + fp16 scales {scales:g} = {total:g} bits/token/bounda
     echo "=== aq_sgd subset accounting (before GPU): k=$COMM_EFF_AQ_SGD_SUBSET_K bits=$COMM_EFF_AQ_SGD_BITS block=$COMM_EFF_AQ_SGD_BLOCK_SIZE -> $AQ_BITS_LINE ==="
   fi
   echo "=== resolved codec OK (before GPU): aq_sgd bits=$COMM_EFF_AQ_SGD_BITS block_size=$COMM_EFF_AQ_SGD_BLOCK_SIZE rounding=$COMM_EFF_AQ_SGD_ROUNDING subset_k=$COMM_EFF_AQ_SGD_SUBSET_K scope=$COMM_EFF_AQ_SGD_SCOPE first_visit=$COMM_EFF_AQ_SGD_FIRST_VISIT capacity_gib=$((COMM_EFF_AQ_SGD_CAPACITY_BYTES/1073741824)) buffer_device=$COMM_EFF_AQ_SGD_BUFFER_DEVICE max_positions=$COMM_EFF_AQ_SGD_MAX_POSITIONS mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
+fi
+
+if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "tah_quant" ]]; then
+  # TAH-Quant carries no basis and no buffer, so the anchor has nothing to own.
+  # Left true (which is the DEFAULT both here and in actor.yaml) the arm would
+  # validate and then do nothing at the anchor, because the anchor's Q
+  # transaction is guarded on a PowerSGD basis that does not exist here.
+  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: tah_quant requires COMM_EFF_ANCHOR_OWNS_Q=false (it is stateless and carries no basis Q)." >&2; exit 1; }
+  [[ "${COMM_EFF_MASK_RECOMPUTE}" == "true" ]] || { echo "FATAL: tah_quant requires COMM_EFF_MASK_RECOMPUTE=true (a dense recompute would price old log-probs against a compressed train forward, so the PPO ratio would not start at one)." >&2; exit 1; }
+  [[ "${COMM_EFF_TAH_TILE}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_TAH_TILE='${COMM_EFF_TAH_TILE}' must be a positive integer." >&2; exit 1; }
+  case "${COMM_EFF_TAH_ROUNDING}" in sr|rn) ;; *) echo "FATAL: bad COMM_EFF_TAH_ROUNDING='${COMM_EFF_TAH_ROUNDING}' (sr|rn)." >&2; exit 1;; esac
+  [[ "${COMM_EFF_TAH_SUBSET_K}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_TAH_SUBSET_K='${COMM_EFF_TAH_SUBSET_K}' must be an integer >= 0 (0 = full width)." >&2; exit 1; }
+  # tile must be a power of two (Sylvester Hadamard), int4_frac in [0,1],
+  # tau >= 0. Done in python because bash cannot do either cleanly.
+  python3 -c "
+import sys
+tile = ${COMM_EFF_TAH_TILE}
+f = float('${COMM_EFF_TAH_INT4_FRAC}')
+tau = float('${COMM_EFF_TAH_TAU}')
+if tile < 2 or (tile & (tile - 1)) != 0:
+    sys.exit(f'COMM_EFF_TAH_TILE={tile} must be a power of two >= 2 (the Sylvester Hadamard needs it)')
+if not 0.0 <= f <= 1.0:
+    sys.exit(f'COMM_EFF_TAH_INT4_FRAC={f} must be in [0, 1]')
+if tau < 0.0:
+    sys.exit(f'COMM_EFF_TAH_TAU={tau} must be >= 0 (0 rotates every tile, inf rotates none)')
+" || { echo "FATAL: tah_quant knob validation failed (see above)." >&2; exit 1; }
+  if (( COMM_EFF_TAH_SUBSET_K > 0 )); then
+    # The money gate. Metadata is fp16 scale + fp16 zero-point + 1-bit
+    # precision bitmap + ceil(log2 tile) pivot index + 1-bit transform flag.
+    # The last two are NOT in the paper's own enumeration, and the pivot is
+    # exactly what closes its 4.41 bits/element to three significant figures,
+    # so this ledger is deliberately one bit per tile more honest than the
+    # published figure at tile=64: a receiver cannot invert without knowing
+    # both where the pivot was and whether the rotation happened.
+    TAH_BITS_LINE="$(python3 -c "
+import math
+k = ${COMM_EFF_TAH_SUBSET_K}; g = ${COMM_EFF_TAH_TILE}; f = float('${COMM_EFF_TAH_INT4_FRAC}')
+meta = 2*16 + 1 + int(math.ceil(math.log2(g))) + 1
+tiles = (k + g - 1) // g
+payload = k * (f*4 + (1-f)*3)
+total = payload + tiles * meta
+print(f'payload {payload:g} + {tiles} tiles x {meta} b metadata {tiles*meta} = {total:g} bits/token/boundary'
+      f' (ceil {math.ceil(total)}; incumbent prf exact-k 77x16 = 1232, ratio {total/1232:.4f}x)')
+")" || { echo "FATAL: tah_quant bit-accounting computation failed." >&2; exit 1; }
+    echo "=== tah_quant subset accounting (before GPU): k=$COMM_EFF_TAH_SUBSET_K tile=$COMM_EFF_TAH_TILE int4_frac=$COMM_EFF_TAH_INT4_FRAC -> $TAH_BITS_LINE ==="
+  else
+    echo "=== tah_quant WARNING: subset_k=0 quantizes the FULL width, which at H=1536 costs about 6773 bits/token/boundary, 5.50x the incumbent's 1232. This arm is OFF the byte budget by construction: it measures what a larger budget buys, not a byte-matched comparison. ==="
+  fi
+  echo "=== resolved codec OK (before GPU): tah_quant tile=$COMM_EFF_TAH_TILE int4_frac=$COMM_EFF_TAH_INT4_FRAC tau=$COMM_EFF_TAH_TAU rounding=$COMM_EFF_TAH_ROUNDING subset_k=$COMM_EFF_TAH_SUBSET_K mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
 fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
@@ -736,7 +812,12 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.aq_sgd.first_visit="$COMM_EFF_AQ_SGD_FIRST_VISIT" \
   actor_rollout_ref.actor.comm_eff.aq_sgd.capacity_bytes="$COMM_EFF_AQ_SGD_CAPACITY_BYTES" \
   actor_rollout_ref.actor.comm_eff.aq_sgd.buffer_device="$COMM_EFF_AQ_SGD_BUFFER_DEVICE" \
-  actor_rollout_ref.actor.comm_eff.aq_sgd.max_positions="$COMM_EFF_AQ_SGD_MAX_POSITIONS" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.max_positions="$COMM_EFF_AQ_SGD_MAX_POSITIONS" \ \
+  actor_rollout_ref.actor.comm_eff.tah.tile="$COMM_EFF_TAH_TILE" \
+  actor_rollout_ref.actor.comm_eff.tah.int4_frac="$COMM_EFF_TAH_INT4_FRAC" \
+  actor_rollout_ref.actor.comm_eff.tah.tau="$COMM_EFF_TAH_TAU" \
+  actor_rollout_ref.actor.comm_eff.tah.rounding="$COMM_EFF_TAH_ROUNDING" \
+  actor_rollout_ref.actor.comm_eff.tah.subset_k="$COMM_EFF_TAH_SUBSET_K" \
   actor_rollout_ref.actor.comm_eff.probe.probe_every="$COMM_EFF_PROBE_EVERY" \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled="$COMM_EFF_PROBE_CTRL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.probe.kl_target_floor="$COMM_EFF_PROBE_KL_TARGET_FLOOR" \

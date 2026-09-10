@@ -175,6 +175,13 @@ actor_rollout_ref:
         capacity_bytes: 17179869184
         buffer_device: cpu
         max_positions: 0
+      tah:
+        _target_: verl.workers.config.CommEffTAHQuantConfig
+        tile: 32
+        int4_frac: 0.8
+        tau: 2.0
+        rounding: rn
+        subset_k: 0
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true
