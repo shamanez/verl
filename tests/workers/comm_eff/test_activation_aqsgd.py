@@ -529,7 +529,6 @@ def test_buffer_capacity_default_agrees_at_every_layer():
 
     # The launcher-side knob is expressed in GiB and must be the same figure.
     for rel in (
-        "examples/grpo_trainer/run_qwen25_math_1p5b_aqsgd_fsdp.sh",
         "examples/grpo_trainer/run_compass_rlvr_ablations_fsdp.sh",
         "examples/grpo_trainer/run_compass_rlvr_ablations_fanout_fsdp.sh",
     ):

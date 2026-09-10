@@ -159,6 +159,15 @@ case "$ARM" in
   # is untouched in all of them; the codec is the only change.
   # ----------------------------------------------------------------------- #
   aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload|srquant)
+    # HORIZON IS PINNED HERE, not left to the dispatcher default of 200. These
+    # arms are read against the PUBLISHED 600-step Pair 1 rows, and issue #93
+    # established that codec ranking INVERTS between the short window and the
+    # horizon: PRF exact-k ranks fourth at 100-120 steps and first at 600, and
+    # FRLR led by 2.55x at step 100 before ending 2.12x worse. A 200-step codec
+    # row would therefore be actively misleading, so the arm carries its own
+    # horizon and cannot be launched short by forgetting an env var.
+    TOTAL_STEPS="${TOTAL_STEPS_CODEC:-600}"
+    TEST_FREQ="${TEST_FREQ_CODEC:-50}"
     export COMM_EFF_ENABLED=true
     export COMM_EFF_MASK_ENABLED=false     # a quantizing codec REPLACES the mask
     export COMM_EFF_MASK_RECOMPUTE=true    # aq_sgd reads its buffer every eligible pass
@@ -198,6 +207,8 @@ case "$ARM" in
         aqsgd-payload)
           export COMM_EFF_AQ_SGD_FIRST_VISIT=dense
           ARM_DESC="A5: AQ-SGD payload accounting, faithful uncompressed first message (OFF-budget by construction; measures traffic, not accuracy)"
+          # Deliberately short: this arm measures WIRE TRAFFIC, not accuracy,
+          # so the horizon argument above does not apply to it.
           TOTAL_STEPS="${TOTAL_STEPS_AQPAYLOAD:-25}"
           TEST_FREQ=-1 ;;
       esac
