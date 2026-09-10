@@ -108,6 +108,12 @@ run_tag() {  # run_tag <tag> <model_path>
 # ---- model roster (tag  run  step), priority-ordered. EXAMPLE from the reference
 # study; edit for your own runs. `run` is the WandB/run-dir name, `step` the saved
 # global_step; `base` is the untrained reference. ----
+# ROSTER_CSV overrides this for a different study: entries separated by "|",
+# each "tag run step", with run and step given as "-" for the untrained base.
+# The default below is the original example study.
+if [[ -n "${ROSTER_CSV:-}" ]]; then
+  IFS='|' read -r -a ROSTER <<< "$ROSTER_CSV"
+else
 ROSTER=(
   "base       -                          -"
   "dense150   quicktest-ood-dense-150    150"
@@ -118,6 +124,7 @@ ROSTER=(
   "dense100   quicktest-ood-dense-150    100"
   "dense50    quicktest-ood-dense-150    50"
 )
+fi
 
 for entry in "${ROSTER[@]}"; do
   read -r tag run step <<<"$entry"
@@ -131,7 +138,11 @@ OOD_EVAL_ROOT="$OOD_EVAL_ROOT" python3 - <<'PY' | tee "$OOD_EVAL_ROOT/RESULTS.tx
 import os, re
 root=os.environ["OOD_EVAL_ROOT"]
 benches=["math500","gsm8k","minerva","olympiad","amc23","mmlu_stem","aime24","aime25","aime26","hmmt25"]
-tags=["base","dense50","dense100","dense150","commeff50","commeff100","commeff150","tis150"]
+# TAGS_CSV keeps the table in step with ROSTER_CSV. Deriving it from the roster
+# rather than repeating it by hand is the point: a tabulator whose tag list is
+# remembered separately silently drops any model the roster added.
+tags=[t for t in os.environ.get("TAGS_CSV","").split(",") if t] or \
+     ["base","dense50","dense100","dense150","commeff50","commeff100","commeff150","tis150"]
 tbl={}
 for tag in tags:
     for b in benches:
