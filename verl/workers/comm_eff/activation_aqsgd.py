@@ -65,13 +65,17 @@ recompute, reference forward), because that identity is what makes the PPO
 ratio start each step at exactly one. The two are reconciled by treating one
 optimizer step as one VISIT:
 
-* every eligible pass READS the same pre-step ``m``;
-* the buffer is written only on the ``train`` path tag, and only when the step
-  counter has advanced past the entry's ``step_last_updated``.
+* every eligible pass READS the buffer as it stood at the end of the previous
+  step;
+* the ``train`` pass STAGES its refreshed buffer, and the stage is published
+  only when the step counter advances.
 
-The write is therefore idempotent within a step. The gradient-checkpoint
-recompute re-derives the identical reconstruction, and the reference forward
-(different weights, so a different ``a``) never writes.
+A plain "skip the second write" guard would not be enough, because the second
+pass would then read what the first pass published and the two would disagree.
+Deferring publication to the step boundary is what makes the
+gradient-checkpoint recompute re-derive the identical reconstruction. The
+reference forward (different weights, so a different ``a``) never stages at
+all.
 
 STORAGE, WHICH IS PART OF THE RESULT
 ------------------------------------
@@ -630,6 +634,11 @@ class ActivationAQSGD:
         self._prompt_lens: Optional[torch.Tensor] = None
         self.hidden_size: Optional[int] = None
         self.logical_pp_bits_aq_sgd: Optional[float] = None
+        # Staged, not yet published, buffer slabs for the CURRENT step, keyed
+        # (example_id, boundary). Published by _flush_pending at the next step
+        # boundary. See _stage_buffer for why publication is deferred.
+        self._pending: dict = {}
+        self._staged_step = 0
         # Diagnostic: mean ||x - m|| / ||x|| over WARM rows. This is the number
         # AQ-SGD's premise is about. Below 1 the buffer is predictive and the
         # delta really is cheaper to send than the value; at about sqrt(2) the
@@ -647,7 +656,14 @@ class ActivationAQSGD:
         example_ids: Optional[torch.Tensor] = None,
         prompt_lens: Optional[torch.Tensor] = None,
     ) -> None:
-        """Set the PRF key and the buffer key for the next forward."""
+        """Set the PRF key and the buffer key for the next forward.
+
+        A change of ``global_step`` publishes the previous step's staged
+        buffer. Every pass of one step therefore reads the same ``m``, which is
+        what keeps the reconstruction pass-identical and the PPO ratio at one.
+        """
+        if int(global_step) != int(self._global_step):
+            self._flush_pending()
         self._global_step = int(global_step)
         self._sample_ids = None if sample_ids is None else sample_ids.reshape(-1)
         self._position_ids = None if position_ids is None else position_ids.reshape(-1)
@@ -736,7 +752,7 @@ class ActivationAQSGD:
         self.buffer.misses += n_scope - n_warm
         return m, warm
 
-    def _write_buffer(
+    def _stage_buffer(
         self,
         layer_idx: int,
         x_hat: torch.Tensor,
@@ -746,30 +762,30 @@ class ActivationAQSGD:
         in_scope: torch.Tensor,
         hidden_size: int,
     ) -> None:
-        """Commit the refreshed buffer, once per example per step.
+        """STAGE the refreshed buffer for this visit. Does not publish it.
 
         Both sides of a boundary end a visit holding ``m + Q(a - m)``, which is
-        exactly the reconstruction the receiver consumed, so the buffer is
-        written from ``x_hat`` and no second quantization is needed.
+        exactly the reconstruction the receiver consumed, so the new buffer is
+        taken from ``x_hat`` and needs no second quantization.
 
-        Two guards make this idempotent and path-safe:
+        Staging rather than writing is what preserves pass identity, and a
+        plain "skip if already written this step" guard is NOT enough: it stops
+        the second write but the second pass would then READ what the first
+        pass published, so the two passes of one step would disagree. Instead
+        nothing is published until :meth:`_flush_pending` runs at the next step
+        boundary, so every pass of step ``t`` reads the buffer as it stood at
+        the end of step ``t-1``.
 
-        * an entry is skipped when its ``step_last_updated`` already equals the
-          current step, so the gradient-checkpoint recompute inside one step
-          re-reads the pre-step buffer and reproduces the identical
-          reconstruction;
-        * the ``G`` rollouts of one prompt disagree about the refreshed prefix,
-          because the subset ``J`` is keyed on the row's ``sample_id``. The
-          write is taken from the LOWEST ``sample_id`` present for that
-          example, which is deterministic and gives one ``m`` per example as
-          the paper specifies.
+        The ``G`` rollouts of one prompt disagree about the refreshed prefix,
+        because the subset ``J`` is keyed on the row's ``sample_id``. The stage
+        is taken from the LOWEST ``sample_id`` present for that example, which
+        is deterministic and leaves one ``m`` per example as the paper
+        specifies.
         """
         vals = x_hat.detach().reshape(-1, hidden_size)
         for ex in torch.unique(example_ids[in_scope]).tolist():
             ex_int = int(ex)
-            entry = self.buffer.get(ex_int, layer_idx)
-            if entry is not None and int(entry[1]) >= int(self._global_step):
-                continue  # already refreshed this visit
+            key = (ex_int, int(layer_idx))
             here = in_scope & (example_ids == ex_int)
             if not bool(here.any()):
                 continue
@@ -781,12 +797,26 @@ class ActivationAQSGD:
             pos = position_ids[sel]
             n_pos = int(pos.max().item()) + 1
             slab = torch.zeros((n_pos, hidden_size), device=vals.device, dtype=vals.dtype)
+            entry = self.buffer.get(ex_int, layer_idx)
             if entry is not None:
                 prev = entry[0].to(device=vals.device, dtype=vals.dtype)
                 keep = min(n_pos, int(prev.shape[0]))
                 slab[:keep] = prev[:keep]
             slab.index_copy_(0, pos, vals[sel])
-            self.buffer.put(ex_int, layer_idx, slab, self._global_step)
+            self._pending[key] = slab.detach().to("cpu", torch.float32)
+
+    def _flush_pending(self) -> None:
+        """Publish the staged buffer. Called when the step counter advances.
+
+        Deferring publication to a step boundary is what makes every pass of a
+        step read one fixed ``m``. The final step's stage is never published,
+        which costs nothing: no later pass would read it.
+        """
+        if not self._pending:
+            return
+        for (ex_int, layer_idx), slab in self._pending.items():
+            self.buffer.put(ex_int, layer_idx, slab, self._staged_step)
+        self._pending = {}
 
     def _make_hook(self, layer_idx: int):
         codec = self
@@ -877,7 +907,8 @@ class ActivationAQSGD:
             # race the train pass for the same visit.
             if tag == "train" and bool(in_scope.any()):
                 with torch.no_grad():
-                    codec._write_buffer(
+                    codec._staged_step = codec._global_step
+                    codec._stage_buffer(
                         layer_idx, h_tilde, example_ids, position_ids, sample_ids_dev, in_scope, hidden_size
                     )
 
@@ -901,6 +932,7 @@ class ActivationAQSGD:
         """
         if self._handles:
             return
+        self._pending = {}
         self._sample_ids = None
         self._position_ids = None
         self._example_ids = None
