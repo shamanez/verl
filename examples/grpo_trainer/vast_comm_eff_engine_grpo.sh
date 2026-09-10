@@ -99,7 +99,10 @@ export HF_TOKEN \
 #    compatible shape.
 #    REQUIRE_MULTI_GPU=1 optionally enforces the existing 4-GPU gate.
 # ---------------------------------------------------------------------------
-DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+# FORCE_NGPUS overrides detection. Needed when several single-GPU arms share
+# one box: CUDA_VISIBLE_DEVICES hides the other devices from CUDA but not from
+# nvidia-smi, so detection would size every arm to the whole box.
+DETECTED_GPUS="${FORCE_NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')}"
 GPU_MIN=1
 if [[ "${REQUIRE_MULTI_GPU:-0}" == "1" ]]; then
   GPU_MIN=4
@@ -112,7 +115,7 @@ if (( DETECTED_GPUS < GPU_MIN || DETECTED_GPUS > 8 )); then
   exit 1
 fi
 export NGPUS_PER_NODE="$DETECTED_GPUS"
-echo "=== detected $NGPUS_PER_NODE GPUs ($(nvidia-smi -L | head -1)) ==="
+echo "=== using $NGPUS_PER_NODE GPU(s)${FORCE_NGPUS:+ (FORCE_NGPUS)}${CUDA_VISIBLE_DEVICES:+, CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES} ==="
 
 # ---------------------------------------------------------------------------
 # 3. ulimit + cgroup probe.
