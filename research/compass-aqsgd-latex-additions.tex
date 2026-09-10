@@ -1,0 +1,169 @@
+% compass-aqsgd-latex-additions.tex
+%
+% The paper delta for the AQ-SGD codec ablation, kept in the repo because the
+% Overleaf source lives outside version control and two sessions were editing
+% it concurrently. If the paper file loses these edits, re-apply from here.
+%
+% Target: main_rewritten.tex in the COMPASS Overleaf project. Red markup uses
+% the project's existing \new{...} macro and revised environment.
+%
+% THREE INLINE INSERTIONS (anchor text -> what to append after it):
+%
+% 1. Related Work, activation-compression paragraph. After:
+%      "...require compatible model structure \citep{ramasinghe2025subspace,
+%       ramasinghe2025mixtures,wang2021pufferfish}."
+%    append:
+%      \new{Our RLVR codec selection compares against AQ-SGD directly rather
+%      than only citing it, at matched boundary payload;
+%      Appendix~\ref{app:rlvr-aqsgd} reports the arm and the reason its premise
+%      is a poor fit for on-policy RLVR.}
+%
+% 2. Table 6 (tab:rlvr-codec-choice) gains a second block. The caption is
+%    rewritten and five rows are added. See the table body committed alongside
+%    this file in the launcher's run plan, or reconstruct from Table 6 in the
+%    compiled PDF.
+%
+% 3. Conclusion and Limitations. After:
+%      "...only one pair runs for $600$ steps."
+%    append:
+%      \new{The codec comparison in Appendix~\ref{app:rlvr-aqsgd} is
+%      single-seed per arm, so a difference smaller than run-to-run variation
+%      cannot be distinguished from one, and it is measured at one payload
+%      point on one pair.}
+%
+% PLUS the appendix section below, appended before \end{document}.
+%
+% Verified: adds ZERO new LaTeX errors (204 pre-existing tectonic
+% \resizebox+tabular artifacts both before and after), zero unresolved
+% references, renders as Appendix K over 5 subsections.
+
+\begin{revised}
+\section{The Quantization Family at Matched Payload}
+\label{app:rlvr-aqsgd}
+
+Table~\ref{tab:rlvr-codec-choice} selects a codec by comparing a low-rank
+family against a sparsifying one. Activation quantization is the third
+established family for this link, and AQ-SGD \citep{wang2022aqsgd} is its
+reference method for pipeline parallelism over slow networks. This appendix
+reports it at matched boundary payload on Pair~1, together with the two control
+arms needed to attribute the result.
+
+\subsection{What AQ-SGD Sends}
+
+AQ-SGD does not quantize the activation. It quantizes the \emph{change} of the
+activation for the same training example between visits. Each side of a
+boundary keeps a local buffer $m(\xi)$ for example $\xi$. The sending stage
+transmits $Q(a(\xi)-m(\xi))$ and both sides advance
+\begin{equation}
+m(\xi)\leftarrow m(\xi)+Q\big(a(\xi)-m(\xi)\big),
+\label{eq:aqsgd-update}
+\end{equation}
+so the receiving stage consumes a running reconstruction. The backward gradient
+is quantized directly, with no buffer, which is the paper's own treatment: a
+gradient carries no cross-visit history to difference against. The guarantee
+rests on a self-enforcing loop. Training stabilizes, so the activation for a
+fixed example moves less between visits, so the same bit budget spent on the
+delta gives a smaller error, so training stabilizes further.
+
+Our implementation sends a keyed subset. For each token a pseudorandom function
+selects exactly $k$ coordinates, using the same key construction as the mask
+codec so that both adjacent stages derive the subset locally and no index bits
+cross the link. Unlike the mask, the coordinates outside the subset are not
+zeroed and carry no $H/k$ gain, because the receiver already holds $m$ there and
+keeps it. The reconstruction is
+\begin{equation}
+\hat h \;=\; m \;+\; \mathcal S_J\!\left(Q\big(h_J-m_J\big)\right),
+\label{eq:aqsgd-subset}
+\end{equation}
+where $\mathcal S_J$ scatters back onto the selected coordinates $J$. Over
+successive visits this refines $m$ toward $h$ one subset at a time. Rounding is
+stochastic, which is the faithful setting: Theorem 3.1 of
+\citet{wang2022aqsgd} assumes an unbiased quantization function, and the
+worked bound in that paper rounds stochastically. What the result does not
+assume is an unbiased \emph{gradient}, which is a different claim. A
+round-to-nearest arm is reported alongside to show that this choice is not what
+decided the outcome.
+
+\subsection{Payload, and Why the Arms Are Comparable}
+
+At $H=1536$ the mask sends $77$ half-precision coordinates, so $1232$ bits per
+token per boundary. Quantization at $b$ bits on $k$ selected coordinates sends
+$kb$ payload bits plus one half-precision scale per block of $32$ selected
+coordinates, so $kb + 16k/32$ bits. At $b=2$ and $k=493$ that is $1232.5$ bits,
+matching the mask to within $0.04\%$ while covering $32.1\%$ of each token
+rather than $5.0\%$. The memoryless arm uses identical $(b,k,\text{block})$
+values, so it is byte-identical to the AQ-SGD arms on the wire and differs in
+exactly one respect, whether a buffered history is differenced against. Any gap
+between those arms is therefore attributable to delta coding alone.
+
+One setting cannot be made byte-matched, and we report it separately rather
+than adjust it away. AQ-SGD sends the first message for each example
+uncompressed. Where most tokens are first visits, that dominates the payload
+and the method does not reach a $5\%$ budget at all. The rows in
+Table~\ref{tab:rlvr-codec-choice} therefore use a cold fallback that respects
+the budget, in which a first visit sends the unbiased sparse estimate and is
+consequently identical to the memoryless arm. A separate short run with the
+faithful uncompressed first message measures the resulting payload directly.
+
+\subsection{Why the Premise Does Not Transfer}
+
+AQ-SGD needs a training example to recur with its activation intact. On-policy
+RLVR only half provides this, and the split is what the two AQ-SGD rows
+measure.
+
+Prompt-prefix tokens do recur. A MATH problem is revisited each epoch with
+byte-identical token ids at identical positions, so its boundary activation
+differs only by the weight drift accumulated since the last visit. At $600$
+steps and $128$ prompts per step over roughly seven thousand problems, a prompt
+is seen about eleven times. This is the regime AQ-SGD was designed for.
+
+Response tokens do not recur. The token occupying a given position is resampled
+from the current policy at every visit, so a buffered value belongs to a
+different token. For roughly independent activations
+$\mathbb E\|a-m\|^2=\|a\|^2+\|m\|^2$, so the delta carries about $\sqrt2$ times
+the norm of the value. At a fixed bit budget that is a coarser grid and a
+larger error than quantizing the value would have given. We measure this ratio
+at $1.41$ on Pair~1 boundary states. The prefix is a minority of the tokens
+that cross a boundary, because a prompt of order one hundred tokens precedes a
+response whose mean length at Pair~1 is $574$, so the mechanism is applicable
+to a small fraction of the traffic. The arm labelled ``recurring prefix''
+confines the buffer to positions where the premise holds and is AQ-SGD's best
+case here. The arm labelled ``all positions'' is the unmodified port. We report
+the measured buffer hit rate with both, so the outcome is explained rather than
+asserted.
+
+\subsection{Storage}
+
+The buffer is indexed by example, position and boundary, and it must span the
+reuse distance to score a hit. In RLVR that distance is a full epoch of
+prompts. Covering prefixes alone at Pair~1 costs
+$n\cdot\bar p\cdot L\cdot H\cdot 2$ bytes for $n$ examples of mean prompt length
+$\bar p$ over $L$ compressed boundaries, which is about $0.16$~GB per token of
+mean prompt length and so tens of gigabytes of host memory. Covering full
+$2048$-token sequences costs order $300$~GB, and Pair~3's $16{,}384$-token
+budget puts the same quantity in the terabytes. The keyed mask stores nothing at
+all, because its selection is derived from a key rather than remembered. Buffers
+are also per process, which is faithful: \citet{wang2022aqsgd} note that data
+parallelism divides the store by the parallel degree but then pays for
+shuffling, so a prompt that lands on a different replica than last epoch is a
+miss. This is a property of the method in this setting and not an artifact of
+our implementation, and it is the reason we report a hit rate alongside every
+accuracy.
+
+\subsection{Protocol}
+
+All arms use the published Pair~1 configuration with the boundary codec
+replaced and nothing else changed: Qwen2.5-Math-1.5B on MATH, $1024$ prompt and
+$2048$ response tokens, $128$ prompts per step with $G=8$ and a $128$-prompt
+mini-batch so that one optimizer tick follows each generation, anchor cadence
+and delay $20/20$, and $600$ optimizer steps. Each arm runs on a single GPU,
+matching the published rows: at data-parallel degree above one the anchor's
+dense replay gradient is averaged across replicas, which changes the quantity
+under study. Final checkpoints are merged to dense models and scored with the
+same ten-benchmark harness that produced Table~\ref{tab:rlvr-full}, so the new
+rows are read against the Pair~1 dense and mask controls already reported there
+rather than against the selection run. Checkpoints are retained at steps $200$,
+$400$ and $600$, and training-path MATH validation runs every $50$ steps,
+because a single end-of-run reading cannot distinguish a codec that trains
+steadily from one that peaks and then drifts.
+\end{revised}
