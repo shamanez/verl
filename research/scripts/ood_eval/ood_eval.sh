@@ -30,6 +30,16 @@ DIR="$OOD_EVAL_ROOT/$TAG/$BENCH"
 mkdir -p "$DIR"
 export CUDA_VISIBLE_DEVICES=$GPUS
 [ -d "$SHIM_DIR" ] && export PATH="$SHIM_DIR:$PATH"
+# The engine sizes itself from `nvidia-smi -L`, which ignores
+# CUDA_VISIBLE_DEVICES, so without the optional shim every worker would claim
+# the whole box. FORCE_NGPUS states the truth directly and does not depend on
+# a shim directory existing.
+export FORCE_NGPUS="${FORCE_NGPUS:-$(echo "$GPUS" | awk -F, '{print NF}')}"
+# Separate this worker's weight-transfer socket from its siblings'. Several
+# eval workers on one host otherwise compute the same ipc:// path, because
+# each starts its own Ray cluster and every fresh cluster hands out job id
+# 01000000, and the sender unlinks the path before binding.
+export VERL_ZMQ_NS="${VERL_ZMQ_NS:-ood-$TAG-$BENCH}"
 export OMP_NUM_THREADS=16 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4 NUMEXPR_MAX_THREADS=8 \
        TORCHINDUCTOR_COMPILE_THREADS=16 RAYON_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false
 echo "=== EVAL $TAG/$BENCH model=$MODEL n=$N temp=$TEMP $(date -Iseconds) ===" | tee -a "$OOD_EVAL_ROOT/eval.log"
