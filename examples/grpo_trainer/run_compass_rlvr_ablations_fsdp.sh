@@ -133,6 +133,10 @@ case "$ARM" in
     ARM_DESC="A2: K=80 (4x cadence)"
     export COMM_EFF_ANCHOR_DELAY_K=80
     KEEP_CKPT=1    # far end of the sweep: check MATH-only does not hide damage
+    # The forecast needs a checkpoint K steps old, so at one tick per step it
+    # does not engage until step 80 and has had two projected firings by step
+    # 120. A 200-step arm here would measure warmup rather than staleness.
+    TOTAL_STEPS="${TOTAL_STEPS_K80:-400}"
     ;;
   k40gm)
     ARM_DESC="A2: K=40, forecast gain matched to K=20 (strength=c/K=0.5)"
@@ -143,6 +147,7 @@ case "$ARM" in
     ARM_DESC="A2: K=80, forecast gain matched to K=20 (strength=c/K=0.25)"
     export COMM_EFF_ANCHOR_DELAY_K=80
     export COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH=0.25
+    TOTAL_STEPS="${TOTAL_STEPS_K80:-400}"   # same warmup argument as k80
     ;;
   smoke)
     ARM_DESC="25-step throughput and memory smoke, no validation"
@@ -182,6 +187,11 @@ else
   cd verl
 fi
 VERL_ROOT="$PWD"
+# The engine touches "$VERL_ROOT/runs/$EXPERIMENT_NAME/done.flag" at the end of
+# a clean run but only creates dirname($LOG), and our LOG lives outside the
+# repo. Without this the touch fails under `set -e` and a healthy run exits 1
+# with no completion flag, which the chain and the reaper both read as death.
+mkdir -p "$VERL_ROOT/runs/${RUN_ID}"
 
 # 2. Secrets (WANDB_API_KEY, HF_TOKEN, R2_*). The engine re-sources this too.
 # shellcheck disable=SC1090
