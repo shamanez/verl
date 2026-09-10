@@ -296,6 +296,23 @@ COMM_EFF_QUANT_BITS="${COMM_EFF_QUANT_BITS:-1}"                      # bits/chan
 COMM_EFF_QUANT_BLOCK_SIZE="${COMM_EFF_QUANT_BLOCK_SIZE:-32}"         # channels per fp16 absmax-scale block (0 = whole-token scale)
 COMM_EFF_QUANT_ROUNDING="${COMM_EFF_QUANT_ROUNDING:-sr}"             # sr = unbiased PRF stochastic rounding | rn = round-to-nearest (biased ablation control)
 COMM_EFF_QUANT_SUBSET_K="${COMM_EFF_QUANT_SUBSET_K:-0}"              # issue #93 I5 byte-parity hybrid: quantize only a PRF-fresh exact-k channel subset J/token, rescale H/k; 0 = full width
+# --- aq_sgd codec (active iff COMM_EFF_COMPRESSION_TYPE=aq_sgd) ---
+# AQ-SGD (Wang et al., NeurIPS 2022). Quantizes the CHANGE of the boundary
+# activation for the same example between visits against a local buffer m(xi),
+# not the activation itself. Reuses the same MASK_RECOMPUTE / MASK_REFERENCE /
+# MASK_SEED / MASK_PP_SIZE knobs as sr_quant, and like both other per-token
+# codecs it cannot anchor-own-Q. MASK_RECOMPUTE MUST be true: the buffer is
+# read on every eligible pass, so a dense recompute would differentiate a
+# reconstruction the forward never sent.
+COMM_EFF_AQ_SGD_BITS="${COMM_EFF_AQ_SGD_BITS:-2}"                    # bits per sent channel of the DELTA
+COMM_EFF_AQ_SGD_BLOCK_SIZE="${COMM_EFF_AQ_SGD_BLOCK_SIZE:-32}"       # channels per fp16 absmax-scale block (0 = whole-token scale)
+COMM_EFF_AQ_SGD_ROUNDING="${COMM_EFF_AQ_SGD_ROUNDING:-sr}"           # sr = unbiased (what Theorem 3.1 assumes) | rn = round-to-nearest (biased control)
+COMM_EFF_AQ_SGD_SUBSET_K="${COMM_EFF_AQ_SGD_SUBSET_K:-0}"            # send only a PRF-fresh exact-k channel subset J/token; un-sent channels KEEP m (no H/k gain); 0 = full width
+COMM_EFF_AQ_SGD_SCOPE="${COMM_EFF_AQ_SGD_SCOPE:-prompt}"             # prompt = buffer the recurring prefix only (AQ-SGD's best case here) | all = the literal port
+COMM_EFF_AQ_SGD_FIRST_VISIT="${COMM_EFF_AQ_SGD_FIRST_VISIT:-rescaled}"  # rescaled = byte-matched cold fallback (== sr_quant subset) | dense = the paper's uncompressed first message, OFF-BUDGET
+COMM_EFF_AQ_SGD_CAPACITY_BYTES="${COMM_EFF_AQ_SGD_CAPACITY_BYTES:-25769803776}"  # LRU cap on the host buffer; must span one epoch of prompts to score hits
+COMM_EFF_AQ_SGD_BUFFER_DEVICE="${COMM_EFF_AQ_SGD_BUFFER_DEVICE:-cpu}"
+COMM_EFF_AQ_SGD_MAX_POSITIONS="${COMM_EFF_AQ_SGD_MAX_POSITIONS:-0}"  # hard cap on buffered positions per example (0 = unbounded); bounds the store under scope=all
 # --- dense-view probe + adaptive KL coefficient (issue #93 I3) ---
 # Every PROBE_EVERY trainer steps the trainer reruns the step's actor +
 # reference logprob passes once with the codec silent (measurement only, no
@@ -423,9 +440,10 @@ cat <<EOF
   objective:           pg_loss only (use_kl_loss=$USE_KL_LOSS, use_kl_in_reward=$USE_KL_IN_REWARD, entropy_coeff=$ENTROPY_COEFF)
   mismatch diag:       calculate_log_probs=$ROLLOUT_CALC_LOGPROBS (logs training/rollout_probs_diff_*); rollout_is=$ROLLOUT_IS threshold=$ROLLOUT_IS_THRESHOLD (null = correction OFF, recompute old_log_prob)
   comm_eff master:     $COMM_EFF_ENABLED
-  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant)
+  compression_type:    $COMM_EFF_COMPRESSION_TYPE  (dense|prf_mask|powersgd|sr_quant|aq_sgd)
   prf_mask:            enabled=$COMM_EFF_MASK_ENABLED p=$COMM_EFF_MASK_P rescale=$COMM_EFF_MASK_RESCALE rescale_mode=$COMM_EFF_MASK_RESCALE_MODE mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE  (active iff compression_type=prf_mask)
   sr_quant:            bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K  (active iff compression_type=sr_quant; reuses mask recompute/reference/seed/pp_size)
+  aq_sgd:              bits=$COMM_EFF_AQ_SGD_BITS block_size=$COMM_EFF_AQ_SGD_BLOCK_SIZE rounding=$COMM_EFF_AQ_SGD_ROUNDING subset_k=$COMM_EFF_AQ_SGD_SUBSET_K scope=$COMM_EFF_AQ_SGD_SCOPE first_visit=$COMM_EFF_AQ_SGD_FIRST_VISIT capacity=$COMM_EFF_AQ_SGD_CAPACITY_BYTES device=$COMM_EFF_AQ_SGD_BUFFER_DEVICE max_positions=$COMM_EFF_AQ_SGD_MAX_POSITIONS  (active iff compression_type=aq_sgd; reuses mask recompute/reference/seed/pp_size)
   probe:               every=$COMM_EFF_PROBE_EVERY ctrl=$COMM_EFF_PROBE_CTRL_ENABLED table=[${COMM_EFF_PROBE_KL_TARGET_TABLE:-<unset>}] floor=$COMM_EFF_PROBE_KL_TARGET_FLOOR gain=$COMM_EFF_PROBE_KL_TARGET_GAIN ki=$COMM_EFF_PROBE_CTRL_KI kp=$COMM_EFF_PROBE_CTRL_KP beta=[$COMM_EFF_PROBE_CTRL_BETA_MIN,$COMM_EFF_PROBE_CTRL_BETA_MAX]  (issue #93 I3; every=0 => off)
   cvc:                 ce_lambda=$COMM_EFF_CVC_LAMBDA warmup=$COMM_EFF_CVC_WARMUP_STEPS dc=$COMM_EFF_DC_ENABLED dc_eta=$COMM_EFF_DC_ETA dc_target=$COMM_EFF_DC_TARGET dc_lambda0=$COMM_EFF_DC_LAMBDA0 dc_lambda_max=$COMM_EFF_DC_LAMBDA_MAX  (issue #93 I4; lambda=0 + dc=false => off)
   dense_every:         $COMM_EFF_MASK_DENSE_EVERY  (0=off; N>0 = full-fidelity uncompressed fwd+bwd on every step where global_step%N==0, anchor suppressed there)
@@ -495,6 +513,44 @@ print(f'payload {payload} + fp16 scales {scales:g} = {total:g} bits/token/bounda
     echo "=== sr_quant subset accounting (before GPU): k=$COMM_EFF_QUANT_SUBSET_K bits=$COMM_EFF_QUANT_BITS block=$COMM_EFF_QUANT_BLOCK_SIZE -> $SUBSET_BITS_LINE ==="
   fi
   echo "=== resolved codec OK (before GPU): sr_quant bits=$COMM_EFF_QUANT_BITS block_size=$COMM_EFF_QUANT_BLOCK_SIZE rounding=$COMM_EFF_QUANT_ROUNDING subset_k=$COMM_EFF_QUANT_SUBSET_K mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
+fi
+if [[ "${COMM_EFF_ENABLED}" == "true" && "${COMM_EFF_COMPRESSION_TYPE}" == "aq_sgd" ]]; then
+  # Same anchor gate as the other two per-token codecs: AQ-SGD's cross-step
+  # state is a local activation buffer, not a basis Q.
+  [[ "${COMM_EFF_ANCHOR_OWNS_Q}" == "true" ]] && { echo "FATAL: aq_sgd requires COMM_EFF_ANCHOR_OWNS_Q=false (its cross-step state is an activation buffer, not a basis Q)." >&2; exit 1; }
+  # Not a style gate. The buffer is read on EVERY eligible pass and staged on
+  # the train pass; with the recompute left dense, the backward would
+  # differentiate a reconstruction the forward never sent.
+  [[ "${COMM_EFF_MASK_RECOMPUTE}" == "true" ]] || { echo "FATAL: aq_sgd requires COMM_EFF_MASK_RECOMPUTE=true (the buffer is read on every eligible pass; a dense recompute would differentiate a reconstruction the forward never sent)." >&2; exit 1; }
+  [[ "${COMM_EFF_AQ_SGD_BITS}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_AQ_SGD_BITS='${COMM_EFF_AQ_SGD_BITS}' must be an integer >= 1." >&2; exit 1; }
+  [[ "${COMM_EFF_AQ_SGD_BLOCK_SIZE}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_AQ_SGD_BLOCK_SIZE='${COMM_EFF_AQ_SGD_BLOCK_SIZE}' must be an integer >= 0 (0 = whole-token scale)." >&2; exit 1; }
+  case "${COMM_EFF_AQ_SGD_ROUNDING}" in sr|rn) ;; *) echo "FATAL: bad COMM_EFF_AQ_SGD_ROUNDING='${COMM_EFF_AQ_SGD_ROUNDING}' (sr|rn)." >&2; exit 1;; esac
+  [[ "${COMM_EFF_AQ_SGD_SUBSET_K}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_AQ_SGD_SUBSET_K='${COMM_EFF_AQ_SGD_SUBSET_K}' must be an integer >= 0 (0 = full width)." >&2; exit 1; }
+  case "${COMM_EFF_AQ_SGD_SCOPE}" in prompt|all) ;; *) echo "FATAL: bad COMM_EFF_AQ_SGD_SCOPE='${COMM_EFF_AQ_SGD_SCOPE}' (prompt|all)." >&2; exit 1;; esac
+  case "${COMM_EFF_AQ_SGD_FIRST_VISIT}" in rescaled|dense) ;; *) echo "FATAL: bad COMM_EFF_AQ_SGD_FIRST_VISIT='${COMM_EFF_AQ_SGD_FIRST_VISIT}' (rescaled|dense)." >&2; exit 1;; esac
+  [[ "${COMM_EFF_AQ_SGD_CAPACITY_BYTES}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: COMM_EFF_AQ_SGD_CAPACITY_BYTES='${COMM_EFF_AQ_SGD_CAPACITY_BYTES}' must be a positive integer." >&2; exit 1; }
+  case "${COMM_EFF_AQ_SGD_BUFFER_DEVICE}" in cpu|cuda) ;; *) echo "FATAL: bad COMM_EFF_AQ_SGD_BUFFER_DEVICE='${COMM_EFF_AQ_SGD_BUFFER_DEVICE}' (cpu|cuda)." >&2; exit 1;; esac
+  [[ "${COMM_EFF_AQ_SGD_MAX_POSITIONS}" =~ ^[0-9]+$ ]] || { echo "FATAL: COMM_EFF_AQ_SGD_MAX_POSITIONS='${COMM_EFF_AQ_SGD_MAX_POSITIONS}' must be an integer >= 0 (0 = unbounded)." >&2; exit 1; }
+  if [[ "${COMM_EFF_AQ_SGD_FIRST_VISIT}" == "dense" ]]; then
+    echo "=== aq_sgd WARNING: first_visit=dense sends the first message UNCOMPRESSED, which is faithful to the paper and OFF the byte budget. This arm measures payload, not a byte-matched accuracy comparison. ==="
+  fi
+  if (( COMM_EFF_AQ_SGD_SUBSET_K > 0 )); then
+    # Same ledger as the sr_quant subset arm, and deliberately so: an aq_sgd
+    # arm and an sr_quant arm at the same (bits, k, block) are byte-identical
+    # on the wire, so delta coding is the only variable between them.
+    AQ_BITS_LINE="$(python3 -c "
+import math
+k = ${COMM_EFF_AQ_SGD_SUBSET_K}; b = ${COMM_EFF_AQ_SGD_BITS}; blk = ${COMM_EFF_AQ_SGD_BLOCK_SIZE}
+eff = k if (blk <= 0 or blk >= k) else blk
+payload = k * b
+scales = k * 16 / eff
+total = payload + scales
+print(f'payload {payload} + fp16 scales {scales:g} = {total:g} bits/token/boundary'
+      f' (ceil {math.ceil(total)}; incumbent prf exact-k 77x16 = 1232, ratio {total/1232:.4f}x)')
+")" || { echo "FATAL: aq_sgd bit-accounting computation failed." >&2; exit 1; }
+    echo "=== aq_sgd subset accounting (before GPU): k=$COMM_EFF_AQ_SGD_SUBSET_K bits=$COMM_EFF_AQ_SGD_BITS block=$COMM_EFF_AQ_SGD_BLOCK_SIZE -> $AQ_BITS_LINE ==="
+  fi
+  echo "=== resolved codec OK (before GPU): aq_sgd bits=$COMM_EFF_AQ_SGD_BITS block_size=$COMM_EFF_AQ_SGD_BLOCK_SIZE rounding=$COMM_EFF_AQ_SGD_ROUNDING subset_k=$COMM_EFF_AQ_SGD_SUBSET_K scope=$COMM_EFF_AQ_SGD_SCOPE first_visit=$COMM_EFF_AQ_SGD_FIRST_VISIT capacity_gib=$((COMM_EFF_AQ_SGD_CAPACITY_BYTES/1073741824)) buffer_device=$COMM_EFF_AQ_SGD_BUFFER_DEVICE max_positions=$COMM_EFF_AQ_SGD_MAX_POSITIONS mask_recompute=$COMM_EFF_MASK_RECOMPUTE mask_reference=$COMM_EFF_MASK_REFERENCE seed=$COMM_EFF_MASK_SEED pp_size=$COMM_EFF_MASK_PP_SIZE ==="
 fi
 # p_by_boundary is a Hydra list literal; only override it when set (empty = default []).
 if [[ -n "${COMM_EFF_MASK_P_BY_BOUNDARY}" ]]; then
@@ -672,6 +728,15 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.comm_eff.quant.block_size="$COMM_EFF_QUANT_BLOCK_SIZE" \
   actor_rollout_ref.actor.comm_eff.quant.rounding="$COMM_EFF_QUANT_ROUNDING" \
   actor_rollout_ref.actor.comm_eff.quant.subset_k="$COMM_EFF_QUANT_SUBSET_K" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.bits="$COMM_EFF_AQ_SGD_BITS" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.block_size="$COMM_EFF_AQ_SGD_BLOCK_SIZE" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.rounding="$COMM_EFF_AQ_SGD_ROUNDING" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.subset_k="$COMM_EFF_AQ_SGD_SUBSET_K" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.scope="$COMM_EFF_AQ_SGD_SCOPE" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.first_visit="$COMM_EFF_AQ_SGD_FIRST_VISIT" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.capacity_bytes="$COMM_EFF_AQ_SGD_CAPACITY_BYTES" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.buffer_device="$COMM_EFF_AQ_SGD_BUFFER_DEVICE" \
+  actor_rollout_ref.actor.comm_eff.aq_sgd.max_positions="$COMM_EFF_AQ_SGD_MAX_POSITIONS" \
   actor_rollout_ref.actor.comm_eff.probe.probe_every="$COMM_EFF_PROBE_EVERY" \
   actor_rollout_ref.actor.comm_eff.probe.ctrl_enabled="$COMM_EFF_PROBE_CTRL_ENABLED" \
   actor_rollout_ref.actor.comm_eff.probe.kl_target_floor="$COMM_EFF_PROBE_KL_TARGET_FLOOR" \
