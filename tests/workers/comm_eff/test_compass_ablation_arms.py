@@ -360,6 +360,53 @@ def test_codec_arm_is_byte_matched_to_the_mask(arm):
     assert abs(bits / prf - 1.0) < 1e-3, (arm, cfg.compression_type, bits, bits / prf)
 
 
+def test_every_arm_gets_a_distinct_r2_path_regardless_of_keep_ckpt():
+    """No two arms may share an R2 key, and KEEP_CKPT must not gate the path.
+
+    The bug this defends against, measured live on 2026-09-11. The launcher set
+    `R2_EXPERIMENT` / `R2_REGIME` only inside `if [[ $KEEP_CKPT == 1 ]]`, which
+    is safe ONLY if KEEP_CKPT is the sole thing that can enable saving. It is
+    not: `SAVE_FREQ` and `CKPT_R2_ENABLED` both honour an inherited value, so a
+    box-level launcher exporting SAVE_FREQ=200 turns saving on for every arm,
+    including KEEP_CKPT=0 arms that never reached those two lines. Those arms
+    fell through to the sink defaults and wrote to `EXP-unknown/regime/`, a
+    SINGLE shared key: aqsgd-rn landed there and tahquant-sr would have
+    overwritten it.
+
+    So the assertion is structural (the exports precede the conditional) plus
+    exhaustive over the arm table, and the arm list is DERIVED from the shell
+    case labels rather than restated here.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    sh = (root / "examples/grpo_trainer/run_compass_rlvr_ablations_fsdp.sh").read_text()
+
+    exp_at = sh.index("export R2_EXPERIMENT=")
+    reg_at = sh.index("export R2_REGIME=")
+    gate_at = sh.index('if [[ "$KEEP_CKPT" == "1" ]]; then')
+    assert exp_at < gate_at and reg_at < gate_at, (
+        "R2_EXPERIMENT / R2_REGIME must be exported BEFORE the KEEP_CKPT gate, or an arm "
+        "whose saving was enabled from outside writes to the sink's shared default key"
+    )
+    assert sh.count("export R2_EXPERIMENT=") == 1 and sh.count("export R2_REGIME=") == 1
+
+    # Derive the arm names from the dispatcher's own case labels, so a new arm
+    # is covered without editing this test.
+    case_body = sh[sh.index('case "$ARM" in') : sh.index("\n  smoke)")]
+    labels = set()
+    for m in re.finditer(r"^\s{2}([a-z0-9|_-]+)\)", case_body, re.M):
+        labels.update(m.group(1).split("|"))
+    labels.discard("*")
+    assert len(labels) >= 9, sorted(labels)
+
+    # R2_REGIME defaults to $ARM, so distinctness of the arm names IS
+    # distinctness of the keys, and no arm may collide with the sink default.
+    assert len(labels) == len(set(labels))
+    assert "regime" not in labels and "EXP-unknown" not in labels
+
+
 @pytest.mark.parametrize("arm", OFF_BUDGET_CODEC_ARMS)
 def test_off_budget_codec_arm_is_actually_off_budget(arm):
     """The full-rate arm must be far off parity, and provably so.

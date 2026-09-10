@@ -226,7 +226,8 @@ case "$ARM" in
           # so this asks whether unbiasedness still matters once the rotation
           # has flattened the tile. The paper cannot answer it.
           export COMM_EFF_TAH_ROUNDING=sr
-          ARM_DESC="A5: TAH-Quant with stochastic rounding, the unbiased-quantizer arm" ;;
+          ARM_DESC="A5: TAH-Quant with stochastic rounding, the unbiased-quantizer arm"
+          KEEP_CKPT=1 ;;
         tahquant-fullrate)
           # The paper's own operating point, all 1536 channels at ~4.41
           # bits/element. OFF-BUDGET by construction at 5.50x the incumbent:
@@ -366,12 +367,23 @@ export TEST_FREQ="$TEST_FREQ"
 # Checkpoints only where the ten-benchmark suite needs them. Everything else
 # runs SAVE_FREQ=-1, because four arms each saving a 1.5B FSDP checkpoint with
 # optimizer state will fill a Vast disk long before the runs finish.
+# The R2 path segments are set UNCONDITIONALLY, and that placement is the fix
+# for a real collision. They used to live inside the KEEP_CKPT branch below,
+# which is only safe if KEEP_CKPT is the only thing that can enable saving. It
+# is not: SAVE_FREQ and CKPT_R2_ENABLED both honour an inherited value, so a
+# launcher that exports SAVE_FREQ=200 for the whole box turns saving on for
+# EVERY arm, including the ones with KEEP_CKPT=0 that never reached these two
+# lines. Those arms then fell through to the sink's own defaults and wrote to
+# `EXP-unknown/regime/` -- a SINGLE shared key, so any two such arms silently
+# overwrite each other's checkpoints. Measured live on 2026-09-11: aqsgd-rn
+# landed there, and tahquant-sr would have landed on top of it. They are only
+# path segments, so setting them always costs nothing and removes the trap.
+export R2_EXPERIMENT="${R2_EXPERIMENT:-$PROJECT}"
+export R2_REGIME="${R2_REGIME:-$ARM}"
 if [[ "$KEEP_CKPT" == "1" ]]; then
   export SAVE_FREQ="${SAVE_FREQ:-200}"
   export CKPT_R2_ENABLED="${CKPT_R2_ENABLED:-true}"
   export CKPT_R2_DELETE_LOCAL="${CKPT_R2_DELETE_LOCAL:-true}"
-  export R2_EXPERIMENT="${R2_EXPERIMENT:-$PROJECT}"
-  export R2_REGIME="${R2_REGIME:-$ARM}"
 else
   export SAVE_FREQ="${SAVE_FREQ:--1}"
 fi
