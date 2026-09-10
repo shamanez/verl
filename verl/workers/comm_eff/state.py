@@ -576,6 +576,45 @@ class CommEffState:
             "comm_eff/logical_pp_bytes_sr_quant": float(bits_per_token) / 8.0,
         }
 
+    def aqsgd_metrics(self) -> dict:
+        """aq_sgd codec metrics, including the ones that EXPLAIN the arm.
+
+        ``comm_eff/logical_pp_bits_aq_sgd`` is the wire ledger, the same
+        accounting sr_quant reports, so an aq_sgd arm can be shown byte-matched
+        to PRF exact-k rather than asserted to be.
+
+        The other three are the measurement the ablation turns on, and without
+        them the arm can only report an accuracy number and not a reason:
+
+        * ``aq_sgd/hit_rate`` is the fraction of buffered TOKEN POSITIONS that
+          had a previous visit to difference against. AQ-SGD's guarantee rests
+          on activations recurring for the same example, and on-policy RLVR
+          resamples every response each step, so this is where the premise
+          either holds or does not.
+        * ``aq_sgd/delta_ratio`` is mean ``||h - m|| / ||h||`` over warm rows.
+          Below 1 the buffer is predictive and the delta really is cheaper to
+          send than the value. Near ``sqrt(2)`` the buffered row is unrelated to
+          the current one, and delta coding is then worse than quantizing the
+          value at the same bit width.
+        * ``aq_sgd/buffer_gib`` and the eviction count say whether the store
+          actually spanned the reuse distance, which at Pair 1 is one full epoch
+          of prompts.
+
+        Empty until the first hook fire records the hidden size.
+        """
+        if self.aqsgd is None:
+            return {}
+        out = {}
+        bits_per_token = getattr(self.aqsgd, "logical_pp_bits_aq_sgd", None)
+        if bits_per_token is not None:
+            out["comm_eff/logical_pp_bits_aq_sgd"] = float(bits_per_token)
+            out["comm_eff/logical_pp_bytes_aq_sgd"] = float(bits_per_token) / 8.0
+        try:
+            out.update({k: float(v) for k, v in self.aqsgd.telemetry().items()})
+        except Exception:  # telemetry must never be able to kill a run
+            pass
+        return out
+
     def note_powersgd_application(self) -> None:
         self.powersgd_applications += 1
 
@@ -708,4 +747,5 @@ def comm_eff_metrics(state: Optional[CommEffState]) -> dict:
     output.update(state.path_metrics())
     output.update(state.mask_ratio_metrics())
     output.update(state.quant_metrics())
+    output.update(state.aqsgd_metrics())
     return output

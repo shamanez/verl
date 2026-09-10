@@ -534,3 +534,96 @@ def test_buffer_capacity_default_agrees_at_every_layer():
     ):
         assert _grep(rel, r"AQ_CAPACITY_GB:-(\d+)") * 1024**3 == expected, rel
 
+def test_aqsgd_telemetry_reaches_the_metrics_dict():
+    """The hit rate is what EXPLAINS the arm, so it must reach the logger.
+
+    comm_eff_metrics() had a quant_metrics() branch for sr_quant and none for
+    aq_sgd, so the codec computed hit_rate and delta_ratio and then threw them
+    away. Without them the ablation can report an accuracy number but not a
+    reason, and the paper's appendix promises the reason.
+    """
+    import torch.nn as nn
+
+    from verl.workers.comm_eff.state import comm_eff_metrics, maybe_build_comm_eff_state
+    from verl.workers.config.comm_eff import (
+        CommEffAnchorConfig,
+        CommEffAQSGDConfig,
+        CommEffConfig,
+        CommEffMaskConfig,
+        CommEffPowerSGDConfig,
+        CommEffSpectralConfig,
+    )
+
+    cfg = CommEffConfig(
+        enabled=True,
+        compression_type="aq_sgd",
+        mask=CommEffMaskConfig(enabled=False, mask_recompute=True, mask_reference=True, pp_size=8),
+        aq_sgd=CommEffAQSGDConfig(bits=2, subset_k=K, block_size=BLK),
+        anchor=CommEffAnchorConfig(
+            enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True
+        ),
+        spectral=CommEffSpectralConfig(enabled=True),
+        powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=False),
+    )
+
+    class _Blk(nn.Module):
+        def __init__(self, d):
+            super().__init__()
+            self.lin = nn.Linear(d, d)
+
+        def forward(self, x):
+            return self.lin(x)
+
+    class _Dec(nn.Module):
+        def __init__(self, n=16, d=H):
+            super().__init__()
+            self.layers = nn.ModuleList([_Blk(d) for _ in range(n)])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    state = maybe_build_comm_eff_state(cfg)
+    model = _Dec()
+    state.build(model)
+    assert state.aqsgd is not None, "the aq_sgd codec must be the one built"
+    state.aqsgd.register(model)
+    state.set_path_tag("train")
+    state.compression_active = True
+    try:
+        n = 16
+        for step in (1, 2):
+            state.global_step = step
+            state.aqsgd.set_context(
+                global_step=step,
+                sample_ids=torch.zeros(n, dtype=torch.long),
+                position_ids=torch.arange(n),
+                example_ids=torch.full((n,), 42, dtype=torch.long),
+                prompt_lens=torch.full((n,), 8, dtype=torch.long),
+            )
+            with torch.no_grad():
+                model(torch.randn(n, H))
+    finally:
+        state.aqsgd.unregister()
+        state.set_path_tag(None)
+
+    mets = comm_eff_metrics(state)
+    for key in (
+        "aq_sgd/hit_rate",
+        "aq_sgd/delta_ratio",
+        "aq_sgd/buffer_gib",
+        "aq_sgd/evictions",
+        "comm_eff/logical_pp_bits_aq_sgd",
+    ):
+        assert key in mets, f"{key} missing from comm_eff_metrics; it would never reach WandB"
+        assert isinstance(mets[key], float), key
+
+    # Step 1 is cold and step 2 is warm over the same 8 prefix positions, so the
+    # hit rate over the run is exactly one half. This pins that the counters
+    # measure token POSITIONS rather than entries or fires.
+    assert mets["aq_sgd/hit_rate"] == pytest.approx(0.5), mets["aq_sgd/hit_rate"]
+    # The ledger is computed from THIS module's narrow geometry (H, K), not the
+    # Pair 1 one; test_wire_ledger_matches_prf_exact_k_at_pair_one pins 1232.5.
+    assert mets["comm_eff/logical_pp_bits_aq_sgd"] == pytest.approx(K * BITS + K * 16 / BLK)
+
