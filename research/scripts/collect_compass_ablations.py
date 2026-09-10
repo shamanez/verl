@@ -107,6 +107,28 @@ def summarise(arm, root):
         vals = [steps[s][key] for s in sorted(steps) if key in steps[s]]
         return vals[-1] if vals else 0.0
 
+    # Fire-step peak vs non-fire peak. max_memory_allocated is a high-water
+    # mark that torch never resets, so take the FIRST value at or after the
+    # first anchor firing as the fire-step peak, and the last value strictly
+    # before it as the pre-anchor peak. A median over the series would just
+    # report when the watermark jumped.
+    mem_key = "actor/perf/max_memory_allocated_gb"
+    ab_key = "actor/comm_eff/anchor_backwards"
+    pre_peak = fire_peak = None
+    prev_ab = None
+    for st in sorted(steps):
+        row = steps[st]
+        if mem_key not in row:
+            continue
+        ab = row.get(ab_key)
+        fired = prev_ab is not None and ab is not None and ab > prev_ab
+        if ab is not None:
+            prev_ab = ab
+        if fired and fire_peak is None:
+            fire_peak = row[mem_key]
+        if fire_peak is None:
+            pre_peak = row[mem_key]
+
     wall = total("timing_s/step")
     toks = total("perf/total_num_tokens")
     n = sum(1 for s in body if "timing_s/step" in steps[s])
@@ -122,6 +144,8 @@ def summarise(arm, root):
         "anchor_backwards": cum("actor/comm_eff/anchor_backwards"),
         "spectral_corrections": cum("actor/comm_eff/spectral_corrections"),
         "mask_train": cum("actor/comm_eff/mask_applications/train"),
+        "pre_anchor_peak_gb": pre_peak,
+        "fire_peak_gb": fire_peak,
         "rank1_fires": cum("actor/comm_eff/rank1_fires"),
         "horizon": cum("actor/comm_eff/rank1_prediction_horizon"),
     }
@@ -221,6 +245,25 @@ def main():
         fires = "--" if r is None else f"{r['rank1_fires']:.0f}"
         cells = " & ".join(cell(r, s) for s in (120, 200))
         print(f"${K}$ & ${strength}$ & {reach} & ${snaps}$ & {fires} & {cells} \\\\")
+
+    print("\n" + "=" * 78)
+    print("TABLE: peak GPU memory decomposition (app:rlvr-throughput)")
+    print("=" * 78)
+    print("Replaces the single compressed-vs-dense ratio, which rested on one early")
+    print("high-water excursion. These separate the codec's cost from the anchor's.")
+    d, na, b = arms.get("dense"), arms.get("noanchor"), arms.get("base")
+    rows = [
+        ("Dense control, no codec, no anchor", d, "pre_anchor_peak_gb"),
+        ("Compressed, anchor removed", na, "pre_anchor_peak_gb"),
+        ("Compressed with anchor, between firings", b, "pre_anchor_peak_gb"),
+        ("Compressed with anchor, on a firing step", b, "fire_peak_gb"),
+    ]
+    for label, r, key in rows:
+        v = r.get(key) if r else None
+        print(f"{label} & {f'${v:.1f}$' if v else '--'} \\\\")
+    if na and b and na.get("pre_anchor_peak_gb") and b.get("fire_peak_gb"):
+        print(f"\n  codec alone costs {na['pre_anchor_peak_gb'] - (d['pre_anchor_peak_gb'] if d and d.get('pre_anchor_peak_gb') else float('nan')):+.2f} GB, "
+              f"anchor firing adds {b['fire_peak_gb'] - b['pre_anchor_peak_gb']:+.2f} GB")
 
     print(f"\n(base MATH reading for these comparisons: {BASE_MATH})")
     return 0 if not any_bad else 1
