@@ -105,7 +105,17 @@ class ServerAdapter(BaseRollout):
         # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
         job_id = ray.get_runtime_context().get_job_id()
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        # VERL_ZMQ_NS must be applied identically here and in the receiver's
+        # _get_zmq_handle, or the two ends bind and connect to different paths
+        # and every weight transfer hangs. The Ray job id alone does not
+        # separate runs that each start their own in-process cluster: they all
+        # get job id 01000000 and collide on this shared /tmp namespace.
+        ns = os.environ.get("VERL_ZMQ_NS", "")
+        if ns:
+            ns = f"{ns}-"
+        self.zmq_handle = (
+            f"ipc:///tmp/rl-colocate-zmq-{ns}{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
+        )
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
