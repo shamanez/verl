@@ -48,6 +48,23 @@ for a in "${ARM_LIST[@]}"; do
     noanchor|dense) per=8 ;;      # no snapshots, no ring, no EMA
     k40|k40gm)      per=40 ;;
     k80|k80gm)      per=55 ;;
+    # The codec arms carry the standard anchor cost PLUS AQ-SGD's activation
+    # buffer, which is a DETERMINISTIC cap (AQ_CAPACITY_GB, default 16) and not
+    # a fraction of free RAM, so this number can be relied on.
+    #
+    # What the buffer actually is, since the batch-shaped estimate overstates
+    # it by an order of magnitude: it holds one entry per (example, boundary),
+    # not per sequence per step, and the G=8 rollouts of a prompt SHARE one
+    # prefix entry because a prefix activation does not depend on the response
+    # sampled after it. At Pair 1 that is n_examples * 7 boundaries * 1536 dims
+    # * 2 bytes = about 0.16 GB per buffered token position, so covering one
+    # epoch of ~100-token prompt prefixes needs about 16 GB. Covering full
+    # 2048-token sequences would need about 350 GB, which is why aqsgd-all runs
+    # under the same cap and lets the LRU evict: the resulting hit rate is the
+    # measurement, and the storage requirement is part of the result.
+    aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload)
+                    per=$(( 32 + ${AQ_CAPACITY_GB:-16} )) ;;
+    srquant)        per=32 ;;     # memoryless: no buffer at all
     *)              per=32 ;;
   esac
   need_gb=$(( need_gb + per ))

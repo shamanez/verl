@@ -37,7 +37,9 @@ from verl.workers.comm_eff.anchor import AnchorReplayRing, anchor_should_fire
 from verl.workers.config.comm_eff import (
     CommEffAnchorConfig,
     CommEffConfig,
+    CommEffAQSGDConfig,
     CommEffMaskConfig,
+    CommEffQuantConfig,
     CommEffSpectralConfig,
 )
 
@@ -83,30 +85,64 @@ NO_ANCHOR_ANCHOR = dict(
     lookahead_min_snapshots=-1,
 )
 
-# arm -> (mask delta, anchor delta, spectral delta, codec on?)
+# The quantizing codecs replace the PRF mask rather than layering on it, so
+# mask.enabled goes false while mask_recompute / mask_reference stay true: both
+# reuse those two for path eligibility, and aq_sgd REQUIRES mask_recompute
+# because its buffer is read on every eligible pass.
+QUANTIZING_MASK = {"enabled": False}
+
+# Byte parity at Pair 1. The mask sends 77 fp16 coordinates = 1232 bits per
+# token per boundary; 2 bits on k=493 with fp16 scales per 32 kept channels is
+# 493*2 + 493*16/32 = 1232.5, matched to 1.0004x.
+PARITY_CODEC = dict(bits=2, subset_k=493, block_size=32)
+
+# arm -> (mask delta, anchor delta, spectral delta, codec)
+# `codec` is the compression_type verbatim. "dense" also implies enabled=False.
 ARMS = {
-    "base": ({}, {}, {}, True),
-    "dense": ({"enabled": False}, NO_ANCHOR_ANCHOR, {"enabled": False}, False),
-    "noanchor": ({}, NO_ANCHOR_ANCHOR, {"enabled": False}, True),
-    "nosign": ({}, {}, {"signed_ema_alpha": 1.0}, True),
-    "k10": ({}, {"delay_K": 10}, {}, True),
-    "k40": ({}, {"delay_K": 40}, {}, True),
-    "k80": ({}, {"delay_K": 80}, {}, True),
-    "k40gm": ({}, {"delay_K": 40, "lookahead_strength": 0.5}, {}, True),
-    "k80gm": ({}, {"delay_K": 80, "lookahead_strength": 0.25}, {}, True),
-    "smoke": ({}, {}, {}, True),
+    "base": ({}, {}, {}, "prf_mask"),
+    "dense": ({"enabled": False}, NO_ANCHOR_ANCHOR, {"enabled": False}, "dense"),
+    "noanchor": ({}, NO_ANCHOR_ANCHOR, {"enabled": False}, "prf_mask"),
+    "nosign": ({}, {}, {"signed_ema_alpha": 1.0}, "prf_mask"),
+    "k10": ({}, {"delay_K": 10}, {}, "prf_mask"),
+    "k40": ({}, {"delay_K": 40}, {}, "prf_mask"),
+    "k80": ({}, {"delay_K": 80}, {}, "prf_mask"),
+    "k40gm": ({}, {"delay_K": 40, "lookahead_strength": 0.5}, {}, "prf_mask"),
+    "k80gm": ({}, {"delay_K": 80, "lookahead_strength": 0.25}, {}, "prf_mask"),
+    "smoke": ({}, {}, {}, "prf_mask"),
+    # Codec ablation (the quantization family), byte-matched to the mask.
+    "aqsgd": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
+    "aqsgd-all": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
+    "aqsgd-rn": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
+    "aqsgd-payload": (QUANTIZING_MASK, {}, {}, "aq_sgd"),
+    "srquant": (QUANTIZING_MASK, {}, {}, "sr_quant"),
+}
+
+# Codec sub-config per arm, for the arms whose codec has one. Absent means the
+# codec's own defaults.
+CODEC_CFG = {
+    "aqsgd": dict(**PARITY_CODEC, rounding="sr", scope="prompt", first_visit="rescaled"),
+    "aqsgd-all": dict(**PARITY_CODEC, rounding="sr", scope="all", first_visit="rescaled"),
+    "aqsgd-rn": dict(**PARITY_CODEC, rounding="rn", scope="prompt", first_visit="rescaled"),
+    "aqsgd-payload": dict(**PARITY_CODEC, rounding="sr", scope="prompt", first_visit="dense"),
+    "srquant": dict(**PARITY_CODEC, rounding="sr"),
 }
 
 
 def build(arm):
-    mask_d, anchor_d, spectral_d, codec_on = ARMS[arm]
-    return CommEffConfig(
-        enabled=codec_on,
-        compression_type="prf_mask" if codec_on else "dense",
+    mask_d, anchor_d, spectral_d, codec = ARMS[arm]
+    kwargs = dict(
+        enabled=codec != "dense",
+        compression_type=codec,
         mask=CommEffMaskConfig(**{**PAIR1_MASK, **mask_d}),
         anchor=CommEffAnchorConfig(**{**PAIR1_ANCHOR, **anchor_d}),
         spectral=CommEffSpectralConfig(**{**PAIR1_SPECTRAL, **spectral_d}),
     )
+    codec_d = CODEC_CFG.get(arm, {})
+    if codec == "aq_sgd":
+        kwargs["aq_sgd"] = CommEffAQSGDConfig(**codec_d)
+    elif codec == "sr_quant":
+        kwargs["quant"] = CommEffQuantConfig(**codec_d)
+    return CommEffConfig(**kwargs)
 
 
 @pytest.mark.parametrize("arm", sorted(ARMS))
@@ -240,3 +276,67 @@ if __name__ == "__main__":
         print(f"{len(failures)} FAILURE(S) -- do not launch")
         sys.exit(1)
     print("all COMPASS ablation arms validate; safe to launch")
+
+# --------------------------------------------------------------------------- #
+# codec ablation arms (the quantization family)
+# --------------------------------------------------------------------------- #
+CODEC_ARMS = ("aqsgd", "aqsgd-all", "aqsgd-rn", "aqsgd-payload", "srquant")
+
+
+@pytest.mark.parametrize("arm", CODEC_ARMS)
+def test_codec_arm_is_byte_matched_to_the_mask(arm):
+    """Every codec arm must price out against PRF exact-k, or it proves nothing.
+
+    The mask sends k=77 fp16 coordinates, so 1232 bits per token per boundary.
+    A quantizing codec sends subset_k*bits payload plus one fp16 scale per block
+    of kept channels. The comparison is only a codec comparison if those match.
+    """
+    cfg = build(arm)
+    sub = cfg.aq_sgd if cfg.compression_type == "aq_sgd" else cfg.quant
+    bits = sub.subset_k * sub.bits + sub.subset_k * 16 / sub.block_size
+    assert bits == pytest.approx(1232.5), (arm, bits)
+    assert abs(bits / (77 * 16) - 1.0) < 1e-3, (arm, bits / (77 * 16))
+
+
+@pytest.mark.parametrize("arm", CODEC_ARMS)
+def test_codec_arm_keeps_the_anchor_and_drops_the_mask(arm):
+    """The codec is the only thing that changes. The anchor circuit is untouched."""
+    cfg = build(arm)
+    assert cfg.mask.enabled is False, "a quantizing codec replaces the mask, it does not layer on it"
+    assert cfg.mask.mask_recompute is True, "aq_sgd reads its buffer on every eligible pass"
+    assert cfg.mask.mask_reference is True
+    assert cfg.anchor.enabled is True and cfg.anchor.cadence == 20 and cfg.anchor.delay_K == 20
+    assert cfg.anchor.owns_q is False, "no codec here carries a basis Q"
+    assert cfg.spectral.enabled is True and cfg.spectral.signed_ema_alpha == 0.25
+
+
+def test_the_codec_arms_differ_only_where_intended():
+    """aqsgd vs srquant is delta coding alone; the aqsgd variants are one knob each."""
+    aq, sr = build("aqsgd"), build("srquant")
+    assert (aq.aq_sgd.bits, aq.aq_sgd.subset_k, aq.aq_sgd.block_size) == (
+        sr.quant.bits, sr.quant.subset_k, sr.quant.block_size
+    ), "byte-identical on the wire, so delta coding is the only variable"
+    assert build("aqsgd-all").aq_sgd.scope == "all"
+    assert build("aqsgd").aq_sgd.scope == "prompt"
+    assert build("aqsgd-rn").aq_sgd.rounding == "rn"
+    assert build("aqsgd").aq_sgd.rounding == "sr", (
+        "sr is the faithful setting: AQ-SGD's Theorem 3.1 assumes an unbiased quantizer"
+    )
+    assert build("aqsgd-payload").aq_sgd.first_visit == "dense", (
+        "the payload arm is OFF-budget by construction and measures traffic, not accuracy"
+    )
+    assert build("aqsgd").aq_sgd.first_visit == "rescaled"
+
+
+def test_aq_sgd_refuses_a_dense_recompute_pass():
+    """Not a style gate: the backward would differentiate a reconstruction never sent."""
+    mask_d, anchor_d, spectral_d, _ = ARMS["aqsgd"]
+    with pytest.raises(ValueError, match="mask_recompute"):
+        CommEffConfig(
+            enabled=True,
+            compression_type="aq_sgd",
+            mask=CommEffMaskConfig(**{**PAIR1_MASK, **mask_d, "mask_recompute": False}),
+            anchor=CommEffAnchorConfig(**{**PAIR1_ANCHOR, **anchor_d}),
+            spectral=CommEffSpectralConfig(**{**PAIR1_SPECTRAL, **spectral_d}),
+            aq_sgd=CommEffAQSGDConfig(**CODEC_CFG["aqsgd"]),
+        )

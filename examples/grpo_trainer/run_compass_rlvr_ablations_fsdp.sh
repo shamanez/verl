@@ -149,6 +149,60 @@ case "$ARM" in
     export COMM_EFF_ANCHOR_LOOKAHEAD_STRENGTH=0.25
     TOTAL_STEPS="${TOTAL_STEPS_K80:-400}"   # same warmup argument as k80
     ;;
+  # ----------------------------------------------------------------------- #
+  # CODEC ablation (the quantization family). Table 6 selects a codec by
+  # comparing a low-rank family against a sparsifying one, so it has no
+  # quantization arm. AQ-SGD is the named baseline that fills it. Every arm
+  # below is byte-matched to PRF exact-k: at H=1536 the mask sends 77 fp16
+  # coordinates = 1232 bits per token per boundary, and 2 bits on k=493 with
+  # fp16 scales per 32 kept channels is 1232.5, so 1.0004x. The anchor circuit
+  # is untouched in all of them; the codec is the only change.
+  # ----------------------------------------------------------------------- #
+  aqsgd|aqsgd-all|aqsgd-rn|aqsgd-payload|srquant)
+    export COMM_EFF_ENABLED=true
+    export COMM_EFF_MASK_ENABLED=false     # a quantizing codec REPLACES the mask
+    export COMM_EFF_MASK_RECOMPUTE=true    # aq_sgd reads its buffer every eligible pass
+    export COMM_EFF_MASK_REFERENCE=true
+    export COMM_EFF_ANCHOR_OWNS_Q=false    # no codec here carries a basis Q
+    if [[ "$ARM" == "srquant" ]]; then
+      export COMM_EFF_COMPRESSION_TYPE=sr_quant
+      export COMM_EFF_QUANT_BITS=2
+      export COMM_EFF_QUANT_SUBSET_K=493
+      export COMM_EFF_QUANT_BLOCK_SIZE=32
+      export COMM_EFF_QUANT_ROUNDING=sr
+      ARM_DESC="A5: memoryless quantization at mask parity (isolates delta coding; also finishes #93 a3-srq-parity-k493 at horizon)"
+      KEEP_CKPT=1
+    else
+      export COMM_EFF_COMPRESSION_TYPE=aq_sgd
+      export COMM_EFF_AQ_SGD_BITS=2
+      export COMM_EFF_AQ_SGD_SUBSET_K=493
+      export COMM_EFF_AQ_SGD_BLOCK_SIZE=32
+      export COMM_EFF_AQ_SGD_ROUNDING=sr
+      export COMM_EFF_AQ_SGD_SCOPE=prompt
+      export COMM_EFF_AQ_SGD_FIRST_VISIT=rescaled
+      export COMM_EFF_AQ_SGD_BUFFER_DEVICE=cpu
+      export COMM_EFF_AQ_SGD_MAX_POSITIONS=0
+      # DETERMINISTIC cap, so the fanout's host-RAM gate can rely on it.
+      export COMM_EFF_AQ_SGD_CAPACITY_BYTES=$(( ${AQ_CAPACITY_GB:-16} * 1073741824 ))
+      case "$ARM" in
+        aqsgd)
+          ARM_DESC="A5: AQ-SGD at mask parity, buffer on the recurring prompt prefix"
+          KEEP_CKPT=1 ;;
+        aqsgd-all)
+          export COMM_EFF_AQ_SGD_SCOPE=all
+          ARM_DESC="A5: AQ-SGD, literal port, buffer on every position including resampled responses"
+          KEEP_CKPT=1 ;;
+        aqsgd-rn)
+          export COMM_EFF_AQ_SGD_ROUNDING=rn
+          ARM_DESC="A5: AQ-SGD with round-to-nearest, the biased-quantizer control" ;;
+        aqsgd-payload)
+          export COMM_EFF_AQ_SGD_FIRST_VISIT=dense
+          ARM_DESC="A5: AQ-SGD payload accounting, faithful uncompressed first message (OFF-budget by construction; measures traffic, not accuracy)"
+          TOTAL_STEPS="${TOTAL_STEPS_AQPAYLOAD:-25}"
+          TEST_FREQ=-1 ;;
+      esac
+    fi
+    ;;
   smoke)
     ARM_DESC="25-step throughput and memory smoke, no validation"
     TOTAL_STEPS=25

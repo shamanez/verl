@@ -957,10 +957,11 @@ class CommEffConfig(BaseConfig):
             if not self.anchor.owns_q:
                 raise ValueError("comm_eff.anchor.warmup_mode='q_only' requires anchor.owns_q=true")
         # fast_q_bootstrap is a PowerSGD-only feature. It is inert for the
-        # prf_mask and sr_quant codecs (no PowerSGD compressor is built), so
-        # leaving the launcher default fast_q_bootstrap=true on such an arm must
-        # not error; the powersgd path validation below is unchanged.
-        if self.powersgd.fast_q_bootstrap and self.compression_type not in ("prf_mask", "sr_quant"):
+        # prf_mask, sr_quant and aq_sgd codecs (no PowerSGD compressor is
+        # built), so leaving the launcher default fast_q_bootstrap=true on such
+        # an arm must not error; the powersgd path validation below is
+        # unchanged.
+        if self.powersgd.fast_q_bootstrap and self.compression_type not in ("prf_mask", "sr_quant", "aq_sgd"):
             if self.compression_type != "powersgd" or not self.powersgd.enabled:
                 raise ValueError("comm_eff.powersgd.fast_q_bootstrap=true requires PowerSGD")
             if not self.anchor.owns_q:

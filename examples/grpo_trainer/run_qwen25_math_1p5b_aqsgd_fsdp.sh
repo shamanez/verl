@@ -146,52 +146,43 @@ export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
 #    real dataset and the real tokenizer. Under-capacity is not a correctness
 #    problem (the LRU simply lowers the hit rate, which is logged), but a
 #    silently tiny buffer would make the arm meaningless, so this both sizes
-#    the cap and refuses to start if the host cannot host a useful one.
+#    the cap and reports the coverage it buys. The cap itself is a fixed
+#    AQ_CAPACITY_GB (default 16), NOT a fraction of free RAM, so the fanout's
+#    host-memory gate has a number it can rely on.
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Math-1.5B}"
-AQ_CAPACITY="$(python3 - <<PY
-import os, pandas as pd, psutil
+AQ_CAPACITY_GB="${AQ_CAPACITY_GB:-16}"          # DETERMINISTIC, so a fanout RAM gate can trust it
+AQ_CAPACITY=$((AQ_CAPACITY_GB * 1073741824))
+if [[ "$CODEC" == "aq_sgd" ]]; then
+  python3 - <<PY || { echo "FATAL: AQ-SGD buffer coverage check failed" >&2; exit 1; }
+import os, sys
+import pandas as pd
 from transformers import AutoTokenizer
 
 H, BOUNDARIES, ITEMSIZE = 1536, 7, 2
-scope = "${AQ_SCOPE}"
-n_arms = max(1, int("${N_ARMS_ON_BOX}"))
+scope, cap = "${AQ_SCOPE}", ${AQ_CAPACITY}
 
 df = pd.read_parquet(os.path.join("${DATA_DIR}", "train.parquet"))
 tok = AutoTokenizer.from_pretrained("${MODEL_PATH}", trust_remote_code=True)
-# Sample rather than tokenize 7k rows: the mean is what sizes the store.
 sample = df["prompt"].head(512)
 lens = [len(tok.apply_chat_template(p, tokenize=True, add_generation_prompt=True))
         if isinstance(p, (list, tuple)) else len(tok(str(p)).input_ids)
         for p in sample]
-mean_prompt = sum(lens) / len(lens)
-n_examples = len(df)
+mean_prompt, n = sum(lens) / len(lens), len(df)
 
-per_position = n_examples * BOUNDARIES * H * ITEMSIZE          # bytes per buffered position
-need_prompt = int(per_position * mean_prompt)
-need_all = int(per_position * (mean_prompt + 2048))
-
-avail = psutil.virtual_memory().available
-# Half the free RAM, split across the arms sharing this host. The other half is
-# for the training processes themselves: at 1.5B the anchor alone holds two CPU
-# weight snapshots plus an fp32 signed-EMA M.
-budget = int(avail * 0.5 / n_arms)
-need = need_all if scope == "all" else need_prompt
-cap = min(need, budget)
-
+per_position = n * BOUNDARIES * H * ITEMSIZE
+need = int(per_position * (mean_prompt + 2048 if scope == "all" else mean_prompt))
 gib = lambda b: b / 1024**3
-print(f"# examples {n_examples}, mean prompt {mean_prompt:.1f} tok, "
-      f"{gib(per_position):.3f} GiB per buffered position", file=os.sys.stderr)
-print(f"# need(prompt) {gib(need_prompt):.1f} GiB, need(all) {gib(need_all):.1f} GiB, "
-      f"host budget {gib(budget):.1f} GiB across {n_arms} arm(s) of {gib(avail):.1f} GiB free",
-      file=os.sys.stderr)
-print(f"# scope={scope} -> capacity {gib(cap):.1f} GiB "
-      f"({100*cap/need:.0f}% of one epoch's reuse distance)", file=os.sys.stderr)
-if cap < 1024**3:
-    print("FATAL_TINY", file=os.sys.stderr); raise SystemExit(1)
-print(int(cap))
+print(f"# {n} examples, mean prompt {mean_prompt:.1f} tok, "
+      f"{gib(per_position):.3f} GiB per buffered position", file=sys.stderr)
+print(f"# scope={scope}: one epoch of reuse distance needs {gib(need):.1f} GiB, "
+      f"cap is {gib(cap):.1f} GiB -> {min(100.0, 100*cap/need):.0f}% coverage", file=sys.stderr)
+if cap < need:
+    print(f"# NOTE: the cap is below the reuse distance, so the LRU will evict within an "
+          f"epoch and aq_sgd/hit_rate will report the consequence. This is a MEASUREMENT, "
+          f"not a fault: the storage requirement is part of the result.", file=sys.stderr)
 PY
-)" || { echo "FATAL: AQ-SGD buffer sizing failed (or the host cannot host a >=1 GiB buffer)" >&2; exit 1; }
-echo "=== aq_sgd buffer capacity for arm $ARM: $((AQ_CAPACITY/1073741824)) GiB ==="
+fi
+echo "=== aq_sgd buffer cap for arm $ARM: ${AQ_CAPACITY_GB} GiB (deterministic) ==="
 
 # 5. Patched launcher copy: the Pair 1 scalars, exactly as run_prf_exactk_600.sh
 #    sets them, with the same fail-loud checks in case the base shape drifts.
