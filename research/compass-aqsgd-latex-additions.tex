@@ -114,8 +114,8 @@ measure.
 Prompt-prefix tokens do recur. A MATH problem is revisited each epoch with
 byte-identical token ids at identical positions, so its boundary activation
 differs only by the weight drift accumulated since the last visit. At $600$
-steps and $128$ prompts per step over roughly seven thousand problems, a prompt
-is seen about eleven times. This is the regime AQ-SGD was designed for.
+steps and $128$ prompts per step over the $7{,}498$ training problems, a prompt
+is seen $10.2$ times. This is the regime AQ-SGD was designed for.
 
 Response tokens do not recur. The token occupying a given position is resampled
 from the current policy at every visit, so a buffered value belongs to a
@@ -123,25 +123,32 @@ different token. For roughly independent activations
 $\mathbb E\|a-m\|^2=\|a\|^2+\|m\|^2$, so the delta carries about $\sqrt2$ times
 the norm of the value. At a fixed bit budget that is a coarser grid and a
 larger error than quantizing the value would have given. We measure this ratio
-at $1.41$ on Pair~1 boundary states. The prefix is a minority of the tokens
-that cross a boundary, because a prompt of order one hundred tokens precedes a
-response whose mean length at Pair~1 is $574$, so the mechanism is applicable
-to a small fraction of the traffic. The arm labelled ``recurring prefix''
-confines the buffer to positions where the premise holds and is AQ-SGD's best
-case here. The arm labelled ``all positions'' is the unmodified port. We report
-the measured buffer hit rate with both, so the outcome is explained rather than
-asserted.
+at $1.41$ on Pair~1 boundary states.
+
+The prefix is also a minority of what crosses a boundary, and we measure that
+share rather than estimate it. Tokenized with the run's own chat template, the
+$7{,}498$ MATH prompts have a mean length of $111.4$ tokens (median $82$, $95$th
+percentile $280$), against a mean response length of $574$. The prefix is
+therefore $16.3\%$ of the tokens that cross a boundary, which is a ceiling on
+how much of the traffic AQ-SGD's mechanism can reach at all, before any
+question of whether it helps there. The arm labelled ``recurring prefix''
+confines the buffer to those positions and is AQ-SGD's best case here. The arm
+labelled ``all positions'' is the unmodified port. We report the measured
+buffer hit rate with both, so the outcome is explained rather than asserted.
 
 \subsection{Storage}
 
 The buffer is indexed by example, position and boundary, and it must span the
 reuse distance to score a hit. In RLVR that distance is a full epoch of
-prompts. Covering prefixes alone at Pair~1 costs
-$n\cdot\bar p\cdot L\cdot H\cdot 2$ bytes for $n$ examples of mean prompt length
-$\bar p$ over $L$ compressed boundaries, which is about $0.16$~GB per token of
-mean prompt length and so tens of gigabytes of host memory. Covering full
-$2048$-token sequences costs order $300$~GB, and Pair~3's $16{,}384$-token
-budget puts the same quantity in the terabytes. The keyed mask stores nothing at
+prompts. The cost is $n\cdot\bar p\cdot L\cdot H\cdot 2$ bytes for $n$ examples
+of mean prompt length $\bar p$ over $L$ compressed boundaries, which at Pair~1
+is $0.150$~GiB per buffered token position. Covering prefixes alone therefore
+needs $16.7$~GiB of host memory, and covering full sequences to the $2048$-token
+budget needs $308$~GiB. Pair~3's $16{,}384$-token budget puts the same quantity
+in the terabytes. We run the prefix arm with a $20$~GiB cap, so it never evicts
+inside an epoch and the hit rate it reports is not an artifact of the cap; the
+all-positions arm runs under the same cap and does evict, which is itself part
+of the measurement. The keyed mask stores nothing at
 all, because its selection is derived from a key rather than remembered. Buffers
 are also per process, which is faithful: \citet{wang2022aqsgd} note that data
 parallelism divides the store by the parallel degree but then pays for
