@@ -161,17 +161,26 @@ cd "$WORK"
 # 1. Checkout. BRANCH must be passed through: the sibling Pair 1 launchers
 #    default to autonomous-harness-v1 and hard-reset, which would silently roll
 #    this branch's arm table off the box.
-if [[ -d verl/.git ]] \
+#    SKIP_CHECKOUT=1 when several arms share one box: four concurrent
+#    `git reset --hard` calls on one working tree would race, and the editable
+#    install means a reset under a live run swaps its code mid-flight. The
+#    fanout driver does the checkout once, up front, and sets this.
+if [[ "${SKIP_CHECKOUT:-0}" == "1" ]]; then
+  echo "=== SKIP_CHECKOUT=1, using the working tree as it stands ==="
+  cd verl || { echo "FATAL: $WORK/verl missing but SKIP_CHECKOUT=1" >&2; exit 1; }
+  echo "    $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
+elif [[ -d verl/.git ]] \
    && (cd verl && git remote set-url origin "$REPO" \
        && git fetch --depth 1 origin "$BRANCH" && git checkout -B "$BRANCH" FETCH_HEAD \
        && git reset --hard FETCH_HEAD); then
   echo "=== reused checkout, reset to origin/$BRANCH ==="
+  cd verl
 else
   { [[ -e verl ]] && mv verl "verl.stale.$(date +%s)"; true; }
   git clone --depth 1 --single-branch -b "$BRANCH" "$REPO" verl || {
     echo "FATAL: clone failed" >&2; exit 1; }
+  cd verl
 fi
-cd verl
 VERL_ROOT="$PWD"
 
 # 2. Secrets (WANDB_API_KEY, HF_TOKEN, R2_*). The engine re-sources this too.

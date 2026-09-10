@@ -67,12 +67,36 @@ if [[ -f "$HERE/../../tests/workers/comm_eff/test_compass_ablation_arms.py" ]]; 
     || { echo "FATAL: config gate failed, not launching" >&2; exit 1; }
 fi
 
+# Prepare MATH once. Four arms racing on the same parquet write would corrupt it.
+export DATA_DIR="${DATA_DIR:-$HOME/data/math}"
+if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/test.parquet" ]]; then
+  echo "=== preparing MATH parquet in $DATA_DIR ==="
+  ( cd "$WORK/verl" && python3 research/scripts/prepare_rlvr_math.py \
+      --dataset math --local_save_dir "$DATA_DIR" ) 2>&1 | tail -5
+fi
+[[ -f "$DATA_DIR/train.parquet" && -f "$DATA_DIR/test.parquet" ]] \
+  || { echo "FATAL: MATH parquet unavailable in $DATA_DIR" >&2; exit 1; }
+
 # Warm the HF cache once, so N arms do not all download the same weights.
 python3 - <<'PY' || echo "WARN: model prefetch skipped"
 from huggingface_hub import snapshot_download
 snapshot_download("Qwen/Qwen2.5-Math-1.5B", allow_patterns=["*.json", "*.safetensors", "*.txt"])
 print("model cached")
 PY
+
+# One checkout for the whole box, before any arm starts. verl is installed
+# editable, so a `git reset --hard` under a live run would swap its code
+# mid-flight; the arms therefore run with SKIP_CHECKOUT=1.
+BRANCH="${BRANCH:-exp/compass-rlvr-ablations}"
+REPO="${REPO:-https://github.com/shamanez/verl.git}"
+if [[ "${SKIP_CHECKOUT:-0}" != "1" ]]; then
+  echo "=== checkout $BRANCH once for the whole box ==="
+  ( cd "$WORK/verl" && git remote set-url origin "$REPO" \
+      && git fetch origin "$BRANCH" && git checkout -B "$BRANCH" FETCH_HEAD \
+      && git reset --hard FETCH_HEAD ) \
+    || { echo "FATAL: checkout failed" >&2; exit 1; }
+fi
+echo "=== tree: $(cd "$WORK/verl" && git rev-parse --abbrev-ref HEAD) $(cd "$WORK/verl" && git rev-parse --short HEAD) ==="
 
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n idle
 
@@ -81,7 +105,7 @@ for arm in "${ARM_LIST[@]}"; do
   win="$SESSION:$arm"
   tmux kill-window -t "$win" 2>/dev/null || true
   tmux new-window -d -t "$SESSION" -n "$arm" \
-    "ARM=$arm GPU=$gpu WORK=$WORK bash $HERE/run_compass_rlvr_ablations_fsdp.sh 2>&1 | tee -a $WORK/runs/compass-$arm/boot.log; exec bash"
+    "ARM=$arm GPU=$gpu WORK=$WORK SKIP_CHECKOUT=1 bash $HERE/run_compass_rlvr_ablations_fsdp.sh 2>&1 | tee -a $WORK/runs/compass-$arm/boot.log; exec bash"
   echo "launched arm=$arm on GPU $gpu  (tmux window $win)"
   gpu=$(( gpu + 1 ))
   [[ $gpu -lt ${#ARM_LIST[@]} ]] && sleep "$STAGGER"
