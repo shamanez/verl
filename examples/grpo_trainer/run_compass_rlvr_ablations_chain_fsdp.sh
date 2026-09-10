@@ -55,7 +55,20 @@ run_queue() {
   local arms=("$@")
   [[ ${#arms[@]} -eq 0 ]] && { echo "[gpu$gpu] nothing queued"; return 0; }
   for arm in "${arms[@]}"; do
-    # wait for whatever is on this GPU to finish or die
+    # First wait for the GPU to be CLAIMED, then wait for it to free. Without
+    # the claim step the chain races its own fan-out: at startup the GPUs are
+    # briefly idle while the staggered wave-1 arms boot, the chain reads that
+    # as "predecessor finished" and starts a successor on top of a GPU that is
+    # about to be taken, putting two arms on one device.
+    local claimed=0
+    while [[ $claimed -lt ${CLAIM_TIMEOUT:-900} ]]; do
+      gpu_busy "$gpu" && break
+      sleep 30; claimed=$(( claimed + 30 ))
+    done
+    if ! gpu_busy "$gpu"; then
+      echo "[gpu$gpu] nothing claimed it within ${CLAIM_TIMEOUT:-900}s, starting $arm on an idle GPU"
+    fi
+    # now wait for whatever is on this GPU to finish or die
     local waited=0
     while gpu_busy "$gpu"; do
       sleep "$POLL"; waited=$(( waited + POLL ))
