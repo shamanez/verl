@@ -104,8 +104,9 @@ gpu=0
 for arm in "${ARM_LIST[@]}"; do
   win="$SESSION:$arm"
   tmux kill-window -t "$win" 2>/dev/null || true
+  mkdir -p "$WORK/runs/compass-$arm"
   tmux new-window -d -t "$SESSION" -n "$arm" \
-    "ARM=$arm GPU=$gpu WORK=$WORK SKIP_CHECKOUT=1 bash $HERE/run_compass_rlvr_ablations_fsdp.sh 2>&1 | tee -a $WORK/runs/compass-$arm/boot.log; exec bash"
+    "ARM=$arm GPU=$gpu WORK=$WORK SKIP_CHECKOUT=1 DATA_DIR=$DATA_DIR bash $HERE/run_compass_rlvr_ablations_fsdp.sh 2>&1 | tee -a $WORK/runs/compass-$arm/boot.log; exec bash"
   echo "launched arm=$arm on GPU $gpu  (tmux window $win)"
   gpu=$(( gpu + 1 ))
   [[ $gpu -lt ${#ARM_LIST[@]} ]] && sleep "$STAGGER"

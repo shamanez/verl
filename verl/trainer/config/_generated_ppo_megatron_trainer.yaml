@@ -191,6 +191,17 @@ actor_rollout_ref:
         block_size: 32
         rounding: sr
         subset_k: 0
+      aq_sgd:
+        _target_: verl.workers.config.CommEffAQSGDConfig
+        bits: 2
+        block_size: 32
+        rounding: sr
+        subset_k: 0
+        scope: prompt
+        first_visit: rescaled
+        capacity_bytes: 25769803776
+        buffer_device: cpu
+        max_positions: 0
       anchor:
         _target_: verl.workers.config.CommEffAnchorConfig
         enabled: true

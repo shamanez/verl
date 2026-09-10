@@ -304,7 +304,7 @@ comm_eff:
   # Dense compatibility is the strict enabled=false path.
   enabled: false
 
-  # Boundary activation codec: dense | prf_mask | powersgd | sr_quant.
+  # Boundary activation codec: dense | prf_mask | powersgd | sr_quant | aq_sgd.
   compression_type: powersgd
 
   # PRF per-(token, dimension) pipeline-boundary activation mask. Inert while
@@ -349,6 +349,41 @@ comm_eff:
     # PRF-fresh exact-subset_k channel subset J per token (mask-keyed, pass
     # identical within a step), zero elsewhere, rescale by H/subset_k.
     subset_k: 0
+
+  # AQ-SGD (Wang et al., NeurIPS 2022): quantizes the CHANGE of the boundary
+  # activation for the same example between visits against a local buffer
+  # m(xi), rather than the activation itself. Active only when
+  # compression_type=aq_sgd; reuses mask.{seed,pp_size,mask_recompute,
+  # mask_reference} for keying and eligibility exactly as sr_quant does.
+  # Fields mirror verl.workers.config.CommEffAQSGDConfig exactly.
+  aq_sgd:
+
+    _target_: verl.workers.config.CommEffAQSGDConfig
+
+    bits: 2
+    block_size: 32
+    # sr is the faithful setting: AQ-SGD's Theorem 3.1 assumes an UNBIASED
+    # quantizer. rn is the biased control and is not the paper's Q.
+    rounding: sr
+    # 0 = send every channel. > 0: send only a PRF-fresh exact-subset_k
+    # channel subset J per token (mask-keyed, pass-identical within a step).
+    # Un-sent channels KEEP their buffered value rather than being zeroed, so
+    # warm rows carry no H/k gain. At H=1536, bits=2 with subset_k=493 costs
+    # 1232.5 bits/token/boundary against PRF exact-k's 1232.
+    subset_k: 0
+    # prompt = buffer only the prompt prefix, the one part of an RLVR sequence
+    # that recurs across epochs with byte-identical tokens. all = the literal
+    # port, buffering resampled response positions too.
+    scope: prompt
+    # rescaled = a cold row falls back to the unbiased sparse estimate, which
+    # holds the byte budget. dense = the paper's uncompressed first message,
+    # OFF-BUDGET by construction; use it to measure payload, not accuracy.
+    first_visit: rescaled
+    # LRU cap on the host-side buffer, in bytes. The store must span the reuse
+    # distance (one epoch of prompts) to score a hit.
+    capacity_bytes: 25769803776
+    buffer_device: cpu
+    max_positions: 0
 
   # Delayed paired dense anchor plus rank-1 RELEX weight projection.
   anchor:

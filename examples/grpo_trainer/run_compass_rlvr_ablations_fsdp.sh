@@ -255,21 +255,27 @@ export LOG="$RUN_DIR/train.log"
 export CUDA_VISIBLE_DEVICES="$GPU"
 SHIM_DIR="$RUN_DIR/bin"
 mkdir -p "$SHIM_DIR"
-cat > "$SHIM_DIR/nvidia-smi" <<'SHIM'
+# Resolve the real binary NOW, before the shim dir goes on PATH, and bake the
+# absolute path in. Letting the shim rediscover it at call time is what breaks:
+# by then the shim is first on PATH and any re-lookup finds the shim itself.
+REAL_SMI="$(command -v nvidia-smi || echo /usr/bin/nvidia-smi)"
+[[ -x "$REAL_SMI" ]] || { echo "FATAL: no real nvidia-smi at $REAL_SMI" >&2; exit 1; }
+cat > "$SHIM_DIR/nvidia-smi" <<SHIM
 #!/usr/bin/env bash
 # Report exactly the devices this arm owns, so the engine sizes itself to one
-# GPU while three sibling arms run on the other three.
-REAL="$(PATH="$(echo "$PATH" | tr ':' '\n' | grep -v "/bin$" | paste -sd: -)" command -v nvidia-smi || echo /usr/bin/nvidia-smi)"
-if [[ "$#" -eq 1 && "$1" == "-L" ]]; then
-  N="$(echo "${CUDA_VISIBLE_DEVICES:-0}" | awk -F, '{print NF}')"
-  exec "$REAL" -L | head -n "$N"
+# GPU while sibling arms hold the others. Everything except a bare -L is
+# passed straight through.
+if [[ "\$#" -eq 1 && "\$1" == "-L" ]]; then
+  N="\$(echo "\${CUDA_VISIBLE_DEVICES:-0}" | awk -F, '{print NF}')"
+  exec "$REAL_SMI" -L | head -n "\$N"
 fi
-exec "$REAL" "$@"
+exec "$REAL_SMI" "\$@"
 SHIM
 chmod +x "$SHIM_DIR/nvidia-smi"
 export PATH="$SHIM_DIR:$PATH"
-[[ "$(nvidia-smi -L | wc -l | tr -d ' ')" == "1" ]] \
-  || { echo "FATAL: nvidia-smi shim did not narrow to 1 GPU" >&2; exit 1; }
+SEEN="$(nvidia-smi -L | wc -l | tr -d ' ')"
+[[ "$SEEN" == "1" ]] \
+  || { echo "FATAL: nvidia-smi shim reports $SEEN GPUs, expected 1" >&2; exit 1; }
 
 # 8. Thread budget. Four verl stacks on one box exhaust the container pids
 #    cgroup long before they exhaust RAM. These caps plus ray_init.num_cpus are
