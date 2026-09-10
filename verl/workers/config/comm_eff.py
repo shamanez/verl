@@ -37,6 +37,7 @@ __all__ = [
     "CommEffAnchorConfig",
     "CommEffSpectralConfig",
     "CommEffPowerSGDConfig",
+    "CommEffAQSGDConfig",
     "CommEffProbeConfig",
     "CommEffDCConfig",
     "CommEffConfig",
@@ -46,8 +47,10 @@ __all__ = [
 # codec is active per run (mutually exclusive). ``dense`` leaves the activation
 # path uncompressed; ``prf_mask`` is the per-(token, dim) PRF Bernoulli mask;
 # ``powersgd`` is the shared frozen-basis projector ``A_hat = (A @ Q) @ Qᵀ``;
-# ``sr_quant`` is the dense low-bit stochastic-rounding boundary quantizer.
-COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant")
+# ``sr_quant`` is the dense low-bit stochastic-rounding boundary quantizer;
+# ``aq_sgd`` is AQ-SGD, which quantizes the CHANGE of the activation for the
+# same example between visits against a local buffer (Wang et al., 2022).
+COMPRESSION_TYPES = ("dense", "prf_mask", "powersgd", "sr_quant", "aq_sgd")
 
 
 @dataclass
@@ -229,6 +232,89 @@ class CommEffQuantConfig(BaseConfig):
     block_size: int = 32
     rounding: str = "sr"
     subset_k: int = 0
+
+
+@dataclass
+class CommEffAQSGDConfig(BaseConfig):
+    """AQ-SGD boundary activation compression (inert while disabled).
+
+    The ``aq_sgd`` codec, selected by ``comm_eff.compression_type='aq_sgd'``.
+    Wang et al., "Fine-tuning Language Models over Slow Networks using
+    Activation Quantization with Guarantees" (NeurIPS 2022). Instead of
+    quantizing the activation, it quantizes the CHANGE of the activation for
+    the same training example between visits: each side of a boundary keeps a
+    buffer ``m(xi)``, the wire carries ``Q(a - m)``, and both sides advance
+    ``m <- m + Q(a - m)``. The backward gradient is quantized directly, with no
+    buffer, which is the paper's own treatment. See
+    ``verl.workers.comm_eff.activation_aqsgd`` for the RLVR-specific
+    consequences, which are the reason this codec is interesting here: the
+    premise needs an example to recur with its activation intact, and on-policy
+    RLVR resamples every response each step.
+
+    Knob reuse matches sr_quant: the ``mask`` sub-config supplies eligibility
+    (``mask_recompute`` / ``mask_reference``), the PRF base seed (``mask.seed``)
+    and the boundary placement (``mask.pp_size``); ``mask.p`` / ``rescale*`` /
+    ``exact_k`` / ``antithetic`` / ``frlr*`` are IGNORED. Carrying no PowerSGD
+    basis, it requires ``anchor.owns_q=false``.
+
+    Args:
+        bits (int): Quantization width for the delta, ``L = 2**bits`` uniform
+            levels per (token, block). Default 2, the byte-parity point.
+        block_size (int): Channels per absmax-scale block. ``0`` (or
+            ``>= hidden_size``) means one whole-token scale. Default 32.
+        rounding (str): ``sr`` (default) = unbiased PRF-keyed stochastic
+            rounding. This is the faithful setting: AQ-SGD's Theorem 3.1 reads
+            "consider an unbiased quantization function Q(x)", and its own
+            worked bound rounds "to the closest k/2^b, stochastically". What
+            the paper does NOT assume is an unbiased GRADIENT, which is a
+            different claim. ``rn`` is deterministic round-to-nearest, kept as
+            the biased control; it is not the paper's quantizer, and issue #93
+            measured a 1-bit RN arm killed at step 60 with a run-MINIMUM
+            gradient norm 6.9x its stochastic twin's whole-run maximum, so
+            selecting it confounds delta coding with rounding bias. Note that
+            neither setting makes the CODEC unbiased: ``m`` is a stale
+            reconstruction, so the reconstruction error is path dependent
+            either way, and that is the property under test.
+        subset_k (int): ``0`` = send every channel. ``> 0`` sends only a
+            PRF-fresh exact-``subset_k`` channel subset ``J`` per token, keyed
+            like the mask codec. Un-sent channels KEEP their buffered value
+            rather than being zeroed, so warm rows carry no ``H/k`` gain. Bits
+            per token per boundary become
+            ``subset_k*bits + subset_k*16/block_size``, the ledger that lets an
+            arm be byte-matched against PRF exact-k.
+        scope (str): Which token positions carry a buffer. ``prompt`` (default)
+            buffers only the prompt prefix, the one part of an RLVR sequence
+            that recurs across epochs with byte-identical tokens, which is
+            AQ-SGD's best case here. ``all`` is the literal port and buffers
+            every position, including resampled response tokens whose buffered
+            history belongs to a different token.
+        first_visit (str): What a cold entry sends. ``rescaled`` (default)
+            holds the byte budget by falling back to the unbiased sparse
+            estimate ``(H/k) * scatter_J(Q(a_J))``, identical to the
+            ``sr_quant`` subset codec, so delta coding is the single variable
+            against a matched sr_quant arm. ``dense`` is faithful to the
+            paper's uncompressed first message and is OFF-BUDGET by
+            construction; use it to measure payload, not accuracy.
+        capacity_bytes (int): LRU cap on the host-side buffer, in bytes. The
+            store must span the reuse distance (a full epoch of prompts) to
+            score a hit, so a cap below that lowers the measured hit rate
+            rather than corrupting the codec. Default 24 GiB.
+        buffer_device (str): Where the buffer lives. ``cpu`` (default); the
+            store is orders of magnitude too large for HBM.
+        max_positions (int): Optional hard cap on buffered positions per
+            example, ``0`` = unbounded. Bounds the store under ``scope='all'``,
+            where full 16k-token sequences are otherwise unaffordable.
+    """
+
+    bits: int = 2
+    block_size: int = 32
+    rounding: str = "sr"
+    subset_k: int = 0
+    scope: str = "prompt"
+    first_visit: str = "rescaled"
+    capacity_bytes: int = 24 * (1024**3)
+    buffer_device: str = "cpu"
+    max_positions: int = 0
 
 
 @dataclass
@@ -425,6 +511,7 @@ class CommEffConfig(BaseConfig):
     compression_type: str = "powersgd"
     mask: CommEffMaskConfig = field(default_factory=CommEffMaskConfig)
     quant: CommEffQuantConfig = field(default_factory=CommEffQuantConfig)
+    aq_sgd: CommEffAQSGDConfig = field(default_factory=CommEffAQSGDConfig)
     anchor: CommEffAnchorConfig = field(default_factory=CommEffAnchorConfig)
     spectral: CommEffSpectralConfig = field(default_factory=CommEffSpectralConfig)
     powersgd: CommEffPowerSGDConfig = field(default_factory=CommEffPowerSGDConfig)
@@ -443,6 +530,7 @@ class CommEffConfig(BaseConfig):
 
         self._validate_mask()
         self._validate_quant()
+        self._validate_aq_sgd()
         self._validate_anchor()
         self._validate_spectral()
         self._validate_powersgd()
@@ -533,6 +621,58 @@ class CommEffConfig(BaseConfig):
         subset_k = self.quant.subset_k
         if isinstance(subset_k, bool) or not isinstance(subset_k, int) or subset_k < 0:
             raise ValueError(f"comm_eff.quant.subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
+
+    def _validate_aq_sgd(self) -> None:
+        """Validate the aq_sgd sub-config (no allocation, no RNG)."""
+
+        from verl.workers.comm_eff.activation_aqsgd import (
+            AQSGD_FIRST_VISIT_MODES,
+            AQSGD_SCOPES,
+        )
+
+        bits = self.aq_sgd.bits
+        if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 16:
+            raise ValueError(f"comm_eff.aq_sgd.bits must be an integer in [1, 16]; got {bits!r}")
+        block_size = self.aq_sgd.block_size
+        if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 0:
+            raise ValueError(
+                f"comm_eff.aq_sgd.block_size must be an integer >= 0 (0 = whole-token scale); got {block_size!r}"
+            )
+        if str(self.aq_sgd.rounding) not in ("sr", "rn"):
+            raise ValueError(f"comm_eff.aq_sgd.rounding must be one of (sr, rn); got {self.aq_sgd.rounding!r}")
+        subset_k = self.aq_sgd.subset_k
+        if isinstance(subset_k, bool) or not isinstance(subset_k, int) or subset_k < 0:
+            raise ValueError(f"comm_eff.aq_sgd.subset_k must be an integer >= 0 (0 = full-width); got {subset_k!r}")
+        if str(self.aq_sgd.scope) not in AQSGD_SCOPES:
+            raise ValueError(f"comm_eff.aq_sgd.scope must be one of {AQSGD_SCOPES}; got {self.aq_sgd.scope!r}")
+        if str(self.aq_sgd.first_visit) not in AQSGD_FIRST_VISIT_MODES:
+            raise ValueError(
+                f"comm_eff.aq_sgd.first_visit must be one of {AQSGD_FIRST_VISIT_MODES}; got {self.aq_sgd.first_visit!r}"
+            )
+        capacity = self.aq_sgd.capacity_bytes
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+            raise ValueError(f"comm_eff.aq_sgd.capacity_bytes must be a positive integer; got {capacity!r}")
+        if str(self.aq_sgd.buffer_device) not in ("cpu", "cuda"):
+            raise ValueError(
+                f"comm_eff.aq_sgd.buffer_device must be one of (cpu, cuda); got {self.aq_sgd.buffer_device!r}"
+            )
+        max_positions = self.aq_sgd.max_positions
+        if isinstance(max_positions, bool) or not isinstance(max_positions, int) or max_positions < 0:
+            raise ValueError(
+                f"comm_eff.aq_sgd.max_positions must be an integer >= 0 (0 = unbounded); got {max_positions!r}"
+            )
+        # A codec-level guard rather than a knob-level one: the buffer only
+        # earns its keep when it is read, and it is read only on paths the mask
+        # eligibility opens. Firing aq_sgd on the train pass alone would write
+        # a buffer that the recompute then never consults, so the arm would be
+        # sr_quant wearing AQ-SGD's name.
+        if self.compression_type == "aq_sgd" and not bool(self.mask.mask_recompute):
+            raise ValueError(
+                "comm_eff.compression_type='aq_sgd' requires comm_eff.mask.mask_recompute=true: "
+                "the codec's buffer is read on every eligible pass of a step and written once, "
+                "and with the recompute pass left dense the reconstruction the backward "
+                "differentiates would not be the one the forward sent."
+            )
 
     def _validate_anchor(self) -> None:
         from verl.workers.comm_eff.lookahead import (
@@ -777,6 +917,15 @@ class CommEffConfig(BaseConfig):
             raise ValueError(
                 "comm_eff.compression_type='sr_quant' requires anchor.owns_q=false: the SR "
                 "boundary quantizer has no PowerSGD basis Q for the anchor to own."
+            )
+        # AQ-SGD's cross-step state is its activation buffer, which lives on
+        # the fast circuit's own stages and is never shipped. It carries no
+        # basis, so the anchor has nothing to own here either.
+        if self.compression_type == "aq_sgd" and self.anchor.owns_q:
+            raise ValueError(
+                "comm_eff.compression_type='aq_sgd' requires anchor.owns_q=false: AQ-SGD's "
+                "cross-step state is a local per-example activation buffer, not a basis Q, "
+                "so there is nothing for the anchor to own."
             )
         if self.compression_type == "powersgd" and not self.powersgd.enabled:
             raise ValueError("comm_eff.compression_type='powersgd' requires powersgd.enabled=true")

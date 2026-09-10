@@ -57,12 +57,12 @@ MASK_ELIGIBLE_TAGS: frozenset = frozenset({TRAIN_TAG})
 
 
 def mask_eligible_tags(state: Any) -> frozenset:
-    """Return the path tags the activation mask / sr_quant codec may fire on.
+    """Return the path tags the activation mask / sr_quant / aq_sgd codec may fire on.
 
     Pure read (no side effects, no allocation). The default eligibility
     (``{TRAIN_TAG}``) is widened, only when ``state.config.mask.enabled`` is
-    truthy OR the codec is ``sr_quant`` (which reuses the mask eligibility
-    knobs without requiring ``mask.enabled``), by:
+    truthy OR the codec is ``sr_quant`` / ``aq_sgd`` (both of which reuse the
+    mask eligibility knobs without requiring ``mask.enabled``), by:
 
     * ``OLD_LOGPROB_TAG`` when ``state.config.mask.mask_recompute`` is truthy;
     * ``REF_LOGPROB_TAG`` when ``state.config.mask.mask_reference`` is truthy.
@@ -78,8 +78,8 @@ def mask_eligible_tags(state: Any) -> frozenset:
     mask_cfg = getattr(config, "mask", None)
     if mask_cfg is None:
         return MASK_ELIGIBLE_TAGS
-    sr_quant_codec = str(getattr(config, "compression_type", "")) == "sr_quant"
-    if not (bool(getattr(mask_cfg, "enabled", False)) or sr_quant_codec):
+    reuses_mask_knobs = str(getattr(config, "compression_type", "")) in ("sr_quant", "aq_sgd")
+    if not (bool(getattr(mask_cfg, "enabled", False)) or reuses_mask_knobs):
         return MASK_ELIGIBLE_TAGS
     tags = {TRAIN_TAG}
     if bool(getattr(mask_cfg, "mask_recompute", False)):
@@ -100,13 +100,13 @@ def _is_enabled(config: Any) -> bool:
 
 
 def resolve_compression_type(config: Any) -> str:
-    """Resolve the effective boundary codec: ``dense``, ``prf_mask``, ``powersgd`` or ``sr_quant``.
+    """Resolve the effective boundary codec: ``dense``, ``prf_mask``, ``powersgd``, ``sr_quant`` or ``aq_sgd``.
 
     Pure read (no side effects, no allocation). The resolution is
     back-compatible:
 
-    * an explicit ``compression_type`` of ``prf_mask``, ``powersgd`` or
-      ``sr_quant`` wins;
+    * an explicit ``compression_type`` of ``prf_mask``, ``powersgd``,
+      ``sr_quant`` or ``aq_sgd`` wins;
     * ``dense`` (the fall-through) honors the mask selector: a mask sub-config
       enabled with ``p > 0`` resolves to ``prf_mask``, otherwise ``dense``.
 
@@ -118,7 +118,7 @@ def resolve_compression_type(config: Any) -> str:
     if config is None:
         return "dense"
     ctype = str(getattr(config, "compression_type", "dense"))
-    if ctype in ("prf_mask", "powersgd", "sr_quant"):
+    if ctype in ("prf_mask", "powersgd", "sr_quant", "aq_sgd"):
         return ctype
     # ctype == "dense": honor the mask selector for back-compat.
     mask_cfg = getattr(config, "mask", None)
@@ -157,6 +157,12 @@ class CommEffState:
         # both the masker and the powersgd compressor (exactly one boundary
         # codec object exists per run).
         self.quantizer = None
+        # The AQ-SGD codec (aq_sgd). Constructed in build() only when
+        # compression_type resolves to aq_sgd; mutually exclusive with the
+        # masker, the quantizer and the powersgd compressor. It is the only
+        # codec carrying cross-STEP state (its per-example activation buffer),
+        # so it is held here rather than rebuilt per pass.
+        self.aqsgd = None
         self.powersgd = None
         self.spectral = None
         self.fsdp_grad_repr: dict = {}
@@ -213,6 +219,21 @@ class CommEffState:
         self.rank1_evr_mean = 0.0
         self.rank1_r2_mean = 0.0
         self.rank1_zero_motion_tensors = 0
+
+    @property
+    def per_token_codec(self):
+        """The single live per-(token, dim) codec object, or ``None``.
+
+        ``prf_mask``, ``sr_quant`` and ``aq_sgd`` are mutually exclusive and
+        expose the identical ``register`` / ``set_context`` / ``unregister``
+        surface, so the engine drives whichever one exists through this.
+        PowerSGD is deliberately excluded: it compresses a packed matrix rather
+        than per-token entries and has its own registration path.
+        """
+        for codec in (self.masker, self.quantizer, self.aqsgd):
+            if codec is not None:
+                return codec
+        return None
 
     def build(self, module: Any) -> None:
         """Build PowerSGD and signed EMA once; anchor snapshots remain lazy."""
@@ -301,6 +322,48 @@ class CommEffState:
                 getattr(quant_cfg, "block_size", 32),
                 getattr(quant_cfg, "rounding", "sr"),
                 getattr(quant_cfg, "subset_k", 0),
+                getattr(mask_cfg, "pp_size", 8),
+                getattr(mask_cfg, "seed", 0),
+                getattr(mask_cfg, "mask_recompute", False),
+                getattr(mask_cfg, "mask_reference", False),
+            )
+
+        if self.compression_type == "aq_sgd":
+            # Imported lazily so the disabled / dense / powersgd / prf_mask /
+            # sr_quant paths never pay the import cost. Mutually exclusive with
+            # every other codec branch. aq_sgd reuses the mask sub-config for
+            # eligibility, the PRF base seed and the boundary placement.
+            from verl.workers.comm_eff.activation_aqsgd import ActivationAQSGD
+
+            aq_cfg = self.config.aq_sgd
+            mask_cfg = self.config.mask
+            self.aqsgd = ActivationAQSGD(
+                bits=int(getattr(aq_cfg, "bits", 2)),
+                base_seed=int(getattr(mask_cfg, "seed", 0)),
+                pp_size=int(getattr(mask_cfg, "pp_size", 8)),
+                block_size=int(getattr(aq_cfg, "block_size", 32)),
+                rounding=str(getattr(aq_cfg, "rounding", "sr")),
+                subset_k=int(getattr(aq_cfg, "subset_k", 0)),
+                scope=str(getattr(aq_cfg, "scope", "prompt")),
+                first_visit=str(getattr(aq_cfg, "first_visit", "rescaled")),
+                capacity_bytes=int(getattr(aq_cfg, "capacity_bytes", 24 * (1024**3))),
+                buffer_device=str(getattr(aq_cfg, "buffer_device", "cpu")),
+                max_positions=int(getattr(aq_cfg, "max_positions", 0)),
+                state=self,
+            )
+            logger.info(
+                "comm_eff: aq_sgd bits=%s block_size=%s rounding=%s subset_k=%s scope=%s "
+                "first_visit=%s capacity_gib=%.1f buffer_device=%s max_positions=%s "
+                "pp_size=%s seed=%s mask_recompute=%s mask_reference=%s",
+                getattr(aq_cfg, "bits", 2),
+                getattr(aq_cfg, "block_size", 32),
+                getattr(aq_cfg, "rounding", "sr"),
+                getattr(aq_cfg, "subset_k", 0),
+                getattr(aq_cfg, "scope", "prompt"),
+                getattr(aq_cfg, "first_visit", "rescaled"),
+                int(getattr(aq_cfg, "capacity_bytes", 24 * (1024**3))) / float(1024**3),
+                getattr(aq_cfg, "buffer_device", "cpu"),
+                getattr(aq_cfg, "max_positions", 0),
                 getattr(mask_cfg, "pp_size", 8),
                 getattr(mask_cfg, "seed", 0),
                 getattr(mask_cfg, "mask_recompute", False),

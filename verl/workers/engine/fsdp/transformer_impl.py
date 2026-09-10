@@ -795,9 +795,9 @@ class FSDPEngine(BaseEngine):
                 "set ulysses_sequence_parallel_size=1 for this codec."
             )
         state = self._comm_eff_state
-        masker = state.masker if state.masker is not None else state.quantizer
-        masker.register(self.module)
-        return masker.is_registered
+        codec = state.per_token_codec
+        codec.register(self.module)
+        return codec.is_registered
 
     def _comm_eff_maybe_set_mask_context(self, micro_batch: TensorDict, input_ids) -> None:
         """Set the per-token PRF context for this micro-batch's masked forward.
@@ -824,11 +824,9 @@ class FSDPEngine(BaseEngine):
         state = getattr(self, "_comm_eff_state", None)
         if state is None:
             return
-        masker = getattr(state, "masker", None)
-        if masker is None:
-            # The sr_quant quantizer shares the masker's context surface
-            # (set_context keyed on the same stable per-token ids).
-            masker = getattr(state, "quantizer", None)
+        # The sr_quant quantizer and the aq_sgd codec share the masker's
+        # context surface (set_context keyed on the same stable per-token ids).
+        masker = state.per_token_codec if hasattr(state, "per_token_codec") else getattr(state, "masker", None)
         if masker is None or not masker.is_registered:
             return
         if getattr(masker, "_anchor_sketch_mode", False):
@@ -873,10 +871,34 @@ class FSDPEngine(BaseEngine):
         gstep = getattr(state, "global_step", None)
         if gstep is None or int(gstep) < 0:
             gstep = getattr(self, "_comm_eff_global_step", 0)
+        # The aq_sgd codec additionally keys its cross-step activation buffer
+        # on a PERSISTENT example identity and needs to know where each
+        # sequence's prompt ends. Both ride the batch as per-row columns
+        # stamped by the worker (a content hash of the prompt, and the prompt
+        # length), and are repeated onto the token axis here exactly as the
+        # sample ids are. Only aq_sgd consumes them, so the other codecs' call
+        # signature is untouched.
+        extra: dict = {}
+        if getattr(state, "aqsgd", None) is not None:
+            example_id_per_row = micro_batch.get("comm_eff_example_id", None)
+            prompt_len_per_row = micro_batch.get("comm_eff_prompt_len", None)
+            if example_id_per_row is None or prompt_len_per_row is None:
+                raise RuntimeError(
+                    "comm_eff_example_id / comm_eff_prompt_len missing from the micro-batch "
+                    "while the aq_sgd codec is live; the worker must stamp both on the batch "
+                    "before micro-batching (engine_workers._comm_eff_stamp_sample_ids)."
+                )
+            extra["example_ids"] = torch.repeat_interleave(
+                example_id_per_row.reshape(-1).to(device=device, dtype=torch.int64), seqlens
+            )
+            extra["prompt_lens"] = torch.repeat_interleave(
+                prompt_len_per_row.reshape(-1).to(device=device, dtype=torch.int64), seqlens
+            )
         masker.set_context(
             global_step=int(gstep),
             sample_ids=sample_ids,
             position_ids=position_ids,
+            **extra,
         )
 
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:

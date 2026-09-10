@@ -921,7 +921,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _comm_eff_stamp_sample_ids(self, data: TensorDict, state) -> None:
         """Stamp a stable per-row id (``comm_eff_sample_id``) on the per-rank batch.
 
-        The prf_mask and sr_quant codecs key each token's draw on
+        The prf_mask, sr_quant and aq_sgd codecs key each token's draw on
         ``(sample_id, position_id)``; ``sample_id`` is the row's index in this
         rank's batch. compute_log_prob and update_actor receive that batch in
         identical row order, so the id is consistent across both forwards and
@@ -930,7 +930,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         quantizer built); the PowerSGD and dense paths never see the extra
         column.
         """
-        if state is None or (getattr(state, "masker", None) is None and getattr(state, "quantizer", None) is None):
+        if state is None or getattr(state, "per_token_codec", None) is None:
             return
         if "comm_eff_sample_id" in data.keys():
             return
@@ -947,6 +947,42 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         offset = self._comm_eff_dp_rank() * _COMM_EFF_SAMPLE_ID_RANK_STRIDE
         sample_ids = torch.arange(bsz, dtype=torch.int64, device=data.device)
         data["comm_eff_sample_id"] = sample_ids if offset == 0 else sample_ids + offset
+        self._comm_eff_stamp_example_ids(data, state)
+
+    def _comm_eff_stamp_example_ids(self, data: TensorDict, state) -> None:
+        """Stamp AQ-SGD's PERSISTENT example identity and prompt length.
+
+        No-op unless the aq_sgd codec is live. The row id stamped above
+        identifies a row inside ONE step, which is all the PRF codecs need;
+        AQ-SGD's buffer instead has to recognise the same MATH problem when it
+        comes round again an epoch later. The prompt's own token ids are the
+        identity that persists, so the id is a content hash of them
+        (:func:`~verl.workers.comm_eff.activation_aqsgd.aqsgd_example_ids`).
+        Deliberately NOT offset by DP rank, unlike the sample id: two ranks
+        holding the same problem should agree on its identity.
+
+        ``comm_eff_prompt_len`` is the count of real prompt tokens, which is
+        what bounds ``scope='prompt'``. Prompts are LEFT-padded, so the count
+        comes from the prompt slice of the attention mask. The codec keys on
+        position within the UNPADDED packed sequence, where the prompt occupies
+        ``[0, prompt_len)``, so the count transfers directly.
+        """
+        if getattr(state, "aqsgd", None) is None:
+            return
+        from verl.workers.comm_eff.activation_aqsgd import aqsgd_example_ids
+
+        prompts = data.get("prompts", None)
+        attention_mask = data.get("attention_mask", None)
+        if prompts is None or attention_mask is None:
+            raise RuntimeError(
+                "comm_eff aq_sgd needs 'prompts' and 'attention_mask' on the batch to build a "
+                f"persistent example identity; got keys {sorted(data.keys())}. The codec must not "
+                "fall back to the per-step row index, which would silently make it memoryless."
+            )
+        n_prompt = int(prompts.shape[1])
+        prompt_mask = attention_mask[:, :n_prompt]
+        data["comm_eff_example_id"] = aqsgd_example_ids(prompts, prompt_mask)
+        data["comm_eff_prompt_len"] = prompt_mask.sum(dim=1).to(torch.int64)
 
     def _comm_eff_dp_rank(self) -> int:
         """This worker's data-parallel rank (cached), or ``0`` when unavailable.
