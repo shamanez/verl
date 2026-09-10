@@ -59,9 +59,15 @@ def _ids(n=N, step=7):
 
 def _rec(x, m, warm, *, step=7, rounding="sr", first_visit="rescaled", subset_k=K):
     return aqsgd_reconstruct(
-        x, m, warm, **_ids(x.shape[0], step),
-        bits=BITS, block_size=BLK, subset_k=subset_k,
-        rounding=rounding, first_visit=first_visit,
+        x,
+        m,
+        warm,
+        **_ids(x.shape[0], step),
+        bits=BITS,
+        block_size=BLK,
+        subset_k=subset_k,
+        rounding=rounding,
+        first_visit=first_visit,
     )
 
 
@@ -84,6 +90,113 @@ def test_exact_buffer_reconstructs_exactly(rounding, subset_k):
     assert torch.allclose(xh, x, atol=1e-6), (xh - x).abs().max()
 
 
+def test_massive_activation_channel_survives_the_buffer_round_trip():
+    """The regression test for the nan that killed the first three aq_sgd arms.
+
+    The chain, which no single-step test could see: a COLD row under
+    ``rescaled`` reconstructs as ``(H/k) * scatter_J(Q(x_J))``, so what
+    ``_stage_buffer`` writes is inflated by the gain (3.1156 at Pair 1). Qwen2.5
+    carries massive-activation channels in the residual stream, and the gain
+    lifts them over fp16's 65504 ceiling at a true magnitude of only ~21k. The
+    entry saturates to inf, and NOTHING GOES WRONG UNTIL THE FIRST WARM READ,
+    which at Pair 1 is one full epoch later at step 59: the delta against inf
+    has an infinite block absmax, spacing goes with it, and
+    ``floor((m + s) / spacing)`` is ``floor(nan)``. One saturated channel
+    returns nan for all 32 channels of its block, on every row sharing it.
+
+    So the assertion is on the WHOLE chain (cold -> store -> warm), not on the
+    reconstruction alone, and it sweeps magnitudes that bracket the fp16 limit.
+    """
+    from verl.workers.comm_eff.activation_aqsgd import _BUFFER_DTYPE
+
+    torch.manual_seed(0)
+    for peak in (1.0e3, 1.0e4, 3.0e4, 1.0e5, 1.0e6):
+        x = torch.randn(N, H) * 3.0
+        x[:, 7] = peak  # one massive-activation channel, as in a real residual stream
+        x_hat = _rec(x, None, None, step=1)
+        assert torch.isfinite(x_hat).all(), f"cold path went non-finite at peak={peak:g}"
+        assert x_hat.abs().max() >= peak, "the rescaled cold path must carry the H/k gain"
+
+        # the buffer round trip, at the dtype the store actually uses
+        stored = x_hat.detach().to(_BUFFER_DTYPE).to(torch.float32)
+        assert torch.isfinite(stored).all(), (
+            f"buffer dtype {_BUFFER_DTYPE} saturated at peak={peak:g} "
+            f"(|x_hat|max={float(x_hat.abs().max()):.4g}); a warm read against it returns nan"
+        )
+
+        warm = torch.ones(N, dtype=torch.bool)
+        x2 = x + torch.randn(N, H) * 0.05
+        out = _rec(x2, stored, warm, step=59)
+        assert torch.isfinite(out).all(), f"warm read went non-finite at peak={peak:g}"
+
+
+def test_buffer_dtype_has_the_range_the_gain_demands():
+    """State the headroom as a number, so a dtype change cannot quietly undo the fix.
+
+    fp16 tops out at 65504, which the H/k gain reaches from a true activation of
+    only ~21k. bf16 reaches 3.4e38. The buffer must be a dtype whose finite max
+    clears the gain-inflated scale by a wide margin.
+    """
+    from verl.workers.comm_eff.activation_aqsgd import _BUFFER_DTYPE, _BUFFER_ITEMSIZE
+
+    finfo = torch.finfo(_BUFFER_DTYPE)
+    gain = 1536.0 / 493.0  # Pair 1
+    # Qwen2.5 residual-stream outliers are observed in the 1e4-1e5 band; the
+    # buffer has to hold gain * that with room to spare.
+    assert finfo.max / gain > 1.0e6, (
+        f"{_BUFFER_DTYPE} tolerates true activations only up to "
+        f"{finfo.max / gain:.4g}; fp16's 65504 is what produced the step-59 nan"
+    )
+    assert _BUFFER_ITEMSIZE == torch.empty(0, dtype=_BUFFER_DTYPE).element_size()
+    assert _BUFFER_ITEMSIZE == 2, "the 16 GiB capacity budget assumes two bytes per channel"
+
+
+def test_nonfinite_buffered_row_is_demoted_to_cold_and_counted():
+    """The guard behind the dtype fix: a bad row degrades the codec, never the loss.
+
+    If a non-finite value ever reaches the buffer again, the row must fall back
+    to the sr_quant cold path rather than return nan, and the demotion must be
+    COUNTED - a silent demotion is indistinguishable from a low hit rate.
+    """
+    codec = ActivationAQSGD(scope="all", bits=BITS, block_size=BLK, subset_k=K, base_seed=1234)
+    n_pos = 4
+    good = torch.randn(n_pos, H)
+    bad = good.clone()
+    bad[2, 5] = float("inf")
+    codec.buffer.put(11, 3, good, step=1)
+    codec.buffer.put(22, 3, bad, step=1)
+
+    example_ids = torch.tensor([11] * n_pos + [22] * n_pos)
+    position_ids = torch.cat([torch.arange(n_pos), torch.arange(n_pos)])
+    in_scope = torch.ones(2 * n_pos, dtype=torch.bool)
+    m, warm = codec._gather_buffer(3, example_ids, position_ids, in_scope, H, torch.device("cpu"), torch.float32)
+
+    assert warm[:n_pos].all(), "the finite example must stay warm"
+    assert bool(warm[n_pos + 2]) is False, "the row holding inf must be demoted to cold"
+    assert warm[n_pos + 0] and warm[n_pos + 1] and warm[n_pos + 3], "only the bad ROW is demoted"
+    assert torch.isfinite(m).all(), "a demoted row must leave a finite m"
+    assert codec.buffer.nonfinite_rows == 1
+    assert codec.buffer.telemetry()["aq_sgd/nonfinite_rows"] == 1.0
+
+    x = torch.randn(2 * n_pos, H)
+    out = aqsgd_reconstruct(
+        x,
+        m,
+        warm,
+        sample_ids=torch.arange(2 * n_pos),
+        position_ids=position_ids,
+        layer_idx=3,
+        global_step=59,
+        base_seed=1234,
+        bits=BITS,
+        block_size=BLK,
+        subset_k=K,
+        rounding="sr",
+        first_visit="rescaled",
+    )
+    assert torch.isfinite(out).all()
+
+
 def test_cold_row_is_bit_identical_to_sr_quant():
     """A cold row IS the sr_quant subset codec, which is what isolates the variable.
 
@@ -96,8 +209,15 @@ def test_cold_row_is_bit_identical_to_sr_quant():
     x = torch.randn(N, H)
     aq = _rec(x, None, None, rounding="sr")
     srq = sr_quantize(
-        x, torch.arange(N), torch.arange(N), layer_idx=3, global_step=7,
-        base_seed=1234, bits=BITS, block_size=BLK, subset_k=K,
+        x,
+        torch.arange(N),
+        torch.arange(N),
+        layer_idx=3,
+        global_step=7,
+        base_seed=1234,
+        bits=BITS,
+        block_size=BLK,
+        subset_k=K,
     )
     assert torch.equal(aq, srq)
 
@@ -205,8 +325,19 @@ def test_backward_is_direct_and_unbiased_under_sr():
     for t in range(trials):
         h = torch.randn(N, H, requires_grad=True)
         out = BoundaryAQSGD.apply(
-            h, None, None, torch.arange(N), torch.arange(N),
-            3, 1000 + t, 1234, BITS, BLK, "sr", K, "rescaled",
+            h,
+            None,
+            None,
+            torch.arange(N),
+            torch.arange(N),
+            3,
+            1000 + t,
+            1234,
+            BITS,
+            BLK,
+            "sr",
+            K,
+            "rescaled",
         )
         out.backward(g_true)
         acc += h.grad
@@ -300,16 +431,32 @@ def test_scope_and_first_visit_vocabularies_are_closed():
 def test_reconstruct_rejects_subset_k_above_hidden_size():
     with pytest.raises(ValueError):
         aqsgd_reconstruct(
-            torch.randn(4, 8), None, None, torch.arange(4), torch.arange(4),
-            layer_idx=0, global_step=0, base_seed=0, bits=2, subset_k=9,
+            torch.randn(4, 8),
+            None,
+            None,
+            torch.arange(4),
+            torch.arange(4),
+            layer_idx=0,
+            global_step=0,
+            base_seed=0,
+            bits=2,
+            subset_k=9,
         )
 
 
 def test_reconstruct_requires_token_identity():
     with pytest.raises(RuntimeError):
         aqsgd_reconstruct(
-            torch.randn(4, 8), None, None, None, None,
-            layer_idx=0, global_step=0, base_seed=0, bits=2, subset_k=4,
+            torch.randn(4, 8),
+            None,
+            None,
+            None,
+            None,
+            layer_idx=0,
+            global_step=0,
+            base_seed=0,
+            bits=2,
+            subset_k=4,
         )
 
 
@@ -386,9 +533,7 @@ def test_passes_of_one_step_are_identical_and_the_stage_publishes_at_the_boundar
     torch.manual_seed(8)
     model = _ToyDecoder(num_layers=16)
     state = _State(tag="train")
-    codec = ActivationAQSGD(
-        pp_size=8, subset_k=K, bits=BITS, block_size=BLK, scope="prompt", state=state
-    )
+    codec = ActivationAQSGD(pp_size=8, subset_k=K, bits=BITS, block_size=BLK, scope="prompt", state=state)
     codec.register(model)
     try:
         n_tokens, prompt_len = 12, 5
@@ -436,7 +581,8 @@ def test_hook_refuses_to_fire_without_an_example_id():
     codec.register(model)
     try:
         codec.set_context(
-            global_step=1, sample_ids=torch.zeros(4, dtype=torch.long),
+            global_step=1,
+            sample_ids=torch.zeros(4, dtype=torch.long),
             position_ids=torch.arange(4),
         )
         with pytest.raises(RuntimeError, match="example_ids"):
@@ -467,9 +613,7 @@ def test_reference_pass_reads_the_buffer_but_never_writes_it():
         compression_type="aq_sgd",
         mask=CommEffMaskConfig(mask_recompute=True, mask_reference=True, pp_size=8),
         aq_sgd=CommEffAQSGDConfig(bits=BITS, subset_k=K, block_size=BLK),
-        anchor=CommEffAnchorConfig(
-            enabled=False, owns_q=False, lookahead_mode="disabled", lookahead_min_snapshots=-1
-        ),
+        anchor=CommEffAnchorConfig(enabled=False, owns_q=False, lookahead_mode="disabled", lookahead_min_snapshots=-1),
         spectral=CommEffSpectralConfig(enabled=False),
         powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=False),
     )
@@ -487,6 +631,7 @@ def test_reference_pass_reads_the_buffer_but_never_writes_it():
         assert len(codec.buffer) == 0, "the reference pass must not advance the buffer"
     finally:
         codec.unregister()
+
 
 def test_buffer_capacity_default_agrees_at_every_layer():
     """The fanout's host-RAM gate reserves a fixed per-arm budget, so a layer
@@ -517,9 +662,7 @@ def test_buffer_capacity_default_agrees_at_every_layer():
         "module": _DEFAULT_CAPACITY_BYTES,
         "codec object": ActivationAQSGD().buffer.capacity_bytes,
         "actor.yaml": _grep("verl/trainer/config/actor/actor.yaml", r"capacity_bytes: (\d+)"),
-        "generated.yaml": _grep(
-            "verl/trainer/config/_generated_ppo_trainer.yaml", r"capacity_bytes: (\d+)"
-        ),
+        "generated.yaml": _grep("verl/trainer/config/_generated_ppo_trainer.yaml", r"capacity_bytes: (\d+)"),
         "engine.sh": _grep(
             "examples/grpo_trainer/vast_comm_eff_engine_grpo.sh",
             r"COMM_EFF_AQ_SGD_CAPACITY_BYTES:-(\d+)",
@@ -533,6 +676,7 @@ def test_buffer_capacity_default_agrees_at_every_layer():
         "examples/grpo_trainer/run_compass_rlvr_ablations_fanout_fsdp.sh",
     ):
         assert _grep(rel, r"AQ_CAPACITY_GB:-(\d+)") * 1024**3 == expected, rel
+
 
 def test_aqsgd_telemetry_reaches_the_metrics_dict():
     """The hit rate is what EXPLAINS the arm, so it must reach the logger.
@@ -559,9 +703,7 @@ def test_aqsgd_telemetry_reaches_the_metrics_dict():
         compression_type="aq_sgd",
         mask=CommEffMaskConfig(enabled=False, mask_recompute=True, mask_reference=True, pp_size=8),
         aq_sgd=CommEffAQSGDConfig(bits=2, subset_k=K, block_size=BLK),
-        anchor=CommEffAnchorConfig(
-            enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True
-        ),
+        anchor=CommEffAnchorConfig(enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True),
         spectral=CommEffSpectralConfig(enabled=True),
         powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=False),
     )
@@ -627,6 +769,7 @@ def test_aqsgd_telemetry_reaches_the_metrics_dict():
     # Pair 1 one; test_wire_ledger_matches_prf_exact_k_at_pair_one pins 1232.5.
     assert mets["comm_eff/logical_pp_bits_aq_sgd"] == pytest.approx(K * BITS + K * 16 / BLK)
 
+
 # --------------------------------------------------------------------------- #
 # integration gates: the two blockers a hand-called register() cannot catch
 # --------------------------------------------------------------------------- #
@@ -645,9 +788,7 @@ def _pair1_aqsgd_config():
         compression_type="aq_sgd",
         mask=CommEffMaskConfig(enabled=False, mask_recompute=True, mask_reference=True, pp_size=8),
         aq_sgd=CommEffAQSGDConfig(bits=2, subset_k=K, block_size=BLK),
-        anchor=CommEffAnchorConfig(
-            enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True
-        ),
+        anchor=CommEffAnchorConfig(enabled=True, owns_q=False, cadence=20, delay_K=20, replay_paired_batch=True),
         spectral=CommEffSpectralConfig(enabled=True),
         powersgd=CommEffPowerSGDConfig(enabled=False, fast_q_bootstrap=False),
     )
@@ -802,4 +943,3 @@ def test_register_does_not_discard_the_staged_buffer():
     model(x)
     codec.unregister()
     assert codec.buffer.hit_rate > 0.0, "the second visit must score hits"
-

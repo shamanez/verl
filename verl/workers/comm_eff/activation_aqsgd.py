@@ -81,7 +81,7 @@ STORAGE, WHICH IS PART OF THE RESULT
 ------------------------------------
 The buffer is indexed by ``(example_id, position, boundary)`` and must span the
 REUSE DISTANCE to score a hit. In RLVR that distance is a full epoch of
-prompts. At Pair 1 (7.5k MATH problems, 7 boundaries, H=1536, fp16) covering
+prompts. At Pair 1 (7.5k MATH problems, 7 boundaries, H=1536, bf16) covering
 prompt prefixes alone costs O(10 GB) of host memory, and covering full
 2048-token sequences costs O(100 TB). The keyed mask it is compared against
 stores nothing at all. ``capacity_bytes`` caps the store with LRU eviction on
@@ -163,10 +163,23 @@ AQSGD_SCOPES = ("prompt", "all")
 # What a cold buffer entry sends. See the module docstring.
 AQSGD_FIRST_VISIT_MODES = ("rescaled", "dense")
 
-# The buffer is stored in fp16: two bytes per channel per (example, position,
-# boundary). Matches the bf16 wire the trainer runs in to within the mantissa,
-# and halves the store against fp32.
-_BUFFER_DTYPE = torch.float16
+# The buffer is stored in bf16: two bytes per channel per (example, position,
+# boundary), and halves the store against fp32.
+#
+# bf16 NOT fp16, and the range is the whole reason. What gets buffered is the
+# reconstruction ``x_hat``, and on a COLD row under ``rescaled`` that carries
+# the ``H/k`` gain (3.1156 at Pair 1), so the stored slab sits ~3x above the
+# true activation scale. Qwen2.5's massive-activation channels then cross
+# fp16's 65504 ceiling at a true magnitude of only ~21k, the entry saturates to
+# ``inf``, and the first WARM read differences against it: the block absmax
+# goes inf, the grid spacing with it, and ``floor((m + s) / spacing)`` is
+# ``floor(nan)``. One saturated channel returns nan for all 32 channels of its
+# block on every row that shares it, the loss goes nan, and the optimizer step
+# is skipped. That is exactly what killed the first three aq_sgd arms at step
+# 59, their first warm step. bf16 spends 3 mantissa bits to buy 2^127 of range,
+# which is free here: the delta is quantized to ``bits`` (2) per channel
+# afterwards, so a 0.4% reference error is far below the wire's own resolution.
+_BUFFER_DTYPE = torch.bfloat16
 _BUFFER_ITEMSIZE = 2
 
 # Default LRU cap on the host-side store. 16 GiB is about one epoch of Pair 1's
@@ -235,7 +248,7 @@ class AQSGDBuffer:
     """The ``m(xi)`` store: buffered boundary activations by example and boundary.
 
     One entry per ``(example_id, boundary)``, holding an ``(n_positions, H)``
-    fp16 tensor on ``device`` (``cpu`` by default; the store is far too large
+    bf16 tensor on ``device`` (``cpu`` by default; the store is far too large
     for HBM) plus the optimizer step it was last written at. Eviction is LRU on
     whole entries, capped by ``capacity_bytes``.
 
@@ -254,7 +267,7 @@ class AQSGDBuffer:
             raise ValueError(f"aq_sgd capacity_bytes must be a positive integer; got {capacity_bytes!r}")
         self.capacity_bytes = int(capacity_bytes)
         self.device = torch.device(device)
-        # (example_id, boundary) -> [values (n_pos, H) fp16, step_last_updated]
+        # (example_id, boundary) -> [values (n_pos, H) bf16, step_last_updated]
         self._store: OrderedDict[tuple[int, int], list] = OrderedDict()
         self._bytes = 0
         # Telemetry. Counted in TOKEN-POSITIONS, not entries, so the hit rate is
@@ -263,6 +276,7 @@ class AQSGDBuffer:
         self.misses = 0
         self.evictions = 0
         self.writes = 0
+        self.nonfinite_rows = 0
 
     def __len__(self) -> int:
         return len(self._store)
@@ -312,6 +326,7 @@ class AQSGDBuffer:
             "aq_sgd/hits": float(self.hits),
             "aq_sgd/misses": float(self.misses),
             "aq_sgd/evictions": float(self.evictions),
+            "aq_sgd/nonfinite_rows": float(self.nonfinite_rows),
         }
 
 
@@ -749,6 +764,21 @@ class ActivationAQSGD:
             rows = position_ids[sel].to(device=values.device)
             m[sel] = values.index_select(0, rows).to(device=device, dtype=torch.float32)
             warm[sel] = True
+        # A non-finite buffered row cannot be differenced against: the block
+        # absmax becomes inf, the grid spacing with it, and the rounding returns
+        # nan for every channel of the block. Demote such a row to COLD so it
+        # takes the sr_quant fallback instead of poisoning the forward, and
+        # count it, because a silent demotion would read as a low hit rate.
+        # bf16 storage should make this unreachable; it is kept as a guard so
+        # the failure mode is a slightly worse codec and never a nan loss.
+        if bool(warm.any()):
+            bad = warm & ~torch.isfinite(m).all(dim=1)
+            n_bad = int(bad.sum().item())
+            if n_bad:
+                m = torch.where(bad.unsqueeze(1), torch.zeros_like(m), m)
+                warm = warm & ~bad
+                self.buffer.nonfinite_rows += n_bad
+
         n_scope = int(in_scope.sum().item())
         n_warm = int(warm.sum().item())
         self.buffer.hits += n_warm
