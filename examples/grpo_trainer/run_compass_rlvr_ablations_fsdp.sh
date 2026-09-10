@@ -319,6 +319,13 @@ export CUDA_VISIBLE_DEVICES="$GPU"
 # CUDA_VISIBLE_DEVICES, so an arm would otherwise size itself to the whole box
 # while actually holding one device. FORCE_NGPUS tells it the truth.
 export FORCE_NGPUS=1
+# Separate this arm's weight-transfer socket from its siblings'. Without it
+# every arm on the box computes the same ipc:// path, because each starts its
+# own Ray cluster and every fresh cluster hands out job id 01000000, and the
+# sender unlinks the path before binding. Arms then steal the socket from one
+# another and a receiver can rebuild a weight buffer published by a different
+# arm, which corrupts rollouts silently rather than crashing.
+export VERL_ZMQ_NS="compass-$ARM"
 
 # 8. Thread budget. Four verl stacks on one box exhaust the container pids
 #    cgroup long before they exhaust RAM. These caps plus ray_init.num_cpus are

@@ -298,7 +298,16 @@ class vLLMColocateWorkerExtension:
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        # VERL_ZMQ_NS separates independent training runs that share a host.
+        # The Ray job id does NOT do this: a run that starts its own Ray
+        # cluster gets job id 01000000, so N such runs on one box all land on
+        # the same socket path. _init_socket os.remove()s the path before
+        # binding, so they silently steal it from each other and a receiver
+        # can rebuild a buffer handle published by a different run.
+        ns = os.environ.get("VERL_ZMQ_NS", "")
+        if ns:
+            ns = f"{ns}-"
+        return f"ipc:///tmp/rl-colocate-zmq-{ns}{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 
 class SuppressSignalInThread:
