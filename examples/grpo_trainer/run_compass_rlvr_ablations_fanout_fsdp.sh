@@ -69,12 +69,41 @@ for a in "${ARM_LIST[@]}"; do
   esac
   need_gb=$(( need_gb + per ))
 done
-have_gb="$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')"
-echo "=== host RAM: need ~${need_gb} GB for ${#ARM_LIST[@]} arms, box has ${have_gb:-unknown} GB ==="
+# `free` reports the HOST, not this container, so on a co-tenanted machine it
+# both overstates what we may use and cannot see a neighbour's arms. Read the
+# cgroup ceiling instead, and subtract what this container already holds.
+have_gb=""
+if [[ -r /sys/fs/cgroup/memory.max ]]; then
+  lim="$(cat /sys/fs/cgroup/memory.max)"
+  cur="$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)"
+  [[ "$lim" != "max" ]] && have_gb=$(( (lim - cur) / 1024 / 1024 / 1024 ))
+elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+  lim="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+  cur="$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo 0)"
+  # cgroup v1 uses a huge sentinel for "unlimited"
+  [[ "$lim" -lt 4611686018427387904 ]] && have_gb=$(( (lim - cur) / 1024 / 1024 / 1024 ))
+fi
+[[ -z "$have_gb" ]] && have_gb="$(free -g 2>/dev/null | awk '/^Mem:/{print $7}')"
+echo "=== container RAM headroom: need ~${need_gb} GB for ${#ARM_LIST[@]} arms, have ${have_gb:-unknown} GB ==="
 if [[ -n "${have_gb:-}" && "$have_gb" -lt "$need_gb" ]]; then
   echo "FATAL: not enough host RAM. Drop the high-K arms to a later wave, or" >&2
   echo "       set ARMS to fewer arms." >&2
   exit 1
+fi
+
+# Disk is the sharper constraint than RAM once checkpoints are on. A 1.5B FSDP
+# checkpoint with optimizer state is roughly 16-19 GB, and the overlay is 200 GB
+# shared with the HF cache, the parquet and vLLM. The KEEP_CKPT arms upload to
+# R2 and delete locally, so what matters is that the aws CLI actually exists:
+# without it every upload fails, the sink correctly keeps the local file, and
+# the disk fills instead.
+free_disk_gb="$(df -BG --output=avail "$WORK" 2>/dev/null | tail -1 | tr -dc '0-9')"
+echo "=== disk: ${free_disk_gb:-unknown} GB free on $WORK ==="
+if ! command -v aws >/dev/null 2>&1; then
+  echo "WARN: no aws CLI. R2 checkpoint upload will fail and local checkpoints" >&2
+  echo "      will accumulate on a ${free_disk_gb:-?} GB volume. Install awscli v2" >&2
+  echo "      and set default.s3.multipart_chunksize 256MB before a KEEP_CKPT arm" >&2
+  echo "      reaches its first save, or R2 rejects the multipart with InvalidPart." >&2
 fi
 
 # The config gate. Nothing launches until every arm passes the real validator.
